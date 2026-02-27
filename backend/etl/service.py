@@ -1,0 +1,339 @@
+"""
+ETL service: orchestrates raw file -> normalize -> upsert -> master logic refresh.
+"""
+
+from datetime import datetime
+from decimal import Decimal
+from typing import Optional
+
+import pandas as pd
+from sqlalchemy.orm import Session
+from sqlalchemy import select, text
+
+from backend.models import (
+    Transaction, Account, CounterpartyCategory, Override,
+    ImportLog, CustomsTopup, PlannedPayment, CostOrder, CustomsAlloc,
+    PaymentFactLink, CustomsDT,
+)
+from backend.etl.parsers import parse_statement
+from backend.etl.master_logic import apply_master_logic
+
+
+def _ensure_account(db: Session, account_no: str, source_type: str):
+    """Create account if it doesn't exist yet."""
+    existing = db.execute(
+        select(Account).where(Account.account == account_no)
+    ).scalar_one_or_none()
+    if existing:
+        return
+
+    # Guess bank/currency from source_type
+    bank_map = {
+        "VTB_RUB_MAIN": ("VTB", "RUB", "VTB RUB Основной", False),
+        "VTB_RUB_TRANSIT": ("VTB", "RUB", "VTB RUB Транзит", False),
+        "VTB_CNY": ("VTB", "CNY", "VTB CNY", False),
+        "WB_MAIN": ("WB", "RUB", "WB RUB Основной", False),
+        "WB_PAYOUT": ("WB", "RUB", "WB RUB Транзит", False),
+    }
+    bank, currency, name, is_customs = bank_map.get(source_type, ("UNKNOWN", "RUB", account_no, False))
+    acc = Account(
+        account=account_no,
+        bank=bank,
+        currency=currency,
+        account_name=name,
+        is_our_account=True,
+        is_customs_payee=is_customs,
+    )
+    db.add(acc)
+    db.flush()
+
+
+def _load_refs(db: Session) -> tuple:
+    """Load reference data needed for master logic."""
+    accounts = db.execute(select(Account)).scalars().all()
+    our_accounts = {a.account for a in accounts if a.is_our_account}
+    customs_accounts = {a.account for a in accounts if a.is_customs_payee}
+
+    cp_cats = db.execute(select(CounterpartyCategory)).scalars().all()
+    cp_categories = {
+        c.cp_key: {"cat_lvl1": c.cat_lvl1, "cat_lvl2": c.cat_lvl2}
+        for c in cp_cats
+    }
+
+    overrides_db = db.execute(select(Override)).scalars().all()
+    overrides = {
+        o.txn_id: {"cat_lvl1": o.cat_lvl1, "cat_lvl2": o.cat_lvl2}
+        for o in overrides_db
+    }
+
+    return our_accounts, customs_accounts, cp_categories, overrides
+
+
+def import_statement(
+    db: Session,
+    filename: str,
+    source_type: str,
+    account_no: str,
+    file_data: bytes,
+) -> ImportLog:
+    log = ImportLog(
+        filename=filename,
+        source_type=source_type,
+        imported_at=datetime.utcnow(),
+    )
+    db.add(log)
+    db.flush()
+
+    try:
+        # Ensure account exists
+        _ensure_account(db, account_no, source_type)
+
+        # 1. Parse
+        df = parse_statement(source_type, file_data, account_no)
+        log.rows_raw = len(df)
+
+        if df.empty:
+            log.status = "OK"
+            log.rows_inserted = 0
+            log.rows_skipped = 0
+            db.commit()
+            return log
+
+        # 2. Master logic
+        our_accounts, customs_accounts, cp_categories, overrides = _load_refs(db)
+        df = apply_master_logic(df, our_accounts, customs_accounts, cp_categories, overrides)
+
+        # 3. Upsert
+        inserted = 0
+        skipped = 0
+
+        txn_ids = df["txn_id"].tolist()
+        if txn_ids:
+            existing_txn_ids = set(
+                row[0] for row in db.execute(
+                    text("SELECT txn_id FROM transactions WHERE txn_id = ANY(:ids)"),
+                    {"ids": txn_ids},
+                )
+            )
+        else:
+            existing_txn_ids = set()
+
+        for _, row in df.iterrows():
+            txn_id = row["txn_id"]
+            if txn_id in existing_txn_ids:
+                skipped += 1
+                continue
+
+            def safe_dec(val):
+                try:
+                    return Decimal(str(val)) if val is not None and str(val) != 'nan' else Decimal("0")
+                except Exception:
+                    return Decimal("0")
+
+            def safe_str(val):
+                if val is None:
+                    return None
+                s = str(val).strip()
+                return s if s and s != 'nan' else None
+
+            txn = Transaction(
+                date=row["date"],
+                bank=safe_str(row["bank"]) or "UNKNOWN",
+                account=safe_str(row["account"]) or account_no,
+                currency=safe_str(row["currency"]) or "RUB",
+                counterparty=safe_str(row.get("counterparty")),
+                inn=safe_str(row.get("inn")),
+                counterparty_account=safe_str(row.get("counterparty_account")),
+                purpose=safe_str(row.get("purpose")),
+                income=safe_dec(row.get("income", 0)),
+                expense=safe_dec(row.get("expense", 0)),
+                txn_id=txn_id,
+                cp_key=safe_str(row.get("cp_key")),
+                net=safe_dec(row.get("net", 0)),
+                is_internal=bool(row.get("is_internal", 0)),
+                is_fx=bool(row.get("is_fx", 0)),
+                event_type2=safe_str(row.get("event_type2")) or "OPER",
+                is_cashflow2=int(row.get("is_cashflow2", 1)),
+                cat_lvl1_2=safe_str(row.get("cat_lvl1_2")),
+                cat_lvl2_2=safe_str(row.get("cat_lvl2_2")),
+                status=safe_str(row.get("status")) or "UNASSIGNED",
+                account_text=safe_str(row.get("account_text")),
+                purpose_tag=safe_str(row.get("purpose_tag")),
+                invoice_id=safe_str(row.get("invoice_id")),
+                annex_id=safe_str(row.get("annex_id")),
+            )
+            db.add(txn)
+            inserted += 1
+
+        db.flush()
+
+        # 4. Sync customs_topup
+        _sync_customs_topup(db)
+
+        # 5. Sync plan payments (auto-match fact from bank statements)
+        _sync_plan_payments(db)
+
+        log.rows_inserted = inserted
+        log.rows_skipped = skipped
+        log.status = "OK"
+        db.commit()
+
+    except Exception as e:
+        db.rollback()
+        log.status = "ERROR"
+        log.error_msg = str(e)[:1000]
+        db.add(log)
+        db.commit()
+        raise
+
+    return log
+
+
+def _sync_customs_topup(db: Session):
+    customs_txns = db.execute(
+        select(Transaction).where(
+            Transaction.event_type2 == "CUSTOMS_PAYMENT",
+            Transaction.expense > 0,
+        )
+    ).scalars().all()
+
+    existing_ids = set(
+        row[0] for row in db.execute(
+            text("SELECT topup_txn_id FROM customs_topup")
+        )
+    )
+
+    for txn in customs_txns:
+        if txn.txn_id not in existing_ids:
+            from backend.models import CustomsTopup
+            topup = CustomsTopup(
+                topup_txn_id=txn.txn_id,
+                date=txn.date.date(),
+                amount_rub=txn.expense,
+                purpose=txn.purpose,
+                account=txn.account,
+                counterparty_account=txn.counterparty_account,
+            )
+            db.add(topup)
+
+
+def reapply_categories(db: Session):
+    _, _, cp_categories, overrides = _load_refs(db)
+    txns = db.execute(select(Transaction).where(Transaction.is_cashflow2 == 1)).scalars().all()
+    for txn in txns:
+        cp_key = txn.cp_key
+        txn_id = txn.txn_id
+        cat1, cat2 = None, None
+        if txn_id in overrides:
+            ov = overrides[txn_id]
+            cat1, cat2 = ov.get("cat_lvl1"), ov.get("cat_lvl2")
+        elif cp_key and cp_key in cp_categories:
+            cp = cp_categories[cp_key]
+            cat1, cat2 = cp.get("cat_lvl1"), cp.get("cat_lvl2")
+        txn.cat_lvl1_2 = cat1
+        txn.cat_lvl2_2 = cat2
+        txn.status = "UNASSIGNED" if not cat1 else "OK"
+    db.commit()
+
+
+def _sync_plan_payments(db: Session):
+    """
+    Auto-match planned payments with fact from bank statements and customs_alloc.
+
+    Matching rules:
+    - ЗАКАЗ:    Transaction.annex_id == str(order_no) AND purpose_tag == 'Заказ'  → sum(expense)
+    - ДОСТАВКА: Transaction.invoice_id == CostOrder.invoice_no AND purpose_tag == 'Логистика' → sum(expense)
+    - ТАМОЖНЯ:  CustomsAlloc.order_no == order_no → sum(alloc_amount)
+
+    Updates paid_rub and is_paid (True when paid_rub >= amount_rub).
+    """
+    payments = db.execute(select(PlannedPayment)).scalars().all()
+    if not payments:
+        return
+
+    # Collect unique order_nos
+    order_nos = {p.order_no for p in payments if p.order_no is not None}
+    if not order_nos:
+        return
+
+    # Build invoice_no map: order_no (int) → invoice_no (str)
+    cost_orders = db.execute(select(CostOrder)).scalars().all()
+    invoice_map = {}  # int(order_no) → invoice_no
+    for co in cost_orders:
+        try:
+            invoice_map[int(co.order_no)] = co.invoice_no
+        except (ValueError, TypeError):
+            pass
+
+    # Preload all relevant transactions
+    # ЗАКАЗ fact: annex_id matches order_no, purpose_tag = Заказ
+    order_fact = {}  # order_no → sum(expense)
+    txns_order = db.execute(
+        select(Transaction).where(
+            Transaction.purpose_tag == "Заказ",
+            Transaction.expense > 0,
+        )
+    ).scalars().all()
+    for t in txns_order:
+        if t.annex_id:
+            try:
+                ono = int(t.annex_id)
+                order_fact[ono] = order_fact.get(ono, Decimal("0")) + (t.expense or Decimal("0"))
+            except (ValueError, TypeError):
+                pass
+
+    # ДОСТАВКА fact: invoice_id matches CostOrder.invoice_no, purpose_tag = Логистика
+    delivery_fact = {}  # order_no → sum(expense)
+    txns_delivery = db.execute(
+        select(Transaction).where(
+            Transaction.purpose_tag == "Логистика",
+            Transaction.expense > 0,
+        )
+    ).scalars().all()
+    # Reverse map: invoice_no → order_no
+    inv_to_order = {v: k for k, v in invoice_map.items() if v}
+    for t in txns_delivery:
+        if t.invoice_id and t.invoice_id in inv_to_order:
+            ono = inv_to_order[t.invoice_id]
+            delivery_fact[ono] = delivery_fact.get(ono, Decimal("0")) + (t.expense or Decimal("0"))
+
+    # ТАМОЖНЯ fact: from customs_alloc + customs_dt
+    customs_fact = {}  # order_no → sum(amount)
+    allocs = db.execute(select(CustomsAlloc)).scalars().all()
+    for a in allocs:
+        if a.order_no:
+            customs_fact[a.order_no] = customs_fact.get(a.order_no, Decimal("0")) + (a.alloc_amount or Decimal("0"))
+
+    # Also from parsed FTS DT declarations
+    dts = db.execute(select(CustomsDT).where(CustomsDT.order_no.isnot(None))).scalars().all()
+    for d in dts:
+        customs_fact[d.order_no] = customs_fact.get(d.order_no, Decimal("0")) + (d.amount_rub or Decimal("0"))
+
+    # Manual fact links
+    manual_links = db.execute(select(PaymentFactLink)).scalars().all()
+    manual_map = {}  # payment_id → sum(amount_rub)
+    for ml in manual_links:
+        manual_map[ml.payment_id] = manual_map.get(ml.payment_id, Decimal("0")) + (ml.amount_rub or Decimal("0"))
+
+    # Update each planned payment
+    for p in payments:
+        if p.order_no is None:
+            continue
+
+        paid = Decimal("0")
+        direction = (p.direction or "").upper()
+
+        if direction == "ЗАКАЗ":
+            paid = order_fact.get(p.order_no, Decimal("0"))
+        elif direction == "ДОСТАВКА":
+            paid = delivery_fact.get(p.order_no, Decimal("0"))
+        elif direction == "ТАМОЖНЯ":
+            paid = customs_fact.get(p.order_no, Decimal("0"))
+
+        # Add manual links
+        paid += manual_map.get(p.id, Decimal("0"))
+
+        p.paid_rub = paid
+        p.is_paid = paid >= (p.amount_rub or Decimal("0")) if (p.amount_rub and p.amount_rub > 0) else False
+
+    db.flush()
