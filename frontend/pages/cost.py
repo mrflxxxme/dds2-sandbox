@@ -92,6 +92,8 @@ def render():
                 with c2:
                     new_delivery_cny = st.number_input("Доставка (CNY)", min_value=0.0, step=100.0, key="new_del_cny")
                     new_delivery_usd = st.number_input("Доставка (USD)", min_value=0.0, step=100.0, key="new_del_usd")
+                    new_dt_number = st.text_input("Номер ДТ (таможня)", key="new_dt_num",
+                        help="Формат: 10131010/050226/5030475")
                     new_note = st.text_input("Примечание", key="new_note")
 
                 st.markdown("**Курсы валют:**")
@@ -118,6 +120,7 @@ def render():
                                 "rate_cny": rate_cny,
                                 "rate_eur": rate_eur,
                                 "rate_usd": rate_usd,
+                                "dt_number": new_dt_number or None,
                                 "note": new_note or None,
                             })
                             st.success(f"✅ Заказ {new_order_no} создан!")
@@ -160,6 +163,9 @@ def render():
                             min_value=0.0, step=100.0, key="edit_del_cny")
                         edit_del_usd = st.number_input("Доставка USD", value=float(order_data["delivery_cost_usd"]),
                             min_value=0.0, step=100.0, key="edit_del_usd")
+                        edit_dt_number = st.text_input("Номер ДТ (таможня)",
+                            value=order_data.get("dt_number") or "", key="edit_dt_num",
+                            help="Формат: 10131010/050226/5030475")
 
                     er1, er2, er3 = st.columns(3)
                     with er1:
@@ -184,6 +190,7 @@ def render():
                                 "rate_cny": edit_rcny,
                                 "rate_eur": edit_reur,
                                 "rate_usd": edit_rusd,
+                                "dt_number": edit_dt_number or None,
                             })
                             st.success("✅ Заказ обновлён")
                             st.rerun()

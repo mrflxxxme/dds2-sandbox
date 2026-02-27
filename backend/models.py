@@ -290,6 +290,7 @@ class CostOrder(Base):
     rate_eur: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=1)
     rate_usd: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=1)
     note: Mapped[Optional[str]] = mapped_column(Text)
+    dt_number: Mapped[Optional[str]] = mapped_column(String(100))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     items: Mapped[list["CostOrderItem"]] = relationship(back_populates="order", cascade="all, delete-orphan")
 

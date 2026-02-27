@@ -27,6 +27,23 @@ async def lifespan(app: FastAPI):
         await conn.execute(text(
             "ALTER TABLE cost_orders ADD COLUMN IF NOT EXISTS actual_arrival_date DATE"
         ))
+        await conn.execute(text(
+            "ALTER TABLE cost_orders ADD COLUMN IF NOT EXISTS dt_number VARCHAR(100)"
+        ))
+        # customs_dt table
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS customs_dt (
+                id SERIAL PRIMARY KEY,
+                dt_number VARCHAR(100) NOT NULL,
+                dt_date DATE NOT NULL,
+                amount_rub NUMERIC(18,2) NOT NULL,
+                order_no INTEGER,
+                note TEXT
+            )
+        """))
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_customs_dt_number ON customs_dt (dt_number)
+        """))
     yield
 
 

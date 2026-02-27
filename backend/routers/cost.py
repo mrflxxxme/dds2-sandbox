@@ -15,10 +15,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import (
     Nomenclature, DutyRule, DutyBasis, CostOrder, CostOrderItem,
-    LeadTime, Order, PlannedPayment,
+    LeadTime, Order, PlannedPayment, CustomsDT,
 )
 
 router = APIRouter(prefix="/cost")
+
+
+async def _auto_link_customs_dt(order_no: str, dt_number: str, db):
+    """Auto-link CustomsDT records matching dt_number to this order."""
+    try:
+        order_no_int = int(order_no)
+    except (ValueError, TypeError):
+        return
+    result = await db.execute(
+        select(CustomsDT).where(CustomsDT.dt_number == dt_number)
+    )
+    dts = result.scalars().all()
+    for d in dts:
+        if d.order_no != order_no_int:
+            d.order_no = order_no_int
+    if dts:
+        await db.commit()
 
 VAT_RATE = Decimal("0.22")
 
@@ -199,6 +216,7 @@ async def get_cost_orders(db: AsyncSession = Depends(get_db)):
             "delivery_cost_usd": float(o.delivery_cost_usd),
             "rate_cny": float(o.rate_cny), "rate_eur": float(o.rate_eur),
             "rate_usd": float(o.rate_usd), "note": o.note,
+            "dt_number": o.dt_number,
             "transport_type": o.transport_type or "AUTO",
             "total_qty": total_qty,
             "total_rub": total, "total_cost_rub": total_cost,
@@ -225,6 +243,7 @@ async def create_cost_order(payload: dict, db: AsyncSession = Depends(get_db)):
             ship_date = date.fromisoformat(payload["ship_date"])
         except Exception:
             pass
+    dt_number = (payload.get("dt_number") or "").strip() or None
     order = CostOrder(
         order_no=order_no,
         invoice_no=payload.get("invoice_no"),
@@ -236,9 +255,15 @@ async def create_cost_order(payload: dict, db: AsyncSession = Depends(get_db)):
         rate_eur=Decimal(str(payload.get("rate_eur", 1))),
         rate_usd=Decimal(str(payload.get("rate_usd", 1))),
         note=payload.get("note"),
+        dt_number=dt_number,
     )
     db.add(order)
     await db.commit()
+
+    # Auto-link CustomsDT by dt_number
+    if dt_number:
+        await _auto_link_customs_dt(order_no, dt_number, db)
+
     return {"ok": True, "order_no": order_no}
 
 
@@ -277,8 +302,15 @@ async def update_cost_order(order_no: str, payload: dict, db: AsyncSession = Dep
         order.rate_usd = Decimal(str(payload["rate_usd"]))
     if "note" in payload:
         order.note = payload["note"] or None
+    if "dt_number" in payload:
+        order.dt_number = (payload["dt_number"] or "").strip() or None
 
     await db.commit()
+
+    # Auto-link CustomsDT by dt_number
+    if order.dt_number:
+        await _auto_link_customs_dt(order.order_no, order.dt_number, db)
+
     return {"ok": True, "order_no": order_no}
 
 
