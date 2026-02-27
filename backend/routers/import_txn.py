@@ -287,3 +287,31 @@ async def assign_category_bulk(payload: dict, db: AsyncSession = Depends(get_db)
 
     await db.commit()
     return {"ok": True, "updated": result.rowcount}
+
+
+@router.post("/transactions/assign_category_by_ids")
+async def assign_category_by_ids(payload: dict, db: AsyncSession = Depends(get_db)):
+    """Assign category to specific transactions by txn_id list."""
+    txn_ids = payload.get("txn_ids", [])
+    cat_lvl1 = payload.get("cat_lvl1")
+    cat_lvl2 = payload.get("cat_lvl2")
+
+    if not txn_ids or not cat_lvl1:
+        raise HTTPException(400, "txn_ids and cat_lvl1 required")
+
+    # Update each transaction
+    updated = 0
+    for tid in txn_ids:
+        result = await db.execute(
+            text(
+                """UPDATE transactions
+                   SET cat_lvl1_2 = :c1, cat_lvl2_2 = :c2,
+                       status = CASE WHEN is_cashflow2=1 THEN 'OK' ELSE status END
+                   WHERE txn_id = :tid AND is_cashflow2 = 1"""
+            ),
+            {"c1": cat_lvl1, "c2": cat_lvl2, "tid": tid},
+        )
+        updated += result.rowcount
+
+    await db.commit()
+    return {"ok": True, "updated": updated}

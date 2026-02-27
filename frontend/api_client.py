@@ -369,6 +369,9 @@ def get_unassigned_grouped():
 def assign_category_bulk(payload: dict):
     return _post("/api/transactions/assign_category_bulk", payload)
 
+def assign_category_by_ids(payload: dict):
+    return _post("/api/transactions/assign_category_by_ids", payload)
+
 # ─── Category Reference ───────────────────────────────────────────────────────
 
 def get_category_ref():
