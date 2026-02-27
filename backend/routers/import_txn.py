@@ -202,3 +202,75 @@ async def assign_category(
     db.add(log)
     await db.commit()
     return {"ok": True}
+
+
+@router.get("/transactions/unassigned_grouped")
+async def get_unassigned_grouped(db: AsyncSession = Depends(get_db)):
+    """Group uncategorized transactions by counterparty, showing income/expense totals."""
+    result = await db.execute(
+        select(
+            Transaction.cp_key,
+            Transaction.counterparty,
+            Transaction.currency,
+            func.count(Transaction.txn_id).label("cnt"),
+            func.sum(Transaction.income).label("total_income"),
+            func.sum(Transaction.expense).label("total_expense"),
+        )
+        .where(Transaction.is_cashflow2 == 1, Transaction.cat_lvl1_2.is_(None))
+        .group_by(Transaction.cp_key, Transaction.counterparty, Transaction.currency)
+        .order_by(func.sum(Transaction.income).desc(), func.sum(Transaction.expense).desc())
+    )
+
+    rows = []
+    for r in result:
+        rows.append({
+            "cp_key": r.cp_key,
+            "counterparty": r.counterparty or "—",
+            "currency": r.currency,
+            "count": r.cnt,
+            "total_income": float(r.total_income or 0),
+            "total_expense": float(r.total_expense or 0),
+        })
+    return rows
+
+
+@router.post("/transactions/assign_category_bulk")
+async def assign_category_bulk(payload: dict, db: AsyncSession = Depends(get_db)):
+    """Assign category to all uncategorized transactions with given cp_key."""
+    cp_key = payload.get("cp_key")
+    cat_lvl1 = payload.get("cat_lvl1")
+    cat_lvl2 = payload.get("cat_lvl2")
+
+    if not cp_key or not cat_lvl1:
+        raise HTTPException(400, "cp_key and cat_lvl1 required")
+
+    # Upsert counterparty category
+    res = await db.execute(
+        select(CounterpartyCategory).where(CounterpartyCategory.cp_key == cp_key)
+    )
+    cpc = res.scalar_one_or_none()
+    if cpc:
+        cpc.cat_lvl1 = cat_lvl1
+        cpc.cat_lvl2 = cat_lvl2
+    else:
+        cpc = CounterpartyCategory(
+            cp_key=cp_key,
+            cp_name=payload.get("counterparty"),
+            cat_lvl1=cat_lvl1,
+            cat_lvl2=cat_lvl2,
+        )
+        db.add(cpc)
+
+    # Update all transactions with this cp_key
+    result = await db.execute(
+        text(
+            """UPDATE transactions
+               SET cat_lvl1_2 = :c1, cat_lvl2_2 = :c2,
+                   status = CASE WHEN is_cashflow2=1 THEN 'OK' ELSE status END
+               WHERE cp_key = :cpk AND is_cashflow2 = 1"""
+        ),
+        {"c1": cat_lvl1, "c2": cat_lvl2, "cpk": cp_key},
+    )
+
+    await db.commit()
+    return {"ok": True, "updated": result.rowcount}

@@ -9,10 +9,10 @@ from frontend import api_client as api
 
 # Common categories (can be extended)
 CATEGORIES = {
-    "Банки": ["Комиссии банка", "Проценты", "Прочее"],
     "Маркетплейсы": ["Wildberries", "OZON", "Прочее"],
-    "Логистика": ["Доставка по РФ", "Доставка из Китая", "Таможня"],
     "Поставщики": ["Оплата товара", "Депозит", "Прочее"],
+    "Логистика": ["Доставка по РФ", "Доставка из Китая", "Таможня"],
+    "Банки": ["Комиссии банка", "Проценты", "Прочее"],
     "Фулфилмент": ["Склад / упаковка", "Прочее"],
     "Зарплата": ["Сотрудники", "ИП", "Прочее"],
     "Налоги": ["НДС", "Прибыль", "Взносы", "Прочее"],
@@ -21,38 +21,143 @@ CATEGORIES = {
     "Прочие доходы": ["Возврат", "Прочее"],
 }
 
+CAT1_LIST = list(CATEGORIES.keys())
+
 
 def render():
     st.title("🔴 INBOX — Неразнесённые операции")
 
+    # ── Grouped by counterparty ──────────────────────────────────────────────
     try:
-        unassigned = api.get_unassigned(limit=500)
+        grouped = api.get_unassigned_grouped()
     except Exception as e:
-        st.error(f"Ошибка загрузки: {e}")
-        return
+        st.error(f"Ошибка: {e}")
+        grouped = []
 
-    if not unassigned:
+    if not grouped:
         st.success("🎉 Все операции разнесены! INBOX пуст.")
         return
 
-    df = pd.DataFrame(unassigned)
-    st.markdown(f"**Неразнесённых операций: {len(df)}**")
+    df_g = pd.DataFrame(grouped)
+    for col in ["total_income", "total_expense"]:
+        df_g[col] = pd.to_numeric(df_g[col], errors="coerce").fillna(0)
 
-    # Summary stats
-    col1, col2 = st.columns(2)
-    with col1:
-        total_rub = df[df["currency"] == "RUB"]["expense"].astype(float).sum()
-        st.metric("Сумма расходов (RUB)", f"{total_rub:,.0f} ₽")
-    with col2:
-        total_cny = df[df["currency"] == "CNY"]["expense"].astype(float).sum()
-        st.metric("Сумма расходов (CNY)", f"{total_cny:,.2f} ¥")
+    total_ops = df_g["count"].sum()
+    total_inc = df_g["total_income"].sum()
+    total_exp = df_g["total_expense"].sum()
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Неразнесённых операций", f"{int(total_ops)}")
+    m2.metric("Поступления", f"{total_inc:,.0f} ₽")
+    m3.metric("Расходы", f"{total_exp:,.0f} ₽")
 
     st.markdown("---")
 
-    # Quick assignment form
-    st.subheader("⚡ Быстрая разноска")
+    # ── Bulk assignment by counterparty ───────────────────────────────────────
+    st.subheader("⚡ Быстрая разноска по контрагентам")
 
-    # Select transaction
+    # Split into income and expense groups
+    df_inc = df_g[df_g["total_income"] > 0].sort_values("total_income", ascending=False)
+    df_exp = df_g[df_g["total_expense"] > 0].sort_values("total_expense", ascending=False)
+
+    tab_inc, tab_exp, tab_single = st.tabs(["📥 Поступления", "📤 Расходы", "🔍 По одной операции"])
+
+    with tab_inc:
+        if len(df_inc) == 0:
+            st.success("Все поступления разнесены!")
+        else:
+            st.markdown(f"**{len(df_inc)} контрагент(ов) с поступлениями**")
+
+            for i, row in df_inc.iterrows():
+                cp_name = row["counterparty"] or "—"
+                cp_key = row["cp_key"] or ""
+                currency = row["currency"]
+                total = row["total_income"]
+                cnt = int(row["count"])
+
+                with st.expander(
+                    f"{'💰' if total > 1_000_000 else '💵'} {cp_name[:50]} — "
+                    f"{total:,.0f} {currency} ({cnt} операц.)"
+                ):
+                    st.text(f"CP Key: {cp_key}")
+
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        cat1 = st.selectbox("Категория", CAT1_LIST, key=f"inc_cat1_{i}")
+                    with c2:
+                        sub_cats = CATEGORIES.get(cat1, ["Прочее"])
+                        cat2 = st.selectbox("Подкатегория", sub_cats, key=f"inc_cat2_{i}")
+
+                    if st.button("✅ Применить ко всем", key=f"inc_apply_{i}", type="primary"):
+                        try:
+                            result = api.assign_category_bulk({
+                                "cp_key": cp_key,
+                                "counterparty": cp_name,
+                                "cat_lvl1": cat1,
+                                "cat_lvl2": cat2,
+                            })
+                            st.success(f"✅ Обновлено {result.get('updated', 0)} операций → {cat1} / {cat2}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Ошибка: {e}")
+
+    with tab_exp:
+        if len(df_exp) == 0:
+            st.success("Все расходы разнесены!")
+        else:
+            st.markdown(f"**{len(df_exp)} контрагент(ов) с расходами**")
+
+            for i, row in df_exp.iterrows():
+                cp_name = row["counterparty"] or "—"
+                cp_key = row["cp_key"] or ""
+                currency = row["currency"]
+                total = row["total_expense"]
+                cnt = int(row["count"])
+
+                with st.expander(
+                    f"{'🔴' if total > 1_000_000 else '🟡'} {cp_name[:50]} — "
+                    f"{total:,.0f} {currency} ({cnt} операц.)"
+                ):
+                    st.text(f"CP Key: {cp_key}")
+
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        cat1 = st.selectbox("Категория", CAT1_LIST, key=f"exp_cat1_{i}")
+                    with c2:
+                        sub_cats = CATEGORIES.get(cat1, ["Прочее"])
+                        cat2 = st.selectbox("Подкатегория", sub_cats, key=f"exp_cat2_{i}")
+
+                    if st.button("✅ Применить ко всем", key=f"exp_apply_{i}", type="primary"):
+                        try:
+                            result = api.assign_category_bulk({
+                                "cp_key": cp_key,
+                                "counterparty": cp_name,
+                                "cat_lvl1": cat1,
+                                "cat_lvl2": cat2,
+                            })
+                            st.success(f"✅ Обновлено {result.get('updated', 0)} операций → {cat1} / {cat2}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Ошибка: {e}")
+
+    with tab_single:
+        _render_single_assignment()
+
+
+def _render_single_assignment():
+    """Old-style single transaction assignment."""
+    try:
+        unassigned = api.get_unassigned(limit=200)
+    except Exception as e:
+        st.error(f"Ошибка: {e}")
+        return
+
+    if not unassigned:
+        st.success("Все разнесены!")
+        return
+
+    df = pd.DataFrame(unassigned)
+
     txn_options = {}
     for _, row in df.iterrows():
         cp = row.get("counterparty", "")[:40] if row.get("counterparty") else "—"
@@ -74,70 +179,30 @@ def render():
         col_info, col_form = st.columns([2, 2])
 
         with col_info:
-            st.markdown("**Детали операции:**")
+            st.markdown("**Детали:**")
             st.text(f"Дата: {str(selected_txn.get('date', ''))[:10]}")
-            st.text(f"Банк: {selected_txn.get('bank', '')}")
             st.text(f"Контрагент: {selected_txn.get('counterparty', '')}")
-            st.text(f"Счёт: {selected_txn.get('counterparty_account', '')}")
-            st.text(f"ИНН: {selected_txn.get('inn', '')}")
-            st.text(f"Приход: {selected_txn.get('income', 0)} {selected_txn.get('currency', '')}")
-            st.text(f"Расход: {selected_txn.get('expense', 0)} {selected_txn.get('currency', '')}")
-            st.text(f"Тег: {selected_txn.get('purpose_tag', '')}")
-            with st.expander("Назначение платежа"):
+            st.text(f"Приход: {selected_txn.get('income', 0)} / Расход: {selected_txn.get('expense', 0)}")
+            with st.expander("Назначение"):
                 st.text(selected_txn.get("purpose", ""))
 
         with col_form:
-            st.markdown("**Назначить категорию:**")
             scope = st.radio(
-                "Область применения",
+                "Область",
                 ["txn", "cp"],
-                format_func=lambda x: "Только для этой операции" if x == "txn" else "Для всего контрагента",
+                format_func=lambda x: "Только эта операция" if x == "txn" else "Весь контрагент",
                 key="inbox_scope",
             )
-
-            cat_lvl1 = st.selectbox("Категория 1", list(CATEGORIES.keys()), key="inbox_cat1")
-            cat_lvl2 = st.selectbox(
-                "Категория 2",
-                CATEGORIES.get(cat_lvl1, ["Прочее"]),
-                key="inbox_cat2",
-            )
-            comment = st.text_input("Комментарий (опц.)", key="inbox_comment")
+            cat_lvl1 = st.selectbox("Категория 1", CAT1_LIST, key="inbox_cat1")
+            cat_lvl2 = st.selectbox("Категория 2", CATEGORIES.get(cat_lvl1, ["Прочее"]), key="inbox_cat2")
 
             if st.button("✅ Применить", type="primary", key="inbox_apply"):
                 try:
                     api.assign_category(
-                        txn_id=txn_id,
-                        cat_lvl1=cat_lvl1,
-                        cat_lvl2=cat_lvl2,
-                        scope=scope,
-                        comment=comment if comment else None,
-                        cp_key=cp_key,
+                        txn_id=txn_id, cat_lvl1=cat_lvl1, cat_lvl2=cat_lvl2,
+                        scope=scope, cp_key=cp_key,
                     )
                     st.success("Категория назначена!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Ошибка: {e}")
-
-    st.markdown("---")
-    st.subheader("📋 Полный список неразнесённых")
-
-    # Full table
-    display_cols = ["date", "bank", "currency", "counterparty", "expense", "income",
-                    "purpose_tag", "cp_key"]
-    display_cols = [c for c in display_cols if c in df.columns]
-
-    df_show = df[display_cols].copy()
-    df_show["date"] = pd.to_datetime(df_show["date"]).dt.strftime("%d.%m.%Y")
-    for col in ["expense", "income"]:
-        if col in df_show.columns:
-            df_show[col] = pd.to_numeric(df_show[col], errors="coerce").fillna(0)
-
-    st.dataframe(
-        df_show.rename(columns={
-            "date": "Дата", "bank": "Банк", "currency": "Валюта",
-            "counterparty": "Контрагент", "expense": "Расход",
-            "income": "Приход", "purpose_tag": "Тег", "cp_key": "CP Key",
-        }),
-        hide_index=True,
-        use_container_width=True,
-    )

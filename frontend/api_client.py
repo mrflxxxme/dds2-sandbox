@@ -360,3 +360,11 @@ def delete_customs_dt(dt_id: int):
     r = requests.delete(f"{API_URL}/api/planning/customs_dt/{dt_id}", timeout=30)
     r.raise_for_status()
     return r.json()
+
+# ─── Bulk categorization ──────────────────────────────────────────────────────
+
+def get_unassigned_grouped():
+    return _get("/api/transactions/unassigned_grouped") or []
+
+def assign_category_bulk(payload: dict):
+    return _post("/api/transactions/assign_category_bulk", payload)
