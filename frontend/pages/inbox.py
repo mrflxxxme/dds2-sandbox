@@ -7,25 +7,47 @@ import pandas as pd
 from frontend import api_client as api
 
 
-# Common categories (can be extended)
-CATEGORIES = {
-    "Маркетплейсы": ["Wildberries", "OZON", "Прочее"],
-    "Поставщики": ["Оплата товара", "Депозит", "Прочее"],
-    "Логистика": ["Доставка по РФ", "Доставка из Китая", "Таможня"],
-    "Банки": ["Комиссии банка", "Проценты", "Прочее"],
-    "Фулфилмент": ["Склад / упаковка", "Прочее"],
-    "Зарплата": ["Сотрудники", "ИП", "Прочее"],
-    "Налоги": ["НДС", "Прибыль", "Взносы", "Прочее"],
-    "Внутренние переводы": ["Между счетами", "Между юрлицами", "Перевод собственнику / займы"],
-    "Прочие расходы": ["Офис", "IT", "Реклама", "Прочее"],
-    "Прочие доходы": ["Возврат", "Прочее"],
-}
+def _load_categories():
+    """Load categories from DB, split by direction."""
+    try:
+        cats = api.get_category_ref()
+    except Exception:
+        cats = []
 
-CAT1_LIST = list(CATEGORIES.keys())
+    income_cats = {}
+    expense_cats = {}
+    for c in cats:
+        d = income_cats if c["direction"] == "income" else expense_cats
+        lvl1 = c["cat_lvl1"]
+        if lvl1 not in d:
+            d[lvl1] = []
+        if c["cat_lvl2"] not in d[lvl1]:
+            d[lvl1].append(c["cat_lvl2"])
+
+    # Fallback if DB empty
+    if not income_cats:
+        income_cats = {
+            "Маркетплейсы": ["Wildberries", "OZON", "Прочее"],
+            "Банки": ["Проценты"],
+            "Прочие доходы": ["Возврат", "Прочее"],
+        }
+    if not expense_cats:
+        expense_cats = {
+            "Поставщики": ["Оплата товара", "Депозит", "Прочее"],
+            "Логистика": ["Доставка по РФ", "Доставка из Китая", "Таможня"],
+            "Банки": ["Комиссии банка"],
+            "Фулфилмент": ["Склад / упаковка", "Прочее"],
+            "Прочие расходы": ["Офис", "IT", "Реклама", "Прочее"],
+        }
+    return income_cats, expense_cats
 
 
 def render():
     st.title("🔴 INBOX — Неразнесённые операции")
+
+    income_cats, expense_cats = _load_categories()
+    all_cats = {**income_cats, **expense_cats}  # merged for single-txn mode
+    all_cat1_list = list(dict.fromkeys(list(income_cats.keys()) + list(expense_cats.keys())))
 
     # ── Grouped by counterparty ──────────────────────────────────────────────
     try:
@@ -110,9 +132,9 @@ def render():
 
                     c1, c2 = st.columns(2)
                     with c1:
-                        cat1 = st.selectbox("Категория", CAT1_LIST, key=f"inc_cat1_{i}")
+                        cat1 = st.selectbox("Категория", list(income_cats.keys()), key=f"inc_cat1_{i}")
                     with c2:
-                        sub_cats = CATEGORIES.get(cat1, ["Прочее"])
+                        sub_cats = income_cats.get(cat1, ["Прочее"])
                         cat2 = st.selectbox("Подкатегория", sub_cats, key=f"inc_cat2_{i}")
 
                     direction = st.radio(
@@ -177,9 +199,9 @@ def render():
 
                     c1, c2 = st.columns(2)
                     with c1:
-                        cat1 = st.selectbox("Категория", CAT1_LIST, key=f"exp_cat1_{i}")
+                        cat1 = st.selectbox("Категория", list(expense_cats.keys()), key=f"exp_cat1_{i}")
                     with c2:
-                        sub_cats = CATEGORIES.get(cat1, ["Прочее"])
+                        sub_cats = expense_cats.get(cat1, ["Прочее"])
                         cat2 = st.selectbox("Подкатегория", sub_cats, key=f"exp_cat2_{i}")
 
                     direction = st.radio(
@@ -256,8 +278,8 @@ def _render_single_assignment():
                 format_func=lambda x: "Только эта операция" if x == "txn" else "Весь контрагент",
                 key="inbox_scope",
             )
-            cat_lvl1 = st.selectbox("Категория 1", CAT1_LIST, key="inbox_cat1")
-            cat_lvl2 = st.selectbox("Категория 2", CATEGORIES.get(cat_lvl1, ["Прочее"]), key="inbox_cat2")
+            cat_lvl1 = st.selectbox("Категория 1", all_cat1_list, key="inbox_cat1")
+            cat_lvl2 = st.selectbox("Категория 2", all_cats.get(cat_lvl1, ["Прочее"]), key="inbox_cat2")
 
             if st.button("✅ Применить", type="primary", key="inbox_apply"):
                 try:

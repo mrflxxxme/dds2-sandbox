@@ -44,6 +44,58 @@ async def lifespan(app: FastAPI):
         await conn.execute(text("""
             CREATE INDEX IF NOT EXISTS ix_customs_dt_number ON customs_dt (dt_number)
         """))
+        # category_ref table
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS category_ref (
+                id SERIAL PRIMARY KEY,
+                direction VARCHAR(10) NOT NULL,
+                cat_lvl1 VARCHAR(100) NOT NULL,
+                cat_lvl2 VARCHAR(100) NOT NULL,
+                sort_order INTEGER DEFAULT 0,
+                UNIQUE(direction, cat_lvl1, cat_lvl2)
+            )
+        """))
+        # Seed defaults if empty
+        row = await conn.execute(text("SELECT count(*) FROM category_ref"))
+        cnt = row.scalar()
+        if cnt == 0:
+            defaults = [
+                # Income
+                ("income", "Маркетплейсы", "Wildberries", 1),
+                ("income", "Маркетплейсы", "OZON", 2),
+                ("income", "Маркетплейсы", "Прочее", 3),
+                ("income", "Банки", "Проценты", 10),
+                ("income", "Внутренние переводы", "Между счетами", 20),
+                ("income", "Внутренние переводы", "Между юрлицами", 21),
+                ("income", "Прочие доходы", "Возврат", 30),
+                ("income", "Прочие доходы", "Прочее", 31),
+                # Expense
+                ("expense", "Поставщики", "Оплата товара", 1),
+                ("expense", "Поставщики", "Депозит", 2),
+                ("expense", "Поставщики", "Прочее", 3),
+                ("expense", "Логистика", "Доставка по РФ", 10),
+                ("expense", "Логистика", "Доставка из Китая", 11),
+                ("expense", "Логистика", "Таможня", 12),
+                ("expense", "Банки", "Комиссии банка", 20),
+                ("expense", "Фулфилмент", "Склад / упаковка", 30),
+                ("expense", "Фулфилмент", "Прочее", 31),
+                ("expense", "Зарплата", "Сотрудники", 40),
+                ("expense", "Зарплата", "ИП", 41),
+                ("expense", "Налоги", "НДС", 50),
+                ("expense", "Налоги", "Прибыль", 51),
+                ("expense", "Налоги", "Взносы", 52),
+                ("expense", "Внутренние переводы", "Между счетами", 60),
+                ("expense", "Внутренние переводы", "Между юрлицами", 61),
+                ("expense", "Внутренние переводы", "Перевод собственнику / займы", 62),
+                ("expense", "Прочие расходы", "Офис", 70),
+                ("expense", "Прочие расходы", "IT", 71),
+                ("expense", "Прочие расходы", "Реклама", 72),
+                ("expense", "Прочие расходы", "Прочее", 73),
+            ]
+            for d, c1, c2, s in defaults:
+                await conn.execute(text(
+                    "INSERT INTO category_ref (direction, cat_lvl1, cat_lvl2, sort_order) VALUES (:d, :c1, :c2, :s)"
+                ), {"d": d, "c1": c1, "c2": c2, "s": s})
     yield
 
 

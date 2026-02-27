@@ -368,3 +368,17 @@ def get_unassigned_grouped():
 
 def assign_category_bulk(payload: dict):
     return _post("/api/transactions/assign_category_bulk", payload)
+
+# ─── Category Reference ───────────────────────────────────────────────────────
+
+def get_category_ref():
+    return _get("/api/refs/categories") or []
+
+def add_category_ref(payload: dict):
+    return _post("/api/refs/categories", payload)
+
+def delete_category_ref(cat_id: int):
+    import requests
+    r = requests.delete(f"{API_URL}/api/refs/categories/{cat_id}", timeout=30)
+    r.raise_for_status()
+    return r.json()

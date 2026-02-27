@@ -340,3 +340,17 @@ class CustomsDT(Base):
     order_no: Mapped[Optional[int]] = mapped_column(Integer)
     note: Mapped[Optional[str]] = mapped_column(Text)
     __table_args__ = (Index("ix_customs_dt_number", "dt_number"),)
+
+
+class CategoryRef(Base):
+    """Reference categories for income/expense."""
+    __tablename__ = "category_ref"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    direction: Mapped[str] = mapped_column(String(10), nullable=False)  # "income" or "expense"
+    cat_lvl1: Mapped[str] = mapped_column(String(100), nullable=False)
+    cat_lvl2: Mapped[str] = mapped_column(String(100), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+    __table_args__ = (
+        UniqueConstraint("direction", "cat_lvl1", "cat_lvl2", name="uq_cat_ref"),
+    )

@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
-from backend.models import Account, CounterpartyCategory, Override, OpeningBalance
+from backend.models import Account, CounterpartyCategory, Override, OpeningBalance, CategoryRef
 from backend.schemas import (
     AccountSchema, CounterpartyCategorySchema,
     OverrideSchema, OpeningBalanceSchema,
@@ -145,3 +145,45 @@ async def upsert_opening_balance(
     await db.commit()
     await db.refresh(ob)
     return ob
+
+
+# ─── Category Reference ──────────────────────────────────────────────────────
+
+@router.get("/categories")
+async def get_categories(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(CategoryRef).order_by(CategoryRef.direction, CategoryRef.sort_order, CategoryRef.cat_lvl1)
+    )
+    cats = result.scalars().all()
+    return [
+        {"id": c.id, "direction": c.direction, "cat_lvl1": c.cat_lvl1,
+         "cat_lvl2": c.cat_lvl2, "sort_order": c.sort_order}
+        for c in cats
+    ]
+
+
+@router.post("/categories")
+async def add_category(payload: dict, db: AsyncSession = Depends(get_db)):
+    direction = payload.get("direction", "expense")
+    cat_lvl1 = payload.get("cat_lvl1", "").strip()
+    cat_lvl2 = payload.get("cat_lvl2", "").strip()
+    if not cat_lvl1 or not cat_lvl2:
+        raise HTTPException(400, "cat_lvl1 and cat_lvl2 required")
+    cat = CategoryRef(
+        direction=direction, cat_lvl1=cat_lvl1, cat_lvl2=cat_lvl2,
+        sort_order=payload.get("sort_order", 0),
+    )
+    db.add(cat)
+    await db.commit()
+    return {"ok": True, "id": cat.id}
+
+
+@router.delete("/categories/{cat_id}")
+async def delete_category(cat_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(CategoryRef).where(CategoryRef.id == cat_id))
+    cat = result.scalar_one_or_none()
+    if not cat:
+        raise HTTPException(404, "Not found")
+    await db.delete(cat)
+    await db.commit()
+    return {"ok": True}

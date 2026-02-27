@@ -10,8 +10,9 @@ from frontend import api_client as api
 def render():
     st.title("⚙️ Справочники")
 
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "Счета", "Категории контрагентов", "Переопределения", "Начальные остатки"
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "Счета", "Категории контрагентов", "Переопределения", "Начальные остатки",
+        "📂 Справочник категорий"
     ])
 
     # ── Accounts ──────────────────────────────────────────────────────────────
@@ -193,6 +194,88 @@ def render():
                         "opening_balance": float(ob_bal),
                     })
                     st.success("Сохранено!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Ошибка: {e}")
+
+    # ── Category Reference ────────────────────────────────────────────────────
+    with tab5:
+        st.subheader("Справочник категорий (Приход / Расход)")
+
+        try:
+            cats = api.get_category_ref()
+        except Exception as e:
+            st.error(f"Ошибка: {e}")
+            cats = []
+
+        if cats:
+            df_cats = pd.DataFrame(cats)
+
+            inc_tab, exp_tab = st.tabs(["📥 Приход", "📤 Расход"])
+
+            with inc_tab:
+                df_inc = df_cats[df_cats["direction"] == "income"].copy()
+                if len(df_inc) > 0:
+                    st.dataframe(
+                        df_inc[["id", "cat_lvl1", "cat_lvl2"]].rename(columns={
+                            "id": "ID", "cat_lvl1": "Категория", "cat_lvl2": "Подкатегория",
+                        }),
+                        hide_index=True, use_container_width=True,
+                    )
+                else:
+                    st.info("Нет категорий прихода")
+
+                del_inc_id = st.number_input("Удалить по ID", 0, key="del_inc_cat")
+                if st.button("🗑 Удалить", key="del_inc_btn") and del_inc_id:
+                    try:
+                        api.delete_category_ref(int(del_inc_id))
+                        st.success("Удалено!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")
+
+            with exp_tab:
+                df_exp = df_cats[df_cats["direction"] == "expense"].copy()
+                if len(df_exp) > 0:
+                    st.dataframe(
+                        df_exp[["id", "cat_lvl1", "cat_lvl2"]].rename(columns={
+                            "id": "ID", "cat_lvl1": "Категория", "cat_lvl2": "Подкатегория",
+                        }),
+                        hide_index=True, use_container_width=True,
+                    )
+                else:
+                    st.info("Нет категорий расхода")
+
+                del_exp_id = st.number_input("Удалить по ID", 0, key="del_exp_cat")
+                if st.button("🗑 Удалить", key="del_exp_btn") and del_exp_id:
+                    try:
+                        api.delete_category_ref(int(del_exp_id))
+                        st.success("Удалено!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")
+        else:
+            st.info("Справочник категорий пуст. Перезапустите бэкенд для загрузки дефолтов.")
+
+        with st.expander("➕ Добавить категорию"):
+            ac1, ac2, ac3 = st.columns(3)
+            with ac1:
+                new_dir = st.selectbox("Тип", ["income", "expense"],
+                    format_func=lambda x: "📥 Приход" if x == "income" else "📤 Расход",
+                    key="new_cat_dir")
+            with ac2:
+                new_cat1 = st.text_input("Категория", key="new_cat1")
+            with ac3:
+                new_cat2 = st.text_input("Подкатегория", key="new_cat2")
+
+            if st.button("💾 Добавить", key="add_cat_btn") and new_cat1 and new_cat2:
+                try:
+                    api.add_category_ref({
+                        "direction": new_dir,
+                        "cat_lvl1": new_cat1,
+                        "cat_lvl2": new_cat2,
+                    })
+                    st.success(f"✅ {new_cat1} / {new_cat2} добавлена!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Ошибка: {e}")

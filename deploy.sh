@@ -1,7 +1,4 @@
 #!/bin/zsh
-# deploy.sh — Копирует файлы в проект и пересобирает
-# Использование: ./deploy.sh файл1 файл2 ...
-
 set -e
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -16,6 +13,7 @@ get_dest() {
     import_txn.py)       echo "backend/routers/import_txn.py" ;;
     refs.py)             echo "backend/routers/refs.py" ;;
     reports.py)          echo "backend/routers/reports.py" ;;
+    refs_frontend.py)    echo "frontend/pages/refs.py" ;;
     api_client.py)       echo "frontend/api_client.py" ;;
     app.py)              echo "frontend/app.py" ;;
     cost.py)             echo "frontend/pages/cost.py" ;;
@@ -31,8 +29,8 @@ get_dest() {
 }
 
 copied=0
-rebuild_be=false
-rebuild_fe=false
+needs_rebuild=false
+changed_files=""
 
 if [ $# -eq 0 ]; then
   echo "Использование: ./deploy.sh файл1 файл2 ..."
@@ -42,22 +40,19 @@ fi
 for src in "$@"; do
   fname=$(basename "$src")
   dest=$(get_dest "$fname")
-
   if [ -z "$dest" ]; then
     echo "⚠️  $fname — не в маппинге, пропускаю"
     continue
   fi
-
   full_dest="$PROJECT_DIR/$dest"
   mkdir -p "$(dirname "$full_dest")"
   cp "$src" "$full_dest"
   echo "✅ $fname → $dest"
   copied=$((copied + 1))
-
-  case "$dest" in
-    backend/*|requirements.txt) rebuild_be=true ;;
-    frontend/*) rebuild_fe=true ;;
-  esac
+  changed_files="$changed_files ${fname%.py}"
+  if [ "$fname" = "requirements.txt" ]; then
+    needs_rebuild=true
+  fi
 done
 
 if [ $copied -eq 0 ]; then
@@ -67,30 +62,24 @@ fi
 
 echo ""
 echo "📦 Скопировано: $copied файл(ов)"
+echo "🔄 Обновите страницу в браузере"
 
+auto_msg="update:${changed_files}"
 echo ""
-echo -n "📝 Git commit? (y/n): "
+echo -n "📝 Git push? (y/n): "
 read do_git
 if [ "$do_git" = "y" ]; then
   cd "$PROJECT_DIR"
   git add .
-  echo -n "Сообщение коммита: "
-  read msg
-  git commit -m "${msg:-update}"
+  git commit -m "$auto_msg"
   git push
-  echo "✅ Запушено на GitHub"
+  echo "✅ Запушено: $auto_msg"
 fi
 
-echo ""
-if $rebuild_be && $rebuild_fe; then
-  echo "🐳 Пересобираю backend + frontend..."
+if $needs_rebuild; then
+  echo ""
+  echo "🐳 requirements.txt изменился — пересобираю..."
   docker-compose build --no-cache && docker-compose up -d
-elif $rebuild_be; then
-  echo "🐳 Пересобираю backend..."
-  docker-compose build --no-cache backend && docker-compose up -d backend
-elif $rebuild_fe; then
-  echo "🐳 Пересобираю frontend..."
-  docker-compose build --no-cache frontend && docker-compose up -d frontend
 fi
 
 echo "🎉 Готово!"
