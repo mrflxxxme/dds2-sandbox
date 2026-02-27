@@ -231,6 +231,10 @@ def render():
 
 def _render_single_assignment():
     """Old-style single transaction assignment."""
+    income_cats, expense_cats = _load_categories()
+    all_cats = {**income_cats, **expense_cats}
+    all_cat1_list = list(dict.fromkeys(list(income_cats.keys()) + list(expense_cats.keys())))
+
     try:
         unassigned = api.get_unassigned(limit=200)
     except Exception as e:
