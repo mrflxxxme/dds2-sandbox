@@ -115,13 +115,21 @@ def render():
                         sub_cats = CATEGORIES.get(cat1, ["Прочее"])
                         cat2 = st.selectbox("Подкатегория", sub_cats, key=f"inc_cat2_{i}")
 
-                    if st.button("✅ Применить ко всем", key=f"inc_apply_{i}", type="primary"):
+                    direction = st.radio(
+                        "Применить к:",
+                        ["income", "expense", "all"],
+                        format_func=lambda x: {"income": "📥 Только доходы", "expense": "📤 Только расходы", "all": "📦 Все операции"}[x],
+                        key=f"inc_dir_{i}", horizontal=True,
+                    )
+
+                    if st.button("✅ Применить", key=f"inc_apply_{i}", type="primary"):
                         try:
                             result = api.assign_category_bulk({
                                 "cp_key": cp_key,
                                 "counterparty": cp_name,
                                 "cat_lvl1": cat1,
                                 "cat_lvl2": cat2,
+                                "direction": direction,
                             })
                             st.success(f"✅ Обновлено {result.get('updated', 0)} операций → {cat1} / {cat2}")
                             st.rerun()
@@ -174,13 +182,21 @@ def render():
                         sub_cats = CATEGORIES.get(cat1, ["Прочее"])
                         cat2 = st.selectbox("Подкатегория", sub_cats, key=f"exp_cat2_{i}")
 
-                    if st.button("✅ Применить ко всем", key=f"exp_apply_{i}", type="primary"):
+                    direction = st.radio(
+                        "Применить к:",
+                        ["expense", "income", "all"],
+                        format_func=lambda x: {"income": "📥 Только доходы", "expense": "📤 Только расходы", "all": "📦 Все операции"}[x],
+                        key=f"exp_dir_{i}", horizontal=True,
+                    )
+
+                    if st.button("✅ Применить", key=f"exp_apply_{i}", type="primary"):
                         try:
                             result = api.assign_category_bulk({
                                 "cp_key": cp_key,
                                 "counterparty": cp_name,
                                 "cat_lvl1": cat1,
                                 "cat_lvl2": cat2,
+                                "direction": direction,
                             })
                             st.success(f"✅ Обновлено {result.get('updated', 0)} операций → {cat1} / {cat2}")
                             st.rerun()

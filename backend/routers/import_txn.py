@@ -244,31 +244,44 @@ async def assign_category_bulk(payload: dict, db: AsyncSession = Depends(get_db)
     if not cp_key or not cat_lvl1:
         raise HTTPException(400, "cp_key and cat_lvl1 required")
 
-    # Upsert counterparty category
-    res = await db.execute(
-        select(CounterpartyCategory).where(CounterpartyCategory.cp_key == cp_key)
-    )
-    cpc = res.scalar_one_or_none()
-    if cpc:
-        cpc.cat_lvl1 = cat_lvl1
-        cpc.cat_lvl2 = cat_lvl2
-    else:
-        cpc = CounterpartyCategory(
-            cp_key=cp_key,
-            cp_name=payload.get("counterparty"),
-            cat_lvl1=cat_lvl1,
-            cat_lvl2=cat_lvl2,
-        )
-        db.add(cpc)
+    direction = payload.get("direction", "all")
 
-    # Update all transactions with this cp_key
+    # Only upsert counterparty category if applying to ALL transactions
+    if direction == "all":
+        res = await db.execute(
+            select(CounterpartyCategory).where(CounterpartyCategory.cp_key == cp_key)
+        )
+        cpc = res.scalar_one_or_none()
+        if cpc:
+            cpc.cat_lvl1 = cat_lvl1
+            cpc.cat_lvl2 = cat_lvl2
+        else:
+            cpc = CounterpartyCategory(
+                cp_key=cp_key,
+                cp_name=payload.get("counterparty"),
+                cat_lvl1=cat_lvl1,
+                cat_lvl2=cat_lvl2,
+            )
+            db.add(cpc)
+
+    # Update transactions with this cp_key
+    if direction == "income":
+        sql = """UPDATE transactions
+                 SET cat_lvl1_2 = :c1, cat_lvl2_2 = :c2,
+                     status = CASE WHEN is_cashflow2=1 THEN 'OK' ELSE status END
+                 WHERE cp_key = :cpk AND is_cashflow2 = 1 AND cat_lvl1_2 IS NULL AND income > 0"""
+    elif direction == "expense":
+        sql = """UPDATE transactions
+                 SET cat_lvl1_2 = :c1, cat_lvl2_2 = :c2,
+                     status = CASE WHEN is_cashflow2=1 THEN 'OK' ELSE status END
+                 WHERE cp_key = :cpk AND is_cashflow2 = 1 AND cat_lvl1_2 IS NULL AND expense > 0"""
+    else:
+        sql = """UPDATE transactions
+                 SET cat_lvl1_2 = :c1, cat_lvl2_2 = :c2,
+                     status = CASE WHEN is_cashflow2=1 THEN 'OK' ELSE status END
+                 WHERE cp_key = :cpk AND is_cashflow2 = 1 AND cat_lvl1_2 IS NULL"""
     result = await db.execute(
-        text(
-            """UPDATE transactions
-               SET cat_lvl1_2 = :c1, cat_lvl2_2 = :c2,
-                   status = CASE WHEN is_cashflow2=1 THEN 'OK' ELSE status END
-               WHERE cp_key = :cpk AND is_cashflow2 = 1"""
-        ),
+        text(sql),
         {"c1": cat_lvl1, "c2": cat_lvl2, "cpk": cp_key},
     )
 
