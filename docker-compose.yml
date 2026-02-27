@@ -27,6 +27,8 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://dds:dds_secret@db:5432/dds_db
       DATABASE_URL_SYNC: postgresql://dds:dds_secret@db:5432/dds_db
+    volumes:
+      - ./backend:/app/backend
 
   frontend:
     build:
@@ -38,6 +40,8 @@ services:
       - backend
     environment:
       API_URL: http://backend:8000
+    volumes:
+      - ./frontend:/app/frontend
 
 volumes:
   pgdata:

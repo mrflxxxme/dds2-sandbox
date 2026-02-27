@@ -60,6 +60,13 @@ def render():
     df_inc = df_g[df_g["total_income"] > 0].sort_values("total_income", ascending=False)
     df_exp = df_g[df_g["total_expense"] > 0].sort_values("total_expense", ascending=False)
 
+    # Load all unassigned for detail views
+    try:
+        all_unassigned = api.get_unassigned(limit=1000)
+        df_all = pd.DataFrame(all_unassigned) if all_unassigned else pd.DataFrame()
+    except Exception:
+        df_all = pd.DataFrame()
+
     tab_inc, tab_exp, tab_single = st.tabs(["📥 Поступления", "📤 Расходы", "🔍 По одной операции"])
 
     with tab_inc:
@@ -80,6 +87,26 @@ def render():
                     f"{total:,.0f} {currency} ({cnt} операц.)"
                 ):
                     st.text(f"CP Key: {cp_key}")
+
+                    # Show transactions for this counterparty
+                    if len(df_all) > 0 and cp_key:
+                        cp_txns = df_all[df_all["cp_key"] == cp_key].copy()
+                        if len(cp_txns) > 0:
+                            cp_txns["date"] = pd.to_datetime(cp_txns["date"]).dt.strftime("%d.%m.%Y")
+                            for nc in ["income", "expense"]:
+                                if nc in cp_txns.columns:
+                                    cp_txns[nc] = pd.to_numeric(cp_txns[nc], errors="coerce").fillna(0)
+                            show_cols = ["date", "income", "expense", "currency"]
+                            if "purpose" in cp_txns.columns:
+                                cp_txns["purpose_short"] = cp_txns["purpose"].astype(str).str[:80]
+                                show_cols.append("purpose_short")
+                            st.dataframe(
+                                cp_txns[show_cols].rename(columns={
+                                    "date": "Дата", "income": "Приход", "expense": "Расход",
+                                    "currency": "Валюта", "purpose_short": "Назначение",
+                                }),
+                                hide_index=True, use_container_width=True
+                            )
 
                     c1, c2 = st.columns(2)
                     with c1:
@@ -119,6 +146,26 @@ def render():
                     f"{total:,.0f} {currency} ({cnt} операц.)"
                 ):
                     st.text(f"CP Key: {cp_key}")
+
+                    # Show transactions for this counterparty
+                    if len(df_all) > 0 and cp_key:
+                        cp_txns = df_all[df_all["cp_key"] == cp_key].copy()
+                        if len(cp_txns) > 0:
+                            cp_txns["date"] = pd.to_datetime(cp_txns["date"]).dt.strftime("%d.%m.%Y")
+                            for nc in ["income", "expense"]:
+                                if nc in cp_txns.columns:
+                                    cp_txns[nc] = pd.to_numeric(cp_txns[nc], errors="coerce").fillna(0)
+                            show_cols = ["date", "income", "expense", "currency"]
+                            if "purpose" in cp_txns.columns:
+                                cp_txns["purpose_short"] = cp_txns["purpose"].astype(str).str[:80]
+                                show_cols.append("purpose_short")
+                            st.dataframe(
+                                cp_txns[show_cols].rename(columns={
+                                    "date": "Дата", "income": "Приход", "expense": "Расход",
+                                    "currency": "Валюта", "purpose_short": "Назначение",
+                                }),
+                                hide_index=True, use_container_width=True
+                            )
 
                     c1, c2 = st.columns(2)
                     with c1:
