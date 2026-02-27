@@ -169,6 +169,16 @@ async def add_category(payload: dict, db: AsyncSession = Depends(get_db)):
     cat_lvl2 = payload.get("cat_lvl2", "").strip()
     if not cat_lvl1 or not cat_lvl2:
         raise HTTPException(400, "cat_lvl1 and cat_lvl2 required")
+    # Check duplicate
+    existing = await db.execute(
+        select(CategoryRef).where(
+            CategoryRef.direction == direction,
+            CategoryRef.cat_lvl1 == cat_lvl1,
+            CategoryRef.cat_lvl2 == cat_lvl2,
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(400, f"Категория '{cat_lvl1} / {cat_lvl2}' уже существует")
     cat = CategoryRef(
         direction=direction, cat_lvl1=cat_lvl1, cat_lvl2=cat_lvl2,
         sort_order=payload.get("sort_order", 0),
