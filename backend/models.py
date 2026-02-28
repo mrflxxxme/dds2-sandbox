@@ -392,3 +392,36 @@ class CategoryRef(Base):
     __table_args__ = (
         UniqueConstraint("direction", "cat_lvl1", "cat_lvl2", name="uq_cat_ref"),
     )
+
+
+# ─── Integrations ────────────────────────────────────────────────────────────
+
+class IntegrationKey(Base):
+    """Encrypted API keys for external services (WB, OZON, etc.)."""
+    __tablename__ = "integration_keys"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    service: Mapped[str] = mapped_column(String(50), nullable=False)  # "wb", "ozon"
+    label: Mapped[Optional[str]] = mapped_column(String(200))  # user-friendly name
+    encrypted_key: Mapped[str] = mapped_column(Text, nullable=False)  # Fernet-encrypted
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_sync_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("service", "label", name="uq_integration_service_label"),
+    )
+
+
+class SyncLog(Base):
+    """Log of integration sync operations."""
+    __tablename__ = "sync_log"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    integration_id: Mapped[int] = mapped_column(Integer, ForeignKey("integration_keys.id"))
+    service: Mapped[str] = mapped_column(String(50), nullable=False)
+    sync_type: Mapped[str] = mapped_column(String(50), nullable=False)  # "sales", "payouts", "orders"
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String(20), default="RUNNING")  # RUNNING, OK, ERROR
+    rows_fetched: Mapped[int] = mapped_column(Integer, default=0)
+    rows_inserted: Mapped[int] = mapped_column(Integer, default=0)
+    error_msg: Mapped[Optional[str]] = mapped_column(Text)

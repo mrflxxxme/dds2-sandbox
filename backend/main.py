@@ -11,7 +11,7 @@ from sqlalchemy import text
 from backend.config import settings
 from backend.database import async_engine, AsyncSessionLocal, Base
 from backend.auth import get_current_user, ensure_default_admin
-from backend.routers import import_txn, refs, reports, planning, cost, auth
+from backend.routers import import_txn, refs, reports, planning, cost, auth, integrations
 
 
 @asynccontextmanager
@@ -112,6 +112,10 @@ app.include_router(
 )
 app.include_router(
     cost.router, prefix="/api/v1", tags=["Cost"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    integrations.router, prefix="/api/v1", tags=["Integrations"],
     dependencies=[Depends(get_current_user)],
 )
 
