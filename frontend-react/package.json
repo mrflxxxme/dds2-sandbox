@@ -3,16 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack",
+    "dev": "next dev --turbopack -p 3000",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
-    "generate-types": "npx openapi-typescript http://backend:8000/openapi.json -o src/lib/api-types.ts"
+    "lint": "next lint"
   },
   "dependencies": {
     "next": "15.3.2",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/node": "^22",
@@ -22,7 +22,6 @@
     "eslint-config-next": "15.3.2",
     "typescript": "^5",
     "tailwindcss": "^4",
-    "@tailwindcss/postcss": "^4",
-    "openapi-typescript": "^7"
+    "@tailwindcss/postcss": "^4"
   }
 }

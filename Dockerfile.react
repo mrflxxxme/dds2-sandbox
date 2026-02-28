@@ -1,28 +1,17 @@
-# ─── Builder stage ────────────────────────────────────────────────────────────
-FROM node:20-slim AS builder
-
-WORKDIR /build
-COPY package.json package-lock.json* ./
-RUN npm install --legacy-peer-deps
-COPY . .
-RUN npm run build
-
-# ─── Runtime stage ────────────────────────────────────────────────────────────
 FROM node:20-slim
 
 WORKDIR /app
 
-ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
+COPY package.json package-lock.json* ./
+RUN npm install --legacy-peer-deps
 
-# Copy standalone build
-COPY --from=builder /build/.next/standalone ./
-COPY --from=builder /build/.next/static ./.next/static
-COPY --from=builder /build/public ./public
+COPY . .
 
 EXPOSE 3000
 
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD node -e "require('http').get('http://localhost:3000', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"
+ENV NEXT_TELEMETRY_DISABLED=1
 
-CMD ["node", "server.js"]
+HEALTHCHECK --interval=30s --timeout=10s --retries=5 \
+    CMD node -e "require('http').get('http://localhost:3000', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+
+CMD ["npm", "run", "dev"]
