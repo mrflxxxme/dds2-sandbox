@@ -11,7 +11,7 @@ from sqlalchemy import text
 from backend.config import settings
 from backend.database import async_engine, AsyncSessionLocal, Base
 from backend.auth import get_current_user, ensure_default_admin
-from backend.routers import import_txn, refs, reports, planning, cost, auth, integrations
+from backend.routers import import_txn, refs, reports, planning, cost, auth, integrations, projects
 
 
 @asynccontextmanager
@@ -92,6 +92,10 @@ register_exception_handlers(app)
 
 # Public routes (no auth required)
 app.include_router(auth.router, prefix="/api/v1", tags=["Auth"])
+app.include_router(
+    projects.router, prefix="/api/v1",
+    dependencies=[Depends(get_current_user)],
+)
 
 # Protected routes (auth required)
 app.include_router(

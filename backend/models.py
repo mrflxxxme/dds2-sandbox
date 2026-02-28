@@ -39,9 +39,61 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    email: Mapped[Optional[str]] = mapped_column(String(200), unique=True)
+    first_name: Mapped[Optional[str]] = mapped_column(String(100))
+    last_name: Mapped[Optional[str]] = mapped_column(String(100))
     password_hash: Mapped[str] = mapped_column(String(200), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    memberships: Mapped[list["ProjectMember"]] = relationship(back_populates="user")
+
+
+class Project(Base):
+    """A project groups all data (transactions, orders, accounts, etc.)."""
+    __tablename__ = "projects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    members: Mapped[list["ProjectMember"]] = relationship(back_populates="project")
+    invites: Mapped[list["ProjectInvite"]] = relationship(back_populates="project")
+
+
+class ProjectMember(Base):
+    """Link between users and projects."""
+    __tablename__ = "project_members"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    joined_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    project: Mapped["Project"] = relationship(back_populates="members")
+    user: Mapped["User"] = relationship(back_populates="memberships")
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "user_id", name="uq_project_member"),
+    )
+
+
+class ProjectInvite(Base):
+    """Invitations to join a project (by email or link)."""
+    __tablename__ = "project_invites"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    email: Mapped[Optional[str]] = mapped_column(String(200))
+    invite_token: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, accepted, expired
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    accepted_by_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"))
+
+    project: Mapped["Project"] = relationship(back_populates="invites")
 
 
 # ─── Reference tables ───────────────────────────────────────────────────────
@@ -50,6 +102,7 @@ class Account(Base):
     __tablename__ = "accounts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     account: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     bank: Mapped[str] = mapped_column(String(20), nullable=False)
     currency: Mapped[str] = mapped_column(String(10), nullable=False)
@@ -65,6 +118,7 @@ class CounterpartyCategory(Base):
     __tablename__ = "counterparty_categories"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     cp_key: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     cp_name: Mapped[Optional[str]] = mapped_column(String(200))
     cat_lvl1: Mapped[Optional[str]] = mapped_column(String(100))
@@ -78,6 +132,7 @@ class Override(Base):
     __tablename__ = "overrides"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     txn_id: Mapped[str] = mapped_column(String(300), unique=True, nullable=False)
     cat_lvl1: Mapped[Optional[str]] = mapped_column(String(100))
     cat_lvl2: Mapped[Optional[str]] = mapped_column(String(100))
@@ -90,6 +145,7 @@ class OpeningBalance(Base):
     __tablename__ = "opening_balances"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     date_open: Mapped[date] = mapped_column(Date, nullable=False)
     account: Mapped[str] = mapped_column(String(50), nullable=False)
     currency: Mapped[str] = mapped_column(String(10), nullable=False)
@@ -104,6 +160,7 @@ class Transaction(Base):
     __tablename__ = "transactions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     bank: Mapped[str] = mapped_column(String(20), nullable=False)
     account: Mapped[str] = mapped_column(String(50), ForeignKey("accounts.account"), nullable=False)
@@ -199,6 +256,7 @@ class Order(Base):
     __tablename__ = "orders"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     order_name: Mapped[Optional[str]] = mapped_column(String(200))
     category: Mapped[Optional[str]] = mapped_column(String(100))
     transport_type: Mapped[Optional[str]] = mapped_column(String(30))
@@ -225,6 +283,7 @@ class PlannedPayment(Base):
     __tablename__ = "planned_payments"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     pay_date: Mapped[Optional[date]] = mapped_column(Date)
     order_no: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("orders.order_no"))
     direction: Mapped[Optional[str]] = mapped_column(String(50))
@@ -240,6 +299,7 @@ class PlannedIncome(Base):
     __tablename__ = "planned_incomes"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     date: Mapped[date] = mapped_column(Date, nullable=False)
     amount_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
     source: Mapped[str] = mapped_column(String(50), default="WB")
@@ -250,6 +310,7 @@ class WbPayout(Base):
     __tablename__ = "wb_payouts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     request_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     amount_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(10), default="RUB")
@@ -273,6 +334,7 @@ class ImportLog(Base):
     __tablename__ = "import_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     filename: Mapped[str] = mapped_column(String(300))
     source_type: Mapped[str] = mapped_column(String(30))
     imported_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -317,6 +379,7 @@ class DutyRule(Base):
 class CostOrder(Base):
     __tablename__ = "cost_orders"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     order_no: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     invoice_no: Mapped[Optional[str]] = mapped_column(String(100))
     ship_date: Mapped[Optional[date]] = mapped_column(Date)
@@ -400,6 +463,7 @@ class IntegrationKey(Base):
     """Encrypted API keys for external services (WB, OZON, etc.)."""
     __tablename__ = "integration_keys"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     service: Mapped[str] = mapped_column(String(50), nullable=False)  # "wb", "ozon"
     label: Mapped[Optional[str]] = mapped_column(String(200))  # user-friendly name
     encrypted_key: Mapped[str] = mapped_column(Text, nullable=False)  # Fernet-encrypted
