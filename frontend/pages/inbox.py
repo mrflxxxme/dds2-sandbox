@@ -54,7 +54,7 @@ def _render_cp_block(i, row, df_all, cats_dict, prefix):
                 if nc in cp_txns.columns:
                     cp_txns[nc] = pd.to_numeric(cp_txns[nc], errors="coerce").fillna(0)
             if "purpose" in cp_txns.columns:
-                cp_txns["purpose_short"] = cp_txns["purpose"].astype(str).str[:60]
+                cp_txns["purpose_short"] = cp_txns["purpose"].astype(str).str[:150]
 
             # Checkboxes for each transaction
             st.markdown("**Выберите операции:**")
@@ -65,7 +65,7 @@ def _render_cp_block(i, row, df_all, cats_dict, prefix):
             for j, (_, txn) in enumerate(cp_txns.iterrows()):
                 txn_id = txn.get("txn_id", "")
                 amt = float(txn.get("income", 0) or 0) if is_income else float(txn.get("expense", 0) or 0)
-                purpose = str(txn.get("purpose_short", ""))[:60] if "purpose_short" in txn.index else ""
+                purpose = str(txn.get("purpose_short", "")) if "purpose_short" in txn.index else ""
                 label = f"{txn.get('date_fmt', '')} | {amt:,.0f} {currency} | {purpose}"
 
                 checked = st.checkbox(label, value=select_all, key=f"{prefix}_cb_{i}_{j}")

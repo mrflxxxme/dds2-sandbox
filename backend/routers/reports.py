@@ -265,17 +265,28 @@ async def get_income_by_category_daily(
     year: int = Query(...),
     month: int = Query(...),
     currency: str = Query("RUB"),
+    cat_lvl1: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Daily income grouped by cat_lvl1 for a given month."""
+    """Daily income grouped by category for a given month.
+    If cat_lvl1 is provided, filters by that cat_lvl1 and groups by cat_lvl2.
+    Otherwise groups by cat_lvl1.
+    """
     import calendar
     date_from = date(year, month, 1)
     date_to = date(year, month, calendar.monthrange(year, month)[1])
 
-    result = await db.execute(
+    if cat_lvl1:
+        group_col = func.coalesce(Transaction.cat_lvl2_2, 'Без подкатегории').label("category")
+        extra_filter = Transaction.cat_lvl1_2 == cat_lvl1
+    else:
+        group_col = func.coalesce(Transaction.cat_lvl1_2, 'Без категории').label("category")
+        extra_filter = None
+
+    q = (
         select(
             func.date_trunc('day', Transaction.date).label("day"),
-            func.coalesce(Transaction.cat_lvl1_2, 'Без категории').label("category"),
+            group_col,
             func.sum(Transaction.income).label("income"),
         )
         .where(
@@ -285,9 +296,12 @@ async def get_income_by_category_daily(
             Transaction.date >= date_from,
             Transaction.date <= date_to,
         )
-        .group_by("day", "category")
-        .order_by("day")
     )
+    if extra_filter is not None:
+        q = q.where(extra_filter)
+    q = q.group_by("day", "category").order_by("day")
+
+    result = await db.execute(q)
 
     rows = []
     for r in result:

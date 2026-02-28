@@ -166,6 +166,21 @@ class OpeningBalanceSchema(BaseModel):
     opening_balance: Decimal
 
 
+class WbPayoutSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: Optional[int] = None
+    request_id: str
+    amount_rub: Decimal
+    currency: str = "RUB"
+    created_at: datetime
+    wb_status_raw: Optional[str] = None
+    status: str = "PENDING"
+    bank_comment: Optional[str] = None
+    matched_txn_id: Optional[str] = None
+    matched_at: Optional[datetime] = None
+    imported_at: Optional[datetime] = None
+
+
 class ImportLogSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int

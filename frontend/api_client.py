@@ -8,18 +8,44 @@ from typing import Any, Optional
 
 API_URL = os.getenv("API_URL", "http://localhost:8000")
 
+# Token storage: set by Streamlit app via set_token()
+_token: Optional[str] = None
+
+
+def set_token(token: Optional[str]):
+    global _token
+    _token = token
+
+
+def _get_headers() -> dict:
+    headers = {}
+    if _token:
+        headers["Authorization"] = f"Bearer {_token}"
+    return headers
+
 
 def _get(path: str, params: dict = None) -> Any:
-    r = requests.get(f"{API_URL}{path}", params=params, timeout=30)
+    r = requests.get(f"{API_URL}{path}", params=params, headers=_get_headers(), timeout=30)
     r.raise_for_status()
     return r.json()
 
 
 def _post(path: str, json: dict = None, files=None, data=None) -> Any:
     if files:
-        r = requests.post(f"{API_URL}{path}", files=files, data=data, timeout=60)
+        r = requests.post(f"{API_URL}{path}", files=files, data=data, headers=_get_headers(), timeout=60)
     else:
-        r = requests.post(f"{API_URL}{path}", json=json, timeout=30)
+        r = requests.post(f"{API_URL}{path}", json=json, headers=_get_headers(), timeout=30)
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("detail", r.text)
+        except Exception:
+            detail = r.text
+        raise Exception(f"{r.status_code}: {detail}")
+    return r.json()
+
+
+def _put(path: str, json: dict = None) -> Any:
+    r = requests.put(f"{API_URL}{path}", json=json, headers=_get_headers(), timeout=30)
     if r.status_code >= 400:
         try:
             detail = r.json().get("detail", r.text)
@@ -30,8 +56,25 @@ def _post(path: str, json: dict = None, files=None, data=None) -> Any:
 
 
 def _delete(path: str) -> Any:
-    r = requests.delete(f"{API_URL}{path}", timeout=15)
+    r = requests.delete(f"{API_URL}{path}", headers=_get_headers(), timeout=15)
     r.raise_for_status()
+    return r.json()
+
+
+# ─── Auth ─────────────────────────────────────────────────────────────────
+
+def login(username: str, password: str) -> dict:
+    """Login and return {access_token, token_type}."""
+    r = requests.post(f"{API_URL}/api/auth/login", json={
+        "username": username,
+        "password": password,
+    }, timeout=15)
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("detail", r.text)
+        except Exception:
+            detail = r.text
+        raise Exception(detail)
     return r.json()
 
 
@@ -241,8 +284,11 @@ def get_income_daily(year: int, month: int, currency: str = "RUB"):
     return _get("/api/reports/income_daily", {"year": year, "month": month, "currency": currency})
 
 
-def get_income_by_category_daily(year: int, month: int, currency: str = "RUB"):
-    return _get("/api/reports/income_by_category_daily", {"year": year, "month": month, "currency": currency})
+def get_income_by_category_daily(year: int, month: int, currency: str = "RUB", cat_lvl1: str = None):
+    params = {"year": year, "month": month, "currency": currency}
+    if cat_lvl1:
+        params["cat_lvl1"] = cat_lvl1
+    return _get("/api/reports/income_by_category_daily", params)
 
 
 # ─── Cost / Себестоимость ─────────────────────────────────────────────────────
@@ -251,11 +297,10 @@ def get_nomenclature():
     return _get("/api/cost/nomenclature") or []
 
 def upload_nomenclature(file_bytes: bytes, filename: str):
-    import requests
-    url = f"{API_URL}/api/cost/nomenclature/upload"
-    r = requests.post(url, files={"file": (filename, file_bytes)}, timeout=60)
-    r.raise_for_status()
-    return r.json()
+    return _post(
+        "/api/cost/nomenclature/upload",
+        files={"file": (filename, file_bytes)},
+    )
 
 def get_duty_rules():
     return _get("/api/cost/duty_rules") or []
@@ -264,10 +309,7 @@ def upsert_duty_rule(payload: dict):
     return _post("/api/cost/duty_rules", payload)
 
 def delete_duty_rule(rule_id: int):
-    import requests
-    r = requests.delete(f"{API_URL}/api/cost/duty_rules/{rule_id}", timeout=30)
-    r.raise_for_status()
-    return r.json()
+    return _delete(f"/api/cost/duty_rules/{rule_id}")
 
 def get_cost_orders():
     return _get("/api/cost/orders") or []
@@ -276,44 +318,31 @@ def create_cost_order(payload: dict):
     return _post("/api/cost/orders", payload)
 
 def delete_cost_order(order_no: str):
-    import requests
-    r = requests.delete(f"{API_URL}/api/cost/orders/{order_no}", timeout=30)
-    r.raise_for_status()
-    return r.json()
+    return _delete(f"/api/cost/orders/{order_no}")
 
 def get_cost_order_items(order_no: str):
     return _get(f"/api/cost/orders/{order_no}/items") or []
 
 def upload_cost_order_items(order_no: str, file_bytes: bytes, filename: str):
-    import requests
-    url = f"{API_URL}/api/cost/orders/{order_no}/upload"
-    r = requests.post(url, files={"file": (filename, file_bytes)}, timeout=60)
-    r.raise_for_status()
-    return r.json()
-
+    return _post(
+        f"/api/cost/orders/{order_no}/upload",
+        files={"file": (filename, file_bytes)},
+    )
 
 def generate_cost_plan(order_no: str):
     return _post(f"/api/cost/orders/{order_no}/generate_plan", {})
 
 def update_cost_order(order_no: str, payload: dict):
-    import requests
-    r = requests.put(f"{API_URL}/api/cost/orders/{order_no}", json=payload, timeout=30)
-    if r.status_code >= 400:
-        try:
-            detail = r.json().get("detail", r.text)
-        except Exception:
-            detail = r.text
-        raise Exception(f"{r.status_code}: {detail}")
-    return r.json()
+    return _put(f"/api/cost/orders/{order_no}", json=payload)
 
 def sync_plan_payments():
     return _post("/api/planning/sync_plan_payments", {})
 
 def get_candidate_transactions(direction: str, account: str = None):
-    params = f"direction={direction}"
+    params = {"direction": direction}
     if account:
-        params += f"&account={account}"
-    return _get(f"/api/planning/candidate_transactions?{params}") or []
+        params["account"] = account
+    return _get("/api/planning/candidate_transactions", params) or []
 
 def get_accounts_list():
     return _get("/api/planning/accounts_list") or []
@@ -325,41 +354,50 @@ def create_fact_link(payload: dict):
     return _post("/api/planning/fact_links", payload)
 
 def delete_fact_link(link_id: int):
-    import requests
-    r = requests.delete(f"{API_URL}/api/planning/fact_links/{link_id}", timeout=30)
-    r.raise_for_status()
-    return r.json()
+    return _delete(f"/api/planning/fact_links/{link_id}")
 
 # ─── Customs DT ───────────────────────────────────────────────────────────────
 
 def upload_fts_report(file_bytes: bytes, filename: str):
-    import requests
-    r = requests.post(
-        f"{API_URL}/api/planning/customs_dt/upload_fts",
-        files={"file": (filename, file_bytes)}, timeout=60
+    return _post(
+        "/api/planning/customs_dt/upload_fts",
+        files={"file": (filename, file_bytes)},
     )
-    if r.status_code >= 400:
-        try:
-            detail = r.json().get("detail", r.text)
-        except Exception:
-            detail = r.text
-        raise Exception(f"{r.status_code}: {detail}")
-    return r.json()
 
 def get_customs_dt_list():
     return _get("/api/planning/customs_dt") or []
 
 def update_customs_dt(dt_id: int, payload: dict):
-    import requests
-    r = requests.put(f"{API_URL}/api/planning/customs_dt/{dt_id}", json=payload, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    return _put(f"/api/planning/customs_dt/{dt_id}", json=payload)
 
 def delete_customs_dt(dt_id: int):
-    import requests
-    r = requests.delete(f"{API_URL}/api/planning/customs_dt/{dt_id}", timeout=30)
-    r.raise_for_status()
-    return r.json()
+    return _delete(f"/api/planning/customs_dt/{dt_id}")
+
+# ─── WB Payouts ──────────────────────────────────────────────────────────────
+
+def upload_wb_payouts(file_bytes: bytes, filename: str):
+    return _post(
+        "/api/planning/wb_payouts/upload",
+        files={"file": (filename, file_bytes,
+               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+
+def get_wb_payouts(status: str = None):
+    params = {}
+    if status:
+        params["status"] = status
+    return _get("/api/planning/wb_payouts", params) or []
+
+def delete_wb_payout(payout_id: int):
+    return _delete(f"/api/planning/wb_payouts/{payout_id}")
+
+def manual_reconcile_wb(payout_id: int, txn_id: str):
+    return _post(f"/api/planning/wb_payouts/{payout_id}/reconcile",
+                 json={"txn_id": txn_id})
+
+def refresh_wb_forecast():
+    return _post("/api/planning/wb_forecast/refresh", json={})
+
 
 # ─── Bulk categorization ──────────────────────────────────────────────────────
 
@@ -381,7 +419,4 @@ def add_category_ref(payload: dict):
     return _post("/api/refs/categories", payload)
 
 def delete_category_ref(cat_id: int):
-    import requests
-    r = requests.delete(f"{API_URL}/api/refs/categories/{cat_id}", timeout=30)
-    r.raise_for_status()
-    return r.json()
+    return _delete(f"/api/refs/categories/{cat_id}")

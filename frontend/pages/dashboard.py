@@ -107,7 +107,21 @@ def render():
     # ── Аналитика поступлений ─────────────────────────────────────────────────
     st.subheader(f"📥 Поступления за {month:02d}/{year} по категориям")
     try:
-        income_data = api.get_income_by_category_daily(year=int(year), month=int(month), currency=currency)
+        # Сначала загружаем данные верхнего уровня для списка категорий
+        income_top = api.get_income_by_category_daily(year=int(year), month=int(month), currency=currency)
+        top_categories = sorted(set(r["category"] for r in income_top)) if income_top else []
+
+        # Выбор категории для drill-down
+        cat_options = ["Все категории"] + top_categories
+        selected_cat = st.selectbox(
+            "Категория прихода", cat_options, key="dash_income_cat"
+        )
+
+        cat_filter = None if selected_cat == "Все категории" else selected_cat
+        income_data = api.get_income_by_category_daily(
+            year=int(year), month=int(month), currency=currency, cat_lvl1=cat_filter
+        ) if cat_filter else income_top
+
         if income_data:
             df_inc = pd.DataFrame(income_data)
             df_inc["date"] = pd.to_datetime(df_inc["date"])
@@ -118,7 +132,11 @@ def render():
                 "Займы": "#f59e0b",
                 "Прочее": "#6b7280",
                 "Без категории": "#d1d5db",
+                "Без подкатегории": "#d1d5db",
             }
+
+            if cat_filter:
+                st.caption(f"Детализация: **{cat_filter}** → подкатегории")
 
             col_chart, col_pie = st.columns([3, 2])
 
@@ -127,7 +145,6 @@ def render():
                 fig = go.Figure()
                 for cat in cats:
                     df_c = df_inc[df_inc["category"] == cat]
-                    # Pivot to get one row per date
                     daily = df_c.groupby("date")["income"].sum().reset_index()
                     fig.add_trace(go.Bar(
                         x=daily["date"], y=daily["income"],

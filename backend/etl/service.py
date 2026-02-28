@@ -2,6 +2,7 @@
 ETL service: orchestrates raw file -> normalize -> upsert -> master logic refresh.
 """
 
+import logging
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional
@@ -10,10 +11,12 @@ import pandas as pd
 from sqlalchemy.orm import Session
 from sqlalchemy import select, text
 
+logger = logging.getLogger(__name__)
+
 from backend.models import (
     Transaction, Account, CounterpartyCategory, Override,
     ImportLog, CustomsTopup, PlannedPayment, CostOrder, CustomsAlloc,
-    PaymentFactLink, CustomsDT,
+    PaymentFactLink, CustomsDT, WbPayout,
 )
 from backend.etl.parsers import parse_statement
 from backend.etl.master_logic import apply_master_logic
@@ -89,8 +92,8 @@ def import_statement(
         _ensure_account(db, account_no, source_type)
 
         # 1. Parse
-        df = parse_statement(source_type, file_data, account_no)
-        log.rows_raw = len(df)
+        df, parse_skipped = parse_statement(source_type, file_data, account_no)
+        log.rows_raw = len(df) + parse_skipped
 
         if df.empty:
             log.status = "OK"
@@ -127,7 +130,8 @@ def import_statement(
             def safe_dec(val):
                 try:
                     return Decimal(str(val)) if val is not None and str(val) != 'nan' else Decimal("0")
-                except Exception:
+                except Exception as e:
+                    logger.warning("Invalid decimal value %r converted to 0: %s", val, e)
                     return Decimal("0")
 
             def safe_str(val):
@@ -173,9 +177,14 @@ def import_statement(
         # 5. Sync plan payments (auto-match fact from bank statements)
         _sync_plan_payments(db)
 
+        # 6. Reconcile WB payouts with newly imported bank transactions
+        _sync_wb_payouts(db)
+
         log.rows_inserted = inserted
-        log.rows_skipped = skipped
+        log.rows_skipped = skipped + parse_skipped
         log.status = "OK"
+        if parse_skipped:
+            log.error_msg = f"{parse_skipped} rows skipped during parsing (bad dates or format)"
         db.commit()
 
     except Exception as e:
@@ -335,5 +344,75 @@ def _sync_plan_payments(db: Session):
 
         p.paid_rub = paid
         p.is_paid = paid >= (p.amount_rub or Decimal("0")) if (p.amount_rub and p.amount_rub > 0) else False
+
+    db.flush()
+
+
+def _sync_wb_payouts(db: Session):
+    """Reconcile WB payouts with bank transactions (sync version for ETL pipeline)."""
+    from datetime import datetime as dt_mod, timedelta
+    from sqlalchemy import or_, and_
+
+    unmatched = db.execute(
+        select(WbPayout).where(WbPayout.status.in_(["TRANSIT", "PROCESSING", "PENDING"]))
+    ).scalars().all()
+    if not unmatched:
+        return
+
+    already_matched = {
+        r[0] for r in db.execute(
+            select(WbPayout.matched_txn_id).where(WbPayout.matched_txn_id.isnot(None))
+        )
+    }
+
+    min_date = min(p.created_at for p in unmatched) - timedelta(days=2)
+    max_date = max(p.created_at for p in unmatched) + timedelta(days=5)
+
+    candidates = db.execute(
+        select(Transaction).where(
+            Transaction.income > 0,
+            Transaction.date >= min_date,
+            Transaction.date <= max_date,
+            or_(
+                and_(
+                    Transaction.cat_lvl1_2 == "Маркетплейсы",
+                    Transaction.cat_lvl2_2 == "Wildberries",
+                ),
+                Transaction.counterparty.ilike("%вайлдберриз%"),
+                Transaction.counterparty.ilike("%wildberries%"),
+            )
+        )
+    ).scalars().all()
+    candidates = [t for t in candidates if t.txn_id not in already_matched]
+
+    if not candidates:
+        return
+
+    used_txn_ids: set = set()
+    for payout in sorted(unmatched, key=lambda p: p.amount_rub, reverse=True):
+        best_match = None
+        best_diff = float("inf")
+
+        for txn in candidates:
+            if txn.txn_id in used_txn_ids:
+                continue
+
+            txn_date = txn.date.date() if hasattr(txn.date, 'date') else txn.date
+            payout_date = payout.created_at.date() if hasattr(payout.created_at, 'date') else payout.created_at
+            delta = (txn_date - payout_date).days
+            if delta < -2 or delta > 5:
+                continue
+
+            diff = abs(float(txn.income) - float(payout.amount_rub))
+            tolerance = float(payout.amount_rub) * 0.01
+            if diff <= tolerance and diff < best_diff:
+                best_diff = diff
+                best_match = txn
+
+        if best_match:
+            payout.matched_txn_id = best_match.txn_id
+            payout.matched_at = dt_mod.utcnow()
+            payout.status = "RECEIVED"
+            used_txn_ids.add(best_match.txn_id)
 
     db.flush()

@@ -32,6 +32,18 @@ class PurposeTag(str, enum.Enum):
     OTHER = "Другое"
 
 
+# ─── Auth ─────────────────────────────────────────────────────────────────────
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(200), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 # ─── Reference tables ───────────────────────────────────────────────────────
 
 class Account(Base):
@@ -131,6 +143,9 @@ class Transaction(Base):
         Index("ix_txn_currency", "currency"),
         Index("ix_txn_cat", "cat_lvl1_2", "cat_lvl2_2"),
         Index("ix_txn_status", "status"),
+        Index("ix_txn_cp_key", "cp_key"),
+        Index("ix_txn_cashflow2", "is_cashflow2"),
+        Index("ix_txn_cashflow_unassigned", "is_cashflow2", "cat_lvl1_2"),
     )
 
 
@@ -228,6 +243,28 @@ class PlannedIncome(Base):
     date: Mapped[date] = mapped_column(Date, nullable=False)
     amount_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
     source: Mapped[str] = mapped_column(String(50), default="WB")
+
+
+class WbPayout(Base):
+    """WB seller cabinet payout tracking."""
+    __tablename__ = "wb_payouts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    request_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    amount_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(10), default="RUB")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    wb_status_raw: Mapped[Optional[str]] = mapped_column(String(300))
+    status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    bank_comment: Mapped[Optional[str]] = mapped_column(Text)
+    matched_txn_id: Mapped[Optional[str]] = mapped_column(String(300))
+    matched_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    imported_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_wb_payout_status", "status"),
+        Index("ix_wb_payout_created", "created_at"),
+    )
 
 
 # ─── Import log ───────────────────────────────────────────────────────────────

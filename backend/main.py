@@ -4,12 +4,14 @@ DDS Financial Management System - FastAPI Backend
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from backend.database import async_engine, Base
-from backend.routers import import_txn, refs, reports, planning, cost
+from backend.config import settings
+from backend.database import async_engine, AsyncSessionLocal, Base
+from backend.auth import get_current_user, ensure_default_admin
+from backend.routers import import_txn, refs, reports, planning, cost, auth
 
 
 @asynccontextmanager
@@ -17,85 +19,51 @@ async def lifespan(app: FastAPI):
     # Create tables on startup
     async with async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # Migrations for existing DBs
-        await conn.execute(text(
-            "ALTER TABLE cost_orders ADD COLUMN IF NOT EXISTS transport_type VARCHAR(30) DEFAULT 'AUTO'"
-        ))
-        await conn.execute(text(
-            "ALTER TABLE planned_payments ADD COLUMN IF NOT EXISTS paid_rub NUMERIC(18,2) DEFAULT 0"
-        ))
-        await conn.execute(text(
-            "ALTER TABLE cost_orders ADD COLUMN IF NOT EXISTS actual_arrival_date DATE"
-        ))
-        await conn.execute(text(
-            "ALTER TABLE cost_orders ADD COLUMN IF NOT EXISTS dt_number VARCHAR(100)"
-        ))
-        # customs_dt table
-        await conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS customs_dt (
-                id SERIAL PRIMARY KEY,
-                dt_number VARCHAR(100) NOT NULL,
-                dt_date DATE NOT NULL,
-                amount_rub NUMERIC(18,2) NOT NULL,
-                order_no INTEGER,
-                note TEXT
-            )
-        """))
-        await conn.execute(text("""
-            CREATE INDEX IF NOT EXISTS ix_customs_dt_number ON customs_dt (dt_number)
-        """))
-        # category_ref table
-        await conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS category_ref (
-                id SERIAL PRIMARY KEY,
-                direction VARCHAR(10) NOT NULL,
-                cat_lvl1 VARCHAR(100) NOT NULL,
-                cat_lvl2 VARCHAR(100) NOT NULL,
-                sort_order INTEGER DEFAULT 0,
-                UNIQUE(direction, cat_lvl1, cat_lvl2)
-            )
-        """))
-        # Seed defaults if empty
-        row = await conn.execute(text("SELECT count(*) FROM category_ref"))
-        cnt = row.scalar()
-        if cnt == 0:
-            defaults = [
-                # Income
-                ("income", "Маркетплейсы", "Wildberries", 1),
-                ("income", "Маркетплейсы", "OZON", 2),
-                ("income", "Маркетплейсы", "Прочее", 3),
-                ("income", "Банки", "Проценты", 10),
-                ("income", "Внутренние переводы", "Между счетами", 20),
-                ("income", "Внутренние переводы", "Между юрлицами", 21),
-                ("income", "Прочие доходы", "Возврат", 30),
-                ("income", "Прочие доходы", "Прочее", 31),
-                # Expense
-                ("expense", "Поставщики", "Оплата товара", 1),
-                ("expense", "Поставщики", "Депозит", 2),
-                ("expense", "Поставщики", "Прочее", 3),
-                ("expense", "Логистика", "Доставка по РФ", 10),
-                ("expense", "Логистика", "Доставка из Китая", 11),
-                ("expense", "Логистика", "Таможня", 12),
-                ("expense", "Банки", "Комиссии банка", 20),
-                ("expense", "Фулфилмент", "Склад / упаковка", 30),
-                ("expense", "Фулфилмент", "Прочее", 31),
-                ("expense", "Зарплата", "Сотрудники", 40),
-                ("expense", "Зарплата", "ИП", 41),
-                ("expense", "Налоги", "НДС", 50),
-                ("expense", "Налоги", "Прибыль", 51),
-                ("expense", "Налоги", "Взносы", 52),
-                ("expense", "Внутренние переводы", "Между счетами", 60),
-                ("expense", "Внутренние переводы", "Между юрлицами", 61),
-                ("expense", "Внутренние переводы", "Перевод собственнику / займы", 62),
-                ("expense", "Прочие расходы", "Офис", 70),
-                ("expense", "Прочие расходы", "IT", 71),
-                ("expense", "Прочие расходы", "Реклама", 72),
-                ("expense", "Прочие расходы", "Прочее", 73),
-            ]
-            for d, c1, c2, s in defaults:
-                await conn.execute(text(
-                    "INSERT INTO category_ref (direction, cat_lvl1, cat_lvl2, sort_order) VALUES (:d, :c1, :c2, :s)"
-                ), {"d": d, "c1": c1, "c2": c2, "s": s})
+
+        # Seed default categories (idempotent)
+        defaults = [
+            # Income
+            ("income", "Маркетплейсы", "Wildberries", 1),
+            ("income", "Маркетплейсы", "OZON", 2),
+            ("income", "Маркетплейсы", "Прочее", 3),
+            ("income", "Банки", "Проценты", 10),
+            ("income", "Внутренние переводы", "Между счетами", 20),
+            ("income", "Внутренние переводы", "Между юрлицами", 21),
+            ("income", "Прочие доходы", "Возврат", 30),
+            ("income", "Прочие доходы", "Прочее", 31),
+            # Expense
+            ("expense", "Поставщики", "Оплата товара", 1),
+            ("expense", "Поставщики", "Депозит", 2),
+            ("expense", "Поставщики", "Прочее", 3),
+            ("expense", "Логистика", "Доставка по РФ", 10),
+            ("expense", "Логистика", "Доставка из Китая", 11),
+            ("expense", "Логистика", "Таможня", 12),
+            ("expense", "Банки", "Комиссии банка", 20),
+            ("expense", "Фулфилмент", "Склад / упаковка", 30),
+            ("expense", "Фулфилмент", "Прочее", 31),
+            ("expense", "Зарплата", "Сотрудники", 40),
+            ("expense", "Зарплата", "ИП", 41),
+            ("expense", "Налоги", "НДС", 50),
+            ("expense", "Налоги", "Прибыль", 51),
+            ("expense", "Налоги", "Взносы", 52),
+            ("expense", "Внутренние переводы", "Между счетами", 60),
+            ("expense", "Внутренние переводы", "Между юрлицами", 61),
+            ("expense", "Внутренние переводы", "Перевод собственнику / займы", 62),
+            ("expense", "Прочие расходы", "Офис", 70),
+            ("expense", "Прочие расходы", "IT", 71),
+            ("expense", "Прочие расходы", "Реклама", 72),
+            ("expense", "Прочие расходы", "Прочее", 73),
+        ]
+        for d, c1, c2, s in defaults:
+            await conn.execute(text(
+                "INSERT INTO category_ref (direction, cat_lvl1, cat_lvl2, sort_order) "
+                "VALUES (:d, :c1, :c2, :s) ON CONFLICT (direction, cat_lvl1, cat_lvl2) DO NOTHING"
+            ), {"d": d, "c1": c1, "c2": c2, "s": s})
+
+    # Create default admin user
+    async with AsyncSessionLocal() as session:
+        await ensure_default_admin(session)
+
     yield
 
 
@@ -108,16 +76,36 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[o.strip() for o in settings.CORS_ORIGINS.split(",")],
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
-app.include_router(import_txn.router, prefix="/api", tags=["Import & Transactions"])
-app.include_router(refs.router, prefix="/api", tags=["Reference Data"])
-app.include_router(reports.router, prefix="/api", tags=["Reports"])
-app.include_router(planning.router, prefix="/api", tags=["Planning"])
-app.include_router(cost.router, prefix="/api", tags=["Cost"])
+# Public routes (no auth required)
+app.include_router(auth.router, prefix="/api", tags=["Auth"])
+
+# Protected routes (auth required)
+app.include_router(
+    import_txn.router, prefix="/api", tags=["Import & Transactions"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    refs.router, prefix="/api", tags=["Reference Data"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    reports.router, prefix="/api", tags=["Reports"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    planning.router, prefix="/api", tags=["Planning"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    cost.router, prefix="/api", tags=["Cost"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 @app.get("/health")
@@ -128,12 +116,10 @@ async def health():
 @app.get("/api/seed_defaults")
 async def seed_defaults(db=None):
     """Seed default reference data (accounts, lead times)."""
-    from sqlalchemy.ext.asyncio import AsyncSession
-    from fastapi import Depends
     return {"message": "Use POST /api/refs/accounts and /api/planning/lead_times"}
 
 
-@app.post("/api/seed")
+@app.post("/api/seed", dependencies=[Depends(get_current_user)])
 async def seed_data():
     """Seed default accounts, lead times, etc. from the Excel files."""
     from backend.database import SyncSessionLocal

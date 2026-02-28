@@ -322,21 +322,133 @@ def render():
     # ── Поступления WB ────────────────────────────────────────────────────────
     with tab3:
         st.subheader("Поступления WB")
+
+        # ── Upload WB Payout Excel ──
+        with st.expander("📤 Загрузить выписку из кабинета WB"):
+            wb_file = st.file_uploader("Excel из кабинета WB", type=["xlsx"], key="wb_upload")
+            if wb_file and st.button("📊 Загрузить", key="btn_wb_upload"):
+                try:
+                    result = api.upload_wb_payouts(wb_file.read(), wb_file.name)
+                    st.success(
+                        f"Создано: {result['created']}, обновлено: {result['updated']}, "
+                        f"пропущено: {result['skipped']}"
+                    )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Ошибка загрузки: {e}")
+
+        # ── WB Payouts Table ──
         try:
-            incomes = api.get_incomes()
+            payouts = api.get_wb_payouts()
         except Exception as e:
             st.error(f"Ошибка: {e}")
-            incomes = []
+            payouts = []
 
-        if incomes:
-            df_i = pd.DataFrame(incomes)
-            if "date" in df_i.columns:
-                df_i["date"] = pd.to_datetime(df_i["date"]).dt.strftime("%d.%m.%Y")
-            st.dataframe(df_i, hide_index=True, use_container_width=True)
-            total = sum(float(i.get("amount_rub", 0)) for i in incomes)
-            st.metric("Итого поступлений", f"{total:,.0f} ₽")
+        if payouts:
+            status_emoji = {
+                "PENDING": "⏳ В очереди",
+                "PROCESSING": "🔄 Обрабатывается",
+                "TRANSIT": "✈️ В пути",
+                "RECEIVED": "✅ Получено",
+            }
+            df_wp = pd.DataFrame(payouts)
+            df_wp["Статус"] = df_wp["status"].map(lambda s: status_emoji.get(s, s))
+            df_wp["Дата"] = pd.to_datetime(df_wp["created_at"]).dt.strftime("%d.%m.%Y")
+            df_wp["Сумма"] = df_wp["amount_rub"].apply(lambda x: f"{float(x):,.0f} ₽")
 
-        with st.expander("➕ Добавить / редактировать поступление"):
+            st.dataframe(
+                df_wp[["Дата", "request_id", "Сумма", "Статус", "matched_txn_id"]].rename(columns={
+                    "request_id": "ID заявки", "matched_txn_id": "Сверено с",
+                }),
+                hide_index=True, use_container_width=True,
+            )
+
+            # Metrics
+            transit_sum = sum(float(p["amount_rub"]) for p in payouts
+                             if p["status"] in ("TRANSIT", "PROCESSING", "PENDING"))
+            received_sum = sum(float(p["amount_rub"]) for p in payouts
+                              if p["status"] == "RECEIVED")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("В пути / ожидает", f"{transit_sum:,.0f} ₽")
+            c2.metric("Получено", f"{received_sum:,.0f} ₽")
+            c3.metric("Всего записей", len(payouts))
+        else:
+            st.info("Нет данных. Загрузите выписку из кабинета WB.")
+
+        # ── Manual Reconciliation ──
+        with st.expander("🔗 Ручная сверка"):
+            unmatched = [p for p in payouts if p["status"] != "RECEIVED"] if payouts else []
+            if unmatched:
+                sel_payout = st.selectbox(
+                    "Выплата WB",
+                    options=unmatched,
+                    format_func=lambda p: f"{p['request_id']} — {float(p['amount_rub']):,.0f} ₽ ({p['status']})",
+                    key="wb_reconcile_sel",
+                )
+                txn_id_input = st.text_input("txn_id банковской транзакции", key="wb_reconcile_txn")
+                if st.button("Привязать", key="btn_wb_reconcile") and sel_payout and txn_id_input:
+                    try:
+                        api.manual_reconcile_wb(sel_payout["id"], txn_id_input)
+                        st.success("Сверено!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")
+            else:
+                st.success("Все выплаты сверены!")
+
+        # ── Auto Forecast ──
+        st.markdown("---")
+        st.subheader("📈 Автопрогноз WB поступлений")
+
+        if st.button("🔄 Обновить прогноз (среднее за 7 дней → 30 дней вперёд)", key="btn_wb_forecast"):
+            try:
+                result = api.refresh_wb_forecast()
+                st.session_state["wb_forecast_msg"] = (
+                    f"Среднедневной доход WB: {result['daily_avg']:,.0f} ₽, "
+                    f"создано записей: {result['created']}"
+                )
+                st.rerun()
+            except Exception as e:
+                st.error(f"Ошибка: {e}")
+
+        if "wb_forecast_msg" in st.session_state:
+            st.success(st.session_state.pop("wb_forecast_msg"))
+
+        # Show current forecast
+        try:
+            incomes_all = api.get_incomes()
+            wb_forecast = [i for i in incomes_all if i.get("source") == "WB_AUTO"]
+            if wb_forecast:
+                df_fc = pd.DataFrame(wb_forecast)
+                df_fc["Дата"] = pd.to_datetime(df_fc["date"]).dt.strftime("%d.%m.%Y")
+                df_fc["Сумма"] = df_fc["amount_rub"].apply(lambda x: f"{float(x):,.0f} ₽")
+                st.dataframe(
+                    df_fc[["Дата", "Сумма"]].rename(columns={"Дата": "Дата", "Сумма": "Прогноз"}),
+                    hide_index=True, use_container_width=True,
+                )
+                total_fc = sum(float(i["amount_rub"]) for i in wb_forecast)
+                st.metric("Итого прогноз на 30 дней", f"{total_fc:,.0f} ₽")
+            else:
+                st.info("Прогноз не сформирован. Нажмите кнопку выше.")
+        except Exception:
+            pass
+
+        # ── Manual PlannedIncome (legacy) ──
+        with st.expander("📝 Ручные записи поступлений"):
+            try:
+                incomes = api.get_incomes()
+            except Exception as e:
+                st.error(f"Ошибка: {e}")
+                incomes = []
+
+            if incomes:
+                df_i = pd.DataFrame(incomes)
+                if "date" in df_i.columns:
+                    df_i["date"] = pd.to_datetime(df_i["date"]).dt.strftime("%d.%m.%Y")
+                st.dataframe(df_i, hide_index=True, use_container_width=True)
+                total = sum(float(i.get("amount_rub", 0)) for i in incomes)
+                st.metric("Итого поступлений", f"{total:,.0f} ₽")
+
             col1, col2, col3 = st.columns(3)
             with col1:
                 i_id = st.number_input("ID (0 = новое)", 0, key="i_id")

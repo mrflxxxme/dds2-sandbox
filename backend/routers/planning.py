@@ -11,13 +11,17 @@ from sqlalchemy import select, func, and_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
+from sqlalchemy import or_
+
 from backend.models import (
     Order, LeadTime, PlannedPayment, PlannedIncome,
     CustomsTopup, CustomsAlloc, Transaction, PaymentFactLink, CustomsDT,
+    WbPayout,
 )
 from backend.schemas import (
     OrderSchema, LeadTimeSchema, PlannedPaymentSchema,
     PlannedIncomeSchema, CustomsTopupSchema, CustomsAllocSchema,
+    WbPayoutSchema,
 )
 
 router = APIRouter(prefix="/planning")
@@ -284,6 +288,19 @@ async def get_cashflow_daily(
     income_map: dict[date, Decimal] = {}
     for inc in inc_result.scalars().all():
         income_map[inc.date] = income_map.get(inc.date, Decimal("0")) + inc.amount_rub
+
+    # WB payouts in transit → add as expected income (created_at + 2 days)
+    transit_result = await db.execute(
+        select(WbPayout).where(
+            WbPayout.status.in_(["TRANSIT", "PROCESSING"]),
+        )
+    )
+    for wp in transit_result.scalars().all():
+        estimated = wp.created_at.date() + timedelta(days=2) if hasattr(wp.created_at, 'date') else wp.created_at + timedelta(days=2)
+        if estimated < today:
+            estimated = today  # overdue transit → show today
+        if estimated <= horizon:
+            income_map[estimated] = income_map.get(estimated, Decimal("0")) + wp.amount_rub
 
     # Planned payments (unpaid)
     pay_result = await db.execute(
@@ -661,6 +678,242 @@ async def delete_customs_dt(dt_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(dt)
     await db.commit()
     return {"ok": True}
+
+
+# ─── WB Payouts ──────────────────────────────────────────────────────────────
+
+@router.post("/wb_payouts/upload")
+async def upload_wb_payouts(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload WB payout Excel from seller cabinet. Upserts by request_id."""
+    from backend.etl.parsers import parse_wb_payout_cabinet
+    from datetime import datetime
+
+    data = await file.read()
+    parsed = parse_wb_payout_cabinet(data)
+
+    if not parsed:
+        raise HTTPException(400, "Не удалось распознать записи в файле")
+
+    created, updated, skipped = 0, 0, 0
+    for item in parsed:
+        result = await db.execute(
+            select(WbPayout).where(WbPayout.request_id == item["request_id"])
+        )
+        obj = result.scalar_one_or_none()
+        if obj:
+            if obj.status != "RECEIVED":
+                obj.wb_status_raw = item["wb_status_raw"]
+                obj.status = item["status"]
+                obj.bank_comment = item["bank_comment"]
+                updated += 1
+            else:
+                skipped += 1
+        else:
+            obj = WbPayout(**item)
+            db.add(obj)
+            created += 1
+
+    await db.commit()
+
+    # Trigger reconciliation
+    await _reconcile_wb_payouts(db)
+
+    return {"ok": True, "created": created, "updated": updated, "skipped": skipped,
+            "total_parsed": len(parsed)}
+
+
+@router.get("/wb_payouts")
+async def get_wb_payouts(
+    status: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """List WB payouts, optionally filtered by status."""
+    q = select(WbPayout).order_by(WbPayout.created_at.desc())
+    if status:
+        q = q.where(WbPayout.status == status)
+    result = await db.execute(q)
+    payouts = result.scalars().all()
+    return [WbPayoutSchema.model_validate(p).model_dump() for p in payouts]
+
+
+@router.delete("/wb_payouts/{payout_id}")
+async def delete_wb_payout(payout_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(WbPayout).where(WbPayout.id == payout_id))
+    obj = result.scalar_one_or_none()
+    if not obj:
+        raise HTTPException(404, "Not found")
+    await db.delete(obj)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.post("/wb_payouts/{payout_id}/reconcile")
+async def manual_reconcile_wb(
+    payout_id: int,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually match a WB payout with a bank transaction."""
+    txn_id = payload.get("txn_id")
+    if not txn_id:
+        raise HTTPException(400, "txn_id required")
+
+    result = await db.execute(select(WbPayout).where(WbPayout.id == payout_id))
+    payout = result.scalar_one_or_none()
+    if not payout:
+        raise HTTPException(404, "Payout not found")
+
+    txn = await db.execute(select(Transaction).where(Transaction.txn_id == txn_id))
+    if not txn.scalar_one_or_none():
+        raise HTTPException(404, "Transaction not found")
+
+    from datetime import datetime as dt_mod
+    payout.matched_txn_id = txn_id
+    payout.matched_at = dt_mod.utcnow()
+    payout.status = "RECEIVED"
+    await db.commit()
+    return {"ok": True}
+
+
+async def _reconcile_wb_payouts(db: AsyncSession):
+    """
+    Match WB payouts (not RECEIVED) with bank income transactions.
+    Criteria: WB counterparty, amount ±1%, date within [-2, +5] days.
+    """
+    from datetime import datetime as dt_mod
+
+    unmatched_result = await db.execute(
+        select(WbPayout).where(WbPayout.status.in_(["TRANSIT", "PROCESSING", "PENDING"]))
+    )
+    payouts = unmatched_result.scalars().all()
+    if not payouts:
+        return
+
+    # Already matched txn_ids
+    matched_result = await db.execute(
+        select(WbPayout.matched_txn_id).where(WbPayout.matched_txn_id.isnot(None))
+    )
+    already_matched = {r[0] for r in matched_result}
+
+    # Date range
+    min_date = min(p.created_at for p in payouts) - timedelta(days=2)
+    max_date = max(p.created_at for p in payouts) + timedelta(days=5)
+
+    # Candidate bank transactions (WB income)
+    candidates_result = await db.execute(
+        select(Transaction).where(
+            Transaction.income > 0,
+            Transaction.date >= min_date,
+            Transaction.date <= max_date,
+            or_(
+                and_(
+                    Transaction.cat_lvl1_2 == "Маркетплейсы",
+                    Transaction.cat_lvl2_2 == "Wildberries",
+                ),
+                Transaction.counterparty.ilike("%вайлдберриз%"),
+                Transaction.counterparty.ilike("%wildberries%"),
+            )
+        )
+    )
+    candidates = [t for t in candidates_result.scalars().all()
+                  if t.txn_id not in already_matched]
+
+    if not candidates:
+        return
+
+    # Greedy matching: largest payouts first
+    used_txn_ids: set[str] = set()
+    for payout in sorted(payouts, key=lambda p: p.amount_rub, reverse=True):
+        best_match = None
+        best_diff = float("inf")
+
+        for txn in candidates:
+            if txn.txn_id in used_txn_ids:
+                continue
+
+            # Date window
+            txn_date = txn.date.date() if hasattr(txn.date, 'date') else txn.date
+            payout_date = payout.created_at.date() if hasattr(payout.created_at, 'date') else payout.created_at
+            delta = (txn_date - payout_date).days
+            if delta < -2 or delta > 5:
+                continue
+
+            # Amount tolerance: ±1%
+            diff = abs(float(txn.income) - float(payout.amount_rub))
+            tolerance = float(payout.amount_rub) * 0.01
+            if diff <= tolerance and diff < best_diff:
+                best_diff = diff
+                best_match = txn
+
+        if best_match:
+            payout.matched_txn_id = best_match.txn_id
+            payout.matched_at = dt_mod.utcnow()
+            payout.status = "RECEIVED"
+            used_txn_ids.add(best_match.txn_id)
+
+    await db.commit()
+
+
+# ─── WB Forecast ─────────────────────────────────────────────────────────────
+
+@router.post("/wb_forecast/refresh")
+async def refresh_wb_forecast(db: AsyncSession = Depends(get_db)):
+    """
+    Auto-generate PlannedIncome for next 30 days based on
+    7-day rolling average of actual WB income.
+    """
+    today = date.today()
+    week_ago = today - timedelta(days=7)
+
+    # Actual WB income from last 7 days
+    result = await db.execute(
+        select(
+            func.coalesce(func.sum(Transaction.income), 0)
+        ).where(
+            Transaction.income > 0,
+            Transaction.is_cashflow2 == 1,
+            Transaction.date >= week_ago,
+            Transaction.date <= today,
+            or_(
+                and_(
+                    Transaction.cat_lvl1_2 == "Маркетплейсы",
+                    Transaction.cat_lvl2_2 == "Wildberries",
+                ),
+                Transaction.counterparty.ilike("%вайлдберриз%"),
+                Transaction.counterparty.ilike("%wildberries%"),
+            )
+        )
+    )
+    total_7d = Decimal(str(result.scalar() or 0))
+    daily_avg = (total_7d / Decimal("7")).quantize(Decimal("0.01"))
+
+    if daily_avg <= 0:
+        return {"ok": True, "daily_avg": 0, "message": "Нет данных WB за последние 7 дней"}
+
+    # Delete stale auto-forecast
+    await db.execute(text("DELETE FROM planned_incomes WHERE source = 'WB_AUTO'"))
+
+    # Get manual WB income dates to avoid overlap
+    manual_result = await db.execute(
+        select(PlannedIncome.date).where(PlannedIncome.source == "WB")
+    )
+    manual_dates = {row[0] for row in manual_result}
+
+    # Insert forecast for next 30 days
+    created = 0
+    for i in range(1, 31):
+        d = today + timedelta(days=i)
+        if d in manual_dates:
+            continue
+        pi = PlannedIncome(date=d, amount_rub=daily_avg, source="WB_AUTO")
+        db.add(pi)
+        created += 1
+
+    await db.commit()
+    return {"ok": True, "daily_avg": float(daily_avg), "created": created}
 
 
 async def _update_payment_paid(payment_id: int, db: AsyncSession):
