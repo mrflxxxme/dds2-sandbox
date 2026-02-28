@@ -12,6 +12,16 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: str = "http://localhost:8501"
 
+    # Redis
+    REDIS_URL: str = "redis://localhost:6379/0"
+
+    # MinIO (S3-compatible storage)
+    MINIO_ENDPOINT: str = "localhost:9000"
+    MINIO_ACCESS_KEY: str = "minioadmin"
+    MINIO_SECRET_KEY: str = "minioadmin"
+    MINIO_BUCKET: str = "dds-files"
+    MINIO_SECURE: bool = False
+
     class Config:
         env_file = ".env"
 

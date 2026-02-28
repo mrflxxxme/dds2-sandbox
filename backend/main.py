@@ -66,6 +66,10 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Shutdown: close Redis connection
+    from backend.cache import close_redis
+    await close_redis()
+
 
 app = FastAPI(
     title="DDS Financial Management",

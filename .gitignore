@@ -1,5 +1,12 @@
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
 .env
 .DS_Store
 pgdata/
+data/
+uploads/
+.pytest_cache/
+*.sqlite3
+.ruff_cache/

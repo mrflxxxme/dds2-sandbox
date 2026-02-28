@@ -281,6 +281,7 @@ class ImportLog(Base):
     rows_skipped: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(20), default="OK")
     error_msg: Mapped[Optional[str]] = mapped_column(Text)
+    file_url: Mapped[Optional[str]] = mapped_column(String(500))  # MinIO object path
 
 
 # ─── Себестоимость ────────────────────────────────────────────────────────────

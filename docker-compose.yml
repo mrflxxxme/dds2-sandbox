@@ -1,19 +1,58 @@
 services:
   db:
     image: postgres:15
+    env_file: .env
     environment:
-      POSTGRES_USER: dds
-      POSTGRES_PASSWORD: dds_secret
-      POSTGRES_DB: dds_db
+      POSTGRES_USER: ${POSTGRES_USER:-dds}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dds_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-dds_db}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dds"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dds}"]
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - internal
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - internal
 
   backend:
     build:
@@ -24,11 +63,28 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://dds:dds_secret@db:5432/dds_db
-      DATABASE_URL_SYNC: postgresql://dds:dds_secret@db:5432/dds_db
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://dds:dds_secret@db:5432/dds_db}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql://dds:dds_secret@db:5432/dds_db}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-dds-files}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
     volumes:
       - ./backend:/app/backend
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - internal
 
   frontend:
     build:
@@ -38,10 +94,20 @@ services:
       - "8501:8501"
     depends_on:
       - backend
+    env_file: .env
     environment:
-      API_URL: http://backend:8000
+      API_URL: ${API_URL:-http://backend:8000}
     volumes:
       - ./frontend:/app/frontend
+    restart: unless-stopped
+    networks:
+      - internal
 
 volumes:
   pgdata:
+  redisdata:
+  miniodata:
+
+networks:
+  internal:
+    driver: bridge

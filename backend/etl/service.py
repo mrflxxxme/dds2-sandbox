@@ -84,6 +84,17 @@ def import_statement(
         source_type=source_type,
         imported_at=datetime.utcnow(),
     )
+
+    # Save original file to MinIO (for audit trail / re-import)
+    from backend.storage import upload_file
+    file_url = upload_file(
+        data=file_data,
+        filename=filename,
+        source_type=source_type,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    log.file_url = file_url
+
     db.add(log)
     db.flush()
 
@@ -186,6 +197,18 @@ def import_statement(
         if parse_skipped:
             log.error_msg = f"{parse_skipped} rows skipped during parsing (bad dates or format)"
         db.commit()
+
+        # 7. Invalidate report caches (async call from sync context)
+        try:
+            import asyncio
+            from backend.cache import invalidate_cache
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(invalidate_cache("reports"))
+            except RuntimeError:
+                asyncio.run(invalidate_cache("reports"))
+        except Exception as e:
+            logger.warning("Cache invalidation skipped: %s", e)
 
     except Exception as e:
         db.rollback()
