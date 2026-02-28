@@ -86,28 +86,32 @@ app.add_middleware(
     allow_credentials=True,
 )
 
+# Register unified error handlers
+from backend.exceptions import register_exception_handlers
+register_exception_handlers(app)
+
 # Public routes (no auth required)
-app.include_router(auth.router, prefix="/api", tags=["Auth"])
+app.include_router(auth.router, prefix="/api/v1", tags=["Auth"])
 
 # Protected routes (auth required)
 app.include_router(
-    import_txn.router, prefix="/api", tags=["Import & Transactions"],
+    import_txn.router, prefix="/api/v1", tags=["Import & Transactions"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
-    refs.router, prefix="/api", tags=["Reference Data"],
+    refs.router, prefix="/api/v1", tags=["Reference Data"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
-    reports.router, prefix="/api", tags=["Reports"],
+    reports.router, prefix="/api/v1", tags=["Reports"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
-    planning.router, prefix="/api", tags=["Planning"],
+    planning.router, prefix="/api/v1", tags=["Planning"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
-    cost.router, prefix="/api", tags=["Cost"],
+    cost.router, prefix="/api/v1", tags=["Cost"],
     dependencies=[Depends(get_current_user)],
 )
 
@@ -123,7 +127,7 @@ async def seed_defaults(db=None):
     return {"message": "Use POST /api/refs/accounts and /api/planning/lead_times"}
 
 
-@app.post("/api/seed", dependencies=[Depends(get_current_user)])
+@app.post("/api/v1/seed", dependencies=[Depends(get_current_user)])
 async def seed_data():
     """Seed default accounts, lead times, etc. from the Excel files."""
     from backend.database import SyncSessionLocal

@@ -12,12 +12,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models import Transaction, Account, OpeningBalance
-from backend.schemas import DashboardBalances, DdsMonthRow
+from backend.schemas import (
+    BalanceRow, DdsMonthRow, FxControlRow, BalanceDailyRow,
+    IncomeDailyRow, IncomeByCategoryRow,
+)
 
 router = APIRouter(prefix="/reports")
 
 
-@router.get("/balance")
+@router.get("/balance", response_model=list[BalanceRow])
 async def get_balance(
     as_of: Optional[date] = Query(None),
     db: AsyncSession = Depends(get_db),
@@ -69,7 +72,7 @@ async def get_balance(
     return balances
 
 
-@router.get("/dds_month")
+@router.get("/dds_month", response_model=list[DdsMonthRow])
 async def get_dds_month(
     year: int = Query(...),
     month: int = Query(...),
@@ -115,7 +118,7 @@ async def get_dds_month(
     return rows
 
 
-@router.get("/fx_control")
+@router.get("/fx_control", response_model=list[FxControlRow])
 async def get_fx_control(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
@@ -169,7 +172,7 @@ async def get_customs_control(
     return result.scalars().all()
 
 
-@router.get("/balance_daily")
+@router.get("/balance_daily", response_model=list[BalanceDailyRow])
 async def get_balance_daily(
     account: str = Query(...),
     currency: str = Query(...),
@@ -218,7 +221,7 @@ async def get_balance_daily(
     return output
 
 
-@router.get("/income_daily")
+@router.get("/income_daily", response_model=list[IncomeDailyRow])
 async def get_income_daily(
     year: int = Query(...),
     month: int = Query(...),
@@ -260,7 +263,7 @@ async def get_income_daily(
     return rows
 
 
-@router.get("/income_by_category_daily")
+@router.get("/income_by_category_daily", response_model=list[IncomeByCategoryRow])
 async def get_income_by_category_daily(
     year: int = Query(...),
     month: int = Query(...),

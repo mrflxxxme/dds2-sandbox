@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import Account, CounterpartyCategory, Override, OpeningBalance, CategoryRef
 from backend.schemas import (
-    AccountSchema, CounterpartyCategorySchema,
-    OverrideSchema, OpeningBalanceSchema,
+    AccountSchema, CounterpartyCategorySchema, OverrideSchema,
+    OpeningBalanceSchema, CategoryRefSchema, DeleteResponse, MessageResponse,
 )
 
 router = APIRouter(prefix="/refs")
@@ -40,7 +40,7 @@ async def upsert_account(payload: AccountSchema, db: AsyncSession = Depends(get_
     return acc
 
 
-@router.delete("/accounts/{account_id}")
+@router.delete("/accounts/{account_id}", response_model=DeleteResponse)
 async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Account).where(Account.id == account_id))
     acc = result.scalar_one_or_none()
@@ -80,7 +80,7 @@ async def upsert_cp_category(
     return cpc
 
 
-@router.delete("/cp_categories/{cpc_id}")
+@router.delete("/cp_categories/{cpc_id}", response_model=DeleteResponse)
 async def delete_cp_category(cpc_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(CounterpartyCategory).where(CounterpartyCategory.id == cpc_id)
@@ -103,7 +103,7 @@ async def get_overrides(db: AsyncSession = Depends(get_db)):
     return result.scalars().all()
 
 
-@router.delete("/overrides/{override_id}")
+@router.delete("/overrides/{override_id}", response_model=DeleteResponse)
 async def delete_override(override_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Override).where(Override.id == override_id))
     obj = result.scalar_one_or_none()
@@ -149,7 +149,7 @@ async def upsert_opening_balance(
 
 # ─── Category Reference ──────────────────────────────────────────────────────
 
-@router.get("/categories")
+@router.get("/categories", response_model=list[CategoryRefSchema])
 async def get_categories(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(CategoryRef).order_by(CategoryRef.direction, CategoryRef.sort_order, CategoryRef.cat_lvl1)
@@ -162,7 +162,7 @@ async def get_categories(db: AsyncSession = Depends(get_db)):
     ]
 
 
-@router.post("/categories")
+@router.post("/categories", response_model=CategoryRefSchema)
 async def add_category(payload: dict, db: AsyncSession = Depends(get_db)):
     direction = payload.get("direction", "expense")
     cat_lvl1 = payload.get("cat_lvl1", "").strip()
@@ -188,7 +188,7 @@ async def add_category(payload: dict, db: AsyncSession = Depends(get_db)):
     return {"ok": True, "id": cat.id}
 
 
-@router.delete("/categories/{cat_id}")
+@router.delete("/categories/{cat_id}", response_model=DeleteResponse)
 async def delete_category(cat_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(CategoryRef).where(CategoryRef.id == cat_id))
     cat = result.scalar_one_or_none()
