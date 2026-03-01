@@ -259,21 +259,26 @@ async def sync_funnel(
     if not dates:
         raise HTTPException(400, "Неверный диапазон дат")
 
-    # Get cost prices from orders (latest order's items by article_wb)
-    cost_map = {}
-    cost_result = await db.execute(
-        select(
-            CostOrderItem.article_wb,
-            CostOrderItem.cost_price_rub,
-        ).where(
-            CostOrderItem.article_wb.isnot(None),
-            CostOrderItem.cost_price_rub.isnot(None),
-        ).order_by(CostOrderItem.id.desc())
-    )
-    for row in cost_result:
-        nm = row.article_wb
-        if nm and nm not in cost_map:
-            cost_map[nm] = float(row.cost_price_rub)
+    # Get cost prices from orders (latest order's items by article_seller)
+    cost_map: dict = {}
+    try:
+        cost_result = await db.execute(
+            select(
+                CostOrderItem.article_seller,
+                CostOrderItem.total_rub,
+                CostOrderItem.qty,
+            ).where(
+                CostOrderItem.article_seller.isnot(None),
+                CostOrderItem.total_rub.isnot(None),
+            ).order_by(CostOrderItem.id.desc())
+        )
+        for row in cost_result:
+            art = row.article_seller
+            if art and art not in cost_map:
+                qty = row.qty or 1
+                cost_map[art] = float(row.total_rub) / qty
+    except Exception as e:
+        logger.warning(f"Cost lookup failed: {e}")
 
     # Get manual overrides
     override_result = await db.execute(

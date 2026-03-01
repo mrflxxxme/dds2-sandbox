@@ -5,7 +5,18 @@ import { api } from '@/lib/api';
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
 const fmtPct = (n: number) => (n || 0).toFixed(2) + '%';
 
+function getLast30Days() {
+    const today = new Date();
+    const to = new Date(today);
+    to.setDate(to.getDate() - 1); // Yesterday
+    const from = new Date(to);
+    from.setDate(from.getDate() - 29); // 30 days back
+    const f = (d: Date) => d.toISOString().slice(0, 10);
+    return { from: f(from), to: f(to) };
+}
+
 export default function FunnelPage() {
+    const defaultDates = getLast30Days();
     const [tab, setTab] = useState<'funnel' | 'costs'>('funnel');
     const [data, setData] = useState<any[]>([]);
     const [detailed, setDetailed] = useState(false);
@@ -14,17 +25,18 @@ export default function FunnelPage() {
     const [loading, setLoading] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [taxRate, setTaxRate] = useState(6);
+    const [initDone, setInitDone] = useState(false);
 
-    // Filters
-    const [dateFrom, setDateFrom] = useState('');
-    const [dateTo, setDateTo] = useState('');
+    // Filters — default to last 30 days
+    const [dateFrom, setDateFrom] = useState(defaultDates.from);
+    const [dateTo, setDateTo] = useState(defaultDates.to);
     const [brand, setBrand] = useState('');
     const [subject, setSubject] = useState('');
     const [search, setSearch] = useState('');
 
-    // Sync dates
-    const [syncFrom, setSyncFrom] = useState('');
-    const [syncTo, setSyncTo] = useState('');
+    // Sync dates — default to last 30 days
+    const [syncFrom, setSyncFrom] = useState(defaultDates.from);
+    const [syncTo, setSyncTo] = useState(defaultDates.to);
 
     // Costs tab
     const [costs, setCosts] = useState<any>({ overrides: [], missing: [] });
@@ -34,8 +46,6 @@ export default function FunnelPage() {
         try {
             const f = await api.getFunnelFilters();
             setFilters(f);
-            if (f.min_date && !dateFrom) setDateFrom(f.min_date);
-            if (f.max_date && !dateTo) setDateTo(f.max_date);
         } catch { }
     }, []);
 
@@ -51,10 +61,13 @@ export default function FunnelPage() {
             setDetailed(res.detailed || false);
             setSummary(sum);
             setTaxRate(tax.tax_rate || 6);
+            return res.data || [];
         } catch (e: any) {
             console.error(e);
+            return [];
+        } finally {
+            setLoading(false);
         }
-        setLoading(false);
     }, [dateFrom, dateTo, brand, subject, search]);
 
     const loadCosts = useCallback(async () => {
@@ -64,8 +77,28 @@ export default function FunnelPage() {
         } catch { }
     }, []);
 
-    useEffect(() => { loadFilters(); }, []);
-    useEffect(() => { if (dateFrom || dateTo) loadData(); }, [dateFrom, dateTo, brand, subject, search]);
+    // Auto-sync on first load if no data
+    useEffect(() => {
+        (async () => {
+            await loadFilters();
+            const rows = await loadData();
+            if (rows.length === 0 && !initDone) {
+                // Auto-sync last 30 days
+                setSyncing(true);
+                try {
+                    await api.syncFunnel(defaultDates.from, defaultDates.to);
+                    await loadData();
+                    await loadFilters();
+                } catch (e: any) {
+                    console.error('Auto-sync failed:', e);
+                }
+                setSyncing(false);
+            }
+            setInitDone(true);
+        })();
+    }, []);
+
+    useEffect(() => { if (initDone && (dateFrom || dateTo)) loadData(); }, [dateFrom, dateTo, brand, subject, search]);
     useEffect(() => { if (tab === 'costs') loadCosts(); }, [tab]);
 
     const handleSync = async () => {
