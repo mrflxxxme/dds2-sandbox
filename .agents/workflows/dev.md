@@ -14,6 +14,13 @@ description: Стандартный рабочий процесс при люб�
 - **После каждого завершённого блока работы** — сделай коммит и пуш на GitHub.
 - Используй понятные коммит-сообщения на русском или английском.
 
+**Всегда работаем в ветке `dev`!** Ветка `main` — стабильная продакшн версия.
+
+```bash
+# turbo
+cd /Users/a1/Desktop/dds_app && git checkout dev
+```
+
 ```bash
 # turbo
 cd /Users/a1/Desktop/dds_app && git add -A
@@ -26,7 +33,12 @@ cd /Users/a1/Desktop/dds_app && git commit -m "описание изменени
 
 ```bash
 # turbo
-cd /Users/a1/Desktop/dds_app && git push origin main
+cd /Users/a1/Desktop/dds_app && git push origin dev
+```
+
+#### Мердж в main (только после тестирования!)
+```bash
+cd /Users/a1/Desktop/dds_app && git checkout main && git merge dev && git push origin main && git checkout dev
 ```
 
 ### 3. Сборка и проверка
