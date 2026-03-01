@@ -4,6 +4,7 @@ Sync data from WB API (analytics + advertising), show daily stats.
 """
 
 import logging
+import asyncio
 import httpx
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -311,7 +312,10 @@ async def run_funnel_sync(
     # Fetch funnel data per day and upsert — commit per day for partial progress
     total_rows = 0
     errors = []
-    for date_str in dates:
+    for idx, date_str in enumerate(dates):
+        # Rate limit: pause between days to avoid WB 429
+        if idx > 0:
+            await asyncio.sleep(1)
         try:
             funnel_data = await _fetch_funnel(analytics_key, date_str)
 
@@ -428,6 +432,70 @@ async def get_sync_status(
         "scheduler": get_scheduler_info(),
         "last_syncs": logs,
     }
+
+
+@router.post("/backfill")
+async def backfill_funnel(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Trigger full backfill: find all missing days in last 90 and sync them.
+    Runs in BACKGROUND — returns immediately, sync continues async.
+    Check progress via GET /funnel/sync_status or /funnel/backfill_status.
+    """
+    from backend.scheduler import _get_missing_dates
+
+    pid = project.id
+    missing = await _get_missing_dates(pid)
+
+    if not missing:
+        return {"status": "ok", "message": "Нет пропущенных дней", "missing_count": 0}
+
+    logger.info(f"Backfill: project {pid} — {len(missing)} missing days, starting background task")
+
+    # Launch background task
+    asyncio.create_task(_run_backfill_bg(pid, missing))
+
+    return {
+        "status": "started",
+        "message": f"Запущен фоновый backfill: {len(missing)} пропущенных дней",
+        "total_missing": len(missing),
+    }
+
+
+async def _run_backfill_bg(project_id: int, missing_dates: list[str]):
+    """Background coroutine: sync missing days one-by-one with rate limit pauses."""
+    from backend.database import AsyncSessionLocal
+
+    total_rows = 0
+    total_errors = 0
+
+    for idx, day_str in enumerate(missing_dates):
+        try:
+            if idx > 0:
+                await asyncio.sleep(2)  # rate limit protection between days
+
+            async with AsyncSessionLocal() as db:
+                result = await run_funnel_sync(db, project_id, day_str, day_str)
+                rows = result.get("rows", 0)
+                total_rows += rows
+                if result.get("errors"):
+                    total_errors += len(result["errors"])
+
+            logger.info(
+                f"Backfill bg: project {project_id} — "
+                f"day {idx+1}/{len(missing_dates)} ({day_str}), "
+                f"+{rows} rows, total: {total_rows}"
+            )
+        except Exception as e:
+            logger.error(f"Backfill bg error: project {project_id}, {day_str}: {e}")
+            total_errors += 1
+
+    logger.info(
+        f"✅ Backfill complete: project {project_id} — "
+        f"{len(missing_dates)} days, {total_rows} rows, {total_errors} errors"
+    )
 
 
 @router.get("/data")

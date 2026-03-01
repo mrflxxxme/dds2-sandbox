@@ -2,14 +2,13 @@
 Background scheduler for periodic WB funnel sync.
 
 Schedule: 00:01, 07:00, 13:00, 19:00 MSK daily.
-- First run (no data): backfill last 90 days.
-- Regular runs: sync only today + yesterday.
+- Finds missing days in the last 90 days and syncs them (up to 10 days per run).
+- Always syncs today + yesterday.
 
 Uses APScheduler (in-process, AsyncIOScheduler).
 """
 
 import logging
-import asyncio
 from datetime import date, timedelta
 
 import pytz
@@ -25,19 +24,40 @@ scheduler: AsyncIOScheduler | None = None
 
 MSK = pytz.timezone("Europe/Moscow")
 
-# ─── Backfill detection ──────────────────────────────────────────────────────
+BACKFILL_DAYS = 90       # how far back to check for missing data
+MISSING_BATCH_SIZE = 10  # max missing days to sync per scheduler run
 
-async def _needs_backfill(project_id: int) -> bool:
-    """Check if project has any funnel data. If not — need 90-day backfill."""
+
+# ─── Smart missing-day detection ─────────────────────────────────────────────
+
+async def _get_missing_dates(project_id: int, lookback_days: int = BACKFILL_DAYS) -> list[str]:
+    """
+    Find dates in the last `lookback_days` that have NO funnel data for this project.
+    Returns list of date strings (YYYY-MM-DD), oldest first.
+    """
     from sqlalchemy import select, func
+    today = date.today()
+    start = today - timedelta(days=lookback_days)
+
+    # Get all dates that have data
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(func.count(WbFunnelDaily.id)).where(
-                WbFunnelDaily.project_id == project_id
-            )
+            select(WbFunnelDaily.date).where(
+                WbFunnelDaily.project_id == project_id,
+                WbFunnelDaily.date >= start,
+            ).distinct()
         )
-        count = result.scalar() or 0
-    return count == 0
+        existing_dates = {r[0] for r in result}
+
+    # Build set of all expected dates (exclude today — it updates throughout the day)
+    all_dates = set()
+    d = start
+    while d < today:  # < today, not <=, because today is always re-synced
+        all_dates.add(d)
+        d += timedelta(days=1)
+
+    missing = sorted(all_dates - existing_dates)
+    return [d.isoformat() for d in missing]
 
 
 # ─── Main sync task ──────────────────────────────────────────────────────────
@@ -45,10 +65,11 @@ async def _needs_backfill(project_id: int) -> bool:
 async def sync_all_projects_funnel():
     """
     Iterate over all projects with WB API keys and sync funnel data.
-    - If project has no funnel data yet: backfill 90 days.
-    - Otherwise: sync only today + yesterday.
+    - Always sync today + yesterday (data updates throughout the day).
+    - Also fill in missing days (up to MISSING_BATCH_SIZE per run).
     """
-    from sqlalchemy import select, or_
+    import asyncio
+    from sqlalchemy import select
     from backend.routers.funnel import run_funnel_sync
 
     logger.info("⏰ Scheduler: starting funnel sync for all projects")
@@ -70,85 +91,91 @@ async def sync_all_projects_funnel():
 
     for pid in project_ids:
         try:
-            needs_backfill = await _needs_backfill(pid)
+            # 1. Always sync today + yesterday
+            d_from = (date.today() - timedelta(days=1)).isoformat()
+            d_to = date.today().isoformat()
+            sync_type = "funnel_auto"
+            logger.info(f"Scheduler: project {pid} — sync today+yesterday {d_from} → {d_to}")
 
-            if needs_backfill:
-                # First run: backfill 90 days
-                d_from = (date.today() - timedelta(days=90)).isoformat()
-                d_to = date.today().isoformat()
-                sync_type = "funnel_backfill"
-                logger.info(f"Scheduler: project {pid} — backfill {d_from} → {d_to}")
-            else:
-                # Regular run: today + yesterday only
-                d_from = (date.today() - timedelta(days=1)).isoformat()
-                d_to = date.today().isoformat()
-                sync_type = "funnel_auto"
-                logger.info(f"Scheduler: project {pid} — sync {d_from} → {d_to}")
+            await _run_and_log(pid, d_from, d_to, sync_type)
 
-            async with AsyncSessionLocal() as db:
-                # Find integration key for logging
-                from sqlalchemy import select
-                int_key = await db.execute(
-                    select(IntegrationKey.id).where(
-                        IntegrationKey.project_id == pid,
-                        IntegrationKey.service.in_(["wb", "wb_analytics"]),
-                        IntegrationKey.is_active == True,
-                    ).limit(1)
+            # 2. Fill missing days (batch)
+            missing = await _get_missing_dates(pid)
+            if missing:
+                batch = missing[:MISSING_BATCH_SIZE]
+                logger.info(
+                    f"Scheduler: project {pid} — {len(missing)} missing days total, "
+                    f"syncing batch of {len(batch)}: {batch[0]} → {batch[-1]}"
                 )
-                key_id = int_key.scalar() or None
+                # Sync missing days one-by-one with delay to avoid WB rate limits
+                for day_str in batch:
+                    await asyncio.sleep(2)  # rate limit protection
+                    await _run_and_log(pid, day_str, day_str, "funnel_backfill")
 
-                # Create sync log entry
-                sync_log = SyncLog(
-                    integration_id=key_id,
-                    service="wb_funnel",
-                    sync_type=sync_type,
-                    status="RUNNING",
-                )
-                db.add(sync_log)
-                await db.commit()
-                await db.refresh(sync_log)
-                log_id = sync_log.id
-
-            # Run the actual sync
-            async with AsyncSessionLocal() as db:
-                result = await run_funnel_sync(db, pid, d_from, d_to)
-
-            # Update sync log with result
-            async with AsyncSessionLocal() as db:
-                from sqlalchemy import update
-                from datetime import datetime
-                await db.execute(
-                    update(SyncLog).where(SyncLog.id == log_id).values(
-                        status="OK" if not result.get("errors") else "PARTIAL",
-                        rows_inserted=result.get("rows", 0),
-                        finished_at=datetime.utcnow(),
-                        error_msg="; ".join(result.get("errors", [])[:3]) or None,
+                remaining = len(missing) - len(batch)
+                if remaining > 0:
+                    logger.info(
+                        f"Scheduler: project {pid} — {remaining} missing days remaining, "
+                        f"will continue on next run"
                     )
-                )
-                await db.commit()
-
-            logger.info(
-                f"Scheduler: project {pid} done — "
-                f"{result.get('rows', 0)} rows, {result.get('days', 0)} days"
-            )
+            else:
+                logger.info(f"Scheduler: project {pid} — no missing days, all {BACKFILL_DAYS} days covered ✅")
 
         except Exception as e:
             logger.error(f"Scheduler: project {pid} sync failed: {e}")
-            # Update sync log with error
-            try:
-                async with AsyncSessionLocal() as db:
-                    from sqlalchemy import update
-                    from datetime import datetime
-                    await db.execute(
-                        update(SyncLog).where(SyncLog.id == log_id).values(
-                            status="ERROR",
-                            finished_at=datetime.utcnow(),
-                            error_msg=str(e)[:500],
-                        )
-                    )
-                    await db.commit()
-            except Exception:
-                pass
+
+
+async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
+    """Run funnel sync and log result to sync_log table."""
+    from backend.routers.funnel import run_funnel_sync
+    from sqlalchemy import select
+    from datetime import datetime
+
+    async with AsyncSessionLocal() as db:
+        # Find integration key for logging
+        int_key = await db.execute(
+            select(IntegrationKey.id).where(
+                IntegrationKey.project_id == project_id,
+                IntegrationKey.service.in_(["wb", "wb_analytics"]),
+                IntegrationKey.is_active == True,
+            ).limit(1)
+        )
+        key_id = int_key.scalar() or None
+
+        # Create sync log entry
+        sync_log = SyncLog(
+            integration_id=key_id,
+            service="wb_funnel",
+            sync_type=sync_type,
+            status="RUNNING",
+        )
+        db.add(sync_log)
+        await db.commit()
+        await db.refresh(sync_log)
+        log_id = sync_log.id
+
+    # Run the actual sync
+    async with AsyncSessionLocal() as db:
+        result = await run_funnel_sync(db, project_id, d_from, d_to)
+
+    # Update sync log with result
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import update
+        await db.execute(
+            update(SyncLog).where(SyncLog.id == log_id).values(
+                status="OK" if not result.get("errors") else "PARTIAL",
+                rows_inserted=result.get("rows", 0),
+                finished_at=datetime.utcnow(),
+                error_msg="; ".join(result.get("errors", [])[:3]) or None,
+            )
+        )
+        await db.commit()
+
+    logger.info(
+        f"Scheduler: project {project_id} [{sync_type}] {d_from}→{d_to} — "
+        f"{result.get('rows', 0)} rows, errors: {len(result.get('errors', []))}"
+    )
+    return result
 
 
 # ─── Scheduler lifecycle ─────────────────────────────────────────────────────
@@ -174,14 +201,6 @@ def start_scheduler():
     logger.info(
         "✅ Scheduler started — funnel sync at 00:01, 07:00, 13:00, 19:00 MSK"
     )
-
-    # Run initial sync in background (after 30s delay for startup)
-    async def _initial_sync():
-        await asyncio.sleep(30)
-        logger.info("Scheduler: running initial sync check...")
-        await sync_all_projects_funnel()
-
-    asyncio.ensure_future(_initial_sync())
 
 
 def stop_scheduler():
