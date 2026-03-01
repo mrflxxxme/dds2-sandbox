@@ -508,10 +508,10 @@ async def get_funnel_data(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get funnel data. Aggregated by day if no brand/article filter, detailed otherwise."""
+    """Get funnel data. Aggregated by day if no article filter, detailed otherwise."""
     pid = project.id
     tax_rate = float(project.tax_rate or 6)
-    detailed = bool(brand or vendor_code)
+    detailed = bool(vendor_code)
 
     if not detailed:
         # Aggregated view: SUM by date
@@ -536,6 +536,8 @@ async def get_funnel_data(
             q = q.where(WbFunnelDaily.date <= date.fromisoformat(date_to))
         if subject:
             q = q.where(WbFunnelDaily.subject == subject)
+        if brand:
+            q = q.where(WbFunnelDaily.brand == brand)
 
         q = q.group_by(WbFunnelDaily.date).order_by(WbFunnelDaily.date.desc())
         result = await db.execute(q)
