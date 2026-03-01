@@ -130,10 +130,71 @@ function MultiLineChart({ data, lines }: {
     );
 }
 
+/* ─── Day-analysis trend chart ─────────────────────────────────── */
+function DayTrendChart({ data, fields, targetDate }: {
+    data: any[];
+    fields: { key: string; label: string; color: string }[];
+    targetDate: string;
+}) {
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas || data.length === 0) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        const dpr = window.devicePixelRatio || 1;
+        const W = canvas.clientWidth, H = canvas.clientHeight;
+        canvas.width = W * dpr; canvas.height = H * dpr;
+        ctx.scale(dpr, dpr); ctx.clearRect(0, 0, W, H);
+        const pad = { top: 20, right: 20, bottom: 28, left: 10 };
+        const cw = W - pad.left - pad.right, ch = H - pad.top - pad.bottom;
+        ctx.fillStyle = '#666'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+        data.forEach((d, i) => {
+            const x = pad.left + (i / (data.length - 1 || 1)) * cw;
+            if (i % Math.max(1, Math.floor(data.length / 8)) === 0 || i === data.length - 1)
+                ctx.fillText(d.date.slice(5), x, H - 6);
+        });
+        const targetIdx = data.findIndex((d: any) => d.date === targetDate);
+        if (targetIdx >= 0) {
+            const x = pad.left + (targetIdx / (data.length - 1 || 1)) * cw;
+            ctx.fillStyle = 'rgba(139,92,246,0.12)'; ctx.fillRect(x - 12, pad.top, 24, ch);
+        }
+        fields.forEach(f => {
+            const vals = data.map((d: any) => Number(d[f.key] || 0));
+            const max = Math.max(...vals, 1), min = Math.min(...vals, 0), range = max - min || 1;
+            ctx.beginPath(); ctx.strokeStyle = f.color; ctx.lineWidth = 2;
+            vals.forEach((v, i) => {
+                const x = pad.left + (i / (data.length - 1 || 1)) * cw;
+                const y = pad.top + ch - ((v - min) / range) * ch;
+                i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+            if (targetIdx >= 0) {
+                const x = pad.left + (targetIdx / (data.length - 1 || 1)) * cw;
+                const y = pad.top + ch - ((vals[targetIdx] - min) / range) * ch;
+                ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fillStyle = f.color; ctx.fill();
+            }
+        });
+    }, [data, fields, targetDate]);
+    return (
+        <div style={{ position: 'relative' }}>
+            <canvas ref={canvasRef} style={{ width: '100%', height: 200, display: 'block' }} />
+            <div style={{ display: 'flex', gap: 16, padding: '6px 0', justifyContent: 'center', flexWrap: 'wrap' }}>
+                {fields.map(f => (
+                    <span key={f.key} style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <span style={{ width: 10, height: 10, borderRadius: 2, background: f.color, display: 'inline-block' }} />
+                        {f.label}
+                    </span>
+                ))}
+            </div>
+        </div>
+    );
+}
+
 /* ─── Main page ──────────────────────────────────────────────── */
 
 export default function FunnelPage() {
-    const [tab, setTab] = useState<'funnel' | 'costs'>('funnel');
+    const [tab, setTab] = useState<'funnel' | 'costs' | 'day-analysis'>('funnel');
     const [data, setData] = useState<any[]>([]);
     const [detailed, setDetailed] = useState(false);
     const [summary, setSummary] = useState<any>(null);
@@ -160,6 +221,21 @@ export default function FunnelPage() {
     // Costs tab
     const [costs, setCosts] = useState<any>({ overrides: [], missing: [] });
     const [editCost, setEditCost] = useState<{ nm_id: number; cost_price: string } | null>(null);
+
+    // Day analysis
+    const [dayReport, setDayReport] = useState<any>(null);
+    const [dayLoading, setDayLoading] = useState(false);
+    const [dayDate, setDayDate] = useState(() => { const d = new Date(); d.setDate(d.getDate() - 1); return d.toISOString().slice(0, 10); });
+    const [dayTrendDays, setDayTrendDays] = useState(14);
+    const dayTrendFields = [
+        { key: 'orders_sum', label: 'Выручка', color: '#8b5cf6' },
+        { key: 'adv_sum', label: 'Реклама', color: '#f59e0b' },
+        { key: 'orders_count', label: 'Заказы', color: '#10b981' },
+        { key: 'open_card', label: 'Переходы', color: '#3b82f6' },
+        { key: 'drr', label: 'ДРР %', color: '#ef4444' },
+    ];
+    const [dayActiveFields, setDayActiveFields] = useState<string[]>(['orders_sum', 'adv_sum']);
+    const dayFmt = (v: any) => { if (v == null) return '—'; const n = Number(v); return isNaN(n) ? String(v) : n.toLocaleString('ru-RU', { maximumFractionDigits: 2 }); };
 
     // Measure first header row height dynamically
     useEffect(() => {
@@ -238,6 +314,17 @@ export default function FunnelPage() {
     useEffect(() => { if (initDone && dateFrom && dateTo) loadData(); }, [dateFrom, dateTo, brand, subject, search]);
     useEffect(() => { if (tab === 'costs') loadCosts(); }, [tab]);
 
+    const loadDayReport = useCallback(async () => {
+        setDayLoading(true);
+        try {
+            const data = await api.getDayAnalysis({ target_date: dayDate, brand: brand || undefined, subject: subject || undefined, trend_days: dayTrendDays });
+            setDayReport(data);
+        } catch (err: any) { console.error('Day analysis error:', err); }
+        finally { setDayLoading(false); }
+    }, [dayDate, brand, subject, dayTrendDays]);
+
+    useEffect(() => { if (tab === 'day-analysis') loadDayReport(); }, [tab, loadDayReport]);
+
     const handleSaveCost = async () => {
         if (!editCost) return;
         try {
@@ -283,6 +370,7 @@ export default function FunnelPage() {
             <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
                 <button className={`tab-btn ${tab === 'funnel' ? 'active' : ''}`} onClick={() => setTab('funnel')}>Воронка</button>
                 <button className={`tab-btn ${tab === 'costs' ? 'active' : ''}`} onClick={() => setTab('costs')}>Себестоимость</button>
+                <button className={`tab-btn ${tab === 'day-analysis' ? 'active' : ''}`} onClick={() => setTab('day-analysis')}>🔍 Анализ дня</button>
             </div>
 
             {tab === 'funnel' && (
@@ -541,6 +629,179 @@ export default function FunnelPage() {
                     </div>
                 )
             }
+
+            {/* ─── Day Analysis tab ─── */}
+            {tab === 'day-analysis' && (
+                <>
+                    {/* Filters */}
+                    <div className="glass-card" style={{ display: 'flex', gap: 12, alignItems: 'center', padding: '10px 16px', marginBottom: 16, flexWrap: 'wrap' }}>
+                        <label style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>Дата:</label>
+                        <input type="date" value={dayDate} onChange={e => setDayDate(e.target.value)}
+                            style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }} />
+                        <label style={{ fontSize: 13, color: 'var(--color-text-dim)', marginLeft: 8 }}>Бренд:</label>
+                        <select value={brand} onChange={e => setBrand(e.target.value)}
+                            style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13, maxWidth: 160 }}>
+                            <option value="">Все</option>
+                            {(filters.brands || []).map((b: string) => <option key={b} value={b}>{b}</option>)}
+                        </select>
+                        <label style={{ fontSize: 13, color: 'var(--color-text-dim)', marginLeft: 8 }}>Категория:</label>
+                        <select value={subject} onChange={e => setSubject(e.target.value)}
+                            style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13, maxWidth: 180 }}>
+                            <option value="">Все</option>
+                            {(filters.subjects || []).map((s: string) => <option key={s} value={s}>{s}</option>)}
+                        </select>
+                        <label style={{ fontSize: 13, color: 'var(--color-text-dim)', marginLeft: 8 }}>Тренд:</label>
+                        <select value={dayTrendDays} onChange={e => setDayTrendDays(Number(e.target.value))}
+                            style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }}>
+                            <option value={7}>7 дней</option>
+                            <option value={14}>14 дней</option>
+                            <option value={30}>30 дней</option>
+                        </select>
+                    </div>
+
+                    {dayLoading && <div style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>Загрузка...</div>}
+
+                    {dayReport && !dayLoading && (() => {
+                        const cmp = dayReport.comparison || {};
+                        const summaryCards = [
+                            { label: 'Выручка', key: 'orders_sum', icon: '💰', color: '#8b5cf6' },
+                            { label: 'Реклама', key: 'adv_sum', icon: '📢', color: '#f59e0b' },
+                            { label: 'ДРР', key: 'drr', icon: '📊', suffix: '%', color: '#ef4444' },
+                            { label: 'Заказы', key: 'orders_count', icon: '📦', color: '#10b981' },
+                            { label: 'Прибыль', key: 'profit', icon: '🏆', color: '#06b6d4' },
+                            { label: 'Переходы', key: 'open_card', icon: '👁', color: '#3b82f6' },
+                            { label: 'Корзины', key: 'add_to_cart', icon: '🛒', color: '#ec4899' },
+                        ];
+                        const selectedFields = dayTrendFields.filter(f => dayActiveFields.includes(f.key));
+
+                        // Split anomalies into positive and negative
+                        const positiveAnomalies = (dayReport.anomalies || []).filter((a: any) => a.flags.some((f: string) => f.includes('📈')));
+                        const negativeAnomalies = (dayReport.anomalies || []).filter((a: any) => a.flags.some((f: string) => f.includes('📉') || f.includes('⚠️') || f.includes('🚫')));
+
+                        const AnomalyRow = ({ a, positive }: { a: any; positive: boolean }) => (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                                <span style={{ minWidth: 24, textAlign: 'center', fontSize: 14 }}>{positive ? '📈' : '📉'}</span>
+                                <span style={{ minWidth: 140, fontWeight: 600, fontSize: 11 }}>{a.vendor_code || a.nm_id}</span>
+                                <span style={{ minWidth: 100, color: '#888', fontSize: 10 }}>{a.subject}</span>
+                                <span style={{ flex: 1, fontSize: 11 }}>{a.flags.join(' · ')}</span>
+                                <span style={{ color: '#8b5cf6', fontWeight: 600, fontSize: 11, minWidth: 80, textAlign: 'right' }}>₽{dayFmt(a.orders_sum)}</span>
+                                <span style={{ color: '#f59e0b', fontSize: 11, minWidth: 60, textAlign: 'right' }}>₽{dayFmt(a.adv_sum)}</span>
+                            </div>
+                        );
+
+                        return (
+                            <>
+                                {/* Summary cards */}
+                                <div style={{ display: 'grid', gridTemplateColumns: `repeat(${summaryCards.length}, 1fr)`, gap: 10, marginBottom: 16 }}>
+                                    {summaryCards.map(c => {
+                                        const comp = cmp[c.key];
+                                        const pct = comp?.change_pct ?? 0;
+                                        const isUp = pct > 0, isDown = pct < 0;
+                                        return (
+                                            <div key={c.key} className="glass-card" style={{ padding: '12px 14px' }}>
+                                                <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>{c.icon} {c.label}</div>
+                                                <div style={{ fontSize: 20, fontWeight: 700, color: c.color }}>
+                                                    {dayFmt(dayReport.summary[c.key])}{c.suffix || ''}
+                                                </div>
+                                                {comp && (
+                                                    <div style={{ fontSize: 11, marginTop: 4, color: isUp ? '#10b981' : isDown ? '#ef4444' : '#666' }}>
+                                                        {isUp ? '↑' : isDown ? '↓' : '→'} {Math.abs(pct)}% vs вчера
+                                                        <span style={{ color: '#666', marginLeft: 6 }}>({dayFmt(comp.previous)})</span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+
+                                {/* Trend chart */}
+                                <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                                        <h3 style={{ margin: 0, fontSize: 14 }}>📈 Тренд за {dayTrendDays} дней</h3>
+                                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                            {dayTrendFields.map(f => (
+                                                <button key={f.key} onClick={() => setDayActiveFields(prev => prev.includes(f.key) ? prev.filter(k => k !== f.key) : [...prev, f.key])}
+                                                    style={{
+                                                        padding: '3px 8px', fontSize: 11, borderRadius: 4, cursor: 'pointer', border: '1px solid',
+                                                        borderColor: dayActiveFields.includes(f.key) ? f.color : 'rgba(255,255,255,0.1)',
+                                                        background: dayActiveFields.includes(f.key) ? f.color + '22' : 'transparent',
+                                                        color: dayActiveFields.includes(f.key) ? f.color : '#888'
+                                                    }}>{f.label}</button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    {dayReport.trend?.length > 0 && selectedFields.length > 0 && (
+                                        <DayTrendChart data={dayReport.trend} fields={selectedFields} targetDate={dayDate} />
+                                    )}
+                                </div>
+
+                                {/* Anomalies — split into positive & negative */}
+                                {(positiveAnomalies.length > 0 || negativeAnomalies.length > 0) && (
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+                                        {/* Positive */}
+                                        <div className="glass-card" style={{ padding: '12px 14px', borderLeft: '3px solid #10b981' }}>
+                                            <h4 style={{ margin: '0 0 8px', fontSize: 13, color: '#10b981' }}>📈 Рост ({positiveAnomalies.length})</h4>
+                                            {positiveAnomalies.length === 0 ? <div style={{ color: '#666', fontSize: 12 }}>Нет аномалий роста</div> :
+                                                positiveAnomalies.map((a: any, i: number) => <AnomalyRow key={i} a={a} positive />)
+                                            }
+                                        </div>
+                                        {/* Negative */}
+                                        <div className="glass-card" style={{ padding: '12px 14px', borderLeft: '3px solid #ef4444' }}>
+                                            <h4 style={{ margin: '0 0 8px', fontSize: 13, color: '#ef4444' }}>📉 Снижение / Проблемы ({negativeAnomalies.length})</h4>
+                                            {negativeAnomalies.length === 0 ? <div style={{ color: '#666', fontSize: 12 }}>Нет проблемных товаров</div> :
+                                                negativeAnomalies.map((a: any, i: number) => <AnomalyRow key={i} a={a} positive={false} />)
+                                            }
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Top products table */}
+                                <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 380px)' }}>
+                                    <h3 style={{ margin: '12px 16px', fontSize: 14 }}>🏆 Топ товаров за {dayDate}</h3>
+                                    <table className="data-table" style={{ minWidth: 900, borderCollapse: 'separate', borderSpacing: 0 }}>
+                                        <thead>
+                                            <tr>
+                                                <th style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 10 }}>#</th>
+                                                <th style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 10 }}>Артикул</th>
+                                                <th style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 10 }}>nmId</th>
+                                                <th style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 10 }}>Категория</th>
+                                                <th style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 10 }}>Бренд</th>
+                                                <th style={{ position: 'sticky', top: 0, background: '#231f16', zIndex: 10 }}>Переходы</th>
+                                                <th style={{ position: 'sticky', top: 0, background: '#231f16', zIndex: 10 }}>Корзины</th>
+                                                <th style={{ position: 'sticky', top: 0, background: '#231f16', zIndex: 10 }}>Заказы</th>
+                                                <th style={{ position: 'sticky', top: 0, background: '#231f16', zIndex: 10 }}>Выручка ₽</th>
+                                                <th style={{ position: 'sticky', top: 0, background: '#1d1c30', zIndex: 10 }}>Реклама ₽</th>
+                                                <th style={{ position: 'sticky', top: 0, background: '#1d1c30', zIndex: 10 }}>ДРР %</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {(dayReport.top_products || []).map((p: any, i: number) => (
+                                                <tr key={i} style={{ background: i % 2 ? 'rgba(255,255,255,0.02)' : 'transparent' }}>
+                                                    <td style={{ textAlign: 'center', color: '#888', fontSize: 11 }}>{i + 1}</td>
+                                                    <td style={{ fontSize: 12 }}>{p.vendor_code}</td>
+                                                    <td style={{ fontSize: 12 }}>
+                                                        <a href={`https://www.wildberries.ru/catalog/${p.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{p.nm_id}</a>
+                                                    </td>
+                                                    <td style={{ fontSize: 12 }}>{p.subject}</td>
+                                                    <td style={{ fontSize: 12 }}>{p.brand}</td>
+                                                    <td style={{ textAlign: 'right' }}>{dayFmt(p.open_card)}</td>
+                                                    <td style={{ textAlign: 'right' }}>{dayFmt(p.add_to_cart)}</td>
+                                                    <td style={{ textAlign: 'right', fontWeight: 600 }}>{dayFmt(p.orders_count)}</td>
+                                                    <td style={{ textAlign: 'right', color: '#8b5cf6', fontWeight: 600 }}>{dayFmt(p.orders_sum)}</td>
+                                                    <td style={{ textAlign: 'right', color: '#f59e0b' }}>{dayFmt(p.adv_sum)}</td>
+                                                    <td style={{ textAlign: 'right', color: p.drr > 20 ? '#ef4444' : p.drr > 10 ? '#f59e0b' : '#10b981', fontWeight: 600 }}>
+                                                        {p.drr.toFixed(1)}%
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </>
+                        );
+                    })()}
+                </>
+            )}
         </div >
     );
 }
