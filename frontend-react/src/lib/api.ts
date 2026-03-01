@@ -107,6 +107,13 @@ class ApiClient {
         }>>('GET', '/api/v1/projects');
     }
 
+    getProject(slug: string) {
+        return this.request<{
+            id: number; name: string; slug: string; owner_id: number;
+            created_at: string;
+        }>('GET', `/api/v1/projects/${slug}`);
+    }
+
     createProject(name: string) {
         return this.request<any>('POST', '/api/v1/projects', { name });
     }

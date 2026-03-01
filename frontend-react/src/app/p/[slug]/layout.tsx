@@ -30,7 +30,15 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
 
     useEffect(() => {
         if (!api.isAuthenticated()) { window.location.href = '/login'; return; }
-        setProjectName(localStorage.getItem('dds_project_name') || slug);
+        // Resolve slug to project_id and sync localStorage
+        api.getProject(slug).then(p => {
+            api.setProjectId(p.id);
+            localStorage.setItem('dds_project_slug', p.slug);
+            localStorage.setItem('dds_project_name', p.name);
+            setProjectName(p.name);
+        }).catch(() => {
+            setProjectName(slug);
+        });
         api.getProfile().then(u => setUsername(u.username)).catch(() => { });
     }, [slug]);
 
