@@ -739,7 +739,7 @@ export default function FunnelPage() {
                                 {(positiveAnomalies.length > 0 || negativeAnomalies.length > 0) && (
                                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
                                         {/* Positive */}
-                                        <div className="glass-card" style={{ padding: '12px 14px', borderLeft: '3px solid #10b981', display: 'flex', flexDirection: 'column' as const }}>
+                                        <div className="glass-card" style={{ padding: '12px 14px', borderLeft: '3px solid #10b981', display: 'flex', flexDirection: 'column' as const, minWidth: 0, overflow: 'hidden' }}>
                                             <h4 style={{ margin: '0 0 8px', fontSize: 13, color: '#10b981', flexShrink: 0 }}>📈 Рост ({positiveAnomalies.length})</h4>
                                             <div style={{ maxHeight: 340, overflowY: 'auto' as const, flex: 1 }}>
                                                 {positiveAnomalies.length === 0 ? <div style={{ color: '#666', fontSize: 12 }}>Нет аномалий роста</div> :
@@ -748,7 +748,7 @@ export default function FunnelPage() {
                                             </div>
                                         </div>
                                         {/* Negative */}
-                                        <div className="glass-card" style={{ padding: '12px 14px', borderLeft: '3px solid #ef4444', display: 'flex', flexDirection: 'column' as const }}>
+                                        <div className="glass-card" style={{ padding: '12px 14px', borderLeft: '3px solid #ef4444', display: 'flex', flexDirection: 'column' as const, minWidth: 0, overflow: 'hidden' }}>
                                             <h4 style={{ margin: '0 0 8px', fontSize: 13, color: '#ef4444', flexShrink: 0 }}>📉 Снижение / Проблемы ({negativeAnomalies.length})</h4>
                                             <div style={{ maxHeight: 340, overflowY: 'auto' as const, flex: 1 }}>
                                                 {negativeAnomalies.length === 0 ? <div style={{ color: '#666', fontSize: 12 }}>Нет проблемных товаров</div> :
