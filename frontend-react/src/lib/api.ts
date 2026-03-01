@@ -514,10 +514,12 @@ class ApiClient {
         if (params?.subject) q.set('subject', params.subject);
         return this.request('GET', `/api/v1/funnel/data?${q.toString()}`);
     }
-    async getFunnelSummary(dateFrom?: string, dateTo?: string): Promise<any> {
+    async getFunnelSummary(dateFrom?: string, dateTo?: string, brand?: string, subject?: string): Promise<any> {
         const q = new URLSearchParams();
         if (dateFrom) q.set('date_from', dateFrom);
         if (dateTo) q.set('date_to', dateTo);
+        if (brand) q.set('brand', brand);
+        if (subject) q.set('subject', subject);
         return this.request('GET', `/api/v1/funnel/summary?${q.toString()}`);
     }
     async getFunnelFilters(): Promise<any> {

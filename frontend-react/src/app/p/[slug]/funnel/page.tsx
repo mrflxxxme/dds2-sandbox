@@ -5,10 +5,10 @@ import { api } from '@/lib/api';
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
 const fmtPct = (n: number) => (n || 0).toFixed(2) + '%';
 
-/* ─── Chart modal (simple canvas line chart) ─────────────────── */
+/* ─── Inline chart (canvas line chart, rendered above table) ── */
 
-function ChartModal({ title, data, field, color, onClose }: {
-    title: string; data: any[]; field: string; color: string; onClose: () => void;
+function InlineChart({ title, data, field, color }: {
+    title: string; data: any[]; field: string; color: string;
 }) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -25,7 +25,7 @@ function ChartModal({ title, data, field, color, onClose }: {
         canvas.height = H * dpr;
         ctx.scale(dpr, dpr);
 
-        // Aggregate by date (data may have multiple rows per date if detailed)
+        // Aggregate by date
         const byDate: Record<string, number> = {};
         data.forEach(r => {
             const d = r.date;
@@ -39,13 +39,12 @@ function ChartModal({ title, data, field, color, onClose }: {
         const minVal = Math.min(...values, 0);
         const range = maxVal - minVal || 1;
 
-        const padTop = 30, padBottom = 50, padLeft = 70, padRight = 20;
+        const padTop = 20, padBottom = 35, padLeft = 70, padRight = 20;
         const chartW = W - padLeft - padRight;
         const chartH = H - padTop - padBottom;
 
-        // Background
-        ctx.fillStyle = '#1a1a2e';
-        ctx.fillRect(0, 0, W, H);
+        // Background transparent
+        ctx.clearRect(0, 0, W, H);
 
         // Grid lines
         ctx.strokeStyle = 'rgba(255,255,255,0.06)';
@@ -56,15 +55,14 @@ function ChartModal({ title, data, field, color, onClose }: {
             ctx.moveTo(padLeft, y);
             ctx.lineTo(W - padRight, y);
             ctx.stroke();
-            // Y labels
             const val = maxVal - (range * i) / 4;
-            ctx.fillStyle = 'rgba(255,255,255,0.5)';
-            ctx.font = '11px sans-serif';
+            ctx.fillStyle = 'rgba(255,255,255,0.45)';
+            ctx.font = '10px sans-serif';
             ctx.textAlign = 'right';
             ctx.fillText(fmt(Math.round(val)), padLeft - 8, y + 4);
         }
 
-        // Line + fill
+        // Line
         const xStep = dates.length > 1 ? chartW / (dates.length - 1) : chartW;
         ctx.beginPath();
         values.forEach((v, i) => {
@@ -73,12 +71,12 @@ function ChartModal({ title, data, field, color, onClose }: {
             if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
         });
         ctx.strokeStyle = color;
-        ctx.lineWidth = 2.5;
+        ctx.lineWidth = 2;
         ctx.stroke();
 
         // Fill under curve
         const gradient = ctx.createLinearGradient(0, padTop, 0, H - padBottom);
-        gradient.addColorStop(0, color + '40');
+        gradient.addColorStop(0, color + '30');
         gradient.addColorStop(1, color + '05');
         ctx.lineTo(padLeft + (values.length - 1) * xStep, padTop + chartH);
         ctx.lineTo(padLeft, padTop + chartH);
@@ -91,52 +89,31 @@ function ChartModal({ title, data, field, color, onClose }: {
             const x = padLeft + i * xStep;
             const y = padTop + chartH - ((v - minVal) / range) * chartH;
             ctx.beginPath();
-            ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+            ctx.arc(x, y, 3, 0, Math.PI * 2);
             ctx.fillStyle = color;
             ctx.fill();
-            ctx.strokeStyle = '#1a1a2e';
-            ctx.lineWidth = 1.5;
-            ctx.stroke();
         });
 
-        // X labels (every Nth)
-        const labelEvery = Math.max(1, Math.floor(dates.length / 10));
-        ctx.fillStyle = 'rgba(255,255,255,0.5)';
+        // X labels
+        const labelEvery = Math.max(1, Math.floor(dates.length / 12));
+        ctx.fillStyle = 'rgba(255,255,255,0.45)';
         ctx.font = '10px sans-serif';
         ctx.textAlign = 'center';
         dates.forEach((d, i) => {
             if (i % labelEvery === 0 || i === dates.length - 1) {
                 const x = padLeft + i * xStep;
-                ctx.fillText(d.slice(5), x, H - padBottom + 18);  // MM-DD
+                ctx.fillText(d.slice(5), x, H - padBottom + 14);
             }
         });
     }, [data, field, color]);
 
     return (
-        <div onClick={onClose}
-            style={{
-                position: 'fixed', inset: 0, zIndex: 1000,
-                background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-            }}>
-            <div onClick={e => e.stopPropagation()}
-                style={{
-                    background: '#1a1a2e', borderRadius: 16,
-                    border: '1px solid rgba(255,255,255,0.1)',
-                    padding: 24, width: 'min(90vw, 800px)', maxHeight: '80vh',
-                    boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
-                }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                    <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>{title}</h3>
-                    <button onClick={onClose}
-                        style={{
-                            background: 'rgba(255,255,255,0.1)', border: 'none', color: '#fff',
-                            borderRadius: 8, padding: '6px 12px', cursor: 'pointer', fontSize: 14,
-                        }}>✕</button>
-                </div>
-                <canvas ref={canvasRef}
-                    style={{ width: '100%', height: 300, borderRadius: 8 }} />
+        <div className="glass-card" style={{ marginBottom: 12, padding: '12px 16px' }}>
+            <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-dim)' }}>
+                {title}
             </div>
+            <canvas ref={canvasRef}
+                style={{ width: '100%', height: 180, borderRadius: 8 }} />
         </div>
     );
 }
@@ -154,15 +131,15 @@ export default function FunnelPage() {
     const [initDone, setInitDone] = useState(false);
     const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
 
-    // Filters — dates will be set from DB range
+    // Filters
     const [dateFrom, setDateFrom] = useState('');
     const [dateTo, setDateTo] = useState('');
     const [brand, setBrand] = useState('');
     const [subject, setSubject] = useState('');
     const [search, setSearch] = useState('');
 
-    // Chart modal
-    const [chartField, setChartField] = useState<{ field: string; label: string; color: string } | null>(
+    // Which chart to display (field name)
+    const [chartField, setChartField] = useState<{ field: string; label: string; color: string }>(
         { field: 'orders_sum_rub', label: 'Сумма заказов ₽', color: '#8b5cf6' }
     );
 
@@ -186,7 +163,7 @@ export default function FunnelPage() {
         try {
             const [res, sum, tax] = await Promise.all([
                 api.getFunnelData({ date_from: from, date_to: to, brand, vendor_code: search, subject }),
-                api.getFunnelSummary(from, to),
+                api.getFunnelSummary(from, to, brand, subject),
                 api.getFunnelTax(),
             ]);
             setData(res.data || []);
@@ -253,7 +230,7 @@ export default function FunnelPage() {
         } catch (e: any) { alert(e.message); }
     };
 
-    // Summary card definitions (clickable for chart)
+    // Summary card definitions
     const summaryCards = [
         { label: 'Переходы', field: 'open_card', color: '#f59e0b' },
         { label: 'Корзины', field: 'add_to_cart', color: '#3b82f6' },
@@ -284,7 +261,7 @@ export default function FunnelPage() {
 
             {tab === 'funnel' && (
                 <>
-                    {/* Sync status + Tax (replaced manual sync) */}
+                    {/* Sync status + Tax */}
                     <div className="glass-card" style={{ marginBottom: 16, padding: '12px 16px' }}>
                         <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
                             <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>
@@ -301,34 +278,30 @@ export default function FunnelPage() {
                         </div>
                     </div>
 
-                    {/* Summary header — clickable cards */}
+                    {/* Summary header — clickable cards to switch chart */}
                     {summary && (
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8, marginBottom: 16 }}>
-                            {summaryCards.map(s => (
-                                <div key={s.label} className="glass-card"
-                                    onClick={() => setChartField({ field: s.field, label: s.label, color: s.color })}
-                                    style={{
-                                        padding: '10px 14px', textAlign: 'center',
-                                        cursor: 'pointer', transition: 'transform 0.15s, box-shadow 0.15s',
-                                    }}
-                                    onMouseEnter={e => { (e.currentTarget as HTMLElement).style.transform = 'translateY(-2px)'; (e.currentTarget as HTMLElement).style.boxShadow = `0 4px 20px ${s.color}30`; }}
-                                    onMouseLeave={e => { (e.currentTarget as HTMLElement).style.transform = 'none'; (e.currentTarget as HTMLElement).style.boxShadow = 'none'; }}>
-                                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>{s.label} 📈</div>
-                                    <div style={{ fontSize: 18, fontWeight: 700, color: s.color }}>{fmt(summary[s.field])}</div>
-                                </div>
-                            ))}
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8, marginBottom: 12 }}>
+                            {summaryCards.map(s => {
+                                const isActive = chartField.field === s.field;
+                                return (
+                                    <div key={s.label} className="glass-card"
+                                        onClick={() => setChartField({ field: s.field, label: s.label, color: s.color })}
+                                        style={{
+                                            padding: '10px 14px', textAlign: 'center',
+                                            cursor: 'pointer', transition: 'transform 0.15s, box-shadow 0.15s',
+                                            border: isActive ? `1px solid ${s.color}60` : '1px solid transparent',
+                                            boxShadow: isActive ? `0 2px 12px ${s.color}20` : 'none',
+                                        }}
+                                        onMouseEnter={e => { (e.currentTarget as HTMLElement).style.transform = 'translateY(-2px)'; }}
+                                        onMouseLeave={e => { (e.currentTarget as HTMLElement).style.transform = 'none'; }}>
+                                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>
+                                            {s.label} {isActive ? '📈' : ''}
+                                        </div>
+                                        <div style={{ fontSize: 18, fontWeight: 700, color: s.color }}>{fmt(summary[s.field])}</div>
+                                    </div>
+                                );
+                            })}
                         </div>
-                    )}
-
-                    {/* Chart modal */}
-                    {chartField && data.length > 0 && (
-                        <ChartModal
-                            title={`${chartField.label} — динамика по дням`}
-                            data={data}
-                            field={chartField.field}
-                            color={chartField.color}
-                            onClose={() => setChartField(null)}
-                        />
                     )}
 
                     {/* Filters */}
@@ -357,8 +330,18 @@ export default function FunnelPage() {
                         )}
                     </div>
 
-                    {/* Table with sticky header + sticky date column */}
-                    <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 380px)' }}>
+                    {/* Inline chart — above table */}
+                    {data.length > 0 && (
+                        <InlineChart
+                            title={`${chartField.label} — динамика по дням`}
+                            data={data}
+                            field={chartField.field}
+                            color={chartField.color}
+                        />
+                    )}
+
+                    {/* Table with sticky header */}
+                    <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 520px)' }}>
                         {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> : (
                             <table className="data-table" style={{ minWidth: detailed ? 1800 : 1200, borderCollapse: 'separate', borderSpacing: 0 }}>
                                 <thead>
@@ -379,13 +362,11 @@ export default function FunnelPage() {
                                         {detailed && <th style={{ position: 'sticky', top: 32, background: 'var(--color-bg-card)', zIndex: 5, fontSize: 0, padding: 0, height: 0 }}></th>}
                                         {detailed && <th style={{ position: 'sticky', top: 32, background: 'var(--color-bg-card)', zIndex: 5, fontSize: 0, padding: 0, height: 0 }}></th>}
                                         {detailed && <th style={{ position: 'sticky', top: 32, background: 'var(--color-bg-card)', zIndex: 5, fontSize: 0, padding: 0, height: 0 }}></th>}
-                                        {/* Воронка */}
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(245,158,11,0.08)', zIndex: 5 }}>Переходы</th>
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(245,158,11,0.08)', zIndex: 5 }}>Корзины</th>
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(245,158,11,0.08)', zIndex: 5 }}>Заказы</th>
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(245,158,11,0.08)', zIndex: 5 }}>Сумма ₽</th>
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(245,158,11,0.08)', zIndex: 5 }}>Выручка ₽</th>
-                                        {/* Реклама */}
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(99,102,241,0.08)', zIndex: 5 }}>Расходы ₽</th>
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(99,102,241,0.08)', zIndex: 5 }}>Просмотры</th>
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(99,102,241,0.08)', zIndex: 5 }}>Клики</th>
@@ -393,13 +374,11 @@ export default function FunnelPage() {
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(99,102,241,0.08)', zIndex: 5 }}>CPC</th>
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(99,102,241,0.08)', zIndex: 5 }}>CPM</th>
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(99,102,241,0.08)', zIndex: 5 }}>ДРР</th>
-                                        {/* Финансы */}
                                         {detailed && <th style={{ position: 'sticky', top: 32, background: 'rgba(16,185,129,0.08)', zIndex: 5 }}>Себест. ₽</th>}
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(16,185,129,0.08)', zIndex: 5 }}>Налог ₽</th>
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(16,185,129,0.08)', zIndex: 5 }}>Прибыль ₽</th>
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(16,185,129,0.08)', zIndex: 5 }}>Маржа</th>
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(16,185,129,0.08)', zIndex: 5 }}>Ср. цена</th>
-                                        {/* Конверсия */}
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(236,72,153,0.08)', zIndex: 5 }}>В корзину</th>
                                         <th style={{ position: 'sticky', top: 32, background: 'rgba(236,72,153,0.08)', zIndex: 5 }}>В заказ</th>
                                     </tr>
@@ -417,13 +396,11 @@ export default function FunnelPage() {
                                             {detailed && <td style={{ fontSize: 12 }}><a href={`https://www.wildberries.ru/catalog/${r.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{r.nm_id}</a></td>}
                                             {detailed && <td style={{ fontSize: 12 }}>{r.subject}</td>}
                                             {detailed && <td style={{ fontSize: 12 }}>{r.brand}</td>}
-                                            {/* Воронка */}
                                             <td style={{ textAlign: 'right' }}>{fmt(r.open_card)}</td>
                                             <td style={{ textAlign: 'right' }}>{fmt(r.add_to_cart)}</td>
                                             <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmt(r.orders_count)}</td>
                                             <td style={{ textAlign: 'right' }}>{fmt(r.orders_sum_rub)}</td>
                                             <td style={{ textAlign: 'right', fontWeight: 500 }}>{fmt(r.revenue)}</td>
-                                            {/* Реклама */}
                                             <td style={{ textAlign: 'right', color: r.adv_sum > 0 ? '#ef4444' : '' }}>{fmt(r.adv_sum)}</td>
                                             <td style={{ textAlign: 'right' }}>{fmt(r.adv_views)}</td>
                                             <td style={{ textAlign: 'right' }}>{fmt(r.adv_clicks)}</td>
@@ -431,13 +408,11 @@ export default function FunnelPage() {
                                             <td style={{ textAlign: 'right' }}>{fmt(r.cpc)}</td>
                                             <td style={{ textAlign: 'right' }}>{fmt(r.cpm)}</td>
                                             <td style={{ textAlign: 'right', color: r.drr > 30 ? '#ef4444' : r.drr > 15 ? '#f59e0b' : '#10b981' }}>{fmtPct(r.drr)}</td>
-                                            {/* Финансы */}
                                             {detailed && <td style={{ textAlign: 'right' }}>{r.cost_price ? fmt(r.cost_total) : <span style={{ color: '#f59e0b', fontSize: 11 }}>—</span>}</td>}
                                             <td style={{ textAlign: 'right' }}>{fmt(r.tax)}</td>
                                             <td style={{ textAlign: 'right', fontWeight: 700, color: r.profit > 0 ? '#10b981' : '#ef4444' }}>{fmt(r.profit)}</td>
                                             <td style={{ textAlign: 'right', color: r.margin > 0 ? '#10b981' : '#ef4444' }}>{fmtPct(r.margin)}</td>
                                             <td style={{ textAlign: 'right' }}>{fmt(r.avg_price)}</td>
-                                            {/* Конверсия */}
                                             <td style={{ textAlign: 'right' }}>{fmtPct(r.add_to_cart_pct)}</td>
                                             <td style={{ textAlign: 'right' }}>{fmtPct(r.cart_to_order_pct)}</td>
                                         </tr>

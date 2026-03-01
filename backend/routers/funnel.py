@@ -663,6 +663,8 @@ async def get_funnel_data(
 async def get_funnel_summary(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    brand: Optional[str] = Query(None),
+    subject: Optional[str] = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -683,6 +685,10 @@ async def get_funnel_summary(
         q = q.where(WbFunnelDaily.date >= date.fromisoformat(date_from))
     if date_to:
         q = q.where(WbFunnelDaily.date <= date.fromisoformat(date_to))
+    if brand:
+        q = q.where(WbFunnelDaily.brand == brand)
+    if subject:
+        q = q.where(WbFunnelDaily.subject == subject)
 
     result = await db.execute(q)
     row = result.one()
