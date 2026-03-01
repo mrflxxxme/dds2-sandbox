@@ -340,42 +340,42 @@ export default function FunnelPage() {
                         />
                     )}
 
-                    {/* Table with sticky header — scrolls with page, horizontal scroll only in container */}
-                    <div className="glass-card" style={{ overflowX: 'auto' }}>
+                    {/* Table with sticky header — both rows pinned */}
+                    <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
                         {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> : (
                             <table className="data-table" style={{ minWidth: detailed ? 1800 : 1200, borderCollapse: 'separate', borderSpacing: 0 }}>
                                 <thead>
                                     <tr>
-                                        <th rowSpan={2} style={{ position: 'sticky', left: 0, top: 0, background: 'var(--color-bg-card)', zIndex: 10, verticalAlign: 'bottom' }}>ДАТА</th>
-                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: 'var(--color-bg-card)', zIndex: 5, verticalAlign: 'bottom' }}>Артикул</th>}
-                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: 'var(--color-bg-card)', zIndex: 5, verticalAlign: 'bottom' }}>nmId</th>}
-                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: 'var(--color-bg-card)', zIndex: 5, verticalAlign: 'bottom' }}>Предмет</th>}
-                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: 'var(--color-bg-card)', zIndex: 5, verticalAlign: 'bottom' }}>Бренд</th>}
-                                        <th colSpan={5} style={{ position: 'sticky', top: 0, background: 'rgba(245,158,11,0.15)', textAlign: 'center', zIndex: 5 }}>ВОРОНКА</th>
-                                        <th colSpan={7} style={{ position: 'sticky', top: 0, background: 'rgba(99,102,241,0.15)', textAlign: 'center', zIndex: 5 }}>ВНУТРЕННЯЯ РЕКЛАМА</th>
-                                        <th colSpan={4} style={{ position: 'sticky', top: 0, background: 'rgba(16,185,129,0.15)', textAlign: 'center', zIndex: 5 }}>ФИНАНСЫ</th>
-                                        <th colSpan={2} style={{ position: 'sticky', top: 0, background: 'rgba(236,72,153,0.15)', textAlign: 'center', zIndex: 5 }}>КОНВЕРСИЯ</th>
+                                        <th rowSpan={2} style={{ position: 'sticky', left: 0, top: 0, background: 'var(--color-bg-card)', zIndex: 12, verticalAlign: 'bottom', borderBottom: '2px solid rgba(255,255,255,0.08)' }}>ДАТА</th>
+                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: 'var(--color-bg-card)', zIndex: 8, verticalAlign: 'bottom' }}>Артикул</th>}
+                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: 'var(--color-bg-card)', zIndex: 8, verticalAlign: 'bottom' }}>nmId</th>}
+                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: 'var(--color-bg-card)', zIndex: 8, verticalAlign: 'bottom' }}>Предмет</th>}
+                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: 'var(--color-bg-card)', zIndex: 8, verticalAlign: 'bottom' }}>Бренд</th>}
+                                        <th colSpan={5} style={{ position: 'sticky', top: 0, background: 'rgba(245,158,11,0.15)', textAlign: 'center', zIndex: 8 }}>ВОРОНКА</th>
+                                        <th colSpan={7} style={{ position: 'sticky', top: 0, background: 'rgba(99,102,241,0.15)', textAlign: 'center', zIndex: 8 }}>ВНУТРЕННЯЯ РЕКЛАМА</th>
+                                        <th colSpan={4} style={{ position: 'sticky', top: 0, background: 'rgba(16,185,129,0.15)', textAlign: 'center', zIndex: 8 }}>ФИНАНСЫ</th>
+                                        <th colSpan={2} style={{ position: 'sticky', top: 0, background: 'rgba(236,72,153,0.15)', textAlign: 'center', zIndex: 8 }}>КОНВЕРСИЯ</th>
                                     </tr>
                                     <tr>
-                                        <th style={{ background: 'rgba(245,158,11,0.08)', fontSize: 11 }}>Переходы</th>
-                                        <th style={{ background: 'rgba(245,158,11,0.08)', fontSize: 11 }}>Корзины</th>
-                                        <th style={{ background: 'rgba(245,158,11,0.08)', fontSize: 11 }}>Заказы</th>
-                                        <th style={{ background: 'rgba(245,158,11,0.08)', fontSize: 11 }}>Сумма ₽</th>
-                                        <th style={{ background: 'rgba(245,158,11,0.08)', fontSize: 11 }}>Выручка ₽</th>
-                                        <th style={{ background: 'rgba(99,102,241,0.08)', fontSize: 11 }}>Расходы ₽</th>
-                                        <th style={{ background: 'rgba(99,102,241,0.08)', fontSize: 11 }}>Просмотры</th>
-                                        <th style={{ background: 'rgba(99,102,241,0.08)', fontSize: 11 }}>Клики</th>
-                                        <th style={{ background: 'rgba(99,102,241,0.08)', fontSize: 11 }}>CTR</th>
-                                        <th style={{ background: 'rgba(99,102,241,0.08)', fontSize: 11 }}>CPC</th>
-                                        <th style={{ background: 'rgba(99,102,241,0.08)', fontSize: 11 }}>CPM</th>
-                                        <th style={{ background: 'rgba(99,102,241,0.08)', fontSize: 11 }}>ДРР</th>
-                                        {detailed && <th style={{ background: 'rgba(16,185,129,0.08)', fontSize: 11 }}>Себест. ₽</th>}
-                                        <th style={{ background: 'rgba(16,185,129,0.08)', fontSize: 11 }}>Налог ₽</th>
-                                        <th style={{ background: 'rgba(16,185,129,0.08)', fontSize: 11 }}>Прибыль ₽</th>
-                                        <th style={{ background: 'rgba(16,185,129,0.08)', fontSize: 11 }}>Маржа</th>
-                                        <th style={{ background: 'rgba(16,185,129,0.08)', fontSize: 11 }}>Ср. цена</th>
-                                        <th style={{ background: 'rgba(236,72,153,0.08)', fontSize: 11 }}>В корзину</th>
-                                        <th style={{ background: 'rgba(236,72,153,0.08)', fontSize: 11 }}>В заказ</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(245,158,11,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Переходы</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(245,158,11,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Корзины</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(245,158,11,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Заказы</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(245,158,11,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Сумма ₽</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(245,158,11,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Выручка ₽</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(99,102,241,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Расходы ₽</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(99,102,241,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Просмотры</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(99,102,241,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Клики</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(99,102,241,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>CTR</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(99,102,241,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>CPC</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(99,102,241,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>CPM</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(99,102,241,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>ДРР</th>
+                                        {detailed && <th style={{ position: 'sticky', top: 28, background: 'rgba(16,185,129,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Себест. ₽</th>}
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(16,185,129,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Налог ₽</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(16,185,129,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Прибыль ₽</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(16,185,129,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Маржа</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(16,185,129,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Ср. цена</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(236,72,153,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>В корзину</th>
+                                        <th style={{ position: 'sticky', top: 28, background: 'rgba(236,72,153,0.08)', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>В заказ</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -384,34 +384,41 @@ export default function FunnelPage() {
                                             Данные загружаются автоматически. Ожидайте синхронизации.
                                         </td></tr>
                                     )}
-                                    {data.map((r, i) => (
-                                        <tr key={i}>
-                                            <td style={{ position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 1, whiteSpace: 'nowrap', fontSize: 12 }}>{r.date}</td>
-                                            {detailed && <td style={{ fontSize: 12 }}>{r.vendor_code}</td>}
-                                            {detailed && <td style={{ fontSize: 12 }}><a href={`https://www.wildberries.ru/catalog/${r.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{r.nm_id}</a></td>}
-                                            {detailed && <td style={{ fontSize: 12 }}>{r.subject}</td>}
-                                            {detailed && <td style={{ fontSize: 12 }}>{r.brand}</td>}
-                                            <td style={{ textAlign: 'right' }}>{fmt(r.open_card)}</td>
-                                            <td style={{ textAlign: 'right' }}>{fmt(r.add_to_cart)}</td>
-                                            <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmt(r.orders_count)}</td>
-                                            <td style={{ textAlign: 'right' }}>{fmt(r.orders_sum_rub)}</td>
-                                            <td style={{ textAlign: 'right', fontWeight: 500 }}>{fmt(r.revenue)}</td>
-                                            <td style={{ textAlign: 'right', color: r.adv_sum > 0 ? '#ef4444' : '' }}>{fmt(r.adv_sum)}</td>
-                                            <td style={{ textAlign: 'right' }}>{fmt(r.adv_views)}</td>
-                                            <td style={{ textAlign: 'right' }}>{fmt(r.adv_clicks)}</td>
-                                            <td style={{ textAlign: 'right' }}>{fmtPct(r.ctr)}</td>
-                                            <td style={{ textAlign: 'right' }}>{fmt(r.cpc)}</td>
-                                            <td style={{ textAlign: 'right' }}>{fmt(r.cpm)}</td>
-                                            <td style={{ textAlign: 'right', color: r.drr > 30 ? '#ef4444' : r.drr > 15 ? '#f59e0b' : '#10b981' }}>{fmtPct(r.drr)}</td>
-                                            {detailed && <td style={{ textAlign: 'right' }}>{r.cost_price ? fmt(r.cost_total) : <span style={{ color: '#f59e0b', fontSize: 11 }}>—</span>}</td>}
-                                            <td style={{ textAlign: 'right' }}>{fmt(r.tax)}</td>
-                                            <td style={{ textAlign: 'right', fontWeight: 700, color: r.profit > 0 ? '#10b981' : '#ef4444' }}>{fmt(r.profit)}</td>
-                                            <td style={{ textAlign: 'right', color: r.margin > 0 ? '#10b981' : '#ef4444' }}>{fmtPct(r.margin)}</td>
-                                            <td style={{ textAlign: 'right' }}>{fmt(r.avg_price)}</td>
-                                            <td style={{ textAlign: 'right' }}>{fmtPct(r.add_to_cart_pct)}</td>
-                                            <td style={{ textAlign: 'right' }}>{fmtPct(r.cart_to_order_pct)}</td>
-                                        </tr>
-                                    ))}
+                                    {data.map((r, i) => {
+                                        const rowBg = i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
+                                        return (
+                                            <tr key={i} style={{ background: rowBg }}>
+                                                <td style={{ position: 'sticky', left: 0, background: i % 2 === 0 ? 'var(--color-bg-card)' : 'color-mix(in srgb, var(--color-bg-card) 95%, white)', zIndex: 1, whiteSpace: 'nowrap', fontSize: 12 }}>{r.date}</td>
+                                                {detailed && <td style={{ fontSize: 12 }}>{r.vendor_code}</td>}
+                                                {detailed && <td style={{ fontSize: 12 }}><a href={`https://www.wildberries.ru/catalog/${r.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{r.nm_id}</a></td>}
+                                                {detailed && <td style={{ fontSize: 12 }}>{r.subject}</td>}
+                                                {detailed && <td style={{ fontSize: 12 }}>{r.brand}</td>}
+                                                {/* Воронка */}
+                                                <td style={{ textAlign: 'right', background: r.open_card > 300000 ? 'rgba(245,158,11,0.08)' : undefined }}>{fmt(r.open_card)}</td>
+                                                <td style={{ textAlign: 'right', background: r.add_to_cart > 15000 ? 'rgba(59,130,246,0.08)' : undefined }}>{fmt(r.add_to_cart)}</td>
+                                                <td style={{ textAlign: 'right', fontWeight: 600, background: r.orders_count > 2500 ? 'rgba(16,185,129,0.1)' : undefined }}>{fmt(r.orders_count)}</td>
+                                                <td style={{ textAlign: 'right', background: r.orders_sum_rub > 5000000 ? 'rgba(139,92,246,0.08)' : undefined }}>{fmt(r.orders_sum_rub)}</td>
+                                                <td style={{ textAlign: 'right', fontWeight: 500, color: r.revenue > 0 ? '#d4d4d8' : '#ef4444' }}>{fmt(r.revenue)}</td>
+                                                {/* Реклама */}
+                                                <td style={{ textAlign: 'right', color: r.adv_sum > 400000 ? '#ef4444' : r.adv_sum > 100000 ? '#f59e0b' : r.adv_sum > 0 ? '#fb923c' : 'var(--color-text-dim)', background: r.adv_sum > 400000 ? 'rgba(239,68,68,0.06)' : undefined }}>{fmt(r.adv_sum)}</td>
+                                                <td style={{ textAlign: 'right' }}>{fmt(r.adv_views)}</td>
+                                                <td style={{ textAlign: 'right' }}>{fmt(r.adv_clicks)}</td>
+                                                <td style={{ textAlign: 'right', color: r.ctr > 5 ? '#10b981' : r.ctr > 2 ? '#d4d4d8' : '#f59e0b' }}>{fmtPct(r.ctr)}</td>
+                                                <td style={{ textAlign: 'right' }}>{fmt(r.cpc)}</td>
+                                                <td style={{ textAlign: 'right' }}>{fmt(r.cpm)}</td>
+                                                <td style={{ textAlign: 'right', color: r.drr > 30 ? '#ef4444' : r.drr > 15 ? '#f59e0b' : r.drr > 0 ? '#10b981' : 'var(--color-text-dim)', fontWeight: r.drr > 30 ? 600 : 400, background: r.drr > 30 ? 'rgba(239,68,68,0.06)' : undefined }}>{fmtPct(r.drr)}</td>
+                                                {/* Финансы */}
+                                                {detailed && <td style={{ textAlign: 'right' }}>{r.cost_price ? fmt(r.cost_total) : <span style={{ color: '#f59e0b', fontSize: 11 }}>—</span>}</td>}
+                                                <td style={{ textAlign: 'right', color: 'var(--color-text-dim)' }}>{fmt(r.tax)}</td>
+                                                <td style={{ textAlign: 'right', fontWeight: 700, color: r.profit > 0 ? '#10b981' : '#ef4444', background: r.profit > 0 ? 'rgba(16,185,129,0.05)' : r.profit < 0 ? 'rgba(239,68,68,0.05)' : undefined }}>{fmt(r.profit)}</td>
+                                                <td style={{ textAlign: 'right', color: r.margin > 20 ? '#10b981' : r.margin > 0 ? '#a3e635' : '#ef4444', fontWeight: r.margin > 20 ? 600 : 400 }}>{fmtPct(r.margin)}</td>
+                                                <td style={{ textAlign: 'right' }}>{fmt(r.avg_price)}</td>
+                                                {/* Конверсия */}
+                                                <td style={{ textAlign: 'right', color: r.add_to_cart_pct > 8 ? '#10b981' : r.add_to_cart_pct > 4 ? '#d4d4d8' : '#f59e0b' }}>{fmtPct(r.add_to_cart_pct)}</td>
+                                                <td style={{ textAlign: 'right', color: r.cart_to_order_pct > 15 ? '#10b981' : r.cart_to_order_pct > 8 ? '#d4d4d8' : '#f59e0b' }}>{fmtPct(r.cart_to_order_pct)}</td>
+                                            </tr>
+                                        );
+                                    })}
                                 </tbody>
                             </table>
                         )}
@@ -420,84 +427,87 @@ export default function FunnelPage() {
                         Всего строк: {data.length} {!detailed && '(агрегация по дням)'}
                     </div>
                 </>
-            )}
+            )
+            }
 
-            {tab === 'costs' && (
-                <div>
-                    <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>Ручная себестоимость</h2>
-                    <p style={{ fontSize: 13, color: 'var(--color-text-dim)', marginBottom: 16 }}>
-                        Товары без себестоимости из заказов. Укажите себестоимость за штуку для расчёта прибыли.
-                    </p>
-                    {costs.missing?.length > 0 && (
-                        <div className="glass-card" style={{ marginBottom: 16 }}>
-                            <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 8, padding: '12px 16px 0' }}>
-                                ⚠️ Без себестоимости ({costs.missing.length})
-                            </h3>
-                            <table className="data-table">
-                                <thead><tr><th>nmId</th><th>Артикул</th><th>Предмет</th><th>Бренд</th><th>Себестоимость ₽</th><th></th></tr></thead>
-                                <tbody>
-                                    {costs.missing.map((m: any) => (
-                                        <tr key={m.nm_id}>
-                                            <td><a href={`https://www.wildberries.ru/catalog/${m.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{m.nm_id}</a></td>
-                                            <td>{m.vendor_code}</td><td>{m.subject}</td><td>{m.brand}</td>
-                                            <td>{editCost?.nm_id === m.nm_id ? (
-                                                <input type="number" value={editCost.cost_price} autoFocus
-                                                    onChange={e => setEditCost({ ...editCost, cost_price: e.target.value })}
-                                                    onKeyDown={e => e.key === 'Enter' && handleSaveCost()}
-                                                    style={{ width: 100, background: 'var(--color-bg)', border: '1px solid var(--color-accent)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)' }} />
-                                            ) : '—'}</td>
-                                            <td>{editCost?.nm_id === m.nm_id ? (
-                                                <div style={{ display: 'flex', gap: 4 }}>
-                                                    <button className="btn-primary" onClick={handleSaveCost} style={{ padding: '2px 8px', fontSize: 12 }}>✓</button>
-                                                    <button className="btn-secondary" onClick={() => setEditCost(null)} style={{ padding: '2px 8px', fontSize: 12 }}>✕</button>
-                                                </div>
-                                            ) : (
-                                                <button className="btn-secondary" onClick={() => setEditCost({ nm_id: m.nm_id, cost_price: '' })} style={{ padding: '2px 8px', fontSize: 12 }}>✏️</button>
-                                            )}</td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    )}
-                    {costs.overrides?.length > 0 && (
-                        <div className="glass-card">
-                            <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 8, padding: '12px 16px 0' }}>
-                                ✅ Установленные ({costs.overrides.length})
-                            </h3>
-                            <table className="data-table">
-                                <thead><tr><th>nmId</th><th>Себестоимость ₽</th><th></th></tr></thead>
-                                <tbody>
-                                    {costs.overrides.map((o: any) => (
-                                        <tr key={o.nm_id}>
-                                            <td><a href={`https://www.wildberries.ru/catalog/${o.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{o.nm_id}</a></td>
-                                            <td>{editCost?.nm_id === o.nm_id ? (
-                                                <input type="number" value={editCost.cost_price} autoFocus
-                                                    onChange={e => setEditCost({ ...editCost, cost_price: e.target.value })}
-                                                    onKeyDown={e => e.key === 'Enter' && handleSaveCost()}
-                                                    style={{ width: 100, background: 'var(--color-bg)', border: '1px solid var(--color-accent)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)' }} />
-                                            ) : fmt(o.cost_price)}</td>
-                                            <td>{editCost?.nm_id === o.nm_id ? (
-                                                <div style={{ display: 'flex', gap: 4 }}>
-                                                    <button className="btn-primary" onClick={handleSaveCost} style={{ padding: '2px 8px', fontSize: 12 }}>✓</button>
-                                                    <button className="btn-secondary" onClick={() => setEditCost(null)} style={{ padding: '2px 8px', fontSize: 12 }}>✕</button>
-                                                </div>
-                                            ) : (
-                                                <button className="btn-secondary" onClick={() => setEditCost({ nm_id: o.nm_id, cost_price: String(o.cost_price) })} style={{ padding: '2px 8px', fontSize: 12 }}>✏️</button>
-                                            )}</td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    )}
-                    {costs.missing?.length === 0 && costs.overrides?.length === 0 && (
-                        <div className="glass-card" style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>
-                            Нет данных. Дождитесь автоматической синхронизации воронки.
-                        </div>
-                    )}
-                </div>
-            )}
-        </div>
+            {
+                tab === 'costs' && (
+                    <div>
+                        <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>Ручная себестоимость</h2>
+                        <p style={{ fontSize: 13, color: 'var(--color-text-dim)', marginBottom: 16 }}>
+                            Товары без себестоимости из заказов. Укажите себестоимость за штуку для расчёта прибыли.
+                        </p>
+                        {costs.missing?.length > 0 && (
+                            <div className="glass-card" style={{ marginBottom: 16 }}>
+                                <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 8, padding: '12px 16px 0' }}>
+                                    ⚠️ Без себестоимости ({costs.missing.length})
+                                </h3>
+                                <table className="data-table">
+                                    <thead><tr><th>nmId</th><th>Артикул</th><th>Предмет</th><th>Бренд</th><th>Себестоимость ₽</th><th></th></tr></thead>
+                                    <tbody>
+                                        {costs.missing.map((m: any) => (
+                                            <tr key={m.nm_id}>
+                                                <td><a href={`https://www.wildberries.ru/catalog/${m.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{m.nm_id}</a></td>
+                                                <td>{m.vendor_code}</td><td>{m.subject}</td><td>{m.brand}</td>
+                                                <td>{editCost?.nm_id === m.nm_id ? (
+                                                    <input type="number" value={editCost.cost_price} autoFocus
+                                                        onChange={e => setEditCost({ ...editCost, cost_price: e.target.value })}
+                                                        onKeyDown={e => e.key === 'Enter' && handleSaveCost()}
+                                                        style={{ width: 100, background: 'var(--color-bg)', border: '1px solid var(--color-accent)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)' }} />
+                                                ) : '—'}</td>
+                                                <td>{editCost?.nm_id === m.nm_id ? (
+                                                    <div style={{ display: 'flex', gap: 4 }}>
+                                                        <button className="btn-primary" onClick={handleSaveCost} style={{ padding: '2px 8px', fontSize: 12 }}>✓</button>
+                                                        <button className="btn-secondary" onClick={() => setEditCost(null)} style={{ padding: '2px 8px', fontSize: 12 }}>✕</button>
+                                                    </div>
+                                                ) : (
+                                                    <button className="btn-secondary" onClick={() => setEditCost({ nm_id: m.nm_id, cost_price: '' })} style={{ padding: '2px 8px', fontSize: 12 }}>✏️</button>
+                                                )}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                        {costs.overrides?.length > 0 && (
+                            <div className="glass-card">
+                                <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 8, padding: '12px 16px 0' }}>
+                                    ✅ Установленные ({costs.overrides.length})
+                                </h3>
+                                <table className="data-table">
+                                    <thead><tr><th>nmId</th><th>Себестоимость ₽</th><th></th></tr></thead>
+                                    <tbody>
+                                        {costs.overrides.map((o: any) => (
+                                            <tr key={o.nm_id}>
+                                                <td><a href={`https://www.wildberries.ru/catalog/${o.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{o.nm_id}</a></td>
+                                                <td>{editCost?.nm_id === o.nm_id ? (
+                                                    <input type="number" value={editCost.cost_price} autoFocus
+                                                        onChange={e => setEditCost({ ...editCost, cost_price: e.target.value })}
+                                                        onKeyDown={e => e.key === 'Enter' && handleSaveCost()}
+                                                        style={{ width: 100, background: 'var(--color-bg)', border: '1px solid var(--color-accent)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)' }} />
+                                                ) : fmt(o.cost_price)}</td>
+                                                <td>{editCost?.nm_id === o.nm_id ? (
+                                                    <div style={{ display: 'flex', gap: 4 }}>
+                                                        <button className="btn-primary" onClick={handleSaveCost} style={{ padding: '2px 8px', fontSize: 12 }}>✓</button>
+                                                        <button className="btn-secondary" onClick={() => setEditCost(null)} style={{ padding: '2px 8px', fontSize: 12 }}>✕</button>
+                                                    </div>
+                                                ) : (
+                                                    <button className="btn-secondary" onClick={() => setEditCost({ nm_id: o.nm_id, cost_price: String(o.cost_price) })} style={{ padding: '2px 8px', fontSize: 12 }}>✏️</button>
+                                                )}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                        {costs.missing?.length === 0 && costs.overrides?.length === 0 && (
+                            <div className="glass-card" style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>
+                                Нет данных. Дождитесь автоматической синхронизации воронки.
+                            </div>
+                        )}
+                    </div>
+                )
+            }
+        </div >
     );
 }
