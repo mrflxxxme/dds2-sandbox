@@ -199,8 +199,215 @@ class ApiClient {
         return this.request<any>('GET', `/api/v1/reports/transactions?${q}`);
     }
 
-    getOrders() {
-        return this.request<any>('GET', '/api/v1/refs/orders');
+    // Transactions
+    searchTransactions(params: any = {}) {
+        return this.request<any>('POST', '/api/v1/transactions/search', params);
+    }
+    getUnassigned(limit = 500) {
+        return this.request<any[]>('GET', `/api/v1/transactions/unassigned?limit=${limit}`);
+    }
+    getUnassignedGrouped() {
+        return this.request<any[]>('GET', '/api/v1/transactions/unassigned_grouped');
+    }
+    assignCategory(data: any) {
+        return this.request<any>('POST', '/api/v1/transactions/assign_category', data);
+    }
+    assignCategoryBulk(data: any) {
+        return this.request<any>('POST', '/api/v1/transactions/assign_category_bulk', data);
+    }
+    assignCategoryByIds(data: any) {
+        return this.request<any>('POST', '/api/v1/transactions/assign_category_by_ids', data);
+    }
+
+    // Reports
+    getDDSMonth(year: number, month: number, currency = 'RUB') {
+        return this.request<any>('GET', `/api/v1/reports/dds_month?year=${year}&month=${month}&currency=${currency}`);
+    }
+    getBalanceDaily(account: string, currency: string, start: string, end: string) {
+        return this.request<any[]>('GET', `/api/v1/reports/balance_daily?account=${encodeURIComponent(account)}&currency=${currency}&start=${start}&end=${end}`);
+    }
+    getFxControl(start: string, end: string) {
+        return this.request<any[]>('GET', `/api/v1/reports/fx_control?start=${start}&end=${end}`);
+    }
+    getCustomsControl(start: string, end: string) {
+        return this.request<any[]>('GET', `/api/v1/reports/customs_control?start=${start}&end=${end}`);
+    }
+    getIncomeDailyReport(start: string, end: string) {
+        return this.request<any[]>('GET', `/api/v1/reports/income_daily?start=${start}&end=${end}`);
+    }
+
+    // Refs — Accounts
+    getAccounts() {
+        return this.request<any[]>('GET', '/api/v1/refs/accounts');
+    }
+    upsertAccount(data: any) {
+        return this.request<any>('POST', '/api/v1/refs/accounts', data);
+    }
+    deleteAccount(id: number) {
+        return this.request<any>('DELETE', `/api/v1/refs/accounts/${id}`);
+    }
+
+    // Refs — CP Categories
+    getCpCategories() {
+        return this.request<any[]>('GET', '/api/v1/refs/cp_categories');
+    }
+    upsertCpCategory(data: any) {
+        return this.request<any>('POST', '/api/v1/refs/cp_categories', data);
+    }
+    deleteCpCategory(id: number) {
+        return this.request<any>('DELETE', `/api/v1/refs/cp_categories/${id}`);
+    }
+
+    // Refs — Overrides
+    getOverrides() {
+        return this.request<any[]>('GET', '/api/v1/refs/overrides');
+    }
+    deleteOverride(id: number) {
+        return this.request<any>('DELETE', `/api/v1/refs/overrides/${id}`);
+    }
+
+    // Refs — Opening balances
+    getOpeningBalances() {
+        return this.request<any[]>('GET', '/api/v1/refs/opening_balances');
+    }
+    upsertOpeningBalance(data: any) {
+        return this.request<any>('POST', '/api/v1/refs/opening_balances', data);
+    }
+
+    // Refs — Category reference
+    getCategoryRef() {
+        return this.request<any[]>('GET', '/api/v1/refs/categories');
+    }
+    addCategoryRef(data: any) {
+        return this.request<any>('POST', '/api/v1/refs/categories', data);
+    }
+    deleteCategoryRef(id: number) {
+        return this.request<any>('DELETE', `/api/v1/refs/categories/${id}`);
+    }
+
+    // Cost — Orders
+    getCostOrders() {
+        return this.request<any[]>('GET', '/api/v1/cost/orders');
+    }
+    createCostOrder(data: any) {
+        return this.request<any>('POST', '/api/v1/cost/orders', data);
+    }
+    updateCostOrder(orderNo: string, data: any) {
+        return this.request<any>('PUT', `/api/v1/cost/orders/${orderNo}`, data);
+    }
+    deleteCostOrder(orderNo: string) {
+        return this.request<any>('DELETE', `/api/v1/cost/orders/${orderNo}`);
+    }
+    getCostOrderItems(orderNo: string) {
+        return this.request<any[]>('GET', `/api/v1/cost/orders/${orderNo}/items`);
+    }
+    generatePlan(orderNo: string) {
+        return this.request<any>('POST', `/api/v1/cost/orders/${orderNo}/generate_plan`);
+    }
+
+    // Cost — Nomenclature
+    getNomenclature() {
+        return this.request<any[]>('GET', '/api/v1/cost/nomenclature');
+    }
+
+    // Cost — Duty rules
+    getDutyRules() {
+        return this.request<any[]>('GET', '/api/v1/cost/duty_rules');
+    }
+    addDutyRule(data: any) {
+        return this.request<any>('POST', '/api/v1/cost/duty_rules', data);
+    }
+    deleteDutyRule(id: number) {
+        return this.request<any>('DELETE', `/api/v1/cost/duty_rules/${id}`);
+    }
+
+    // Planning — Orders
+    getPlanningOrders() {
+        return this.request<any[]>('GET', '/api/v1/planning/orders');
+    }
+    createPlanningOrder(data: any) {
+        return this.request<any>('POST', '/api/v1/planning/orders', data);
+    }
+    deletePlanningOrder(id: number) {
+        return this.request<any>('DELETE', `/api/v1/planning/orders/${id}`);
+    }
+    getPlanningOrderSummary(orderNo: string) {
+        return this.request<any>('GET', `/api/v1/planning/orders/${orderNo}/summary`);
+    }
+
+    // Planning — Payments
+    getPlanningPayments() {
+        return this.request<any[]>('GET', '/api/v1/planning/payments');
+    }
+    createPlanningPayment(data: any) {
+        return this.request<any>('POST', '/api/v1/planning/payments', data);
+    }
+    deletePlanningPayment(id: number) {
+        return this.request<any>('DELETE', `/api/v1/planning/payments/${id}`);
+    }
+    markPaymentPaid(id: number) {
+        return this.request<any>('POST', `/api/v1/planning/payments/${id}/mark_paid`);
+    }
+    syncPlanPayments() {
+        return this.request<any>('POST', '/api/v1/planning/sync_plan_payments');
+    }
+
+    // Planning — Incomes
+    getPlanningIncomes() {
+        return this.request<any[]>('GET', '/api/v1/planning/incomes');
+    }
+    createPlanningIncome(data: any) {
+        return this.request<any>('POST', '/api/v1/planning/incomes', data);
+    }
+    deletePlanningIncome(id: number) {
+        return this.request<any>('DELETE', `/api/v1/planning/incomes/${id}`);
+    }
+
+    // Planning — WB Payouts
+    getWbPayouts() {
+        return this.request<any[]>('GET', '/api/v1/planning/wb_payouts');
+    }
+    deleteWbPayout(id: number) {
+        return this.request<any>('DELETE', `/api/v1/planning/wb_payouts/${id}`);
+    }
+
+    // Planning — Cashflow
+    getCashflowDaily() {
+        return this.request<any[]>('GET', '/api/v1/planning/cashflow_daily');
+    }
+
+    // Planning — Lead Times
+    getLeadTimes() {
+        return this.request<any[]>('GET', '/api/v1/planning/lead_times');
+    }
+    upsertLeadTime(data: any) {
+        return this.request<any>('POST', '/api/v1/planning/lead_times', data);
+    }
+
+    // Planning — Customs
+    getCustomsDt() {
+        return this.request<any[]>('GET', '/api/v1/planning/customs_dt');
+    }
+    getCustomsAlloc() {
+        return this.request<any[]>('GET', '/api/v1/planning/customs/alloc');
+    }
+    getCustomsTopup() {
+        return this.request<any[]>('GET', '/api/v1/planning/customs/topup');
+    }
+
+    getAccountsList() {
+        return this.request<any[]>('GET', '/api/v1/planning/accounts_list');
+    }
+    getCandidateTransactions() {
+        return this.request<any[]>('GET', '/api/v1/planning/candidate_transactions');
+    }
+    getFactLinks(paymentId: number) {
+        return this.request<any[]>('GET', `/api/v1/planning/fact_links/${paymentId}`);
+    }
+
+    // Import
+    getImportLogs() {
+        return this.request<any[]>('GET', '/api/v1/import/logs');
     }
 
     // Upload
@@ -214,12 +421,30 @@ class ApiClient {
         const projectId = this.getProjectId();
         if (projectId) headers['X-Project-Id'] = String(projectId);
 
-        const res = await fetch(`${API_URL}/api/v1/import/${sourceType}`, {
+        const res = await fetch(`${API_URL}/api/v1/import/upload`, {
             method: 'POST',
             headers,
             body: formData,
         });
 
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.detail || `Error ${res.status}`);
+        }
+        return res.json();
+    }
+
+    async uploadCostFile(orderNo: string, file: File): Promise<any> {
+        const formData = new FormData();
+        formData.append('file', file);
+        const headers: Record<string, string> = {};
+        const token = this.getToken();
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const projectId = this.getProjectId();
+        if (projectId) headers['X-Project-Id'] = String(projectId);
+        const res = await fetch(`${API_URL}/api/v1/cost/orders/${orderNo}/upload`, {
+            method: 'POST', headers, body: formData,
+        });
         if (!res.ok) {
             const err = await res.json().catch(() => ({}));
             throw new Error(err.detail || `Error ${res.status}`);

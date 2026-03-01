@@ -6,10 +6,13 @@ import Link from 'next/link';
 
 const navItems = [
     { href: '', label: 'Дашборд', icon: '📊' },
-    { href: '/dds', label: 'ДДС отчёт', icon: '📈' },
-    { href: '/txn', label: 'Транзакции', icon: '💳' },
-    { href: '/orders', label: 'Заказы', icon: '📦' },
-    { href: '/import', label: 'Импорт', icon: '📥' },
+    { href: '/import', label: 'Импорт выписок', icon: '📥' },
+    { href: '/txn', label: 'Операции', icon: '💳' },
+    { href: '/inbox', label: 'INBOX / Неразнесённые', icon: '🔴' },
+    { href: '/reports', label: 'Отчёты', icon: '📈' },
+    { href: '/planning', label: 'Планирование', icon: '📦' },
+    { href: '/cost', label: 'Себестоимость', icon: '🧮' },
+    { href: '/refs', label: 'Справочники', icon: '📋' },
 ];
 
 const settingsItems = [

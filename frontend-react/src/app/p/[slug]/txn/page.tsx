@@ -24,7 +24,7 @@ export default function TransactionsPage() {
         <div className="animate-in">
             <div className="page-header">
                 <div>
-                    <h1 className="page-title">Транзакции</h1>
+                    <h1 className="page-title">Операции</h1>
                     <p className="page-subtitle">Все движения денежных средств</p>
                 </div>
                 <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'transactions')}
