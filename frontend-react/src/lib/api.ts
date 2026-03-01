@@ -331,6 +331,9 @@ class ApiClient {
     createPlanningOrder(data: any) {
         return this.request<any>('POST', '/api/v1/planning/orders', data);
     }
+    upsertPlanningOrder(data: any) {
+        return this.request<any>('POST', '/api/v1/planning/orders', data);
+    }
     deletePlanningOrder(id: number) {
         return this.request<any>('DELETE', `/api/v1/planning/orders/${id}`);
     }

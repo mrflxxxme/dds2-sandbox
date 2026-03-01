@@ -44,11 +44,20 @@ function PlanOrders() {
     const [expanded, setExpanded] = useState<string | null>(null);
     const [summary, setSummary] = useState<any>(null);
     const [msg, setMsg] = useState('');
+    const [editId, setEditId] = useState<number | null>(null);
+    const [showForm, setShowForm] = useState(false);
+
+    const emptyForm = {
+        order_name: '', category: '', transport_type: 'AUTO', order_no: '',
+        supplier: '', planned_ship_date: '', actual_ship_date: '',
+        order_amount: '', deposit: '', logistics_cny: '', customs_rub: ''
+    };
+    const [form, setForm] = useState(emptyForm);
 
     useEffect(() => { load(); }, []);
     const load = async () => { try { setData(await api.getPlanningOrders()); } catch { } };
     const del = async (id: number) => {
-        if (!confirm('Удалить?')) return;
+        if (!confirm('Удалить заказ?')) return;
         try { await api.deletePlanningOrder(id); load(); } catch (e: any) { setMsg(e.message); }
     };
     const showSummary = async (orderNo: string) => {
@@ -57,38 +66,133 @@ function PlanOrders() {
         try { setSummary(await api.getPlanningOrderSummary(orderNo)); } catch { setSummary(null); }
     };
 
+    const openEdit = (r: any) => {
+        setEditId(r.id);
+        setForm({
+            order_name: r.order_name || '',
+            category: r.category || '',
+            transport_type: r.transport_type || 'AUTO',
+            order_no: r.order_no != null ? String(r.order_no) : '',
+            supplier: r.supplier || '',
+            planned_ship_date: r.planned_ship_date || '',
+            actual_ship_date: r.actual_ship_date || '',
+            order_amount: r.order_amount != null ? String(r.order_amount) : '',
+            deposit: r.deposit != null ? String(r.deposit) : '',
+            logistics_cny: r.logistics_cny != null ? String(r.logistics_cny) : '',
+            customs_rub: r.customs_rub != null ? String(r.customs_rub) : '',
+        });
+        setShowForm(true);
+    };
+
+    const openNew = () => {
+        setEditId(null);
+        setForm(emptyForm);
+        setShowForm(true);
+    };
+
+    const save = async () => {
+        try {
+            const payload: any = {
+                order_name: form.order_name || null,
+                category: form.category || null,
+                transport_type: form.transport_type || null,
+                order_no: form.order_no ? parseInt(form.order_no) : null,
+                supplier: form.supplier || null,
+                planned_ship_date: form.planned_ship_date || null,
+                actual_ship_date: form.actual_ship_date || null,
+                order_amount: form.order_amount ? parseFloat(form.order_amount) : null,
+                deposit: form.deposit ? parseFloat(form.deposit) : null,
+                logistics_cny: form.logistics_cny ? parseFloat(form.logistics_cny) : null,
+                customs_rub: form.customs_rub ? parseFloat(form.customs_rub) : null,
+            };
+            if (editId) payload.id = editId;
+            await api.upsertPlanningOrder(payload);
+            setMsg('✅ Сохранено!');
+            setShowForm(false);
+            load();
+        } catch (e: any) { setMsg(`❌ ${e.message}`); }
+    };
+
+    const F = ({ label, field, type = 'text' }: { label: string; field: string; type?: string }) => (
+        <div className="form-group">
+            <label className="form-label" style={{ fontSize: 11 }}>{label}</label>
+            <input className="form-input" type={type} value={(form as any)[field]}
+                onChange={e => setForm({ ...form, [field]: e.target.value })}
+                style={{ fontSize: 13 }} />
+        </div>
+    );
+
     return (
         <div className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                 <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Заказы (Планирование)</h3>
-                <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'plan_orders')}>📥 Excel</button>
+                <div style={{ display: 'flex', gap: 8 }}>
+                    <button className="btn btn-primary btn-sm" onClick={openNew}>+ Новый заказ</button>
+                    <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'plan_orders')}>📥 Excel</button>
+                </div>
             </div>
-            {msg && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 8 }}>{msg}</div>}
+            {msg && <div style={{ fontSize: 13, marginBottom: 8, padding: '6px 12px', borderRadius: 6, background: msg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', color: msg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)' }}>{msg} <span style={{ float: 'right', cursor: 'pointer' }} onClick={() => setMsg('')}>✕</span></div>}
+
+            {showForm && (
+                <div style={{ background: 'var(--color-bg-input)', padding: 16, borderRadius: 8, marginBottom: 16 }}>
+                    <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>{editId ? `Редактирование заказа #${editId}` : 'Новый заказ'}</h4>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+                        <F label="Инвойс / Название" field="order_name" />
+                        <F label="№ заказа" field="order_no" type="number" />
+                        <F label="Категория" field="category" />
+                        <F label="Поставщик" field="supplier" />
+                        <div className="form-group">
+                            <label className="form-label" style={{ fontSize: 11 }}>Транспорт</label>
+                            <select className="form-input" value={form.transport_type}
+                                onChange={e => setForm({ ...form, transport_type: e.target.value })}
+                                style={{ fontSize: 13 }}>
+                                <option value="AUTO">AUTO</option>
+                                <option value="RAIL">RAIL</option>
+                                <option value="AIR">AIR</option>
+                                <option value="SEA">SEA</option>
+                            </select>
+                        </div>
+                        <F label="Дата отгрузки" field="planned_ship_date" type="date" />
+                        <F label="Дата прибытия" field="actual_ship_date" type="date" />
+                        <F label="Сумма заказа ₽" field="order_amount" type="number" />
+                        <F label="Депозит ₽" field="deposit" type="number" />
+                        <F label="Доставка ¥" field="logistics_cny" type="number" />
+                        <F label="Пошлина ₽" field="customs_rub" type="number" />
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                        <button className="btn btn-primary btn-sm" onClick={save}>💾 Сохранить</button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => setShowForm(false)}>Отмена</button>
+                    </div>
+                </div>
+            )}
 
             {data.length > 0 ? (
                 <div style={{ overflowX: 'auto' }}>
                     <table className="data-table">
-                        <thead><tr><th>№</th><th>Инвойс</th><th>Транспорт</th><th>Отгрузка</th><th>Прибытие</th><th>Кол-во</th><th>Товар ₽</th><th>Доставка ¥</th><th>Доставка ₽</th><th>Пошлина ₽</th><th>НДС ₽</th><th>Итого ₽</th><th></th></tr></thead>
+                        <thead><tr>
+                            <th>№</th><th>Инвойс</th><th>Транспорт</th><th>Отгрузка</th><th>Прибытие</th>
+                            <th>Товар ₽</th><th>Депозит ₽</th><th>Доставка ¥</th><th>Пошлина ₽</th><th></th>
+                        </tr></thead>
                         <tbody>{data.map(r => (
                             <tr key={r.id} style={{ cursor: 'pointer' }} onClick={() => showSummary(String(r.order_no || r.id))}>
                                 <td style={{ fontWeight: 600 }}>{r.order_no ?? r.id}</td>
-                                <td>{r.invoice}</td>
-                                <td><span className="badge badge-info">{r.transport}</span></td>
-                                <td style={{ fontSize: 12 }}>{r.ship_date ? formatDate(r.ship_date) : '—'}</td>
-                                <td style={{ fontSize: 12 }}>{r.arrival_date ? formatDate(r.arrival_date) : '—'}</td>
-                                <td>{r.total_qty != null ? formatNumber(r.total_qty) : '—'}</td>
-                                <td style={{ color: 'var(--color-success)' }}>{r.total_goods_rub != null ? formatNumber(r.total_goods_rub) : '—'}</td>
-                                <td>{r.delivery_cny != null ? formatNumber(r.delivery_cny) : '—'}</td>
-                                <td>{r.delivery_rub != null ? formatNumber(r.delivery_rub) : '—'}</td>
-                                <td>{r.duty_rub != null ? formatNumber(r.duty_rub) : '—'}</td>
-                                <td>{r.vat_rub != null ? formatNumber(r.vat_rub) : '—'}</td>
-                                <td style={{ fontWeight: 700 }}>{r.total_rub != null ? formatNumber(r.total_rub) : '—'}</td>
-                                <td><button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={e => { e.stopPropagation(); del(r.id); }}>✕</button></td>
+                                <td><span className="badge badge-info" style={{ fontSize: 11 }}>{r.order_name || '—'}</span></td>
+                                <td>{r.transport_type ? <span className="badge badge-warning">{r.transport_type}</span> : '—'}</td>
+                                <td style={{ fontSize: 12 }}>{r.planned_ship_date ? formatDate(r.planned_ship_date) : '—'}</td>
+                                <td style={{ fontSize: 12 }}>{r.actual_ship_date ? formatDate(r.actual_ship_date) : '—'}</td>
+                                <td style={{ color: 'var(--color-success)' }}>{r.order_amount != null ? formatNumber(r.order_amount) : '—'}</td>
+                                <td>{r.deposit != null ? formatNumber(r.deposit) : '—'}</td>
+                                <td>{r.logistics_cny != null ? formatNumber(r.logistics_cny) : '—'}</td>
+                                <td>{r.customs_rub != null ? formatNumber(r.customs_rub) : '—'}</td>
+                                <td style={{ display: 'flex', gap: 4 }}>
+                                    <button className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={e => { e.stopPropagation(); openEdit(r); }}>✎</button>
+                                    <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={e => { e.stopPropagation(); del(r.id); }}>✕</button>
+                                </td>
                             </tr>
                         ))}</tbody>
                     </table>
                 </div>
-            ) : <div className="empty-state"><div className="empty-state-text">Нет заказов</div></div>}
+            ) : <div className="empty-state"><div className="empty-state-text">Нет заказов. Нажмите «+ Новый заказ»</div></div>}
 
             {expanded && summary && (
                 <div style={{ marginTop: 16, padding: 16, background: 'var(--color-bg-input)', borderRadius: 8 }}>
