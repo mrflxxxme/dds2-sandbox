@@ -249,26 +249,88 @@ function CostOrders() {
             )}
 
             {/* Items detail */}
-            {selected && (
-                <div style={{ marginTop: 16, borderTop: '1px solid var(--color-border)', paddingTop: 16 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                        <h4 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Позиции заказа #{selected} ({items.length})</h4>
-                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                            <input type="file" accept=".xlsx,.xls,.csv" onChange={e => setFile(e.target.files?.[0] || null)} style={{ fontSize: 12 }} />
-                            <button className="btn btn-primary btn-sm" onClick={uploadFile} disabled={!file}>📤 Загрузить</button>
-                            {items.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(items, `order_${selected}_items`)}>📥 Excel</button>}
+            {selected && (() => {
+                const ord = orders.find(o => String(o.order_no) === selected);
+                const totalRub = ord?.total_rub ?? 0;
+                const pct = (v: number) => totalRub > 0 ? ((v / totalRub) * 100).toFixed(1) + '%' : '';
+                const colMap: Record<string, string> = {
+                    id: '№', barcode: 'Баркод', subject: 'Категория', article_seller: 'Артикул',
+                    article_wb: 'WB', qty: 'Кол-во', price_cny: 'Цена CNY', weight_kg: 'Вес кг',
+                    area_m2: 'Площ. м²', volume_m3: 'Объём м³', cost_cny: 'Себ. CNY',
+                    cost_rub: 'Себ. ₽/шт', delivery_rub: 'Дост. ₽/шт', duty_rub: 'Пошл. ₽/шт',
+                    vat_rub: 'НДС ₽/шт', util_rub: 'Утиль ₽/шт', total_rub: 'Итого ₽/шт',
+                    total_cost_rub: 'Итого себ. ₽', total_delivery_rub: 'Итого дост. ₽',
+                    total_duty_rub: 'Итого пошл. ₽', total_vat_rub: 'Итого НДС ₽',
+                    total_util_rub: 'Итого утиль ₽', grand_total_rub: 'Всего ₽',
+                    name: 'Название', description: 'Описание', order_no: 'Заказ',
+                    nm_id: 'nm_id', imt_id: 'imt_id', sku: 'SKU',
+                };
+                const tr = (key: string) => colMap[key.toLowerCase()] || key;
+
+                return (
+                    <div style={{ marginTop: 16, borderTop: '1px solid var(--color-border)', paddingTop: 16 }}>
+                        {/* Summary metrics */}
+                        {ord && (
+                            <div style={{ marginBottom: 16 }}>
+                                <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    📊 Расчёт себестоимости по позициям
+                                </h4>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
+                                    {[
+                                        { label: 'Кол-во (шт)', value: ord.total_qty, fmt: (v: number) => formatNumber(v), color: 'var(--color-text)' },
+                                        { label: 'Себестоимость', value: ord.total_cost_rub, fmt: (v: number) => formatNumber(v) + ' ₽', color: 'var(--color-success)', sub: pct(ord.total_cost_rub ?? 0) },
+                                        { label: 'Доставка', value: ord.total_delivery_rub, fmt: (v: number) => formatNumber(v) + ' ₽', color: 'var(--color-info)', sub: pct(ord.total_delivery_rub ?? 0) },
+                                        { label: 'Пошлина', value: ord.total_duty_rub, fmt: (v: number) => formatNumber(v) + ' ₽', color: 'var(--color-warning)', sub: pct(ord.total_duty_rub ?? 0) },
+                                        { label: 'НДС', value: ord.total_vat_rub, fmt: (v: number) => formatNumber(v) + ' ₽', color: '#a78bfa', sub: pct(ord.total_vat_rub ?? 0) },
+                                    ].map((m, i) => (
+                                        <div key={i} style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: '12px 16px', border: '1px solid var(--color-border)' }}>
+                                            <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>{m.label}</div>
+                                            <div style={{ fontSize: 20, fontWeight: 700, color: m.color }}>{m.value != null ? m.fmt(m.value) : '—'}</div>
+                                            {m.sub && <div style={{ fontSize: 10, color: 'var(--color-text-dim)', marginTop: 2 }}>↑ {m.sub}</div>}
+                                        </div>
+                                    ))}
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginTop: 12 }}>
+                                    <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: '12px 16px', border: '1px solid var(--color-border)' }}>
+                                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>Утильсбор</div>
+                                        <div style={{ fontSize: 20, fontWeight: 700, color: '#f59e0b' }}>{ord.total_util_rub != null ? formatNumber(ord.total_util_rub) + ' ₽' : '—'}</div>
+                                        {ord.total_util_rub != null && <div style={{ fontSize: 10, color: 'var(--color-text-dim)', marginTop: 2 }}>↑ {pct(ord.total_util_rub)}</div>}
+                                    </div>
+                                    <div style={{ background: 'linear-gradient(135deg, rgba(139,92,246,0.1), rgba(245,158,11,0.1))', borderRadius: 8, padding: '12px 16px', border: '1px solid rgba(139,92,246,0.3)', gridColumn: 'span 2' }}>
+                                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>🔥 ИТОГО</div>
+                                        <div style={{ fontSize: 24, fontWeight: 800, color: '#f59e0b' }}>{ord.total_rub != null ? formatNumber(ord.total_rub) + ' ₽' : '—'}</div>
+                                    </div>
+                                    <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: '12px 16px', border: '1px solid var(--color-border)' }}>
+                                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>Курс ¥/₽</div>
+                                        <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--color-text)' }}>{ord.rate_cny != null ? Number(ord.rate_cny).toFixed(2) : '—'}</div>
+                                    </div>
+                                    <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: '12px 16px', border: '1px solid var(--color-border)' }}>
+                                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>Доставка ¥</div>
+                                        <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--color-text)' }}>{ord.delivery_cost_cny != null ? formatNumber(ord.delivery_cost_cny) : '—'}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                            <h4 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Позиции заказа #{selected} ({items.length})</h4>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                <input type="file" accept=".xlsx,.xls,.csv" onChange={e => setFile(e.target.files?.[0] || null)} style={{ fontSize: 12 }} />
+                                <button className="btn btn-primary btn-sm" onClick={uploadFile} disabled={!file}>📤 Загрузить</button>
+                                {items.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(items, `order_${selected}_items`)}>📥 Excel</button>}
+                            </div>
                         </div>
+                        {items.length > 0 ? (
+                            <div style={{ overflowX: 'auto', maxHeight: 400, overflowY: 'auto' }}>
+                                <table className="data-table">
+                                    <thead><tr>{Object.keys(items[0]).map(k => <th key={k} style={{ fontSize: 11 }}>{tr(k)}</th>)}</tr></thead>
+                                    <tbody>{items.map((r, i) => <tr key={i}>{Object.values(r).map((v: any, j) => <td key={j} style={{ fontSize: 12 }}>{typeof v === 'number' ? formatNumber(v) : v ?? '—'}</td>)}</tr>)}</tbody>
+                                </table>
+                            </div>
+                        ) : <div style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>Нет позиций. Загрузите файл Excel.</div>}
                     </div>
-                    {items.length > 0 ? (
-                        <div style={{ overflowX: 'auto', maxHeight: 400, overflowY: 'auto' }}>
-                            <table className="data-table">
-                                <thead><tr>{Object.keys(items[0]).map(k => <th key={k} style={{ fontSize: 11 }}>{k}</th>)}</tr></thead>
-                                <tbody>{items.map((r, i) => <tr key={i}>{Object.values(r).map((v: any, j) => <td key={j} style={{ fontSize: 12 }}>{typeof v === 'number' ? formatNumber(v) : v ?? '—'}</td>)}</tr>)}</tbody>
-                            </table>
-                        </div>
-                    ) : <div style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>Нет позиций. Загрузите файл Excel.</div>}
-                </div>
-            )}
+                );
+            })()}
         </div>
     );
 }
