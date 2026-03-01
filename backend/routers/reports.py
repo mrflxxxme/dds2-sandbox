@@ -11,11 +11,12 @@ from sqlalchemy import select, func, text, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
-from backend.models import Transaction, Account, OpeningBalance
+from backend.models import Transaction, Account, OpeningBalance, Project
 from backend.schemas import (
     BalanceRow, DdsMonthRow, FxControlRow, BalanceDailyRow,
     IncomeDailyRow, IncomeByCategoryRow,
 )
+from backend.project_context import get_current_project
 
 router = APIRouter(prefix="/reports")
 
@@ -23,6 +24,7 @@ router = APIRouter(prefix="/reports")
 @router.get("/balance", response_model=list[BalanceRow])
 async def get_balance(
     as_of: Optional[date] = Query(None),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -33,7 +35,7 @@ async def get_balance(
         as_of = date.today()
 
     # Get opening balances
-    ob_result = await db.execute(select(OpeningBalance))
+    ob_result = await db.execute(select(OpeningBalance).where(OpeningBalance.project_id == project.id))
     opening_map: dict[tuple, Decimal] = {}
     for ob in ob_result.scalars().all():
         opening_map[(ob.account, ob.currency)] = ob.opening_balance
@@ -45,7 +47,7 @@ async def get_balance(
             Transaction.currency,
             func.sum(Transaction.net).label("net_sum"),
         )
-        .where(Transaction.date <= as_of)
+        .where(Transaction.project_id == project.id, Transaction.date <= as_of)
         .group_by(Transaction.account, Transaction.currency)
     )
     net_map: dict[tuple, Decimal] = {}
@@ -53,7 +55,7 @@ async def get_balance(
         net_map[(row.account, row.currency)] = Decimal(str(row.net_sum or 0))
 
     # Get account metadata
-    accs = await db.execute(select(Account).where(Account.is_our_account == True))
+    accs = await db.execute(select(Account).where(Account.is_our_account == True, Account.project_id == project.id))
     accounts = accs.scalars().all()
 
     balances = []
@@ -77,6 +79,7 @@ async def get_dds_month(
     year: int = Query(...),
     month: int = Query(...),
     currency: str = Query("RUB"),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """DDS grouped by cat_lvl1_2/cat_lvl2_2 for a given month."""
@@ -96,6 +99,7 @@ async def get_dds_month(
         )
         .where(
             and_(
+                Transaction.project_id == project.id,
                 Transaction.date >= month_start,
                 Transaction.date <= month_end,
                 Transaction.currency == currency,
@@ -122,6 +126,7 @@ async def get_dds_month(
 async def get_fx_control(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     q = select(
@@ -134,7 +139,7 @@ async def get_fx_control(
         Transaction.expense,
         Transaction.net,
         Transaction.txn_id,
-    ).where(Transaction.is_fx == True)
+    ).where(Transaction.project_id == project.id, Transaction.is_fx == True)
 
     conditions = []
     if date_from:
@@ -155,9 +160,10 @@ async def get_fx_control(
 async def get_customs_control(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    q = select(Transaction).where(Transaction.event_type2 == "CUSTOMS_PAYMENT")
+    q = select(Transaction).where(Transaction.project_id == project.id, Transaction.event_type2 == "CUSTOMS_PAYMENT")
     conditions = []
     if date_from:
         conditions.append(Transaction.date >= date_from)
@@ -178,6 +184,7 @@ async def get_balance_daily(
     currency: str = Query(...),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Running daily balance for a specific account."""
@@ -196,6 +203,7 @@ async def get_balance_daily(
         func.date(Transaction.date).label("day"),
         func.sum(Transaction.net).label("daily_net"),
     ).where(
+        Transaction.project_id == project.id,
         Transaction.account == account,
         Transaction.currency == currency,
     )
@@ -226,6 +234,7 @@ async def get_income_daily(
     year: int = Query(...),
     month: int = Query(...),
     currency: str = Query("RUB"),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -243,6 +252,7 @@ async def get_income_daily(
             func.sum(Transaction.income).label("income"),
         )
         .where(
+            Transaction.project_id == project.id,
             Transaction.currency == currency,
             Transaction.is_cashflow2 == 1,
             Transaction.income > 0,
@@ -269,6 +279,7 @@ async def get_income_by_category_daily(
     month: int = Query(...),
     currency: str = Query("RUB"),
     cat_lvl1: Optional[str] = Query(None),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Daily income grouped by category for a given month.
@@ -293,6 +304,7 @@ async def get_income_by_category_daily(
             func.sum(Transaction.income).label("income"),
         )
         .where(
+            Transaction.project_id == project.id,
             Transaction.currency == currency,
             Transaction.is_cashflow2 == 1,
             Transaction.income > 0,

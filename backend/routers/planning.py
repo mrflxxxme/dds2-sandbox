@@ -16,13 +16,14 @@ from sqlalchemy import or_
 from backend.models import (
     Order, LeadTime, PlannedPayment, PlannedIncome,
     CustomsTopup, CustomsAlloc, Transaction, PaymentFactLink, CustomsDT,
-    WbPayout,
+    WbPayout, Project,
 )
 from backend.schemas import (
     OrderSchema, LeadTimeSchema, PlannedPaymentSchema,
     PlannedIncomeSchema, CustomsTopupSchema, CustomsAllocSchema,
     WbPayoutSchema,
 )
+from backend.project_context import get_current_project
 
 router = APIRouter(prefix="/planning")
 
@@ -30,26 +31,34 @@ router = APIRouter(prefix="/planning")
 # ─── Orders ──────────────────────────────────────────────────────────────────
 
 @router.get("/orders", response_model=List[OrderSchema])
-async def get_orders(db: AsyncSession = Depends(get_db)):
+async def get_orders(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
-        select(Order).order_by(Order.planned_ship_date.desc().nullslast())
+        select(Order).where(Order.project_id == project.id)
+        .order_by(Order.planned_ship_date.desc().nullslast())
     )
     return result.scalars().all()
 
 
 @router.post("/orders", response_model=OrderSchema)
-async def upsert_order(payload: OrderSchema, db: AsyncSession = Depends(get_db)):
+async def upsert_order(
+    payload: OrderSchema,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     if payload.id:
-        result = await db.execute(select(Order).where(Order.id == payload.id))
+        result = await db.execute(select(Order).where(Order.id == payload.id, Order.project_id == project.id))
         obj = result.scalar_one_or_none()
         if obj:
             for k, v in payload.model_dump(exclude={"id"}).items():
                 setattr(obj, k, v)
         else:
-            obj = Order(**payload.model_dump(exclude={"id"}))
+            obj = Order(**payload.model_dump(exclude={"id"}), project_id=project.id)
             db.add(obj)
     else:
-        obj = Order(**payload.model_dump(exclude={"id"}))
+        obj = Order(**payload.model_dump(exclude={"id"}), project_id=project.id)
         db.add(obj)
     await db.commit()
     await db.refresh(obj)
@@ -57,8 +66,12 @@ async def upsert_order(payload: OrderSchema, db: AsyncSession = Depends(get_db))
 
 
 @router.delete("/orders/{order_id}")
-async def delete_order(order_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Order).where(Order.id == order_id))
+async def delete_order(
+    order_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(Order).where(Order.id == order_id, Order.project_id == project.id))
     obj = result.scalar_one_or_none()
     if not obj:
         raise HTTPException(404, "Not found")
@@ -96,9 +109,10 @@ async def upsert_lead_time(payload: LeadTimeSchema, db: AsyncSession = Depends(g
 @router.get("/payments", response_model=List[PlannedPaymentSchema])
 async def get_payments(
     order_no: Optional[int] = Query(None),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    q = select(PlannedPayment)
+    q = select(PlannedPayment).where(PlannedPayment.project_id == project.id)
     if order_no:
         q = q.where(PlannedPayment.order_no == order_no)
     q = q.order_by(PlannedPayment.pay_date)
@@ -108,21 +122,23 @@ async def get_payments(
 
 @router.post("/payments", response_model=PlannedPaymentSchema)
 async def upsert_payment(
-    payload: PlannedPaymentSchema, db: AsyncSession = Depends(get_db)
+    payload: PlannedPaymentSchema,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
 ):
     if payload.id:
         result = await db.execute(
-            select(PlannedPayment).where(PlannedPayment.id == payload.id)
+            select(PlannedPayment).where(PlannedPayment.id == payload.id, PlannedPayment.project_id == project.id)
         )
         obj = result.scalar_one_or_none()
         if obj:
             for k, v in payload.model_dump(exclude={"id"}).items():
                 setattr(obj, k, v)
         else:
-            obj = PlannedPayment(**payload.model_dump(exclude={"id"}))
+            obj = PlannedPayment(**payload.model_dump(exclude={"id"}), project_id=project.id)
             db.add(obj)
     else:
-        obj = PlannedPayment(**payload.model_dump(exclude={"id"}))
+        obj = PlannedPayment(**payload.model_dump(exclude={"id"}), project_id=project.id)
         db.add(obj)
     await db.commit()
     await db.refresh(obj)
@@ -130,9 +146,13 @@ async def upsert_payment(
 
 
 @router.delete("/payments/{payment_id}")
-async def delete_payment(payment_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_payment(
+    payment_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
-        select(PlannedPayment).where(PlannedPayment.id == payment_id)
+        select(PlannedPayment).where(PlannedPayment.id == payment_id, PlannedPayment.project_id == project.id)
     )
     obj = result.scalar_one_or_none()
     if not obj:
@@ -143,9 +163,13 @@ async def delete_payment(payment_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/payments/{payment_id}/mark_paid")
-async def mark_paid(payment_id: int, db: AsyncSession = Depends(get_db)):
+async def mark_paid(
+    payment_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
-        select(PlannedPayment).where(PlannedPayment.id == payment_id)
+        select(PlannedPayment).where(PlannedPayment.id == payment_id, PlannedPayment.project_id == project.id)
     )
     obj = result.scalar_one_or_none()
     if not obj:
@@ -158,20 +182,26 @@ async def mark_paid(payment_id: int, db: AsyncSession = Depends(get_db)):
 # ─── Planned Incomes ──────────────────────────────────────────────────────────
 
 @router.get("/incomes", response_model=List[PlannedIncomeSchema])
-async def get_incomes(db: AsyncSession = Depends(get_db)):
+async def get_incomes(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
-        select(PlannedIncome).order_by(PlannedIncome.date)
+        select(PlannedIncome).where(PlannedIncome.project_id == project.id)
+        .order_by(PlannedIncome.date)
     )
     return result.scalars().all()
 
 
 @router.post("/incomes", response_model=PlannedIncomeSchema)
 async def upsert_income(
-    payload: PlannedIncomeSchema, db: AsyncSession = Depends(get_db)
+    payload: PlannedIncomeSchema,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
 ):
     if payload.id:
         result = await db.execute(
-            select(PlannedIncome).where(PlannedIncome.id == payload.id)
+            select(PlannedIncome).where(PlannedIncome.id == payload.id, PlannedIncome.project_id == project.id)
         )
         obj = result.scalar_one_or_none()
         if obj:
@@ -179,10 +209,10 @@ async def upsert_income(
             obj.amount_rub = payload.amount_rub
             obj.source = payload.source
         else:
-            obj = PlannedIncome(**payload.model_dump(exclude={"id"}))
+            obj = PlannedIncome(**payload.model_dump(exclude={"id"}), project_id=project.id)
             db.add(obj)
     else:
-        obj = PlannedIncome(**payload.model_dump(exclude={"id"}))
+        obj = PlannedIncome(**payload.model_dump(exclude={"id"}), project_id=project.id)
         db.add(obj)
     await db.commit()
     await db.refresh(obj)
@@ -190,9 +220,13 @@ async def upsert_income(
 
 
 @router.delete("/incomes/{income_id}")
-async def delete_income(income_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_income(
+    income_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
-        select(PlannedIncome).where(PlannedIncome.id == income_id)
+        select(PlannedIncome).where(PlannedIncome.id == income_id, PlannedIncome.project_id == project.id)
     )
     obj = result.scalar_one_or_none()
     if not obj:
@@ -272,6 +306,7 @@ async def delete_alloc(alloc_id: int, db: AsyncSession = Depends(get_db)):
 async def get_cashflow_daily(
     days: int = Query(60),
     starting_balance: float = Query(0.0),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -283,7 +318,7 @@ async def get_cashflow_daily(
 
     # Planned incomes indexed by date
     inc_result = await db.execute(
-        select(PlannedIncome).where(PlannedIncome.date <= horizon)
+        select(PlannedIncome).where(PlannedIncome.project_id == project.id, PlannedIncome.date <= horizon)
     )
     income_map: dict[date, Decimal] = {}
     for inc in inc_result.scalars().all():
@@ -305,6 +340,7 @@ async def get_cashflow_daily(
     # Planned payments (unpaid)
     pay_result = await db.execute(
         select(PlannedPayment).where(
+            PlannedPayment.project_id == project.id,
             PlannedPayment.is_paid == False,
             PlannedPayment.pay_date <= horizon,
         )
@@ -346,23 +382,28 @@ async def get_cashflow_daily(
 # ─── Order Summary (plan vs fact) ─────────────────────────────────────────────
 
 @router.get("/orders/{order_no}/summary")
-async def order_summary(order_no: int, db: AsyncSession = Depends(get_db)):
+async def order_summary(
+    order_no: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     """Return plan vs fact for a specific order."""
     # Order plan
-    result = await db.execute(select(Order).where(Order.order_no == order_no))
+    result = await db.execute(select(Order).where(Order.order_no == order_no, Order.project_id == project.id))
     order = result.scalar_one_or_none()
     if not order:
         raise HTTPException(404, "Order not found")
 
     # Planned payments
     pp_result = await db.execute(
-        select(PlannedPayment).where(PlannedPayment.order_no == order_no)
+        select(PlannedPayment).where(PlannedPayment.order_no == order_no, PlannedPayment.project_id == project.id)
     )
     planned_payments = pp_result.scalars().all()
 
     # Fact: order payments (annex_id = order_no)
     txn_order_result = await db.execute(
         select(Transaction).where(
+            Transaction.project_id == project.id,
             Transaction.annex_id == str(order_no),
             Transaction.purpose_tag == "Заказ",
         )
@@ -372,6 +413,7 @@ async def order_summary(order_no: int, db: AsyncSession = Depends(get_db)):
     # Fact: logistics (invoice_id linked to this order's transactions)
     txn_log_result = await db.execute(
         select(Transaction).where(
+            Transaction.project_id == project.id,
             Transaction.purpose_tag == "Логистика",
             Transaction.annex_id == str(order_no),
         )
@@ -493,12 +535,13 @@ async def delete_fact_link(link_id: int, db: AsyncSession = Depends(get_db)):
 async def get_candidate_transactions(
     direction: str = Query("ЗАКАЗ"),
     account: str = Query(None),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Get candidate transactions for manual linking. Filter by account or purpose_tag."""
     from backend.models import Account
 
-    conditions = [Transaction.expense > 0]
+    conditions = [Transaction.project_id == project.id, Transaction.expense > 0]
 
     if account:
         # Filter by specific account
@@ -860,7 +903,10 @@ async def _reconcile_wb_payouts(db: AsyncSession):
 # ─── WB Forecast ─────────────────────────────────────────────────────────────
 
 @router.post("/wb_forecast/refresh")
-async def refresh_wb_forecast(db: AsyncSession = Depends(get_db)):
+async def refresh_wb_forecast(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     """
     Auto-generate PlannedIncome for next 30 days based on
     7-day rolling average of actual WB income.
@@ -873,6 +919,7 @@ async def refresh_wb_forecast(db: AsyncSession = Depends(get_db)):
         select(
             func.coalesce(func.sum(Transaction.income), 0)
         ).where(
+            Transaction.project_id == project.id,
             Transaction.income > 0,
             Transaction.is_cashflow2 == 1,
             Transaction.date >= week_ago,
@@ -894,11 +941,14 @@ async def refresh_wb_forecast(db: AsyncSession = Depends(get_db)):
         return {"ok": True, "daily_avg": 0, "message": "Нет данных WB за последние 7 дней"}
 
     # Delete stale auto-forecast
-    await db.execute(text("DELETE FROM planned_incomes WHERE source = 'WB_AUTO'"))
+    await db.execute(
+        text("DELETE FROM planned_incomes WHERE source = 'WB_AUTO' AND project_id = :pid"),
+        {"pid": project.id},
+    )
 
     # Get manual WB income dates to avoid overlap
     manual_result = await db.execute(
-        select(PlannedIncome.date).where(PlannedIncome.source == "WB")
+        select(PlannedIncome.date).where(PlannedIncome.source == "WB", PlannedIncome.project_id == project.id)
     )
     manual_dates = {row[0] for row in manual_result}
 
@@ -908,7 +958,7 @@ async def refresh_wb_forecast(db: AsyncSession = Depends(get_db)):
         d = today + timedelta(days=i)
         if d in manual_dates:
             continue
-        pi = PlannedIncome(date=d, amount_rub=daily_avg, source="WB_AUTO")
+        pi = PlannedIncome(date=d, amount_rub=daily_avg, source="WB_AUTO", project_id=project.id)
         db.add(pi)
         created += 1
 

@@ -15,8 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import (
     Nomenclature, DutyRule, DutyBasis, CostOrder, CostOrderItem,
-    LeadTime, Order, PlannedPayment, CustomsDT,
+    LeadTime, Order, PlannedPayment, CustomsDT, Project,
 )
+from backend.project_context import get_current_project
 
 router = APIRouter(prefix="/cost")
 
@@ -37,7 +38,9 @@ async def _auto_link_customs_dt(order_no: str, dt_number: str, db):
     if dts:
         await db.commit()
 
-VAT_RATE = Decimal("0.22")
+# VAT_RATE is now per-project: project.tax_rate / 100
+# Fallback default if not set on project
+DEFAULT_VAT_RATE = Decimal("0.22")
 
 
 # ─── Nomenclature ─────────────────────────────────────────────────────────────
@@ -171,7 +174,10 @@ async def delete_duty_rule(rule_id: int, db: AsyncSession = Depends(get_db)):
 # ─── Cost Orders ──────────────────────────────────────────────────────────────
 
 @router.get("/orders")
-async def get_cost_orders(db: AsyncSession = Depends(get_db)):
+async def get_cost_orders(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     import math
 
     def _sf(val):
@@ -181,7 +187,11 @@ async def get_cost_orders(db: AsyncSession = Depends(get_db)):
         except Exception:
             return 0.0
 
-    result = await db.execute(select(CostOrder).order_by(CostOrder.created_at.desc()))
+    result = await db.execute(
+        select(CostOrder)
+        .where(CostOrder.project_id == project.id)
+        .order_by(CostOrder.created_at.desc())
+    )
     orders = result.scalars().all()
     out = []
     for o in orders:
@@ -230,11 +240,15 @@ async def get_cost_orders(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/orders")
-async def create_cost_order(payload: dict, db: AsyncSession = Depends(get_db)):
+async def create_cost_order(
+    payload: dict,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     order_no = payload.get("order_no", "").strip()
     if not order_no:
         raise HTTPException(400, "order_no required")
-    result = await db.execute(select(CostOrder).where(CostOrder.order_no == order_no))
+    result = await db.execute(select(CostOrder).where(CostOrder.order_no == order_no, CostOrder.project_id == project.id))
     if result.scalar_one_or_none():
         raise HTTPException(400, f"Заказ {order_no} уже существует")
     ship_date = None
@@ -245,6 +259,7 @@ async def create_cost_order(payload: dict, db: AsyncSession = Depends(get_db)):
             pass
     dt_number = (payload.get("dt_number") or "").strip() or None
     order = CostOrder(
+        project_id=project.id,
         order_no=order_no,
         invoice_no=payload.get("invoice_no"),
         ship_date=ship_date,
@@ -268,9 +283,14 @@ async def create_cost_order(payload: dict, db: AsyncSession = Depends(get_db)):
 
 
 @router.put("/orders/{order_no}")
-async def update_cost_order(order_no: str, payload: dict, db: AsyncSession = Depends(get_db)):
+async def update_cost_order(
+    order_no: str,
+    payload: dict,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     """Edit an existing cost order."""
-    result = await db.execute(select(CostOrder).where(CostOrder.order_no == order_no))
+    result = await db.execute(select(CostOrder).where(CostOrder.order_no == order_no, CostOrder.project_id == project.id))
     order = result.scalar_one_or_none()
     if not order:
         raise HTTPException(404, "Not found")
@@ -315,8 +335,12 @@ async def update_cost_order(order_no: str, payload: dict, db: AsyncSession = Dep
 
 
 @router.delete("/orders/{order_no}")
-async def delete_cost_order(order_no: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(CostOrder).where(CostOrder.order_no == order_no))
+async def delete_cost_order(
+    order_no: str,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(CostOrder).where(CostOrder.order_no == order_no, CostOrder.project_id == project.id))
     order = result.scalar_one_or_none()
     if not order:
         raise HTTPException(404, "Not found")
@@ -328,7 +352,11 @@ async def delete_cost_order(order_no: str, db: AsyncSession = Depends(get_db)):
 # ─── Generate Payment Plan ───────────────────────────────────────────────────
 
 @router.post("/orders/{order_no}/generate_plan")
-async def generate_plan(order_no: str, db: AsyncSession = Depends(get_db)):
+async def generate_plan(
+    order_no: str,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     """
     Generate planned payments from CostOrder data:
     - ЗАКАЗ: sum(price_cny × qty) → pay_date = ship_date
@@ -346,8 +374,8 @@ async def generate_plan(order_no: str, db: AsyncSession = Depends(get_db)):
         except Exception:
             return 0.0
 
-    # 1. Get CostOrder
-    result = await db.execute(select(CostOrder).where(CostOrder.order_no == order_no))
+    # 1. Get CostOrder (scoped to project)
+    result = await db.execute(select(CostOrder).where(CostOrder.order_no == order_no, CostOrder.project_id == project.id))
     cost_order = result.scalar_one_or_none()
     if not cost_order:
         raise HTTPException(404, "CostOrder not found")
@@ -394,10 +422,11 @@ async def generate_plan(order_no: str, db: AsyncSession = Depends(get_db)):
 
     # 5. Create/update Order in planning module
     order_no_int = int(order_no)
-    ord_result = await db.execute(select(Order).where(Order.order_no == order_no_int))
+    ord_result = await db.execute(select(Order).where(Order.order_no == order_no_int, Order.project_id == project.id))
     plan_order = ord_result.scalar_one_or_none()
     if not plan_order:
         plan_order = Order(
+            project_id=project.id,
             order_no=order_no_int,
             order_name=f"Заказ {order_no} (инв. {cost_order.invoice_no or '—'})",
             category=None,
@@ -420,7 +449,7 @@ async def generate_plan(order_no: str, db: AsyncSession = Depends(get_db)):
 
     # 6. Delete existing planned payments for this order (regenerate)
     await db.execute(
-        delete(PlannedPayment).where(PlannedPayment.order_no == order_no_int)
+        delete(PlannedPayment).where(PlannedPayment.order_no == order_no_int, PlannedPayment.project_id == project.id)
     )
 
     # 7. Create planned payments
@@ -429,6 +458,7 @@ async def generate_plan(order_no: str, db: AsyncSession = Depends(get_db)):
     # ЗАКАЗ (оплата поставщику в CNY)
     if order_cny > 0:
         payments.append(PlannedPayment(
+            project_id=project.id,
             order_no=order_no_int,
             direction="ЗАКАЗ",
             pay_date=pay_date_order,
@@ -442,6 +472,7 @@ async def generate_plan(order_no: str, db: AsyncSession = Depends(get_db)):
     # ДОСТАВКА (CNY + USD → RUB)
     if delivery_rub > 0:
         payments.append(PlannedPayment(
+            project_id=project.id,
             order_no=order_no_int,
             direction="ДОСТАВКА",
             pay_date=pay_date_delivery,
@@ -455,6 +486,7 @@ async def generate_plan(order_no: str, db: AsyncSession = Depends(get_db)):
     # ТАМОЖНЯ (пошлина + НДС в RUB)
     if customs_rub > 0:
         payments.append(PlannedPayment(
+            project_id=project.id,
             order_no=order_no_int,
             direction="ТАМОЖНЯ",
             pay_date=pay_date_customs,
@@ -490,7 +522,11 @@ async def generate_plan(order_no: str, db: AsyncSession = Depends(get_db)):
 # ─── Cost Order Items ─────────────────────────────────────────────────────────
 
 @router.get("/orders/{order_no}/items")
-async def get_cost_order_items(order_no: str, db: AsyncSession = Depends(get_db)):
+async def get_cost_order_items(
+    order_no: str,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     import math
 
     def _sf(val):
@@ -536,11 +572,12 @@ async def get_cost_order_items(order_no: str, db: AsyncSession = Depends(get_db)
 async def upload_order_items(
     order_no: str,
     file: UploadFile = File(...),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Upload Excel file with order items, calculate cost per item."""
     # Check order exists
-    result = await db.execute(select(CostOrder).where(CostOrder.order_no == order_no))
+    result = await db.execute(select(CostOrder).where(CostOrder.order_no == order_no, CostOrder.project_id == project.id))
     order = result.scalar_one_or_none()
     if not order:
         raise HTTPException(404, f"Заказ {order_no} не найден")
@@ -645,9 +682,10 @@ async def upload_order_items(
                 base = cost_rub_unit + delivery_rub_unit / 2
                 duty_rub_unit = base * Decimal(str(rule.rate)) / 100
 
-        # НДС 22% от (себестоимость + пошлина + доставка/2)
+        # НДС от (себестоимость + пошлина + доставка/2), ставка из проекта
+        vat_rate = Decimal(str(project.tax_rate / 100)) if project.tax_rate else DEFAULT_VAT_RATE
         vat_base = cost_rub_unit + duty_rub_unit + delivery_rub_unit / 2
-        vat_rub_unit = vat_base * VAT_RATE
+        vat_rub_unit = vat_base * vat_rate
 
         # Total per unit
         total_rub_unit = cost_rub_unit + delivery_rub_unit + duty_rub_unit + vat_rub_unit + util_rub_unit
