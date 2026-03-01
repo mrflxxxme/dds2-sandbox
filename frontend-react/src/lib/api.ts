@@ -437,6 +437,7 @@ class ApiClient {
     async uploadFile(file: File, sourceType: string): Promise<any> {
         const formData = new FormData();
         formData.append('file', file);
+        formData.append('source_type', sourceType);
 
         const headers: Record<string, string> = {};
         const token = this.getToken();
@@ -452,7 +453,10 @@ class ApiClient {
 
         if (!res.ok) {
             const err = await res.json().catch(() => ({}));
-            throw new Error(err.detail || `Error ${res.status}`);
+            const detail = err.detail;
+            if (typeof detail === 'string') throw new Error(detail);
+            if (Array.isArray(detail)) throw new Error(detail.map((d: any) => d.msg || JSON.stringify(d)).join('; '));
+            throw new Error(JSON.stringify(detail) || `Error ${res.status}`);
         }
         return res.json();
     }
