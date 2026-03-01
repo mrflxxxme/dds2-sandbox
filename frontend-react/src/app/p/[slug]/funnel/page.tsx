@@ -138,10 +138,10 @@ export default function FunnelPage() {
     const [subject, setSubject] = useState('');
     const [search, setSearch] = useState('');
 
-    // Which chart to display (field name)
-    const [chartField, setChartField] = useState<{ field: string; label: string; color: string }>(
+    // Which charts to display (multiple selection)
+    const [chartFields, setChartFields] = useState<{ field: string; label: string; color: string }[]>([
         { field: 'orders_sum_rub', label: 'Сумма заказов ₽', color: '#8b5cf6' }
-    );
+    ]);
 
     // Costs tab
     const [costs, setCosts] = useState<any>({ overrides: [], missing: [] });
@@ -237,6 +237,7 @@ export default function FunnelPage() {
         { label: 'Заказы', field: 'orders_count', color: '#10b981' },
         { label: 'Сумма заказов ₽', field: 'orders_sum_rub', color: '#8b5cf6' },
         { label: 'Расходы рекл. ₽', field: 'adv_sum', color: '#ef4444' },
+        { label: 'ДРР %', field: 'drr', color: '#f97316', suffix: '%' },
         { label: 'Просмотры', field: 'adv_views', color: '#6366f1' },
         { label: 'Клики', field: 'adv_clicks', color: '#ec4899' },
     ];
@@ -280,12 +281,22 @@ export default function FunnelPage() {
 
                     {/* Summary header — clickable cards to switch chart */}
                     {summary && (
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8, marginBottom: 12 }}>
-                            {summaryCards.map(s => {
-                                const isActive = chartField.field === s.field;
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 8, marginBottom: 12 }}>
+                            {summaryCards.map((s: any) => {
+                                const isActive = chartFields.some(c => c.field === s.field);
+                                const toggleChart = () => {
+                                    setChartFields(prev => {
+                                        const exists = prev.find(c => c.field === s.field);
+                                        if (exists) {
+                                            const next = prev.filter(c => c.field !== s.field);
+                                            return next.length > 0 ? next : prev; // keep at least one
+                                        }
+                                        return [...prev, { field: s.field, label: s.label, color: s.color }];
+                                    });
+                                };
                                 return (
                                     <div key={s.label} className="glass-card"
-                                        onClick={() => setChartField({ field: s.field, label: s.label, color: s.color })}
+                                        onClick={toggleChart}
                                         style={{
                                             padding: '10px 14px', textAlign: 'center',
                                             cursor: 'pointer', transition: 'transform 0.15s, box-shadow 0.15s',
@@ -297,7 +308,9 @@ export default function FunnelPage() {
                                         <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>
                                             {s.label} {isActive ? '📈' : ''}
                                         </div>
-                                        <div style={{ fontSize: 18, fontWeight: 700, color: s.color }}>{fmt(summary[s.field])}</div>
+                                        <div style={{ fontSize: 18, fontWeight: 700, color: s.color }}>
+                                            {s.suffix ? fmtPct(summary[s.field]).replace('%', '') + s.suffix : fmt(summary[s.field])}
+                                        </div>
                                     </div>
                                 );
                             })}
@@ -331,51 +344,52 @@ export default function FunnelPage() {
                     </div>
 
                     {/* Inline chart — above table */}
-                    {data.length > 0 && (
+                    {data.length > 0 && chartFields.map(cf => (
                         <InlineChart
-                            title={`${chartField.label} — динамика по дням`}
+                            key={cf.field}
+                            title={`${cf.label} — динамика по дням`}
                             data={data}
-                            field={chartField.field}
-                            color={chartField.color}
+                            field={cf.field}
+                            color={cf.color}
                         />
-                    )}
+                    ))}
 
                     {/* Table with sticky header — both rows pinned */}
                     <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
                         {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> : (
                             <table className="data-table" style={{ minWidth: detailed ? 1800 : 1200, borderCollapse: 'separate', borderSpacing: 0 }}>
-                                <thead>
+                                <thead style={{ position: 'sticky', top: 0, zIndex: 20 }}>
                                     <tr>
-                                        <th rowSpan={2} style={{ position: 'sticky', left: 0, top: 0, background: '#1a1a2e', zIndex: 12, verticalAlign: 'bottom', borderBottom: '2px solid rgba(255,255,255,0.08)' }}>ДАТА</th>
-                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 8, verticalAlign: 'bottom' }}>Артикул</th>}
-                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 8, verticalAlign: 'bottom' }}>nmId</th>}
-                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 8, verticalAlign: 'bottom' }}>Предмет</th>}
-                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 8, verticalAlign: 'bottom' }}>Бренд</th>}
-                                        <th colSpan={5} style={{ position: 'sticky', top: 0, background: '#2a2517', textAlign: 'center', zIndex: 8 }}>ВОРОНКА</th>
-                                        <th colSpan={7} style={{ position: 'sticky', top: 0, background: '#1f1e36', textAlign: 'center', zIndex: 8 }}>ВНУТРЕННЯЯ РЕКЛАМА</th>
-                                        <th colSpan={4} style={{ position: 'sticky', top: 0, background: '#1a2a28', textAlign: 'center', zIndex: 8 }}>ФИНАНСЫ</th>
-                                        <th colSpan={2} style={{ position: 'sticky', top: 0, background: '#2a1a28', textAlign: 'center', zIndex: 8 }}>КОНВЕРСИЯ</th>
+                                        <th rowSpan={2} style={{ position: 'sticky', left: 0, top: 0, background: '#1a1a2e', zIndex: 22, verticalAlign: 'bottom', borderBottom: '2px solid rgba(255,255,255,0.08)' }}>ДАТА</th>
+                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 20, verticalAlign: 'bottom' }}>Артикул</th>}
+                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 20, verticalAlign: 'bottom' }}>nmId</th>}
+                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 20, verticalAlign: 'bottom' }}>Предмет</th>}
+                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 20, verticalAlign: 'bottom' }}>Бренд</th>}
+                                        <th colSpan={5} style={{ position: 'sticky', top: 0, background: '#2a2517', textAlign: 'center', zIndex: 20 }}>ВОРОНКА</th>
+                                        <th colSpan={7} style={{ position: 'sticky', top: 0, background: '#1f1e36', textAlign: 'center', zIndex: 20 }}>ВНУТРЕННЯЯ РЕКЛАМА</th>
+                                        <th colSpan={4} style={{ position: 'sticky', top: 0, background: '#1a2a28', textAlign: 'center', zIndex: 20 }}>ФИНАНСЫ</th>
+                                        <th colSpan={2} style={{ position: 'sticky', top: 0, background: '#2a1a28', textAlign: 'center', zIndex: 20 }}>КОНВЕРСИЯ</th>
                                     </tr>
                                     <tr>
-                                        <th style={{ position: 'sticky', top: 28, background: '#231f16', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Переходы</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#231f16', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Корзины</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#231f16', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Заказы</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#231f16', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Сумма ₽</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#231f16', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Выручка ₽</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Расходы ₽</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Просмотры</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Клики</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>CTR</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>CPC</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>CPM</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>ДРР</th>
-                                        {detailed && <th style={{ position: 'sticky', top: 28, background: '#1a2422', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Себест. ₽</th>}
-                                        <th style={{ position: 'sticky', top: 28, background: '#1a2422', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Налог ₽</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1a2422', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Прибыль ₽</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1a2422', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Маржа</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1a2422', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>Ср. цена</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#241a24', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>В корзину</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#241a24', zIndex: 7, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.08)' }}>В заказ</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Переходы</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Корзины</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Заказы</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Сумма ₽</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Выручка ₽</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Расходы ₽</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Просмотры</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Клики</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>CTR</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>CPC</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>CPM</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>ДРР</th>
+                                        {detailed && <th style={{ position: 'sticky', top: 28, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Себест. ₽</th>}
+                                        <th style={{ position: 'sticky', top: 28, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Налог ₽</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Прибыль ₽</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Маржа</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Ср. цена</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#241a24', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>В корзину</th>
+                                        <th style={{ position: 'sticky', top: 28, background: '#241a24', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>В заказ</th>
                                     </tr>
                                 </thead>
                                 <tbody>

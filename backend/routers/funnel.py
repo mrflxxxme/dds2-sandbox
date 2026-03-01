@@ -703,6 +703,7 @@ async def get_funnel_summary(
         "adv_sum": float(row.adv_sum or 0),
         "adv_views": int(row.adv_views or 0),
         "adv_clicks": int(row.adv_clicks or 0),
+        "drr": round(float(row.adv_sum or 0) / float(row.orders_sum_rub or 1) * 100, 2) if float(row.orders_sum_rub or 0) > 0 else 0,
     }
 
 
