@@ -15,7 +15,7 @@ from sqlalchemy import text
 from backend.config import settings
 from backend.database import async_engine, AsyncSessionLocal, Base
 from backend.auth import get_current_user, ensure_default_admin
-from backend.routers import import_txn, refs, reports, planning, cost, auth, integrations, projects
+from backend.routers import import_txn, refs, reports, planning, cost, auth, integrations, projects, funnel
 
 logger = logging.getLogger("dds")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -127,6 +127,10 @@ app.include_router(
 )
 app.include_router(
     integrations.router, prefix="/api/v1", tags=["Integrations"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    funnel.router, prefix="/api/v1", tags=["Funnel"],
     dependencies=[Depends(get_current_user)],
 )
 

@@ -467,6 +467,40 @@ class ApiClient {
         }
         return res.json();
     }
+    // ─── Funnel (Воронка продаж) ─────────────────────────────────
+    async syncFunnel(dateFrom: string, dateTo: string): Promise<any> {
+        return this.request('POST', '/api/v1/funnel/sync', { date_from: dateFrom, date_to: dateTo });
+    }
+    async getFunnelData(params?: { date_from?: string; date_to?: string; brand?: string; vendor_code?: string; subject?: string }): Promise<any> {
+        const q = new URLSearchParams();
+        if (params?.date_from) q.set('date_from', params.date_from);
+        if (params?.date_to) q.set('date_to', params.date_to);
+        if (params?.brand) q.set('brand', params.brand);
+        if (params?.vendor_code) q.set('vendor_code', params.vendor_code);
+        if (params?.subject) q.set('subject', params.subject);
+        return this.request('GET', `/api/v1/funnel/data?${q.toString()}`);
+    }
+    async getFunnelSummary(dateFrom?: string, dateTo?: string): Promise<any> {
+        const q = new URLSearchParams();
+        if (dateFrom) q.set('date_from', dateFrom);
+        if (dateTo) q.set('date_to', dateTo);
+        return this.request('GET', `/api/v1/funnel/summary?${q.toString()}`);
+    }
+    async getFunnelFilters(): Promise<any> {
+        return this.request('GET', '/api/v1/funnel/filters');
+    }
+    async getFunnelCosts(): Promise<any> {
+        return this.request('GET', '/api/v1/funnel/costs');
+    }
+    async setFunnelCost(nmId: number, costPrice: number): Promise<any> {
+        return this.request('POST', '/api/v1/funnel/cost', { nm_id: nmId, cost_price: costPrice });
+    }
+    async getFunnelTax(): Promise<any> {
+        return this.request('GET', '/api/v1/funnel/tax');
+    }
+    async setFunnelTax(taxRate: number): Promise<any> {
+        return this.request('POST', '/api/v1/funnel/tax', { tax_rate: taxRate });
+    }
 }
 
 export const api = new ApiClient();
