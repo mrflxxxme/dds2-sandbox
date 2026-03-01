@@ -14,7 +14,10 @@ export default function TransactionsPage() {
     const load = async () => {
         setLoading(true);
         try {
-            const res = await api.getTransactions({ start: start || undefined, end: end || undefined });
+            const res = await api.searchTransactions({
+                date_from: start || undefined,
+                date_to: end || undefined
+            });
             setData(Array.isArray(res) ? res : res.transactions || []);
         } catch { }
         setLoading(false);

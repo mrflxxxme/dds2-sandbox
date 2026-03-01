@@ -11,6 +11,7 @@ from sqlalchemy import select, func, and_, or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
+from backend.middleware import get_project_id
 from backend.models import (
     Transaction, Account, CounterpartyCategory, Override,
     ImportLog, CategoryChangeLog,
@@ -30,6 +31,7 @@ async def upload_statement(
     file: UploadFile = File(...),
     source_type: str = Form(...),
     account_no: str = Form(...),
+    project_id: int = Depends(get_project_id),
     db: AsyncSession = Depends(get_db),
 ):
     """Upload and import a bank statement file.
@@ -69,7 +71,7 @@ async def upload_statement(
     def _run():
         with SyncSessionLocal() as sync_db:
             log = import_statement(
-                sync_db, safe_filename, source_type, account_no, data
+                sync_db, safe_filename, source_type, account_no, data, project_id
             )
             return {
                 "id": log.id,
@@ -88,9 +90,9 @@ async def upload_statement(
 
 
 @router.get("/import/logs", response_model=List[ImportLogSchema])
-async def get_import_logs(db: AsyncSession = Depends(get_db)):
+async def get_import_logs(project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(ImportLog).order_by(ImportLog.imported_at.desc()).limit(100)
+        select(ImportLog).where(ImportLog.project_id == project_id).order_by(ImportLog.imported_at.desc()).limit(100)
     )
     return result.scalars().all()
 
@@ -100,9 +102,10 @@ async def get_import_logs(db: AsyncSession = Depends(get_db)):
 @router.post("/transactions/search", response_model=List[TransactionSchema])
 async def search_transactions(
     f: TransactionFilter,
+    project_id: int = Depends(get_project_id),
     db: AsyncSession = Depends(get_db),
 ):
-    q = select(Transaction)
+    q = select(Transaction).where(Transaction.project_id == project_id)
     conditions = []
     if f.date_from:
         conditions.append(Transaction.date >= f.date_from)
@@ -128,10 +131,10 @@ async def search_transactions(
 
 
 @router.get("/transactions/unassigned", response_model=List[TransactionSchema])
-async def get_unassigned(limit: int = 200, db: AsyncSession = Depends(get_db)):
+async def get_unassigned(limit: int = 200, project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(Transaction)
-        .where(Transaction.is_cashflow2 == 1, Transaction.cat_lvl1_2.is_(None))
+        .where(Transaction.project_id == project_id, Transaction.is_cashflow2 == 1, Transaction.cat_lvl1_2.is_(None))
         .order_by(Transaction.expense.desc())
         .limit(limit)
     )
@@ -141,6 +144,7 @@ async def get_unassigned(limit: int = 200, db: AsyncSession = Depends(get_db)):
 @router.post("/transactions/assign_category")
 async def assign_category(
     assignment: CategoryAssignment,
+    project_id: int = Depends(get_project_id),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -150,7 +154,7 @@ async def assign_category(
     """
     # Get the transaction
     result = await db.execute(
-        select(Transaction).where(Transaction.txn_id == assignment.txn_id)
+        select(Transaction).where(Transaction.txn_id == assignment.txn_id, Transaction.project_id == project_id)
     )
     txn = result.scalar_one_or_none()
     if not txn:
@@ -161,7 +165,7 @@ async def assign_category(
     if assignment.scope == "txn":
         # Upsert override
         res = await db.execute(
-            select(Override).where(Override.txn_id == assignment.txn_id)
+            select(Override).where(Override.txn_id == assignment.txn_id, Override.project_id == project_id)
         )
         ov = res.scalar_one_or_none()
         if ov:
@@ -170,6 +174,7 @@ async def assign_category(
             ov.comment = assignment.comment
         else:
             ov = Override(
+                project_id=project_id,
                 txn_id=assignment.txn_id,
                 cat_lvl1=assignment.cat_lvl1,
                 cat_lvl2=assignment.cat_lvl2,
@@ -187,7 +192,7 @@ async def assign_category(
 
         # Upsert counterparty category
         res = await db.execute(
-            select(CounterpartyCategory).where(CounterpartyCategory.cp_key == cp_key)
+            select(CounterpartyCategory).where(CounterpartyCategory.cp_key == cp_key, CounterpartyCategory.project_id == project_id)
         )
         cpc = res.scalar_one_or_none()
         if cpc:
@@ -195,6 +200,7 @@ async def assign_category(
             cpc.cat_lvl2 = assignment.cat_lvl2
         else:
             cpc = CounterpartyCategory(
+                project_id=project_id,
                 cp_key=cp_key,
                 cp_name=txn.counterparty,
                 cat_lvl1=assignment.cat_lvl1,
@@ -202,15 +208,15 @@ async def assign_category(
             )
             db.add(cpc)
 
-        # Update all transactions with this cp_key
+        # Update all transactions with this cp_key in the current project
         await db.execute(
             text(
                 """UPDATE transactions
                    SET cat_lvl1_2 = :c1, cat_lvl2_2 = :c2,
                        status = CASE WHEN is_cashflow2=1 THEN 'OK' ELSE status END
-                   WHERE cp_key = :cpk AND is_cashflow2 = 1"""
+                   WHERE cp_key = :cpk AND is_cashflow2 = 1 AND project_id = :pid"""
             ),
-            {"c1": assignment.cat_lvl1, "c2": assignment.cat_lvl2, "cpk": cp_key},
+            {"c1": assignment.cat_lvl1, "c2": assignment.cat_lvl2, "cpk": cp_key, "pid": project_id},
         )
 
     # Log the change
@@ -228,7 +234,7 @@ async def assign_category(
 
 
 @router.get("/transactions/unassigned_grouped")
-async def get_unassigned_grouped(db: AsyncSession = Depends(get_db)):
+async def get_unassigned_grouped(project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
     """Group uncategorized transactions by counterparty, showing income/expense totals."""
     result = await db.execute(
         select(
@@ -239,7 +245,7 @@ async def get_unassigned_grouped(db: AsyncSession = Depends(get_db)):
             func.sum(Transaction.income).label("total_income"),
             func.sum(Transaction.expense).label("total_expense"),
         )
-        .where(Transaction.is_cashflow2 == 1, Transaction.cat_lvl1_2.is_(None))
+        .where(Transaction.project_id == project_id, Transaction.is_cashflow2 == 1, Transaction.cat_lvl1_2.is_(None))
         .group_by(Transaction.cp_key, Transaction.counterparty, Transaction.currency)
         .order_by(func.sum(Transaction.income).desc(), func.sum(Transaction.expense).desc())
     )
@@ -258,7 +264,7 @@ async def get_unassigned_grouped(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/transactions/assign_category_bulk")
-async def assign_category_bulk(payload: dict, db: AsyncSession = Depends(get_db)):
+async def assign_category_bulk(payload: dict, project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
     """Assign category to all uncategorized transactions with given cp_key."""
     cp_key = payload.get("cp_key")
     cat_lvl1 = payload.get("cat_lvl1")
@@ -272,7 +278,7 @@ async def assign_category_bulk(payload: dict, db: AsyncSession = Depends(get_db)
     # Only upsert counterparty category if applying to ALL transactions
     if direction == "all":
         res = await db.execute(
-            select(CounterpartyCategory).where(CounterpartyCategory.cp_key == cp_key)
+            select(CounterpartyCategory).where(CounterpartyCategory.cp_key == cp_key, CounterpartyCategory.project_id == project_id)
         )
         cpc = res.scalar_one_or_none()
         if cpc:
@@ -280,6 +286,7 @@ async def assign_category_bulk(payload: dict, db: AsyncSession = Depends(get_db)
             cpc.cat_lvl2 = cat_lvl2
         else:
             cpc = CounterpartyCategory(
+                project_id=project_id,
                 cp_key=cp_key,
                 cp_name=payload.get("counterparty"),
                 cat_lvl1=cat_lvl1,
@@ -292,20 +299,20 @@ async def assign_category_bulk(payload: dict, db: AsyncSession = Depends(get_db)
         sql = """UPDATE transactions
                  SET cat_lvl1_2 = :c1, cat_lvl2_2 = :c2,
                      status = CASE WHEN is_cashflow2=1 THEN 'OK' ELSE status END
-                 WHERE cp_key = :cpk AND is_cashflow2 = 1 AND cat_lvl1_2 IS NULL AND income > 0"""
+                 WHERE cp_key = :cpk AND is_cashflow2 = 1 AND cat_lvl1_2 IS NULL AND income > 0 AND project_id = :pid"""
     elif direction == "expense":
         sql = """UPDATE transactions
                  SET cat_lvl1_2 = :c1, cat_lvl2_2 = :c2,
                      status = CASE WHEN is_cashflow2=1 THEN 'OK' ELSE status END
-                 WHERE cp_key = :cpk AND is_cashflow2 = 1 AND cat_lvl1_2 IS NULL AND expense > 0"""
+                 WHERE cp_key = :cpk AND is_cashflow2 = 1 AND cat_lvl1_2 IS NULL AND expense > 0 AND project_id = :pid"""
     else:
         sql = """UPDATE transactions
                  SET cat_lvl1_2 = :c1, cat_lvl2_2 = :c2,
                      status = CASE WHEN is_cashflow2=1 THEN 'OK' ELSE status END
-                 WHERE cp_key = :cpk AND is_cashflow2 = 1 AND cat_lvl1_2 IS NULL"""
+                 WHERE cp_key = :cpk AND is_cashflow2 = 1 AND cat_lvl1_2 IS NULL AND project_id = :pid"""
     result = await db.execute(
         text(sql),
-        {"c1": cat_lvl1, "c2": cat_lvl2, "cpk": cp_key},
+        {"c1": cat_lvl1, "c2": cat_lvl2, "cpk": cp_key, "pid": project_id},
     )
 
     await db.commit()
@@ -313,7 +320,7 @@ async def assign_category_bulk(payload: dict, db: AsyncSession = Depends(get_db)
 
 
 @router.post("/transactions/assign_category_by_ids")
-async def assign_category_by_ids(payload: dict, db: AsyncSession = Depends(get_db)):
+async def assign_category_by_ids(payload: dict, project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
     """Assign category to specific transactions by txn_id list."""
     txn_ids = payload.get("txn_ids", [])
     cat_lvl1 = payload.get("cat_lvl1")
@@ -330,9 +337,9 @@ async def assign_category_by_ids(payload: dict, db: AsyncSession = Depends(get_d
                 """UPDATE transactions
                    SET cat_lvl1_2 = :c1, cat_lvl2_2 = :c2,
                        status = CASE WHEN is_cashflow2=1 THEN 'OK' ELSE status END
-                   WHERE txn_id = :tid AND is_cashflow2 = 1"""
+                   WHERE txn_id = :tid AND is_cashflow2 = 1 AND project_id = :pid"""
             ),
-            {"c1": cat_lvl1, "c2": cat_lvl2, "tid": tid},
+            {"c1": cat_lvl1, "c2": cat_lvl2, "tid": tid, "pid": project_id},
         )
         updated += result.rowcount
 

@@ -22,7 +22,7 @@ from backend.etl.parsers import parse_statement
 from backend.etl.master_logic import apply_master_logic
 
 
-def _ensure_account(db: Session, account_no: str, source_type: str):
+def _ensure_account(db: Session, account_no: str, source_type: str, project_id: int):
     """Create account if it doesn't exist yet."""
     existing = db.execute(
         select(Account).where(Account.account == account_no)
@@ -40,6 +40,7 @@ def _ensure_account(db: Session, account_no: str, source_type: str):
     }
     bank, currency, name, is_customs = bank_map.get(source_type, ("UNKNOWN", "RUB", account_no, False))
     acc = Account(
+        project_id=project_id,
         account=account_no,
         bank=bank,
         currency=currency,
@@ -51,19 +52,19 @@ def _ensure_account(db: Session, account_no: str, source_type: str):
     db.flush()
 
 
-def _load_refs(db: Session) -> tuple:
+def _load_refs(db: Session, project_id: int) -> tuple:
     """Load reference data needed for master logic."""
-    accounts = db.execute(select(Account)).scalars().all()
+    accounts = db.execute(select(Account).where(Account.project_id == project_id)).scalars().all()
     our_accounts = {a.account for a in accounts if a.is_our_account}
     customs_accounts = {a.account for a in accounts if a.is_customs_payee}
 
-    cp_cats = db.execute(select(CounterpartyCategory)).scalars().all()
+    cp_cats = db.execute(select(CounterpartyCategory).where(CounterpartyCategory.project_id == project_id)).scalars().all()
     cp_categories = {
         c.cp_key: {"cat_lvl1": c.cat_lvl1, "cat_lvl2": c.cat_lvl2}
         for c in cp_cats
     }
 
-    overrides_db = db.execute(select(Override)).scalars().all()
+    overrides_db = db.execute(select(Override).where(Override.project_id == project_id)).scalars().all()
     overrides = {
         o.txn_id: {"cat_lvl1": o.cat_lvl1, "cat_lvl2": o.cat_lvl2}
         for o in overrides_db
@@ -78,8 +79,10 @@ def import_statement(
     source_type: str,
     account_no: str,
     file_data: bytes,
+    project_id: int,
 ) -> ImportLog:
     log = ImportLog(
+        project_id=project_id,
         filename=filename,
         source_type=source_type,
         imported_at=datetime.utcnow(),
@@ -100,7 +103,7 @@ def import_statement(
 
     try:
         # Ensure account exists
-        _ensure_account(db, account_no, source_type)
+        _ensure_account(db, account_no, source_type, project_id)
 
         # 1. Parse
         df, parse_skipped = parse_statement(source_type, file_data, account_no)
@@ -114,7 +117,7 @@ def import_statement(
             return log
 
         # 2. Master logic
-        our_accounts, customs_accounts, cp_categories, overrides = _load_refs(db)
+        our_accounts, customs_accounts, cp_categories, overrides = _load_refs(db, project_id)
         df = apply_master_logic(df, our_accounts, customs_accounts, cp_categories, overrides)
 
         # 3. Upsert
@@ -125,8 +128,8 @@ def import_statement(
         if txn_ids:
             existing_txn_ids = set(
                 row[0] for row in db.execute(
-                    text("SELECT txn_id FROM transactions WHERE txn_id = ANY(:ids)"),
-                    {"ids": txn_ids},
+                    text("SELECT txn_id FROM transactions WHERE txn_id = ANY(:ids) AND project_id = :pid"),
+                    {"ids": txn_ids, "pid": project_id},
                 )
             )
         else:
@@ -152,6 +155,7 @@ def import_statement(
                 return s if s and s != 'nan' else None
 
             txn = Transaction(
+                project_id=project_id,
                 date=row["date"],
                 bank=safe_str(row["bank"]) or "UNKNOWN",
                 account=safe_str(row["account"]) or account_no,

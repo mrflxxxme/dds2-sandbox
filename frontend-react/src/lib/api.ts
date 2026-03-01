@@ -437,10 +437,11 @@ class ApiClient {
     }
 
     // Upload
-    async uploadFile(file: File, sourceType: string): Promise<any> {
+    async uploadFile(file: File, sourceType: string, accountNo: string): Promise<any> {
         const formData = new FormData();
         formData.append('file', file);
         formData.append('source_type', sourceType);
+        if (accountNo) formData.append('account_no', accountNo);
 
         const headers: Record<string, string> = {};
         const token = this.getToken();
@@ -458,7 +459,7 @@ class ApiClient {
             const err = await res.json().catch(() => ({}));
             const detail = err.detail;
             if (typeof detail === 'string') throw new Error(detail);
-            if (Array.isArray(detail)) throw new Error(detail.map((d: any) => d.msg || JSON.stringify(d)).join('; '));
+            if (Array.isArray(detail)) throw new Error(detail.map((d: any) => `${d.loc ? d.loc.join('.') + ': ' : ''}${d.msg || JSON.stringify(d)}`).join('; '));
             throw new Error(JSON.stringify(detail) || `Error ${res.status}`);
         }
         return res.json();
@@ -473,6 +474,25 @@ class ApiClient {
         const projectId = this.getProjectId();
         if (projectId) headers['X-Project-Id'] = String(projectId);
         const res = await fetch(`${API_URL}/api/v1/cost/orders/${orderNo}/upload`, {
+            method: 'POST', headers, body: formData,
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.detail || `Error ${res.status}`);
+        }
+        return res.json();
+    }
+
+    // Wb Payouts import
+    async uploadWbPayouts(file: File): Promise<any> {
+        const formData = new FormData();
+        formData.append('file', file);
+        const headers: Record<string, string> = {};
+        const token = this.getToken();
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const projectId = this.getProjectId();
+        if (projectId) headers['X-Project-Id'] = String(projectId);
+        const res = await fetch(`${API_URL}/api/v1/planning/wb_payouts/upload`, {
             method: 'POST', headers, body: formData,
         });
         if (!res.ok) {

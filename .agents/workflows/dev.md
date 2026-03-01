@@ -52,7 +52,7 @@ cd /Users/a1/Desktop/dds_app && git checkout main && git merge dev && git push o
 cd /Users/a1/Desktop/dds_app && docker compose up -d --build frontend-react
 ```
 
-**Изменения только backend** — hot-reload через volume mount, пересборка НЕ нужна.
+**Изменения только backend** — hot-reload через volume mount + uvicorn `--reload`, пересборка НЕ нужна.
 При изменении requirements-backend.txt:
 // turbo
 ```bash
