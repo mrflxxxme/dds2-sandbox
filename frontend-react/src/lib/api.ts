@@ -535,6 +535,9 @@ class ApiClient {
     async setFunnelTax(taxRate: number): Promise<any> {
         return this.request('POST', '/api/v1/funnel/tax', { tax_rate: taxRate });
     }
+    async getSyncStatus(): Promise<any> {
+        return this.request('GET', '/api/v1/funnel/sync_status');
+    }
 }
 
 export const api = new ApiClient();

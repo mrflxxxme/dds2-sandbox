@@ -1,42 +1,168 @@
 'use client';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
 
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
 const fmtPct = (n: number) => (n || 0).toFixed(2) + '%';
 
-function getLast30Days() {
-    const today = new Date();
-    const to = new Date(today);
-    to.setDate(to.getDate() - 1); // Yesterday
-    const from = new Date(to);
-    from.setDate(from.getDate() - 29); // 30 days back
-    const f = (d: Date) => d.toISOString().slice(0, 10);
-    return { from: f(from), to: f(to) };
+/* ─── Chart modal (simple canvas line chart) ─────────────────── */
+
+function ChartModal({ title, data, field, color, onClose }: {
+    title: string; data: any[]; field: string; color: string; onClose: () => void;
+}) {
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+
+    useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas || !data.length) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        const dpr = window.devicePixelRatio || 1;
+        const W = canvas.clientWidth;
+        const H = canvas.clientHeight;
+        canvas.width = W * dpr;
+        canvas.height = H * dpr;
+        ctx.scale(dpr, dpr);
+
+        // Aggregate by date (data may have multiple rows per date if detailed)
+        const byDate: Record<string, number> = {};
+        data.forEach(r => {
+            const d = r.date;
+            byDate[d] = (byDate[d] || 0) + (r[field] || 0);
+        });
+        const dates = Object.keys(byDate).sort();
+        const values = dates.map(d => byDate[d]);
+        if (!values.length) return;
+
+        const maxVal = Math.max(...values, 1);
+        const minVal = Math.min(...values, 0);
+        const range = maxVal - minVal || 1;
+
+        const padTop = 30, padBottom = 50, padLeft = 70, padRight = 20;
+        const chartW = W - padLeft - padRight;
+        const chartH = H - padTop - padBottom;
+
+        // Background
+        ctx.fillStyle = '#1a1a2e';
+        ctx.fillRect(0, 0, W, H);
+
+        // Grid lines
+        ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 4; i++) {
+            const y = padTop + (chartH * i) / 4;
+            ctx.beginPath();
+            ctx.moveTo(padLeft, y);
+            ctx.lineTo(W - padRight, y);
+            ctx.stroke();
+            // Y labels
+            const val = maxVal - (range * i) / 4;
+            ctx.fillStyle = 'rgba(255,255,255,0.5)';
+            ctx.font = '11px sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText(fmt(Math.round(val)), padLeft - 8, y + 4);
+        }
+
+        // Line + fill
+        const xStep = dates.length > 1 ? chartW / (dates.length - 1) : chartW;
+        ctx.beginPath();
+        values.forEach((v, i) => {
+            const x = padLeft + i * xStep;
+            const y = padTop + chartH - ((v - minVal) / range) * chartH;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+
+        // Fill under curve
+        const gradient = ctx.createLinearGradient(0, padTop, 0, H - padBottom);
+        gradient.addColorStop(0, color + '40');
+        gradient.addColorStop(1, color + '05');
+        ctx.lineTo(padLeft + (values.length - 1) * xStep, padTop + chartH);
+        ctx.lineTo(padLeft, padTop + chartH);
+        ctx.closePath();
+        ctx.fillStyle = gradient;
+        ctx.fill();
+
+        // Dots
+        values.forEach((v, i) => {
+            const x = padLeft + i * xStep;
+            const y = padTop + chartH - ((v - minVal) / range) * chartH;
+            ctx.beginPath();
+            ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.strokeStyle = '#1a1a2e';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+        });
+
+        // X labels (every Nth)
+        const labelEvery = Math.max(1, Math.floor(dates.length / 10));
+        ctx.fillStyle = 'rgba(255,255,255,0.5)';
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'center';
+        dates.forEach((d, i) => {
+            if (i % labelEvery === 0 || i === dates.length - 1) {
+                const x = padLeft + i * xStep;
+                ctx.fillText(d.slice(5), x, H - padBottom + 18);  // MM-DD
+            }
+        });
+    }, [data, field, color]);
+
+    return (
+        <div onClick={onClose}
+            style={{
+                position: 'fixed', inset: 0, zIndex: 1000,
+                background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}>
+            <div onClick={e => e.stopPropagation()}
+                style={{
+                    background: '#1a1a2e', borderRadius: 16,
+                    border: '1px solid rgba(255,255,255,0.1)',
+                    padding: 24, width: 'min(90vw, 800px)', maxHeight: '80vh',
+                    boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+                }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>{title}</h3>
+                    <button onClick={onClose}
+                        style={{
+                            background: 'rgba(255,255,255,0.1)', border: 'none', color: '#fff',
+                            borderRadius: 8, padding: '6px 12px', cursor: 'pointer', fontSize: 14,
+                        }}>✕</button>
+                </div>
+                <canvas ref={canvasRef}
+                    style={{ width: '100%', height: 300, borderRadius: 8 }} />
+            </div>
+        </div>
+    );
 }
 
+/* ─── Main page ──────────────────────────────────────────────── */
+
 export default function FunnelPage() {
-    const defaultDates = getLast30Days();
     const [tab, setTab] = useState<'funnel' | 'costs'>('funnel');
     const [data, setData] = useState<any[]>([]);
     const [detailed, setDetailed] = useState(false);
     const [summary, setSummary] = useState<any>(null);
     const [filters, setFilters] = useState<any>({ brands: [], subjects: [] });
     const [loading, setLoading] = useState(false);
-    const [syncing, setSyncing] = useState(false);
     const [taxRate, setTaxRate] = useState(6);
     const [initDone, setInitDone] = useState(false);
+    const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
 
-    // Filters — default to last 30 days
-    const [dateFrom, setDateFrom] = useState(defaultDates.from);
-    const [dateTo, setDateTo] = useState(defaultDates.to);
+    // Filters — dates will be set from DB range
+    const [dateFrom, setDateFrom] = useState('');
+    const [dateTo, setDateTo] = useState('');
     const [brand, setBrand] = useState('');
     const [subject, setSubject] = useState('');
     const [search, setSearch] = useState('');
 
-    // Sync dates — default to last 30 days
-    const [syncFrom, setSyncFrom] = useState(defaultDates.from);
-    const [syncTo, setSyncTo] = useState(defaultDates.to);
+    // Chart modal
+    const [chartField, setChartField] = useState<{ field: string; label: string; color: string } | null>(null);
 
     // Costs tab
     const [costs, setCosts] = useState<any>({ overrides: [], missing: [] });
@@ -46,15 +172,19 @@ export default function FunnelPage() {
         try {
             const f = await api.getFunnelFilters();
             setFilters(f);
-        } catch { }
+            return f;
+        } catch { return null; }
     }, []);
 
-    const loadData = useCallback(async () => {
+    const loadData = useCallback(async (df?: string, dt?: string) => {
+        const from = df || dateFrom;
+        const to = dt || dateTo;
+        if (!from || !to) return [];
         setLoading(true);
         try {
             const [res, sum, tax] = await Promise.all([
-                api.getFunnelData({ date_from: dateFrom, date_to: dateTo, brand, vendor_code: search, subject }),
-                api.getFunnelSummary(dateFrom, dateTo),
+                api.getFunnelData({ date_from: from, date_to: to, brand, vendor_code: search, subject }),
+                api.getFunnelSummary(from, to),
                 api.getFunnelTax(),
             ]);
             setData(res.data || []);
@@ -70,6 +200,16 @@ export default function FunnelPage() {
         }
     }, [dateFrom, dateTo, brand, subject, search]);
 
+    const loadSyncStatus = useCallback(async () => {
+        try {
+            const s = await api.getSyncStatus();
+            if (s.last_syncs?.length > 0) {
+                const last = s.last_syncs[0];
+                setLastSyncAt(last.finished_at || last.started_at || null);
+            }
+        } catch { }
+    }, []);
+
     const loadCosts = useCallback(async () => {
         try {
             const c = await api.getFunnelCosts();
@@ -77,54 +217,22 @@ export default function FunnelPage() {
         } catch { }
     }, []);
 
-    // Auto-sync on first load if no data
+    // Init: load filters → set dates from DB range → load data
     useEffect(() => {
         (async () => {
-            await loadFilters();
-            const rows = await loadData();
-            if (rows.length === 0 && !initDone) {
-                // Auto-sync last 7 days (shorter to avoid timeout)
-                const syncDates = (() => {
-                    const today = new Date();
-                    const to = new Date(today);
-                    to.setDate(to.getDate() - 1);
-                    const from = new Date(to);
-                    from.setDate(from.getDate() - 6); // 7 days only
-                    const f = (d: Date) => d.toISOString().slice(0, 10);
-                    return { from: f(from), to: f(to) };
-                })();
-                setSyncing(true);
-                try {
-                    await api.syncFunnel(syncDates.from, syncDates.to);
-                } catch (e: any) {
-                    console.warn('Auto-sync may have partially completed:', e.message);
-                }
-                // Always reload data — backend commits per-day, so partial data is saved
-                await loadData();
-                await loadFilters();
-                setSyncing(false);
+            const f = await loadFilters();
+            await loadSyncStatus();
+            if (f?.min_date && f?.max_date) {
+                setDateFrom(f.min_date);
+                setDateTo(f.max_date);
+                await loadData(f.min_date, f.max_date);
             }
             setInitDone(true);
         })();
     }, []);
 
-    useEffect(() => { if (initDone && (dateFrom || dateTo)) loadData(); }, [dateFrom, dateTo, brand, subject, search]);
+    useEffect(() => { if (initDone && dateFrom && dateTo) loadData(); }, [dateFrom, dateTo, brand, subject, search]);
     useEffect(() => { if (tab === 'costs') loadCosts(); }, [tab]);
-
-    const handleSync = async () => {
-        if (!syncFrom || !syncTo) return alert('Укажите даты синхронизации');
-        setSyncing(true);
-        try {
-            const res = await api.syncFunnel(syncFrom, syncTo);
-            alert(`Синхронизировано: ${res.rows} строк за ${res.days} дней`);
-        } catch (e: any) {
-            console.warn('Sync may have partially completed:', e.message);
-        }
-        // Always reload — partial data may have been saved
-        await loadData();
-        await loadFilters();
-        setSyncing(false);
-    };
 
     const handleSaveCost = async () => {
         if (!editCost) return;
@@ -143,6 +251,25 @@ export default function FunnelPage() {
         } catch (e: any) { alert(e.message); }
     };
 
+    // Summary card definitions (clickable for chart)
+    const summaryCards = [
+        { label: 'Переходы', field: 'open_card', color: '#f59e0b' },
+        { label: 'Корзины', field: 'add_to_cart', color: '#3b82f6' },
+        { label: 'Заказы', field: 'orders_count', color: '#10b981' },
+        { label: 'Сумма заказов ₽', field: 'orders_sum_rub', color: '#8b5cf6' },
+        { label: 'Расходы рекл. ₽', field: 'adv_sum', color: '#ef4444' },
+        { label: 'Просмотры', field: 'adv_views', color: '#6366f1' },
+        { label: 'Клики', field: 'adv_clicks', color: '#ec4899' },
+    ];
+
+    const formatSyncDate = (iso: string | null) => {
+        if (!iso) return '—';
+        try {
+            const d = new Date(iso);
+            return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+        } catch { return iso; }
+    };
+
     return (
         <div>
             <h1 style={{ fontSize: 22, fontWeight: 600, marginBottom: 16 }}>📊 Воронка продаж</h1>
@@ -155,19 +282,13 @@ export default function FunnelPage() {
 
             {tab === 'funnel' && (
                 <>
-                    {/* Sync panel */}
-                    <div className="glass-card" style={{ marginBottom: 16, padding: 16 }}>
+                    {/* Sync status + Tax (replaced manual sync) */}
+                    <div className="glass-card" style={{ marginBottom: 16, padding: '12px 16px' }}>
                         <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-                            <span style={{ fontWeight: 500, fontSize: 14 }}>🔄 Синхронизация WB:</span>
-                            <input type="date" value={syncFrom} onChange={e => setSyncFrom(e.target.value)}
-                                style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)' }} />
-                            <span>—</span>
-                            <input type="date" value={syncTo} onChange={e => setSyncTo(e.target.value)}
-                                style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)' }} />
-                            <button className="btn-primary" onClick={handleSync} disabled={syncing}
-                                style={{ padding: '6px 16px', fontSize: 13 }}>
-                                {syncing ? '⏳ Загрузка...' : '🔄 Синхронизировать'}
-                            </button>
+                            <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>
+                                🔄 Последняя синхронизация: <strong style={{ color: 'var(--color-text)' }}>{formatSyncDate(lastSyncAt)}</strong>
+                            </span>
+                            <span style={{ fontSize: 12, color: 'rgba(16,185,129,0.8)' }}>● авто</span>
                             <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
                                 <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>Налог %:</span>
                                 <input type="number" value={taxRate} step="0.1"
@@ -178,32 +299,44 @@ export default function FunnelPage() {
                         </div>
                     </div>
 
-                    {/* Summary header */}
+                    {/* Summary header — clickable cards */}
                     {summary && (
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8, marginBottom: 16 }}>
-                            {[
-                                { label: 'Переходы', value: fmt(summary.open_card), color: '#f59e0b' },
-                                { label: 'Корзины', value: fmt(summary.add_to_cart), color: '#3b82f6' },
-                                { label: 'Заказы', value: fmt(summary.orders_count), color: '#10b981' },
-                                { label: 'Сумма заказов ₽', value: fmt(summary.orders_sum_rub), color: '#8b5cf6' },
-                                { label: 'Расходы рекл. ₽', value: fmt(summary.adv_sum), color: '#ef4444' },
-                                { label: 'Просмотры', value: fmt(summary.adv_views), color: '#6366f1' },
-                                { label: 'Клики', value: fmt(summary.adv_clicks), color: '#ec4899' },
-                            ].map(s => (
-                                <div key={s.label} className="glass-card" style={{ padding: '10px 14px', textAlign: 'center' }}>
-                                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>{s.label}</div>
-                                    <div style={{ fontSize: 18, fontWeight: 700, color: s.color }}>{s.value}</div>
+                            {summaryCards.map(s => (
+                                <div key={s.label} className="glass-card"
+                                    onClick={() => setChartField({ field: s.field, label: s.label, color: s.color })}
+                                    style={{
+                                        padding: '10px 14px', textAlign: 'center',
+                                        cursor: 'pointer', transition: 'transform 0.15s, box-shadow 0.15s',
+                                    }}
+                                    onMouseEnter={e => { (e.currentTarget as HTMLElement).style.transform = 'translateY(-2px)'; (e.currentTarget as HTMLElement).style.boxShadow = `0 4px 20px ${s.color}30`; }}
+                                    onMouseLeave={e => { (e.currentTarget as HTMLElement).style.transform = 'none'; (e.currentTarget as HTMLElement).style.boxShadow = 'none'; }}>
+                                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>{s.label} 📈</div>
+                                    <div style={{ fontSize: 18, fontWeight: 700, color: s.color }}>{fmt(summary[s.field])}</div>
                                 </div>
                             ))}
                         </div>
                     )}
 
+                    {/* Chart modal */}
+                    {chartField && data.length > 0 && (
+                        <ChartModal
+                            title={`${chartField.label} — динамика по дням`}
+                            data={data}
+                            field={chartField.field}
+                            color={chartField.color}
+                            onClose={() => setChartField(null)}
+                        />
+                    )}
+
                     {/* Filters */}
                     <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
                         <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
+                            min={filters.min_date || undefined} max={filters.max_date || undefined}
                             style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }} />
                         <span style={{ color: 'var(--color-text-dim)' }}>—</span>
                         <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
+                            min={filters.min_date || undefined} max={filters.max_date || undefined}
                             style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }} />
                         <select value={brand} onChange={e => setBrand(e.target.value)}
                             style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }}>
@@ -222,58 +355,57 @@ export default function FunnelPage() {
                         )}
                     </div>
 
-                    {/* Table */}
+                    {/* Table with sticky header + sticky date column */}
                     <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 380px)' }}>
                         {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> : (
-                            <table className="data-table" style={{ minWidth: detailed ? 1800 : 1200 }}>
+                            <table className="data-table" style={{ minWidth: detailed ? 1800 : 1200, borderCollapse: 'separate', borderSpacing: 0 }}>
                                 <thead>
                                     <tr>
-                                        <th style={{ position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }}>Дата</th>
-                                        {detailed && <th>Артикул</th>}
-                                        {detailed && <th>nmId</th>}
-                                        {detailed && <th>Предмет</th>}
-                                        {detailed && <th>Бренд</th>}
-                                        <th colSpan={5} style={{ background: 'rgba(245,158,11,0.15)', textAlign: 'center' }}>Воронка</th>
-                                        <th colSpan={7} style={{ background: 'rgba(99,102,241,0.15)', textAlign: 'center' }}>Внутренняя реклама</th>
-                                        <th colSpan={4} style={{ background: 'rgba(16,185,129,0.15)', textAlign: 'center' }}>Финансы</th>
-                                        <th colSpan={2} style={{ background: 'rgba(236,72,153,0.15)', textAlign: 'center' }}>Конверсия</th>
+                                        <th style={{ position: 'sticky', left: 0, top: 0, background: 'var(--color-bg-card)', zIndex: 10 }}>Дата</th>
+                                        {detailed && <th style={{ position: 'sticky', top: 0, background: 'var(--color-bg-card)', zIndex: 5 }}>Артикул</th>}
+                                        {detailed && <th style={{ position: 'sticky', top: 0, background: 'var(--color-bg-card)', zIndex: 5 }}>nmId</th>}
+                                        {detailed && <th style={{ position: 'sticky', top: 0, background: 'var(--color-bg-card)', zIndex: 5 }}>Предмет</th>}
+                                        {detailed && <th style={{ position: 'sticky', top: 0, background: 'var(--color-bg-card)', zIndex: 5 }}>Бренд</th>}
+                                        <th colSpan={5} style={{ position: 'sticky', top: 0, background: 'rgba(245,158,11,0.15)', textAlign: 'center', zIndex: 5 }}>Воронка</th>
+                                        <th colSpan={7} style={{ position: 'sticky', top: 0, background: 'rgba(99,102,241,0.15)', textAlign: 'center', zIndex: 5 }}>Внутренняя реклама</th>
+                                        <th colSpan={4} style={{ position: 'sticky', top: 0, background: 'rgba(16,185,129,0.15)', textAlign: 'center', zIndex: 5 }}>Финансы</th>
+                                        <th colSpan={2} style={{ position: 'sticky', top: 0, background: 'rgba(236,72,153,0.15)', textAlign: 'center', zIndex: 5 }}>Конверсия</th>
                                     </tr>
                                     <tr>
-                                        {/* second header row — repeat Дата for alignment */}
-                                        <th style={{ position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2, fontSize: 0, padding: 0, height: 0, overflow: 'hidden' }}></th>
-                                        {detailed && <th style={{ fontSize: 0, padding: 0, height: 0 }}></th>}
-                                        {detailed && <th style={{ fontSize: 0, padding: 0, height: 0 }}></th>}
-                                        {detailed && <th style={{ fontSize: 0, padding: 0, height: 0 }}></th>}
-                                        {detailed && <th style={{ fontSize: 0, padding: 0, height: 0 }}></th>}
+                                        <th style={{ position: 'sticky', left: 0, top: 32, background: 'var(--color-bg-card)', zIndex: 10, fontSize: 11 }}></th>
+                                        {detailed && <th style={{ position: 'sticky', top: 32, background: 'var(--color-bg-card)', zIndex: 5, fontSize: 0, padding: 0, height: 0 }}></th>}
+                                        {detailed && <th style={{ position: 'sticky', top: 32, background: 'var(--color-bg-card)', zIndex: 5, fontSize: 0, padding: 0, height: 0 }}></th>}
+                                        {detailed && <th style={{ position: 'sticky', top: 32, background: 'var(--color-bg-card)', zIndex: 5, fontSize: 0, padding: 0, height: 0 }}></th>}
+                                        {detailed && <th style={{ position: 'sticky', top: 32, background: 'var(--color-bg-card)', zIndex: 5, fontSize: 0, padding: 0, height: 0 }}></th>}
                                         {/* Воронка */}
-                                        <th style={{ background: 'rgba(245,158,11,0.08)' }}>Переходы</th>
-                                        <th style={{ background: 'rgba(245,158,11,0.08)' }}>Корзины</th>
-                                        <th style={{ background: 'rgba(245,158,11,0.08)' }}>Заказы</th>
-                                        <th style={{ background: 'rgba(245,158,11,0.08)' }}>Сумма ₽</th>
-                                        <th style={{ background: 'rgba(245,158,11,0.08)' }}>Выручка ₽</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(245,158,11,0.08)', zIndex: 5 }}>Переходы</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(245,158,11,0.08)', zIndex: 5 }}>Корзины</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(245,158,11,0.08)', zIndex: 5 }}>Заказы</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(245,158,11,0.08)', zIndex: 5 }}>Сумма ₽</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(245,158,11,0.08)', zIndex: 5 }}>Выручка ₽</th>
                                         {/* Реклама */}
-                                        <th style={{ background: 'rgba(99,102,241,0.08)' }}>Расходы ₽</th>
-                                        <th style={{ background: 'rgba(99,102,241,0.08)' }}>Просмотры</th>
-                                        <th style={{ background: 'rgba(99,102,241,0.08)' }}>Клики</th>
-                                        <th style={{ background: 'rgba(99,102,241,0.08)' }}>CTR</th>
-                                        <th style={{ background: 'rgba(99,102,241,0.08)' }}>CPC</th>
-                                        <th style={{ background: 'rgba(99,102,241,0.08)' }}>CPM</th>
-                                        <th style={{ background: 'rgba(99,102,241,0.08)' }}>ДРР</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(99,102,241,0.08)', zIndex: 5 }}>Расходы ₽</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(99,102,241,0.08)', zIndex: 5 }}>Просмотры</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(99,102,241,0.08)', zIndex: 5 }}>Клики</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(99,102,241,0.08)', zIndex: 5 }}>CTR</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(99,102,241,0.08)', zIndex: 5 }}>CPC</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(99,102,241,0.08)', zIndex: 5 }}>CPM</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(99,102,241,0.08)', zIndex: 5 }}>ДРР</th>
                                         {/* Финансы */}
-                                        {detailed && <th style={{ background: 'rgba(16,185,129,0.08)' }}>Себест. ₽</th>}
-                                        <th style={{ background: 'rgba(16,185,129,0.08)' }}>Налог ₽</th>
-                                        <th style={{ background: 'rgba(16,185,129,0.08)' }}>Прибыль ₽</th>
-                                        <th style={{ background: 'rgba(16,185,129,0.08)' }}>Маржа</th>
-                                        <th style={{ background: 'rgba(16,185,129,0.08)' }}>Ср. цена</th>
+                                        {detailed && <th style={{ position: 'sticky', top: 32, background: 'rgba(16,185,129,0.08)', zIndex: 5 }}>Себест. ₽</th>}
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(16,185,129,0.08)', zIndex: 5 }}>Налог ₽</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(16,185,129,0.08)', zIndex: 5 }}>Прибыль ₽</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(16,185,129,0.08)', zIndex: 5 }}>Маржа</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(16,185,129,0.08)', zIndex: 5 }}>Ср. цена</th>
                                         {/* Конверсия */}
-                                        <th style={{ background: 'rgba(236,72,153,0.08)' }}>В корзину</th>
-                                        <th style={{ background: 'rgba(236,72,153,0.08)' }}>В заказ</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(236,72,153,0.08)', zIndex: 5 }}>В корзину</th>
+                                        <th style={{ position: 'sticky', top: 32, background: 'rgba(236,72,153,0.08)', zIndex: 5 }}>В заказ</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     {data.length === 0 && (
                                         <tr><td colSpan={30} style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-dim)' }}>
-                                            Нет данных. Нажмите «Синхронизировать» чтобы загрузить данные из WB.
+                                            Данные загружаются автоматически. Ожидайте синхронизации.
                                         </td></tr>
                                     )}
                                     {data.map((r, i) => (
@@ -389,7 +521,7 @@ export default function FunnelPage() {
                     )}
                     {costs.missing?.length === 0 && costs.overrides?.length === 0 && (
                         <div className="glass-card" style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>
-                            Нет данных. Сначала синхронизируйте воронку на вкладке «Воронка».
+                            Нет данных. Дождитесь автоматической синхронизации воронки.
                         </div>
                     )}
                 </div>
