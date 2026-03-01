@@ -69,29 +69,36 @@ async def list_keys(db: AsyncSession = Depends(get_db)):
     return output
 
 
+from pydantic import BaseModel
+
+
+class AddKeyRequest(BaseModel):
+    service: str
+    api_key: str
+    label: Optional[str] = None
+
+
 @router.post("/keys", response_model=IntegrationKeySchema)
 async def add_key(
-    service: str,
-    api_key: str,
-    label: Optional[str] = None,
+    body: AddKeyRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """Add a new integration API key (encrypted)."""
-    if service not in ("wb", "ozon"):
-        raise HTTPException(400, f"Unsupported service: {service}. Use 'wb' or 'ozon'.")
+    if body.service not in ("wb", "ozon"):
+        raise HTTPException(400, f"Unsupported service: {body.service}. Use 'wb' or 'ozon'.")
 
     # Test connection before saving
-    if service == "wb":
+    if body.service == "wb":
         from backend.integrations.wb_api import WBApiClient
-        client = WBApiClient(api_key)
+        client = WBApiClient(body.api_key)
         valid = await client.test_connection()
         if not valid:
             raise HTTPException(400, "WB API ключ невалидный. Проверьте ключ.")
 
-    encrypted = _encrypt(api_key)
+    encrypted = _encrypt(body.api_key)
     key = IntegrationKey(
-        service=service,
-        label=label or service.upper(),
+        service=body.service,
+        label=body.label or body.service.upper(),
         encrypted_key=encrypted,
         is_active=True,
     )
@@ -106,7 +113,7 @@ async def add_key(
         "is_active": key.is_active,
         "created_at": key.created_at,
         "last_sync_at": key.last_sync_at,
-        "key_preview": "***" + api_key[-4:],
+        "key_preview": "***" + body.api_key[-4:],
     }
 
 
