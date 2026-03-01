@@ -404,8 +404,9 @@ class ApiClient {
     getAccountsList() {
         return this.request<any[]>('GET', '/api/v1/planning/accounts_list');
     }
-    getCandidateTransactions() {
-        return this.request<any[]>('GET', '/api/v1/planning/candidate_transactions');
+    getCandidateTransactions(account?: string) {
+        const params = account ? `?account=${encodeURIComponent(account)}` : '';
+        return this.request<any[]>('GET', `/api/v1/planning/candidate_transactions${params}`);
     }
     getFactLinks(paymentId: number) {
         return this.request<any[]>('GET', `/api/v1/planning/fact_links/${paymentId}`);

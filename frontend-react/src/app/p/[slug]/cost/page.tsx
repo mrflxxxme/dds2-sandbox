@@ -265,6 +265,7 @@ function CostOrders() {
                     total_util_rub: 'Итого утиль ₽', grand_total_rub: 'Всего ₽',
                     name: 'Название', description: 'Описание', order_no: 'Заказ',
                     nm_id: 'nm_id', imt_id: 'imt_id', sku: 'SKU',
+                    unrecognized: 'Не распознано',
                 };
                 const tr = (key: string) => colMap[key.toLowerCase()] || key;
                 const intCols = new Set(['id', 'nm_id', 'imt_id', 'order_no']);

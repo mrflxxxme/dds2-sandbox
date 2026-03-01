@@ -142,6 +142,7 @@ function PlanPayments() {
     const [selPayId, setSelPayId] = useState<number | null>(null);
     const [selTxnId, setSelTxnId] = useState<string>('');
     const [linkAmount, setLinkAmount] = useState('');
+    const [selAccount, setSelAccount] = useState<string>('');
 
     useEffect(() => { load(); }, []);
     const load = async () => { try { setData(await api.getPlanningPayments()); } catch { } };
@@ -169,12 +170,19 @@ function PlanPayments() {
             setMsg('✅ Платёж добавлен!'); setShowAddForm(false); load();
         } catch (e: any) { setMsg(`❌ ${e.message}`); }
     };
+    const loadCandidates = async (account?: string) => {
+        try { setCandidates(await api.getCandidateTransactions(account || undefined)); } catch { setCandidates([]); }
+    };
     const openLinkForm = async () => {
         setShowLinkForm(!showLinkForm);
         if (!showLinkForm) {
-            try { setCandidates(await api.getCandidateTransactions()); } catch { setCandidates([]); }
+            await loadCandidates(selAccount);
             try { setAccounts(await api.getAccountsList()); } catch { setAccounts([]); }
         }
+    };
+    const handleAccountChange = async (acc: string) => {
+        setSelAccount(acc);
+        await loadCandidates(acc);
     };
     const linkTransaction = async () => {
         if (!selPayId || !selTxnId) return;
@@ -208,9 +216,19 @@ function PlanPayments() {
 
     const unpaidPayments = data.filter(p => !p.is_paid);
 
+    const [txnSearch, setTxnSearch] = useState('');
+    const filteredCandidates = candidates.filter((c: any) => {
+        if (!txnSearch) return true;
+        const s = txnSearch.toLowerCase();
+        return (c.counterparty || '').toLowerCase().includes(s) ||
+            String(c.expense || '').includes(s) ||
+            (c.date || '').includes(s) ||
+            (c.purpose || '').toLowerCase().includes(s);
+    });
+
     return (
         <div className="glass-card">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                 <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Плановые платежи</h3>
                 <div style={{ display: 'flex', gap: 8 }}>
                     <button className="btn btn-secondary btn-sm" onClick={sync}>🔄 Синхронизировать факт с выписками</button>
@@ -219,117 +237,154 @@ function PlanPayments() {
             </div>
             {msg && <div style={{ fontSize: 13, marginBottom: 8, padding: '6px 12px', borderRadius: 6, background: msg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', color: msg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)' }}>{msg} <span style={{ float: 'right', cursor: 'pointer' }} onClick={() => setMsg('')}>✕</span></div>}
 
-            {data.length > 0 ? (
-                <>
-                    <div style={{ overflowX: 'auto' }}>
-                        <table className="data-table">
-                            <thead><tr>
-                                <th>ID</th><th>Дата</th><th>Заказ</th><th>Направление</th><th>Сумма</th><th>Вал.</th>
-                                <th>План ₽</th><th>Факт ₽</th><th>Остаток</th><th>Статус</th><th></th>
-                            </tr></thead>
-                            <tbody>{data.map(r => {
-                                const st = _status(r);
-                                const amt = parseFloat(r.amount_rub || 0);
-                                const paid = parseFloat(r.paid_rub || 0);
-                                const remain = amt - paid;
-                                return (
-                                    <tr key={r.id}>
-                                        <td>{r.id}</td>
-                                        <td style={{ fontSize: 12 }}>{r.pay_date ? formatDate(r.pay_date) : '—'}</td>
-                                        <td>{r.order_no || '—'}</td>
-                                        <td><span className="badge badge-info">{r.direction || '—'}</span></td>
-                                        <td>{formatNumber(r.amount || 0)}</td>
-                                        <td><span className={`badge badge-${r.currency === 'RUB' ? 'success' : 'warning'}`}>{r.currency}</span></td>
-                                        <td style={{ fontWeight: 500 }}>{formatNumber(amt)} ₽</td>
-                                        <td>{paid > 0 ? `${formatNumber(paid)} ₽` : '—'}</td>
-                                        <td>{remain > 0 ? `${formatNumber(remain)} ₽` : '—'}</td>
-                                        <td><span className={`badge badge-${st.cls}`}>{st.label}</span></td>
-                                        <td style={{ display: 'flex', gap: 4 }}>
-                                            {!r.is_paid && <button className="btn btn-primary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => markPaid(r.id)}>✓</button>}
-                                            <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(r.id)}>✕</button>
-                                        </td>
-                                    </tr>
-                                );
-                            })}</tbody>
-                        </table>
-                    </div>
+            {/* Compact summary – inline row */}
+            {data.length > 0 && (
+                <div style={{ display: 'flex', gap: 24, marginBottom: 12, padding: '8px 12px', background: 'var(--color-bg-input)', borderRadius: 8, fontSize: 13, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span><span style={{ color: 'var(--color-text-muted)' }}>План:</span> <b>{formatNumber(totalPlan)} ₽</b></span>
+                    <span><span style={{ color: 'var(--color-text-muted)' }}>Оплачено:</span> <b style={{ color: 'var(--color-success)' }}>{formatNumber(totalPaid)} ₽</b></span>
+                    <span><span style={{ color: 'var(--color-text-muted)' }}>Остаток:</span> <b style={{ color: totalRemain > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{formatNumber(totalRemain)} ₽</b></span>
+                    <span><span style={{ color: 'var(--color-text-muted)' }}>Прогресс:</span> <b>{progress}</b></span>
+                </div>
+            )}
 
-                    {/* Summary metrics */}
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginTop: 16, padding: 16, background: 'var(--color-bg-input)', borderRadius: 8 }}>
-                        <div><div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Всего план</div><div style={{ fontSize: 20, fontWeight: 700 }}>{formatNumber(totalPlan)} ₽</div></div>
-                        <div><div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Оплачено</div><div style={{ fontSize: 20, fontWeight: 700 }}>{formatNumber(totalPaid)} ₽</div></div>
-                        <div><div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Остаток</div><div style={{ fontSize: 20, fontWeight: 700 }}>{formatNumber(totalRemain)} ₽</div></div>
-                        <div><div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Прогресс</div><div style={{ fontSize: 20, fontWeight: 700 }}>{progress}</div></div>
-                    </div>
-                </>
+            {data.length > 0 ? (
+                <div style={{ overflowX: 'auto' }}>
+                    <table className="data-table">
+                        <thead><tr>
+                            <th>ID</th><th>Дата</th><th>Заказ</th><th>Направление</th><th>Сумма</th><th>Вал.</th>
+                            <th>План ₽</th><th>Факт ₽</th><th>Остаток</th><th>Статус</th><th></th>
+                        </tr></thead>
+                        <tbody>{data.map(r => {
+                            const st = _status(r);
+                            const amt = parseFloat(r.amount_rub || 0);
+                            const paid = parseFloat(r.paid_rub || 0);
+                            const remain = amt - paid;
+                            return (
+                                <tr key={r.id}>
+                                    <td>{r.id}</td>
+                                    <td style={{ fontSize: 12 }}>{r.pay_date ? formatDate(r.pay_date) : '—'}</td>
+                                    <td>{r.order_no || '—'}</td>
+                                    <td><span className="badge badge-info">{r.direction || '—'}</span></td>
+                                    <td>{formatNumber(r.amount || 0)}</td>
+                                    <td><span className={`badge badge-${r.currency === 'RUB' ? 'success' : 'warning'}`}>{r.currency}</span></td>
+                                    <td style={{ fontWeight: 500 }}>{formatNumber(amt)} ₽</td>
+                                    <td>{paid > 0 ? `${formatNumber(paid)} ₽` : '—'}</td>
+                                    <td>{remain > 0 ? `${formatNumber(remain)} ₽` : '—'}</td>
+                                    <td><span className={`badge badge-${st.cls}`}>{st.label}</span></td>
+                                    <td style={{ display: 'flex', gap: 4 }}>
+                                        {!r.is_paid && <button className="btn btn-primary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => markPaid(r.id)}>✓</button>}
+                                        <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(r.id)}>✕</button>
+                                    </td>
+                                </tr>
+                            );
+                        })}</tbody>
+                    </table>
+                </div>
             ) : <div className="empty-state"><div className="empty-state-text">Нет платежей</div></div>}
 
-            {/* Mark paid */}
-            <div style={{ marginTop: 16, display: 'flex', gap: 8, alignItems: 'center' }}>
-                <input className="form-input" type="number" placeholder="ID платежа" style={{ maxWidth: 120, fontSize: 13 }}
-                    onChange={e => setSelPayId(parseInt(e.target.value) || null)} />
-                <button className="btn btn-primary btn-sm" onClick={() => selPayId && markPaid(selPayId)}>✅ Отметить оплаченным</button>
-            </div>
-
-            {/* Add payment */}
-            <div style={{ marginTop: 16 }}>
+            {/* Action buttons row */}
+            <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 <button className="btn btn-secondary btn-sm" onClick={() => setShowAddForm(!showAddForm)}>➕ Добавить платёж</button>
-                {showAddForm && (
-                    <div style={{ background: 'var(--color-bg-input)', padding: 16, borderRadius: 8, marginTop: 8 }}>
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
-                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Дата оплаты</label>
-                                <input className="form-input" type="date" value={payForm.pay_date} onChange={e => setPayForm({ ...payForm, pay_date: e.target.value })} style={{ fontSize: 13 }} /></div>
-                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Номер заказа</label>
-                                <input className="form-input" type="number" value={payForm.order_no} onChange={e => setPayForm({ ...payForm, order_no: e.target.value })} style={{ fontSize: 13 }} /></div>
-                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Направление</label>
-                                <select className="form-input" value={payForm.direction} onChange={e => setPayForm({ ...payForm, direction: e.target.value })} style={{ fontSize: 13 }}>
-                                    <option>ЗАКАЗ</option><option>ДОСТАВКА</option><option>ТАМОЖНЯ</option><option>ДЕПОЗИТ</option><option>ДРУГОЕ</option>
-                                </select></div>
-                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Сумма</label>
-                                <input className="form-input" type="number" value={payForm.amount} onChange={e => setPayForm({ ...payForm, amount: e.target.value })} style={{ fontSize: 13 }} /></div>
-                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Валюта</label>
-                                <select className="form-input" value={payForm.currency} onChange={e => setPayForm({ ...payForm, currency: e.target.value })} style={{ fontSize: 13 }}>
-                                    <option>RUB</option><option>CNY</option><option>USD</option>
-                                </select></div>
-                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Курс</label>
-                                <input className="form-input" type="number" step="0.01" value={payForm.fx_rate} onChange={e => setPayForm({ ...payForm, fx_rate: e.target.value })} style={{ fontSize: 13 }} /></div>
-                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Сумма ₽</label>
-                                <input className="form-input" type="number" value={payForm.amount_rub} onChange={e => setPayForm({ ...payForm, amount_rub: e.target.value })} style={{ fontSize: 13 }} /></div>
-                        </div>
-                        <button className="btn btn-primary btn-sm" style={{ marginTop: 8 }} onClick={addPayment}>💾 Добавить платёж</button>
-                    </div>
-                )}
+                <button className="btn btn-secondary btn-sm" onClick={openLinkForm}>🔗 Привязать транзакцию</button>
             </div>
 
-            {/* Link transaction */}
-            <div style={{ marginTop: 16 }}>
-                <button className="btn btn-secondary btn-sm" onClick={openLinkForm}>🔗 Привязать транзакцию из выписки к платежу</button>
-                {showLinkForm && (
-                    <div style={{ background: 'var(--color-bg-input)', padding: 16, borderRadius: 8, marginTop: 8 }}>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Платёж</label>
-                                <select className="form-input" value={selPayId || ''} onChange={e => setSelPayId(parseInt(e.target.value) || null)} style={{ fontSize: 13 }}>
-                                    <option value="">Выберите платёж</option>
-                                    {unpaidPayments.map(p => (
-                                        <option key={p.id} value={p.id}>ID:{p.id} | №{p.order_no || '—'} | {p.direction} | {formatNumber(p.amount_rub || 0)} ₽</option>
-                                    ))}
-                                </select></div>
-                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Транзакция из выписки</label>
-                                <select className="form-input" value={selTxnId} onChange={e => setSelTxnId(e.target.value)} style={{ fontSize: 13 }}>
-                                    <option value="">Выберите транзакцию</option>
-                                    {candidates.map((c: any) => (
-                                        <option key={c.txn_id} value={c.txn_id}>{c.date?.slice(0, 10)} | {c.currency} {formatNumber(c.expense)} | {(c.counterparty || '').slice(0, 30)}</option>
-                                    ))}
-                                </select></div>
+            {/* Add payment form */}
+            {showAddForm && (
+                <div style={{ background: 'var(--color-bg-input)', padding: 16, borderRadius: 8, marginTop: 8 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+                        <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Дата оплаты</label>
+                            <input className="form-input" type="date" value={payForm.pay_date} onChange={e => setPayForm({ ...payForm, pay_date: e.target.value })} style={{ fontSize: 12 }} /></div>
+                        <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Номер заказа</label>
+                            <input className="form-input" type="number" value={payForm.order_no} onChange={e => setPayForm({ ...payForm, order_no: e.target.value })} style={{ fontSize: 12 }} /></div>
+                        <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Направление</label>
+                            <select className="form-input" value={payForm.direction} onChange={e => setPayForm({ ...payForm, direction: e.target.value })} style={{ fontSize: 12 }}>
+                                <option>ЗАКАЗ</option><option>ДОСТАВКА</option><option>ТАМОЖНЯ</option><option>ДЕПОЗИТ</option><option>ДРУГОЕ</option>
+                            </select></div>
+                        <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Валюта</label>
+                            <select className="form-input" value={payForm.currency} onChange={e => setPayForm({ ...payForm, currency: e.target.value })} style={{ fontSize: 12 }}>
+                                <option>RUB</option><option>CNY</option><option>USD</option>
+                            </select></div>
+                        <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Сумма</label>
+                            <input className="form-input" type="number" value={payForm.amount} onChange={e => setPayForm({ ...payForm, amount: e.target.value })} style={{ fontSize: 12 }} /></div>
+                        <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Курс</label>
+                            <input className="form-input" type="number" step="0.01" value={payForm.fx_rate} onChange={e => setPayForm({ ...payForm, fx_rate: e.target.value })} style={{ fontSize: 12 }} /></div>
+                        <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Сумма ₽</label>
+                            <input className="form-input" type="number" value={payForm.amount_rub} onChange={e => setPayForm({ ...payForm, amount_rub: e.target.value })} style={{ fontSize: 12 }} /></div>
+                        <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+                            <button className="btn btn-primary btn-sm" onClick={addPayment}>💾 Добавить</button>
                         </div>
-                        <div className="form-group" style={{ marginTop: 8, maxWidth: 200 }}>
-                            <label className="form-label" style={{ fontSize: 11 }}>Сумма привязки</label>
-                            <input className="form-input" type="number" value={linkAmount} onChange={e => setLinkAmount(e.target.value)} style={{ fontSize: 13 }} />
-                        </div>
-                        <button className="btn btn-primary btn-sm" style={{ marginTop: 8 }} onClick={linkTransaction}>🔗 Привязать</button>
                     </div>
-                )}
-            </div>
+                </div>
+            )}
+
+            {/* Link transaction – dropdown-based panel (Streamlit style) */}
+            {showLinkForm && (
+                <div style={{ background: 'var(--color-bg-input)', padding: 20, borderRadius: 8, marginTop: 8 }}>
+                    {/* Row: Платёж + Счёт */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+                        <div className="form-group" style={{ margin: 0 }}>
+                            <label className="form-label" style={{ fontSize: 12, fontWeight: 600 }}>Платёж</label>
+                            <select className="form-input" value={selPayId ?? ''} onChange={e => setSelPayId(e.target.value ? parseInt(e.target.value) : null)}
+                                style={{ fontSize: 12 }}>
+                                <option value="">— Выберите платёж —</option>
+                                {unpaidPayments.map((p: any) => (
+                                    <option key={p.id} value={p.id}>
+                                        ID:{p.id} | №{p.order_no || '—'} | {p.direction} | {formatNumber(p.amount || 0)} {p.currency} ({formatNumber(p.amount_rub || 0)}₽)
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="form-group" style={{ margin: 0 }}>
+                            <label className="form-label" style={{ fontSize: 12, fontWeight: 600 }}>Счёт</label>
+                            <select className="form-input" value={selAccount} onChange={e => handleAccountChange(e.target.value)}
+                                style={{ fontSize: 12 }}>
+                                <option value="">Все счета</option>
+                                {accounts.map((a: any) => (
+                                    <option key={a.id} value={a.account}>{a.bank} ({a.currency})</option>
+                                ))}
+                            </select>
+                        </div>
+                    </div>
+
+                    {/* Транзакция из выписки */}
+                    <div className="form-group" style={{ margin: '0 0 12px 0' }}>
+                        <label className="form-label" style={{ fontSize: 12, fontWeight: 600 }}>Транзакция из выписки</label>
+                        <select className="form-input" value={selTxnId} onChange={e => setSelTxnId(e.target.value)}
+                            style={{ fontSize: 12 }}>
+                            <option value="">— Выберите транзакцию —</option>
+                            {filteredCandidates.map((c: any) => (
+                                <option key={c.txn_id} value={c.txn_id}>
+                                    {c.date?.slice(0, 10)} | {c.currency} {formatNumber(c.expense)} | {c.counterparty || '—'}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+
+                    {/* Назначение платежа (shown when transaction selected) */}
+                    {selTxnId && (() => {
+                        const sel = candidates.find((c: any) => c.txn_id === selTxnId);
+                        return sel?.purpose ? (
+                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginBottom: 12, padding: '8px 12px', background: 'var(--color-bg)', borderRadius: 6, border: '1px solid var(--color-border)' }}>
+                                <span style={{ opacity: 0.6 }}>📋 Назначение:</span> {sel.purpose}
+                            </div>
+                        ) : null;
+                    })()}
+
+                    {/* Сумма привязки + Привязать */}
+                    <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end' }}>
+                        <div className="form-group" style={{ margin: 0 }}>
+                            <label className="form-label" style={{ fontSize: 12, fontWeight: 600 }}>
+                                Сумма привязки{selPayId ? ` (${unpaidPayments.find((p: any) => p.id === selPayId)?.currency || 'RUB'})` : ''}
+                            </label>
+                            <input className="form-input" type="number" value={linkAmount} onChange={e => setLinkAmount(e.target.value)}
+                                style={{ fontSize: 12, width: 200 }} />
+                        </div>
+                        <button className="btn btn-primary btn-sm" onClick={linkTransaction}
+                            disabled={!selPayId || !selTxnId}
+                        >🔗 Привязать</button>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
