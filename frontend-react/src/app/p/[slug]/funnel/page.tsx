@@ -8,6 +8,7 @@ const fmtPct = (n: number) => (n || 0).toFixed(2) + '%';
 export default function FunnelPage() {
     const [tab, setTab] = useState<'funnel' | 'costs'>('funnel');
     const [data, setData] = useState<any[]>([]);
+    const [detailed, setDetailed] = useState(false);
     const [summary, setSummary] = useState<any>(null);
     const [filters, setFilters] = useState<any>({ brands: [], subjects: [] });
     const [loading, setLoading] = useState(false);
@@ -47,6 +48,7 @@ export default function FunnelPage() {
                 api.getFunnelTax(),
             ]);
             setData(res.data || []);
+            setDetailed(res.detailed || false);
             setSummary(sum);
             setTaxRate(tax.tax_rate || 6);
         } catch (e: any) {
@@ -171,31 +173,39 @@ export default function FunnelPage() {
                         </select>
                         <input placeholder="🔍 Артикул..." value={search} onChange={e => setSearch(e.target.value)}
                             style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13, width: 160 }} />
+                        {detailed && (
+                            <span style={{ fontSize: 12, color: '#f59e0b', marginLeft: 8 }}>📋 Детализация по артикулам</span>
+                        )}
                     </div>
 
                     {/* Table */}
                     <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 380px)' }}>
                         {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> : (
-                            <table className="data-table" style={{ minWidth: 2000 }}>
+                            <table className="data-table" style={{ minWidth: detailed ? 1800 : 1200 }}>
                                 <thead>
                                     <tr>
-                                        <th rowSpan={2} style={{ position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }}>Дата</th>
-                                        <th rowSpan={2}>Артикул</th>
-                                        <th rowSpan={2}>nmId</th>
-                                        <th rowSpan={2}>Предмет</th>
-                                        <th rowSpan={2}>Бренд</th>
-                                        <th colSpan={6} style={{ background: 'rgba(245,158,11,0.15)', textAlign: 'center' }}>Воронка</th>
+                                        <th style={{ position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }}>Дата</th>
+                                        {detailed && <th>Артикул</th>}
+                                        {detailed && <th>nmId</th>}
+                                        {detailed && <th>Предмет</th>}
+                                        {detailed && <th>Бренд</th>}
+                                        <th colSpan={5} style={{ background: 'rgba(245,158,11,0.15)', textAlign: 'center' }}>Воронка</th>
                                         <th colSpan={7} style={{ background: 'rgba(99,102,241,0.15)', textAlign: 'center' }}>Внутренняя реклама</th>
-                                        <th colSpan={5} style={{ background: 'rgba(16,185,129,0.15)', textAlign: 'center' }}>Прибыль</th>
+                                        <th colSpan={4} style={{ background: 'rgba(16,185,129,0.15)', textAlign: 'center' }}>Финансы</th>
                                         <th colSpan={2} style={{ background: 'rgba(236,72,153,0.15)', textAlign: 'center' }}>Конверсия</th>
                                     </tr>
                                     <tr>
+                                        {/* second header row — repeat Дата for alignment */}
+                                        <th style={{ position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2, fontSize: 0, padding: 0, height: 0, overflow: 'hidden' }}></th>
+                                        {detailed && <th style={{ fontSize: 0, padding: 0, height: 0 }}></th>}
+                                        {detailed && <th style={{ fontSize: 0, padding: 0, height: 0 }}></th>}
+                                        {detailed && <th style={{ fontSize: 0, padding: 0, height: 0 }}></th>}
+                                        {detailed && <th style={{ fontSize: 0, padding: 0, height: 0 }}></th>}
                                         {/* Воронка */}
                                         <th style={{ background: 'rgba(245,158,11,0.08)' }}>Переходы</th>
                                         <th style={{ background: 'rgba(245,158,11,0.08)' }}>Корзины</th>
                                         <th style={{ background: 'rgba(245,158,11,0.08)' }}>Заказы</th>
                                         <th style={{ background: 'rgba(245,158,11,0.08)' }}>Сумма ₽</th>
-                                        <th style={{ background: 'rgba(245,158,11,0.08)' }}>Выкуп %</th>
                                         <th style={{ background: 'rgba(245,158,11,0.08)' }}>Выручка ₽</th>
                                         {/* Реклама */}
                                         <th style={{ background: 'rgba(99,102,241,0.08)' }}>Расходы ₽</th>
@@ -205,8 +215,8 @@ export default function FunnelPage() {
                                         <th style={{ background: 'rgba(99,102,241,0.08)' }}>CPC</th>
                                         <th style={{ background: 'rgba(99,102,241,0.08)' }}>CPM</th>
                                         <th style={{ background: 'rgba(99,102,241,0.08)' }}>ДРР</th>
-                                        {/* Прибыль */}
-                                        <th style={{ background: 'rgba(16,185,129,0.08)' }}>Себест. ₽</th>
+                                        {/* Финансы */}
+                                        {detailed && <th style={{ background: 'rgba(16,185,129,0.08)' }}>Себест. ₽</th>}
                                         <th style={{ background: 'rgba(16,185,129,0.08)' }}>Налог ₽</th>
                                         <th style={{ background: 'rgba(16,185,129,0.08)' }}>Прибыль ₽</th>
                                         <th style={{ background: 'rgba(16,185,129,0.08)' }}>Маржа</th>
@@ -218,23 +228,22 @@ export default function FunnelPage() {
                                 </thead>
                                 <tbody>
                                     {data.length === 0 && (
-                                        <tr><td colSpan={22} style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-dim)' }}>
+                                        <tr><td colSpan={30} style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-dim)' }}>
                                             Нет данных. Нажмите «Синхронизировать» чтобы загрузить данные из WB.
                                         </td></tr>
                                     )}
                                     {data.map((r, i) => (
                                         <tr key={i}>
                                             <td style={{ position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 1, whiteSpace: 'nowrap', fontSize: 12 }}>{r.date}</td>
-                                            <td style={{ fontSize: 12 }}>{r.vendor_code}</td>
-                                            <td style={{ fontSize: 12 }}><a href={`https://www.wildberries.ru/catalog/${r.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{r.nm_id}</a></td>
-                                            <td style={{ fontSize: 12 }}>{r.subject}</td>
-                                            <td style={{ fontSize: 12 }}>{r.brand}</td>
+                                            {detailed && <td style={{ fontSize: 12 }}>{r.vendor_code}</td>}
+                                            {detailed && <td style={{ fontSize: 12 }}><a href={`https://www.wildberries.ru/catalog/${r.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{r.nm_id}</a></td>}
+                                            {detailed && <td style={{ fontSize: 12 }}>{r.subject}</td>}
+                                            {detailed && <td style={{ fontSize: 12 }}>{r.brand}</td>}
                                             {/* Воронка */}
                                             <td style={{ textAlign: 'right' }}>{fmt(r.open_card)}</td>
                                             <td style={{ textAlign: 'right' }}>{fmt(r.add_to_cart)}</td>
                                             <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmt(r.orders_count)}</td>
                                             <td style={{ textAlign: 'right' }}>{fmt(r.orders_sum_rub)}</td>
-                                            <td style={{ textAlign: 'right', color: r.buyout_percent > 50 ? '#10b981' : '#f59e0b' }}>{fmtPct(r.buyout_percent)}</td>
                                             <td style={{ textAlign: 'right', fontWeight: 500 }}>{fmt(r.revenue)}</td>
                                             {/* Реклама */}
                                             <td style={{ textAlign: 'right', color: r.adv_sum > 0 ? '#ef4444' : '' }}>{fmt(r.adv_sum)}</td>
@@ -244,8 +253,8 @@ export default function FunnelPage() {
                                             <td style={{ textAlign: 'right' }}>{fmt(r.cpc)}</td>
                                             <td style={{ textAlign: 'right' }}>{fmt(r.cpm)}</td>
                                             <td style={{ textAlign: 'right', color: r.drr > 30 ? '#ef4444' : r.drr > 15 ? '#f59e0b' : '#10b981' }}>{fmtPct(r.drr)}</td>
-                                            {/* Прибыль */}
-                                            <td style={{ textAlign: 'right' }}>{r.cost_price ? fmt(r.cost_total) : <span style={{ color: '#f59e0b', fontSize: 11 }}>—</span>}</td>
+                                            {/* Финансы */}
+                                            {detailed && <td style={{ textAlign: 'right' }}>{r.cost_price ? fmt(r.cost_total) : <span style={{ color: '#f59e0b', fontSize: 11 }}>—</span>}</td>}
                                             <td style={{ textAlign: 'right' }}>{fmt(r.tax)}</td>
                                             <td style={{ textAlign: 'right', fontWeight: 700, color: r.profit > 0 ? '#10b981' : '#ef4444' }}>{fmt(r.profit)}</td>
                                             <td style={{ textAlign: 'right', color: r.margin > 0 ? '#10b981' : '#ef4444' }}>{fmtPct(r.margin)}</td>
@@ -260,7 +269,7 @@ export default function FunnelPage() {
                         )}
                     </div>
                     <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-dim)' }}>
-                        Всего строк: {data.length}
+                        Всего строк: {data.length} {!detailed && '(агрегация по дням)'}
                     </div>
                 </>
             )}
@@ -271,99 +280,69 @@ export default function FunnelPage() {
                     <p style={{ fontSize: 13, color: 'var(--color-text-dim)', marginBottom: 16 }}>
                         Товары без себестоимости из заказов. Укажите себестоимость за штуку для расчёта прибыли.
                     </p>
-
-                    {/* Missing costs */}
                     {costs.missing?.length > 0 && (
                         <div className="glass-card" style={{ marginBottom: 16 }}>
                             <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 8, padding: '12px 16px 0' }}>
                                 ⚠️ Без себестоимости ({costs.missing.length})
                             </h3>
                             <table className="data-table">
-                                <thead>
-                                    <tr>
-                                        <th>nmId</th>
-                                        <th>Артикул</th>
-                                        <th>Предмет</th>
-                                        <th>Бренд</th>
-                                        <th>Себестоимость ₽</th>
-                                        <th></th>
-                                    </tr>
-                                </thead>
+                                <thead><tr><th>nmId</th><th>Артикул</th><th>Предмет</th><th>Бренд</th><th>Себестоимость ₽</th><th></th></tr></thead>
                                 <tbody>
                                     {costs.missing.map((m: any) => (
                                         <tr key={m.nm_id}>
                                             <td><a href={`https://www.wildberries.ru/catalog/${m.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{m.nm_id}</a></td>
-                                            <td>{m.vendor_code}</td>
-                                            <td>{m.subject}</td>
-                                            <td>{m.brand}</td>
-                                            <td>
-                                                {editCost?.nm_id === m.nm_id ? (
-                                                    <input type="number" value={editCost.cost_price} autoFocus
-                                                        onChange={e => setEditCost({ ...editCost, cost_price: e.target.value })}
-                                                        onKeyDown={e => e.key === 'Enter' && handleSaveCost()}
-                                                        style={{ width: 100, background: 'var(--color-bg)', border: '1px solid var(--color-accent)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)' }} />
-                                                ) : '—'}
-                                            </td>
-                                            <td>
-                                                {editCost?.nm_id === m.nm_id ? (
-                                                    <div style={{ display: 'flex', gap: 4 }}>
-                                                        <button className="btn-primary" onClick={handleSaveCost} style={{ padding: '2px 8px', fontSize: 12 }}>✓</button>
-                                                        <button className="btn-secondary" onClick={() => setEditCost(null)} style={{ padding: '2px 8px', fontSize: 12 }}>✕</button>
-                                                    </div>
-                                                ) : (
-                                                    <button className="btn-secondary" onClick={() => setEditCost({ nm_id: m.nm_id, cost_price: '' })} style={{ padding: '2px 8px', fontSize: 12 }}>✏️</button>
-                                                )}
-                                            </td>
+                                            <td>{m.vendor_code}</td><td>{m.subject}</td><td>{m.brand}</td>
+                                            <td>{editCost?.nm_id === m.nm_id ? (
+                                                <input type="number" value={editCost.cost_price} autoFocus
+                                                    onChange={e => setEditCost({ ...editCost, cost_price: e.target.value })}
+                                                    onKeyDown={e => e.key === 'Enter' && handleSaveCost()}
+                                                    style={{ width: 100, background: 'var(--color-bg)', border: '1px solid var(--color-accent)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)' }} />
+                                            ) : '—'}</td>
+                                            <td>{editCost?.nm_id === m.nm_id ? (
+                                                <div style={{ display: 'flex', gap: 4 }}>
+                                                    <button className="btn-primary" onClick={handleSaveCost} style={{ padding: '2px 8px', fontSize: 12 }}>✓</button>
+                                                    <button className="btn-secondary" onClick={() => setEditCost(null)} style={{ padding: '2px 8px', fontSize: 12 }}>✕</button>
+                                                </div>
+                                            ) : (
+                                                <button className="btn-secondary" onClick={() => setEditCost({ nm_id: m.nm_id, cost_price: '' })} style={{ padding: '2px 8px', fontSize: 12 }}>✏️</button>
+                                            )}</td>
                                         </tr>
                                     ))}
                                 </tbody>
                             </table>
                         </div>
                     )}
-
-                    {/* Existing overrides */}
                     {costs.overrides?.length > 0 && (
                         <div className="glass-card">
                             <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 8, padding: '12px 16px 0' }}>
                                 ✅ Установленные ({costs.overrides.length})
                             </h3>
                             <table className="data-table">
-                                <thead>
-                                    <tr>
-                                        <th>nmId</th>
-                                        <th>Себестоимость ₽</th>
-                                        <th></th>
-                                    </tr>
-                                </thead>
+                                <thead><tr><th>nmId</th><th>Себестоимость ₽</th><th></th></tr></thead>
                                 <tbody>
                                     {costs.overrides.map((o: any) => (
                                         <tr key={o.nm_id}>
                                             <td><a href={`https://www.wildberries.ru/catalog/${o.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{o.nm_id}</a></td>
-                                            <td>
-                                                {editCost?.nm_id === o.nm_id ? (
-                                                    <input type="number" value={editCost.cost_price} autoFocus
-                                                        onChange={e => setEditCost({ ...editCost, cost_price: e.target.value })}
-                                                        onKeyDown={e => e.key === 'Enter' && handleSaveCost()}
-                                                        style={{ width: 100, background: 'var(--color-bg)', border: '1px solid var(--color-accent)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)' }} />
-                                                ) : fmt(o.cost_price)}
-                                            </td>
-                                            <td>
-                                                {editCost?.nm_id === o.nm_id ? (
-                                                    <div style={{ display: 'flex', gap: 4 }}>
-                                                        <button className="btn-primary" onClick={handleSaveCost} style={{ padding: '2px 8px', fontSize: 12 }}>✓</button>
-                                                        <button className="btn-secondary" onClick={() => setEditCost(null)} style={{ padding: '2px 8px', fontSize: 12 }}>✕</button>
-                                                    </div>
-                                                ) : (
-                                                    <button className="btn-secondary" onClick={() => setEditCost({ nm_id: o.nm_id, cost_price: String(o.cost_price) })} style={{ padding: '2px 8px', fontSize: 12 }}>✏️</button>
-                                                )}
-                                            </td>
+                                            <td>{editCost?.nm_id === o.nm_id ? (
+                                                <input type="number" value={editCost.cost_price} autoFocus
+                                                    onChange={e => setEditCost({ ...editCost, cost_price: e.target.value })}
+                                                    onKeyDown={e => e.key === 'Enter' && handleSaveCost()}
+                                                    style={{ width: 100, background: 'var(--color-bg)', border: '1px solid var(--color-accent)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)' }} />
+                                            ) : fmt(o.cost_price)}</td>
+                                            <td>{editCost?.nm_id === o.nm_id ? (
+                                                <div style={{ display: 'flex', gap: 4 }}>
+                                                    <button className="btn-primary" onClick={handleSaveCost} style={{ padding: '2px 8px', fontSize: 12 }}>✓</button>
+                                                    <button className="btn-secondary" onClick={() => setEditCost(null)} style={{ padding: '2px 8px', fontSize: 12 }}>✕</button>
+                                                </div>
+                                            ) : (
+                                                <button className="btn-secondary" onClick={() => setEditCost({ nm_id: o.nm_id, cost_price: String(o.cost_price) })} style={{ padding: '2px 8px', fontSize: 12 }}>✏️</button>
+                                            )}</td>
                                         </tr>
                                     ))}
                                 </tbody>
                             </table>
                         </div>
                     )}
-
                     {costs.missing?.length === 0 && costs.overrides?.length === 0 && (
                         <div className="glass-card" style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>
                             Нет данных. Сначала синхронизируйте воронку на вкладке «Воронка».

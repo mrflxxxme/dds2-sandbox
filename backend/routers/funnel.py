@@ -360,87 +360,155 @@ async def get_funnel_data(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get funnel data with optional filters."""
+    """Get funnel data. Aggregated by day if no brand/article filter, detailed otherwise."""
     pid = project.id
     tax_rate = float(project.tax_rate or 6)
+    detailed = bool(brand or vendor_code)
 
-    q = select(WbFunnelDaily).where(WbFunnelDaily.project_id == pid)
+    if not detailed:
+        # Aggregated view: SUM by date
+        q = select(
+            WbFunnelDaily.date,
+            func.sum(WbFunnelDaily.open_card).label("open_card"),
+            func.sum(WbFunnelDaily.add_to_cart).label("add_to_cart"),
+            func.sum(WbFunnelDaily.orders_count).label("orders_count"),
+            func.sum(WbFunnelDaily.orders_sum_rub).label("orders_sum_rub"),
+            func.avg(WbFunnelDaily.buyout_percent).label("buyout_percent"),
+            func.avg(WbFunnelDaily.cart_to_order_pct).label("cart_to_order_pct"),
+            func.avg(WbFunnelDaily.add_to_cart_pct).label("add_to_cart_pct"),
+            func.avg(WbFunnelDaily.avg_price).label("avg_price"),
+            func.sum(WbFunnelDaily.adv_views).label("adv_views"),
+            func.sum(WbFunnelDaily.adv_clicks).label("adv_clicks"),
+            func.sum(WbFunnelDaily.adv_sum).label("adv_sum"),
+        ).where(WbFunnelDaily.project_id == pid)
 
-    if date_from:
-        q = q.where(WbFunnelDaily.date >= date.fromisoformat(date_from))
-    if date_to:
-        q = q.where(WbFunnelDaily.date <= date.fromisoformat(date_to))
-    if brand:
-        q = q.where(WbFunnelDaily.brand == brand)
-    if vendor_code:
-        q = q.where(WbFunnelDaily.vendor_code.ilike(f"%{vendor_code}%"))
-    if subject:
-        q = q.where(WbFunnelDaily.subject == subject)
+        if date_from:
+            q = q.where(WbFunnelDaily.date >= date.fromisoformat(date_from))
+        if date_to:
+            q = q.where(WbFunnelDaily.date <= date.fromisoformat(date_to))
+        if subject:
+            q = q.where(WbFunnelDaily.subject == subject)
 
-    q = q.order_by(WbFunnelDaily.date.desc(), WbFunnelDaily.orders_sum_rub.desc())
+        q = q.group_by(WbFunnelDaily.date).order_by(WbFunnelDaily.date.desc())
+        result = await db.execute(q)
+        rows = result.all()
 
-    result = await db.execute(q)
-    rows = result.scalars().all()
+        data = []
+        for r in rows:
+            orders_sum = float(r.orders_sum_rub or 0)
+            buyout = float(r.buyout_percent or 0)
+            revenue = orders_sum * buyout / 100 if buyout else orders_sum
+            adv = float(r.adv_sum or 0)
+            tax = revenue * tax_rate / 100
+            profit = revenue - adv - tax
+            margin = (profit / revenue * 100) if revenue else 0
+            views = int(r.adv_views or 0)
+            clicks = int(r.adv_clicks or 0)
+            ctr = (clicks / views * 100) if views else 0
+            cpc = (adv / clicks) if clicks else 0
+            cpm = (adv / views * 1000) if views else 0
+            orders_count = int(r.orders_count or 0)
+            cr = (orders_count / clicks * 100) if clicks else 0
+            drr = (adv / orders_sum * 100) if orders_sum else 0
 
-    data = []
-    for r in rows:
-        orders_sum = float(r.orders_sum_rub or 0)
-        buyout = float(r.buyout_percent or 0)
-        revenue = orders_sum * buyout / 100 if buyout else orders_sum
-        adv = float(r.adv_sum or 0)
-        cost_per_unit = float(r.cost_price or 0)
-        cost_total = cost_per_unit * (r.orders_count or 0)
-        tax = revenue * tax_rate / 100
-        profit = revenue - cost_total - adv - tax
-        margin = (profit / revenue * 100) if revenue else 0
+            data.append({
+                "date": r.date.isoformat(),
+                "open_card": int(r.open_card or 0),
+                "add_to_cart": int(r.add_to_cart or 0),
+                "orders_count": orders_count,
+                "orders_sum_rub": orders_sum,
+                "buyout_percent": round(buyout, 2),
+                "revenue": round(revenue, 2),
+                "adv_sum": adv,
+                "adv_views": views,
+                "adv_clicks": clicks,
+                "ctr": round(ctr, 2),
+                "cpc": round(cpc, 2),
+                "cpm": round(cpm, 2),
+                "cr": round(cr, 2),
+                "drr": round(drr, 2),
+                "tax": round(tax, 2),
+                "profit": round(profit, 2),
+                "margin": round(margin, 2),
+                "avg_price": round(float(r.avg_price or 0), 2),
+                "add_to_cart_pct": round(float(r.add_to_cart_pct or 0), 2),
+                "cart_to_order_pct": round(float(r.cart_to_order_pct or 0), 2),
+            })
 
-        views = r.adv_views or 0
-        clicks = r.adv_clicks or 0
-        ctr = (clicks / views * 100) if views else 0
-        cpc = (adv / clicks) if clicks else 0
-        cpm = (adv / views * 1000) if views else 0
-        cr = (r.orders_count / clicks * 100) if clicks else 0
-        drr = (adv / orders_sum * 100) if orders_sum else 0
+        return {"data": data, "tax_rate": tax_rate, "detailed": False}
 
-        data.append({
-            "id": r.id,
-            "date": r.date.isoformat(),
-            "nm_id": r.nm_id,
-            "vendor_code": r.vendor_code,
-            "subject": r.subject,
-            "brand": r.brand,
-            # Funnel
-            "open_card": r.open_card,
-            "add_to_cart": r.add_to_cart,
-            "orders_count": r.orders_count,
-            "orders_sum_rub": orders_sum,
-            "buyout_percent": buyout,
-            "revenue": round(revenue, 2),
-            # Cost
-            "cost_price": cost_per_unit,
-            "cost_total": round(cost_total, 2),
-            "tax": round(tax, 2),
-            "profit": round(profit, 2),
-            "margin": round(margin, 2),
-            # Ads
-            "adv_sum": adv,
-            "adv_views": views,
-            "adv_clicks": clicks,
-            "ctr": round(ctr, 2),
-            "cpc": round(cpc, 2),
-            "cpm": round(cpm, 2),
-            "cr": round(cr, 2),
-            "drr": round(drr, 2),
-            # Conversions
-            "add_to_cart_pct": float(r.add_to_cart_pct or 0),
-            "cart_to_order_pct": float(r.cart_to_order_pct or 0),
-            # Stocks
-            "avg_price": float(r.avg_price or 0),
-            "stocks_wb": r.stocks_wb,
-            "stocks_mp": r.stocks_mp,
-        })
+    else:
+        # Detailed view: per product
+        q = select(WbFunnelDaily).where(WbFunnelDaily.project_id == pid)
 
-    return {"data": data, "tax_rate": tax_rate}
+        if date_from:
+            q = q.where(WbFunnelDaily.date >= date.fromisoformat(date_from))
+        if date_to:
+            q = q.where(WbFunnelDaily.date <= date.fromisoformat(date_to))
+        if brand:
+            q = q.where(WbFunnelDaily.brand == brand)
+        if vendor_code:
+            q = q.where(WbFunnelDaily.vendor_code.ilike(f"%{vendor_code}%"))
+        if subject:
+            q = q.where(WbFunnelDaily.subject == subject)
+
+        q = q.order_by(WbFunnelDaily.date.desc(), WbFunnelDaily.orders_sum_rub.desc())
+        result = await db.execute(q)
+        rows = result.scalars().all()
+
+        data = []
+        for r in rows:
+            orders_sum = float(r.orders_sum_rub or 0)
+            buyout = float(r.buyout_percent or 0)
+            revenue = orders_sum * buyout / 100 if buyout else orders_sum
+            adv = float(r.adv_sum or 0)
+            cost_per_unit = float(r.cost_price or 0)
+            cost_total = cost_per_unit * (r.orders_count or 0)
+            tax = revenue * tax_rate / 100
+            profit = revenue - cost_total - adv - tax
+            margin = (profit / revenue * 100) if revenue else 0
+            views = r.adv_views or 0
+            clicks = r.adv_clicks or 0
+            ctr = (clicks / views * 100) if views else 0
+            cpc = (adv / clicks) if clicks else 0
+            cpm = (adv / views * 1000) if views else 0
+            cr = (r.orders_count / clicks * 100) if clicks else 0
+            drr = (adv / orders_sum * 100) if orders_sum else 0
+
+            data.append({
+                "id": r.id,
+                "date": r.date.isoformat(),
+                "nm_id": r.nm_id,
+                "vendor_code": r.vendor_code,
+                "subject": r.subject,
+                "brand": r.brand,
+                "open_card": r.open_card,
+                "add_to_cart": r.add_to_cart,
+                "orders_count": r.orders_count,
+                "orders_sum_rub": orders_sum,
+                "buyout_percent": buyout,
+                "revenue": round(revenue, 2),
+                "cost_price": cost_per_unit,
+                "cost_total": round(cost_total, 2),
+                "tax": round(tax, 2),
+                "profit": round(profit, 2),
+                "margin": round(margin, 2),
+                "adv_sum": adv,
+                "adv_views": views,
+                "adv_clicks": clicks,
+                "ctr": round(ctr, 2),
+                "cpc": round(cpc, 2),
+                "cpm": round(cpm, 2),
+                "cr": round(cr, 2),
+                "drr": round(drr, 2),
+                "add_to_cart_pct": float(r.add_to_cart_pct or 0),
+                "cart_to_order_pct": float(r.cart_to_order_pct or 0),
+                "avg_price": float(r.avg_price or 0),
+                "stocks_wb": r.stocks_wb,
+                "stocks_mp": r.stocks_mp,
+            })
+
+        return {"data": data, "tax_rate": tax_rate, "detailed": True}
 
 
 @router.get("/summary")
