@@ -83,15 +83,25 @@ export default function FunnelPage() {
             await loadFilters();
             const rows = await loadData();
             if (rows.length === 0 && !initDone) {
-                // Auto-sync last 30 days
+                // Auto-sync last 7 days (shorter to avoid timeout)
+                const syncDates = (() => {
+                    const today = new Date();
+                    const to = new Date(today);
+                    to.setDate(to.getDate() - 1);
+                    const from = new Date(to);
+                    from.setDate(from.getDate() - 6); // 7 days only
+                    const f = (d: Date) => d.toISOString().slice(0, 10);
+                    return { from: f(from), to: f(to) };
+                })();
                 setSyncing(true);
                 try {
-                    await api.syncFunnel(defaultDates.from, defaultDates.to);
-                    await loadData();
-                    await loadFilters();
+                    await api.syncFunnel(syncDates.from, syncDates.to);
                 } catch (e: any) {
-                    console.error('Auto-sync failed:', e);
+                    console.warn('Auto-sync may have partially completed:', e.message);
                 }
+                // Always reload data — backend commits per-day, so partial data is saved
+                await loadData();
+                await loadFilters();
                 setSyncing(false);
             }
             setInitDone(true);
@@ -107,11 +117,12 @@ export default function FunnelPage() {
         try {
             const res = await api.syncFunnel(syncFrom, syncTo);
             alert(`Синхронизировано: ${res.rows} строк за ${res.days} дней`);
-            loadData();
-            loadFilters();
         } catch (e: any) {
-            alert('Ошибка: ' + (e.message || e));
+            console.warn('Sync may have partially completed:', e.message);
         }
+        // Always reload — partial data may have been saved
+        await loadData();
+        await loadFilters();
         setSyncing(false);
     };
 

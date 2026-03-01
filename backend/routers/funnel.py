@@ -160,6 +160,7 @@ async def _fetch_ad_campaigns(api_key: str) -> list[int]:
 async def _fetch_ad_stats(api_key: str, campaign_ids: list[int],
                           begin_date: str, end_date: str) -> dict:
     """Fetch detailed ad stats per nmId per date. Returns {date: {nm_id: {sum, clicks, views}}}."""
+    import asyncio
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -172,42 +173,54 @@ async def _fetch_ad_stats(api_key: str, campaign_ids: list[int],
     async with httpx.AsyncClient(timeout=60) as client:
         for idx, chunk in enumerate(chunks):
             if idx > 0:
-                import asyncio
-                await asyncio.sleep(20)  # WB rate limit
+                await asyncio.sleep(21)  # WB rate limit
 
             ids_param = ",".join(str(c) for c in chunk)
-            resp = await client.get(
-                f"https://advert-api.wildberries.ru/adv/v3/fullstats"
-                f"?ids={ids_param}&beginDate={begin_date}&endDate={end_date}",
-                headers=headers,
-            )
-            if resp.status_code != 200:
-                logger.error(f"WB adv stats error {resp.status_code}: {resp.text[:200]}")
-                continue
+            url = (f"https://advert-api.wildberries.ru/adv/v3/fullstats"
+                   f"?ids={ids_param}&beginDate={begin_date}&endDate={end_date}")
 
-            data = resp.json()
-            items = data if isinstance(data, list) else (data.get("data") or data)
-            if not isinstance(items, list):
-                continue
+            # Retry on 429 with backoff
+            for attempt in range(3):
+                try:
+                    resp = await client.get(url, headers=headers)
+                except Exception as e:
+                    logger.warning(f"Ad stats request failed: {e}")
+                    break
 
-            for campaign in items:
-                for day in campaign.get("days") or []:
-                    res_date = (day.get("date") or "")[:10]
-                    if not res_date:
-                        continue
-                    if res_date not in result:
-                        result[res_date] = {}
+                if resp.status_code == 429:
+                    wait = 30 * (attempt + 1)
+                    logger.warning(f"WB adv 429 rate limit, waiting {wait}s (attempt {attempt+1}/3)")
+                    await asyncio.sleep(wait)
+                    continue
+                elif resp.status_code != 200:
+                    logger.error(f"WB adv stats error {resp.status_code}: {resp.text[:200]}")
+                    break
 
-                    for app in day.get("apps") or []:
-                        for nm in app.get("nms") or []:
-                            nm_id = nm.get("nmId")
-                            if not nm_id:
-                                continue
-                            if nm_id not in result[res_date]:
-                                result[res_date][nm_id] = {"sum": 0, "clicks": 0, "views": 0}
-                            result[res_date][nm_id]["sum"] += nm.get("sum", 0)
-                            result[res_date][nm_id]["clicks"] += nm.get("clicks", 0)
-                            result[res_date][nm_id]["views"] += nm.get("views", 0)
+                # Success — parse
+                data = resp.json()
+                items = data if isinstance(data, list) else (data.get("data") or data)
+                if not isinstance(items, list):
+                    break
+
+                for campaign in items:
+                    for day in campaign.get("days") or []:
+                        res_date = (day.get("date") or "")[:10]
+                        if not res_date:
+                            continue
+                        if res_date not in result:
+                            result[res_date] = {}
+
+                        for app in day.get("apps") or []:
+                            for nm in app.get("nms") or []:
+                                nm_id = nm.get("nmId")
+                                if not nm_id:
+                                    continue
+                                if nm_id not in result[res_date]:
+                                    result[res_date][nm_id] = {"sum": 0, "clicks": 0, "views": 0}
+                                result[res_date][nm_id]["sum"] += nm.get("sum", 0)
+                                result[res_date][nm_id]["clicks"] += nm.get("clicks", 0)
+                                result[res_date][nm_id]["views"] += nm.get("views", 0)
+                break  # Success, move to next chunk
 
     return result
 
@@ -295,68 +308,78 @@ async def sync_funnel(
     if campaign_ids:
         ad_stats = await _fetch_ad_stats(adv_key, campaign_ids, dates[0], dates[-1])
 
-    # Fetch funnel data per day and upsert
+    # Fetch funnel data per day and upsert — commit after each day for partial progress
     total_rows = 0
+    errors = []
     for date_str in dates:
-        funnel_data = await _fetch_funnel(analytics_key, date_str)
+        try:
+            funnel_data = await _fetch_funnel(analytics_key, date_str)
 
-        rows_to_upsert = []
-        for nm_id, fd in funnel_data.items():
-            ad = (ad_stats.get(date_str) or {}).get(nm_id, {})
-            cost = cost_map.get(nm_id)
+            rows_to_upsert = []
+            for nm_id, fd in funnel_data.items():
+                ad = (ad_stats.get(date_str) or {}).get(nm_id, {})
+                cost = cost_map.get(nm_id)
 
-            rows_to_upsert.append({
-                "project_id": pid,
-                "date": date.fromisoformat(date_str),
-                "nm_id": nm_id,
-                "vendor_code": fd["vendor_code"],
-                "subject": fd["subject"],
-                "brand": fd["brand"],
-                "open_card": fd["open_card"],
-                "add_to_cart": fd["add_to_cart"],
-                "orders_count": fd["orders_count"],
-                "orders_sum_rub": fd["orders_sum_rub"],
-                "buyout_percent": fd["buyout_percent"],
-                "cart_to_order_pct": fd["cart_to_order_pct"],
-                "add_to_cart_pct": fd["add_to_cart_pct"],
-                "avg_price": fd["avg_price"],
-                "stocks_wb": fd["stocks_wb"],
-                "stocks_mp": fd["stocks_mp"],
-                "adv_views": ad.get("views", 0),
-                "adv_clicks": ad.get("clicks", 0),
-                "adv_sum": ad.get("sum", 0),
-                "cost_price": cost,
-            })
+                rows_to_upsert.append({
+                    "project_id": pid,
+                    "date": date.fromisoformat(date_str),
+                    "nm_id": nm_id,
+                    "vendor_code": fd["vendor_code"],
+                    "subject": fd["subject"],
+                    "brand": fd["brand"],
+                    "open_card": fd["open_card"],
+                    "add_to_cart": fd["add_to_cart"],
+                    "orders_count": fd["orders_count"],
+                    "orders_sum_rub": fd["orders_sum_rub"],
+                    "buyout_percent": fd["buyout_percent"],
+                    "cart_to_order_pct": fd["cart_to_order_pct"],
+                    "add_to_cart_pct": fd["add_to_cart_pct"],
+                    "avg_price": fd["avg_price"],
+                    "stocks_wb": fd["stocks_wb"],
+                    "stocks_mp": fd["stocks_mp"],
+                    "adv_views": ad.get("views", 0),
+                    "adv_clicks": ad.get("clicks", 0),
+                    "adv_sum": ad.get("sum", 0),
+                    "cost_price": cost,
+                })
 
-        if rows_to_upsert:
-            stmt = pg_insert(WbFunnelDaily).values(rows_to_upsert)
-            stmt = stmt.on_conflict_do_update(
-                constraint="uq_funnel_daily",
-                set_={
-                    "vendor_code": stmt.excluded.vendor_code,
-                    "subject": stmt.excluded.subject,
-                    "brand": stmt.excluded.brand,
-                    "open_card": stmt.excluded.open_card,
-                    "add_to_cart": stmt.excluded.add_to_cart,
-                    "orders_count": stmt.excluded.orders_count,
-                    "orders_sum_rub": stmt.excluded.orders_sum_rub,
-                    "buyout_percent": stmt.excluded.buyout_percent,
-                    "cart_to_order_pct": stmt.excluded.cart_to_order_pct,
-                    "add_to_cart_pct": stmt.excluded.add_to_cart_pct,
-                    "avg_price": stmt.excluded.avg_price,
-                    "stocks_wb": stmt.excluded.stocks_wb,
-                    "stocks_mp": stmt.excluded.stocks_mp,
-                    "adv_views": stmt.excluded.adv_views,
-                    "adv_clicks": stmt.excluded.adv_clicks,
-                    "adv_sum": stmt.excluded.adv_sum,
-                    "cost_price": stmt.excluded.cost_price,
-                },
-            )
-            await db.execute(stmt)
-            total_rows += len(rows_to_upsert)
+            if rows_to_upsert:
+                stmt = pg_insert(WbFunnelDaily).values(rows_to_upsert)
+                stmt = stmt.on_conflict_do_update(
+                    constraint="uq_funnel_daily",
+                    set_={
+                        "vendor_code": stmt.excluded.vendor_code,
+                        "subject": stmt.excluded.subject,
+                        "brand": stmt.excluded.brand,
+                        "open_card": stmt.excluded.open_card,
+                        "add_to_cart": stmt.excluded.add_to_cart,
+                        "orders_count": stmt.excluded.orders_count,
+                        "orders_sum_rub": stmt.excluded.orders_sum_rub,
+                        "buyout_percent": stmt.excluded.buyout_percent,
+                        "cart_to_order_pct": stmt.excluded.cart_to_order_pct,
+                        "add_to_cart_pct": stmt.excluded.add_to_cart_pct,
+                        "avg_price": stmt.excluded.avg_price,
+                        "stocks_wb": stmt.excluded.stocks_wb,
+                        "stocks_mp": stmt.excluded.stocks_mp,
+                        "adv_views": stmt.excluded.adv_views,
+                        "adv_clicks": stmt.excluded.adv_clicks,
+                        "adv_sum": stmt.excluded.adv_sum,
+                        "cost_price": stmt.excluded.cost_price,
+                    },
+                )
+                await db.execute(stmt)
+                await db.commit()  # Commit per day — saves partial data
+                total_rows += len(rows_to_upsert)
+                logger.info(f"Funnel synced {date_str}: {len(rows_to_upsert)} rows")
+        except Exception as e:
+            logger.error(f"Funnel sync error for {date_str}: {e}")
+            errors.append(str(e))
+            try:
+                await db.rollback()
+            except Exception:
+                pass
 
-    await db.commit()
-    return {"status": "ok", "rows": total_rows, "days": len(dates)}
+    return {"status": "ok", "rows": total_rows, "days": len(dates), "errors": errors[:5]}
 
 
 @router.get("/data")
