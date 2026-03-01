@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
+from backend.middleware import get_project_id
 from backend.models import Account, CounterpartyCategory, Override, OpeningBalance, CategoryRef
 from backend.schemas import (
     AccountSchema, CounterpartyCategorySchema, OverrideSchema,
@@ -20,20 +21,20 @@ router = APIRouter(prefix="/refs")
 # ─── Accounts ─────────────────────────────────────────────────────────────────
 
 @router.get("/accounts", response_model=List[AccountSchema])
-async def get_accounts(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Account).order_by(Account.bank, Account.currency))
+async def get_accounts(project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Account).where(Account.project_id == project_id).order_by(Account.bank, Account.currency))
     return result.scalars().all()
 
 
 @router.post("/accounts", response_model=AccountSchema)
-async def upsert_account(payload: AccountSchema, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Account).where(Account.account == payload.account))
+async def upsert_account(payload: AccountSchema, project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Account).where(Account.account == payload.account, Account.project_id == project_id))
     acc = result.scalar_one_or_none()
     if acc:
         for field, val in payload.model_dump(exclude={"id"}).items():
             setattr(acc, field, val)
     else:
-        acc = Account(**payload.model_dump(exclude={"id"}))
+        acc = Account(**payload.model_dump(exclude={"id"}), project_id=project_id)
         db.add(acc)
     await db.commit()
     await db.refresh(acc)
@@ -41,8 +42,8 @@ async def upsert_account(payload: AccountSchema, db: AsyncSession = Depends(get_
 
 
 @router.delete("/accounts/{account_id}", response_model=DeleteResponse)
-async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Account).where(Account.id == account_id))
+async def delete_account(account_id: int, project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Account).where(Account.id == account_id, Account.project_id == project_id))
     acc = result.scalar_one_or_none()
     if not acc:
         raise HTTPException(404, "Not found")
@@ -54,9 +55,9 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
 # ─── Counterparty Categories ──────────────────────────────────────────────────
 
 @router.get("/cp_categories", response_model=List[CounterpartyCategorySchema])
-async def get_cp_categories(db: AsyncSession = Depends(get_db)):
+async def get_cp_categories(project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(CounterpartyCategory).order_by(CounterpartyCategory.cat_lvl1, CounterpartyCategory.cp_name)
+        select(CounterpartyCategory).where(CounterpartyCategory.project_id == project_id).order_by(CounterpartyCategory.cat_lvl1, CounterpartyCategory.cp_name)
     )
     return result.scalars().all()
 
@@ -96,9 +97,9 @@ async def delete_cp_category(cpc_id: int, db: AsyncSession = Depends(get_db)):
 # ─── Overrides ────────────────────────────────────────────────────────────────
 
 @router.get("/overrides", response_model=List[OverrideSchema])
-async def get_overrides(db: AsyncSession = Depends(get_db)):
+async def get_overrides(project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(Override).order_by(Override.updated_at.desc()).limit(500)
+        select(Override).where(Override.project_id == project_id).order_by(Override.updated_at.desc()).limit(500)
     )
     return result.scalars().all()
 
@@ -117,8 +118,8 @@ async def delete_override(override_id: int, db: AsyncSession = Depends(get_db)):
 # ─── Opening Balances ─────────────────────────────────────────────────────────
 
 @router.get("/opening_balances", response_model=List[OpeningBalanceSchema])
-async def get_opening_balances(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(OpeningBalance).order_by(OpeningBalance.date_open))
+async def get_opening_balances(project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(OpeningBalance).where(OpeningBalance.project_id == project_id).order_by(OpeningBalance.date_open))
     return result.scalars().all()
 
 

@@ -203,6 +203,9 @@ class Transaction(Base):
         Index("ix_txn_cp_key", "cp_key"),
         Index("ix_txn_cashflow2", "is_cashflow2"),
         Index("ix_txn_cashflow_unassigned", "is_cashflow2", "cat_lvl1_2"),
+        Index("ix_txn_project_date", "project_id", "date"),
+        Index("ix_txn_project_cashflow", "project_id", "is_cashflow2", "cat_lvl1_2"),
+        Index("ix_txn_project_status", "project_id", "status"),
     )
 
 
