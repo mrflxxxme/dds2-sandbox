@@ -46,13 +46,17 @@ def _decrypt(value: str) -> str:
 
 
 async def _get_wb_key(db: AsyncSession, project_id: int, service: str) -> Optional[str]:
-    """Get decrypted WB API key by service label."""
+    """Get decrypted WB API key by service label. Also checks global keys (project_id IS NULL)."""
+    from sqlalchemy import or_
     result = await db.execute(
         select(IntegrationKey).where(
-            IntegrationKey.project_id == project_id,
+            or_(
+                IntegrationKey.project_id == project_id,
+                IntegrationKey.project_id.is_(None),
+            ),
             IntegrationKey.service == service,
             IntegrationKey.is_active == True,
-        ).limit(1)
+        ).order_by(IntegrationKey.project_id.desc().nullslast()).limit(1)
     )
     key = result.scalar_one_or_none()
     if not key:
