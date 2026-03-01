@@ -35,7 +35,9 @@ dds_app/
 │   │   ├── reports.py          # /api/v1/reports/* — DDS month, balance, FX, customs
 │   │   ├── planning.py         # /api/v1/planning/* — orders, payments, cashflow
 │   │   ├── cost.py             # /api/v1/cost/* — orders, nomenclature, duty rules
-│   │   └── integrations.py     # /api/v1/integrations/* — WB API (planned)
+│   │   └── integrations.py     # /api/v1/integrations/* — WB API keys, sync sales/nomenclature
+│   ├── integrations/
+│   │   └── wb_api.py           # WB Content/Statistics API client (cards, sales, orders)
 │   └── etl/                    # ETL pipeline
 │       ├── parsers.py          # 5 bank statement parsers
 │       ├── master_logic.py     # Categorization, txn_id, cp_key generation
@@ -103,6 +105,7 @@ dds_app/
 | Reports | (reads from transactions + opening_balances) | `reports.py` |
 | Planning | `orders`, `planned_payments`, `planned_incomes`, `lead_time`, `customs_*`, `wb_payouts`, `payment_fact_links` | `planning.py` |
 | Cost | `cost_orders`, `cost_order_items`, `nomenclature`, `duty_rules` | `cost.py` |
+| Integrations | `integration_keys`, `sync_log`, `wb_payouts` | `integrations.py` |
 
 ---
 
@@ -151,6 +154,38 @@ AGENTS.md  — обновить структуру, таблицу моделе�
 
 ---
 
+## WB (Wildberries) интеграция
+
+### API клиент (`backend/integrations/wb_api.py`)
+- `WBApiClient(api_key)` — HTTP client с retry logic
+- `get_sales(date_from)` — продажи (Statistics API)
+- `get_orders(date_from)` — заказы (Statistics API)
+- `get_finance_report(date_from, date_to)` — финансовый отчёт
+- `get_cards_list(limit=100)` — **карточки товаров** (Content API, cursor pagination)
+- `parse_wb_cards_to_nomenclature(cards)` — маппинг WB карточек → Nomenclature
+
+### Маппинг WB → Nomenclature
+| WB поле | Nomenclature поле |
+|---------|------------------|
+| `nmID` | `article_wb` |
+| `brand` | `brand` |
+| `subjectName` | `subject` |
+| `vendorCode` | `article_seller` |
+| `sizes[].skus[]` | `barcode` (одна строка на баркод) |
+| `dimensions.L×W×H/1000` | `volume_l` |
+
+### Endpoints
+- `POST /api/v1/integrations/keys` — добавить API ключ (Fernet encryption)
+- `POST /api/v1/integrations/wb/sync` — синхронизация продаж/заказов/финансов
+- `POST /api/v1/integrations/wb/sync_nomenclature` — **синхронизация номенклатуры из WB Content API**
+- `GET /api/v1/integrations/sync_log` — лог синхронизаций
+
+### UI
+- Кнопка **«🔄 Синхронизация WB»** на вкладке Номенклатура (`cost/page.tsx`)
+- Результат: loading spinner → сообщение (inserted/updated counts)
+
+---
+
 ## Безопасность (текущее состояние)
 
 ### ✅ Исправлено
@@ -175,4 +210,4 @@ AGENTS.md  — обновить структуру, таблицу моделе�
 
 ---
 
-*Последнее обновление: 2026-03-01*
+*Последнее обновление: 2026-03-01 — WB номенклатура sync, обязательные правила (docs + git push)*

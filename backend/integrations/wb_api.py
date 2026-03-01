@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 WB_API_BASE = "https://statistics-api.wildberries.ru"
 WB_API_BASE_V2 = "https://common-api.wildberries.ru"
+WB_CONTENT_API_BASE = "https://content-api.wildberries.ru"
 
 # Request timeout in seconds
 TIMEOUT = 30
@@ -105,8 +106,115 @@ class WBApiClient:
             params,
         )
 
+    async def get_cards_list(self, limit: int = 100) -> list[dict]:
+        """
+        Fetch ALL product cards using cursor-based pagination.
+        WB Content API: POST /content/v2/get/cards/list
+        Returns flattened list of all cards.
+        """
+        all_cards = []
+        cursor = {"limit": limit}
+
+        while True:
+            body = {
+                "settings": {
+                    "cursor": cursor,
+                    "filter": {"withPhoto": -1},
+                }
+            }
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                url = f"{WB_CONTENT_API_BASE}/content/v2/get/cards/list"
+                logger.info("WB Content API POST cards/list cursor=%s", cursor)
+                response = await client.post(
+                    url, headers=self.headers, json=body
+                )
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401)")
+                if response.status_code == 429:
+                    raise ValueError("WB API: слишком много запросов (429)")
+                if response.status_code != 200:
+                    raise ValueError(
+                        f"WB Content API error: HTTP {response.status_code} — {response.text[:200]}"
+                    )
+
+                data = response.json()
+                cards = data.get("cards", [])
+                if not cards:
+                    break
+
+                all_cards.extend(cards)
+
+                # Cursor pagination
+                next_cursor = data.get("cursor", {})
+                total = next_cursor.get("total", 0)
+
+                if len(all_cards) >= total or len(cards) < limit:
+                    break
+
+                cursor = {
+                    "updatedAt": next_cursor.get("updatedAt"),
+                    "nmID": next_cursor.get("nmID"),
+                    "limit": limit,
+                }
+
+        logger.info("WB Content API: fetched %d cards total", len(all_cards))
+        return all_cards
+
+
+def parse_wb_cards_to_nomenclature(cards: list[dict]) -> list[dict]:
+    """
+    Transform WB Content API cards response into our Nomenclature format.
+    One card may have multiple barcodes (sizes), so we flatten them.
+
+    WB card → Nomenclature mapping:
+      - nmID → article_wb
+      - brand → brand
+      - subjectName → subject
+      - vendorCode → article_seller
+      - sizes[].skus[] → barcode (one row per barcode)
+      - dimensions.length × width × height / 1000 → volume_l
+    """
+    nomenclature = []
+    seen_barcodes = set()
+
+    for card in cards:
+        nm_id = card.get("nmID")
+        brand = card.get("brand", "")
+        subject = card.get("subjectName", "")
+        vendor_code = card.get("vendorCode", "")
+
+        # Calculate volume in liters from dimensions (cm → liters)
+        dims = card.get("dimensions", {})
+        length_cm = dims.get("length", 0) or 0
+        width_cm = dims.get("width", 0) or 0
+        height_cm = dims.get("height", 0) or 0
+        volume_l = (length_cm * width_cm * height_cm) / 1000.0  # cm³ → liters
+
+        # Each size has its own barcodes (skus)
+        sizes = card.get("sizes", [])
+        for size in sizes:
+            skus = size.get("skus", [])
+            for barcode in skus:
+                barcode = str(barcode).strip()
+                if not barcode or barcode in seen_barcodes:
+                    continue
+                seen_barcodes.add(barcode)
+
+                nomenclature.append({
+                    "barcode": barcode,
+                    "brand": brand,
+                    "subject": subject,
+                    "article_seller": vendor_code,
+                    "article_wb": nm_id,
+                    "volume_l": round(volume_l, 4),
+                })
+
+    return nomenclature
+
 
 def parse_wb_sales_to_payouts(sales: list[dict]) -> list[dict]:
+
     """
     Transform WB sales API response into our wb_payouts format.
     Groups by saleID and maps fields.

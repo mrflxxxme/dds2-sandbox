@@ -234,7 +234,102 @@ async def sync_wb_sales(
     return sync_log
 
 
+@router.post("/wb/sync_nomenclature", response_model=SyncLogSchema)
+async def sync_wb_nomenclature(
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Sync nomenclature from Wildberries Content API (cards/list).
+    Fetches all product cards and upserts into nomenclature table.
+    Maps: nmID→article_wb, subjectName→subject, vendorCode→article_seller,
+          sizes.skus→barcode, dimensions→volume_l.
+    """
+    from backend.models import Nomenclature
+
+    # Get active WB key
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.service == "wb",
+            IntegrationKey.is_active == True,
+        )
+    )
+    key = result.scalar_one_or_none()
+    if not key:
+        raise HTTPException(400, "WB API ключ не найден. Добавьте ключ через /integrations/keys")
+
+    api_key = _decrypt(key.encrypted_key)
+
+    # Create sync log
+    sync_log = SyncLog(
+        integration_id=key.id,
+        service="wb",
+        sync_type="nomenclature",
+        started_at=datetime.utcnow(),
+        status="RUNNING",
+    )
+    db.add(sync_log)
+    await db.flush()
+
+    try:
+        from backend.integrations.wb_api import WBApiClient, parse_wb_cards_to_nomenclature
+
+        client = WBApiClient(api_key)
+        raw_cards = await client.get_cards_list(limit=100)
+        nom_items = parse_wb_cards_to_nomenclature(raw_cards)
+
+        inserted = 0
+        updated = 0
+
+        for item in nom_items:
+            bc = item["barcode"]
+            result = await db.execute(
+                select(Nomenclature).where(Nomenclature.barcode == bc)
+            )
+            nom = result.scalar_one_or_none()
+            if nom:
+                nom.brand = item.get("brand") or nom.brand
+                nom.subject = item.get("subject") or nom.subject
+                nom.article_seller = item.get("article_seller") or nom.article_seller
+                nom.article_wb = item.get("article_wb") or nom.article_wb
+                if item.get("volume_l"):
+                    nom.volume_l = Decimal(str(item["volume_l"]))
+                nom.updated_at = datetime.utcnow()
+                updated += 1
+            else:
+                nom = Nomenclature(
+                    barcode=bc,
+                    brand=item.get("brand"),
+                    subject=item.get("subject"),
+                    article_seller=item.get("article_seller"),
+                    article_wb=item.get("article_wb"),
+                    volume_l=Decimal(str(item.get("volume_l", 0))),
+                )
+                db.add(nom)
+                inserted += 1
+
+        sync_log.rows_fetched = len(raw_cards)
+        sync_log.rows_inserted = inserted
+        sync_log.status = "OK"
+        sync_log.finished_at = datetime.utcnow()
+        sync_log.error_msg = f"cards={len(raw_cards)}, barcodes={len(nom_items)}, inserted={inserted}, updated={updated}"
+
+        key.last_sync_at = datetime.utcnow()
+        await db.commit()
+        await db.refresh(sync_log)
+
+    except Exception as e:
+        sync_log.status = "ERROR"
+        sync_log.error_msg = str(e)[:1000]
+        sync_log.finished_at = datetime.utcnow()
+        await db.commit()
+        await db.refresh(sync_log)
+        logger.error("WB nomenclature sync error: %s", e)
+
+    return sync_log
+
+
 @router.get("/sync_log", response_model=list[SyncLogSchema])
+
 async def get_sync_log(
     service: Optional[str] = Query(None),
     limit: int = Query(20),

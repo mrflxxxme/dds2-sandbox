@@ -309,6 +309,9 @@ class ApiClient {
     getNomenclature() {
         return this.request<any[]>('GET', '/api/v1/cost/nomenclature');
     }
+    syncNomenclature() {
+        return this.request<any>('POST', '/api/v1/integrations/wb/sync_nomenclature');
+    }
 
     // Cost — Duty rules
     getDutyRules() {

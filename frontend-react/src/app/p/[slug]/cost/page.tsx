@@ -144,7 +144,28 @@ function CostOrders() {
 function Nomenclature() {
     const [data, setData] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
-    useEffect(() => { (async () => { try { setData(await api.getNomenclature()); } catch { } setLoading(false); })(); }, []);
+    const [syncing, setSyncing] = useState(false);
+    const [syncMsg, setSyncMsg] = useState('');
+
+    const load = async () => { try { setData(await api.getNomenclature()); } catch { } setLoading(false); };
+    useEffect(() => { load(); }, []);
+
+    const handleSync = async () => {
+        setSyncing(true);
+        setSyncMsg('');
+        try {
+            const result = await api.syncNomenclature();
+            if (result.status === 'OK') {
+                setSyncMsg(`✅ Синхронизация завершена: ${result.error_msg || 'OK'}`);
+            } else {
+                setSyncMsg(`❌ Ошибка: ${result.error_msg || 'unknown'}`);
+            }
+            await load();
+        } catch (e: any) {
+            setSyncMsg(`❌ ${e.message}`);
+        }
+        setSyncing(false);
+    };
 
     if (loading) return <div style={{ padding: 20, color: 'var(--color-text-muted)' }}>Загрузка...</div>;
 
@@ -152,8 +173,21 @@ function Nomenclature() {
         <div className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                 <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Номенклатура ({data.length})</h3>
-                {data.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'nomenclature')}>📥 Excel</button>}
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <button
+                        className="btn btn-primary btn-sm"
+                        onClick={handleSync}
+                        disabled={syncing}
+                        style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                    >
+                        {syncing ? (
+                            <><span className="spinner" style={{ width: 14, height: 14, border: '2px solid rgba(255,255,255,0.3)', borderTop: '2px solid #fff', borderRadius: '50%', animation: 'spin 0.8s linear infinite', display: 'inline-block' }} /> Синхронизация...</>
+                        ) : '🔄 Синхронизация WB'}
+                    </button>
+                    {data.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'nomenclature')}>📥 Excel</button>}
+                </div>
             </div>
+            {syncMsg && <div style={{ fontSize: 13, marginBottom: 12, padding: '8px 12px', borderRadius: 6, background: syncMsg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', color: syncMsg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)' }}>{syncMsg}</div>}
             {data.length > 0 ? (
                 <div style={{ overflowX: 'auto', maxHeight: 500, overflowY: 'auto' }}>
                     <table className="data-table">
@@ -161,7 +195,7 @@ function Nomenclature() {
                         <tbody>{data.map((r, i) => <tr key={i}>{Object.values(r).map((v: any, j) => <td key={j} style={{ fontSize: 12 }}>{typeof v === 'number' ? formatNumber(v) : v ?? '—'}</td>)}</tr>)}</tbody>
                     </table>
                 </div>
-            ) : <div className="empty-state"><div className="empty-state-text">Номенклатура пуста</div></div>}
+            ) : <div className="empty-state"><div className="empty-state-text">Номенклатура пуста. Нажмите «🔄 Синхронизация WB» для загрузки из WB</div></div>}
         </div>
     );
 }
