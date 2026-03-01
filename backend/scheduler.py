@@ -9,6 +9,7 @@ Uses APScheduler (in-process, AsyncIOScheduler).
 """
 
 import logging
+import traceback
 from datetime import date, timedelta
 
 import pytz
@@ -258,7 +259,7 @@ async def fast_backfill_tick():
             _stop_fast_backfill()
 
     except Exception as e:
-        logger.error(f"Fast backfill error: {e}")
+        logger.error(f"Fast backfill error: {e}\n{traceback.format_exc()}")
     finally:
         _backfill_lock = False
 
@@ -297,7 +298,7 @@ def start_scheduler():
     from apscheduler.triggers.interval import IntervalTrigger
     scheduler.add_job(
         fast_backfill_tick,
-        trigger=IntervalTrigger(seconds=30),
+        trigger=IntervalTrigger(seconds=60),
         id="fast_backfill",
         name="Fast backfill (every 30s)",
         replace_existing=True,
