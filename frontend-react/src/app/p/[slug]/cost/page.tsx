@@ -146,9 +146,19 @@ function Nomenclature() {
     const [loading, setLoading] = useState(true);
     const [syncing, setSyncing] = useState(false);
     const [syncMsg, setSyncMsg] = useState('');
+    const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
 
     const load = async () => { try { setData(await api.getNomenclature()); } catch { } setLoading(false); };
-    useEffect(() => { load(); }, []);
+    const loadLastSync = async () => {
+        try {
+            const logs = await api.getSyncLog();
+            const nomLog = logs.find((l: any) => l.sync_type === 'nomenclature' && l.status === 'OK');
+            if (nomLog?.finished_at) {
+                setLastSyncAt(nomLog.finished_at);
+            }
+        } catch { }
+    };
+    useEffect(() => { load(); loadLastSync(); }, []);
 
     const handleSync = async () => {
         setSyncing(true);
@@ -157,6 +167,7 @@ function Nomenclature() {
             const result = await api.syncNomenclature();
             if (result.status === 'OK') {
                 setSyncMsg(`✅ Синхронизация завершена: ${result.error_msg || 'OK'}`);
+                if (result.finished_at) setLastSyncAt(result.finished_at);
             } else {
                 setSyncMsg(`❌ Ошибка: ${result.error_msg || 'unknown'}`);
             }
@@ -167,12 +178,20 @@ function Nomenclature() {
         setSyncing(false);
     };
 
+    const formatSyncTime = (iso: string) => {
+        const d = new Date(iso);
+        return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    };
+
     if (loading) return <div style={{ padding: 20, color: 'var(--color-text-muted)' }}>Загрузка...</div>;
 
     return (
         <div className="glass-card">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Номенклатура ({data.length})</h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <div>
+                    <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Номенклатура ({data.length})</h3>
+                    {lastSyncAt && <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 4 }}>🕐 Последняя синхронизация: {formatSyncTime(lastSyncAt)}</div>}
+                </div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                     <button
                         className="btn btn-primary btn-sm"

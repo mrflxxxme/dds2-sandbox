@@ -110,6 +110,7 @@ class WBApiClient:
         """
         Fetch ALL product cards using cursor-based pagination.
         WB Content API: POST /content/v2/get/cards/list
+        Max 100 per page. Continues until all pages fetched.
         Returns flattened list of all cards.
         """
         all_cards = []
@@ -145,13 +146,12 @@ class WBApiClient:
 
                 all_cards.extend(cards)
 
-                # Cursor pagination
-                next_cursor = data.get("cursor", {})
-                total = next_cursor.get("total", 0)
-
-                if len(all_cards) >= total or len(cards) < limit:
+                # Stop if this was the last page (fewer cards than limit)
+                if len(cards) < limit:
                     break
 
+                # Cursor pagination — use nmID and updatedAt for next page
+                next_cursor = data.get("cursor", {})
                 cursor = {
                     "updatedAt": next_cursor.get("updatedAt"),
                     "nmID": next_cursor.get("nmID"),
