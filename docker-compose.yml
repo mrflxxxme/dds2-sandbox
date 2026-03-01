@@ -87,23 +87,6 @@ services:
     networks:
       - internal
 
-  frontend:
-    build:
-      context: .
-      dockerfile: ./Dockerfile.frontend
-    ports:
-      - "8501:8501"
-    depends_on:
-      - backend
-    env_file: .env
-    environment:
-      API_URL: ${API_URL:-http://backend:8000}
-    volumes:
-      - ./frontend:/app/frontend
-    restart: unless-stopped
-    networks:
-      - internal
-
   frontend-react:
     build:
       context: ./frontend-react

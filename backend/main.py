@@ -93,6 +93,10 @@ app.add_middleware(
     allow_credentials=True,
 )
 
+# Rate limiting (Redis-based)
+from backend.rate_limit import RateLimitMiddleware
+app.add_middleware(RateLimitMiddleware)
+
 # Register unified error handlers
 from backend.exceptions import register_exception_handlers
 register_exception_handlers(app)
