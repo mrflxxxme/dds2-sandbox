@@ -679,13 +679,13 @@ export default function FunnelPage() {
                         const negativeAnomalies = (dayReport.anomalies || []).filter((a: any) => a.flags.some((f: string) => f.includes('📉') || f.includes('⚠️') || f.includes('🚫')));
 
                         const AnomalyRow = ({ a, positive }: { a: any; positive: boolean }) => (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
-                                <span style={{ minWidth: 24, textAlign: 'center', fontSize: 14 }}>{positive ? '📈' : '📉'}</span>
-                                <span style={{ minWidth: 140, fontWeight: 600, fontSize: 11 }}>{a.vendor_code || a.nm_id}</span>
-                                <span style={{ minWidth: 100, color: '#888', fontSize: 10 }}>{a.subject}</span>
-                                <span style={{ flex: 1, fontSize: 11 }}>{a.flags.join(' · ')}</span>
-                                <span style={{ color: '#8b5cf6', fontWeight: 600, fontSize: 11, minWidth: 80, textAlign: 'right' }}>₽{dayFmt(a.orders_sum)}</span>
-                                <span style={{ color: '#f59e0b', fontSize: 11, minWidth: 60, textAlign: 'right' }}>₽{dayFmt(a.adv_sum)}</span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 8px', fontSize: 11, borderBottom: '1px solid rgba(255,255,255,0.04)', whiteSpace: 'nowrap' }}>
+                                <span style={{ fontSize: 12, flexShrink: 0 }}>{positive ? '📈' : '📉'}</span>
+                                <span style={{ fontWeight: 600, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 0 }} title={a.vendor_code || String(a.nm_id)}>{a.vendor_code || a.nm_id}</span>
+                                <span style={{ color: '#888', fontSize: 10, maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 0 }} title={a.subject}>{a.subject}</span>
+                                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', color: '#aaa', fontSize: 10 }} title={a.flags.join(' · ')}>{a.flags.join(' · ')}</span>
+                                <span style={{ color: '#8b5cf6', fontWeight: 600, flexShrink: 0, minWidth: 60, textAlign: 'right' }}>₽{dayFmt(a.orders_sum)}</span>
+                                <span style={{ color: '#f59e0b', flexShrink: 0, minWidth: 50, textAlign: 'right' }}>₽{dayFmt(a.adv_sum)}</span>
                             </div>
                         );
 
@@ -720,7 +720,7 @@ export default function FunnelPage() {
                                         <h3 style={{ margin: 0, fontSize: 14 }}>📈 Тренд за {dayTrendDays} дней</h3>
                                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                                             {dayTrendFields.map(f => (
-                                                <button key={f.key} onClick={() => setDayActiveFields(prev => prev.includes(f.key) ? prev.filter(k => k !== f.key) : [...prev, f.key])}
+                                                <button key={f.key} onClick={() => setDayActiveFields((prev: string[]) => prev.includes(f.key) ? prev.filter((k: string) => k !== f.key) : [...prev, f.key])}
                                                     style={{
                                                         padding: '3px 8px', fontSize: 11, borderRadius: 4, cursor: 'pointer', border: '1px solid',
                                                         borderColor: dayActiveFields.includes(f.key) ? f.color : 'rgba(255,255,255,0.1)',
@@ -739,18 +739,22 @@ export default function FunnelPage() {
                                 {(positiveAnomalies.length > 0 || negativeAnomalies.length > 0) && (
                                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
                                         {/* Positive */}
-                                        <div className="glass-card" style={{ padding: '12px 14px', borderLeft: '3px solid #10b981' }}>
-                                            <h4 style={{ margin: '0 0 8px', fontSize: 13, color: '#10b981' }}>📈 Рост ({positiveAnomalies.length})</h4>
-                                            {positiveAnomalies.length === 0 ? <div style={{ color: '#666', fontSize: 12 }}>Нет аномалий роста</div> :
-                                                positiveAnomalies.map((a: any, i: number) => <AnomalyRow key={i} a={a} positive />)
-                                            }
+                                        <div className="glass-card" style={{ padding: '12px 14px', borderLeft: '3px solid #10b981', display: 'flex', flexDirection: 'column' as const }}>
+                                            <h4 style={{ margin: '0 0 8px', fontSize: 13, color: '#10b981', flexShrink: 0 }}>📈 Рост ({positiveAnomalies.length})</h4>
+                                            <div style={{ maxHeight: 340, overflowY: 'auto' as const, flex: 1 }}>
+                                                {positiveAnomalies.length === 0 ? <div style={{ color: '#666', fontSize: 12 }}>Нет аномалий роста</div> :
+                                                    positiveAnomalies.map((a: any, i: number) => <AnomalyRow key={i} a={a} positive />)
+                                                }
+                                            </div>
                                         </div>
                                         {/* Negative */}
-                                        <div className="glass-card" style={{ padding: '12px 14px', borderLeft: '3px solid #ef4444' }}>
-                                            <h4 style={{ margin: '0 0 8px', fontSize: 13, color: '#ef4444' }}>📉 Снижение / Проблемы ({negativeAnomalies.length})</h4>
-                                            {negativeAnomalies.length === 0 ? <div style={{ color: '#666', fontSize: 12 }}>Нет проблемных товаров</div> :
-                                                negativeAnomalies.map((a: any, i: number) => <AnomalyRow key={i} a={a} positive={false} />)
-                                            }
+                                        <div className="glass-card" style={{ padding: '12px 14px', borderLeft: '3px solid #ef4444', display: 'flex', flexDirection: 'column' as const }}>
+                                            <h4 style={{ margin: '0 0 8px', fontSize: 13, color: '#ef4444', flexShrink: 0 }}>📉 Снижение / Проблемы ({negativeAnomalies.length})</h4>
+                                            <div style={{ maxHeight: 340, overflowY: 'auto' as const, flex: 1 }}>
+                                                {negativeAnomalies.length === 0 ? <div style={{ color: '#666', fontSize: 12 }}>Нет проблемных товаров</div> :
+                                                    negativeAnomalies.map((a: any, i: number) => <AnomalyRow key={i} a={a} positive={false} />)
+                                                }
+                                            </div>
                                         </div>
                                     </div>
                                 )}
