@@ -52,3 +52,13 @@ DDS Development Rules
    - Backend: log errors with structured logging, return meaningful HTTP status codes.
    - Frontend: always show user-friendly error messages, never raw stack traces.
    - On sync errors: still reload data (partial data may have been saved).
+
+10. Hot-reload vs Docker rebuild:
+   - Backend .py files: hot-reload автоматический (uvicorn --reload), НЕ пересобирай Docker.
+   - Frontend .tsx/.ts/.css files: hot-reload автоматический (Next.js), НЕ пересобирай Docker.
+   - Docker rebuild ТОЛЬКО при изменении: Dockerfile, docker-compose.yml, package.json, requirements-backend.txt.
+
+11. Skills и Workflows:
+   - При создании нового API — используй skill `new-api-endpoint`.
+   - При создании новой страницы — используй skill `new-page`.
+   - При изменении схемы БД — используй skill `db-migration`.

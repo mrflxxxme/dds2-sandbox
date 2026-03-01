@@ -71,9 +71,14 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as session:
         await ensure_default_admin(session)
 
+    # Start background scheduler (funnel auto-sync)
+    from backend.scheduler import start_scheduler, stop_scheduler
+    start_scheduler()
+
     yield
 
-    # Shutdown: close Redis connection
+    # Shutdown: stop scheduler + close Redis
+    stop_scheduler()
     from backend.cache import close_redis
     await close_redis()
 

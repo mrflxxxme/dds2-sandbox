@@ -237,32 +237,32 @@ class CostOverrideRequest(BaseModel):
     cost_price: float
 
 
-# ─── Endpoints ───────────────────────────────────────────────────────────────
+# ─── Core sync logic (reusable by endpoint + scheduler) ─────────────────────
 
-@router.post("/sync")
-async def sync_funnel(
-    body: SyncRequest,
-    project: Project = Depends(get_current_project),
-    db: AsyncSession = Depends(get_db),
-):
-    """Sync WB sales funnel + advertising data for a date range."""
-    pid = project.id
+async def run_funnel_sync(
+    db: AsyncSession, project_id: int, date_from: str, date_to: str
+) -> dict:
+    """
+    Core funnel sync: fetch WB data for date range and upsert into DB.
+    Callable from both the POST /sync endpoint and the background scheduler.
+    Returns {status, rows, days, errors}.
+    """
+    pid = project_id
 
     # Get API keys
     analytics_key = await _get_wb_key(db, pid, "wb_analytics")
     if not analytics_key:
-        # Try generic "wb" key
         analytics_key = await _get_wb_key(db, pid, "wb")
     if not analytics_key:
-        raise HTTPException(400, "API ключ WB (аналитика) не найден. Добавьте ключ с сервисом 'wb_analytics' или 'wb'.")
+        return {"status": "error", "rows": 0, "days": 0, "errors": ["API ключ WB не найден"]}
 
     adv_key = await _get_wb_key(db, pid, "wb_advert")
     if not adv_key:
-        adv_key = analytics_key  # Often same key
+        adv_key = analytics_key
 
     # Build date range
-    d_from = date.fromisoformat(body.date_from)
-    d_to = date.fromisoformat(body.date_to)
+    d_from = date.fromisoformat(date_from)
+    d_to = date.fromisoformat(date_to)
     dates = []
     d = d_from
     while d <= d_to:
@@ -270,9 +270,9 @@ async def sync_funnel(
         d += timedelta(days=1)
 
     if not dates:
-        raise HTTPException(400, "Неверный диапазон дат")
+        return {"status": "error", "rows": 0, "days": 0, "errors": ["Пустой диапазон дат"]}
 
-    # Get cost prices from orders (latest order's items by article_seller)
+    # Get cost prices from orders
     cost_map: dict = {}
     try:
         cost_result = await db.execute(
@@ -303,12 +303,12 @@ async def sync_funnel(
     # Fetch ad campaigns
     campaign_ids = await _fetch_ad_campaigns(adv_key)
 
-    # Fetch ad stats for the whole range at once
+    # Fetch ad stats for the whole range
     ad_stats = {}
     if campaign_ids:
         ad_stats = await _fetch_ad_stats(adv_key, campaign_ids, dates[0], dates[-1])
 
-    # Fetch funnel data per day and upsert — commit after each day for partial progress
+    # Fetch funnel data per day and upsert — commit per day for partial progress
     total_rows = 0
     errors = []
     for date_str in dates:
@@ -368,7 +368,7 @@ async def sync_funnel(
                     },
                 )
                 await db.execute(stmt)
-                await db.commit()  # Commit per day — saves partial data
+                await db.commit()
                 total_rows += len(rows_to_upsert)
                 logger.info(f"Funnel synced {date_str}: {len(rows_to_upsert)} rows")
         except Exception as e:
@@ -380,6 +380,54 @@ async def sync_funnel(
                 pass
 
     return {"status": "ok", "rows": total_rows, "days": len(dates), "errors": errors[:5]}
+
+
+# ─── Endpoints ───────────────────────────────────────────────────────────────
+
+@router.post("/sync")
+async def sync_funnel(
+    body: SyncRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Sync WB sales funnel + advertising data for a date range (manual trigger)."""
+    result = await run_funnel_sync(db, project.id, body.date_from, body.date_to)
+    if result["status"] == "error" and not result["rows"]:
+        raise HTTPException(400, result["errors"][0] if result["errors"] else "Sync failed")
+    return result
+
+
+@router.get("/sync_status")
+async def get_sync_status(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get scheduler status and last sync info."""
+    from backend.scheduler import get_scheduler_info
+
+    # Last sync log for this project's funnel
+    last_sync = await db.execute(
+        select(SyncLog).where(
+            SyncLog.service == "wb_funnel",
+        ).order_by(SyncLog.id.desc()).limit(5)
+    )
+    logs = [
+        {
+            "id": s.id,
+            "sync_type": s.sync_type,
+            "status": s.status,
+            "rows_inserted": s.rows_inserted,
+            "started_at": s.started_at.isoformat() if s.started_at else None,
+            "finished_at": s.finished_at.isoformat() if s.finished_at else None,
+            "error_msg": s.error_msg,
+        }
+        for s in last_sync.scalars()
+    ]
+
+    return {
+        "scheduler": get_scheduler_info(),
+        "last_syncs": logs,
+    }
 
 
 @router.get("/data")
