@@ -151,15 +151,27 @@ AGENTS.md  — обновить структуру, таблицу моделе�
 
 ---
 
-## Известные проблемы (TODO)
+## Безопасность (текущее состояние)
 
-- [ ] Data routers не фильтруют по project_id (IDOR vulnerability)
-- [ ] JWT SECRET_KEY имеет дефолтное значение
-- [ ] Default admin/admin credentials
-- [ ] Открытые порты DB/Redis/MinIO в docker-compose
-- [ ] Нет rate limiting на login
-- [ ] Token в localStorage (XSS risk)
-- [ ] CORS_ORIGINS не включает :3000
+### ✅ Исправлено
+- [x] SECRET_KEY — auto-генерируется при отсутствии, валидация длины ≥32
+- [x] Default admin — случайный пароль, выводится в логи при первом запуске
+- [x] CORS — включает :3000, restricted methods/headers
+- [x] Docker ports — DB/Redis/MinIO закрыты снаружи
+- [x] Redis — требует пароль
+- [x] Rate limiting — Redis-based на login/register (10/мин)
+- [x] Password validation — минимум 6 символов
+- [x] File upload — валидация расширения (.xlsx/.xls/.csv/.pdf) и размера (50MB)
+- [x] Filename sanitization — path traversal protection
+- [x] Register toggle — можно отключить через `REGISTER_ENABLED=false`
+- [x] Security logging — login attempts, admin creation
+- [x] Seed endpoint removed — убран публичный `/api/seed_defaults`
+
+### ⚠️ TODO (архитектурные)
+- [ ] Project-level data isolation (project_id FK + middleware)
+- [ ] JWT в HttpOnly cookies вместо localStorage
+- [ ] Refresh tokens + token revocation (Redis blacklist)
+- [ ] Admin role-based access
 
 ---
 

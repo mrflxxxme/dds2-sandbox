@@ -1,10 +1,12 @@
 """
-Authentication endpoints: login, change password.
+Authentication endpoints: login, register, profile, change password.
+Rate limiting on login via Redis.
 """
 
+import logging
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,12 +16,49 @@ from backend.auth import (
     hash_password,
     create_access_token,
     get_current_user,
+    validate_password_strength,
 )
+from backend.config import settings
 from backend.database import get_db
 from backend.models import User
 
+logger = logging.getLogger("dds.auth")
+
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
+
+# ─── Rate Limiting ────────────────────────────────────────────────────────────
+
+async def check_rate_limit(request: Request, action: str = "login"):
+    """Check Redis-based rate limit. Raises 429 if exceeded."""
+    try:
+        from backend.cache import get_redis
+        redis = await get_redis()
+        if redis is None:
+            return  # Redis unavailable — skip rate limiting
+
+        client_ip = request.client.host if request.client else "unknown"
+        key = f"rate_limit:{action}:{client_ip}"
+
+        current = await redis.get(key)
+        if current and int(current) >= settings.LOGIN_RATE_LIMIT:
+            logger.warning(f"Rate limit exceeded for {action} from {client_ip}")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Слишком много попыток. Подождите минуту.",
+            )
+
+        pipe = redis.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, 60)  # 1 minute window
+        await pipe.execute()
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # Redis error — don't block login
+
+
+# ─── Schemas ──────────────────────────────────────────────────────────────────
 
 class LoginRequest(BaseModel):
     username: str
@@ -34,23 +73,6 @@ class TokenResponse(BaseModel):
 class ChangePasswordRequest(BaseModel):
     old_password: str
     new_password: str
-
-
-@router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(User).where(User.username == body.username, User.is_active == True)
-    )
-    user = result.scalar_one_or_none()
-
-    if user is None or not verify_password(body.password, user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Неверный логин или пароль",
-        )
-
-    token = create_access_token(user.id, user.username)
-    return TokenResponse(access_token=token)
 
 
 class RegisterRequest(BaseModel):
@@ -77,9 +99,53 @@ class ProfileUpdateRequest(BaseModel):
     last_name: str | None = None
 
 
+# ─── Login ────────────────────────────────────────────────────────────────────
+
+@router.post("/login", response_model=TokenResponse)
+async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    """Authenticate user and return JWT token. Rate limited."""
+    await check_rate_limit(request, "login")
+
+    result = await db.execute(
+        select(User).where(User.username == body.username, User.is_active == True)
+    )
+    user = result.scalar_one_or_none()
+
+    if user is None or not verify_password(body.password, user.password_hash):
+        logger.info(f"Failed login attempt for username: {body.username}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Неверный логин или пароль",
+        )
+
+    logger.info(f"Successful login: {body.username} (id={user.id})")
+    token = create_access_token(user.id, user.username)
+    return TokenResponse(access_token=token)
+
+
+# ─── Register ─────────────────────────────────────────────────────────────────
+
 @router.post("/register", response_model=TokenResponse)
-async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
-    """Register a new user. Auto-creates a 'default' project."""
+async def register(body: RegisterRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    """Register a new user. Auto-creates a 'default' project.
+    Can be disabled via REGISTER_ENABLED=false in config.
+    """
+    # Check if registration is enabled
+    if not settings.REGISTER_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Регистрация отключена. Обратитесь к администратору.",
+        )
+
+    await check_rate_limit(request, "register")
+
+    # Validate password strength
+    validate_password_strength(body.password)
+
+    # Validate username
+    if len(body.username) < 3:
+        raise HTTPException(400, "Логин должен быть не менее 3 символов")
+
     from backend.models import Project, ProjectMember
 
     # Check if username exists
@@ -104,7 +170,7 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     await db.flush()
 
     # Auto-create default project
-    import re, uuid
+    import uuid
     slug = f"project-{uuid.uuid4().hex[:8]}"
     project = Project(
         name="Мой проект",
@@ -118,9 +184,12 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     db.add(member)
     await db.commit()
 
+    logger.info(f"New user registered: {body.username} (id={user.id}), project slug={slug}")
     token = create_access_token(user.id, user.username)
     return TokenResponse(access_token=token)
 
+
+# ─── Profile ──────────────────────────────────────────────────────────────────
 
 @router.get("/me", response_model=ProfileResponse)
 async def get_profile(current_user: User = Depends(get_current_user)):
@@ -147,20 +216,26 @@ async def update_profile(
     return current_user
 
 
+# ─── Change Password ─────────────────────────────────────────────────────────
+
 @router.post("/change_password")
 async def change_password(
     body: ChangePasswordRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Change current user's password. Requires old password verification."""
     if not verify_password(body.old_password, current_user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Неверный текущий пароль",
         )
 
+    # Validate new password strength
+    validate_password_strength(body.new_password)
+
     current_user.password_hash = hash_password(body.new_password)
     db.add(current_user)
     await db.commit()
+    logger.info(f"Password changed for user: {current_user.username} (id={current_user.id})")
     return {"status": "ok", "message": "Пароль изменён"}
-

@@ -32,12 +32,35 @@ async def upload_statement(
     account_no: str = Form(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """Upload and import a bank statement file."""
-    from sqlalchemy.orm import Session
+    """Upload and import a bank statement file.
+    Validates file extension and size before processing.
+    """
+    import os
+    from backend.config import settings as app_settings
     from backend.etl.service import import_statement
     from backend.database import SyncSessionLocal
 
+    # Validate file extension
+    allowed_exts = [e.strip() for e in app_settings.ALLOWED_UPLOAD_EXTENSIONS.split(",")]
+    file_ext = os.path.splitext(file.filename or "")[1].lower()
+    if file_ext not in allowed_exts:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Недопустимый формат файла: {file_ext}. Разрешены: {', '.join(allowed_exts)}",
+        )
+
+    # Sanitize filename — remove path separators
+    safe_filename = os.path.basename(file.filename or "upload")
+
     data = await file.read()
+
+    # Validate file size
+    max_bytes = app_settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    if len(data) > max_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Файл слишком большой. Максимум: {app_settings.MAX_UPLOAD_SIZE_MB} МБ",
+        )
 
     # Run synchronously inside a thread (ETL uses sync ORM)
     import asyncio
@@ -46,7 +69,7 @@ async def upload_statement(
     def _run():
         with SyncSessionLocal() as sync_db:
             log = import_statement(
-                sync_db, file.filename, source_type, account_no, data
+                sync_db, safe_filename, source_type, account_no, data
             )
             return {
                 "id": log.id,

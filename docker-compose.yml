@@ -6,8 +6,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-dds}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dds_secret}
       POSTGRES_DB: ${POSTGRES_DB:-dds_db}
-    ports:
-      - "5432:5432"
+    # ports: removed — DB only accessible within Docker network
+    # - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -21,8 +21,9 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    # ports: removed — Redis only accessible within Docker network
+    # - "6379:6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD:-dds_redis_secret}
     volumes:
       - redisdata:/data
     healthcheck:
@@ -40,9 +41,9 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
-    ports:
-      - "9000:9000"
-      - "9001:9001"
+    # ports: removed — MinIO only accessible within Docker network
+    # - "9000:9000"
+    # - "9001:9001"
     volumes:
       - miniodata:/data
     healthcheck:
@@ -69,7 +70,7 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://dds:dds_secret@db:5432/dds_db}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql://dds:dds_secret@db:5432/dds_db}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_URL: ${REDIS_URL:-redis://:dds_redis_secret@redis:6379/0}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}

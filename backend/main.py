@@ -1,7 +1,11 @@
 """
 DDS Financial Management System - FastAPI Backend
+
+Entry point: lifespan, middleware, router registration.
+See AGENTS.md for full architecture overview.
 """
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends
@@ -12,6 +16,9 @@ from backend.config import settings
 from backend.database import async_engine, AsyncSessionLocal, Base
 from backend.auth import get_current_user, ensure_default_admin
 from backend.routers import import_txn, refs, reports, planning, cost, auth, integrations, projects
+
+logger = logging.getLogger("dds")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 
 @asynccontextmanager
@@ -81,8 +88,8 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in settings.CORS_ORIGINS.split(",")],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Project-Id"],
     allow_credentials=True,
 )
 
@@ -129,10 +136,6 @@ async def health():
     return {"status": "ok"}
 
 
-@app.get("/api/seed_defaults")
-async def seed_defaults(db=None):
-    """Seed default reference data (accounts, lead times)."""
-    return {"message": "Use POST /api/refs/accounts and /api/planning/lead_times"}
 
 
 @app.post("/api/v1/seed", dependencies=[Depends(get_current_user)])

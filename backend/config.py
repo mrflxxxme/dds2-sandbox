@@ -1,4 +1,8 @@
+import secrets
+import warnings
+
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 
 
 class Settings(BaseSettings):
@@ -6,11 +10,12 @@ class Settings(BaseSettings):
     DATABASE_URL_SYNC: str = "postgresql://dds:dds_secret@localhost:5432/dds_db"
 
     # Auth
-    SECRET_KEY: str = "change-me-in-production-use-a-strong-random-key"
+    SECRET_KEY: str = ""
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480  # 8 hours
+    MIN_PASSWORD_LENGTH: int = 6
 
     # CORS
-    CORS_ORIGINS: str = "http://localhost:8501"
+    CORS_ORIGINS: str = "http://localhost:8501,http://localhost:3000"
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -21,6 +26,36 @@ class Settings(BaseSettings):
     MINIO_SECRET_KEY: str = "minioadmin"
     MINIO_BUCKET: str = "dds-files"
     MINIO_SECURE: bool = False
+
+    # Rate limiting
+    LOGIN_RATE_LIMIT: int = 10  # max attempts per minute per IP
+    REGISTER_ENABLED: bool = True  # disable open registration
+
+    # File upload limits
+    MAX_UPLOAD_SIZE_MB: int = 50
+    ALLOWED_UPLOAD_EXTENSIONS: str = ".xlsx,.xls,.csv,.pdf"
+
+    @field_validator("SECRET_KEY")
+    @classmethod
+    def validate_secret_key(cls, v: str) -> str:
+        if not v or v in ("", "change-me-in-production-use-a-strong-random-key",
+                          "change-me-to-a-random-64-char-string"):
+            generated = secrets.token_urlsafe(48)
+            warnings.warn(
+                f"\n⚠️  SECRET_KEY не задан! Сгенерирован временный ключ.\n"
+                f"   Добавьте в .env: SECRET_KEY={generated}\n"
+                f"   Без фиксированного ключа JWT-токены будут недействительны при перезапуске!",
+                UserWarning,
+                stacklevel=2,
+            )
+            return generated
+        if len(v) < 32:
+            warnings.warn(
+                "⚠️  SECRET_KEY слишком короткий (< 32 символов). Используйте длинный случайный ключ.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return v
 
     class Config:
         env_file = ".env"
