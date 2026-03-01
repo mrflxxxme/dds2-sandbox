@@ -162,7 +162,9 @@ export default function FunnelPage() {
     const [search, setSearch] = useState('');
 
     // Chart modal
-    const [chartField, setChartField] = useState<{ field: string; label: string; color: string } | null>(null);
+    const [chartField, setChartField] = useState<{ field: string; label: string; color: string } | null>(
+        { field: 'orders_sum_rub', label: 'Сумма заказов ₽', color: '#8b5cf6' }
+    );
 
     // Costs tab
     const [costs, setCosts] = useState<any>({ overrides: [], missing: [] });
