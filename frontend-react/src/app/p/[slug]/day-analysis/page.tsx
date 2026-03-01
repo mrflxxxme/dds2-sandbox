@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
-import { useProject } from '@/lib/project';
 
 /* ─── Format number ───────────────────────────────────────────── */
 const fmt = (v: any) => {
@@ -106,7 +105,6 @@ function TrendChart({ data, fields, targetDate }: {
 
 /* ─── Main page ─────────────────────────────────────────────── */
 export default function DayAnalysisPage() {
-    const { project } = useProject();
     const [targetDate, setTargetDate] = useState(() => {
         const d = new Date();
         d.setDate(d.getDate() - 1);
