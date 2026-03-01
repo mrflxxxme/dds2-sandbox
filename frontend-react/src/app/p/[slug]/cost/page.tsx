@@ -278,7 +278,12 @@ function CostOrders() {
                     if (typeof v === 'number') return formatNumber(v);
                     return v ?? '—';
                 };
-                const itemKeys = items.length > 0 ? Object.keys(items[0]) : [];
+                const hasCarpets = items.some((r: any) => {
+                    const s = String(r.subject || '').toLowerCase();
+                    return s.includes('ковр') || s.includes('палас') || s.includes('дорожк') || s.includes('carpet');
+                });
+                const hiddenCols = new Set(['volume_m3', ...(hasCarpets ? [] : ['area_m2'])]);
+                const itemKeys = items.length > 0 ? Object.keys(items[0]).filter(k => !hiddenCols.has(k)) : [];
 
                 return (
                     <div style={{ marginTop: 16, borderTop: '1px solid var(--color-border)', paddingTop: 16 }}>
