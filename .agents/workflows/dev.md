@@ -42,9 +42,21 @@ cd /Users/a1/Desktop/dds_app && git checkout main && git merge dev && git push o
 ```
 
 ### 3. Сборка и проверка
+
+**Изменения кода** (src/, public/) — hot-reload автоматический, пересборка НЕ нужна.
+Контейнеры используют volume mount, Next.js подхватывает изменения мгновенно.
+
+**Изменения зависимостей** (package.json, Dockerfile, next.config) — нужна пересборка:
 // turbo
 ```bash
 cd /Users/a1/Desktop/dds_app && docker compose up -d --build frontend-react
+```
+
+**Изменения только backend** — hot-reload через volume mount, пересборка НЕ нужна.
+При изменении requirements-backend.txt:
+// turbo
+```bash
+cd /Users/a1/Desktop/dds_app && docker compose up -d --build backend
 ```
 
 - После сборки проверь что страница загружается корректно.

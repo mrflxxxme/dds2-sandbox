@@ -165,13 +165,22 @@
 services:
   db:          # PostgreSQL :5432
   redis:       # Redis :6379
-  backend:     # FastAPI :8000
-  frontend-react:  # Next.js :3000
+  backend:     # FastAPI :8000 (volume mount: ./backend → hot-reload)
+  frontend-react:  # Next.js :3000 (volume mount: ./src, ./public → hot-reload)
 ```
 
-Запуск: `docker compose up -d --build`
-Только frontend: `docker compose up -d --build frontend-react`
-Логи: `docker compose logs -f frontend-react`
+### Режимы запуска
+
+| Сценарий | Команда |
+|----------|---------|
+| Первый запуск | `docker compose up -d --build` |
+| Изменения кода (src/, backend/) | Не нужна — hot-reload автоматический |
+| Изменения зависимостей (package.json, requirements) | `docker compose up -d --build frontend-react` или `backend` |
+| Логи | `docker compose logs -f frontend-react` |
+
+> **Примечание**: Volume mounts обеспечивают hot-reload без пересборки контейнеров.
+> Frontend: `src/` и `public/` монтируются в контейнер.
+> Backend: `backend/` монтируется в контейнер.
 
 ---
 
