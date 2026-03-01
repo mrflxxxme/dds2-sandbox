@@ -181,7 +181,7 @@ function CostOrders() {
                 <div style={{ overflowX: 'auto' }}>
                     <table className="data-table">
                         <thead><tr>
-                            <th>Заказ</th><th>Инвойс</th><th>Отправка</th><th>Транспорт</th>
+                            <th>Заказ</th><th>Инвойс</th><th>ДТ</th><th>Отправка</th><th>Транспорт</th>
                             <th>Позиций</th><th>Кол-во</th><th>Товар ₽</th><th>Доставка ₽</th>
                             <th>Пошлина ₽</th><th>НДС ₽</th><th>Утиль ₽</th><th>Итого ₽</th>
                             <th>Курс ¥</th><th>План</th><th></th>
@@ -192,6 +192,7 @@ function CostOrders() {
                                 onClick={() => loadItems(String(r.order_no))}>
                                 <td style={{ fontWeight: 600 }}>{r.order_no}</td>
                                 <td><span className="badge badge-info" style={{ fontSize: 11 }}>{r.invoice_no || '—'}</span></td>
+                                <td style={{ fontSize: 11, fontFamily: 'monospace', color: 'var(--color-text-dim)' }}>{r.dt_number || '—'}</td>
                                 <td style={{ fontSize: 12 }}>{r.ship_date ? formatDate(r.ship_date) : '—'}</td>
                                 <td><span className="badge badge-warning">{r.transport_type || 'AUTO'}</span></td>
                                 <td>{r.items_count ?? '—'}</td>
@@ -266,48 +267,57 @@ function CostOrders() {
                     nm_id: 'nm_id', imt_id: 'imt_id', sku: 'SKU',
                 };
                 const tr = (key: string) => colMap[key.toLowerCase()] || key;
+                const intCols = new Set(['id', 'nm_id', 'imt_id', 'order_no']);
+                const wbCol = 'article_wb';
+                const renderCell = (key: string, v: any) => {
+                    if (key === wbCol && v != null) {
+                        const nmId = typeof v === 'number' ? Math.round(v) : parseInt(String(v).replace(/\s/g, ''), 10);
+                        if (!isNaN(nmId)) return (<a href={`https://www.wildberries.ru/catalog/${nmId}/detail.aspx`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--color-info)', textDecoration: 'underline' }}>{nmId}</a>);
+                    }
+                    if (intCols.has(key) && typeof v === 'number') return Math.round(v);
+                    if (typeof v === 'number') return formatNumber(v);
+                    return v ?? '—';
+                };
+                const itemKeys = items.length > 0 ? Object.keys(items[0]) : [];
 
                 return (
                     <div style={{ marginTop: 16, borderTop: '1px solid var(--color-border)', paddingTop: 16 }}>
-                        {/* Summary metrics */}
+                        <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>📊 Расчёт себестоимости по позициям</h4>
                         {ord && (
-                            <div style={{ marginBottom: 16 }}>
-                                <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
-                                    📊 Расчёт себестоимости по позициям
-                                </h4>
-                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
-                                    {[
-                                        { label: 'Кол-во (шт)', value: ord.total_qty, fmt: (v: number) => formatNumber(v), color: 'var(--color-text)' },
-                                        { label: 'Себестоимость', value: ord.total_cost_rub, fmt: (v: number) => formatNumber(v) + ' ₽', color: 'var(--color-success)', sub: pct(ord.total_cost_rub ?? 0) },
-                                        { label: 'Доставка', value: ord.total_delivery_rub, fmt: (v: number) => formatNumber(v) + ' ₽', color: 'var(--color-info)', sub: pct(ord.total_delivery_rub ?? 0) },
-                                        { label: 'Пошлина', value: ord.total_duty_rub, fmt: (v: number) => formatNumber(v) + ' ₽', color: 'var(--color-warning)', sub: pct(ord.total_duty_rub ?? 0) },
-                                        { label: 'НДС', value: ord.total_vat_rub, fmt: (v: number) => formatNumber(v) + ' ₽', color: '#a78bfa', sub: pct(ord.total_vat_rub ?? 0) },
-                                    ].map((m, i) => (
-                                        <div key={i} style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: '12px 16px', border: '1px solid var(--color-border)' }}>
-                                            <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>{m.label}</div>
-                                            <div style={{ fontSize: 20, fontWeight: 700, color: m.color }}>{m.value != null ? m.fmt(m.value) : '—'}</div>
-                                            {m.sub && <div style={{ fontSize: 10, color: 'var(--color-text-dim)', marginTop: 2 }}>↑ {m.sub}</div>}
-                                        </div>
-                                    ))}
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 16 }}>
+                                {[
+                                    { label: 'Кол-во (шт)', value: formatNumber(ord.total_qty ?? 0) },
+                                    { label: 'Себестоимость', value: `${formatNumber(ord.total_cost_rub ?? 0)} ₽`, color: 'var(--color-success)', sub: `↑ ${pct(ord.total_cost_rub ?? 0)}` },
+                                    { label: 'Доставка', value: `${formatNumber(ord.total_delivery_rub ?? 0)} ₽`, sub: `↑ ${pct(ord.total_delivery_rub ?? 0)}` },
+                                    { label: 'Пошлина', value: `${formatNumber(ord.total_duty_rub ?? 0)} ₽`, color: 'var(--color-warning)', sub: `↑ ${pct(ord.total_duty_rub ?? 0)}` },
+                                    { label: 'НДС', value: `${formatNumber(ord.total_vat_rub ?? 0)} ₽`, color: 'var(--color-danger)', sub: `↑ ${pct(ord.total_vat_rub ?? 0)}` },
+                                ].map((c, i) => (
+                                    <div key={i} style={{ background: 'var(--color-bg-input)', padding: '12px 16px', borderRadius: 8, border: '1px solid var(--color-border)' }}>
+                                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>{c.label}</div>
+                                        <div style={{ fontSize: 18, fontWeight: 700, color: c.color || 'var(--color-text)' }}>{c.value}</div>
+                                        {c.sub && <div style={{ fontSize: 10, color: 'var(--color-text-dim)', marginTop: 2 }}>{c.sub}</div>}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        {ord && (
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 16 }}>
+                                <div style={{ background: 'var(--color-bg-input)', padding: '12px 16px', borderRadius: 8, border: '1px solid var(--color-border)' }}>
+                                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>Утильсбор</div>
+                                    <div style={{ fontSize: 18, fontWeight: 700 }}>{formatNumber(ord.total_util_rub ?? 0)} ₽</div>
+                                    <div style={{ fontSize: 10, color: 'var(--color-text-dim)', marginTop: 2 }}>↑ {pct(ord.total_util_rub ?? 0)}</div>
                                 </div>
-                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginTop: 12 }}>
-                                    <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: '12px 16px', border: '1px solid var(--color-border)' }}>
-                                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>Утильсбор</div>
-                                        <div style={{ fontSize: 20, fontWeight: 700, color: '#f59e0b' }}>{ord.total_util_rub != null ? formatNumber(ord.total_util_rub) + ' ₽' : '—'}</div>
-                                        {ord.total_util_rub != null && <div style={{ fontSize: 10, color: 'var(--color-text-dim)', marginTop: 2 }}>↑ {pct(ord.total_util_rub)}</div>}
-                                    </div>
-                                    <div style={{ background: 'linear-gradient(135deg, rgba(139,92,246,0.1), rgba(245,158,11,0.1))', borderRadius: 8, padding: '12px 16px', border: '1px solid rgba(139,92,246,0.3)', gridColumn: 'span 2' }}>
-                                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>🔥 ИТОГО</div>
-                                        <div style={{ fontSize: 24, fontWeight: 800, color: '#f59e0b' }}>{ord.total_rub != null ? formatNumber(ord.total_rub) + ' ₽' : '—'}</div>
-                                    </div>
-                                    <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: '12px 16px', border: '1px solid var(--color-border)' }}>
-                                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>Курс ¥/₽</div>
-                                        <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--color-text)' }}>{ord.rate_cny != null ? Number(ord.rate_cny).toFixed(2) : '—'}</div>
-                                    </div>
-                                    <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: '12px 16px', border: '1px solid var(--color-border)' }}>
-                                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>Доставка ¥</div>
-                                        <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--color-text)' }}>{ord.delivery_cost_cny != null ? formatNumber(ord.delivery_cost_cny) : '—'}</div>
-                                    </div>
+                                <div style={{ background: 'linear-gradient(135deg, rgba(139,92,246,0.15), rgba(236,72,153,0.15))', padding: '12px 16px', borderRadius: 8, border: '1px solid rgba(139,92,246,0.3)', gridColumn: 'span 2' }}>
+                                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>🔥 ИТОГО</div>
+                                    <div style={{ fontSize: 22, fontWeight: 800, color: 'var(--color-success)' }}>{formatNumber(totalRub)} ₽</div>
+                                </div>
+                                <div style={{ background: 'var(--color-bg-input)', padding: '12px 16px', borderRadius: 8, border: '1px solid var(--color-border)' }}>
+                                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>Курс ¥/₽</div>
+                                    <div style={{ fontSize: 18, fontWeight: 700 }}>{ord.rate_cny ? Number(ord.rate_cny).toFixed(2) : '—'}</div>
+                                </div>
+                                <div style={{ background: 'var(--color-bg-input)', padding: '12px 16px', borderRadius: 8, border: '1px solid var(--color-border)' }}>
+                                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>Доставка ¥</div>
+                                    <div style={{ fontSize: 18, fontWeight: 700 }}>{formatNumber(ord.delivery_cost_cny ?? 0)}</div>
                                 </div>
                             </div>
                         )}
@@ -323,8 +333,8 @@ function CostOrders() {
                         {items.length > 0 ? (
                             <div style={{ overflowX: 'auto', maxHeight: 400, overflowY: 'auto' }}>
                                 <table className="data-table">
-                                    <thead><tr>{Object.keys(items[0]).map(k => <th key={k} style={{ fontSize: 11 }}>{tr(k)}</th>)}</tr></thead>
-                                    <tbody>{items.map((r, i) => <tr key={i}>{Object.values(r).map((v: any, j) => <td key={j} style={{ fontSize: 12 }}>{typeof v === 'number' ? formatNumber(v) : v ?? '—'}</td>)}</tr>)}</tbody>
+                                    <thead><tr>{itemKeys.map(k => <th key={k} style={{ fontSize: 11 }}>{tr(k)}</th>)}</tr></thead>
+                                    <tbody>{items.map((r: any, i: number) => <tr key={i}>{itemKeys.map((k, j) => <td key={j} style={{ fontSize: 12 }}>{renderCell(k, r[k])}</td>)}</tr>)}</tbody>
                                 </table>
                             </div>
                         ) : <div style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>Нет позиций. Загрузите файл Excel.</div>}
