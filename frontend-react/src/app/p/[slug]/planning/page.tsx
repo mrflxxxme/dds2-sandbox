@@ -43,163 +43,90 @@ function PlanOrders() {
     const [data, setData] = useState<any[]>([]);
     const [expanded, setExpanded] = useState<string | null>(null);
     const [summary, setSummary] = useState<any>(null);
-    const [msg, setMsg] = useState('');
-    const [editId, setEditId] = useState<number | null>(null);
-    const [showForm, setShowForm] = useState(false);
-
-    const emptyForm = {
-        order_name: '', category: '', transport_type: 'AUTO', order_no: '',
-        supplier: '', planned_ship_date: '', actual_ship_date: '',
-        order_amount: '', deposit: '', logistics_cny: '', customs_rub: ''
-    };
-    const [form, setForm] = useState(emptyForm);
 
     useEffect(() => { load(); }, []);
-    const load = async () => { try { setData(await api.getPlanningOrders()); } catch { } };
-    const del = async (id: number) => {
-        if (!confirm('Удалить заказ?')) return;
-        try { await api.deletePlanningOrder(id); load(); } catch (e: any) { setMsg(e.message); }
-    };
+    const load = async () => { try { setData(await api.getCostOrders()); } catch { } };
+
     const showSummary = async (orderNo: string) => {
         if (expanded === orderNo) { setExpanded(null); return; }
         setExpanded(orderNo);
         try { setSummary(await api.getPlanningOrderSummary(orderNo)); } catch { setSummary(null); }
     };
 
-    const openEdit = (r: any) => {
-        setEditId(r.id);
-        setForm({
-            order_name: r.order_name || '',
-            category: r.category || '',
-            transport_type: r.transport_type || 'AUTO',
-            order_no: r.order_no != null ? String(r.order_no) : '',
-            supplier: r.supplier || '',
-            planned_ship_date: r.planned_ship_date || '',
-            actual_ship_date: r.actual_ship_date || '',
-            order_amount: r.order_amount != null ? String(r.order_amount) : '',
-            deposit: r.deposit != null ? String(r.deposit) : '',
-            logistics_cny: r.logistics_cny != null ? String(r.logistics_cny) : '',
-            customs_rub: r.customs_rub != null ? String(r.customs_rub) : '',
-        });
-        setShowForm(true);
-    };
-
-    const openNew = () => {
-        setEditId(null);
-        setForm(emptyForm);
-        setShowForm(true);
-    };
-
-    const save = async () => {
-        try {
-            const payload: any = {
-                order_name: form.order_name || null,
-                category: form.category || null,
-                transport_type: form.transport_type || null,
-                order_no: form.order_no ? parseInt(form.order_no) : null,
-                supplier: form.supplier || null,
-                planned_ship_date: form.planned_ship_date || null,
-                actual_ship_date: form.actual_ship_date || null,
-                order_amount: form.order_amount ? parseFloat(form.order_amount) : null,
-                deposit: form.deposit ? parseFloat(form.deposit) : null,
-                logistics_cny: form.logistics_cny ? parseFloat(form.logistics_cny) : null,
-                customs_rub: form.customs_rub ? parseFloat(form.customs_rub) : null,
-            };
-            if (editId) payload.id = editId;
-            await api.upsertPlanningOrder(payload);
-            setMsg('✅ Сохранено!');
-            setShowForm(false);
-            load();
-        } catch (e: any) { setMsg(`❌ ${e.message}`); }
-    };
-
-    const F = ({ label, field, type = 'text' }: { label: string; field: string; type?: string }) => (
-        <div className="form-group">
-            <label className="form-label" style={{ fontSize: 11 }}>{label}</label>
-            <input className="form-input" type={type} value={(form as any)[field]}
-                onChange={e => setForm({ ...form, [field]: e.target.value })}
-                style={{ fontSize: 13 }} />
-        </div>
-    );
-
     return (
         <div className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Заказы (Планирование)</h3>
-                <div style={{ display: 'flex', gap: 8 }}>
-                    <button className="btn btn-primary btn-sm" onClick={openNew}>+ Новый заказ</button>
-                    <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'plan_orders')}>📥 Excel</button>
-                </div>
+                <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Заказы (из Себестоимости)</h3>
+                <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'plan_orders')}>📥 Excel</button>
             </div>
-            {msg && <div style={{ fontSize: 13, marginBottom: 8, padding: '6px 12px', borderRadius: 6, background: msg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', color: msg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)' }}>{msg} <span style={{ float: 'right', cursor: 'pointer' }} onClick={() => setMsg('')}>✕</span></div>}
-
-            {showForm && (
-                <div style={{ background: 'var(--color-bg-input)', padding: 16, borderRadius: 8, marginBottom: 16 }}>
-                    <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>{editId ? `Редактирование заказа #${editId}` : 'Новый заказ'}</h4>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-                        <F label="Инвойс / Название" field="order_name" />
-                        <F label="№ заказа" field="order_no" type="number" />
-                        <F label="Категория" field="category" />
-                        <F label="Поставщик" field="supplier" />
-                        <div className="form-group">
-                            <label className="form-label" style={{ fontSize: 11 }}>Транспорт</label>
-                            <select className="form-input" value={form.transport_type}
-                                onChange={e => setForm({ ...form, transport_type: e.target.value })}
-                                style={{ fontSize: 13 }}>
-                                <option value="AUTO">AUTO</option>
-                                <option value="RAIL">RAIL</option>
-                                <option value="AIR">AIR</option>
-                                <option value="SEA">SEA</option>
-                            </select>
-                        </div>
-                        <F label="Дата отгрузки" field="planned_ship_date" type="date" />
-                        <F label="Дата прибытия" field="actual_ship_date" type="date" />
-                        <F label="Сумма заказа ₽" field="order_amount" type="number" />
-                        <F label="Депозит ₽" field="deposit" type="number" />
-                        <F label="Доставка ¥" field="logistics_cny" type="number" />
-                        <F label="Пошлина ₽" field="customs_rub" type="number" />
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-                        <button className="btn btn-primary btn-sm" onClick={save}>💾 Сохранить</button>
-                        <button className="btn btn-secondary btn-sm" onClick={() => setShowForm(false)}>Отмена</button>
-                    </div>
-                </div>
-            )}
 
             {data.length > 0 ? (
                 <div style={{ overflowX: 'auto' }}>
                     <table className="data-table">
                         <thead><tr>
                             <th>№</th><th>Инвойс</th><th>Транспорт</th><th>Отгрузка</th><th>Прибытие</th>
-                            <th>Товар ₽</th><th>Депозит ₽</th><th>Доставка ¥</th><th>Пошлина ₽</th><th></th>
+                            <th>Кол-во</th><th>Товар ₽</th><th>Доставка ¥</th><th>Доставка ₽</th>
+                            <th>Пошлина ₽</th><th>НДС ₽</th><th>Итого ₽</th><th>Курс ¥</th>
                         </tr></thead>
                         <tbody>{data.map(r => (
-                            <tr key={r.id} style={{ cursor: 'pointer' }} onClick={() => showSummary(String(r.order_no || r.id))}>
-                                <td style={{ fontWeight: 600 }}>{r.order_no ?? r.id}</td>
-                                <td><span className="badge badge-info" style={{ fontSize: 11 }}>{r.order_name || '—'}</span></td>
-                                <td>{r.transport_type ? <span className="badge badge-warning">{r.transport_type}</span> : '—'}</td>
-                                <td style={{ fontSize: 12 }}>{r.planned_ship_date ? formatDate(r.planned_ship_date) : '—'}</td>
-                                <td style={{ fontSize: 12 }}>{r.actual_ship_date ? formatDate(r.actual_ship_date) : '—'}</td>
-                                <td style={{ color: 'var(--color-success)' }}>{r.order_amount != null ? formatNumber(r.order_amount) : '—'}</td>
-                                <td>{r.deposit != null ? formatNumber(r.deposit) : '—'}</td>
-                                <td>{r.logistics_cny != null ? formatNumber(r.logistics_cny) : '—'}</td>
-                                <td>{r.customs_rub != null ? formatNumber(r.customs_rub) : '—'}</td>
-                                <td style={{ display: 'flex', gap: 4 }}>
-                                    <button className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={e => { e.stopPropagation(); openEdit(r); }}>✎</button>
-                                    <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={e => { e.stopPropagation(); del(r.id); }}>✕</button>
-                                </td>
+                            <tr key={r.order_no} style={{ cursor: 'pointer' }} onClick={() => showSummary(String(r.order_no))}>
+                                <td style={{ fontWeight: 600 }}>{r.order_no}</td>
+                                <td><span className="badge badge-info" style={{ fontSize: 11 }}>{r.invoice_no || '—'}</span></td>
+                                <td><span className="badge badge-warning">{r.transport_type || 'AUTO'}</span></td>
+                                <td style={{ fontSize: 12 }}>{r.ship_date ? formatDate(r.ship_date) : '—'}</td>
+                                <td style={{ fontSize: 12 }}>{r.actual_arrival_date ? formatDate(r.actual_arrival_date) : '—'}</td>
+                                <td>{r.total_qty != null ? formatNumber(r.total_qty) : '—'}</td>
+                                <td style={{ color: 'var(--color-success)', fontWeight: 500 }}>{r.total_cost_rub != null ? formatNumber(r.total_cost_rub) : '—'}</td>
+                                <td>{r.delivery_cost_cny != null ? formatNumber(r.delivery_cost_cny) : '—'}</td>
+                                <td>{r.total_delivery_rub != null ? formatNumber(r.total_delivery_rub) : '—'}</td>
+                                <td>{r.total_duty_rub != null ? formatNumber(r.total_duty_rub) : '—'}</td>
+                                <td>{r.total_vat_rub != null ? formatNumber(r.total_vat_rub) : '—'}</td>
+                                <td style={{ fontWeight: 600 }}>{r.total_rub != null ? formatNumber(r.total_rub) : '—'}</td>
+                                <td style={{ fontSize: 12 }}>{r.rate_cny != null ? Number(r.rate_cny).toFixed(2) : '—'}</td>
                             </tr>
                         ))}</tbody>
                     </table>
                 </div>
-            ) : <div className="empty-state"><div className="empty-state-text">Нет заказов. Нажмите «+ Новый заказ»</div></div>}
+            ) : <div className="empty-state"><div className="empty-state-text">Нет заказов. Создайте заказ в модуле <b>Себестоимость</b>.</div></div>}
 
-            {expanded && summary && (
-                <div style={{ marginTop: 16, padding: 16, background: 'var(--color-bg-input)', borderRadius: 8 }}>
-                    <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Сводка по заказу #{expanded} (план vs факт)</h4>
-                    <pre style={{ fontSize: 12, color: 'var(--color-text-muted)', whiteSpace: 'pre-wrap' }}>{JSON.stringify(summary, null, 2)}</pre>
-                </div>
-            )}
+            <p style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 12 }}>✏️ Редактирование заказов — в модуле <b>Себестоимость</b></p>
+
+            {/* Order summary (plan vs fact) */}
+            <div style={{ borderTop: '1px solid var(--color-border)', marginTop: 16, paddingTop: 16 }}>
+                <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>📊 Сводка по заказу (план vs факт)</h4>
+                {data.length > 0 && (
+                    <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 12 }}>
+                        <select className="form-input" style={{ maxWidth: 200, fontSize: 13 }}
+                            value={expanded || ''} onChange={e => showSummary(e.target.value)}>
+                            <option value="">Выберите заказ</option>
+                            {data.map(o => <option key={o.order_no} value={String(o.order_no)}>№{o.order_no}</option>)}
+                        </select>
+                    </div>
+                )}
+                {expanded && summary && (
+                    <div style={{ padding: 16, background: 'var(--color-bg-input)', borderRadius: 8 }}>
+                        {summary.totals && (
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginBottom: 16 }}>
+                                <div><div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>План заказ</div><div style={{ fontSize: 18, fontWeight: 600 }}>{formatNumber(summary.totals.plan_order || 0)} ₽</div></div>
+                                <div><div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>План логистика</div><div style={{ fontSize: 18, fontWeight: 600 }}>{formatNumber(summary.totals.plan_logistics_cny || 0)} ¥</div></div>
+                                <div><div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>План таможня</div><div style={{ fontSize: 18, fontWeight: 600 }}>{formatNumber(summary.totals.plan_customs_rub || 0)} ₽</div></div>
+                                <div><div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Факт заказ</div><div style={{ fontSize: 18, fontWeight: 600 }}>{formatNumber(summary.totals.fact_order || 0)} ₽</div></div>
+                                <div></div>
+                                <div><div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Факт таможня</div><div style={{ fontSize: 18, fontWeight: 600 }}>{formatNumber(summary.totals.fact_customs || 0)} ₽</div></div>
+                            </div>
+                        )}
+                        {summary.fact_order_payments?.length > 0 && (
+                            <div style={{ marginTop: 12 }}>
+                                <h5 style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Факт оплаты заказа:</h5>
+                                <table className="data-table"><thead><tr><th>Дата</th><th>Контрагент</th><th>Сумма</th><th>Валюта</th></tr></thead>
+                                    <tbody>{summary.fact_order_payments.map((p: any, i: number) => (
+                                        <tr key={i}><td style={{ fontSize: 12 }}>{p.date}</td><td style={{ fontSize: 12 }}>{p.counterparty}</td><td style={{ fontSize: 12 }}>{formatNumber(p.expense)}</td><td style={{ fontSize: 12 }}>{p.currency}</td></tr>
+                                    ))}</tbody></table>
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
         </div>
     );
 }
@@ -207,6 +134,14 @@ function PlanOrders() {
 function PlanPayments() {
     const [data, setData] = useState<any[]>([]);
     const [msg, setMsg] = useState('');
+    const [showAddForm, setShowAddForm] = useState(false);
+    const [showLinkForm, setShowLinkForm] = useState(false);
+    const [payForm, setPayForm] = useState({ pay_date: '', order_no: '', direction: 'ЗАКАЗ', amount: '', currency: 'RUB', fx_rate: '', amount_rub: '' });
+    const [candidates, setCandidates] = useState<any[]>([]);
+    const [accounts, setAccounts] = useState<any[]>([]);
+    const [selPayId, setSelPayId] = useState<number | null>(null);
+    const [selTxnId, setSelTxnId] = useState<string>('');
+    const [linkAmount, setLinkAmount] = useState('');
 
     useEffect(() => { load(); }, []);
     const load = async () => { try { setData(await api.getPlanningPayments()); } catch { } };
@@ -218,47 +153,183 @@ function PlanPayments() {
         try { await api.markPaymentPaid(id); setMsg('✅ Оплачено!'); load(); } catch (e: any) { setMsg(e.message); }
     };
     const sync = async () => {
-        try { await api.syncPlanPayments(); setMsg('✅ Синхронизировано!'); load(); } catch (e: any) { setMsg(e.message); }
+        try { await api.syncPlanPayments(); setMsg('✅ Факт синхронизирован!'); load(); } catch (e: any) { setMsg(e.message); }
     };
+    const addPayment = async () => {
+        try {
+            await api.upsertPlanningPayment({
+                pay_date: payForm.pay_date || null,
+                order_no: payForm.order_no ? parseInt(payForm.order_no) : null,
+                direction: payForm.direction,
+                amount: payForm.amount ? parseFloat(payForm.amount) : null,
+                currency: payForm.currency,
+                fx_rate: payForm.fx_rate ? parseFloat(payForm.fx_rate) : null,
+                amount_rub: payForm.amount_rub ? parseFloat(payForm.amount_rub) : null,
+            });
+            setMsg('✅ Платёж добавлен!'); setShowAddForm(false); load();
+        } catch (e: any) { setMsg(`❌ ${e.message}`); }
+    };
+    const openLinkForm = async () => {
+        setShowLinkForm(!showLinkForm);
+        if (!showLinkForm) {
+            try { setCandidates(await api.getCandidateTransactions()); } catch { setCandidates([]); }
+            try { setAccounts(await api.getAccountsList()); } catch { setAccounts([]); }
+        }
+    };
+    const linkTransaction = async () => {
+        if (!selPayId || !selTxnId) return;
+        try {
+            await api.createFactLink({ payment_id: selPayId, txn_id: selTxnId, amount_rub: linkAmount ? parseFloat(linkAmount) : null });
+            setMsg('✅ Привязано!'); await sync(); setShowLinkForm(false);
+        } catch (e: any) { setMsg(`❌ ${e.message}`); }
+    };
+
+    const _status = (r: any) => {
+        const amt = parseFloat(r.amount_rub || 0);
+        const paid = parseFloat(r.paid_rub || 0);
+        if (r.is_paid || (amt > 0 && paid >= amt)) return { label: '✅ Оплачено', cls: 'success' };
+        if (paid > 0 && amt > 0) return { label: `🟠 ${(paid / amt * 100).toFixed(0)}%`, cls: 'warning' };
+        const d = r.pay_date;
+        if (d) {
+            try {
+                const dt = new Date(d); const today = new Date(); today.setHours(0, 0, 0, 0);
+                if (dt < today) return { label: '🔴 Просрочено', cls: 'danger' };
+                if (dt.toDateString() === today.toDateString()) return { label: '🟡 Сегодня', cls: 'warning' };
+                return { label: '🔵 Будущее', cls: 'info' };
+            } catch { }
+        }
+        return { label: '—', cls: 'secondary' };
+    };
+
+    const totalPlan = data.reduce((s, r) => s + parseFloat(r.amount_rub || 0), 0);
+    const totalPaid = data.reduce((s, r) => s + parseFloat(r.paid_rub || 0), 0);
+    const totalRemain = totalPlan - totalPaid;
+    const progress = totalPlan > 0 ? (totalPaid / totalPlan * 100).toFixed(0) + '%' : '—';
+
+    const unpaidPayments = data.filter(p => !p.is_paid);
 
     return (
         <div className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Платежи</h3>
+                <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Плановые платежи</h3>
                 <div style={{ display: 'flex', gap: 8 }}>
-                    <button className="btn btn-secondary btn-sm" onClick={sync}>🔄 Синхронизация</button>
+                    <button className="btn btn-secondary btn-sm" onClick={sync}>🔄 Синхронизировать факт с выписками</button>
                     <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'plan_payments')}>📥 Excel</button>
                 </div>
             </div>
-            {msg && <div style={{ color: 'var(--color-success)', fontSize: 13, marginBottom: 8 }}>{msg}<span style={{ float: 'right', cursor: 'pointer' }} onClick={() => setMsg('')}>✕</span></div>}
+            {msg && <div style={{ fontSize: 13, marginBottom: 8, padding: '6px 12px', borderRadius: 6, background: msg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', color: msg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)' }}>{msg} <span style={{ float: 'right', cursor: 'pointer' }} onClick={() => setMsg('')}>✕</span></div>}
 
             {data.length > 0 ? (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr><th>ID</th><th>Заказ</th><th>Тип</th><th>Дата</th><th>Сумма</th><th>Валюта</th><th>Статус</th><th>Описание</th><th></th></tr></thead>
-                        <tbody>{data.map(r => (
-                            <tr key={r.id}>
-                                <td>{r.id}</td>
-                                <td>{r.order_no || '—'}</td>
-                                <td>{r.payment_type || '—'}</td>
-                                <td style={{ fontSize: 12 }}>{r.planned_date ? formatDate(r.planned_date) : '—'}</td>
-                                <td style={{ fontWeight: 600, color: (r.amount || 0) < 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{formatNumber(r.amount)}</td>
-                                <td><span className={`badge badge-${r.currency === 'RUB' ? 'success' : 'warning'}`}>{r.currency}</span></td>
-                                <td>
-                                    <span className={`badge badge-${r.is_paid ? 'success' : 'warning'}`}>
-                                        {r.is_paid ? '✓ Оплачен' : '⏳ Ожидает'}
-                                    </span>
-                                </td>
-                                <td style={{ fontSize: 12, color: 'var(--color-text-dim)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.description}</td>
-                                <td style={{ display: 'flex', gap: 4 }}>
-                                    {!r.is_paid && <button className="btn btn-primary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => markPaid(r.id)}>✓</button>}
-                                    <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(r.id)}>✕</button>
-                                </td>
-                            </tr>
-                        ))}</tbody>
-                    </table>
-                </div>
+                <>
+                    <div style={{ overflowX: 'auto' }}>
+                        <table className="data-table">
+                            <thead><tr>
+                                <th>ID</th><th>Дата</th><th>Заказ</th><th>Направление</th><th>Сумма</th><th>Вал.</th>
+                                <th>План ₽</th><th>Факт ₽</th><th>Остаток</th><th>Статус</th><th></th>
+                            </tr></thead>
+                            <tbody>{data.map(r => {
+                                const st = _status(r);
+                                const amt = parseFloat(r.amount_rub || 0);
+                                const paid = parseFloat(r.paid_rub || 0);
+                                const remain = amt - paid;
+                                return (
+                                    <tr key={r.id}>
+                                        <td>{r.id}</td>
+                                        <td style={{ fontSize: 12 }}>{r.pay_date ? formatDate(r.pay_date) : '—'}</td>
+                                        <td>{r.order_no || '—'}</td>
+                                        <td><span className="badge badge-info">{r.direction || '—'}</span></td>
+                                        <td>{formatNumber(r.amount || 0)}</td>
+                                        <td><span className={`badge badge-${r.currency === 'RUB' ? 'success' : 'warning'}`}>{r.currency}</span></td>
+                                        <td style={{ fontWeight: 500 }}>{formatNumber(amt)} ₽</td>
+                                        <td>{paid > 0 ? `${formatNumber(paid)} ₽` : '—'}</td>
+                                        <td>{remain > 0 ? `${formatNumber(remain)} ₽` : '—'}</td>
+                                        <td><span className={`badge badge-${st.cls}`}>{st.label}</span></td>
+                                        <td style={{ display: 'flex', gap: 4 }}>
+                                            {!r.is_paid && <button className="btn btn-primary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => markPaid(r.id)}>✓</button>}
+                                            <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(r.id)}>✕</button>
+                                        </td>
+                                    </tr>
+                                );
+                            })}</tbody>
+                        </table>
+                    </div>
+
+                    {/* Summary metrics */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginTop: 16, padding: 16, background: 'var(--color-bg-input)', borderRadius: 8 }}>
+                        <div><div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Всего план</div><div style={{ fontSize: 20, fontWeight: 700 }}>{formatNumber(totalPlan)} ₽</div></div>
+                        <div><div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Оплачено</div><div style={{ fontSize: 20, fontWeight: 700 }}>{formatNumber(totalPaid)} ₽</div></div>
+                        <div><div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Остаток</div><div style={{ fontSize: 20, fontWeight: 700 }}>{formatNumber(totalRemain)} ₽</div></div>
+                        <div><div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Прогресс</div><div style={{ fontSize: 20, fontWeight: 700 }}>{progress}</div></div>
+                    </div>
+                </>
             ) : <div className="empty-state"><div className="empty-state-text">Нет платежей</div></div>}
+
+            {/* Mark paid */}
+            <div style={{ marginTop: 16, display: 'flex', gap: 8, alignItems: 'center' }}>
+                <input className="form-input" type="number" placeholder="ID платежа" style={{ maxWidth: 120, fontSize: 13 }}
+                    onChange={e => setSelPayId(parseInt(e.target.value) || null)} />
+                <button className="btn btn-primary btn-sm" onClick={() => selPayId && markPaid(selPayId)}>✅ Отметить оплаченным</button>
+            </div>
+
+            {/* Add payment */}
+            <div style={{ marginTop: 16 }}>
+                <button className="btn btn-secondary btn-sm" onClick={() => setShowAddForm(!showAddForm)}>➕ Добавить платёж</button>
+                {showAddForm && (
+                    <div style={{ background: 'var(--color-bg-input)', padding: 16, borderRadius: 8, marginTop: 8 }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Дата оплаты</label>
+                                <input className="form-input" type="date" value={payForm.pay_date} onChange={e => setPayForm({ ...payForm, pay_date: e.target.value })} style={{ fontSize: 13 }} /></div>
+                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Номер заказа</label>
+                                <input className="form-input" type="number" value={payForm.order_no} onChange={e => setPayForm({ ...payForm, order_no: e.target.value })} style={{ fontSize: 13 }} /></div>
+                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Направление</label>
+                                <select className="form-input" value={payForm.direction} onChange={e => setPayForm({ ...payForm, direction: e.target.value })} style={{ fontSize: 13 }}>
+                                    <option>ЗАКАЗ</option><option>ДОСТАВКА</option><option>ТАМОЖНЯ</option><option>ДЕПОЗИТ</option><option>ДРУГОЕ</option>
+                                </select></div>
+                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Сумма</label>
+                                <input className="form-input" type="number" value={payForm.amount} onChange={e => setPayForm({ ...payForm, amount: e.target.value })} style={{ fontSize: 13 }} /></div>
+                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Валюта</label>
+                                <select className="form-input" value={payForm.currency} onChange={e => setPayForm({ ...payForm, currency: e.target.value })} style={{ fontSize: 13 }}>
+                                    <option>RUB</option><option>CNY</option><option>USD</option>
+                                </select></div>
+                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Курс</label>
+                                <input className="form-input" type="number" step="0.01" value={payForm.fx_rate} onChange={e => setPayForm({ ...payForm, fx_rate: e.target.value })} style={{ fontSize: 13 }} /></div>
+                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Сумма ₽</label>
+                                <input className="form-input" type="number" value={payForm.amount_rub} onChange={e => setPayForm({ ...payForm, amount_rub: e.target.value })} style={{ fontSize: 13 }} /></div>
+                        </div>
+                        <button className="btn btn-primary btn-sm" style={{ marginTop: 8 }} onClick={addPayment}>💾 Добавить платёж</button>
+                    </div>
+                )}
+            </div>
+
+            {/* Link transaction */}
+            <div style={{ marginTop: 16 }}>
+                <button className="btn btn-secondary btn-sm" onClick={openLinkForm}>🔗 Привязать транзакцию из выписки к платежу</button>
+                {showLinkForm && (
+                    <div style={{ background: 'var(--color-bg-input)', padding: 16, borderRadius: 8, marginTop: 8 }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Платёж</label>
+                                <select className="form-input" value={selPayId || ''} onChange={e => setSelPayId(parseInt(e.target.value) || null)} style={{ fontSize: 13 }}>
+                                    <option value="">Выберите платёж</option>
+                                    {unpaidPayments.map(p => (
+                                        <option key={p.id} value={p.id}>ID:{p.id} | №{p.order_no || '—'} | {p.direction} | {formatNumber(p.amount_rub || 0)} ₽</option>
+                                    ))}
+                                </select></div>
+                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Транзакция из выписки</label>
+                                <select className="form-input" value={selTxnId} onChange={e => setSelTxnId(e.target.value)} style={{ fontSize: 13 }}>
+                                    <option value="">Выберите транзакцию</option>
+                                    {candidates.map((c: any) => (
+                                        <option key={c.txn_id} value={c.txn_id}>{c.date?.slice(0, 10)} | {c.currency} {formatNumber(c.expense)} | {(c.counterparty || '').slice(0, 30)}</option>
+                                    ))}
+                                </select></div>
+                        </div>
+                        <div className="form-group" style={{ marginTop: 8, maxWidth: 200 }}>
+                            <label className="form-label" style={{ fontSize: 11 }}>Сумма привязки</label>
+                            <input className="form-input" type="number" value={linkAmount} onChange={e => setLinkAmount(e.target.value)} style={{ fontSize: 13 }} />
+                        </div>
+                        <button className="btn btn-primary btn-sm" style={{ marginTop: 8 }} onClick={linkTransaction}>🔗 Привязать</button>
+                    </div>
+                )}
+            </div>
         </div>
     );
 }

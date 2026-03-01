@@ -410,6 +410,15 @@ class ApiClient {
     getFactLinks(paymentId: number) {
         return this.request<any[]>('GET', `/api/v1/planning/fact_links/${paymentId}`);
     }
+    createFactLink(data: any) {
+        return this.request<any>('POST', '/api/v1/planning/fact_links', data);
+    }
+    deleteFactLink(linkId: number) {
+        return this.request<any>('DELETE', `/api/v1/planning/fact_links/${linkId}`);
+    }
+    upsertPlanningPayment(data: any) {
+        return this.request<any>('POST', '/api/v1/planning/payments', data);
+    }
 
     // Import
     getImportLogs() {
