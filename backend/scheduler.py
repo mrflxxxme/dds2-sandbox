@@ -60,6 +60,42 @@ async def _get_missing_dates(project_id: int, lookback_days: int = BACKFILL_DAYS
     return [d.isoformat() for d in missing]
 
 
+async def _get_sync_project_ids() -> list[int]:
+    """
+    Get project IDs that should be synced.
+    If a global WB key exists (project_id IS NULL), return ALL projects.
+    Otherwise, return only projects with their own WB keys.
+    """
+    from sqlalchemy import select, or_
+    async with AsyncSessionLocal() as db:
+        # Check if there's a global (project_id=NULL) WB key
+        global_key = await db.execute(
+            select(IntegrationKey.id).where(
+                IntegrationKey.service.in_(["wb", "wb_analytics"]),
+                IntegrationKey.is_active == True,
+                IntegrationKey.project_id.is_(None),
+            ).limit(1)
+        )
+        has_global = global_key.scalar() is not None
+
+        if has_global:
+            # Global key: sync ALL projects
+            result = await db.execute(
+                select(Project.id)
+            )
+            return [r[0] for r in result if r[0]]
+        else:
+            # Only projects with their own keys
+            result = await db.execute(
+                select(IntegrationKey.project_id).where(
+                    IntegrationKey.service.in_(["wb", "wb_analytics"]),
+                    IntegrationKey.is_active == True,
+                    IntegrationKey.project_id.isnot(None),
+                ).distinct()
+            )
+            return [r[0] for r in result if r[0]]
+
+
 # ─── Main sync task ──────────────────────────────────────────────────────────
 
 async def sync_all_projects_funnel():
@@ -74,16 +110,7 @@ async def sync_all_projects_funnel():
 
     logger.info("⏰ Scheduler: starting funnel sync for all projects")
 
-    async with AsyncSessionLocal() as db:
-        # Find all projects that have WB API keys
-        result = await db.execute(
-            select(IntegrationKey.project_id).where(
-                IntegrationKey.service.in_(["wb", "wb_analytics"]),
-                IntegrationKey.is_active == True,
-                IntegrationKey.project_id.isnot(None),
-            ).distinct()
-        )
-        project_ids = [r[0] for r in result if r[0]]
+    project_ids = await _get_sync_project_ids()
 
     if not project_ids:
         logger.info("Scheduler: no projects with WB keys found, skipping")
@@ -178,10 +205,79 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
     return result
 
 
+# ─── Fast backfill (every 30s until all days filled) ─────────────────────────
+
+_backfill_lock = False  # simple lock to prevent overlapping runs
+
+async def fast_backfill_tick():
+    """
+    Scheduler tick: sync ONE missing day for EACH project.
+    Runs every 30 seconds. Removes itself when all projects are fully covered.
+    """
+    global _backfill_lock
+    if _backfill_lock:
+        return  # previous tick still running
+    _backfill_lock = True
+
+    try:
+        import asyncio
+        from backend.routers.funnel import run_funnel_sync
+
+        project_ids = await _get_sync_project_ids()
+
+        if not project_ids:
+            _stop_fast_backfill()
+            return
+
+        all_filled = True
+        for pid in project_ids:
+            missing = await _get_missing_dates(pid)
+            if not missing:
+                logger.info(f"⏩ Fast backfill: project {pid} — all {BACKFILL_DAYS} days filled ✅")
+                continue
+
+            all_filled = False
+            day = missing[0]  # sync oldest missing day first
+            logger.info(
+                f"⏩ Fast backfill: project {pid} — syncing {day} "
+                f"({len(missing)} days remaining)"
+            )
+
+            async with AsyncSessionLocal() as db:
+                res = await run_funnel_sync(db, pid, day, day)
+                logger.info(
+                    f"⏩ Fast backfill: project {pid} — {day} done, "
+                    f"+{res.get('rows', 0)} rows"
+                )
+
+            # Small pause between projects
+            await asyncio.sleep(1)
+
+        if all_filled:
+            logger.info("🎉 Fast backfill complete — all projects fully covered!")
+            _stop_fast_backfill()
+
+    except Exception as e:
+        logger.error(f"Fast backfill error: {e}")
+    finally:
+        _backfill_lock = False
+
+
+def _stop_fast_backfill():
+    """Remove the fast backfill job from scheduler."""
+    global scheduler
+    if scheduler:
+        try:
+            scheduler.remove_job("fast_backfill")
+            logger.info("Fast backfill job removed from scheduler")
+        except Exception:
+            pass
+
+
 # ─── Scheduler lifecycle ─────────────────────────────────────────────────────
 
 def start_scheduler():
-    """Start the background scheduler with cron jobs."""
+    """Start the background scheduler with cron jobs + fast backfill."""
     global scheduler
 
     scheduler = AsyncIOScheduler(timezone=MSK)
@@ -197,9 +293,20 @@ def start_scheduler():
             misfire_grace_time=600,  # 10 min grace
         )
 
+    # Fast backfill: every 30s until all days are filled
+    from apscheduler.triggers.interval import IntervalTrigger
+    scheduler.add_job(
+        fast_backfill_tick,
+        trigger=IntervalTrigger(seconds=30),
+        id="fast_backfill",
+        name="Fast backfill (every 30s)",
+        replace_existing=True,
+        misfire_grace_time=60,
+    )
+
     scheduler.start()
     logger.info(
-        "✅ Scheduler started — funnel sync at 00:01, 07:00, 13:00, 19:00 MSK"
+        "✅ Scheduler started — funnel sync 4x/day + fast backfill every 30s"
     )
 
 
@@ -226,3 +333,4 @@ def get_scheduler_info() -> dict:
         })
 
     return {"running": scheduler.running, "jobs": jobs}
+
