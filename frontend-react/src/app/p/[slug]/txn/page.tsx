@@ -82,9 +82,9 @@ export default function TransactionsPage() {
                                         <td>{t.cat_lvl1 || t.event_type || '—'}</td>
                                         <td style={{
                                             textAlign: 'right', fontWeight: 600, fontFamily: 'monospace',
-                                            color: (t.amount || t.amount_rub || 0) >= 0 ? 'var(--color-success)' : 'var(--color-danger)'
+                                            color: parseFloat(t.income) > 0 ? 'var(--color-success)' : 'var(--color-danger)'
                                         }}>
-                                            {formatNumber(t.amount || t.amount_rub)}
+                                            {formatNumber(parseFloat(t.income) > 0 ? t.income : t.expense)}
                                         </td>
                                         <td><span className="badge badge-info">{t.currency || 'RUB'}</span></td>
                                     </tr>

@@ -172,8 +172,8 @@ function CpBlock({ group, total, cats, isOpen, onToggle, allTxns, onAssign }: an
                                     {allTxns.slice(0, 20).map((t: any, j: number) => (
                                         <tr key={j}>
                                             <td style={{ fontSize: 12 }}>{formatDate(t.date)}</td>
-                                            <td style={{ fontWeight: 600, color: (t.income || 0) > 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>
-                                                {formatNumber(t.income || t.expense || 0)}
+                                            <td style={{ fontWeight: 600, color: parseFloat(t.income) > 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                                                {formatNumber(parseFloat(t.income) > 0 ? t.income : t.expense)}
                                             </td>
                                             <td style={{ fontSize: 12, maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                                 {t.purpose || '—'}
