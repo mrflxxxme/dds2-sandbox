@@ -139,6 +139,8 @@ export default function FunnelPage() {
     const [summary, setSummary] = useState<any>(null);
     const [filters, setFilters] = useState<any>({ brands: [], subjects: [] });
     const [loading, setLoading] = useState(false);
+    const headerRow1Ref = useRef<HTMLTableRowElement>(null);
+    const [row1H, setRow1H] = useState(32);
     const [taxRate, setTaxRate] = useState(6);
     const [initDone, setInitDone] = useState(false);
     const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
@@ -158,6 +160,17 @@ export default function FunnelPage() {
     // Costs tab
     const [costs, setCosts] = useState<any>({ overrides: [], missing: [] });
     const [editCost, setEditCost] = useState<{ nm_id: number; cost_price: string } | null>(null);
+
+    // Measure first header row height dynamically
+    useEffect(() => {
+        const el = headerRow1Ref.current;
+        if (!el) return;
+        const measure = () => setRow1H(el.offsetHeight);
+        measure();
+        const ro = new ResizeObserver(measure);
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, [data]);
 
     const loadFilters = useCallback(async () => {
         try {
@@ -364,8 +377,8 @@ export default function FunnelPage() {
                     <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
                         {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> : (
                             <table className="data-table" style={{ minWidth: detailed ? 1800 : 1200, borderCollapse: 'separate', borderSpacing: 0 }}>
-                                <thead style={{ position: 'sticky', top: 0, zIndex: 20 }}>
-                                    <tr>
+                                <thead>
+                                    <tr ref={headerRow1Ref}>
                                         <th rowSpan={2} style={{ position: 'sticky', left: 0, top: 0, background: '#1a1a2e', zIndex: 22, verticalAlign: 'bottom', borderBottom: '2px solid rgba(255,255,255,0.08)' }}>ДАТА</th>
                                         {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 20, verticalAlign: 'bottom' }}>Артикул</th>}
                                         {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 20, verticalAlign: 'bottom' }}>nmId</th>}
@@ -377,25 +390,25 @@ export default function FunnelPage() {
                                         <th colSpan={2} style={{ position: 'sticky', top: 0, background: '#2a1a28', textAlign: 'center', zIndex: 20 }}>КОНВЕРСИЯ</th>
                                     </tr>
                                     <tr>
-                                        <th style={{ position: 'sticky', top: 28, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Переходы</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Корзины</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Заказы</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Сумма ₽</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Выручка ₽</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Расходы ₽</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Просмотры</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Клики</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>CTR</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>CPC</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>CPM</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>ДРР</th>
-                                        {detailed && <th style={{ position: 'sticky', top: 28, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Себест. ₽</th>}
-                                        <th style={{ position: 'sticky', top: 28, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Налог ₽</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Прибыль ₽</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Маржа</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Ср. цена</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#241a24', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>В корзину</th>
-                                        <th style={{ position: 'sticky', top: 28, background: '#241a24', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>В заказ</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Переходы</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Корзины</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Заказы</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Сумма ₽</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Выручка ₽</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Расходы ₽</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Просмотры</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Клики</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>CTR</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>CPC</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>CPM</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>ДРР</th>
+                                        {detailed && <th style={{ position: 'sticky', top: row1H, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Себест. ₽</th>}
+                                        <th style={{ position: 'sticky', top: row1H, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Налог ₽</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Прибыль ₽</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Маржа</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Ср. цена</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#241a24', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>В корзину</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#241a24', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>В заказ</th>
                                     </tr>
                                 </thead>
                                 <tbody>
