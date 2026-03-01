@@ -13,6 +13,7 @@ const navItems = [
     { href: '/planning', label: 'Планирование', icon: '📦' },
     { href: '/cost', label: 'Себестоимость', icon: '🧮' },
     { href: '/funnel', label: 'Воронка продаж', icon: '📊' },
+    { href: '/day-analysis', label: 'Анализ дня', icon: '🔍' },
     { href: '/refs', label: 'Справочники', icon: '📋' },
 ];
 

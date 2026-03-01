@@ -540,6 +540,15 @@ class ApiClient {
     async getSyncStatus(): Promise<any> {
         return this.request('GET', '/api/v1/funnel/sync_status');
     }
+    // ─── Day Analysis ─────────────────────────────────────────────
+    async getDayAnalysis(params: { target_date: string; brand?: string; subject?: string; trend_days?: number }): Promise<any> {
+        const q = new URLSearchParams();
+        q.set('target_date', params.target_date);
+        if (params.brand) q.set('brand', params.brand);
+        if (params.subject) q.set('subject', params.subject);
+        if (params.trend_days) q.set('trend_days', String(params.trend_days));
+        return this.request('GET', `/api/v1/funnel/day-analysis?${q.toString()}`);
+    }
 }
 
 export const api = new ApiClient();
