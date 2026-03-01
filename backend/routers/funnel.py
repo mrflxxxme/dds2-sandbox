@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy import select, delete, func, and_
+from sqlalchemy import select, delete, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from pydantic import BaseModel
@@ -598,7 +598,10 @@ async def get_funnel_data(
         if brand:
             q = q.where(WbFunnelDaily.brand == brand)
         if vendor_code:
-            q = q.where(WbFunnelDaily.vendor_code.ilike(f"%{vendor_code}%"))
+            vc_filter = WbFunnelDaily.vendor_code.ilike(f"%{vendor_code}%")
+            if vendor_code.isdigit():
+                vc_filter = or_(vc_filter, WbFunnelDaily.nm_id == int(vendor_code))
+            q = q.where(vc_filter)
         if subject:
             q = q.where(WbFunnelDaily.subject == subject)
 
