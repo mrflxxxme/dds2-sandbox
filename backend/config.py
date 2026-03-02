@@ -22,8 +22,8 @@ class Settings(BaseSettings):
 
     # MinIO (S3-compatible storage)
     MINIO_ENDPOINT: str = "localhost:9000"
-    MINIO_ACCESS_KEY: str = "minioadmin"
-    MINIO_SECRET_KEY: str = "minioadmin"
+    MINIO_ACCESS_KEY: str = ""
+    MINIO_SECRET_KEY: str = ""
     MINIO_BUCKET: str = "dds-files"
     MINIO_SECURE: bool = False
 
@@ -34,6 +34,18 @@ class Settings(BaseSettings):
     # File upload limits
     MAX_UPLOAD_SIZE_MB: int = 50
     ALLOWED_UPLOAD_EXTENSIONS: str = ".xlsx,.xls,.csv,.pdf"
+
+    @field_validator("MINIO_ACCESS_KEY", "MINIO_SECRET_KEY")
+    @classmethod
+    def validate_minio_credentials(cls, v: str, info) -> str:
+        if not v or v in ("", "minioadmin"):
+            warnings.warn(
+                f"\n⚠️  {info.field_name} не задан или использует дефолтное значение!\n"
+                f"   Укажите безопасное значение в .env для production.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return v
 
     @field_validator("SECRET_KEY")
     @classmethod

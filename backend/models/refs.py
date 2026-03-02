@@ -72,11 +72,12 @@ class CategoryRef(Base):
     """Reference categories for income/expense."""
     __tablename__ = "category_ref"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     direction: Mapped[str] = mapped_column(String(10), nullable=False)  # "income" or "expense"
     cat_lvl1: Mapped[str] = mapped_column(String(100), nullable=False)
     cat_lvl2: Mapped[str] = mapped_column(String(100), nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
     __table_args__ = (
-        UniqueConstraint("direction", "cat_lvl1", "cat_lvl2", name="uq_cat_ref"),
+        UniqueConstraint("project_id", "direction", "cat_lvl1", "cat_lvl2", name="uq_cat_ref"),
     )

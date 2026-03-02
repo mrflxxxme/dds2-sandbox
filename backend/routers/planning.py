@@ -83,21 +83,35 @@ async def delete_order(
 # ─── Lead Times ───────────────────────────────────────────────────────────────
 
 @router.get("/lead_times", response_model=List[LeadTimeSchema])
-async def get_lead_times(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(LeadTime).order_by(LeadTime.direction))
+async def get_lead_times(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(LeadTime)
+        .where(LeadTime.project_id == project.id)
+        .order_by(LeadTime.direction)
+    )
     return result.scalars().all()
 
 
 @router.post("/lead_times", response_model=LeadTimeSchema)
-async def upsert_lead_time(payload: LeadTimeSchema, db: AsyncSession = Depends(get_db)):
+async def upsert_lead_time(
+    payload: LeadTimeSchema,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
-        select(LeadTime).where(LeadTime.direction == payload.direction)
+        select(LeadTime).where(
+            LeadTime.project_id == project.id,
+            LeadTime.direction == payload.direction,
+        )
     )
     obj = result.scalar_one_or_none()
     if obj:
         obj.days = payload.days
     else:
-        obj = LeadTime(**payload.model_dump(exclude={"id"}))
+        obj = LeadTime(project_id=project.id, **payload.model_dump(exclude={"id"}))
         db.add(obj)
     await db.commit()
     await db.refresh(obj)
@@ -239,9 +253,14 @@ async def delete_income(
 # ─── Customs TOPUP / ALLOC ────────────────────────────────────────────────────
 
 @router.get("/customs/topup", response_model=List[CustomsTopupSchema])
-async def get_customs_topup(db: AsyncSession = Depends(get_db)):
+async def get_customs_topup(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
-        select(CustomsTopup).order_by(CustomsTopup.date.desc())
+        select(CustomsTopup)
+        .where(CustomsTopup.project_id == project.id)
+        .order_by(CustomsTopup.date.desc())
     )
     topups = result.scalars().all()
 
@@ -250,7 +269,9 @@ async def get_customs_topup(db: AsyncSession = Depends(get_db)):
         select(
             CustomsAlloc.topup_txn_id,
             func.sum(CustomsAlloc.alloc_amount).label("allocated"),
-        ).group_by(CustomsAlloc.topup_txn_id)
+        )
+        .where(CustomsAlloc.project_id == project.id)
+        .group_by(CustomsAlloc.topup_txn_id)
     )
     alloc_map = {row.topup_txn_id: Decimal(str(row.allocated or 0)) for row in alloc_result}
 
@@ -268,9 +289,10 @@ async def get_customs_topup(db: AsyncSession = Depends(get_db)):
 @router.get("/customs/alloc", response_model=List[CustomsAllocSchema])
 async def get_customs_alloc(
     topup_txn_id: Optional[str] = Query(None),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    q = select(CustomsAlloc)
+    q = select(CustomsAlloc).where(CustomsAlloc.project_id == project.id)
     if topup_txn_id:
         q = q.where(CustomsAlloc.topup_txn_id == topup_txn_id)
     q = q.order_by(CustomsAlloc.pay_date)
@@ -280,9 +302,11 @@ async def get_customs_alloc(
 
 @router.post("/customs/alloc", response_model=CustomsAllocSchema)
 async def create_alloc(
-    payload: CustomsAllocSchema, db: AsyncSession = Depends(get_db)
+    payload: CustomsAllocSchema,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
 ):
-    obj = CustomsAlloc(**payload.model_dump(exclude={"id"}))
+    obj = CustomsAlloc(project_id=project.id, **payload.model_dump(exclude={"id"}))
     db.add(obj)
     await db.commit()
     await db.refresh(obj)
@@ -290,8 +314,14 @@ async def create_alloc(
 
 
 @router.delete("/customs/alloc/{alloc_id}")
-async def delete_alloc(alloc_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(CustomsAlloc).where(CustomsAlloc.id == alloc_id))
+async def delete_alloc(
+    alloc_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(CustomsAlloc).where(CustomsAlloc.id == alloc_id, CustomsAlloc.project_id == project.id)
+    )
     obj = result.scalar_one_or_none()
     if not obj:
         raise HTTPException(404, "Not found")
@@ -544,9 +574,18 @@ def _parse_fts_pdf(pdf_bytes: bytes) -> list[dict]:
 
 
 @router.post("/customs_dt/upload_fts")
-async def upload_fts_report(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+async def upload_fts_report(
+    file: UploadFile = File(...),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     """Upload FTS PDF report and parse DT declarations."""
     content = await file.read()
+
+    # Validate file content (magic bytes)
+    from backend.utils.file_validation import validate_file_content
+    validate_file_content(content, file.filename or "report.pdf")
+
     parsed = _parse_fts_pdf(content)
 
     if not parsed:
@@ -555,15 +594,19 @@ async def upload_fts_report(file: UploadFile = File(...), db: AsyncSession = Dep
     created = 0
     skipped = 0
     for item in parsed:
-        # Check if DT already exists
+        # Check if DT already exists within project
         existing = await db.execute(
-            select(CustomsDT).where(CustomsDT.dt_number == item["dt_number"])
+            select(CustomsDT).where(
+                CustomsDT.project_id == project.id,
+                CustomsDT.dt_number == item["dt_number"],
+            )
         )
         if existing.scalar_one_or_none():
             skipped += 1
             continue
 
         dt = CustomsDT(
+            project_id=project.id,
             dt_number=item["dt_number"],
             dt_date=date.fromisoformat(item["dt_date"]),
             amount_rub=Decimal(str(item["amount_rub"])),
@@ -576,9 +619,16 @@ async def upload_fts_report(file: UploadFile = File(...), db: AsyncSession = Dep
 
 
 @router.get("/customs_dt")
-async def get_customs_dt_list(db: AsyncSession = Depends(get_db)):
+async def get_customs_dt_list(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     """List all parsed DT declarations."""
-    result = await db.execute(select(CustomsDT).order_by(CustomsDT.dt_date.desc()))
+    result = await db.execute(
+        select(CustomsDT)
+        .where(CustomsDT.project_id == project.id)
+        .order_by(CustomsDT.dt_date.desc())
+    )
     dts = result.scalars().all()
     return [
         {
@@ -592,9 +642,16 @@ async def get_customs_dt_list(db: AsyncSession = Depends(get_db)):
 
 
 @router.put("/customs_dt/{dt_id}")
-async def update_customs_dt(dt_id: int, payload: dict, db: AsyncSession = Depends(get_db)):
+async def update_customs_dt(
+    dt_id: int,
+    payload: dict,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     """Assign order_no to a DT declaration."""
-    result = await db.execute(select(CustomsDT).where(CustomsDT.id == dt_id))
+    result = await db.execute(
+        select(CustomsDT).where(CustomsDT.id == dt_id, CustomsDT.project_id == project.id)
+    )
     dt = result.scalar_one_or_none()
     if not dt:
         raise HTTPException(404, "Not found")
@@ -609,8 +666,14 @@ async def update_customs_dt(dt_id: int, payload: dict, db: AsyncSession = Depend
 
 
 @router.delete("/customs_dt/{dt_id}")
-async def delete_customs_dt(dt_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(CustomsDT).where(CustomsDT.id == dt_id))
+async def delete_customs_dt(
+    dt_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(CustomsDT).where(CustomsDT.id == dt_id, CustomsDT.project_id == project.id)
+    )
     dt = result.scalar_one_or_none()
     if not dt:
         raise HTTPException(404, "Not found")
@@ -624,6 +687,7 @@ async def delete_customs_dt(dt_id: int, db: AsyncSession = Depends(get_db)):
 @router.post("/wb_payouts/upload")
 async def upload_wb_payouts(
     file: UploadFile = File(...),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Upload WB payout Excel from seller cabinet. Upserts by request_id."""
@@ -631,6 +695,11 @@ async def upload_wb_payouts(
     from datetime import datetime
 
     data = await file.read()
+
+    # Validate file content (magic bytes)
+    from backend.utils.file_validation import validate_file_content
+    validate_file_content(data, file.filename or "payouts.xlsx")
+
     parsed = parse_wb_payout_cabinet(data)
 
     if not parsed:
@@ -639,7 +708,10 @@ async def upload_wb_payouts(
     created, updated, skipped = 0, 0, 0
     for item in parsed:
         result = await db.execute(
-            select(WbPayout).where(WbPayout.request_id == item["request_id"])
+            select(WbPayout).where(
+                WbPayout.project_id == project.id,
+                WbPayout.request_id == item["request_id"],
+            )
         )
         obj = result.scalar_one_or_none()
         if obj:
@@ -651,7 +723,7 @@ async def upload_wb_payouts(
             else:
                 skipped += 1
         else:
-            obj = WbPayout(**item)
+            obj = WbPayout(project_id=project.id, **item)
             db.add(obj)
             created += 1
 
@@ -667,10 +739,11 @@ async def upload_wb_payouts(
 @router.get("/wb_payouts")
 async def get_wb_payouts(
     status: Optional[str] = Query(None),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """List WB payouts, optionally filtered by status."""
-    q = select(WbPayout).order_by(WbPayout.created_at.desc())
+    q = select(WbPayout).where(WbPayout.project_id == project.id).order_by(WbPayout.created_at.desc())
     if status:
         q = q.where(WbPayout.status == status)
     result = await db.execute(q)

@@ -6,7 +6,7 @@ from datetime import datetime, date, timezone
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, Text, ForeignKey, Index
+from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, Text, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -36,8 +36,13 @@ class LeadTime(Base):
     __tablename__ = "lead_time"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    direction: Mapped[str] = mapped_column(String(30), unique=True, nullable=False)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
+    direction: Mapped[str] = mapped_column(String(30), nullable=False)
     days: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "direction", name="uq_lead_time_project_dir"),
+    )
 
 
 class PlannedPayment(Base, SoftDeleteMixin):

@@ -46,8 +46,15 @@ DEFAULT_VAT_RATE = Decimal("0.22")
 # ─── Nomenclature ─────────────────────────────────────────────────────────────
 
 @router.get("/nomenclature")
-async def get_nomenclature(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Nomenclature).order_by(Nomenclature.subject, Nomenclature.article_seller))
+async def get_nomenclature(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Nomenclature)
+        .where(Nomenclature.project_id == project.id)
+        .order_by(Nomenclature.subject, Nomenclature.article_seller)
+    )
     return [
         {
             "id": n.id, "barcode": n.barcode, "brand": n.brand,
@@ -61,9 +68,15 @@ async def get_nomenclature(db: AsyncSession = Depends(get_db)):
 @router.post("/nomenclature/upload")
 async def upload_nomenclature(
     file: UploadFile = File(...),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     data = await file.read()
+
+    # Validate file content (magic bytes)
+    from backend.utils.file_validation import validate_file_content
+    validate_file_content(data, file.filename or "upload.xlsx")
+
     df = pd.read_excel(io.BytesIO(data))
 
     # Normalize columns
@@ -80,7 +93,12 @@ async def upload_nomenclature(
         bc = str(row.get("barcode", "")).strip()
         if not bc or bc == "nan":
             continue
-        result = await db.execute(select(Nomenclature).where(Nomenclature.barcode == bc))
+        result = await db.execute(
+            select(Nomenclature).where(
+                Nomenclature.project_id == project.id,
+                Nomenclature.barcode == bc,
+            )
+        )
         nom = result.scalar_one_or_none()
         if nom:
             nom.brand = str(row.get("brand", "") or "").strip() or None
@@ -106,6 +124,7 @@ async def upload_nomenclature(
             except Exception:
                 awb = None
             nom = Nomenclature(
+                project_id=project.id,
                 barcode=bc,
                 brand=str(row.get("brand", "") or "").strip() or None,
                 subject=str(row.get("subject", "") or "").strip() or None,
@@ -123,8 +142,15 @@ async def upload_nomenclature(
 # ─── Duty Rules ───────────────────────────────────────────────────────────────
 
 @router.get("/duty_rules")
-async def get_duty_rules(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(DutyRule).order_by(DutyRule.subject))
+async def get_duty_rules(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(DutyRule)
+        .where(DutyRule.project_id == project.id)
+        .order_by(DutyRule.subject)
+    )
     return [
         {
             "id": r.id, "subject": r.subject, "basis": r.basis,
@@ -136,11 +162,17 @@ async def get_duty_rules(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/duty_rules")
-async def upsert_duty_rule(payload: dict, db: AsyncSession = Depends(get_db)):
+async def upsert_duty_rule(
+    payload: dict,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     subject = payload.get("subject", "").strip()
     if not subject:
         raise HTTPException(400, "subject required")
-    result = await db.execute(select(DutyRule).where(DutyRule.subject == subject))
+    result = await db.execute(
+        select(DutyRule).where(DutyRule.project_id == project.id, DutyRule.subject == subject)
+    )
     rule = result.scalar_one_or_none()
     if rule:
         rule.basis = payload.get("basis", rule.basis)
@@ -149,6 +181,7 @@ async def upsert_duty_rule(payload: dict, db: AsyncSession = Depends(get_db)):
         rule.note = payload.get("note", rule.note)
     else:
         rule = DutyRule(
+            project_id=project.id,
             subject=subject,
             basis=payload.get("basis", "INVOICE"),
             rate=Decimal(str(payload.get("rate", 0))),
@@ -161,8 +194,14 @@ async def upsert_duty_rule(payload: dict, db: AsyncSession = Depends(get_db)):
 
 
 @router.delete("/duty_rules/{rule_id}")
-async def delete_duty_rule(rule_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(DutyRule).where(DutyRule.id == rule_id))
+async def delete_duty_rule(
+    rule_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(DutyRule).where(DutyRule.id == rule_id, DutyRule.project_id == project.id)
+    )
     rule = result.scalar_one_or_none()
     if not rule:
         raise HTTPException(404, "Not found")
@@ -415,7 +454,10 @@ async def get_cost_order_items(
     nom_map = {}
     if barcodes:
         nom_result = await db.execute(
-            select(Nomenclature).where(Nomenclature.barcode.in_(barcodes))
+            select(Nomenclature).where(
+                Nomenclature.project_id == project.id,
+                Nomenclature.barcode.in_(barcodes),
+            )
         )
         nom_map = {n.barcode: n.article_wb for n in nom_result.scalars().all()}
 
@@ -451,6 +493,10 @@ async def upload_order_items(
 
     data = await file.read()
 
+    # Validate file content (magic bytes)
+    from backend.utils.file_validation import validate_file_content
+    validate_file_content(data, file.filename or "upload.xlsx")
+
     # Detect file format and normalize
     from backend.services.cost_service import detect_and_normalize_excel
     try:
@@ -461,11 +507,15 @@ async def upload_order_items(
     # Delete existing items for this order
     await db.execute(delete(CostOrderItem).where(CostOrderItem.order_no == order_no))
 
-    # Load nomenclature and duty rules
-    nom_result = await db.execute(select(Nomenclature))
+    # Load nomenclature and duty rules (project-scoped)
+    nom_result = await db.execute(
+        select(Nomenclature).where(Nomenclature.project_id == project.id)
+    )
     nom_map = {n.barcode: n for n in nom_result.scalars().all()}
 
-    duty_result = await db.execute(select(DutyRule))
+    duty_result = await db.execute(
+        select(DutyRule).where(DutyRule.project_id == project.id)
+    )
     duty_map = {r.subject: r for r in duty_result.scalars().all()}
 
     # Calculate totals for delivery split

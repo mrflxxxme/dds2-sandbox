@@ -6,7 +6,7 @@ from datetime import datetime, date, timezone
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, Text, ForeignKey, Index, Enum as SAEnum
+from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, Text, ForeignKey, Index, Enum as SAEnum, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -17,7 +17,8 @@ from backend.models.mixins import SoftDeleteMixin
 class Nomenclature(Base):
     __tablename__ = "nomenclature"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    barcode: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
+    barcode: Mapped[str] = mapped_column(String(50), nullable=False)
     brand: Mapped[Optional[str]] = mapped_column(String(100))
     subject: Mapped[Optional[str]] = mapped_column(String(100))
     article_seller: Mapped[Optional[str]] = mapped_column(String(100))
@@ -25,15 +26,24 @@ class Nomenclature(Base):
     volume_l: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc))
 
+    __table_args__ = (
+        UniqueConstraint("project_id", "barcode", name="uq_nomenclature_project_barcode"),
+    )
+
 
 class DutyRule(Base):
     __tablename__ = "duty_rules"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    subject: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
+    subject: Mapped[str] = mapped_column(String(100), nullable=False)
     basis: Mapped[str] = mapped_column(SAEnum(DutyBasis), nullable=False)
     rate: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
     util_collect_rub: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=0)
     note: Mapped[Optional[str]] = mapped_column(String(200))
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "subject", name="uq_duty_rule_project_subject"),
+    )
 
 
 class CostOrder(Base, SoftDeleteMixin):

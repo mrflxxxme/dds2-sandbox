@@ -56,6 +56,10 @@ async def upload_statement(
 
     data = await file.read()
 
+    # Validate file content (magic bytes)
+    from backend.utils.file_validation import validate_file_content
+    validate_file_content(data, safe_filename)
+
     # Validate file size
     max_bytes = app_settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
     if len(data) > max_bytes:

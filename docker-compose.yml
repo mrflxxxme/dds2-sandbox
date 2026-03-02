@@ -97,10 +97,6 @@ services:
       - backend
     environment:
       NEXT_TELEMETRY_DISABLED: 1
-      WATCHPACK_POLLING: "true"
-    volumes:
-      - ./frontend-react/src:/app/src
-      - ./frontend-react/public:/app/public
     restart: unless-stopped
     networks:
       - internal

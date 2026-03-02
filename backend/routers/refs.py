@@ -9,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.middleware import get_project_id
-from backend.models import Account, CounterpartyCategory, Override, OpeningBalance, CategoryRef
+from backend.project_context import get_current_project
+from backend.models import Account, CounterpartyCategory, Override, OpeningBalance, CategoryRef, Project
 from backend.schemas import (
     AccountSchema, CounterpartyCategorySchema, OverrideSchema,
     OpeningBalanceSchema, CategoryRefSchema, DeleteResponse, MessageResponse,
@@ -151,9 +152,14 @@ async def upsert_opening_balance(
 # ─── Category Reference ──────────────────────────────────────────────────────
 
 @router.get("/categories", response_model=list[CategoryRefSchema])
-async def get_categories(db: AsyncSession = Depends(get_db)):
+async def get_categories(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
-        select(CategoryRef).order_by(CategoryRef.direction, CategoryRef.sort_order, CategoryRef.cat_lvl1)
+        select(CategoryRef)
+        .where(CategoryRef.project_id == project.id)
+        .order_by(CategoryRef.direction, CategoryRef.sort_order, CategoryRef.cat_lvl1)
     )
     cats = result.scalars().all()
     return [
@@ -164,15 +170,20 @@ async def get_categories(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/categories", response_model=CategoryRefSchema)
-async def add_category(payload: dict, db: AsyncSession = Depends(get_db)):
+async def add_category(
+    payload: dict,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     direction = payload.get("direction", "expense")
     cat_lvl1 = payload.get("cat_lvl1", "").strip()
     cat_lvl2 = payload.get("cat_lvl2", "").strip()
     if not cat_lvl1 or not cat_lvl2:
         raise HTTPException(400, "cat_lvl1 and cat_lvl2 required")
-    # Check duplicate
+    # Check duplicate within project
     existing = await db.execute(
         select(CategoryRef).where(
+            CategoryRef.project_id == project.id,
             CategoryRef.direction == direction,
             CategoryRef.cat_lvl1 == cat_lvl1,
             CategoryRef.cat_lvl2 == cat_lvl2,
@@ -181,6 +192,7 @@ async def add_category(payload: dict, db: AsyncSession = Depends(get_db)):
     if existing.scalar_one_or_none():
         raise HTTPException(400, f"Категория '{cat_lvl1} / {cat_lvl2}' уже существует")
     cat = CategoryRef(
+        project_id=project.id,
         direction=direction, cat_lvl1=cat_lvl1, cat_lvl2=cat_lvl2,
         sort_order=payload.get("sort_order", 0),
     )
@@ -190,8 +202,14 @@ async def add_category(payload: dict, db: AsyncSession = Depends(get_db)):
 
 
 @router.delete("/categories/{cat_id}", response_model=DeleteResponse)
-async def delete_category(cat_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(CategoryRef).where(CategoryRef.id == cat_id))
+async def delete_category(
+    cat_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(CategoryRef).where(CategoryRef.id == cat_id, CategoryRef.project_id == project.id)
+    )
     cat = result.scalar_one_or_none()
     if not cat:
         raise HTTPException(404, "Not found")

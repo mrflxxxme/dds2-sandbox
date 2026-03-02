@@ -6,7 +6,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import String, Integer, Date, Numeric, Text, ForeignKey, Index
+from sqlalchemy import String, Integer, Date, Numeric, Text, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -16,7 +16,8 @@ class CustomsTopup(Base):
     __tablename__ = "customs_topup"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    topup_txn_id: Mapped[str] = mapped_column(String(300), unique=True, nullable=False)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
+    topup_txn_id: Mapped[str] = mapped_column(String(300), nullable=False)
     date: Mapped[date] = mapped_column(Date, nullable=False)
     amount_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
     purpose: Mapped[Optional[str]] = mapped_column(Text)
@@ -25,11 +26,16 @@ class CustomsTopup(Base):
 
     allocs: Mapped[list["CustomsAlloc"]] = relationship(back_populates="topup", cascade="all, delete-orphan")
 
+    __table_args__ = (
+        UniqueConstraint("project_id", "topup_txn_id", name="uq_customs_topup_project_txn"),
+    )
+
 
 class CustomsAlloc(Base):
     __tablename__ = "customs_alloc"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     topup_txn_id: Mapped[str] = mapped_column(String(300), ForeignKey("customs_topup.topup_txn_id"), nullable=False)
     pay_date: Mapped[Optional[date]] = mapped_column(Date)
     pay_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2))
@@ -44,6 +50,7 @@ class CustomsDT(Base):
     """Parsed DT declaration from FTS report, linked to order."""
     __tablename__ = "customs_dt"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     dt_number: Mapped[str] = mapped_column(String(100), nullable=False)
     dt_date: Mapped[date] = mapped_column(Date, nullable=False)
     amount_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
