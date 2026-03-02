@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
     async with async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-        # Seed default categories (idempotent)
+        # Seed default categories for all existing projects (idempotent)
         defaults = [
             # Income
             ("income", "Маркетплейсы", "Wildberries", 1),
@@ -97,11 +97,16 @@ async def lifespan(app: FastAPI):
             ("expense", "Прочие расходы", "Реклама", 72),
             ("expense", "Прочие расходы", "Прочее", 73),
         ]
-        for d, c1, c2, s in defaults:
-            await conn.execute(text(
-                "INSERT INTO category_ref (direction, cat_lvl1, cat_lvl2, sort_order) "
-                "VALUES (:d, :c1, :c2, :s) ON CONFLICT (direction, cat_lvl1, cat_lvl2) DO NOTHING"
-            ), {"d": d, "c1": c1, "c2": c2, "s": s})
+        # Get all project IDs for seeding
+        project_rows = await conn.execute(text("SELECT id FROM projects"))
+        project_ids = [r[0] for r in project_rows]
+        for pid in project_ids:
+            for d, c1, c2, s in defaults:
+                await conn.execute(text(
+                    "INSERT INTO category_ref (project_id, direction, cat_lvl1, cat_lvl2, sort_order) "
+                    "VALUES (:pid, :d, :c1, :c2, :s) "
+                    "ON CONFLICT (project_id, direction, cat_lvl1, cat_lvl2) DO NOTHING"
+                ), {"pid": pid, "d": d, "c1": c1, "c2": c2, "s": s})
 
     # Create default admin user
     async with AsyncSessionLocal() as session:

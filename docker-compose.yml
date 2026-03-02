@@ -78,6 +78,8 @@ services:
       MINIO_SECURE: ${MINIO_SECURE:-false}
     volumes:
       - ./backend:/app/backend
+      - ./migrations:/app/migrations
+      - ./alembic.ini:/app/alembic.ini
     healthcheck:
       test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" ]
       interval: 10s
