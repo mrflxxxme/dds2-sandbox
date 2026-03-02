@@ -10,9 +10,10 @@ from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, Text, 
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
+from backend.models.mixins import SoftDeleteMixin
 
 
-class Order(Base):
+class Order(Base, SoftDeleteMixin):
     __tablename__ = "orders"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -39,7 +40,7 @@ class LeadTime(Base):
     days: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
-class PlannedPayment(Base):
+class PlannedPayment(Base, SoftDeleteMixin):
     __tablename__ = "planned_payments"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

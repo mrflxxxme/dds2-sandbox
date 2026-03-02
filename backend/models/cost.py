@@ -11,6 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
 from backend.models.enums import DutyBasis
+from backend.models.mixins import SoftDeleteMixin
 
 
 class Nomenclature(Base):
@@ -35,7 +36,7 @@ class DutyRule(Base):
     note: Mapped[Optional[str]] = mapped_column(String(200))
 
 
-class CostOrder(Base):
+class CostOrder(Base, SoftDeleteMixin):
     __tablename__ = "cost_orders"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))

@@ -14,9 +14,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
 from backend.models.enums import EventType2
+from backend.models.mixins import SoftDeleteMixin
 
 
-class Transaction(Base):
+class Transaction(Base, SoftDeleteMixin):
     __tablename__ = "transactions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
