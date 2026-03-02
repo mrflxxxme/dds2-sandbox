@@ -309,74 +309,9 @@ async def get_cashflow_daily(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Calculate daily cashflow for the next `days` days.
-    Includes overdue unpaid payments.
-    """
-    today = date.today()
-    horizon = today + timedelta(days=days)
-
-    # Planned incomes indexed by date
-    inc_result = await db.execute(
-        select(PlannedIncome).where(PlannedIncome.project_id == project.id, PlannedIncome.date <= horizon)
-    )
-    income_map: dict[date, Decimal] = {}
-    for inc in inc_result.scalars().all():
-        income_map[inc.date] = income_map.get(inc.date, Decimal("0")) + inc.amount_rub
-
-    # WB payouts in transit → add as expected income (created_at + 2 days)
-    transit_result = await db.execute(
-        select(WbPayout).where(
-            WbPayout.status.in_(["TRANSIT", "PROCESSING"]),
-        )
-    )
-    for wp in transit_result.scalars().all():
-        estimated = wp.created_at.date() + timedelta(days=2) if hasattr(wp.created_at, 'date') else wp.created_at + timedelta(days=2)
-        if estimated < today:
-            estimated = today  # overdue transit → show today
-        if estimated <= horizon:
-            income_map[estimated] = income_map.get(estimated, Decimal("0")) + wp.amount_rub
-
-    # Planned payments (unpaid)
-    pay_result = await db.execute(
-        select(PlannedPayment).where(
-            PlannedPayment.project_id == project.id,
-            PlannedPayment.is_paid == False,
-            PlannedPayment.pay_date <= horizon,
-        )
-    )
-    payments = pay_result.scalars().all()
-
-    # Overdue = pay_date < today → move to today
-    expense_map: dict[date, Decimal] = {}
-    for p in payments:
-        amt = p.amount_rub or Decimal("0")
-        if amt == 0 and p.amount and p.fx_rate:
-            amt = p.amount * p.fx_rate
-        elif amt == 0 and p.amount:
-            amt = p.amount
-
-        effective_date = p.pay_date if (p.pay_date and p.pay_date >= today) else today
-        expense_map[effective_date] = expense_map.get(effective_date, Decimal("0")) + Decimal(str(amt))
-
-    # Build daily series
-    running = Decimal(str(starting_balance))
-    rows = []
-    for i in range(days + 1):
-        d = today + timedelta(days=i)
-        inc = income_map.get(d, Decimal("0"))
-        exp = expense_map.get(d, Decimal("0"))
-        net = inc - exp
-        running += net
-        rows.append({
-            "date": str(d),
-            "planned_income": float(inc),
-            "planned_expense": float(exp),
-            "net": float(net),
-            "deficit_running": float(running),
-        })
-
-    return rows
+    """Calculate daily cashflow for the next `days` days."""
+    from backend.services.planning_service import calculate_cashflow_daily
+    return await calculate_cashflow_daily(db, project.id, days, starting_balance)
 
 
 # ─── Order Summary (plan vs fact) ─────────────────────────────────────────────
@@ -388,59 +323,20 @@ async def order_summary(
     db: AsyncSession = Depends(get_db),
 ):
     """Return plan vs fact for a specific order."""
-    # Order plan
-    result = await db.execute(select(Order).where(Order.order_no == order_no, Order.project_id == project.id))
-    order = result.scalar_one_or_none()
-    if not order:
-        raise HTTPException(404, "Order not found")
-
-    # Planned payments
-    pp_result = await db.execute(
-        select(PlannedPayment).where(PlannedPayment.order_no == order_no, PlannedPayment.project_id == project.id)
-    )
-    planned_payments = pp_result.scalars().all()
-
-    # Fact: order payments (annex_id = order_no)
-    txn_order_result = await db.execute(
-        select(Transaction).where(
-            Transaction.project_id == project.id,
-            Transaction.annex_id == str(order_no),
-            Transaction.purpose_tag == "Заказ",
-        )
-    )
-    txn_orders = txn_order_result.scalars().all()
-
-    # Fact: logistics (invoice_id linked to this order's transactions)
-    txn_log_result = await db.execute(
-        select(Transaction).where(
-            Transaction.project_id == project.id,
-            Transaction.purpose_tag == "Логистика",
-            Transaction.annex_id == str(order_no),
-        )
-    )
-    txn_logistics = txn_log_result.scalars().all()
-
-    # Fact: customs from customs_alloc
-    alloc_result = await db.execute(
-        select(CustomsAlloc).where(CustomsAlloc.order_no == order_no)
-    )
-    customs_allocs = alloc_result.scalars().all()
-
+    from backend.services.planning_service import get_order_summary
     from backend.schemas import OrderSchema, PlannedPaymentSchema, TransactionSchema, CustomsAllocSchema
 
+    data = await get_order_summary(db, project.id, order_no)
+    if not data:
+        raise HTTPException(404, "Order not found")
+
     return {
-        "order": OrderSchema.model_validate(order),
-        "planned_payments": [PlannedPaymentSchema.model_validate(p) for p in planned_payments],
-        "fact_order_payments": [TransactionSchema.model_validate(t) for t in txn_orders],
-        "fact_logistics": [TransactionSchema.model_validate(t) for t in txn_logistics],
-        "fact_customs_allocs": [CustomsAllocSchema.model_validate(a) for a in customs_allocs],
-        "totals": {
-            "plan_order": float(order.order_amount or 0),
-            "plan_logistics_cny": float(order.logistics_cny or 0),
-            "plan_customs_rub": float(order.customs_rub or 0),
-            "fact_order": sum(float(t.expense) for t in txn_orders),
-            "fact_customs": sum(float(a.alloc_amount or 0) for a in customs_allocs),
-        }
+        "order": OrderSchema.model_validate(data["order"]),
+        "planned_payments": [PlannedPaymentSchema.model_validate(p) for p in data["planned_payments"]],
+        "fact_order_payments": [TransactionSchema.model_validate(t) for t in data["fact_order_payments"]],
+        "fact_logistics": [TransactionSchema.model_validate(t) for t in data["fact_logistics"]],
+        "fact_customs_allocs": [CustomsAllocSchema.model_validate(a) for a in data["fact_customs_allocs"]],
+        "totals": data["totals"],
     }
 
 
@@ -968,17 +864,5 @@ async def refresh_wb_forecast(
 
 async def _update_payment_paid(payment_id: int, db: AsyncSession):
     """Recalculate paid_rub for a payment from manual links."""
-    links_result = await db.execute(
-        select(PaymentFactLink).where(PaymentFactLink.payment_id == payment_id)
-    )
-    links = links_result.scalars().all()
-    total_manual = sum(float(l.amount_rub or 0) for l in links)
-
-    pp_result = await db.execute(select(PlannedPayment).where(PlannedPayment.id == payment_id))
-    pp = pp_result.scalar_one_or_none()
-    if pp:
-        # Manual links add to whatever auto-sync found
-        # For now, manual links directly set paid_rub
-        pp.paid_rub = Decimal(str(round(total_manual, 2)))
-        pp.is_paid = total_manual >= float(pp.amount_rub or 0) if pp.amount_rub else False
-        await db.commit()
+    from backend.services.planning_service import update_payment_paid_amount
+    await update_payment_paid_amount(payment_id, db)

@@ -1,0 +1,55 @@
+"""
+Model mixins — reusable base classes for models.
+"""
+
+from datetime import datetime, timezone
+from typing import Optional
+
+from sqlalchemy import Boolean, DateTime
+from sqlalchemy.orm import Mapped, mapped_column
+
+
+class SoftDeleteMixin:
+    """
+    Mixin for soft delete support.
+
+    Adds `is_deleted` flag and `deleted_at` timestamp.
+    Usage:
+        class Order(Base, SoftDeleteMixin):
+            ...
+
+    Querying active records:
+        query.where(Order.is_deleted == False)
+    """
+    is_deleted: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default="false"
+    )
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    def soft_delete(self):
+        """Mark record as deleted without physical removal."""
+        self.is_deleted = True
+        self.deleted_at = datetime.now(timezone.utc)
+
+    def restore(self):
+        """Restore a soft-deleted record."""
+        self.is_deleted = False
+        self.deleted_at = None
+
+
+class TimestampMixin:
+    """
+    Mixin for created_at / updated_at timestamps.
+
+    Usage:
+        class SomeModel(Base, TimestampMixin):
+            ...
+    """
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=True,
+    )
