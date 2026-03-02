@@ -325,13 +325,28 @@ async def update_cost_order(
     if "dt_number" in payload:
         order.dt_number = (payload["dt_number"] or "").strip() or None
 
+    # Handle order_no change (must update FK references too)
+    new_order_no = None
+    if "order_no" in payload and payload["order_no"] and str(payload["order_no"]) != order_no:
+        new_order_no = str(payload["order_no"]).strip()
+        # Check uniqueness
+        dup = await db.execute(select(CostOrder).where(CostOrder.order_no == new_order_no))
+        if dup.scalar_one_or_none():
+            raise HTTPException(400, f"Заказ с номером {new_order_no} уже существует")
+        # Update CostOrderItem FK references
+        from sqlalchemy import update as sql_update
+        await db.execute(
+            sql_update(CostOrderItem).where(CostOrderItem.order_no == order_no).values(order_no=new_order_no)
+        )
+        order.order_no = new_order_no
+
     await db.commit()
 
     # Auto-link CustomsDT by dt_number
     if order.dt_number:
         await _auto_link_customs_dt(order.order_no, order.dt_number, db)
 
-    return {"ok": True, "order_no": order_no}
+    return {"ok": True, "order_no": new_order_no or order_no}
 
 
 @router.delete("/orders/{order_no}")

@@ -97,6 +97,7 @@ function CostOrders() {
         if (!editOrder) return;
         try {
             await api.updateCostOrder(editOrder, {
+                order_no: form.order_no || editOrder,
                 invoice_no: form.invoice_no || null,
                 transport_type: form.transport_type,
                 ship_date: form.ship_date || null,
@@ -224,6 +225,7 @@ function CostOrders() {
                 <div style={{ marginTop: 16, background: 'var(--color-bg-input)', padding: 16, borderRadius: 8 }}>
                     <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Редактирование заказа #{editOrder}</h4>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+                        <F label="Номер заказа" field="order_no" />
                         <F label="Инвойс" field="invoice_no" />
                         <div className="form-group">
                             <label className="form-label" style={{ fontSize: 11 }}>Транспорт</label>
