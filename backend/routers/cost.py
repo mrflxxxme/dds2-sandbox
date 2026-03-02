@@ -333,19 +333,16 @@ async def update_cost_order(
         dup = await db.execute(select(CostOrder).where(CostOrder.order_no == new_order_no))
         if dup.scalar_one_or_none():
             raise HTTPException(400, f"Заказ с номером {new_order_no} уже существует")
-        # Flush other field changes first, then rename via raw SQL
-        await db.flush()
+        # Defer FK checks to commit time (constraint is DEFERRABLE)
         from sqlalchemy import text as sql_text
-        # Raw SQL: update parent first, then children
-        # PostgreSQL FK checks on child INSERT/UPDATE, not on parent UPDATE
-        await db.execute(sql_text(
-            "UPDATE cost_orders SET order_no = :new WHERE order_no = :old"
-        ), {"new": new_order_no, "old": order_no})
+        await db.execute(sql_text("SET CONSTRAINTS cost_order_items_order_no_fkey DEFERRED"))
+        # Update parent
+        order.order_no = new_order_no
+        await db.flush()
+        # Update children FK references
         await db.execute(sql_text(
             "UPDATE cost_order_items SET order_no = :new WHERE order_no = :old"
         ), {"new": new_order_no, "old": order_no})
-        # Refresh the ORM object
-        await db.refresh(order)
 
     await db.commit()
 
