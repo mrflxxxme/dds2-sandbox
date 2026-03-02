@@ -1,51 +1,72 @@
 """
 Models package — all SQLAlchemy models.
 
-All models are defined in _all_models.py and re-exported here.
-This ensures backward compatibility: `from backend.models import User` still works.
+Models are split into domain-specific modules for maintainability.
+All models are re-exported here for backward compatibility:
+    from backend.models import User, Transaction, Order  # still works
 """
 
-from backend.models._all_models import (
-    # Enums
+# Enums
+from backend.models.enums import (
     EventType2,
     TransactionStatus,
     PurposeTag,
     DutyBasis,
-    # Auth
+)
+
+# Auth
+from backend.models.auth import (
     User,
     Project,
     ProjectMember,
     ProjectInvite,
-    # References
+)
+
+# References
+from backend.models.refs import (
     Account,
     CounterpartyCategory,
     Override,
     OpeningBalance,
     CategoryRef,
-    # Transactions
+)
+
+# Transactions
+from backend.models.transactions import (
     Transaction,
     CategoryChangeLog,
     ImportLog,
-    # Customs
+)
+
+# Customs
+from backend.models.customs import (
     CustomsTopup,
     CustomsAlloc,
     CustomsDT,
-    # Planning
+)
+
+# Planning
+from backend.models.planning import (
     Order,
     LeadTime,
     PlannedPayment,
     PlannedIncome,
     WbPayout,
     PaymentFactLink,
-    # Cost
+)
+
+# Cost
+from backend.models.cost import (
     Nomenclature,
     DutyRule,
     CostOrder,
     CostOrderItem,
-    # Integrations
+)
+
+# Integrations & Funnel
+from backend.models.integrations import (
     IntegrationKey,
     SyncLog,
-    # Funnel
     WbFunnelDaily,
     WbCostOverride,
 )
@@ -54,14 +75,22 @@ from backend.models._all_models import (
 WbApiKey = IntegrationKey
 
 __all__ = [
+    # Enums
     "EventType2", "TransactionStatus", "PurposeTag", "DutyBasis",
+    # Auth
     "User", "Project", "ProjectMember", "ProjectInvite",
+    # References
     "Account", "CounterpartyCategory", "Override", "OpeningBalance", "CategoryRef",
+    # Transactions
     "Transaction", "CategoryChangeLog", "ImportLog",
+    # Customs
     "CustomsTopup", "CustomsAlloc", "CustomsDT",
+    # Planning
     "Order", "LeadTime", "PlannedPayment", "PlannedIncome", "WbPayout", "PaymentFactLink",
+    # Cost
     "Nomenclature", "DutyRule", "CostOrder", "CostOrderItem",
-    "IntegrationKey", "SyncLog",
-    "WbFunnelDaily", "WbCostOverride",
+    # Integrations & Funnel
+    "IntegrationKey", "SyncLog", "WbFunnelDaily", "WbCostOverride",
+    # Aliases
     "WbApiKey",
 ]
