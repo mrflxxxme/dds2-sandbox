@@ -2,7 +2,7 @@
 Planning models: Order, LeadTime, PlannedPayment, PlannedIncome, WbPayout, PaymentFactLink.
 """
 
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -80,7 +80,7 @@ class WbPayout(Base):
     bank_comment: Mapped[Optional[str]] = mapped_column(Text)
     matched_txn_id: Mapped[Optional[str]] = mapped_column(String(300))
     matched_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
-    imported_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    imported_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc))
 
     __table_args__ = (
         Index("ix_wb_payout_status", "status"),

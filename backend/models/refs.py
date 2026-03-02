@@ -2,7 +2,7 @@
 Reference models: Account, CounterpartyCategory, Override, OpeningBalance, CategoryRef.
 """
 
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -52,7 +52,7 @@ class Override(Base):
     cat_lvl2: Mapped[Optional[str]] = mapped_column(String(100))
     order_id: Mapped[Optional[str]] = mapped_column(String(100))
     comment: Mapped[Optional[str]] = mapped_column(Text)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
 
 class OpeningBalance(Base):

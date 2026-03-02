@@ -6,10 +6,13 @@ See AGENTS.md for full architecture overview.
 """
 
 import logging
+import json
+import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import text
 
 from backend.config import settings
@@ -17,8 +20,41 @@ from backend.database import async_engine, AsyncSessionLocal, Base
 from backend.auth import get_current_user, ensure_default_admin
 from backend.routers import import_txn, refs, reports, planning, cost, auth, integrations, projects, funnel
 
+
+# ─── Structured JSON Logging ─────────────────────────────────────────────────
+
+class JSONFormatter(logging.Formatter):
+    """JSON log formatter for structured logging."""
+    def format(self, record):
+        log_entry = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info and record.exc_info[0]:
+            log_entry["exception"] = self.formatException(record.exc_info)
+        if hasattr(record, "request_id"):
+            log_entry["request_id"] = record.request_id
+        return json.dumps(log_entry, ensure_ascii=False)
+
+
+handler = logging.StreamHandler()
+handler.setFormatter(JSONFormatter())
+logging.root.handlers = [handler]
+logging.root.setLevel(logging.INFO)
+
 logger = logging.getLogger("dds")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+
+class RequestIdMiddleware(BaseHTTPMiddleware):
+    """Add X-Request-ID to each request for traceability."""
+    async def dispatch(self, request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4())[:8])
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
 
 
 @asynccontextmanager
@@ -101,6 +137,9 @@ app.add_middleware(
 # Rate limiting (Redis-based)
 from backend.rate_limit import RateLimitMiddleware
 app.add_middleware(RateLimitMiddleware)
+
+# Request ID for traceability
+app.add_middleware(RequestIdMiddleware)
 
 # Register unified error handlers
 from backend.exceptions import register_exception_handlers

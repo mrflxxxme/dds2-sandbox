@@ -2,7 +2,7 @@
 Cost models: Nomenclature, DutyRule, CostOrder, CostOrderItem.
 """
 
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -22,7 +22,7 @@ class Nomenclature(Base):
     article_seller: Mapped[Optional[str]] = mapped_column(String(100))
     article_wb: Mapped[Optional[int]] = mapped_column(Integer)
     volume_l: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc))
 
 
 class DutyRule(Base):
@@ -51,7 +51,7 @@ class CostOrder(Base):
     rate_usd: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=1)
     note: Mapped[Optional[str]] = mapped_column(Text)
     dt_number: Mapped[Optional[str]] = mapped_column(String(100))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc))
     items: Mapped[list["CostOrderItem"]] = relationship(back_populates="order", cascade="all, delete-orphan")
 
 
