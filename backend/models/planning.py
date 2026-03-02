@@ -77,7 +77,7 @@ class WbPayout(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
-    request_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    request_id: Mapped[str] = mapped_column(String(100), nullable=False)
     amount_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(10), default="RUB")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
@@ -89,6 +89,7 @@ class WbPayout(Base):
     imported_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc))
 
     __table_args__ = (
+        UniqueConstraint("project_id", "request_id", name="uq_wb_payout_project_request"),
         Index("ix_wb_payout_status", "status"),
         Index("ix_wb_payout_created", "created_at"),
     )

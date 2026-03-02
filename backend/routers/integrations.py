@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
 from backend.database import get_db
-from backend.models import IntegrationKey, SyncLog, WbPayout
+from backend.project_context import get_current_project
+from backend.models import IntegrationKey, SyncLog, WbPayout, Project
 from backend.schemas import (
     MessageResponse, StatusResponse, DeleteResponse,
     IntegrationKeySchema, SyncLogSchema, WbPayoutSchema,
@@ -48,10 +49,15 @@ def _decrypt(value: str) -> str:
 # ─── Integration Keys CRUD ───────────────────────────────────────────────────
 
 @router.get("/keys", response_model=list[IntegrationKeySchema])
-async def list_keys(db: AsyncSession = Depends(get_db)):
-    """List all integration keys (masked)."""
+async def list_keys(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all integration keys for the current project (masked)."""
     result = await db.execute(
-        select(IntegrationKey).order_by(IntegrationKey.created_at.desc())
+        select(IntegrationKey)
+        .where(IntegrationKey.project_id == project.id)
+        .order_by(IntegrationKey.created_at.desc())
     )
     keys = result.scalars().all()
     # Mask the encrypted key for security
@@ -81,9 +87,10 @@ class AddKeyRequest(BaseModel):
 @router.post("/keys", response_model=IntegrationKeySchema)
 async def add_key(
     body: AddKeyRequest,
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Add a new integration API key (encrypted)."""
+    """Add a new integration API key (encrypted) for the current project."""
     if body.service not in ("wb", "ozon"):
         raise HTTPException(400, f"Unsupported service: {body.service}. Use 'wb' or 'ozon'.")
 
@@ -97,6 +104,7 @@ async def add_key(
 
     encrypted = _encrypt(body.api_key)
     key = IntegrationKey(
+        project_id=project.id,
         service=body.service,
         label=body.label or body.service.upper(),
         encrypted_key=encrypted,
@@ -118,9 +126,18 @@ async def add_key(
 
 
 @router.delete("/keys/{key_id}", response_model=DeleteResponse)
-async def delete_key(key_id: int, db: AsyncSession = Depends(get_db)):
-    """Delete an integration key."""
-    result = await db.execute(select(IntegrationKey).where(IntegrationKey.id == key_id))
+async def delete_key(
+    key_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete an integration key (only within the current project)."""
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.id == key_id,
+            IntegrationKey.project_id == project.id,
+        )
+    )
     key = result.scalar_one_or_none()
     if not key:
         raise HTTPException(404, "Ключ не найден")
@@ -135,6 +152,7 @@ async def delete_key(key_id: int, db: AsyncSession = Depends(get_db)):
 async def sync_wb_sales(
     sync_type: str = Query("sales", enum=["sales", "orders", "finance"]),
     date_from: Optional[date] = Query(None),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -143,9 +161,10 @@ async def sync_wb_sales(
     - orders: загрузить заказы (для будущего модуля)
     - finance: загрузить финансовый отчёт (детализация выплат)
     """
-    # Get active WB key
+    # Get active WB key for this project
     result = await db.execute(
         select(IntegrationKey).where(
+            IntegrationKey.project_id == project.id,
             IntegrationKey.service == "wb",
             IntegrationKey.is_active == True,
         )
@@ -180,12 +199,15 @@ async def sync_wb_sales(
             raw_data = await client.get_sales(date_from)
             payouts = parse_wb_sales_to_payouts(raw_data)
 
-            # Upsert into wb_payouts
+            # Upsert into wb_payouts (scoped to project)
             existing_ids = set()
             if payouts:
                 req_ids = [p["request_id"] for p in payouts]
                 result = await db.execute(
-                    select(WbPayout.request_id).where(WbPayout.request_id.in_(req_ids))
+                    select(WbPayout.request_id).where(
+                        WbPayout.project_id == project.id,
+                        WbPayout.request_id.in_(req_ids),
+                    )
                 )
                 existing_ids = {r[0] for r in result}
 
@@ -194,6 +216,7 @@ async def sync_wb_sales(
                 if p["request_id"] in existing_ids:
                     continue
                 payout = WbPayout(
+                    project_id=project.id,
                     request_id=p["request_id"],
                     amount_rub=Decimal(str(p["amount_rub"])),
                     currency=p["currency"],
@@ -243,6 +266,7 @@ async def sync_wb_sales(
 
 @router.post("/wb/sync_nomenclature", response_model=SyncLogSchema)
 async def sync_wb_nomenclature(
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -253,9 +277,10 @@ async def sync_wb_nomenclature(
     """
     from backend.models import Nomenclature
 
-    # Get active WB key
+    # Get active WB key for this project
     result = await db.execute(
         select(IntegrationKey).where(
+            IntegrationKey.project_id == project.id,
             IntegrationKey.service == "wb",
             IntegrationKey.is_active == True,
         )
@@ -290,7 +315,10 @@ async def sync_wb_nomenclature(
         for item in nom_items:
             bc = item["barcode"]
             result = await db.execute(
-                select(Nomenclature).where(Nomenclature.barcode == bc)
+                select(Nomenclature).where(
+                    Nomenclature.project_id == project.id,
+                    Nomenclature.barcode == bc,
+                )
             )
             nom = result.scalar_one_or_none()
             if nom:
@@ -304,6 +332,7 @@ async def sync_wb_nomenclature(
                 updated += 1
             else:
                 nom = Nomenclature(
+                    project_id=project.id,
                     barcode=bc,
                     brand=item.get("brand"),
                     subject=item.get("subject"),
@@ -336,14 +365,23 @@ async def sync_wb_nomenclature(
 
 
 @router.get("/sync_log", response_model=list[SyncLogSchema])
-
 async def get_sync_log(
     service: Optional[str] = Query(None),
     limit: int = Query(20),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get sync history."""
-    q = select(SyncLog).order_by(SyncLog.started_at.desc()).limit(limit)
+    """Get sync history for the current project."""
+    # Get integration key IDs belonging to this project
+    key_ids_q = select(IntegrationKey.id).where(
+        IntegrationKey.project_id == project.id
+    )
+    q = (
+        select(SyncLog)
+        .where(SyncLog.integration_id.in_(key_ids_q))
+        .order_by(SyncLog.started_at.desc())
+        .limit(limit)
+    )
     if service:
         q = q.where(SyncLog.service == service)
     result = await db.execute(q)

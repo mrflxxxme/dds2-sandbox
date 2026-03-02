@@ -28,7 +28,7 @@ class IntegrationKey(Base):
     last_sync_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
     __table_args__ = (
-        UniqueConstraint("service", "label", name="uq_integration_service_label"),
+        UniqueConstraint("project_id", "service", "label", name="uq_integration_project_service_label"),
     )
 
 
