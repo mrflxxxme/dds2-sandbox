@@ -181,7 +181,7 @@ function Integrations() {
                                 <tr key={s.id}>
                                     <td><span className="badge badge-info">{s.service}</span></td>
                                     <td>{s.sync_type}</td>
-                                    <td><span className={`badge ${s.status === 'success' ? 'badge-success' : 'badge-danger'}`}>{s.status}</span></td>
+                                    <td><span className={`badge ${s.status === 'OK' ? 'badge-success' : s.status === 'RUNNING' ? 'badge-warning' : s.status === 'ERROR' || s.status === 'TIMEOUT' ? 'badge-danger' : 'badge-secondary'}`}>{s.status}</span></td>
                                     <td style={{ fontSize: 13 }}>{formatDateTime(s.started_at)}</td>
                                     <td>{s.rows_fetched}</td>
                                     <td>{s.rows_inserted}</td>
