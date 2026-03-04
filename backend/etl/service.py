@@ -23,9 +23,12 @@ from backend.etl.master_logic import apply_master_logic
 
 
 def _ensure_account(db: Session, account_no: str, source_type: str, project_id: int):
-    """Create account if it doesn't exist yet."""
+    """Create account if it doesn't exist yet (scoped by project_id)."""
     existing = db.execute(
-        select(Account).where(Account.account == account_no)
+        select(Account).where(
+            Account.account == account_no,
+            Account.project_id == project_id,
+        )
     ).scalar_one_or_none()
     if existing:
         return
@@ -187,13 +190,13 @@ def import_statement(
         db.flush()
 
         # 4. Sync customs_topup
-        _sync_customs_topup(db)
+        _sync_customs_topup(db, project_id)
 
         # 5. Sync plan payments (auto-match fact from bank statements)
-        _sync_plan_payments(db)
+        _sync_plan_payments(db, project_id)
 
         # 6. Reconcile WB payouts with newly imported bank transactions
-        _sync_wb_payouts(db)
+        _sync_wb_payouts(db, project_id)
 
         log.rows_inserted = inserted
         log.rows_skipped = skipped + parse_skipped
@@ -225,9 +228,11 @@ def import_statement(
     return log
 
 
-def _sync_customs_topup(db: Session):
+def _sync_customs_topup(db: Session, project_id: int):
+    """Sync customs topup records from CUSTOMS_PAYMENT transactions (scoped by project_id)."""
     customs_txns = db.execute(
         select(Transaction).where(
+            Transaction.project_id == project_id,
             Transaction.event_type2 == "CUSTOMS_PAYMENT",
             Transaction.expense > 0,
         )
@@ -235,7 +240,8 @@ def _sync_customs_topup(db: Session):
 
     existing_ids = set(
         row[0] for row in db.execute(
-            text("SELECT topup_txn_id FROM customs_topup")
+            text("SELECT topup_txn_id FROM customs_topup WHERE project_id = :pid"),
+            {"pid": project_id},
         )
     )
 
@@ -243,6 +249,7 @@ def _sync_customs_topup(db: Session):
         if txn.txn_id not in existing_ids:
             from backend.models import CustomsTopup
             topup = CustomsTopup(
+                project_id=project_id,
                 topup_txn_id=txn.txn_id,
                 date=txn.date.date(),
                 amount_rub=txn.expense,
@@ -253,9 +260,15 @@ def _sync_customs_topup(db: Session):
             db.add(topup)
 
 
-def reapply_categories(db: Session):
-    _, _, cp_categories, overrides = _load_refs(db)
-    txns = db.execute(select(Transaction).where(Transaction.is_cashflow2 == 1)).scalars().all()
+def reapply_categories(db: Session, project_id: int):
+    """Reapply categories to all cashflow transactions (scoped by project_id)."""
+    _, _, cp_categories, overrides = _load_refs(db, project_id)
+    txns = db.execute(
+        select(Transaction).where(
+            Transaction.project_id == project_id,
+            Transaction.is_cashflow2 == 1,
+        )
+    ).scalars().all()
     for txn in txns:
         cp_key = txn.cp_key
         txn_id = txn.txn_id
@@ -272,9 +285,10 @@ def reapply_categories(db: Session):
     db.commit()
 
 
-def _sync_plan_payments(db: Session):
+def _sync_plan_payments(db: Session, project_id: int):
     """
     Auto-match planned payments with fact from bank statements and customs_alloc.
+    Scoped by project_id to ensure multi-tenant isolation.
 
     Matching rules:
     - ЗАКАЗ:    Transaction.annex_id == str(order_no) AND purpose_tag == 'Заказ'  → sum(expense)
@@ -283,7 +297,9 @@ def _sync_plan_payments(db: Session):
 
     Updates paid_rub and is_paid (True when paid_rub >= amount_rub).
     """
-    payments = db.execute(select(PlannedPayment)).scalars().all()
+    payments = db.execute(
+        select(PlannedPayment).where(PlannedPayment.project_id == project_id)
+    ).scalars().all()
     if not payments:
         return
 
@@ -293,7 +309,9 @@ def _sync_plan_payments(db: Session):
         return
 
     # Build invoice_no map: order_no (int) → invoice_no (str)
-    cost_orders = db.execute(select(CostOrder)).scalars().all()
+    cost_orders = db.execute(
+        select(CostOrder).where(CostOrder.project_id == project_id)
+    ).scalars().all()
     invoice_map = {}  # int(order_no) → invoice_no
     for co in cost_orders:
         try:
@@ -306,6 +324,7 @@ def _sync_plan_payments(db: Session):
     order_fact = {}  # order_no → sum(expense)
     txns_order = db.execute(
         select(Transaction).where(
+            Transaction.project_id == project_id,
             Transaction.purpose_tag == "Заказ",
             Transaction.expense > 0,
         )
@@ -322,6 +341,7 @@ def _sync_plan_payments(db: Session):
     delivery_fact = {}  # order_no → sum(expense)
     txns_delivery = db.execute(
         select(Transaction).where(
+            Transaction.project_id == project_id,
             Transaction.purpose_tag == "Логистика",
             Transaction.expense > 0,
         )
@@ -335,18 +355,29 @@ def _sync_plan_payments(db: Session):
 
     # ТАМОЖНЯ fact: from customs_alloc + customs_dt
     customs_fact = {}  # order_no → sum(amount)
-    allocs = db.execute(select(CustomsAlloc)).scalars().all()
+    allocs = db.execute(
+        select(CustomsAlloc).where(CustomsAlloc.project_id == project_id)
+    ).scalars().all()
     for a in allocs:
         if a.order_no:
             customs_fact[a.order_no] = customs_fact.get(a.order_no, Decimal("0")) + (a.alloc_amount or Decimal("0"))
 
     # Also from parsed FTS DT declarations
-    dts = db.execute(select(CustomsDT).where(CustomsDT.order_no.isnot(None))).scalars().all()
+    dts = db.execute(
+        select(CustomsDT).where(
+            CustomsDT.project_id == project_id,
+            CustomsDT.order_no.isnot(None),
+        )
+    ).scalars().all()
     for d in dts:
         customs_fact[d.order_no] = customs_fact.get(d.order_no, Decimal("0")) + (d.amount_rub or Decimal("0"))
 
     # Manual fact links
-    manual_links = db.execute(select(PaymentFactLink)).scalars().all()
+    manual_links = db.execute(
+        select(PaymentFactLink).join(
+            PlannedPayment, PaymentFactLink.payment_id == PlannedPayment.id
+        ).where(PlannedPayment.project_id == project_id)
+    ).scalars().all()
     manual_map = {}  # payment_id → sum(amount_rub)
     for ml in manual_links:
         manual_map[ml.payment_id] = manual_map.get(ml.payment_id, Decimal("0")) + (ml.amount_rub or Decimal("0"))
@@ -375,13 +406,16 @@ def _sync_plan_payments(db: Session):
     db.flush()
 
 
-def _sync_wb_payouts(db: Session):
-    """Reconcile WB payouts with bank transactions (sync version for ETL pipeline)."""
+def _sync_wb_payouts(db: Session, project_id: int):
+    """Reconcile WB payouts with bank transactions (scoped by project_id)."""
     from datetime import datetime as dt_mod, timedelta
     from sqlalchemy import or_, and_
 
     unmatched = db.execute(
-        select(WbPayout).where(WbPayout.status.in_(["TRANSIT", "PROCESSING", "PENDING"]))
+        select(WbPayout).where(
+            WbPayout.project_id == project_id,
+            WbPayout.status.in_(["TRANSIT", "PROCESSING", "PENDING"]),
+        )
     ).scalars().all()
     if not unmatched:
         return
@@ -397,6 +431,7 @@ def _sync_wb_payouts(db: Session):
 
     candidates = db.execute(
         select(Transaction).where(
+            Transaction.project_id == project_id,
             Transaction.income > 0,
             Transaction.date >= min_date,
             Transaction.date <= max_date,
