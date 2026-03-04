@@ -128,6 +128,17 @@ async def lifespan(app: FastAPI):
 
     # Start background scheduler (funnel auto-sync)
     from backend.scheduler import start_scheduler, stop_scheduler
+
+    # Cleanup stale RUNNING sync_log entries (from previous crashes)
+    async with AsyncSessionLocal() as session:
+        stale = await session.execute(text(
+            "UPDATE sync_log SET status = 'STALE', error_msg = 'Process restarted while running' "
+            "WHERE status = 'RUNNING' AND started_at < NOW() - INTERVAL '10 minutes'"
+        ))
+        await session.commit()
+        if stale.rowcount:
+            logger.warning(f"Cleaned {stale.rowcount} stale RUNNING sync_log entries")
+
     start_scheduler()
 
     yield

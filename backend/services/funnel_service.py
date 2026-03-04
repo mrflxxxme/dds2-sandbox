@@ -371,32 +371,54 @@ async def run_funnel_sync(
 
 
 async def run_backfill_bg(project_id: int, missing_dates: list[str]):
-    """Background coroutine: sync missing days one-by-one with rate limit pauses."""
+    """Background coroutine: sync missing days with concurrent semaphore."""
     from backend.database import AsyncSessionLocal
 
+    # Semaphore: max 3 concurrent WB API calls
+    sem = asyncio.Semaphore(3)
     total_rows = 0
     total_errors = 0
 
-    for idx, day_str in enumerate(missing_dates):
-        try:
-            if idx > 0:
-                await asyncio.sleep(2)
+    async def _sync_one(day_str: str) -> dict:
+        """Sync a single day, guarded by semaphore."""
+        async with sem:
+            try:
+                async with AsyncSessionLocal() as db:
+                    result = await asyncio.wait_for(
+                        run_funnel_sync(db, project_id, day_str, day_str),
+                        timeout=300,  # 5 min max per day
+                    )
+                    return {"day": day_str, "rows": result.get("rows", 0), "errors": result.get("errors", [])}
+            except asyncio.TimeoutError:
+                return {"day": day_str, "rows": 0, "errors": [f"Timeout 5min: {day_str}"]}
+            except Exception as e:
+                return {"day": day_str, "rows": 0, "errors": [str(e)[:200]]}
 
-            async with AsyncSessionLocal() as db:
-                result = await run_funnel_sync(db, project_id, day_str, day_str)
-                rows = result.get("rows", 0)
-                total_rows += rows
-                if result.get("errors"):
-                    total_errors += len(result["errors"])
+    # Process in batches of 5 days at a time
+    batch_size = 5
+    for i in range(0, len(missing_dates), batch_size):
+        batch = missing_dates[i:i + batch_size]
+        results = await asyncio.gather(
+            *[_sync_one(d) for d in batch],
+            return_exceptions=True,
+        )
 
-            logger.info(
-                f"Backfill bg: project {project_id} — "
-                f"day {idx+1}/{len(missing_dates)} ({day_str}), "
-                f"+{rows} rows, total: {total_rows}"
-            )
-        except Exception as e:
-            logger.error(f"Backfill bg error: project {project_id}, {day_str}: {e}")
-            total_errors += 1
+        for r in results:
+            if isinstance(r, Exception):
+                total_errors += 1
+                logger.error(f"Backfill bg exception: project {project_id}: {r}")
+            elif isinstance(r, dict):
+                total_rows += r.get("rows", 0)
+                if r.get("errors"):
+                    total_errors += len(r["errors"])
+                logger.info(
+                    f"Backfill bg: project {project_id} — "
+                    f"day {r['day']}, +{r.get('rows', 0)} rows"
+                )
+
+        # Pause between batches to respect rate limits
+        if i + batch_size < len(missing_dates):
+            await asyncio.sleep(3)
 
     logger.info(
         f"✅ Backfill complete: project {project_id} — "

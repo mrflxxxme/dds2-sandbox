@@ -182,13 +182,20 @@ async def sync_all_projects_funnel():
 
 
 async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
-    """Run funnel sync and log result to sync_log table."""
-    from backend.services.funnel_service import run_funnel_sync
-    from sqlalchemy import select
-    from datetime import datetime
+    """Run funnel sync and log result to sync_log table.
 
+    GUARANTEED: sync_log status will be updated to OK/PARTIAL/TIMEOUT/ERROR,
+    never left as RUNNING.
+    """
+    from backend.services.funnel_service import run_funnel_sync
+    from sqlalchemy import select, update
+    from datetime import datetime
+    import asyncio
+
+    log_id = None
+
+    # Step 1: Create sync_log entry (RUNNING)
     async with AsyncSessionLocal() as db:
-        # Find integration key for logging
         int_key = await db.execute(
             select(IntegrationKey.id).where(
                 IntegrationKey.project_id == project_id,
@@ -198,7 +205,6 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
         )
         key_id = int_key.scalar() or None
 
-        # Create sync log entry
         sync_log = SyncLog(
             integration_id=key_id,
             service="wb_funnel",
@@ -210,26 +216,44 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
         await db.refresh(sync_log)
         log_id = sync_log.id
 
-    # Run the actual sync
-    async with AsyncSessionLocal() as db:
-        result = await run_funnel_sync(db, project_id, d_from, d_to)
+    # Step 2: Run sync with timeout and guaranteed status update
+    result = {"rows": 0, "errors": []}
+    status = "ERROR"
 
-    # Update sync log with result
-    async with AsyncSessionLocal() as db:
-        from sqlalchemy import update
-        await db.execute(
-            update(SyncLog).where(SyncLog.id == log_id).values(
-                status="OK" if not result.get("errors") else "PARTIAL",
-                rows_inserted=result.get("rows", 0),
-                finished_at=datetime.utcnow(),
-                error_msg="; ".join(result.get("errors", [])[:3]) or None,
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await asyncio.wait_for(
+                run_funnel_sync(db, project_id, d_from, d_to),
+                timeout=300,  # 5 min max per sync
             )
-        )
-        await db.commit()
+            status = "OK" if not result.get("errors") else "PARTIAL"
+    except asyncio.TimeoutError:
+        result = {"rows": 0, "errors": [f"Timeout: 5min exceeded ({d_from}→{d_to})"]}
+        status = "TIMEOUT"
+        logger.error(f"Scheduler: project {project_id} [{sync_type}] TIMEOUT {d_from}→{d_to}")
+    except Exception as e:
+        result = {"rows": 0, "errors": [str(e)[:500]]}
+        status = "ERROR"
+        logger.error(f"Scheduler: project {project_id} [{sync_type}] ERROR: {e}")
+    finally:
+        # ALWAYS update sync_log — never leave as RUNNING
+        try:
+            async with AsyncSessionLocal() as db:
+                await db.execute(
+                    update(SyncLog).where(SyncLog.id == log_id).values(
+                        status=status,
+                        rows_inserted=result.get("rows", 0),
+                        finished_at=datetime.utcnow(),
+                        error_msg="; ".join(result.get("errors", [])[:3]) or None,
+                    )
+                )
+                await db.commit()
+        except Exception as log_err:
+            logger.error(f"Failed to update sync_log {log_id}: {log_err}")
 
     logger.info(
         f"Scheduler: project {project_id} [{sync_type}] {d_from}→{d_to} — "
-        f"{result.get('rows', 0)} rows, errors: {len(result.get('errors', []))}"
+        f"{result.get('rows', 0)} rows, status: {status}"
     )
     return result
 

@@ -50,11 +50,13 @@ class CircuitBreaker:
         failure_threshold: int = 5,
         recovery_timeout: float = 60.0,  # seconds before trying again
         half_open_max_calls: int = 1,
+        exclude_errors: tuple = (),  # errors that don't count as failures
     ):
         self.name = name
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.half_open_max_calls = half_open_max_calls
+        self.exclude_errors = exclude_errors
 
         self._state = CircuitState.CLOSED
         self._failure_count = 0
@@ -124,6 +126,8 @@ class CircuitBreaker:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if exc_type is None:
             self.record_success()
+        elif self.exclude_errors and issubclass(exc_type, self.exclude_errors):
+            pass  # Excluded errors (e.g. RateLimitError) don't affect circuit
         else:
             self.record_failure()
         return False  # Don't suppress exceptions
@@ -132,6 +136,13 @@ class CircuitBreaker:
 class CircuitOpenError(Exception):
     """Raised when circuit breaker is open and request is blocked."""
     pass
+
+
+class RateLimitError(Exception):
+    """429 rate limit — NOT a circuit breaker failure, just a signal to wait."""
+    def __init__(self, message: str = "Rate limited", retry_after: int = 60):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 # ─── Retry with Exponential Backoff ─────────────────────────────────────────
@@ -162,6 +173,19 @@ def retry_with_backoff(
             for attempt in range(max_retries + 1):
                 try:
                     return await func(*args, **kwargs)
+                except RateLimitError as e:
+                    last_exception = e
+                    if attempt == max_retries:
+                        raise
+                    # Use Retry-After from the error
+                    delay = e.retry_after
+                    logger.warning(
+                        "api.rate_limited",
+                        function=func.__name__,
+                        attempt=attempt + 1,
+                        retry_after=delay,
+                    )
+                    await asyncio.sleep(delay)
                 except Exception as e:
                     last_exception = e
 

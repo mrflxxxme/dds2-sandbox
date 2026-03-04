@@ -23,6 +23,7 @@ import structlog
 from backend.integrations.resilience import (
     CircuitBreaker,
     CircuitOpenError,
+    RateLimitError,
     retry_with_backoff,
 )
 
@@ -36,11 +37,12 @@ WB_CONTENT_API_BASE = "https://content-api.wildberries.ru"
 # Request timeout in seconds
 TIMEOUT = 30
 
-# Shared circuit breaker (per-process, shared by all WBApiClient instances)
+# Shared circuit breaker — only 5xx errors trip it, 429 is excluded
 _wb_circuit = CircuitBreaker(
     name="wildberries",
     failure_threshold=5,
-    recovery_timeout=60.0,
+    recovery_timeout=120.0,  # 2 min for real server failures
+    exclude_errors=(RateLimitError,),
 )
 
 
@@ -63,7 +65,11 @@ class WBApiClient:
                 if response.status_code == 401:
                     raise ValueError("WB API: неверный API-ключ (401)")
                 if response.status_code == 429:
-                    raise ValueError("WB API: слишком много запросов, попробуйте позже (429)")
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError(
+                        f"WB API rate limited (429)",
+                        retry_after=retry_after,
+                    )
                 if response.status_code >= 500:
                     raise ValueError(f"WB API server error: HTTP {response.status_code}")
                 if response.status_code != 200:
@@ -158,7 +164,11 @@ class WBApiClient:
                     if response.status_code == 401:
                         raise ValueError("WB API: неверный API-ключ (401)")
                     if response.status_code == 429:
-                        raise ValueError("WB API: слишком много запросов (429)")
+                        retry_after = int(response.headers.get("Retry-After", "60"))
+                        raise RateLimitError(
+                            f"WB API rate limited (429)",
+                            retry_after=retry_after,
+                        )
                     if response.status_code >= 500:
                         raise ValueError(f"WB Content API server error: HTTP {response.status_code}")
                     if response.status_code != 200:
