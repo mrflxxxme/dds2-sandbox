@@ -80,7 +80,9 @@ function Integrations() {
         setSyncing(keyId);
         try {
             const d = new Date(); d.setDate(d.getDate() - 7);
-            await api.syncWb(keyId, d.toISOString().slice(0, 10));
+            const dateTo = new Date().toISOString().slice(0, 10);
+            const dateFrom = d.toISOString().slice(0, 10);
+            await api.syncFunnel(dateFrom, dateTo);
             setMsg('Синхронизация завершена');
             loadData();
         } catch (e: any) { setMsg(e.message); }
