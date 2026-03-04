@@ -21,7 +21,7 @@ const navGroups = [
         title: 'Заказы',
         items: [
             { href: '/planning', label: 'Планирование', icon: '📦' },
-            { href: '/cost', label: 'Себестоимость', icon: '🧮' },
+
         ],
     },
     {

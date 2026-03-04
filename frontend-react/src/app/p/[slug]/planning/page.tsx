@@ -27,7 +27,7 @@ export default function PlanningPage() {
                         onClick={() => setTab(t.key)}>{t.label}</button>
                 ))}
             </div>
-            {tab === 'orders' && <PlanOrders />}
+            {tab === 'orders' && <CostOrders />}
             {tab === 'payments' && <PlanPayments />}
             {tab === 'incomes' && <PlanIncomes />}
             {tab === 'wb' && <WbPayouts />}
@@ -37,13 +37,102 @@ export default function PlanningPage() {
     );
 }
 
-function PlanOrders() {
-    const [data, setData] = useState<any[]>([]);
+function CostOrders() {
+    const [orders, setOrders] = useState<any[]>([]);
+    const [items, setItems] = useState<any[]>([]);
+    const [selected, setSelected] = useState<string | null>(null);
+    const [showCreate, setShowCreate] = useState(false);
+    const [editOrder, setEditOrder] = useState<string | null>(null);
+    const emptyForm = {
+        order_no: '', invoice_no: '', transport_type: 'AUTO', ship_date: '',
+        actual_arrival_date: '', delivery_cost_cny: '0', delivery_cost_usd: '0',
+        rate_cny: '12.5', rate_eur: '100', rate_usd: '90', dt_number: '', note: ''
+    };
+    const [form, setForm] = useState(emptyForm);
+    const [msg, setMsg] = useState('');
+    const [file, setFile] = useState<File | null>(null);
     const [expanded, setExpanded] = useState<string | null>(null);
     const [summary, setSummary] = useState<any>(null);
 
     useEffect(() => { load(); }, []);
-    const load = async () => { try { setData(await api.getCostOrders()); } catch { } };
+    const load = async () => { try { setOrders(await api.getCostOrders()); } catch { } };
+
+    const loadItems = async (orderNo: string) => {
+        setSelected(orderNo);
+        try { setItems(await api.getCostOrderItems(orderNo)); } catch { setItems([]); }
+    };
+
+    const create = async () => {
+        try {
+            await api.createCostOrder({
+                order_no: form.order_no,
+                invoice_no: form.invoice_no || null,
+                transport_type: form.transport_type,
+                ship_date: form.ship_date || null,
+                actual_arrival_date: form.actual_arrival_date || null,
+                delivery_cost_cny: parseFloat(form.delivery_cost_cny) || 0,
+                delivery_cost_usd: parseFloat(form.delivery_cost_usd) || 0,
+                rate_cny: parseFloat(form.rate_cny) || 0,
+                rate_eur: parseFloat(form.rate_eur) || 0,
+                rate_usd: parseFloat(form.rate_usd) || 0,
+                dt_number: form.dt_number || null,
+                note: form.note || null,
+            });
+            setMsg('✅ Заказ создан!'); setShowCreate(false); setForm(emptyForm); load();
+        } catch (e: any) { setMsg(`❌ ${e.message}`); }
+    };
+
+    const openEdit = (r: any) => {
+        if (editOrder === String(r.order_no)) { setEditOrder(null); return; }
+        setEditOrder(String(r.order_no));
+        setForm({
+            order_no: String(r.order_no),
+            invoice_no: r.invoice_no || '',
+            transport_type: r.transport_type || 'AUTO',
+            ship_date: r.ship_date || '',
+            actual_arrival_date: r.actual_arrival_date || '',
+            delivery_cost_cny: String(r.delivery_cost_cny ?? 0),
+            delivery_cost_usd: String(r.delivery_cost_usd ?? 0),
+            rate_cny: String(r.rate_cny ?? 0),
+            rate_eur: String(r.rate_eur ?? 0),
+            rate_usd: String(r.rate_usd ?? 0),
+            dt_number: r.dt_number || '',
+            note: r.note || '',
+        });
+    };
+
+    const saveEdit = async () => {
+        if (!editOrder) return;
+        try {
+            await api.updateCostOrder(editOrder, {
+                order_no: form.order_no || editOrder,
+                invoice_no: form.invoice_no || null,
+                transport_type: form.transport_type,
+                ship_date: form.ship_date || null,
+                actual_arrival_date: form.actual_arrival_date || null,
+                delivery_cost_cny: parseFloat(form.delivery_cost_cny) || 0,
+                delivery_cost_usd: parseFloat(form.delivery_cost_usd) || 0,
+                rate_cny: parseFloat(form.rate_cny) || 0,
+                rate_eur: parseFloat(form.rate_eur) || 0,
+                rate_usd: parseFloat(form.rate_usd) || 0,
+                dt_number: form.dt_number || null,
+                note: form.note || null,
+            });
+            setMsg('✅ Сохранено!'); setEditOrder(null); load();
+        } catch (e: any) { setMsg(`❌ ${e.message}`); }
+    };
+
+    const del = async (orderNo: string) => {
+        if (!confirm('Удалить заказ?')) return;
+        try { await api.deleteCostOrder(orderNo); load(); setSelected(null); setEditOrder(null); } catch (e: any) { setMsg(e.message); }
+    };
+    const generatePlan = async (orderNo: string) => {
+        try { await api.generatePlan(orderNo); setMsg('✅ План сгенерирован!'); load(); } catch (e: any) { setMsg(`❌ ${e.message}`); }
+    };
+    const uploadFile = async () => {
+        if (!file || !selected) return;
+        try { await api.uploadCostFile(selected, file); setMsg('✅ Файл загружен! Пересчёт выполнен.'); loadItems(selected); load(); } catch (e: any) { setMsg(`❌ ${e.message}`); }
+    };
 
     const showSummary = async (orderNo: string) => {
         if (expanded === orderNo) { setExpanded(null); return; }
@@ -51,53 +140,239 @@ function PlanOrders() {
         try { setSummary(await api.getPlanningOrderSummary(orderNo)); } catch { setSummary(null); }
     };
 
+    const F = ({ label, field, type = 'text', step }: { label: string; field: string; type?: string; step?: string }) => (
+        <div className="form-group">
+            <label className="form-label" style={{ fontSize: 11 }}>{label}</label>
+            <input className="form-input" type={type} step={step} value={(form as any)[field]}
+                onChange={e => setForm({ ...form, [field]: e.target.value })}
+                style={{ fontSize: 13 }} />
+        </div>
+    );
+
     return (
         <div className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Заказы (из Себестоимости)</h3>
-                <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'plan_orders')}>📥 Excel</button>
+                <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Заказы</h3>
+                <div style={{ display: 'flex', gap: 8 }}>
+                    <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(orders, 'cost_orders')}>📥 Excel</button>
+                    <button className="btn btn-primary btn-sm" onClick={() => { setShowCreate(!showCreate); setEditOrder(null); }}>+ Создать заказ</button>
+                </div>
             </div>
+            {msg && <div style={{ fontSize: 13, marginBottom: 8, padding: '6px 12px', borderRadius: 6, background: msg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', color: msg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)' }}>{msg} <span style={{ float: 'right', cursor: 'pointer' }} onClick={() => setMsg('')}>✕</span></div>}
 
-            {data.length > 0 ? (
+            {/* Create form */}
+            {showCreate && (
+                <div style={{ background: 'var(--color-bg-input)', padding: 16, borderRadius: 8, marginBottom: 16 }}>
+                    <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Новый заказ</h4>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+                        <F label="Номер заказа *" field="order_no" />
+                        <F label="Инвойс" field="invoice_no" />
+                        <div className="form-group">
+                            <label className="form-label" style={{ fontSize: 11 }}>Транспорт</label>
+                            <select className="form-input" value={form.transport_type}
+                                onChange={e => setForm({ ...form, transport_type: e.target.value })} style={{ fontSize: 13 }}>
+                                <option>AUTO</option><option>RAIL</option><option>AIR</option><option>SEA</option>
+                            </select>
+                        </div>
+                        <F label="Дата отправки" field="ship_date" type="date" />
+                        <F label="Дата прибытия" field="actual_arrival_date" type="date" />
+                        <F label="Доставка ¥" field="delivery_cost_cny" type="number" step="0.01" />
+                        <F label="Доставка $" field="delivery_cost_usd" type="number" step="0.01" />
+                        <F label="Курс ¥/₽" field="rate_cny" type="number" step="0.01" />
+                        <F label="Курс €/₽" field="rate_eur" type="number" step="0.01" />
+                        <F label="Курс $/₽" field="rate_usd" type="number" step="0.01" />
+                        <F label="Номер ДТ" field="dt_number" />
+                        <F label="Примечание" field="note" />
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                        <button className="btn btn-primary btn-sm" onClick={create}>💾 Создать</button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => setShowCreate(false)}>Отмена</button>
+                    </div>
+                </div>
+            )}
+
+            {/* Orders table */}
+            {orders.length > 0 ? (
                 <div style={{ overflowX: 'auto' }}>
                     <table className="data-table">
                         <thead><tr>
-                            <th>№</th><th>Инвойс</th><th>Транспорт</th><th>Отгрузка</th><th>Прибытие</th>
-                            <th>Кол-во</th><th>Товар ₽</th><th>Доставка ¥</th><th>Доставка ₽</th>
-                            <th>Пошлина ₽</th><th>НДС ₽</th><th>Итого ₽</th><th>Курс ¥</th>
+                            <th>Заказ</th><th>Инвойс</th><th>ДТ</th><th>Отправка</th><th>Транспорт</th>
+                            <th>Позиций</th><th>Кол-во</th><th>Товар ₽</th><th>Доставка ₽</th>
+                            <th>Пошлина ₽</th><th>НДС ₽</th><th>Утиль ₽</th><th>Итого ₽</th>
+                            <th>Курс ¥</th><th>План</th><th></th>
                         </tr></thead>
-                        <tbody>{data.map(r => (
-                            <tr key={r.order_no} style={{ cursor: 'pointer' }} onClick={() => showSummary(String(r.order_no))}>
+                        <tbody>{orders.map(r => (
+                            <tr key={r.order_no}
+                                style={{ cursor: 'pointer', background: selected === String(r.order_no) ? 'rgba(139,92,246,0.1)' : editOrder === String(r.order_no) ? 'rgba(59,130,246,0.08)' : undefined }}
+                                onClick={() => loadItems(String(r.order_no))}>
                                 <td style={{ fontWeight: 600 }}>{r.order_no}</td>
                                 <td><span className="badge badge-info" style={{ fontSize: 11 }}>{r.invoice_no || '—'}</span></td>
-                                <td><span className="badge badge-warning">{r.transport_type || 'AUTO'}</span></td>
+                                <td style={{ fontSize: 11, fontFamily: 'monospace', color: 'var(--color-text-dim)' }}>{r.dt_number || '—'}</td>
                                 <td style={{ fontSize: 12 }}>{r.ship_date ? formatDate(r.ship_date) : '—'}</td>
-                                <td style={{ fontSize: 12 }}>{r.actual_arrival_date ? formatDate(r.actual_arrival_date) : '—'}</td>
+                                <td><span className="badge badge-warning">{r.transport_type || 'AUTO'}</span></td>
+                                <td>{r.items_count ?? '—'}</td>
                                 <td>{r.total_qty != null ? formatNumber(r.total_qty) : '—'}</td>
                                 <td style={{ color: 'var(--color-success)', fontWeight: 500 }}>{r.total_cost_rub != null ? formatNumber(r.total_cost_rub) : '—'}</td>
-                                <td>{r.delivery_cost_cny != null ? formatNumber(r.delivery_cost_cny) : '—'}</td>
                                 <td>{r.total_delivery_rub != null ? formatNumber(r.total_delivery_rub) : '—'}</td>
                                 <td>{r.total_duty_rub != null ? formatNumber(r.total_duty_rub) : '—'}</td>
                                 <td>{r.total_vat_rub != null ? formatNumber(r.total_vat_rub) : '—'}</td>
+                                <td>{r.total_util_rub != null ? formatNumber(r.total_util_rub) : '—'}</td>
                                 <td style={{ fontWeight: 600 }}>{r.total_rub != null ? formatNumber(r.total_rub) : '—'}</td>
                                 <td style={{ fontSize: 12 }}>{r.rate_cny != null ? Number(r.rate_cny).toFixed(2) : '—'}</td>
+                                <td>{r.has_plan ? <span className="badge badge-success">✓</span> : <span className="badge badge-secondary">—</span>}</td>
+                                <td style={{ display: 'flex', gap: 4 }} onClick={e => e.stopPropagation()}>
+                                    <button className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }}
+                                        onClick={() => openEdit(r)}>✎</button>
+                                    <button className="btn btn-primary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }}
+                                        onClick={() => generatePlan(String(r.order_no))}>{r.has_plan ? '🔄' : '📋'}</button>
+                                    <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }}
+                                        onClick={() => del(String(r.order_no))}>✕</button>
+                                </td>
                             </tr>
                         ))}</tbody>
                     </table>
                 </div>
-            ) : <div className="empty-state"><div className="empty-state-text">Нет заказов. Создайте заказ в модуле <b>Себестоимость</b>.</div></div>}
+            ) : <div className="empty-state"><div className="empty-state-text">Нет заказов. Нажмите «+ Создать заказ».</div></div>}
 
-            <p style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 12 }}>✏️ Редактирование заказов — в модуле <b>Себестоимость</b></p>
+            {/* Edit form */}
+            {editOrder && (
+                <div style={{ marginTop: 16, background: 'var(--color-bg-input)', padding: 16, borderRadius: 8 }}>
+                    <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Редактирование заказа #{editOrder}</h4>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+                        <F label="Номер заказа" field="order_no" />
+                        <F label="Инвойс" field="invoice_no" />
+                        <div className="form-group">
+                            <label className="form-label" style={{ fontSize: 11 }}>Транспорт</label>
+                            <select className="form-input" value={form.transport_type}
+                                onChange={e => setForm({ ...form, transport_type: e.target.value })} style={{ fontSize: 13 }}>
+                                <option>AUTO</option><option>RAIL</option><option>AIR</option><option>SEA</option>
+                            </select>
+                        </div>
+                        <F label="Дата отправки" field="ship_date" type="date" />
+                        <F label="Дата прибытия" field="actual_arrival_date" type="date" />
+                        <F label="Доставка ¥" field="delivery_cost_cny" type="number" step="0.01" />
+                        <F label="Доставка $" field="delivery_cost_usd" type="number" step="0.01" />
+                        <F label="Курс ¥/₽" field="rate_cny" type="number" step="0.01" />
+                        <F label="Курс €/₽" field="rate_eur" type="number" step="0.01" />
+                        <F label="Курс $/₽" field="rate_usd" type="number" step="0.01" />
+                        <F label="Номер ДТ" field="dt_number" />
+                        <F label="Примечание" field="note" />
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                        <button className="btn btn-primary btn-sm" onClick={saveEdit}>💾 Сохранить</button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => setEditOrder(null)}>Отмена</button>
+                    </div>
+                </div>
+            )}
+
+            {/* Items detail */}
+            {selected && (() => {
+                const ord = orders.find(o => String(o.order_no) === selected);
+                const totalRub = ord?.total_rub ?? 0;
+                const pct = (v: number) => totalRub > 0 ? ((v / totalRub) * 100).toFixed(1) + '%' : '';
+                const colMap: Record<string, string> = {
+                    id: '№', barcode: 'Баркод', subject: 'Категория', article_seller: 'Артикул',
+                    article_wb: 'WB', qty: 'Кол-во', price_cny: 'Цена CNY', weight_kg: 'Вес кг',
+                    area_m2: 'Площ. м²', volume_m3: 'Объём м³', cost_cny: 'Себ. CNY',
+                    cost_rub: 'Себ. ₽/шт', delivery_rub: 'Дост. ₽/шт', duty_rub: 'Пошл. ₽/шт',
+                    vat_rub: 'НДС ₽/шт', util_rub: 'Утиль ₽/шт', total_rub: 'Итого ₽/шт',
+                    total_cost_rub: 'Итого себ. ₽', total_delivery_rub: 'Итого дост. ₽',
+                    total_duty_rub: 'Итого пошл. ₽', total_vat_rub: 'Итого НДС ₽',
+                    total_util_rub: 'Итого утиль ₽', grand_total_rub: 'Всего ₽',
+                    name: 'Название', description: 'Описание', order_no: 'Заказ',
+                    nm_id: 'nm_id', imt_id: 'imt_id', sku: 'SKU',
+                    unrecognized: 'Не распознано',
+                };
+                const tr = (key: string) => colMap[key.toLowerCase()] || key;
+                const intCols = new Set(['id', 'nm_id', 'imt_id', 'order_no']);
+                const wbCol = 'article_wb';
+                const renderCell = (key: string, v: any) => {
+                    if (key === wbCol && v != null) {
+                        const nmId = typeof v === 'number' ? Math.round(v) : parseInt(String(v).replace(/\s/g, ''), 10);
+                        if (!isNaN(nmId)) return (<a href={`https://www.wildberries.ru/catalog/${nmId}/detail.aspx`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--color-info)', textDecoration: 'underline' }}>{nmId}</a>);
+                    }
+                    if (intCols.has(key) && typeof v === 'number') return Math.round(v);
+                    if (typeof v === 'number') return formatNumber(v);
+                    return v ?? '—';
+                };
+                const hasCarpets = items.some((r: any) => {
+                    const s = String(r.subject || '').toLowerCase();
+                    return s.includes('ковр') || s.includes('палас') || s.includes('дорожк') || s.includes('carpet');
+                });
+                const hiddenCols = new Set(['volume_m3', ...(hasCarpets ? [] : ['area_m2'])]);
+                const itemKeys = items.length > 0 ? Object.keys(items[0]).filter(k => !hiddenCols.has(k)) : [];
+
+                return (
+                    <div style={{ marginTop: 16, borderTop: '1px solid var(--color-border)', paddingTop: 16 }}>
+                        <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>📊 Расчёт себестоимости по позициям</h4>
+                        {ord && (
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 16 }}>
+                                {[
+                                    { label: 'Кол-во (шт)', value: formatNumber(ord.total_qty ?? 0) },
+                                    { label: 'Себестоимость', value: `${formatNumber(ord.total_cost_rub ?? 0)} ₽`, color: 'var(--color-success)', sub: `↑ ${pct(ord.total_cost_rub ?? 0)}` },
+                                    { label: 'Доставка', value: `${formatNumber(ord.total_delivery_rub ?? 0)} ₽`, sub: `↑ ${pct(ord.total_delivery_rub ?? 0)}` },
+                                    { label: 'Пошлина', value: `${formatNumber(ord.total_duty_rub ?? 0)} ₽`, color: 'var(--color-warning)', sub: `↑ ${pct(ord.total_duty_rub ?? 0)}` },
+                                    { label: 'НДС', value: `${formatNumber(ord.total_vat_rub ?? 0)} ₽`, color: 'var(--color-danger)', sub: `↑ ${pct(ord.total_vat_rub ?? 0)}` },
+                                ].map((c, i) => (
+                                    <div key={i} style={{ background: 'var(--color-bg-input)', padding: '12px 16px', borderRadius: 8, border: '1px solid var(--color-border)' }}>
+                                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>{c.label}</div>
+                                        <div style={{ fontSize: 18, fontWeight: 700, color: c.color || 'var(--color-text)' }}>{c.value}</div>
+                                        {c.sub && <div style={{ fontSize: 10, color: 'var(--color-text-dim)', marginTop: 2 }}>{c.sub}</div>}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        {ord && (
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 16 }}>
+                                <div style={{ background: 'var(--color-bg-input)', padding: '12px 16px', borderRadius: 8, border: '1px solid var(--color-border)' }}>
+                                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>Утильсбор</div>
+                                    <div style={{ fontSize: 18, fontWeight: 700 }}>{formatNumber(ord.total_util_rub ?? 0)} ₽</div>
+                                    <div style={{ fontSize: 10, color: 'var(--color-text-dim)', marginTop: 2 }}>↑ {pct(ord.total_util_rub ?? 0)}</div>
+                                </div>
+                                <div style={{ background: 'linear-gradient(135deg, rgba(139,92,246,0.15), rgba(236,72,153,0.15))', padding: '12px 16px', borderRadius: 8, border: '1px solid rgba(139,92,246,0.3)', gridColumn: 'span 2' }}>
+                                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>🔥 ИТОГО</div>
+                                    <div style={{ fontSize: 22, fontWeight: 800, color: 'var(--color-success)' }}>{formatNumber(totalRub)} ₽</div>
+                                </div>
+                                <div style={{ background: 'var(--color-bg-input)', padding: '12px 16px', borderRadius: 8, border: '1px solid var(--color-border)' }}>
+                                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>Курс ¥/₽</div>
+                                    <div style={{ fontSize: 18, fontWeight: 700 }}>{ord.rate_cny ? Number(ord.rate_cny).toFixed(2) : '—'}</div>
+                                </div>
+                                <div style={{ background: 'var(--color-bg-input)', padding: '12px 16px', borderRadius: 8, border: '1px solid var(--color-border)' }}>
+                                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>Доставка ¥</div>
+                                    <div style={{ fontSize: 18, fontWeight: 700 }}>{formatNumber(ord.delivery_cost_cny ?? 0)}</div>
+                                </div>
+                            </div>
+                        )}
+
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                            <h4 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Позиции заказа #{selected} ({items.length})</h4>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                <input type="file" accept=".xlsx,.xls,.csv" onChange={e => setFile(e.target.files?.[0] || null)} style={{ fontSize: 12 }} />
+                                <button className="btn btn-primary btn-sm" onClick={uploadFile} disabled={!file}>📤 Загрузить</button>
+                                {items.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(items, `order_${selected}_items`)}>📥 Excel</button>}
+                            </div>
+                        </div>
+                        {items.length > 0 ? (
+                            <div style={{ overflowX: 'auto', maxHeight: 400, overflowY: 'auto' }}>
+                                <table className="data-table">
+                                    <thead><tr>{itemKeys.map(k => <th key={k} style={{ fontSize: 11 }}>{tr(k)}</th>)}</tr></thead>
+                                    <tbody>{items.map((r: any, i: number) => <tr key={i}>{itemKeys.map((k, j) => <td key={j} style={{ fontSize: 12 }}>{renderCell(k, r[k])}</td>)}</tr>)}</tbody>
+                                </table>
+                            </div>
+                        ) : <div style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>Нет позиций. Загрузите файл Excel.</div>}
+                    </div>
+                );
+            })()}
 
             {/* Order summary (plan vs fact) */}
             <div style={{ borderTop: '1px solid var(--color-border)', marginTop: 16, paddingTop: 16 }}>
                 <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>📊 Сводка по заказу (план vs факт)</h4>
-                {data.length > 0 && (
+                {orders.length > 0 && (
                     <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 12 }}>
                         <select className="form-input" style={{ maxWidth: 200, fontSize: 13 }}
                             value={expanded || ''} onChange={e => showSummary(e.target.value)}>
                             <option value="">Выберите заказ</option>
-                            {data.map(o => <option key={o.order_no} value={String(o.order_no)}>№{o.order_no}</option>)}
+                            {orders.map(o => <option key={o.order_no} value={String(o.order_no)}>№{o.order_no}</option>)}
                         </select>
                     </div>
                 )}
