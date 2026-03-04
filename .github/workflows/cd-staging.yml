@@ -1,0 +1,88 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [dev]
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test_dds
+          POSTGRES_PASSWORD: test_secret
+          POSTGRES_DB: test_dds_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://test_dds:test_secret@localhost:5432/test_dds_db
+      DATABASE_URL_SYNC: postgresql://test_dds:test_secret@localhost:5432/test_dds_db
+      REDIS_URL: redis://localhost:6379/0
+      SECRET_KEY: ci-test-secret-key-minimum-32-characters-long
+      MINIO_ENDPOINT: localhost:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-backend.txt
+          pip install pytest pytest-asyncio httpx
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: self-hosted
+    needs: test
+    if: github.ref == 'refs/heads/dev'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and deploy staging
+        run: |
+          docker compose -f docker-compose.yml \
+            -f docker-compose.staging.yml \
+            --project-name dds-staging \
+            up -d --build backend frontend-react
+
+      - name: Run database migrations
+        run: |
+          docker compose --project-name dds-staging \
+            exec -T backend alembic upgrade head
+
+      - name: Health check
+        run: |
+          sleep 10
+          curl -f http://localhost:8001/health || exit 1
+          echo "✅ Staging is healthy"

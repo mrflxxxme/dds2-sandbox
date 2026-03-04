@@ -22,3 +22,5 @@ pytest==8.1.1
 pytest-asyncio==0.23.5
 apscheduler==3.10.4
 pytz==2024.1
+sentry-sdk[fastapi]==2.1.1
+structlog==24.1.0

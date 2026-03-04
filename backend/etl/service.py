@@ -8,10 +8,11 @@ from decimal import Decimal
 from typing import Optional
 
 import pandas as pd
+import structlog
 from sqlalchemy.orm import Session
 from sqlalchemy import select, text
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger("dds.etl")
 
 from backend.models import (
     Transaction, Account, CounterpartyCategory, Override,
@@ -91,6 +92,11 @@ def import_statement(
         imported_at=datetime.utcnow(),
     )
 
+    log_ctx = logger.bind(
+        filename=filename, source_type=source_type, project_id=project_id,
+    )
+    log_ctx.info("etl.import.start")
+
     # Save original file to MinIO (for audit trail / re-import)
     from backend.storage import upload_file
     file_url = upload_file(
@@ -111,17 +117,20 @@ def import_statement(
         # 1. Parse
         df, parse_skipped = parse_statement(source_type, file_data, account_no)
         log.rows_raw = len(df) + parse_skipped
+        log_ctx.info("etl.parse.done", rows_raw=log.rows_raw, skipped=parse_skipped)
 
         if df.empty:
             log.status = "OK"
             log.rows_inserted = 0
             log.rows_skipped = 0
             db.commit()
+            log_ctx.info("etl.import.done", status="OK", inserted=0, note="empty_file")
             return log
 
         # 2. Master logic
         our_accounts, customs_accounts, cp_categories, overrides = _load_refs(db, project_id)
         df = apply_master_logic(df, our_accounts, customs_accounts, cp_categories, overrides)
+        log_ctx.info("etl.master_logic.done", rows=len(df))
 
         # 3. Upsert
         inserted = 0
@@ -205,6 +214,11 @@ def import_statement(
             log.error_msg = f"{parse_skipped} rows skipped during parsing (bad dates or format)"
         db.commit()
 
+        log_ctx.info(
+            "etl.import.done",
+            status="OK", inserted=inserted, skipped=skipped + parse_skipped,
+        )
+
         # 7. Invalidate report caches (async call from sync context)
         try:
             import asyncio
@@ -223,6 +237,7 @@ def import_statement(
         log.error_msg = str(e)[:1000]
         db.add(log)
         db.commit()
+        log_ctx.error("etl.import.failed", error=str(e)[:500])
         raise
 
     return log

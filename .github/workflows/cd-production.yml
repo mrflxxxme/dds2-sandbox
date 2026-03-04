@@ -1,0 +1,45 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: self-hosted
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pre-deploy backup
+        run: |
+          echo "📦 Creating pre-deploy backup..."
+          docker compose --project-name dds-prod \
+            exec -T db pg_dump -U dds dds_db | gzip > backups/pre-deploy-$(date +%Y%m%d_%H%M%S).sql.gz
+          echo "✅ Backup created"
+
+      - name: Build and deploy
+        run: |
+          docker compose -f docker-compose.prod.yml \
+            --project-name dds-prod \
+            up -d --build backend frontend-react
+
+      - name: Run database migrations
+        run: |
+          docker compose --project-name dds-prod \
+            exec -T backend alembic upgrade head
+
+      - name: Health check with rollback
+        run: |
+          sleep 15
+          if ! curl -f http://localhost:80/health; then
+            echo "❌ Health check failed! Rolling back..."
+            git checkout HEAD~1
+            docker compose -f docker-compose.prod.yml \
+              --project-name dds-prod \
+              up -d --build backend frontend-react
+            echo "🔄 Rollback complete"
+            exit 1
+          fi
+          echo "✅ Production deploy successful"

@@ -1,0 +1,35 @@
+# Staging override — use with: docker compose -f docker-compose.yml -f docker-compose.staging.yml --project-name dds-staging up -d --build
+#
+# Provides:
+# - Separate DB volume (pgdata_staging) for full data isolation
+# - Backend on port 8001, frontend on port 3001
+# - DDS_ENV=staging for conditional logic
+
+services:
+  db:
+    environment:
+      POSTGRES_DB: dds_staging_db
+    volumes:
+      - pgdata_staging:/var/lib/postgresql/data
+
+  backend:
+    environment:
+      DATABASE_URL: postgresql+asyncpg://dds:dds_secret@db:5432/dds_staging_db
+      DATABASE_URL_SYNC: postgresql://dds:dds_secret@db:5432/dds_staging_db
+      DDS_ENV: staging
+    ports:
+      - "8001:8000"
+
+  frontend-react:
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8001
+    ports:
+      - "3001:3000"
+
+  # Disable backup for staging
+  db-backup:
+    profiles:
+      - disabled
+
+volumes:
+  pgdata_staging:

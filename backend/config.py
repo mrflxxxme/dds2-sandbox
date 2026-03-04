@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480  # 8 hours
     MIN_PASSWORD_LENGTH: int = 6
 
+    # Environment
+    DDS_ENV: str = "development"  # development | staging | production
+    SENTRY_DSN: str = ""  # Empty = Sentry disabled
+
     # CORS
     CORS_ORIGINS: str = "http://localhost:8501,http://localhost:3000"
 

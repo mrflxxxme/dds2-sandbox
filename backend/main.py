@@ -21,6 +21,20 @@ from backend.auth import get_current_user, ensure_default_admin
 from backend.routers import import_txn, refs, reports, planning, cost, auth, integrations, projects, funnel
 
 
+# ─── Sentry Error Tracking ──────────────────────────────────────────────────
+
+if settings.SENTRY_DSN:
+    import sentry_sdk
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        environment=settings.DDS_ENV,
+        traces_sample_rate=0.2,    # 20% performance traces
+        profiles_sample_rate=0.1,  # 10% profiling
+        send_default_pii=False,    # Don't send personal data
+    )
+    logging.getLogger("dds").info("Sentry initialized (env=%s)", settings.DDS_ENV)
+
+
 # ─── Structured JSON Logging ─────────────────────────────────────────────────
 
 class JSONFormatter(logging.Formatter):
