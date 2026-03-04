@@ -253,8 +253,10 @@ async def fast_backfill_tick():
         from backend.services.funnel_service import run_funnel_sync
 
         project_ids = await _get_sync_project_ids()
+        logger.info(f"⏩ Fast backfill tick: found {len(project_ids)} projects: {project_ids}")
 
         if not project_ids:
+            logger.warning("⏩ Fast backfill: no projects found, stopping")
             _stop_fast_backfill()
             return
 
