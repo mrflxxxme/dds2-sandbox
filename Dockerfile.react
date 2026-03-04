@@ -25,6 +25,7 @@ RUN addgroup --system app && adduser --system --ingroup app app
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV HOSTNAME=0.0.0.0
 
 # Copy standalone output (configured in next.config.mjs: output: 'standalone')
 COPY --from=builder --chown=app:app /app/.next/standalone ./
@@ -34,8 +35,5 @@ COPY --from=builder --chown=app:app /app/public ./public
 USER app
 
 EXPOSE 3000
-
-HEALTHCHECK --interval=30s --timeout=10s --retries=5 \
-    CMD node -e "require('http').get('http://localhost:3000', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
 
 CMD ["node", "server.js"]
