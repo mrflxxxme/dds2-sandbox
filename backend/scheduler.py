@@ -371,7 +371,7 @@ _ad_check_lock = asyncio.Lock()
 async def ad_anomaly_check():
     """
     Check for days with incomplete ad data and re-sync them.
-    Runs every 6 hours. Uses median-based detection.
+    Runs every 3 min. Auto-stops when all ads are complete.
     """
     if _ad_check_lock.locked():
         return
@@ -381,10 +381,12 @@ async def ad_anomaly_check():
             project_ids = await _get_sync_project_ids()
             logger.info(f"📊 Ad anomaly check: {len(project_ids)} projects")
 
+            all_ads_ok = True
             for pid in project_ids:
                 incomplete_days = await _get_days_with_incomplete_ads(pid)
                 if incomplete_days:
-                    day = incomplete_days[0]  # one day per project per check
+                    all_ads_ok = False
+                    day = incomplete_days[0]
                     logger.info(
                         f"📊 Ad anomaly: project {pid} — re-syncing {day} "
                         f"({len(incomplete_days)} incomplete days total)"
@@ -399,8 +401,23 @@ async def ad_anomaly_check():
                 else:
                     logger.info(f"📊 Ad anomaly: project {pid} — all ads complete ✅")
 
+            if all_ads_ok:
+                logger.info("🎉 Ad anomaly check complete — all projects have full ad data! Stopping.")
+                _stop_ad_anomaly_check()
+
         except Exception as e:
             logger.error(f"Ad anomaly check error: {e}\n{traceback.format_exc()}")
+
+
+def _stop_ad_anomaly_check():
+    """Remove the ad anomaly check job from scheduler."""
+    global scheduler
+    if scheduler:
+        try:
+            scheduler.remove_job("ad_anomaly_check")
+            logger.info("Ad anomaly check job removed from scheduler")
+        except Exception:
+            pass
 
 
 # ─── Scheduler lifecycle ─────────────────────────────────────────────────────
@@ -455,19 +472,19 @@ def start_scheduler():
         misfire_grace_time=60,
     )
 
-    # Ad anomaly check: every 30 min — re-sync incomplete ad days
+    # Ad anomaly check: every 3 min — re-sync incomplete ad days, auto-stops
     scheduler.add_job(
         ad_anomaly_check,
-        trigger=IntervalTrigger(minutes=30),
+        trigger=IntervalTrigger(seconds=180),
         id="ad_anomaly_check",
-        name="Ad anomaly check (every 30min)",
+        name="Ad anomaly check (every 3min, auto-stop)",
         replace_existing=True,
-        misfire_grace_time=120,
+        misfire_grace_time=60,
     )
 
     scheduler.start()
     logger.info(
-        "✅ Scheduler started — daily sync 3x/day + backfill (auto-stop) + ad check every 30min"
+        "✅ Scheduler started — daily sync 3x/day + backfill (auto-stop) + ad check (auto-stop)"
     )
 
 
