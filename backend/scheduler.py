@@ -102,10 +102,12 @@ async def _get_missing_dates(project_id: int, lookback_days: int = BACKFILL_DAYS
     return missing
 
 
-async def _get_days_without_ads(project_id: int, lookback_days: int = BACKFILL_DAYS) -> list[str]:
+async def _get_days_with_incomplete_ads(project_id: int, lookback_days: int = BACKFILL_DAYS) -> list[str]:
     """
-    Find dates that have funnel data but ZERO ad data (all adv_sum = 0).
-    These likely failed due to WB 429 rate limits during ad fetch.
+    Find dates that have funnel data but INCOMPLETE ad data.
+    Uses the median ad total across recent days as a baseline —
+    any day with < 50% of median is flagged for re-sync.
+    Also flags days with zero ad data.
     Returns list of date strings, oldest first. Max 5 per call.
     """
     from sqlalchemy import select, func
@@ -113,21 +115,53 @@ async def _get_days_without_ads(project_id: int, lookback_days: int = BACKFILL_D
     start = today - timedelta(days=lookback_days)
 
     async with AsyncSessionLocal() as db:
-        # Find dates where we have funnel data but total adv_sum = 0
+        # Get ad totals per day
         result = await db.execute(
             select(
                 WbFunnelDaily.date,
                 func.sum(WbFunnelDaily.adv_sum).label("total_adv"),
+                func.count(func.nullif(WbFunnelDaily.adv_sum, 0)).label("items_with_ads"),
             ).where(
                 WbFunnelDaily.project_id == project_id,
                 WbFunnelDaily.date >= start,
                 WbFunnelDaily.date < today,
             ).group_by(WbFunnelDaily.date)
-            .having(func.sum(WbFunnelDaily.adv_sum) == 0)
             .order_by(WbFunnelDaily.date)
-            .limit(5)
         )
-        return [r[0].isoformat() for r in result]
+        rows = list(result)
+
+    if not rows:
+        return []
+
+    # Calculate median ad total across all days
+    ad_totals = sorted([float(r.total_adv or 0) for r in rows])
+    mid = len(ad_totals) // 2
+    if len(ad_totals) % 2 == 0:
+        median_adv = (ad_totals[mid - 1] + ad_totals[mid]) / 2
+    else:
+        median_adv = ad_totals[mid]
+
+    if median_adv <= 0:
+        # No baseline — fall back to just finding zero days
+        return [r.date.isoformat() for r in rows if float(r.total_adv or 0) == 0][:5]
+
+    # Flag days with < 50% of median ad total
+    threshold = median_adv * 0.5
+    incomplete = []
+    for r in rows:
+        day_adv = float(r.total_adv or 0)
+        if day_adv < threshold:
+            incomplete.append(r.date.isoformat())
+
+    if incomplete:
+        logger.info(
+            f"Ad completeness check: project {project_id}, "
+            f"median={median_adv:.0f}, threshold={threshold:.0f}, "
+            f"incomplete days: {len(incomplete)}"
+        )
+
+    return incomplete[:5]
+
 
 
 async def _get_sync_project_ids() -> list[int]:
@@ -344,7 +378,7 @@ async def fast_backfill_tick():
                     await asyncio.sleep(1)
                 else:
                     # All days have funnel data — check for days with missing ad data
-                    no_ads_days = await _get_days_without_ads(pid)
+                    no_ads_days = await _get_days_with_incomplete_ads(pid)
                     if no_ads_days:
                         all_filled = False
                         day = no_ads_days[0]

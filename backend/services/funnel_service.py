@@ -173,7 +173,7 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
     chunks = [campaign_ids[i:i+50] for i in range(0, len(campaign_ids), 50)]
     skipped_chunks = 0
     budget_exceeded = False
-    TIME_BUDGET = 90  # seconds — must be well under the 600s wait_for
+    TIME_BUDGET = 300  # seconds — enough for 9 chunks with 12s delays + retries
     t_start = time.monotonic()
 
     async with httpx.AsyncClient(timeout=60) as client:
@@ -192,7 +192,7 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
                 break
 
             if idx > 0:
-                await asyncio.sleep(5)  # minimal delay between chunks
+                await asyncio.sleep(12)  # WB needs ~10s between ad stat requests
 
             ids_param = ",".join(str(c) for c in chunk)
             url = (f"https://advert-api.wildberries.ru/adv/v3/fullstats"
@@ -210,7 +210,7 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
                     break
 
                 if resp.status_code == 429:
-                    wait = [5, 10, 20][attempt]  # fast retries
+                    wait = [10, 20, 40][attempt]  # generous waits for WB rate limiter
                     logger.warning(
                         f"WB adv 429 rate limit, waiting {wait}s "
                         f"(attempt {attempt+1}/3, elapsed {time.monotonic()-t_start:.0f}s)"
