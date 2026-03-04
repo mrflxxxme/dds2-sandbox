@@ -7,12 +7,10 @@ from datetime import datetime, date, timedelta
 from decimal import Decimal
 from typing import Optional
 
-from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.config import settings
 from backend.database import get_db
 from backend.project_context import get_current_project
 from backend.models import IntegrationKey, SyncLog, WbPayout, Project
@@ -20,30 +18,11 @@ from backend.schemas import (
     MessageResponse, StatusResponse, DeleteResponse,
     IntegrationKeySchema, SyncLogSchema, WbPayoutSchema,
 )
+from backend.utils.crypto import encrypt as _encrypt, decrypt as _decrypt
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/integrations")
-
-
-# ─── Encryption helpers ──────────────────────────────────────────────────────
-
-def _get_fernet() -> Fernet:
-    """Get Fernet cipher using SECRET_KEY (first 32 bytes, base64-padded)."""
-    import base64
-    key = settings.SECRET_KEY.encode()[:32].ljust(32, b"=")
-    return Fernet(base64.urlsafe_b64encode(key))
-
-
-def _encrypt(value: str) -> str:
-    return _get_fernet().encrypt(value.encode()).decode()
-
-
-def _decrypt(value: str) -> str:
-    try:
-        return _get_fernet().decrypt(value.encode()).decode()
-    except InvalidToken:
-        raise ValueError("Не удалось расшифровать API-ключ. Проверьте SECRET_KEY.")
 
 
 # ─── Integration Keys CRUD ───────────────────────────────────────────────────

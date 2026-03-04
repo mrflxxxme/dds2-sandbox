@@ -1,18 +1,17 @@
 """
-Router: /planning — orders, payments, incomes, lead_time, customs, cashflow
+Router: /planning — orders, payments, incomes, lead_time, customs, cashflow.
+Thin HTTP layer — complex business logic is in services/planning_service.py.
 """
 
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
-from sqlalchemy import select, func, and_, text
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
-from sqlalchemy import or_
-
 from backend.models import (
     Order, LeadTime, PlannedPayment, PlannedIncome,
     CustomsTopup, CustomsAlloc, Transaction, PaymentFactLink, CustomsDT,
@@ -24,6 +23,7 @@ from backend.schemas import (
     WbPayoutSchema,
 )
 from backend.project_context import get_current_project
+from backend.services import planning_service
 
 router = APIRouter(prefix="/planning")
 
@@ -88,8 +88,7 @@ async def get_lead_times(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(LeadTime)
-        .where(LeadTime.project_id == project.id)
+        select(LeadTime).where(LeadTime.project_id == project.id)
         .order_by(LeadTime.direction)
     )
     return result.scalars().all()
@@ -258,19 +257,16 @@ async def get_customs_topup(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(CustomsTopup)
-        .where(CustomsTopup.project_id == project.id)
+        select(CustomsTopup).where(CustomsTopup.project_id == project.id)
         .order_by(CustomsTopup.date.desc())
     )
     topups = result.scalars().all()
 
-    # Calculate allocated/remaining per topup
     alloc_result = await db.execute(
         select(
             CustomsAlloc.topup_txn_id,
             func.sum(CustomsAlloc.alloc_amount).label("allocated"),
-        )
-        .where(CustomsAlloc.project_id == project.id)
+        ).where(CustomsAlloc.project_id == project.id)
         .group_by(CustomsAlloc.topup_txn_id)
     )
     alloc_map = {row.topup_txn_id: Decimal(str(row.allocated or 0)) for row in alloc_result}
@@ -340,8 +336,7 @@ async def get_cashflow_daily(
     db: AsyncSession = Depends(get_db),
 ):
     """Calculate daily cashflow for the next `days` days."""
-    from backend.services.planning_service import calculate_cashflow_daily
-    return await calculate_cashflow_daily(db, project.id, days, starting_balance)
+    return await planning_service.calculate_cashflow_daily(db, project.id, days, starting_balance)
 
 
 # ─── Order Summary (plan vs fact) ─────────────────────────────────────────────
@@ -353,10 +348,9 @@ async def order_summary(
     db: AsyncSession = Depends(get_db),
 ):
     """Return plan vs fact for a specific order."""
-    from backend.services.planning_service import get_order_summary
-    from backend.schemas import OrderSchema, PlannedPaymentSchema, TransactionSchema, CustomsAllocSchema
+    from backend.schemas import TransactionSchema
 
-    data = await get_order_summary(db, project.id, order_no)
+    data = await planning_service.get_order_summary(db, project.id, order_no)
     if not data:
         raise HTTPException(404, "Order not found")
 
@@ -416,12 +410,10 @@ async def create_fact_link(payload: dict, db: AsyncSession = Depends(get_db)):
     if not payment_id or not txn_id or amount_rub is None:
         raise HTTPException(400, "payment_id, txn_id, amount_rub required")
 
-    # Verify payment exists
     pp = await db.execute(select(PlannedPayment).where(PlannedPayment.id == payment_id))
     if not pp.scalar_one_or_none():
         raise HTTPException(404, "Payment not found")
 
-    # Verify transaction exists
     txn = await db.execute(select(Transaction).where(Transaction.txn_id == txn_id))
     if not txn.scalar_one_or_none():
         raise HTTPException(404, "Transaction not found")
@@ -435,9 +427,7 @@ async def create_fact_link(payload: dict, db: AsyncSession = Depends(get_db)):
     db.add(link)
     await db.commit()
 
-    # Re-sync this payment's paid_rub
-    await _update_payment_paid(payment_id, db)
-
+    await planning_service.update_payment_paid_amount(payment_id, db)
     return {"ok": True, "id": link.id}
 
 
@@ -451,9 +441,7 @@ async def delete_fact_link(link_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(link)
     await db.commit()
 
-    # Re-sync this payment's paid_rub
-    await _update_payment_paid(payment_id, db)
-
+    await planning_service.update_payment_paid_amount(payment_id, db)
     return {"ok": True}
 
 
@@ -464,16 +452,14 @@ async def get_candidate_transactions(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get candidate transactions for manual linking. Filter by account or purpose_tag."""
+    """Get candidate transactions for manual linking."""
     from backend.models import Account
 
     conditions = [Transaction.project_id == project.id, Transaction.expense > 0]
 
     if account:
-        # Filter by specific account
         conditions.append(Transaction.account == account)
     else:
-        # Fallback: filter by purpose_tag
         tag_map = {"ЗАКАЗ": "Заказ", "ДОСТАВКА": "Логистика"}
         purpose_tag = tag_map.get(direction)
         if purpose_tag:
@@ -514,65 +500,6 @@ async def get_accounts_list(db: AsyncSession = Depends(get_db)):
 
 # ─── Customs DT (FTS report) ─────────────────────────────────────────────────
 
-def _parse_fts_pdf(pdf_bytes: bytes) -> list[dict]:
-    """Parse FTS customs report PDF and extract DT lines grouped by DT number."""
-    import re
-    try:
-        import pdfplumber
-    except ImportError:
-        import subprocess, sys
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "pdfplumber",
-                               "--break-system-packages", "-q"])
-        import pdfplumber
-
-    import io
-    results = {}  # dt_number → {date, total, lines[]}
-
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text() or ""
-            for line in text.split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                # Match DT lines: number, amount, ДТ, code, date, dt_number
-                # Pattern: "2 05.02.2026 49 240,00 ДТ 10131010 05.02.2026 10131010/050226/5030475"
-                m = re.match(
-                    r'^\d+\s+'                    # row number
-                    r'(\d{2}\.\d{2}\.\d{4})\s+'   # operation date
-                    r'([\d\s]+[,\.]\d{2})\s+'     # amount (with spaces/comma)
-                    r'ДТ\s+'                       # doc type = ДТ
-                    r'\d+\s+'                      # customs code
-                    r'\d{2}\.\d{2}\.\d{4}\s+'     # doc date
-                    r'(\d{8}/\d{6}/\d{7})',            # DT number (8/6/7 digits)
-                    line
-                )
-                if m:
-                    op_date_str = m.group(1)
-                    amount_str = m.group(2).replace(" ", "").replace(",", ".")
-                    dt_number = m.group(3)
-                    try:
-                        amount = float(amount_str)
-                        op_date = date(
-                            int(op_date_str[6:10]),
-                            int(op_date_str[3:5]),
-                            int(op_date_str[0:2])
-                        )
-                    except (ValueError, IndexError):
-                        continue
-
-                    if dt_number not in results:
-                        results[dt_number] = {"dt_date": op_date, "total": 0.0, "lines": []}
-                    results[dt_number]["total"] += amount
-                    results[dt_number]["lines"].append(amount)
-
-    return [
-        {"dt_number": k, "dt_date": v["dt_date"].isoformat(), "amount_rub": round(v["total"], 2),
-         "lines": v["lines"]}
-        for k, v in sorted(results.items(), key=lambda x: x[1]["dt_date"])
-    ]
-
-
 @router.post("/customs_dt/upload_fts")
 async def upload_fts_report(
     file: UploadFile = File(...),
@@ -582,11 +509,10 @@ async def upload_fts_report(
     """Upload FTS PDF report and parse DT declarations."""
     content = await file.read()
 
-    # Validate file content (magic bytes)
     from backend.utils.file_validation import validate_file_content
     validate_file_content(content, file.filename or "report.pdf")
 
-    parsed = _parse_fts_pdf(content)
+    parsed = planning_service.parse_fts_pdf(content)
 
     if not parsed:
         raise HTTPException(400, "Не удалось найти ДТ строки в PDF")
@@ -594,7 +520,6 @@ async def upload_fts_report(
     created = 0
     skipped = 0
     for item in parsed:
-        # Check if DT already exists within project
         existing = await db.execute(
             select(CustomsDT).where(
                 CustomsDT.project_id == project.id,
@@ -625,8 +550,7 @@ async def get_customs_dt_list(
 ):
     """List all parsed DT declarations."""
     result = await db.execute(
-        select(CustomsDT)
-        .where(CustomsDT.project_id == project.id)
+        select(CustomsDT).where(CustomsDT.project_id == project.id)
         .order_by(CustomsDT.dt_date.desc())
     )
     dts = result.scalars().all()
@@ -696,7 +620,6 @@ async def upload_wb_payouts(
 
     data = await file.read()
 
-    # Validate file content (magic bytes)
     from backend.utils.file_validation import validate_file_content
     validate_file_content(data, file.filename or "payouts.xlsx")
 
@@ -729,8 +652,7 @@ async def upload_wb_payouts(
 
     await db.commit()
 
-    # Trigger reconciliation
-    await _reconcile_wb_payouts(db)
+    await planning_service.reconcile_wb_payouts(db)
 
     return {"ok": True, "created": created, "updated": updated, "skipped": skipped,
             "total_parsed": len(parsed)}
@@ -790,85 +712,6 @@ async def manual_reconcile_wb(
     return {"ok": True}
 
 
-async def _reconcile_wb_payouts(db: AsyncSession):
-    """
-    Match WB payouts (not RECEIVED) with bank income transactions.
-    Criteria: WB counterparty, amount ±1%, date within [-2, +5] days.
-    """
-    from datetime import datetime as dt_mod
-
-    unmatched_result = await db.execute(
-        select(WbPayout).where(WbPayout.status.in_(["TRANSIT", "PROCESSING", "PENDING"]))
-    )
-    payouts = unmatched_result.scalars().all()
-    if not payouts:
-        return
-
-    # Already matched txn_ids
-    matched_result = await db.execute(
-        select(WbPayout.matched_txn_id).where(WbPayout.matched_txn_id.isnot(None))
-    )
-    already_matched = {r[0] for r in matched_result}
-
-    # Date range
-    min_date = min(p.created_at for p in payouts) - timedelta(days=2)
-    max_date = max(p.created_at for p in payouts) + timedelta(days=5)
-
-    # Candidate bank transactions (WB income)
-    candidates_result = await db.execute(
-        select(Transaction).where(
-            Transaction.income > 0,
-            Transaction.date >= min_date,
-            Transaction.date <= max_date,
-            or_(
-                and_(
-                    Transaction.cat_lvl1_2 == "Маркетплейсы",
-                    Transaction.cat_lvl2_2 == "Wildberries",
-                ),
-                Transaction.counterparty.ilike("%вайлдберриз%"),
-                Transaction.counterparty.ilike("%wildberries%"),
-            )
-        )
-    )
-    candidates = [t for t in candidates_result.scalars().all()
-                  if t.txn_id not in already_matched]
-
-    if not candidates:
-        return
-
-    # Greedy matching: largest payouts first
-    used_txn_ids: set[str] = set()
-    for payout in sorted(payouts, key=lambda p: p.amount_rub, reverse=True):
-        best_match = None
-        best_diff = float("inf")
-
-        for txn in candidates:
-            if txn.txn_id in used_txn_ids:
-                continue
-
-            # Date window
-            txn_date = txn.date.date() if hasattr(txn.date, 'date') else txn.date
-            payout_date = payout.created_at.date() if hasattr(payout.created_at, 'date') else payout.created_at
-            delta = (txn_date - payout_date).days
-            if delta < -2 or delta > 5:
-                continue
-
-            # Amount tolerance: ±1%
-            diff = abs(float(txn.income) - float(payout.amount_rub))
-            tolerance = float(payout.amount_rub) * 0.01
-            if diff <= tolerance and diff < best_diff:
-                best_diff = diff
-                best_match = txn
-
-        if best_match:
-            payout.matched_txn_id = best_match.txn_id
-            payout.matched_at = dt_mod.utcnow()
-            payout.status = "RECEIVED"
-            used_txn_ids.add(best_match.txn_id)
-
-    await db.commit()
-
-
 # ─── WB Forecast ─────────────────────────────────────────────────────────────
 
 @router.post("/wb_forecast/refresh")
@@ -876,66 +719,5 @@ async def refresh_wb_forecast(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Auto-generate PlannedIncome for next 30 days based on
-    7-day rolling average of actual WB income.
-    """
-    today = date.today()
-    week_ago = today - timedelta(days=7)
-
-    # Actual WB income from last 7 days
-    result = await db.execute(
-        select(
-            func.coalesce(func.sum(Transaction.income), 0)
-        ).where(
-            Transaction.project_id == project.id,
-            Transaction.income > 0,
-            Transaction.is_cashflow2 == 1,
-            Transaction.date >= week_ago,
-            Transaction.date <= today,
-            or_(
-                and_(
-                    Transaction.cat_lvl1_2 == "Маркетплейсы",
-                    Transaction.cat_lvl2_2 == "Wildberries",
-                ),
-                Transaction.counterparty.ilike("%вайлдберриз%"),
-                Transaction.counterparty.ilike("%wildberries%"),
-            )
-        )
-    )
-    total_7d = Decimal(str(result.scalar() or 0))
-    daily_avg = (total_7d / Decimal("7")).quantize(Decimal("0.01"))
-
-    if daily_avg <= 0:
-        return {"ok": True, "daily_avg": 0, "message": "Нет данных WB за последние 7 дней"}
-
-    # Delete stale auto-forecast
-    await db.execute(
-        text("DELETE FROM planned_incomes WHERE source = 'WB_AUTO' AND project_id = :pid"),
-        {"pid": project.id},
-    )
-
-    # Get manual WB income dates to avoid overlap
-    manual_result = await db.execute(
-        select(PlannedIncome.date).where(PlannedIncome.source == "WB", PlannedIncome.project_id == project.id)
-    )
-    manual_dates = {row[0] for row in manual_result}
-
-    # Insert forecast for next 30 days
-    created = 0
-    for i in range(1, 31):
-        d = today + timedelta(days=i)
-        if d in manual_dates:
-            continue
-        pi = PlannedIncome(date=d, amount_rub=daily_avg, source="WB_AUTO", project_id=project.id)
-        db.add(pi)
-        created += 1
-
-    await db.commit()
-    return {"ok": True, "daily_avg": float(daily_avg), "created": created}
-
-
-async def _update_payment_paid(payment_id: int, db: AsyncSession):
-    """Recalculate paid_rub for a payment from manual links."""
-    from backend.services.planning_service import update_payment_paid_amount
-    await update_payment_paid_amount(payment_id, db)
+    """Auto-generate PlannedIncome for next 30 days based on 7-day rolling average."""
+    return await planning_service.refresh_wb_forecast(db, project.id)

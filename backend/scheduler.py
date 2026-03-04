@@ -107,7 +107,7 @@ async def sync_all_projects_funnel():
     """
     import asyncio
     from sqlalchemy import select
-    from backend.routers.funnel import run_funnel_sync
+    from backend.services.funnel_service import run_funnel_sync
 
     logger.info("⏰ Scheduler: starting funnel sync for all projects")
 
@@ -155,7 +155,7 @@ async def sync_all_projects_funnel():
 
 async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
     """Run funnel sync and log result to sync_log table."""
-    from backend.routers.funnel import run_funnel_sync
+    from backend.services.funnel_service import run_funnel_sync
     from sqlalchemy import select
     from datetime import datetime
 
@@ -222,7 +222,7 @@ async def fast_backfill_tick():
 
     try:
         import asyncio
-        from backend.routers.funnel import run_funnel_sync
+        from backend.services.funnel_service import run_funnel_sync
 
         project_ids = await _get_sync_project_ids()
 
