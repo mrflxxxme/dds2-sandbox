@@ -920,3 +920,223 @@ async def get_day_analysis(db: AsyncSession, pid: int, tax_rate: float,
         "trend": trend,
         "anomalies": anomalies,
     }
+
+
+# ─── Product trends (linear regression) ─────────────────────────────────────
+
+def _linear_regression_trend(values: list[float]) -> float:
+    """
+    Compute trendPct using simple linear regression on N data points.
+    y = a*x + b where x = 0..N-1
+    trendPct = (predicted_last - mean) / |mean| * 100
+    Returns 0 if insufficient data or zero mean.
+    """
+    n = len(values)
+    if n < 2:
+        return 0.0
+    mean_y = sum(values) / n
+    if abs(mean_y) < 1e-9:
+        return 0.0
+    # x = 0, 1, ..., n-1
+    mean_x = (n - 1) / 2.0
+    sum_xy = sum(i * v for i, v in enumerate(values))
+    sum_xx = sum(i * i for i in range(n))
+    denom = sum_xx - n * mean_x * mean_x
+    if abs(denom) < 1e-9:
+        return 0.0
+    a = (sum_xy - n * mean_x * mean_y) / denom
+    # Predicted value at the last point
+    predicted = mean_y + a * (n - 1 - mean_x)
+    trend_pct = (predicted - mean_y) / abs(mean_y) * 100
+    return round(trend_pct, 1)
+
+
+async def get_product_trends(
+    db: AsyncSession, pid: int, tax_rate: float,
+    trend_days: int = 7, brand: Optional[str] = None,
+    search: Optional[str] = None,
+) -> dict:
+    """
+    Per-product metrics with linear regression trends.
+    Returns list of products with aggregated values and trend percentages.
+    """
+    from collections import defaultdict
+
+    today = date.today()
+    d_from = today - timedelta(days=trend_days)
+
+    # Fetch raw daily rows per product
+    q = select(WbFunnelDaily).where(
+        WbFunnelDaily.project_id == pid,
+        WbFunnelDaily.date >= d_from,
+        WbFunnelDaily.date <= today,
+    )
+    if brand:
+        q = q.where(WbFunnelDaily.brand == brand)
+    if search:
+        vc_filter = WbFunnelDaily.vendor_code.ilike(f"%{search}%")
+        if search.isdigit():
+            vc_filter = or_(vc_filter, WbFunnelDaily.nm_id == int(search))
+        q = q.where(vc_filter)
+
+    q = q.order_by(WbFunnelDaily.nm_id, WbFunnelDaily.date)
+    result = await db.execute(q)
+    rows = result.scalars().all()
+
+    # Group by nm_id → ordered daily records
+    products: dict = defaultdict(list)
+    product_meta: dict = {}
+    for r in rows:
+        products[r.nm_id].append(r)
+        product_meta[r.nm_id] = {
+            "vendor_code": r.vendor_code,
+            "subject": r.subject,
+            "brand": r.brand,
+        }
+
+    output = []
+    for nm_id, daily_rows in products.items():
+        meta = product_meta[nm_id]
+        n_days = len(daily_rows)
+        if n_days == 0:
+            continue
+
+        # Aggregate totals for the period
+        total_orders_count = sum(r.orders_count or 0 for r in daily_rows)
+        total_orders_sum = sum(float(r.orders_sum_rub or 0) for r in daily_rows)
+        total_open_card = sum(r.open_card or 0 for r in daily_rows)
+        total_add_to_cart = sum(r.add_to_cart or 0 for r in daily_rows)
+        total_adv_sum = sum(float(r.adv_sum or 0) for r in daily_rows)
+        total_adv_views = sum(r.adv_views or 0 for r in daily_rows)
+        total_adv_clicks = sum(r.adv_clicks or 0 for r in daily_rows)
+
+        # Latest day values for stocks and avg_price
+        latest = daily_rows[-1]
+        stocks_wb = latest.stocks_wb or 0
+        avg_price = float(latest.avg_price or 0)
+        cost_price = float(latest.cost_price or 0)
+
+        # Derived metrics
+        avg_daily_orders = total_orders_count / n_days if n_days else 0
+        turnover_days = round(stocks_wb / avg_daily_orders, 1) if avg_daily_orders > 0 else 0
+
+        buyout = float(latest.buyout_percent or 100)
+        revenue = total_orders_sum * buyout / 100 if buyout else total_orders_sum
+        tax = revenue * tax_rate / 100
+        cost_total = cost_price * total_orders_count
+        profit = revenue - cost_total - total_adv_sum - tax
+        margin = round((profit / revenue * 100), 2) if revenue else 0
+        drr = round((total_adv_sum / total_orders_sum * 100), 2) if total_orders_sum else 0
+        ctr = round((total_adv_clicks / total_adv_views * 100), 2) if total_adv_views else 0
+
+        add_to_cart_pct = round((total_add_to_cart / total_open_card * 100), 2) if total_open_card else 0
+        cart_to_order_pct = round((total_orders_count / total_add_to_cart * 100), 2) if total_add_to_cart else 0
+
+        # ── Linear regression trends per metric ──
+        # Build time series arrays (one value per day)
+        daily_orders = [r.orders_count or 0 for r in daily_rows]
+        daily_revenue = [float(r.orders_sum_rub or 0) for r in daily_rows]
+        daily_open = [r.open_card or 0 for r in daily_rows]
+        daily_cart = [r.add_to_cart or 0 for r in daily_rows]
+        daily_adv = [float(r.adv_sum or 0) for r in daily_rows]
+        daily_adv_views = [r.adv_views or 0 for r in daily_rows]
+        daily_adv_clicks = [r.adv_clicks or 0 for r in daily_rows]
+        daily_stocks = [r.stocks_wb or 0 for r in daily_rows]
+        daily_avg_price = [float(r.avg_price or 0) for r in daily_rows]
+
+        # Computed daily series for ratios
+        daily_drr = []
+        daily_margin = []
+        daily_ctr = []
+        daily_add_to_cart_pct = []
+        daily_cart_to_order = []
+        daily_turnover = []
+
+        for r in daily_rows:
+            os_ = float(r.orders_sum_rub or 0)
+            adv = float(r.adv_sum or 0)
+            oc = r.orders_count or 0
+            views = r.adv_views or 0
+            clicks = r.adv_clicks or 0
+            open_c = r.open_card or 0
+            cart_c = r.add_to_cart or 0
+            stk = r.stocks_wb or 0
+
+            daily_drr.append((adv / os_ * 100) if os_ else 0)
+            daily_ctr.append((clicks / views * 100) if views else 0)
+            daily_add_to_cart_pct.append((cart_c / open_c * 100) if open_c else 0)
+            daily_cart_to_order.append((oc / cart_c * 100) if cart_c else 0)
+
+            rev = os_ * buyout / 100 if buyout else os_
+            t = rev * tax_rate / 100
+            cp = float(r.cost_price or 0) * oc
+            p = rev - cp - adv - t
+            daily_margin.append((p / rev * 100) if rev else 0)
+            daily_turnover.append(stk / oc if oc else 0)
+
+        trend_orders = _linear_regression_trend(daily_orders)
+        trend_revenue = _linear_regression_trend(daily_revenue)
+        trend_open = _linear_regression_trend(daily_open)
+        trend_adv = _linear_regression_trend(daily_adv)
+        trend_drr = _linear_regression_trend(daily_drr)
+        trend_margin = _linear_regression_trend(daily_margin)
+        trend_ctr = _linear_regression_trend(daily_ctr)
+        trend_avg_price = _linear_regression_trend(daily_avg_price)
+        trend_add_to_cart_pct = _linear_regression_trend(daily_add_to_cart_pct)
+        trend_cart_to_order = _linear_regression_trend(daily_cart_to_order)
+        trend_stocks = _linear_regression_trend(daily_stocks)
+        trend_turnover = _linear_regression_trend(daily_turnover)
+
+        output.append({
+            "nm_id": nm_id,
+            "vendor_code": meta["vendor_code"],
+            "subject": meta["subject"],
+            "brand": meta["brand"],
+            "n_days": n_days,
+
+            # Aggregated values
+            "turnover_days": turnover_days,
+            "stocks_wb": stocks_wb,
+            "orders_count": total_orders_count,
+            "orders_sum_rub": round(total_orders_sum, 2),
+            "revenue": round(revenue, 2),
+            "open_card": total_open_card,
+            "add_to_cart_pct": add_to_cart_pct,
+            "cart_to_order_pct": cart_to_order_pct,
+            "margin": margin,
+            "profit": round(profit, 2),
+            "avg_price": avg_price,
+            "drr": drr,
+            "adv_sum": round(total_adv_sum, 2),
+            "ctr": ctr,
+            "cost_price": cost_price,
+
+            # Trend percentages (linear regression)
+            "trend_turnover": trend_turnover,
+            "trend_orders": trend_orders,
+            "trend_revenue": trend_revenue,
+            "trend_open": trend_open,
+            "trend_add_to_cart_pct": trend_add_to_cart_pct,
+            "trend_cart_to_order": trend_cart_to_order,
+            "trend_margin": trend_margin,
+            "trend_profit": _linear_regression_trend([
+                float(r.orders_sum_rub or 0) * buyout / 100 - float(r.adv_sum or 0)
+                - float(r.orders_sum_rub or 0) * buyout / 100 * tax_rate / 100
+                - float(r.cost_price or 0) * (r.orders_count or 0)
+                for r in daily_rows
+            ]),
+            "trend_avg_price": trend_avg_price,
+            "trend_drr": trend_drr,
+            "trend_adv": trend_adv,
+            "trend_ctr": trend_ctr,
+            "trend_stocks": trend_stocks,
+        })
+
+    # Sort by total revenue descending
+    output.sort(key=lambda x: x["orders_sum_rub"], reverse=True)
+
+    return {
+        "products": output,
+        "trend_days": trend_days,
+        "total_products": len(output),
+    }

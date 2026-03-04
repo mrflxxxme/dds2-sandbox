@@ -558,6 +558,14 @@ class ApiClient {
         if (params.trend_days) q.set('trend_days', String(params.trend_days));
         return this.request('GET', `/api/v1/funnel/day-analysis?${q.toString()}`);
     }
+    // ─── Product Trends ───────────────────────────────────────────
+    async getProductTrends(params: { trend_days?: number; brand?: string; search?: string } = {}): Promise<{ products: any[]; trend_days: number; total_products: number }> {
+        const q = new URLSearchParams();
+        if (params.trend_days) q.set('trend_days', String(params.trend_days));
+        if (params.brand) q.set('brand', params.brand);
+        if (params.search) q.set('search', params.search);
+        return this.request('GET', `/api/v1/funnel/trends?${q.toString()}`);
+    }
 }
 
 export const api = new ApiClient();

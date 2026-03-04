@@ -229,3 +229,18 @@ async def get_day_analysis(
     return await funnel_service.get_day_analysis(
         db, project.id, tax_rate, target_date, brand, subject, trend_days
     )
+
+
+@router.get("/trends")
+async def get_product_trends(
+    trend_days: int = Query(7, description="Trend window: 7, 14, or 30"),
+    brand: Optional[str] = Query(None),
+    search: Optional[str] = Query(None, description="Filter by vendor_code or nmId"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-product metrics with linear regression trends."""
+    tax_rate = float(project.tax_rate or 6)
+    return await funnel_service.get_product_trends(
+        db, project.id, tax_rate, trend_days, brand, search
+    )
