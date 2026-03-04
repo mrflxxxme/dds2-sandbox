@@ -422,6 +422,12 @@
     border: 1px solid rgba(99, 102, 241, 0.2);
 }
 
+.badge-secondary {
+    background: rgba(113, 113, 122, 0.1);
+    color: var(--color-text-muted);
+    border: 1px solid rgba(113, 113, 122, 0.2);
+}
+
 /* ─── Project Selector ──────────────────────────────────────────────────────── */
 
 .project-selector {
