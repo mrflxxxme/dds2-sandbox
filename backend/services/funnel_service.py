@@ -153,17 +153,19 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
     """
     result = {}
     chunks = [campaign_ids[i:i+50] for i in range(0, len(campaign_ids), 50)]
+    skipped_chunks = 0
 
     async with httpx.AsyncClient(timeout=60) as client:
         for idx, chunk in enumerate(chunks):
             if idx > 0:
-                await asyncio.sleep(21)  # WB rate limit
+                await asyncio.sleep(35)  # WB rate limit: 35s between chunks
 
             ids_param = ",".join(str(c) for c in chunk)
             url = (f"https://advert-api.wildberries.ru/adv/v3/fullstats"
                    f"?ids={ids_param}&beginDate={begin_date}&endDate={end_date}")
 
-            for attempt in range(3):
+            chunk_ok = False
+            for attempt in range(5):  # 5 retries instead of 3
                 try:
                     resp = await client.get(url, headers={
                         "Accept": "application/json",
@@ -174,8 +176,8 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
                     break
 
                 if resp.status_code == 429:
-                    wait = 30 * (attempt + 1)
-                    logger.warning(f"WB adv 429 rate limit, waiting {wait}s (attempt {attempt+1}/3)")
+                    wait = 45 * (attempt + 1)  # 45, 90, 135, 180, 225 seconds
+                    logger.warning(f"WB adv 429 rate limit, waiting {wait}s (attempt {attempt+1}/5)")
                     await asyncio.sleep(wait)
                     continue
                 elif resp.status_code != 200:
@@ -205,7 +207,18 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
                                 result[res_date][nm_id]["sum"] += nm.get("sum", 0)
                                 result[res_date][nm_id]["clicks"] += nm.get("clicks", 0)
                                 result[res_date][nm_id]["views"] += nm.get("views", 0)
+                chunk_ok = True
                 break  # Success, move to next chunk
+
+            if not chunk_ok:
+                skipped_chunks += 1
+                logger.warning(
+                    f"WB adv: chunk {idx+1}/{len(chunks)} SKIPPED after retries "
+                    f"({len(chunk)} campaigns, {begin_date}→{end_date})"
+                )
+
+    if skipped_chunks:
+        logger.warning(f"WB adv: {skipped_chunks}/{len(chunks)} chunks skipped for {begin_date}→{end_date}")
 
     return result
 

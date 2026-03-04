@@ -61,6 +61,34 @@ async def _get_missing_dates(project_id: int, lookback_days: int = BACKFILL_DAYS
     return [d.isoformat() for d in missing]
 
 
+async def _get_days_without_ads(project_id: int, lookback_days: int = BACKFILL_DAYS) -> list[str]:
+    """
+    Find dates that have funnel data but ZERO ad data (all adv_sum = 0).
+    These likely failed due to WB 429 rate limits during ad fetch.
+    Returns list of date strings, oldest first. Max 5 per call.
+    """
+    from sqlalchemy import select, func
+    today = date.today()
+    start = today - timedelta(days=lookback_days)
+
+    async with AsyncSessionLocal() as db:
+        # Find dates where we have funnel data but total adv_sum = 0
+        result = await db.execute(
+            select(
+                WbFunnelDaily.date,
+                func.sum(WbFunnelDaily.adv_sum).label("total_adv"),
+            ).where(
+                WbFunnelDaily.project_id == project_id,
+                WbFunnelDaily.date >= start,
+                WbFunnelDaily.date < today,
+            ).group_by(WbFunnelDaily.date)
+            .having(func.sum(WbFunnelDaily.adv_sum) == 0)
+            .order_by(WbFunnelDaily.date)
+            .limit(5)
+        )
+        return [r[0].isoformat() for r in result]
+
+
 async def _get_sync_project_ids() -> list[int]:
     """
     Get project IDs that should be synced.
@@ -232,27 +260,42 @@ async def fast_backfill_tick():
 
         all_filled = True
         for pid in project_ids:
+            # Process missing days first
             missing = await _get_missing_dates(pid)
-            if not missing:
-                logger.info(f"⏩ Fast backfill: project {pid} — all {BACKFILL_DAYS} days filled ✅")
-                continue
-
-            all_filled = False
-            day = missing[0]  # sync oldest missing day first
-            logger.info(
-                f"⏩ Fast backfill: project {pid} — syncing {day} "
-                f"({len(missing)} days remaining)"
-            )
-
-            async with AsyncSessionLocal() as db:
-                res = await run_funnel_sync(db, pid, day, day)
+            if missing:
+                all_filled = False
+                day = missing[0]  # One day at a time
                 logger.info(
-                    f"⏩ Fast backfill: project {pid} — {day} done, "
-                    f"+{res.get('rows', 0)} rows"
+                    f"⏩ Fast backfill: project {pid} — syncing {day} "
+                    f"({len(missing)} days remaining)"
                 )
+                res = await _run_and_log(pid, day, day, "backfill")
+                if res:
+                    logger.info(
+                        f"⏩ Fast backfill: project {pid} — {day} done, "
+                        f"+{res.get('rows', 0)} rows"
+                    )
+                await asyncio.sleep(1)
+            else:
+                # All days have funnel data — check for days with missing ad data
+                no_ads_days = await _get_days_without_ads(pid)
+                if no_ads_days:
+                    all_filled = False
+                    day = no_ads_days[0]
+                    logger.info(
+                        f"⏩ Fast backfill: project {pid} — re-syncing ads for {day} "
+                        f"({len(no_ads_days)} days without ad data)"
+                    )
+                    res = await _run_and_log(pid, day, day, "ad_resync")
+                    if res:
+                        logger.info(
+                            f"⏩ Fast backfill: project {pid} — {day} ads re-synced, "
+                            f"+{res.get('rows', 0)} rows"
+                        )
+                    await asyncio.sleep(1)
+                else:
+                    logger.info(f"⏩ Fast backfill: project {pid} — all {BACKFILL_DAYS} days filled ✅")
 
-            # Small pause between projects
-            await asyncio.sleep(1)
 
         if all_filled:
             logger.info("🎉 Fast backfill complete — all projects fully covered!")
@@ -294,20 +337,20 @@ def start_scheduler():
             misfire_grace_time=600,  # 10 min grace
         )
 
-    # Fast backfill: every 30s until all days are filled
+    # Fast backfill: every 60s until all days are filled
     from apscheduler.triggers.interval import IntervalTrigger
     scheduler.add_job(
         fast_backfill_tick,
-        trigger=IntervalTrigger(seconds=5),
+        trigger=IntervalTrigger(seconds=60),
         id="fast_backfill",
-        name="Fast backfill (every 5s)",
+        name="Fast backfill (every 60s)",
         replace_existing=True,
-        misfire_grace_time=10,
+        misfire_grace_time=30,
     )
 
     scheduler.start()
     logger.info(
-        "✅ Scheduler started — funnel sync 4x/day + fast backfill every 30s"
+        "✅ Scheduler started — funnel sync 4x/day + fast backfill every 60s"
     )
 
 
