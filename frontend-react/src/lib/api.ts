@@ -531,7 +531,7 @@ class ApiClient {
         if (subject) q.set('subject', subject);
         return this.request('GET', `/api/v1/funnel/summary?${q.toString()}`);
     }
-    async getFunnelFilters(): Promise<{ brands: string[]; subjects: string[]; vendor_codes: string[] }> {
+    async getFunnelFilters(): Promise<{ brands: string[]; subjects: string[]; vendor_codes: string[]; min_date: string | null; max_date: string | null }> {
         return this.request('GET', '/api/v1/funnel/filters');
     }
     async getFunnelCosts(): Promise<Array<{ nm_id: number; cost_price: number; source: string }>> {
