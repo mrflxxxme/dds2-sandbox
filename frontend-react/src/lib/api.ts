@@ -546,7 +546,7 @@ class ApiClient {
     async setFunnelTax(taxRate: number): Promise<MessageResponse> {
         return this.request('POST', '/api/v1/funnel/tax', { tax_rate: taxRate });
     }
-    async getSyncStatus(): Promise<{ last_sync: string | null; status: string; progress: number }> {
+    async getSyncStatus(): Promise<{ scheduler: Record<string, unknown>; last_syncs: Array<{ id: number; sync_type: string; status: string; rows_inserted: number; started_at: string | null; finished_at: string | null; error_msg: string | null }> }> {
         return this.request('GET', '/api/v1/funnel/sync_status');
     }
     // ─── Day Analysis ─────────────────────────────────────────────
