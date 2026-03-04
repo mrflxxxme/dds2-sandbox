@@ -104,6 +104,39 @@ services:
     networks:
       - internal
 
+  db-backup:
+    image: postgres:15
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      PGHOST: db
+      POSTGRES_USER: ${POSTGRES_USER:-dds}
+      POSTGRES_DB: ${POSTGRES_DB:-dds_db}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-dds_secret}
+      BACKUP_DIR: /backups
+      BACKUP_RETENTION_DAYS: "14"
+      BACKUP_INTERVAL_HOURS: "6"
+    volumes:
+      - ./backups:/backups
+      - ./scripts:/scripts
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        echo "🕐 Backup scheduler started (every $${BACKUP_INTERVAL_HOURS}h, keep $${BACKUP_RETENTION_DAYS} days)"
+        # Делаем бэкап сразу при старте
+        /scripts/backup.sh
+        # Далее — по расписанию
+        while true; do
+          sleep $${BACKUP_INTERVAL_HOURS}h
+          /scripts/backup.sh
+        done
+    restart: unless-stopped
+    networks:
+      - internal
+
 volumes:
   pgdata:
   redisdata:
