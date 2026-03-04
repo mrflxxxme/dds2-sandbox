@@ -205,6 +205,7 @@ export default function FunnelPage() {
     const [taxRate, setTaxRate] = useState(6);
     const [initDone, setInitDone] = useState(false);
     const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
+    const [missingDays, setMissingDays] = useState<number | null>(null);
 
     // Filters
     const [dateFrom, setDateFrom] = useState('');
@@ -284,6 +285,9 @@ export default function FunnelPage() {
             if (s.last_syncs?.length > 0) {
                 const last = s.last_syncs[0];
                 setLastSyncAt(last.finished_at || last.started_at || null);
+            }
+            if (s.missing_days != null) {
+                setMissingDays(s.missing_days);
             }
         } catch { }
     }, []);
@@ -366,6 +370,14 @@ export default function FunnelPage() {
                                 🔄 Последняя синхронизация: <strong style={{ color: 'var(--color-text)' }}>{formatSyncDate(lastSyncAt)}</strong>
                             </span>
                             <span style={{ fontSize: 12, color: 'rgba(16,185,129,0.8)' }}>● авто</span>
+                            {missingDays != null && missingDays > 0 && (
+                                <span style={{ fontSize: 12, color: '#f59e0b', background: 'rgba(245,158,11,0.1)', padding: '2px 8px', borderRadius: 4 }}>
+                                    ⏳ Осталось обновить: {missingDays} {missingDays === 1 ? 'день' : missingDays < 5 ? 'дня' : 'дней'}
+                                </span>
+                            )}
+                            {missingDays === 0 && (
+                                <span style={{ fontSize: 12, color: '#10b981' }}>✅ Все дни синхронизированы</span>
+                            )}
                             <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
                                 <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>Налог %:</span>
                                 <input type="number" value={taxRate} step="0.1"

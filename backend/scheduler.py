@@ -298,11 +298,11 @@ def start_scheduler():
     from apscheduler.triggers.interval import IntervalTrigger
     scheduler.add_job(
         fast_backfill_tick,
-        trigger=IntervalTrigger(seconds=60),
+        trigger=IntervalTrigger(seconds=5),
         id="fast_backfill",
-        name="Fast backfill (every 30s)",
+        name="Fast backfill (every 5s)",
         replace_existing=True,
-        misfire_grace_time=60,
+        misfire_grace_time=10,
     )
 
     scheduler.start()

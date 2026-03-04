@@ -58,8 +58,8 @@ async def get_sync_status(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get scheduler status and last sync info."""
-    from backend.scheduler import get_scheduler_info
+    """Get scheduler status, last sync info, and missing days count."""
+    from backend.scheduler import get_scheduler_info, _get_missing_dates
     from sqlalchemy import select
 
     last_sync = await db.execute(
@@ -80,9 +80,17 @@ async def get_sync_status(
         for s in last_sync.scalars()
     ]
 
+    # Count missing days for this project
+    try:
+        missing = await _get_missing_dates(project.id)
+        missing_days = len(missing)
+    except Exception:
+        missing_days = None
+
     return {
         "scheduler": get_scheduler_info(),
         "last_syncs": logs,
+        "missing_days": missing_days,
     }
 
 
