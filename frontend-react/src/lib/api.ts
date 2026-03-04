@@ -514,7 +514,7 @@ class ApiClient {
     async syncFunnel(dateFrom: string, dateTo: string): Promise<{ ok: boolean; days_synced: number }> {
         return this.request('POST', '/api/v1/funnel/sync', { date_from: dateFrom, date_to: dateTo });
     }
-    async getFunnelData(params?: { date_from?: string; date_to?: string; brand?: string; vendor_code?: string; subject?: string }): Promise<FunnelDayRow[]> {
+    async getFunnelData(params?: { date_from?: string; date_to?: string; brand?: string; vendor_code?: string; subject?: string }): Promise<{ data: FunnelDayRow[]; detailed: boolean; tax_rate: number }> {
         const q = new URLSearchParams();
         if (params?.date_from) q.set('date_from', params.date_from);
         if (params?.date_to) q.set('date_to', params.date_to);
