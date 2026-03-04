@@ -72,21 +72,31 @@ export default function TeamPage() {
             {/* Invite */}
             <div className="glass-card" style={{ marginBottom: 24 }}>
                 <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>✉️ Пригласить участника</h3>
-                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                    <div className="form-group" style={{ flex: 1, minWidth: 250 }}>
-                        <input className="form-input" placeholder="Email участника" type="email"
-                            value={email} onChange={e => setEmail(e.target.value)}
-                            onKeyDown={e => e.key === 'Enter' && sendInvite()} />
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <button className="btn btn-primary" onClick={copyLink}>🔗 Получить ссылку-приглашение</button>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', opacity: 0.5 }}>
+                        <div className="form-group" style={{ flex: 1, minWidth: 200, margin: 0 }}>
+                            <input className="form-input" placeholder="Email участника" type="email"
+                                value={email} onChange={e => setEmail(e.target.value)} disabled
+                                style={{ cursor: 'not-allowed' }} />
+                        </div>
+                        <button className="btn btn-secondary" disabled style={{ cursor: 'not-allowed' }}
+                            title="Отправка email не настроена">Пригласить</button>
                     </div>
-                    <button className="btn btn-primary" onClick={sendInvite}>Пригласить</button>
-                    <button className="btn btn-secondary" onClick={copyLink}>🔗 Ссылка</button>
+                    <span style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>
+                        📧 Отправка email пока не настроена — используйте ссылку
+                    </span>
                 </div>
                 {inviteLink && (
                     <div style={{
-                        marginTop: 10, fontSize: 12, color: 'var(--color-text-dim)', fontFamily: 'monospace',
-                        background: 'var(--color-bg-input)', padding: '8px 12px', borderRadius: 6
+                        marginTop: 12, fontSize: 13, color: '#a78bfa', fontFamily: 'monospace',
+                        background: 'rgba(139,92,246,0.08)', border: '1px solid rgba(139,92,246,0.2)',
+                        padding: '10px 14px', borderRadius: 8, display: 'flex', alignItems: 'center', gap: 10
                     }}>
-                        {inviteLink}
+                        <span style={{ flex: 1, wordBreak: 'break-all' }}>{inviteLink}</span>
+                        <button className="btn btn-sm btn-secondary"
+                            onClick={() => { navigator.clipboard.writeText(inviteLink); setMsg('Ссылка скопирована'); }}
+                            style={{ whiteSpace: 'nowrap' }}>📋 Копировать</button>
                     </div>
                 )}
             </div>

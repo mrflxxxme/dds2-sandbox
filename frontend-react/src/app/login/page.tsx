@@ -15,7 +15,14 @@ export default function LoginPage() {
         try {
             const res = await api.login(username, password);
             api.setToken(res.access_token);
-            window.location.href = '/projects';
+            // Check for pending invite
+            const pendingInvite = localStorage.getItem('dds_pending_invite');
+            if (pendingInvite) {
+                localStorage.removeItem('dds_pending_invite');
+                window.location.href = `/invite/${pendingInvite}`;
+            } else {
+                window.location.href = '/projects';
+            }
         } catch (err: any) {
             setError(err.message || 'Ошибка входа');
         } finally {
