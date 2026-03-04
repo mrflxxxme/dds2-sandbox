@@ -1,5 +1,5 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 from backend.config import settings
@@ -32,5 +32,24 @@ class Base(DeclarativeBase):
 
 
 async def get_db() -> AsyncSession:
+    """Get async DB session (no RLS context)."""
     async with AsyncSessionLocal() as session:
         yield session
+
+
+async def get_db_with_rls(project_id: int) -> AsyncSession:
+    """
+    Get async DB session with RLS context set.
+
+    Sets SET LOCAL app.project_id = :pid so that PostgreSQL RLS policies
+    filter rows automatically. SET LOCAL is transaction-scoped, so it
+    doesn't leak to other requests sharing the same connection.
+    """
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            await session.execute(
+                text("SET LOCAL app.project_id = :pid"),
+                {"pid": str(project_id)},
+            )
+            yield session
+
