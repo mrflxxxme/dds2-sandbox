@@ -455,19 +455,19 @@ def start_scheduler():
         misfire_grace_time=60,
     )
 
-    # Ad anomaly check: every 6 hours — re-sync incomplete ad days
+    # Ad anomaly check: every 30 min — re-sync incomplete ad days
     scheduler.add_job(
         ad_anomaly_check,
-        trigger=IntervalTrigger(hours=6),
+        trigger=IntervalTrigger(minutes=30),
         id="ad_anomaly_check",
-        name="Ad anomaly check (every 6h)",
+        name="Ad anomaly check (every 30min)",
         replace_existing=True,
-        misfire_grace_time=300,
+        misfire_grace_time=120,
     )
 
     scheduler.start()
     logger.info(
-        "✅ Scheduler started — daily sync 3x/day + backfill (auto-stop) + ad check every 6h"
+        "✅ Scheduler started — daily sync 3x/day + backfill (auto-stop) + ad check every 30min"
     )
 
 
