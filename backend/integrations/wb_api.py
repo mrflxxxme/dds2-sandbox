@@ -6,6 +6,10 @@ Supported endpoints:
 - /api/v1/supplier/sales — продажи
 - /api/v1/supplier/orders — заказы FBS
 - /api/v5/supplier/reportDetailByPeriod — финансовый отчёт (детализация выплат)
+
+Resilience:
+- Circuit breaker: stops calling WB API after 5 consecutive failures (60s cooldown)
+- Exponential backoff: retries 429/5xx errors up to 3 times
 """
 
 import logging
@@ -14,9 +18,17 @@ from decimal import Decimal
 from typing import Optional
 
 import httpx
+import structlog
 
-logger = logging.getLogger(__name__)
+from backend.integrations.resilience import (
+    CircuitBreaker,
+    CircuitOpenError,
+    retry_with_backoff,
+)
 
+logger = structlog.get_logger("dds.wb_api")
+
+# ─── WB API Base URLs (configurable per version) ───────────────────────────
 WB_API_BASE = "https://statistics-api.wildberries.ru"
 WB_API_BASE_V2 = "https://common-api.wildberries.ru"
 WB_CONTENT_API_BASE = "https://content-api.wildberries.ru"
@@ -24,34 +36,45 @@ WB_CONTENT_API_BASE = "https://content-api.wildberries.ru"
 # Request timeout in seconds
 TIMEOUT = 30
 
+# Shared circuit breaker (per-process, shared by all WBApiClient instances)
+_wb_circuit = CircuitBreaker(
+    name="wildberries",
+    failure_threshold=5,
+    recovery_timeout=60.0,
+)
+
 
 class WBApiClient:
-    """Wildberries API client with automatic retry and rate limit handling."""
+    """Wildberries API client with circuit breaker, retry, and rate limit handling."""
 
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.headers = {"Authorization": api_key}
 
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
     async def _get(self, base_url: str, path: str, params: dict = None) -> list[dict]:
-        """Make GET request to WB API with error handling."""
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-            url = f"{base_url}{path}"
-            logger.info("WB API GET %s params=%s", path, params)
-            response = await client.get(url, headers=self.headers, params=params)
+        """Make GET request to WB API with circuit breaker and retry."""
+        async with _wb_circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                url = f"{base_url}{path}"
+                logger.info("wb_api.request", method="GET", path=path, params=params)
+                response = await client.get(url, headers=self.headers, params=params)
 
-            if response.status_code == 401:
-                raise ValueError("WB API: неверный API-ключ (401)")
-            if response.status_code == 429:
-                raise ValueError("WB API: слишком много запросов, попробуйте позже (429)")
-            if response.status_code != 200:
-                raise ValueError(f"WB API error: HTTP {response.status_code} — {response.text[:200]}")
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401)")
+                if response.status_code == 429:
+                    raise ValueError("WB API: слишком много запросов, попробуйте позже (429)")
+                if response.status_code >= 500:
+                    raise ValueError(f"WB API server error: HTTP {response.status_code}")
+                if response.status_code != 200:
+                    raise ValueError(f"WB API error: HTTP {response.status_code} — {response.text[:200]}")
 
-            data = response.json()
-            if isinstance(data, list):
-                return data
-            if isinstance(data, dict) and "data" in data:
-                return data["data"] if isinstance(data["data"], list) else [data["data"]]
-            return [data] if data else []
+                data = response.json()
+                if isinstance(data, list):
+                    return data
+                if isinstance(data, dict) and "data" in data:
+                    return data["data"] if isinstance(data["data"], list) else [data["data"]]
+                return [data] if data else []
 
     async def test_connection(self) -> bool:
         """Test if the API key is valid by fetching a minimal sales request."""
@@ -106,6 +129,7 @@ class WBApiClient:
             params,
         )
 
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
     async def get_cards_list(self, limit: int = 100) -> list[dict]:
         """
         Fetch ALL product cards using cursor-based pagination.
@@ -123,42 +147,45 @@ class WBApiClient:
                     "filter": {"withPhoto": -1},
                 }
             }
-            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-                url = f"{WB_CONTENT_API_BASE}/content/v2/get/cards/list"
-                logger.info("WB Content API POST cards/list cursor=%s", cursor)
-                response = await client.post(
-                    url, headers=self.headers, json=body
-                )
-
-                if response.status_code == 401:
-                    raise ValueError("WB API: неверный API-ключ (401)")
-                if response.status_code == 429:
-                    raise ValueError("WB API: слишком много запросов (429)")
-                if response.status_code != 200:
-                    raise ValueError(
-                        f"WB Content API error: HTTP {response.status_code} — {response.text[:200]}"
+            async with _wb_circuit:
+                async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                    url = f"{WB_CONTENT_API_BASE}/content/v2/get/cards/list"
+                    logger.info("wb_api.request", method="POST", path="cards/list", cursor=cursor)
+                    response = await client.post(
+                        url, headers=self.headers, json=body
                     )
 
-                data = response.json()
-                cards = data.get("cards", [])
-                if not cards:
-                    break
+                    if response.status_code == 401:
+                        raise ValueError("WB API: неверный API-ключ (401)")
+                    if response.status_code == 429:
+                        raise ValueError("WB API: слишком много запросов (429)")
+                    if response.status_code >= 500:
+                        raise ValueError(f"WB Content API server error: HTTP {response.status_code}")
+                    if response.status_code != 200:
+                        raise ValueError(
+                            f"WB Content API error: HTTP {response.status_code} — {response.text[:200]}"
+                        )
 
-                all_cards.extend(cards)
+                    data = response.json()
+                    cards = data.get("cards", [])
+                    if not cards:
+                        break
 
-                # Stop if this was the last page (fewer cards than limit)
-                if len(cards) < limit:
-                    break
+                    all_cards.extend(cards)
 
-                # Cursor pagination — use nmID and updatedAt for next page
-                next_cursor = data.get("cursor", {})
-                cursor = {
-                    "updatedAt": next_cursor.get("updatedAt"),
-                    "nmID": next_cursor.get("nmID"),
-                    "limit": limit,
-                }
+                    # Stop if this was the last page (fewer cards than limit)
+                    if len(cards) < limit:
+                        break
 
-        logger.info("WB Content API: fetched %d cards total", len(all_cards))
+                    # Cursor pagination — use nmID and updatedAt for next page
+                    next_cursor = data.get("cursor", {})
+                    cursor = {
+                        "updatedAt": next_cursor.get("updatedAt"),
+                        "nmID": next_cursor.get("nmID"),
+                        "limit": limit,
+                    }
+
+        logger.info("wb_api.cards_fetched", total=len(all_cards))
         return all_cards
 
 

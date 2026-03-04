@@ -132,7 +132,7 @@ def import_statement(
         df = apply_master_logic(df, our_accounts, customs_accounts, cp_categories, overrides)
         log_ctx.info("etl.master_logic.done", rows=len(df))
 
-        # 3. Upsert
+        # 3. Bulk upsert — build Transaction objects, skip existing
         inserted = 0
         skipped = 0
 
@@ -147,26 +147,28 @@ def import_statement(
         else:
             existing_txn_ids = set()
 
+        def safe_dec(val):
+            try:
+                return Decimal(str(val)) if val is not None and str(val) != 'nan' else Decimal("0")
+            except Exception as e:
+                logger.warning("Invalid decimal value %r converted to 0: %s", val, e)
+                return Decimal("0")
+
+        def safe_str(val):
+            if val is None:
+                return None
+            s = str(val).strip()
+            return s if s and s != 'nan' else None
+
+        # Build all Transaction objects first, then add_all in one batch
+        batch = []
         for _, row in df.iterrows():
             txn_id = row["txn_id"]
             if txn_id in existing_txn_ids:
                 skipped += 1
                 continue
 
-            def safe_dec(val):
-                try:
-                    return Decimal(str(val)) if val is not None and str(val) != 'nan' else Decimal("0")
-                except Exception as e:
-                    logger.warning("Invalid decimal value %r converted to 0: %s", val, e)
-                    return Decimal("0")
-
-            def safe_str(val):
-                if val is None:
-                    return None
-                s = str(val).strip()
-                return s if s and s != 'nan' else None
-
-            txn = Transaction(
+            batch.append(Transaction(
                 project_id=project_id,
                 date=row["date"],
                 bank=safe_str(row["bank"]) or "UNKNOWN",
@@ -192,9 +194,12 @@ def import_statement(
                 purpose_tag=safe_str(row.get("purpose_tag")),
                 invoice_id=safe_str(row.get("invoice_id")),
                 annex_id=safe_str(row.get("annex_id")),
-            )
-            db.add(txn)
-            inserted += 1
+            ))
+
+        if batch:
+            db.add_all(batch)
+            inserted = len(batch)
+            log_ctx.info("etl.bulk_insert.done", inserted=inserted, skipped=skipped)
 
         db.flush()
 
