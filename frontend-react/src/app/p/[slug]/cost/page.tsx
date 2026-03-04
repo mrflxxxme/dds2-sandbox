@@ -4,20 +4,19 @@ import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 
 export default function CostPage() {
-    const [tab, setTab] = useState<'orders' | 'nomenclature' | 'duties'>('orders');
+    const [tab, setTab] = useState<'orders' | 'duties'>('orders');
 
     return (
         <div className="animate-in">
             <div className="page-header">
                 <div>
                     <h1 className="page-title">🧮 Себестоимость</h1>
-                    <p className="page-subtitle">Заказы, номенклатура, пошлины и утилизация</p>
+                    <p className="page-subtitle">Заказы, пошлины и утилизация</p>
                 </div>
             </div>
             <div style={{ display: 'flex', gap: 4, marginBottom: 20 }}>
                 {[
                     { key: 'orders' as const, label: '📦 Заказы' },
-                    { key: 'nomenclature' as const, label: '📋 Номенклатура' },
                     { key: 'duties' as const, label: '⚖️ Пошлины / Утиль' },
                 ].map(t => (
                     <button key={t.key} className={`btn ${tab === t.key ? 'btn-primary' : 'btn-secondary'} btn-sm`}
@@ -25,7 +24,6 @@ export default function CostPage() {
                 ))}
             </div>
             {tab === 'orders' && <CostOrders />}
-            {tab === 'nomenclature' && <Nomenclature />}
             {tab === 'duties' && <DutyRules />}
         </div>
     );
@@ -353,83 +351,6 @@ function CostOrders() {
     );
 }
 
-function Nomenclature() {
-    const [data, setData] = useState<any[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [syncing, setSyncing] = useState(false);
-    const [syncMsg, setSyncMsg] = useState('');
-    const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
-
-    const load = async () => { try { setData(await api.getNomenclature()); } catch { } setLoading(false); };
-    const loadLastSync = async () => {
-        try {
-            const logs = await api.getSyncLog();
-            const nomLog = logs.find((l: any) => l.sync_type === 'nomenclature' && l.status === 'OK');
-            if (nomLog?.finished_at) {
-                setLastSyncAt(nomLog.finished_at);
-            }
-        } catch { }
-    };
-    useEffect(() => { load(); loadLastSync(); }, []);
-
-    const handleSync = async () => {
-        setSyncing(true);
-        setSyncMsg('');
-        try {
-            const result = await api.syncNomenclature();
-            if (result.status === 'OK') {
-                setSyncMsg(`✅ Синхронизация завершена: ${result.error_msg || 'OK'}`);
-                if (result.finished_at) setLastSyncAt(result.finished_at);
-            } else {
-                setSyncMsg(`❌ Ошибка: ${result.error_msg || 'unknown'}`);
-            }
-            await load();
-        } catch (e: any) {
-            setSyncMsg(`❌ ${e.message}`);
-        }
-        setSyncing(false);
-    };
-
-    const formatSyncTime = (iso: string) => {
-        const d = new Date(iso);
-        return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-    };
-
-    if (loading) return <div style={{ padding: 20, color: 'var(--color-text-muted)' }}>Загрузка...</div>;
-
-    return (
-        <div className="glass-card">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                <div>
-                    <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Номенклатура ({data.length})</h3>
-                    {lastSyncAt && <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 4 }}>🕐 Последняя синхронизация: {formatSyncTime(lastSyncAt)}</div>}
-                </div>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <button
-                        className="btn btn-primary btn-sm"
-                        onClick={handleSync}
-                        disabled={syncing}
-                        style={{ display: 'flex', alignItems: 'center', gap: 6 }}
-                    >
-                        {syncing ? (
-                            <><span className="spinner" style={{ width: 14, height: 14, border: '2px solid rgba(255,255,255,0.3)', borderTop: '2px solid #fff', borderRadius: '50%', animation: 'spin 0.8s linear infinite', display: 'inline-block' }} /> Синхронизация...</>
-                        ) : '🔄 Синхронизация WB'}
-                    </button>
-                    {data.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'nomenclature')}>📥 Excel</button>}
-                </div>
-            </div>
-            {syncMsg && <div style={{ fontSize: 13, marginBottom: 12, padding: '8px 12px', borderRadius: 6, background: syncMsg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', color: syncMsg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)' }}>{syncMsg}</div>}
-            {data.length > 0 ? (
-                <div style={{ overflowX: 'auto', maxHeight: 500, overflowY: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr>{Object.keys(data[0]).map(k => <th key={k} style={{ fontSize: 11 }}>{k}</th>)}</tr></thead>
-                        <tbody>{data.map((r, i) => <tr key={i}>{Object.values(r).map((v: any, j) => <td key={j} style={{ fontSize: 12 }}>{typeof v === 'number' ? formatNumber(v) : v ?? '—'}</td>)}</tr>)}</tbody>
-                    </table>
-                </div>
-            ) : <div className="empty-state"><div className="empty-state-text">Номенклатура пуста. Нажмите «🔄 Синхронизация WB» для загрузки из WB</div></div>}
-        </div>
-    );
-}
 
 function DutyRules() {
     const [rules, setRules] = useState<any[]>([]);

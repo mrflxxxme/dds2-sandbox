@@ -194,7 +194,7 @@ function DayTrendChart({ data, fields, targetDate }: {
 /* ─── Main page ──────────────────────────────────────────────── */
 
 export default function FunnelPage() {
-    const [tab, setTab] = useState<'funnel' | 'costs' | 'day-analysis'>('funnel');
+    const [tab, setTab] = useState<'funnel' | 'day-analysis'>('funnel');
     const [data, setData] = useState<any[]>([]);
     const [detailed, setDetailed] = useState(false);
     const [summary, setSummary] = useState<any>(null);
@@ -218,9 +218,7 @@ export default function FunnelPage() {
         { field: 'orders_sum_rub', label: 'Сумма заказов ₽', color: '#8b5cf6' }
     ]);
 
-    // Costs tab
-    const [costs, setCosts] = useState<any>({ overrides: [], missing: [] });
-    const [editCost, setEditCost] = useState<{ nm_id: number; cost_price: string } | null>(null);
+
 
     // Day analysis
     const [dayReport, setDayReport] = useState<any>(null);
@@ -290,12 +288,7 @@ export default function FunnelPage() {
         } catch { }
     }, []);
 
-    const loadCosts = useCallback(async () => {
-        try {
-            const c = await api.getFunnelCosts();
-            setCosts(c);
-        } catch { }
-    }, []);
+
 
     // Init: load filters → set dates from DB range → load data
     useEffect(() => {
@@ -312,7 +305,7 @@ export default function FunnelPage() {
     }, []);
 
     useEffect(() => { if (initDone && dateFrom && dateTo) loadData(); }, [dateFrom, dateTo, brand, subject, search]);
-    useEffect(() => { if (tab === 'costs') loadCosts(); }, [tab]);
+
 
     const loadDayReport = useCallback(async () => {
         setDayLoading(true);
@@ -325,15 +318,7 @@ export default function FunnelPage() {
 
     useEffect(() => { if (tab === 'day-analysis') loadDayReport(); }, [tab, loadDayReport]);
 
-    const handleSaveCost = async () => {
-        if (!editCost) return;
-        try {
-            await api.setFunnelCost(editCost.nm_id, parseFloat(editCost.cost_price));
-            setEditCost(null);
-            loadCosts();
-            loadData();
-        } catch (e: any) { alert(e.message); }
-    };
+
 
     const handleSaveTax = async () => {
         try {
@@ -369,7 +354,6 @@ export default function FunnelPage() {
             {/* Tabs */}
             <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
                 <button className={`tab-btn ${tab === 'funnel' ? 'active' : ''}`} onClick={() => setTab('funnel')}>Воронка</button>
-                <button className={`tab-btn ${tab === 'costs' ? 'active' : ''}`} onClick={() => setTab('costs')}>Себестоимость</button>
                 <button className={`tab-btn ${tab === 'day-analysis' ? 'active' : ''}`} onClick={() => setTab('day-analysis')}>🔍 Анализ дня</button>
             </div>
 
@@ -551,84 +535,7 @@ export default function FunnelPage() {
             )
             }
 
-            {
-                tab === 'costs' && (
-                    <div>
-                        <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>Ручная себестоимость</h2>
-                        <p style={{ fontSize: 13, color: 'var(--color-text-dim)', marginBottom: 16 }}>
-                            Товары без себестоимости из заказов. Укажите себестоимость за штуку для расчёта прибыли.
-                        </p>
-                        {costs.missing?.length > 0 && (
-                            <div className="glass-card" style={{ marginBottom: 16 }}>
-                                <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 8, padding: '12px 16px 0' }}>
-                                    ⚠️ Без себестоимости ({costs.missing.length})
-                                </h3>
-                                <table className="data-table">
-                                    <thead><tr><th>nmId</th><th>Артикул</th><th>Предмет</th><th>Бренд</th><th>Себестоимость ₽</th><th></th></tr></thead>
-                                    <tbody>
-                                        {costs.missing.map((m: any) => (
-                                            <tr key={m.nm_id}>
-                                                <td><a href={`https://www.wildberries.ru/catalog/${m.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{m.nm_id}</a></td>
-                                                <td>{m.vendor_code}</td><td>{m.subject}</td><td>{m.brand}</td>
-                                                <td>{editCost?.nm_id === m.nm_id ? (
-                                                    <input type="number" value={editCost.cost_price} autoFocus
-                                                        onChange={e => setEditCost({ ...editCost, cost_price: e.target.value })}
-                                                        onKeyDown={e => e.key === 'Enter' && handleSaveCost()}
-                                                        style={{ width: 100, background: 'var(--color-bg)', border: '1px solid var(--color-accent)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)' }} />
-                                                ) : '—'}</td>
-                                                <td>{editCost?.nm_id === m.nm_id ? (
-                                                    <div style={{ display: 'flex', gap: 4 }}>
-                                                        <button className="btn-primary" onClick={handleSaveCost} style={{ padding: '2px 8px', fontSize: 12 }}>✓</button>
-                                                        <button className="btn-secondary" onClick={() => setEditCost(null)} style={{ padding: '2px 8px', fontSize: 12 }}>✕</button>
-                                                    </div>
-                                                ) : (
-                                                    <button className="btn-secondary" onClick={() => setEditCost({ nm_id: m.nm_id, cost_price: '' })} style={{ padding: '2px 8px', fontSize: 12 }}>✏️</button>
-                                                )}</td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
-                        )}
-                        {costs.overrides?.length > 0 && (
-                            <div className="glass-card">
-                                <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 8, padding: '12px 16px 0' }}>
-                                    ✅ Установленные ({costs.overrides.length})
-                                </h3>
-                                <table className="data-table">
-                                    <thead><tr><th>nmId</th><th>Себестоимость ₽</th><th></th></tr></thead>
-                                    <tbody>
-                                        {costs.overrides.map((o: any) => (
-                                            <tr key={o.nm_id}>
-                                                <td><a href={`https://www.wildberries.ru/catalog/${o.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{o.nm_id}</a></td>
-                                                <td>{editCost?.nm_id === o.nm_id ? (
-                                                    <input type="number" value={editCost.cost_price} autoFocus
-                                                        onChange={e => setEditCost({ ...editCost, cost_price: e.target.value })}
-                                                        onKeyDown={e => e.key === 'Enter' && handleSaveCost()}
-                                                        style={{ width: 100, background: 'var(--color-bg)', border: '1px solid var(--color-accent)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)' }} />
-                                                ) : fmt(o.cost_price)}</td>
-                                                <td>{editCost?.nm_id === o.nm_id ? (
-                                                    <div style={{ display: 'flex', gap: 4 }}>
-                                                        <button className="btn-primary" onClick={handleSaveCost} style={{ padding: '2px 8px', fontSize: 12 }}>✓</button>
-                                                        <button className="btn-secondary" onClick={() => setEditCost(null)} style={{ padding: '2px 8px', fontSize: 12 }}>✕</button>
-                                                    </div>
-                                                ) : (
-                                                    <button className="btn-secondary" onClick={() => setEditCost({ nm_id: o.nm_id, cost_price: String(o.cost_price) })} style={{ padding: '2px 8px', fontSize: 12 }}>✏️</button>
-                                                )}</td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
-                        )}
-                        {costs.missing?.length === 0 && costs.overrides?.length === 0 && (
-                            <div className="glass-card" style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>
-                                Нет данных. Дождитесь автоматической синхронизации воронки.
-                            </div>
-                        )}
-                    </div>
-                )
-            }
+
 
             {/* ─── Day Analysis tab ─── */}
             {tab === 'day-analysis' && (

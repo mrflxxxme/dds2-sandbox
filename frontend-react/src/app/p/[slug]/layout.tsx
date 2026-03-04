@@ -45,8 +45,10 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
     const slug = params.slug as string;
     const [username, setUsername] = useState('');
     const [projectName, setProjectName] = useState('');
+    const [mounted, setMounted] = useState(false);
 
     useEffect(() => {
+        setMounted(true);
         if (!api.isAuthenticated()) { window.location.href = '/login'; return; }
         // Resolve slug to project_id and sync localStorage
         api.getProject(slug).then(p => {
@@ -61,6 +63,7 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
     }, [slug]);
 
     const isActive = (href: string) => {
+        if (!mounted) return false;
         const full = `/p/${slug}${href}`;
         return pathname === full;
     };

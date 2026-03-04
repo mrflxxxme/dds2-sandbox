@@ -4,7 +4,7 @@ import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 
 export default function PlanningPage() {
-    const [tab, setTab] = useState<'orders' | 'payments' | 'incomes' | 'wb' | 'cashflow' | 'customs' | 'leadtimes'>('orders');
+    const [tab, setTab] = useState<'orders' | 'payments' | 'incomes' | 'wb' | 'cashflow' | 'customs'>('orders');
 
     return (
         <div className="animate-in">
@@ -22,7 +22,6 @@ export default function PlanningPage() {
                     { key: 'wb' as const, label: '💰 WB Payouts' },
                     { key: 'cashflow' as const, label: '📊 Кэшфлоу' },
                     { key: 'customs' as const, label: '🛃 Таможня' },
-                    { key: 'leadtimes' as const, label: '⏱ Lead Times' },
                 ].map(t => (
                     <button key={t.key} className={`btn ${tab === t.key ? 'btn-primary' : 'btn-secondary'} btn-sm`}
                         onClick={() => setTab(t.key)}>{t.label}</button>
@@ -34,7 +33,6 @@ export default function PlanningPage() {
             {tab === 'wb' && <WbPayouts />}
             {tab === 'cashflow' && <Cashflow />}
             {tab === 'customs' && <CustomsDt />}
-            {tab === 'leadtimes' && <LeadTimes />}
         </div>
     );
 }
@@ -501,50 +499,3 @@ function CustomsDt() {
     );
 }
 
-function LeadTimes() {
-    const [data, setData] = useState<any[]>([]);
-    const [showForm, setShowForm] = useState(false);
-    const [form, setForm] = useState({ transport: 'AUTO', stage: '', days: 0 });
-    const [msg, setMsg] = useState('');
-
-    useEffect(() => { load(); }, []);
-    const load = async () => { try { setData(await api.getLeadTimes()); } catch { } };
-    const save = async () => {
-        try { await api.upsertLeadTime({ ...form, days: parseInt(String(form.days)) }); setMsg('✅ Сохранено!'); setShowForm(false); load(); } catch (e: any) { setMsg(e.message); }
-    };
-
-    return (
-        <div className="glass-card">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Lead Times</h3>
-                <div style={{ display: 'flex', gap: 8 }}>
-                    <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'lead_times')}>📥 Excel</button>
-                    <button className="btn btn-primary btn-sm" onClick={() => setShowForm(!showForm)}>+ Добавить</button>
-                </div>
-            </div>
-            {msg && <div style={{ color: 'var(--color-success)', fontSize: 13, marginBottom: 8 }}>{msg}</div>}
-
-            {showForm && (
-                <div style={{ background: 'var(--color-bg-input)', padding: 16, borderRadius: 8, marginBottom: 16, display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
-                    <div className="form-group"><label className="form-label">Транспорт</label>
-                        <select className="form-input" value={form.transport} onChange={e => setForm({ ...form, transport: e.target.value })}>
-                            <option>AUTO</option><option>RAIL</option><option>AIR</option><option>SEA</option>
-                        </select>
-                    </div>
-                    <div className="form-group"><label className="form-label">Этап</label><input className="form-input" value={form.stage} onChange={e => setForm({ ...form, stage: e.target.value })} /></div>
-                    <div className="form-group"><label className="form-label">Дней</label><input className="form-input" type="number" value={form.days} onChange={e => setForm({ ...form, days: parseInt(e.target.value) || 0 })} /></div>
-                    <div><button className="btn btn-primary btn-sm" onClick={save}>💾 Сохранить</button></div>
-                </div>
-            )}
-
-            {data.length > 0 ? (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr>{Object.keys(data[0]).map(k => <th key={k}>{k}</th>)}</tr></thead>
-                        <tbody>{data.map((r, i) => <tr key={i}>{Object.values(r).map((v: any, j) => <td key={j}>{typeof v === 'number' ? formatNumber(v) : v ?? '—'}</td>)}</tr>)}</tbody>
-                    </table>
-                </div>
-            ) : <div className="empty-state"><div className="empty-state-text">Нет данных</div></div>}
-        </div>
-    );
-}
