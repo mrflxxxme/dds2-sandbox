@@ -4,21 +4,39 @@ import { useParams, usePathname } from 'next/navigation';
 import { api } from '@/lib/api';
 import Link from 'next/link';
 
-const navItems = [
-    { href: '', label: 'Дашборд', icon: '📊' },
-    { href: '/import', label: 'Импорт выписок', icon: '📥' },
-    { href: '/txn', label: 'Операции', icon: '💳' },
-    { href: '/inbox', label: 'INBOX / Неразнесённые', icon: '🔴' },
-    { href: '/reports', label: 'Отчёты', icon: '📈' },
-    { href: '/planning', label: 'Планирование', icon: '📦' },
-    { href: '/cost', label: 'Себестоимость', icon: '🧮' },
-    { href: '/funnel', label: 'Воронка продаж', icon: '📊' },
-    { href: '/refs', label: 'Справочники', icon: '📋' },
-];
+const dashboardItem = { href: '', label: 'Дашборд', icon: '📊' };
 
-const settingsItems = [
-    { href: '/settings', label: 'Настройки', icon: '⚙️' },
-    { href: '/team', label: 'Команда', icon: '👥' },
+const navGroups = [
+    {
+        title: 'Финансы',
+        items: [
+            { href: '/import', label: 'Импорт документов', icon: '📥' },
+            { href: '/txn', label: 'Операции', icon: '💳' },
+            { href: '/inbox', label: 'INBOX — Неразнесённые', icon: '🔴' },
+            { href: '/reports', label: 'Отчёты', icon: '📈' },
+            { href: '/refs', label: 'Справочники', icon: '📋' },
+        ],
+    },
+    {
+        title: 'Заказы',
+        items: [
+            { href: '/planning', label: 'Планирование', icon: '📦' },
+            { href: '/cost', label: 'Себестоимость', icon: '🧮' },
+        ],
+    },
+    {
+        title: 'Продажи',
+        items: [
+            { href: '/funnel', label: 'Воронка продаж', icon: '📊' },
+        ],
+    },
+    {
+        title: 'Настройки',
+        items: [
+            { href: '/settings', label: 'Настройка проекта', icon: '⚙️' },
+            { href: '/team', label: 'Команда', icon: '👥' },
+        ],
+    },
 ];
 
 export default function ProjectLayout({ children }: { children: React.ReactNode }) {
@@ -61,22 +79,24 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
                 </div>
 
                 <nav className="sidebar-nav">
-                    <div className="sidebar-section">Данные</div>
-                    {navItems.map(item => (
-                        <Link key={item.href} href={`/p/${slug}${item.href}`}
-                            className={`sidebar-link ${isActive(item.href) ? 'active' : ''}`}>
-                            <span>{item.icon}</span>
-                            <span>{item.label}</span>
-                        </Link>
-                    ))}
+                    {/* Дашборд — отдельно, без группы */}
+                    <Link href={`/p/${slug}`}
+                        className={`sidebar-link ${isActive('') ? 'active' : ''}`}>
+                        <span>{dashboardItem.icon}</span>
+                        <span>{dashboardItem.label}</span>
+                    </Link>
 
-                    <div className="sidebar-section" style={{ marginTop: 8 }}>Управление</div>
-                    {settingsItems.map(item => (
-                        <Link key={item.href} href={`/p/${slug}${item.href}`}
-                            className={`sidebar-link ${isActive(item.href) ? 'active' : ''}`}>
-                            <span>{item.icon}</span>
-                            <span>{item.label}</span>
-                        </Link>
+                    {navGroups.map(group => (
+                        <div key={group.title}>
+                            <div className="sidebar-section" style={{ marginTop: 8 }}>{group.title}</div>
+                            {group.items.map(item => (
+                                <Link key={item.href} href={`/p/${slug}${item.href}`}
+                                    className={`sidebar-link ${isActive(item.href) ? 'active' : ''}`}>
+                                    <span>{item.icon}</span>
+                                    <span>{item.label}</span>
+                                </Link>
+                            ))}
+                        </div>
                     ))}
                 </nav>
 
