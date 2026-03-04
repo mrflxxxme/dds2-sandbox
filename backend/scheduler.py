@@ -8,6 +8,7 @@ Schedule: 00:01, 07:00, 13:00, 19:00 MSK daily.
 Uses APScheduler (in-process, AsyncIOScheduler).
 """
 
+import asyncio
 import logging
 import traceback
 from datetime import date, timedelta
@@ -27,13 +28,46 @@ MSK = pytz.timezone("Europe/Moscow")
 
 BACKFILL_DAYS = 90       # how far back to check for missing data
 MISSING_BATCH_SIZE = 10  # max missing days to sync per scheduler run
+MAX_DATE_FAILURES = 3    # skip date after this many TIMEOUT/ERROR in sync_log
 
 
 # ─── Smart missing-day detection ─────────────────────────────────────────────
 
+async def _get_failed_dates(project_id: int) -> set[str]:
+    """
+    Find dates that have failed (TIMEOUT/ERROR) >= MAX_DATE_FAILURES times.
+    These "poisoned" dates will be skipped to avoid infinite retry loops.
+    """
+    from sqlalchemy import select, func, literal_column
+    async with AsyncSessionLocal() as db:
+        # Count failures per date range in sync_log for backfill sync types
+        result = await db.execute(
+            select(SyncLog.sync_type, SyncLog.error_msg, SyncLog.status)
+            .where(
+                SyncLog.service == "wb_funnel",
+                SyncLog.sync_type.in_(["backfill", "ad_resync"]),
+                SyncLog.status.in_(["TIMEOUT", "ERROR"]),
+            )
+        )
+        # Extract dates from error_msg patterns like "Timeout: 5min exceeded (YYYY-MM-DD→YYYY-MM-DD)"
+        # and count per date
+        from collections import Counter
+        import re
+        date_failures: Counter = Counter()
+        for row in result:
+            msg = row.error_msg or ""
+            # Try to extract dates from error messages
+            dates_found = re.findall(r"\d{4}-\d{2}-\d{2}", msg)
+            for d in dates_found:
+                date_failures[d] += 1
+
+        return {d for d, count in date_failures.items() if count >= MAX_DATE_FAILURES}
+
+
 async def _get_missing_dates(project_id: int, lookback_days: int = BACKFILL_DAYS) -> list[str]:
     """
     Find dates in the last `lookback_days` that have NO funnel data for this project.
+    Skips "poisoned" dates that have failed >= MAX_DATE_FAILURES times.
     Returns list of date strings (YYYY-MM-DD), oldest first.
     """
     from sqlalchemy import select, func
@@ -50,6 +84,11 @@ async def _get_missing_dates(project_id: int, lookback_days: int = BACKFILL_DAYS
         )
         existing_dates = {r[0] for r in result}
 
+    # Get dates to skip (too many failures)
+    poisoned = await _get_failed_dates(project_id)
+    if poisoned:
+        logger.info(f"Skipping {len(poisoned)} poisoned dates: {sorted(poisoned)[:5]}")
+
     # Build set of all expected dates (exclude today — it updates throughout the day)
     all_dates = set()
     d = start
@@ -58,7 +97,9 @@ async def _get_missing_dates(project_id: int, lookback_days: int = BACKFILL_DAYS
         d += timedelta(days=1)
 
     missing = sorted(all_dates - existing_dates)
-    return [d.isoformat() for d in missing]
+    # Filter out poisoned dates
+    missing = [d.isoformat() for d in missing if d.isoformat() not in poisoned]
+    return missing
 
 
 async def _get_days_without_ads(project_id: int, lookback_days: int = BACKFILL_DAYS) -> list[str]:
@@ -224,7 +265,7 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
         async with AsyncSessionLocal() as db:
             result = await asyncio.wait_for(
                 run_funnel_sync(db, project_id, d_from, d_to),
-                timeout=300,  # 5 min max per sync
+                timeout=600,  # 10 min — gives ad stats budget (180s) + headroom
             )
             status = "OK" if not result.get("errors") else "PARTIAL"
     except asyncio.TimeoutError:
@@ -258,79 +299,76 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
     return result
 
 
-# ─── Fast backfill (every 30s until all days filled) ─────────────────────────
+# ─── Fast backfill (every 3min until all days filled) ────────────────────────
 
-_backfill_lock = False  # simple lock to prevent overlapping runs
+_backfill_lock = asyncio.Lock()
 
 async def fast_backfill_tick():
     """
     Scheduler tick: sync ONE missing day for EACH project.
-    Runs every 30 seconds. Removes itself when all projects are fully covered.
+    Runs every 180 seconds (3 min). Removes itself when all projects are fully covered.
     """
-    global _backfill_lock
-    if _backfill_lock:
+    if _backfill_lock.locked():
         return  # previous tick still running
-    _backfill_lock = True
 
-    try:
-        import asyncio
-        from backend.services.funnel_service import run_funnel_sync
+    async with _backfill_lock:
+        try:
+            import asyncio
+            from backend.services.funnel_service import run_funnel_sync
 
-        project_ids = await _get_sync_project_ids()
-        logger.info(f"⏩ Fast backfill tick: found {len(project_ids)} projects: {project_ids}")
+            project_ids = await _get_sync_project_ids()
+            logger.info(f"⏩ Fast backfill tick: found {len(project_ids)} projects: {project_ids}")
 
-        if not project_ids:
-            logger.warning("⏩ Fast backfill: no projects found, stopping")
-            _stop_fast_backfill()
-            return
+            if not project_ids:
+                logger.warning("⏩ Fast backfill: no projects found, stopping")
+                _stop_fast_backfill()
+                return
 
-        all_filled = True
-        for pid in project_ids:
-            # Process missing days first
-            missing = await _get_missing_dates(pid)
-            if missing:
-                all_filled = False
-                day = missing[0]  # One day at a time
-                logger.info(
-                    f"⏩ Fast backfill: project {pid} — syncing {day} "
-                    f"({len(missing)} days remaining)"
-                )
-                res = await _run_and_log(pid, day, day, "backfill")
-                if res:
-                    logger.info(
-                        f"⏩ Fast backfill: project {pid} — {day} done, "
-                        f"+{res.get('rows', 0)} rows"
-                    )
-                await asyncio.sleep(1)
-            else:
-                # All days have funnel data — check for days with missing ad data
-                no_ads_days = await _get_days_without_ads(pid)
-                if no_ads_days:
+            all_filled = True
+            for pid in project_ids:
+                # Process missing days first
+                missing = await _get_missing_dates(pid)
+                if missing:
                     all_filled = False
-                    day = no_ads_days[0]
+                    day = missing[0]  # One day at a time
                     logger.info(
-                        f"⏩ Fast backfill: project {pid} — re-syncing ads for {day} "
-                        f"({len(no_ads_days)} days without ad data)"
+                        f"⏩ Fast backfill: project {pid} — syncing {day} "
+                        f"({len(missing)} days remaining)"
                     )
-                    res = await _run_and_log(pid, day, day, "ad_resync")
+                    res = await _run_and_log(pid, day, day, "backfill")
                     if res:
                         logger.info(
-                            f"⏩ Fast backfill: project {pid} — {day} ads re-synced, "
+                            f"⏩ Fast backfill: project {pid} — {day} done, "
                             f"+{res.get('rows', 0)} rows"
                         )
                     await asyncio.sleep(1)
                 else:
-                    logger.info(f"⏩ Fast backfill: project {pid} — all {BACKFILL_DAYS} days filled ✅")
+                    # All days have funnel data — check for days with missing ad data
+                    no_ads_days = await _get_days_without_ads(pid)
+                    if no_ads_days:
+                        all_filled = False
+                        day = no_ads_days[0]
+                        logger.info(
+                            f"⏩ Fast backfill: project {pid} — re-syncing ads for {day} "
+                            f"({len(no_ads_days)} days without ad data)"
+                        )
+                        res = await _run_and_log(pid, day, day, "ad_resync")
+                        if res:
+                            logger.info(
+                                f"⏩ Fast backfill: project {pid} — {day} ads re-synced, "
+                                f"+{res.get('rows', 0)} rows"
+                            )
+                        await asyncio.sleep(3)
+                    else:
+                        logger.info(f"⏩ Fast backfill: project {pid} — all {BACKFILL_DAYS} days filled ✅")
 
 
-        if all_filled:
-            logger.info("🎉 Fast backfill complete — all projects fully covered!")
-            _stop_fast_backfill()
+            if all_filled:
+                logger.info("🎉 Fast backfill complete — all projects fully covered!")
+                _stop_fast_backfill()
 
-    except Exception as e:
-        logger.error(f"Fast backfill error: {e}\n{traceback.format_exc()}")
-    finally:
-        _backfill_lock = False
+        except Exception as e:
+            logger.error(f"Fast backfill error: {e}\n{traceback.format_exc()}")
 
 
 def _stop_fast_backfill():
@@ -379,20 +417,20 @@ def start_scheduler():
             misfire_grace_time=600,  # 10 min grace
         )
 
-    # Fast backfill: every 60s until all days are filled
+    # Fast backfill: every 180s (3 min) — gives WB rate limiter time to reset
     from apscheduler.triggers.interval import IntervalTrigger
     scheduler.add_job(
         fast_backfill_tick,
-        trigger=IntervalTrigger(seconds=60),
+        trigger=IntervalTrigger(seconds=180),
         id="fast_backfill",
-        name="Fast backfill (every 60s)",
+        name="Fast backfill (every 3min)",
         replace_existing=True,
-        misfire_grace_time=30,
+        misfire_grace_time=60,
     )
 
     scheduler.start()
     logger.info(
-        "✅ Scheduler started — funnel sync 4x/day + fast backfill every 60s"
+        "✅ Scheduler started — funnel sync 4x/day + fast backfill every 3min"
     )
 
 

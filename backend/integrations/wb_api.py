@@ -146,15 +146,15 @@ class WBApiClient:
         all_cards = []
         cursor = {"limit": limit}
 
-        while True:
-            body = {
-                "settings": {
-                    "cursor": cursor,
-                    "filter": {"withPhoto": -1},
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            while True:
+                body = {
+                    "settings": {
+                        "cursor": cursor,
+                        "filter": {"withPhoto": -1},
+                    }
                 }
-            }
-            async with _wb_circuit:
-                async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                async with _wb_circuit:
                     url = f"{WB_CONTENT_API_BASE}/content/v2/get/cards/list"
                     logger.info("wb_api.request", method="POST", path="cards/list", cursor=cursor)
                     response = await client.post(

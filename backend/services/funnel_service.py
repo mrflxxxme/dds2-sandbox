@@ -12,6 +12,7 @@ Handles:
 
 import logging
 import asyncio
+import time
 import httpx
 from datetime import date, timedelta
 from decimal import Decimal
@@ -75,13 +76,27 @@ async def fetch_funnel(api_key: str, date_str: str) -> dict:
                 "limit": limit,
                 "offset": offset,
             }
-            resp = await client.post(
-                "https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/products",
-                headers=headers,
-                json=payload,
-            )
-            if resp.status_code != 200:
-                logger.error(f"WB funnel API error {resp.status_code}: {resp.text[:200]}")
+            # Retry loop for 429 rate limiting
+            resp = None
+            for attempt in range(3):
+                resp = await client.post(
+                    "https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/products",
+                    headers=headers,
+                    json=payload,
+                )
+                if resp.status_code == 429:
+                    wait = 10 * (2 ** attempt)  # 10s, 20s, 40s
+                    logger.warning(
+                        f"WB funnel API 429 rate limited, waiting {wait}s "
+                        f"(attempt {attempt+1}/3, offset={offset})"
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                break  # Success or non-retryable error
+
+            if resp is None or resp.status_code != 200:
+                status = resp.status_code if resp else "no response"
+                logger.error(f"WB funnel API error {status}: {resp.text[:200] if resp else 'N/A'}")
                 break
 
             data = resp.json()
@@ -150,22 +165,41 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
                          begin_date: str, end_date: str) -> dict:
     """Fetch detailed ad stats per nmId per date.
     Returns {date: {nm_id: {sum, clicks, views}}}.
+
+    Uses a 180-second time budget: returns partial data if budget is
+    exceeded instead of hanging until the outer wait_for kills us.
     """
     result = {}
     chunks = [campaign_ids[i:i+50] for i in range(0, len(campaign_ids), 50)]
     skipped_chunks = 0
+    budget_exceeded = False
+    TIME_BUDGET = 90  # seconds — must be well under the 600s wait_for
+    t_start = time.monotonic()
 
     async with httpx.AsyncClient(timeout=60) as client:
         for idx, chunk in enumerate(chunks):
+            # ── Time budget check ────────────────────────────────────
+            elapsed = time.monotonic() - t_start
+            if elapsed >= TIME_BUDGET:
+                remaining = len(chunks) - idx
+                logger.warning(
+                    f"WB adv: time budget {TIME_BUDGET}s exceeded after "
+                    f"{elapsed:.0f}s — skipping {remaining} remaining chunks "
+                    f"({begin_date}→{end_date})"
+                )
+                skipped_chunks += remaining
+                budget_exceeded = True
+                break
+
             if idx > 0:
-                await asyncio.sleep(35)  # WB rate limit: 35s between chunks
+                await asyncio.sleep(5)  # minimal delay between chunks
 
             ids_param = ",".join(str(c) for c in chunk)
             url = (f"https://advert-api.wildberries.ru/adv/v3/fullstats"
                    f"?ids={ids_param}&beginDate={begin_date}&endDate={end_date}")
 
             chunk_ok = False
-            for attempt in range(5):  # 5 retries instead of 3
+            for attempt in range(3):  # was 5 — reduced to fit budget
                 try:
                     resp = await client.get(url, headers={
                         "Accept": "application/json",
@@ -176,8 +210,18 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
                     break
 
                 if resp.status_code == 429:
-                    wait = 45 * (attempt + 1)  # 45, 90, 135, 180, 225 seconds
-                    logger.warning(f"WB adv 429 rate limit, waiting {wait}s (attempt {attempt+1}/5)")
+                    wait = [5, 10, 20][attempt]  # fast retries
+                    logger.warning(
+                        f"WB adv 429 rate limit, waiting {wait}s "
+                        f"(attempt {attempt+1}/3, elapsed {time.monotonic()-t_start:.0f}s)"
+                    )
+                    # Check budget before sleeping
+                    if time.monotonic() - t_start + wait >= TIME_BUDGET:
+                        logger.warning(
+                            f"WB adv: sleep {wait}s would exceed budget, "
+                            f"skipping chunk {idx+1}/{len(chunks)}"
+                        )
+                        break
                     await asyncio.sleep(wait)
                     continue
                 elif resp.status_code != 200:
@@ -217,8 +261,18 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
                     f"({len(chunk)} campaigns, {begin_date}→{end_date})"
                 )
 
+    elapsed_total = time.monotonic() - t_start
     if skipped_chunks:
-        logger.warning(f"WB adv: {skipped_chunks}/{len(chunks)} chunks skipped for {begin_date}→{end_date}")
+        logger.warning(
+            f"WB adv: {skipped_chunks}/{len(chunks)} chunks skipped "
+            f"for {begin_date}→{end_date} (elapsed {elapsed_total:.0f}s, "
+            f"budget_exceeded={budget_exceeded})"
+        )
+    else:
+        logger.info(
+            f"WB adv: all {len(chunks)} chunks OK "
+            f"for {begin_date}→{end_date} in {elapsed_total:.0f}s"
+        )
 
     return result
 
@@ -386,7 +440,7 @@ async def run_backfill_bg(project_id: int, missing_dates: list[str]):
                 async with AsyncSessionLocal() as db:
                     result = await asyncio.wait_for(
                         run_funnel_sync(db, project_id, day_str, day_str),
-                        timeout=300,  # 5 min max per day
+                        timeout=600,  # 10 min — allows ad stats budget (180s) + funnel fetch + DB ops
                     )
                     return {"day": day_str, "rows": result.get("rows", 0), "errors": result.get("errors", [])}
             except asyncio.TimeoutError:
