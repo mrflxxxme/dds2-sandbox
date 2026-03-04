@@ -17,7 +17,7 @@ class CustomsTopup(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
-    topup_txn_id: Mapped[str] = mapped_column(String(300), nullable=False)
+    topup_txn_id: Mapped[str] = mapped_column(String(300), nullable=False, unique=True)
     date: Mapped[date] = mapped_column(Date, nullable=False)
     amount_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
     purpose: Mapped[Optional[str]] = mapped_column(Text)

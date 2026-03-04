@@ -10,3 +10,4 @@ uploads/
 .pytest_cache/
 *.sqlite3
 .ruff_cache/
+backups/

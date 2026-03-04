@@ -35,7 +35,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     """Redis-based rate limiting. Fails open (allows request) if Redis is unavailable."""
 
     async def dispatch(self, request: Request, call_next):
-        # Skip rate limiting for health check and OPTIONS
+        # Skip rate limiting for health check, OPTIONS, and test mode
+        import os
+        if os.environ.get("TESTING") == "1":
+            return await call_next(request)
         if request.url.path in ("/health", "/docs", "/openapi.json") or request.method == "OPTIONS":
             return await call_next(request)
 

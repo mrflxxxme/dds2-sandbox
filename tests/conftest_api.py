@@ -1,24 +1,31 @@
 """
 API test fixtures — async FastAPI test client with test database.
+
+Uses TESTING=1 env var to disable rate limiter.
+Uses existing DB schema from Alembic (no create_all / drop_all).
 """
 
-import asyncio
+import os
+os.environ["TESTING"] = "1"  # Disable rate limiter before importing app
+
+import uuid
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy import text
 
 from backend.config import settings
-from backend.database import Base, get_db
+from backend.database import get_db
 from backend.main import app
 
 
-# ─── Test DB engine ──────────────────────────────────────────────────────────
+# ─── Test DB engine (separate pool to avoid event loop conflicts) ─────────────
 
 TEST_DATABASE_URL = settings.DATABASE_URL
 
-test_engine = create_async_engine(TEST_DATABASE_URL, echo=False)
+test_engine = create_async_engine(TEST_DATABASE_URL, echo=False, pool_pre_ping=True)
 TestSessionLocal = sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -33,26 +40,8 @@ app.dependency_overrides[get_db] = override_get_db
 
 # ─── Fixtures ────────────────────────────────────────────────────────────────
 
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create a shared event loop for session-scoped fixtures."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest_asyncio.fixture(scope="session")
-async def setup_db():
-    """Create all tables before tests, drop after."""
-    async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield
-    async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-
-
 @pytest_asyncio.fixture
-async def client(setup_db) -> AsyncClient:
+async def client():
     """Async HTTP test client for FastAPI app."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -60,7 +49,7 @@ async def client(setup_db) -> AsyncClient:
 
 
 @pytest_asyncio.fixture
-async def db_session(setup_db) -> AsyncSession:
+async def db_session():
     """Direct DB session for setup/teardown in tests."""
     async with TestSessionLocal() as session:
         yield session
@@ -69,20 +58,22 @@ async def db_session(setup_db) -> AsyncSession:
 @pytest_asyncio.fixture
 async def auth_headers(client: AsyncClient) -> dict:
     """Register a test user and return auth headers."""
-    import uuid
     username = f"testuser_{uuid.uuid4().hex[:8]}"
 
     # Register
-    await client.post("/api/auth/register", json={
+    await client.post("/api/v1/auth/register", json={
         "username": username,
         "password": "testpass123",
         "email": f"{username}@test.com",
     })
 
     # Login
-    resp = await client.post("/api/auth/login", data={
+    resp = await client.post("/api/v1/auth/login", json={
         "username": username,
         "password": "testpass123",
     })
-    token = resp.json()["access_token"]
-    return {"Authorization": f"Bearer {token}"}
+    data = resp.json()
+    assert "access_token" in data, (
+        f"Login failed ({resp.status_code}): {data}"
+    )
+    return {"Authorization": f"Bearer {data['access_token']}"}

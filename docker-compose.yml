@@ -80,6 +80,7 @@ services:
       - ./backend:/app/backend
       - ./migrations:/app/migrations
       - ./alembic.ini:/app/alembic.ini
+      - ./tests:/app/tests
     healthcheck:
       test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" ]
       interval: 10s

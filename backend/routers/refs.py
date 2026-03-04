@@ -1,218 +1,128 @@
 """
-Router: /refs — accounts, cp_categories, overrides, opening_balances
+Router: /refs — accounts, cp_categories, overrides, opening_balances, category_ref
+
+Delegates CRUD logic to services/refs_service.py.
 """
 
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
-from backend.middleware import get_project_id
-from backend.project_context import get_current_project
-from backend.models import Account, CounterpartyCategory, Override, OpeningBalance, CategoryRef, Project
+from backend.models import Project
 from backend.schemas import (
-    AccountSchema, CounterpartyCategorySchema, OverrideSchema,
-    OpeningBalanceSchema, CategoryRefSchema, DeleteResponse, MessageResponse,
+    AccountSchema, CounterpartyCategorySchema, OpeningBalanceSchema,
 )
+from backend.project_context import get_current_project
+from backend.middleware import get_project_id
+from backend.services import refs_service
 
 router = APIRouter(prefix="/refs")
 
 
 # ─── Accounts ─────────────────────────────────────────────────────────────────
 
-@router.get("/accounts", response_model=List[AccountSchema])
+@router.get("/accounts")
 async def get_accounts(project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Account).where(Account.project_id == project_id).order_by(Account.bank, Account.currency))
-    return result.scalars().all()
+    return await refs_service.list_accounts(db, project_id)
 
 
-@router.post("/accounts", response_model=AccountSchema)
+@router.post("/accounts")
 async def upsert_account(payload: AccountSchema, project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Account).where(Account.account == payload.account, Account.project_id == project_id))
-    acc = result.scalar_one_or_none()
-    if acc:
-        for field, val in payload.model_dump(exclude={"id"}).items():
-            setattr(acc, field, val)
-    else:
-        acc = Account(**payload.model_dump(exclude={"id"}), project_id=project_id)
-        db.add(acc)
-    await db.commit()
-    await db.refresh(acc)
-    return acc
+    return await refs_service.upsert_account(db, project_id, payload.model_dump(exclude_unset=True))
 
 
-@router.delete("/accounts/{account_id}", response_model=DeleteResponse)
+@router.delete("/accounts/{account_id}")
 async def delete_account(account_id: int, project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Account).where(Account.id == account_id, Account.project_id == project_id))
-    acc = result.scalar_one_or_none()
-    if not acc:
-        raise HTTPException(404, "Not found")
-    await db.delete(acc)
-    await db.commit()
+    deleted = await refs_service.delete_account(db, account_id)
+    if not deleted:
+        raise HTTPException(404, "Account not found")
     return {"ok": True}
 
 
 # ─── Counterparty Categories ──────────────────────────────────────────────────
 
-@router.get("/cp_categories", response_model=List[CounterpartyCategorySchema])
+@router.get("/cp_categories")
 async def get_cp_categories(project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(CounterpartyCategory).where(CounterpartyCategory.project_id == project_id).order_by(CounterpartyCategory.cat_lvl1, CounterpartyCategory.cp_name)
-    )
-    return result.scalars().all()
+    return await refs_service.list_cp_categories(db, project_id)
 
 
-@router.post("/cp_categories", response_model=CounterpartyCategorySchema)
+@router.post("/cp_categories")
 async def upsert_cp_category(
     payload: CounterpartyCategorySchema, db: AsyncSession = Depends(get_db)
 ):
-    result = await db.execute(
-        select(CounterpartyCategory).where(CounterpartyCategory.cp_key == payload.cp_key)
-    )
-    cpc = result.scalar_one_or_none()
-    if cpc:
-        for field, val in payload.model_dump(exclude={"id"}).items():
-            setattr(cpc, field, val)
-    else:
-        cpc = CounterpartyCategory(**payload.model_dump(exclude={"id"}))
-        db.add(cpc)
-    await db.commit()
-    await db.refresh(cpc)
-    return cpc
+    return await refs_service.upsert_cp_category(db, payload.model_dump(exclude_unset=True))
 
 
-@router.delete("/cp_categories/{cpc_id}", response_model=DeleteResponse)
+@router.delete("/cp_categories/{cpc_id}")
 async def delete_cp_category(cpc_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(CounterpartyCategory).where(CounterpartyCategory.id == cpc_id)
-    )
-    obj = result.scalar_one_or_none()
-    if not obj:
-        raise HTTPException(404, "Not found")
-    await db.delete(obj)
-    await db.commit()
+    deleted = await refs_service.delete_cp_category(db, cpc_id)
+    if not deleted:
+        raise HTTPException(404, "Category not found")
     return {"ok": True}
 
 
 # ─── Overrides ────────────────────────────────────────────────────────────────
 
-@router.get("/overrides", response_model=List[OverrideSchema])
+@router.get("/overrides")
 async def get_overrides(project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Override).where(Override.project_id == project_id).order_by(Override.updated_at.desc()).limit(500)
-    )
-    return result.scalars().all()
+    return await refs_service.list_overrides(db, project_id)
 
 
-@router.delete("/overrides/{override_id}", response_model=DeleteResponse)
+@router.delete("/overrides/{override_id}")
 async def delete_override(override_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Override).where(Override.id == override_id))
-    obj = result.scalar_one_or_none()
-    if not obj:
-        raise HTTPException(404, "Not found")
-    await db.delete(obj)
-    await db.commit()
+    deleted = await refs_service.delete_override(db, override_id)
+    if not deleted:
+        raise HTTPException(404, "Override not found")
     return {"ok": True}
 
 
 # ─── Opening Balances ─────────────────────────────────────────────────────────
 
-@router.get("/opening_balances", response_model=List[OpeningBalanceSchema])
+@router.get("/opening_balances")
 async def get_opening_balances(project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(OpeningBalance).where(OpeningBalance.project_id == project_id).order_by(OpeningBalance.date_open))
-    return result.scalars().all()
+    return await refs_service.list_opening_balances(db, project_id)
 
 
-@router.post("/opening_balances", response_model=OpeningBalanceSchema)
+@router.post("/opening_balances")
 async def upsert_opening_balance(
     payload: OpeningBalanceSchema, db: AsyncSession = Depends(get_db)
 ):
-    from sqlalchemy import and_
-    result = await db.execute(
-        select(OpeningBalance).where(
-            and_(
-                OpeningBalance.date_open == payload.date_open,
-                OpeningBalance.account == payload.account,
-                OpeningBalance.currency == payload.currency,
-            )
-        )
-    )
-    ob = result.scalar_one_or_none()
-    if ob:
-        ob.opening_balance = payload.opening_balance
-    else:
-        ob = OpeningBalance(**payload.model_dump(exclude={"id"}))
-        db.add(ob)
-    await db.commit()
-    await db.refresh(ob)
-    return ob
+    return await refs_service.upsert_opening_balance(db, payload.model_dump(exclude_unset=True))
 
 
 # ─── Category Reference ──────────────────────────────────────────────────────
 
-@router.get("/categories", response_model=list[CategoryRefSchema])
+@router.get("/categories")
 async def get_categories(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(CategoryRef)
-        .where(CategoryRef.project_id == project.id)
-        .order_by(CategoryRef.direction, CategoryRef.sort_order, CategoryRef.cat_lvl1)
-    )
-    cats = result.scalars().all()
-    return [
-        {"id": c.id, "direction": c.direction, "cat_lvl1": c.cat_lvl1,
-         "cat_lvl2": c.cat_lvl2, "sort_order": c.sort_order}
-        for c in cats
-    ]
+    return await refs_service.list_categories(db, project.id)
 
 
-@router.post("/categories", response_model=CategoryRefSchema)
+@router.post("/categories")
 async def add_category(
     payload: dict,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    direction = payload.get("direction", "expense")
     cat_lvl1 = payload.get("cat_lvl1", "").strip()
-    cat_lvl2 = payload.get("cat_lvl2", "").strip()
-    if not cat_lvl1 or not cat_lvl2:
-        raise HTTPException(400, "cat_lvl1 and cat_lvl2 required")
-    # Check duplicate within project
-    existing = await db.execute(
-        select(CategoryRef).where(
-            CategoryRef.project_id == project.id,
-            CategoryRef.direction == direction,
-            CategoryRef.cat_lvl1 == cat_lvl1,
-            CategoryRef.cat_lvl2 == cat_lvl2,
-        )
-    )
-    if existing.scalar_one_or_none():
-        raise HTTPException(400, f"Категория '{cat_lvl1} / {cat_lvl2}' уже существует")
-    cat = CategoryRef(
-        project_id=project.id,
-        direction=direction, cat_lvl1=cat_lvl1, cat_lvl2=cat_lvl2,
-        sort_order=payload.get("sort_order", 0),
-    )
-    db.add(cat)
-    await db.commit()
+    cat_lvl2 = payload.get("cat_lvl2", "").strip() or None
+    if not cat_lvl1:
+        raise HTTPException(400, "cat_lvl1 is required")
+
+    cat = await refs_service.add_category(db, project.id, cat_lvl1, cat_lvl2)
     return {"ok": True, "id": cat.id}
 
 
-@router.delete("/categories/{cat_id}", response_model=DeleteResponse)
+@router.delete("/categories/{cat_id}")
 async def delete_category(
     cat_id: int,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(CategoryRef).where(CategoryRef.id == cat_id, CategoryRef.project_id == project.id)
-    )
-    cat = result.scalar_one_or_none()
-    if not cat:
-        raise HTTPException(404, "Not found")
-    await db.delete(cat)
-    await db.commit()
+    deleted = await refs_service.delete_category(db, cat_id, project.id)
+    if not deleted:
+        raise HTTPException(404, "Category not found")
     return {"ok": True}

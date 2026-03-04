@@ -6,6 +6,9 @@ import io
 import pandas as pd
 import pytest
 
+# Load API test fixtures (client, auth_headers, db_session)
+pytest_plugins = ["tests.conftest_api"]
+
 
 @pytest.fixture
 def vtb_rub_excel() -> bytes:
