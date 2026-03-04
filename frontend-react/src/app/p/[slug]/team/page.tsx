@@ -32,12 +32,27 @@ export default function TeamPage() {
         } catch (e: any) { setMsg(e.message); }
     };
 
+    const copyToClipboard = (text: string) => {
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text);
+        } else {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+        }
+    };
+
     const copyLink = async () => {
         try {
             const res = await api.getInviteLink(slug);
             const link = `${window.location.origin}/invite/${res.invite_token}`;
             setInviteLink(link);
-            navigator.clipboard.writeText(link);
+            copyToClipboard(link);
             setMsg('Ссылка скопирована');
         } catch (e: any) { setMsg(e.message); }
     };
@@ -95,7 +110,7 @@ export default function TeamPage() {
                     }}>
                         <span style={{ flex: 1, wordBreak: 'break-all' }}>{inviteLink}</span>
                         <button className="btn btn-sm btn-secondary"
-                            onClick={() => { navigator.clipboard.writeText(inviteLink); setMsg('Ссылка скопирована'); }}
+                            onClick={() => { copyToClipboard(inviteLink); setMsg('Ссылка скопирована'); }}
                             style={{ whiteSpace: 'nowrap' }}>📋 Копировать</button>
                     </div>
                 )}
