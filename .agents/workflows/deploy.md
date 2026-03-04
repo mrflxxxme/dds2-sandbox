@@ -26,42 +26,48 @@ git commit -m "<описание изменений>"
 
 // turbo
 ```bash
-git push origin main
+git push origin dev
 ```
 
-### 2. SSH на сервер и pull
+### 2. Pull на сервере и пересборка
+// turbo
 ```bash
-ssh root@130.49.150.69
-```
-> На сервере:
-```bash
-cd /root/dds_app    # или где расположен проект
-git pull origin main
+ssh root@130.49.150.69 "cd /opt/dds_app && git pull origin dev"
 ```
 
-### 3. Пересобрать и перезапустить контейнеры на сервере
-> На сервере:
 ```bash
-docker compose up -d --build backend frontend-react
+ssh root@130.49.150.69 "cd /opt/dds_app && docker compose up -d --build backend"
 ```
 
-### 4. Проверить что всё поднялось
-> На сервере:
+Если нужно пересобрать и frontend:
 ```bash
-docker compose ps
-docker compose logs backend --tail=20 --no-log-prefix | grep -v health
-curl -s http://localhost:8000/health
+ssh root@130.49.150.69 "cd /opt/dds_app && docker compose up -d --build backend frontend-react"
 ```
 
-### 5. Проверить в браузере
-Открыть http://130.49.150.69/p/default/funnel и убедиться что данные появились.
+### 3. Проверить что всё поднялось
+// turbo
+```bash
+ssh root@130.49.150.69 "cd /opt/dds_app && docker compose ps --format 'table {{.Name}}\t{{.Status}}'"
+```
+
+// turbo
+```bash
+ssh root@130.49.150.69 "cd /opt/dds_app && docker compose logs backend --tail=10 --no-log-prefix 2>&1 | grep -v health"
+```
+
+### 4. Проверить в браузере
+Открыть http://130.49.150.69 и убедиться что всё работает.
 
 ---
 
 ## Откат при проблемах
-> На сервере:
 ```bash
-git log --oneline -5           # найти предыдущий коммит
-git checkout <commit-hash> .   # вернуть файлы
-docker compose up -d --build backend frontend-react
+ssh root@130.49.150.69 "cd /opt/dds_app && git log --oneline -5"
+ssh root@130.49.150.69 "cd /opt/dds_app && git checkout <commit-hash> . && docker compose up -d --build backend"
 ```
+
+## Сервер
+- IP: 130.49.150.69
+- Путь к проекту: /opt/dds_app
+- Ветка: dev
+- SSH: root (ключ настроен ~/.ssh/id_ed25519)

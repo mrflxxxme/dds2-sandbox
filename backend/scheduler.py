@@ -389,7 +389,13 @@ def start_scheduler():
 
     Uses a file lock to prevent duplicate schedulers when running with
     multiple uvicorn workers (--workers 2).
+    Disabled when SCHEDULER_ENABLED=false (for local dev when server is syncing).
     """
+    from backend.config import settings
+    if not settings.SCHEDULER_ENABLED:
+        logger.info("⏭️ Scheduler disabled (SCHEDULER_ENABLED=false)")
+        return
+
     global scheduler
 
     # Guard: only ONE worker should run the scheduler

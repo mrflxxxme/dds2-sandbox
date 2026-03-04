@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     MINIO_BUCKET: str = "dds-files"
     MINIO_SECURE: bool = False
 
+    # Scheduler
+    SCHEDULER_ENABLED: bool = True  # False = no background sync (for dev when server is also running)
+
     # Rate limiting
     LOGIN_RATE_LIMIT: int = 10  # max attempts per minute per IP
     REGISTER_ENABLED: bool = True  # disable open registration
