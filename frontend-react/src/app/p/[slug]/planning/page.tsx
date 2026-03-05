@@ -140,11 +140,11 @@ function CostOrders() {
         try { setSummary(await api.getPlanningOrderSummary(orderNo)); } catch { setSummary(null); }
     };
 
-    const F = ({ label, field, type = 'text', step }: { label: string; field: string; type?: string; step?: string }) => (
+    const renderField = (label: string, field: string, type = 'text', step?: string) => (
         <div className="form-group">
             <label className="form-label" style={{ fontSize: 11 }}>{label}</label>
             <input className="form-input" type={type} step={step} value={(form as any)[field]}
-                onChange={e => setForm({ ...form, [field]: e.target.value })}
+                onChange={e => setForm(prev => ({ ...prev, [field]: e.target.value }))}
                 style={{ fontSize: 13 }} />
         </div>
     );
@@ -165,24 +165,24 @@ function CostOrders() {
                 <div style={{ background: 'var(--color-bg-input)', padding: 16, borderRadius: 8, marginBottom: 16 }}>
                     <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Новый заказ</h4>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-                        <F label="Номер заказа *" field="order_no" />
-                        <F label="Инвойс" field="invoice_no" />
+                        {renderField("Номер заказа *", "order_no")}
+                        {renderField("Инвойс", "invoice_no")}
                         <div className="form-group">
                             <label className="form-label" style={{ fontSize: 11 }}>Транспорт</label>
                             <select className="form-input" value={form.transport_type}
-                                onChange={e => setForm({ ...form, transport_type: e.target.value })} style={{ fontSize: 13 }}>
+                                onChange={e => setForm(prev => ({ ...prev, transport_type: e.target.value }))} style={{ fontSize: 13 }}>
                                 <option>AUTO</option><option>RAIL</option><option>AIR</option><option>SEA</option>
                             </select>
                         </div>
-                        <F label="Дата отправки" field="ship_date" type="date" />
-                        <F label="Дата прибытия" field="actual_arrival_date" type="date" />
-                        <F label="Доставка ¥" field="delivery_cost_cny" type="number" step="0.01" />
-                        <F label="Доставка $" field="delivery_cost_usd" type="number" step="0.01" />
-                        <F label="Курс ¥/₽" field="rate_cny" type="number" step="0.01" />
-                        <F label="Курс €/₽" field="rate_eur" type="number" step="0.01" />
-                        <F label="Курс $/₽" field="rate_usd" type="number" step="0.01" />
-                        <F label="Номер ДТ" field="dt_number" />
-                        <F label="Примечание" field="note" />
+                        {renderField("Дата отправки", "ship_date", "date")}
+                        {renderField("Дата прибытия", "actual_arrival_date", "date")}
+                        {renderField("Доставка ¥", "delivery_cost_cny", "number", "0.01")}
+                        {renderField("Доставка $", "delivery_cost_usd", "number", "0.01")}
+                        {renderField("Курс ¥/₽", "rate_cny", "number", "0.01")}
+                        {renderField("Курс €/₽", "rate_eur", "number", "0.01")}
+                        {renderField("Курс $/₽", "rate_usd", "number", "0.01")}
+                        {renderField("Номер ДТ", "dt_number")}
+                        {renderField("Примечание", "note")}
                     </div>
                     <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
                         <button className="btn btn-primary btn-sm" onClick={create}>💾 Создать</button>
@@ -239,24 +239,24 @@ function CostOrders() {
                 <div style={{ marginTop: 16, background: 'var(--color-bg-input)', padding: 16, borderRadius: 8 }}>
                     <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Редактирование заказа #{editOrder}</h4>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-                        <F label="Номер заказа" field="order_no" />
-                        <F label="Инвойс" field="invoice_no" />
+                        {renderField("Номер заказа", "order_no")}
+                        {renderField("Инвойс", "invoice_no")}
                         <div className="form-group">
                             <label className="form-label" style={{ fontSize: 11 }}>Транспорт</label>
                             <select className="form-input" value={form.transport_type}
-                                onChange={e => setForm({ ...form, transport_type: e.target.value })} style={{ fontSize: 13 }}>
+                                onChange={e => setForm(prev => ({ ...prev, transport_type: e.target.value }))} style={{ fontSize: 13 }}>
                                 <option>AUTO</option><option>RAIL</option><option>AIR</option><option>SEA</option>
                             </select>
                         </div>
-                        <F label="Дата отправки" field="ship_date" type="date" />
-                        <F label="Дата прибытия" field="actual_arrival_date" type="date" />
-                        <F label="Доставка ¥" field="delivery_cost_cny" type="number" step="0.01" />
-                        <F label="Доставка $" field="delivery_cost_usd" type="number" step="0.01" />
-                        <F label="Курс ¥/₽" field="rate_cny" type="number" step="0.01" />
-                        <F label="Курс €/₽" field="rate_eur" type="number" step="0.01" />
-                        <F label="Курс $/₽" field="rate_usd" type="number" step="0.01" />
-                        <F label="Номер ДТ" field="dt_number" />
-                        <F label="Примечание" field="note" />
+                        {renderField("Дата отправки", "ship_date", "date")}
+                        {renderField("Дата прибытия", "actual_arrival_date", "date")}
+                        {renderField("Доставка ¥", "delivery_cost_cny", "number", "0.01")}
+                        {renderField("Доставка $", "delivery_cost_usd", "number", "0.01")}
+                        {renderField("Курс ¥/₽", "rate_cny", "number", "0.01")}
+                        {renderField("Курс €/₽", "rate_eur", "number", "0.01")}
+                        {renderField("Курс $/₽", "rate_usd", "number", "0.01")}
+                        {renderField("Номер ДТ", "dt_number")}
+                        {renderField("Примечание", "note")}
                     </div>
                     <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
                         <button className="btn btn-primary btn-sm" onClick={saveEdit}>💾 Сохранить</button>
