@@ -229,6 +229,9 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
                     break
 
                 data = resp.json()
+                if data is None:
+                    logger.warning(f"WB adv: empty JSON response for chunk {idx+1}")
+                    break
                 items = data if isinstance(data, list) else (data.get("data") or data)
                 if not isinstance(items, list):
                     break
