@@ -249,29 +249,20 @@ async def get_invite_link(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate a reusable invite link for the project."""
+    """Generate a new unique invite link for the project."""
     project = await _get_project_with_access(slug, user, db)
 
-    # Reuse existing link-invite or create new one
-    result = await db.execute(
-        select(ProjectInvite).where(
-            ProjectInvite.project_id == project.id,
-            ProjectInvite.email == None,  # noqa: E711
-            ProjectInvite.status == "pending",
-        )
+    # Always create a new invite link
+    token = uuid.uuid4().hex
+    invite = ProjectInvite(
+        project_id=project.id,
+        email=None,
+        invite_token=token,
+        status="pending",
     )
-    invite = result.scalar_one_or_none()
-    if not invite:
-        token = uuid.uuid4().hex
-        invite = ProjectInvite(
-            project_id=project.id,
-            email=None,
-            invite_token=token,
-            status="pending",
-        )
-        db.add(invite)
-        await db.commit()
-        await db.refresh(invite)
+    db.add(invite)
+    await db.commit()
+    await db.refresh(invite)
 
     return {
         "invite_token": invite.invite_token,
@@ -328,11 +319,10 @@ async def accept_invite(
     member = ProjectMember(project_id=invite.project_id, user_id=user.id)
     db.add(member)
 
-    # Mark invite as accepted (for email invites only)
-    if invite.email:
-        invite.status = "accepted"
-        invite.accepted_at = datetime.utcnow()
-        invite.accepted_by_id = user.id
+    # Mark invite as accepted (both email and link invites)
+    invite.status = "accepted"
+    invite.accepted_at = datetime.utcnow()
+    invite.accepted_by_id = user.id
 
     await db.commit()
 
