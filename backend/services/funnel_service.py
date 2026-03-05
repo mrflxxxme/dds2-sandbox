@@ -850,11 +850,18 @@ async def get_filters(db: AsyncSession, pid: int) -> dict:
     )
     d = dates.one()
 
+    # Cap max_date at yesterday — today's data is incomplete until day ends
+    from datetime import date as date_type
+    max_dt = d.max_date
+    yesterday = date_type.today() - timedelta(days=1)
+    if max_dt and max_dt >= date_type.today():
+        max_dt = yesterday
+
     return {
         "brands": sorted([r[0] for r in brands if r[0]]),
         "subjects": sorted([r[0] for r in subjects if r[0]]),
         "min_date": d.min_date.isoformat() if d.min_date else None,
-        "max_date": d.max_date.isoformat() if d.max_date else None,
+        "max_date": max_dt.isoformat() if max_dt else None,
     }
 
 

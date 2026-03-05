@@ -35,8 +35,22 @@ export default function AcceptInvitePage() {
                 }, 2000);
             }
         } catch (err: any) {
+            const msg = err.message || '';
+            // If 401 (expired token) — save invite token and redirect to login
+            if (msg === 'Unauthorized' || msg.includes('401')) {
+                localStorage.setItem('dds_pending_invite', token);
+                setStatus('login');
+                setMessage('Сессия истекла. Войдите снова для принятия приглашения.');
+                return;
+            }
+            // If already a member — treat as success
+            if (msg.includes('уже участник')) {
+                setStatus('success');
+                setMessage(msg);
+                return;
+            }
             setStatus('error');
-            setMessage(err.message || 'Не удалось принять приглашение');
+            setMessage(msg || 'Не удалось принять приглашение');
         }
     };
 
