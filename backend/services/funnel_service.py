@@ -485,10 +485,23 @@ async def batch_resync_ads(project_id: int) -> dict:
     Batch re-sync ALL ad data for a project.
     Splits into 30-day windows (WB API max 31 days), fetches each window
     with all campaign chunks, then updates adv columns in DB.
+    Pauses scheduler ad jobs to avoid 429 conflicts.
     Returns {status, days_updated, total_updated, errors}.
     """
     from backend.database import AsyncSessionLocal
     from datetime import timedelta as td
+
+    # Pause scheduler ad jobs to avoid 429 conflicts
+    try:
+        from backend.scheduler import scheduler as sched
+        if sched:
+            try:
+                sched.pause_job("ad_anomaly_check")
+                logger.info("🔄 Paused ad_anomaly_check scheduler job")
+            except Exception:
+                pass
+    except Exception:
+        sched = None
 
     errors = []
     total_updated = 0
