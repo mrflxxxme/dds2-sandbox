@@ -194,17 +194,32 @@ async def upload_order_items(
     db: AsyncSession = Depends(get_db),
 ):
     """Upload Excel file with order items, calculate cost per item."""
+    import logging
+    logger = logging.getLogger("dds.cost.upload")
+
     data = await file.read()
+    logger.info("Upload file: %s, size: %d bytes, order: %s", file.filename, len(data), order_no)
 
     from backend.utils.file_validation import validate_file_content
-    validate_file_content(data, file.filename or "upload.xlsx")
+    try:
+        validate_file_content(data, file.filename or "upload.xlsx")
+    except Exception as e:
+        logger.error("File validation failed: %s", e)
+        raise
 
     from decimal import Decimal
     tax_rate = Decimal(str(project.tax_rate)) if project.tax_rate else None
-    inserted, unrecognized, error = await cost_service.upload_order_items(
-        db, project.id, order_no, data, tax_rate
-    )
+    try:
+        inserted, unrecognized, error = await cost_service.upload_order_items(
+            db, project.id, order_no, data, tax_rate
+        )
+    except Exception as e:
+        logger.error("upload_order_items exception: %s", e, exc_info=True)
+        raise HTTPException(500, f"Internal error: {e}")
+
     if error:
+        logger.warning("upload_order_items error: %s", error)
         status = 404 if "не найден" in error else 400
         raise HTTPException(status, error)
+    logger.info("Upload OK: inserted=%s, unrecognized=%s", inserted, unrecognized)
     return {"inserted": inserted, "unrecognized": unrecognized}

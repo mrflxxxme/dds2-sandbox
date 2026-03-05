@@ -616,6 +616,70 @@ def normalize_carpet(df: pd.DataFrame) -> pd.DataFrame:
     return df[["barcode", "qty", "price_cny", "weight_kg", "area_m2", "volume_m3"]]
 
 
+def normalize_divandek_cn(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize дивандек format with Chinese headers (客户编码 = barcode)."""
+    col_map = {
+        "客户编号": "barcode",
+        "数量": "qty",
+        "单价": "price_cny",
+        "总净重": "total_net_weight",
+        "单箱体积": "volume_box_m3",
+        "装箱数": "qty_per_box",
+        "尺寸": "size",
+    }
+    df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
+
+    # Filter rows with valid numeric barcodes
+    if "barcode" in df.columns:
+        df = df[pd.to_numeric(df["barcode"], errors="coerce").notna()].copy()
+
+    # Barcode cleanup
+    df["barcode"] = pd.to_numeric(df.get("barcode", ""), errors="coerce").fillna(0).astype(int).astype(str)
+    df["barcode"] = df["barcode"].str.replace(r'\.0$', '', regex=True).str.strip()
+
+    df["qty"] = pd.to_numeric(df.get("qty", 1), errors="coerce").fillna(1).astype(int)
+    df["price_cny"] = pd.to_numeric(df.get("price_cny", 0), errors="coerce").fillna(0)
+
+    # Weight per unit = total_net_weight / qty
+    total_weight = pd.to_numeric(df.get("total_net_weight", 0), errors="coerce").fillna(0)
+    qty_safe = df["qty"].replace(0, 1)
+    df["weight_kg"] = total_weight / qty_safe
+
+    # Area from size (e.g. "*240 + 50*7" or "180*200")
+    if "size" in df.columns:
+        def _area_from_size(s):
+            try:
+                s = str(s).strip()
+                if "*" in s:
+                    # Take the first two numeric dimensions
+                    parts = [p.strip() for p in s.replace("+", "*").split("*") if p.strip()]
+                    nums = []
+                    for p in parts:
+                        try:
+                            nums.append(float(p))
+                        except ValueError:
+                            pass
+                    if len(nums) >= 2:
+                        return nums[0] / 100 * nums[1] / 100
+            except Exception:
+                pass
+            return 0.0
+        df["area_m2"] = df["size"].apply(_area_from_size)
+    else:
+        df["area_m2"] = 0
+
+    # Volume per unit = volume_box_m3 / qty_per_box
+    if "volume_box_m3" in df.columns and "qty_per_box" in df.columns:
+        vol = pd.to_numeric(df["volume_box_m3"], errors="coerce").fillna(0)
+        qpb = pd.to_numeric(df["qty_per_box"], errors="coerce").fillna(1).replace(0, 1)
+        df["volume_m3"] = vol / qpb
+    else:
+        df["volume_m3"] = 0
+
+    df["volume_m3"] = df["volume_m3"].fillna(0)
+    return df[["barcode", "qty", "price_cny", "weight_kg", "area_m2", "volume_m3"]]
+
+
 def detect_and_normalize_excel(data: bytes) -> pd.DataFrame:
     """Detect Excel format by columns and normalize to standard schema."""
     df = pd.read_excel(io.BytesIO(data))
@@ -625,6 +689,8 @@ def detect_and_normalize_excel(data: bytes) -> pd.DataFrame:
         return normalize_divandek(df)
     elif "条码" in cols:
         return normalize_carpet(df)
+    elif "客户编号" in cols:
+        return normalize_divandek_cn(df)
     else:
         raise ValueError(f"Неизвестный формат файла. Колонки: {cols}")
 
