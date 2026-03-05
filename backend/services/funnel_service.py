@@ -480,6 +480,115 @@ async def run_backfill_bg(project_id: int, missing_dates: list[str]):
     )
 
 
+async def batch_resync_ads(project_id: int) -> dict:
+    """
+    Batch re-sync ALL ad data for a project in one API call
+    (like Google Script does — one request per chunk for the full date range).
+    Updates only adv_sum, adv_views, adv_clicks columns.
+    Returns {status, days_updated, total_updated, errors}.
+    """
+    from backend.database import AsyncSessionLocal
+
+    errors = []
+    try:
+        async with AsyncSessionLocal() as db:
+            # 1. Get API key
+            adv_key = await get_wb_key(db, project_id, "wb")
+            if not adv_key:
+                return {"status": "error", "days_updated": 0,
+                        "total_updated": 0, "errors": ["API key not found"]}
+
+            # 2. Get date range from existing data
+            result = await db.execute(
+                select(
+                    func.min(WbFunnelDaily.date),
+                    func.max(WbFunnelDaily.date),
+                ).where(WbFunnelDaily.project_id == project_id)
+            )
+            row = result.one_or_none()
+            if not row or not row[0]:
+                return {"status": "error", "days_updated": 0,
+                        "total_updated": 0, "errors": ["No existing data"]}
+
+            begin_date = row[0].isoformat()
+            end_date = row[1].isoformat()
+            logger.info(
+                f"🔄 Batch ad resync: project {project_id}, "
+                f"range {begin_date} → {end_date}"
+            )
+
+            # 3. Get active campaign IDs
+            campaign_ids = await fetch_ad_campaigns(adv_key)
+            if not campaign_ids:
+                return {"status": "error", "days_updated": 0,
+                        "total_updated": 0, "errors": ["No campaigns found"]}
+
+            logger.info(
+                f"🔄 Batch ad resync: {len(campaign_ids)} campaigns, "
+                f"fetching stats for full range..."
+            )
+
+            # 4. Fetch ALL ad stats at once (full date range, like Google Script)
+            ad_stats = await fetch_ad_stats(
+                adv_key, campaign_ids, begin_date, end_date
+            )
+
+            if not ad_stats:
+                return {"status": "error", "days_updated": 0,
+                        "total_updated": 0, "errors": ["No ad data returned"]}
+
+            logger.info(
+                f"🔄 Batch ad resync: got ad data for {len(ad_stats)} days, "
+                f"now updating DB..."
+            )
+
+            # 5. Update ad columns for each day's data
+            from sqlalchemy import update as sa_update
+            total_updated = 0
+            days_updated = 0
+
+            for date_str, nm_data in ad_stats.items():
+                day_updated = 0
+                for nm_id, ad in nm_data.items():
+                    result = await db.execute(
+                        sa_update(WbFunnelDaily).where(
+                            WbFunnelDaily.project_id == project_id,
+                            WbFunnelDaily.date == date.fromisoformat(date_str),
+                            WbFunnelDaily.nm_id == nm_id,
+                        ).values(
+                            adv_sum=ad["sum"],
+                            adv_views=ad["views"],
+                            adv_clicks=ad["clicks"],
+                        )
+                    )
+                    day_updated += result.rowcount
+
+                await db.commit()
+                total_updated += day_updated
+                days_updated += 1
+                if day_updated:
+                    logger.info(
+                        f"🔄 Batch ad resync: {date_str} — "
+                        f"{day_updated} rows updated"
+                    )
+
+            logger.info(
+                f"✅ Batch ad resync complete: project {project_id} — "
+                f"{days_updated} days, {total_updated} rows updated"
+            )
+            return {
+                "status": "ok",
+                "days_updated": days_updated,
+                "total_updated": total_updated,
+                "errors": errors,
+            }
+
+    except Exception as e:
+        logger.error(f"Batch ad resync error: {e}")
+        return {"status": "error", "days_updated": 0,
+                "total_updated": 0, "errors": [str(e)[:500]]}
+
+
 # ─── Data queries ────────────────────────────────────────────────────────────
 
 def _compute_metrics(orders_sum: float, buyout: float, adv: float,

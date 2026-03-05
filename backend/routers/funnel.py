@@ -53,6 +53,17 @@ async def sync_funnel(
     return result
 
 
+@router.post("/resync_ads")
+async def resync_ads(
+    project: Project = Depends(get_current_project),
+):
+    """Batch re-sync ALL ad data for the project (entire date range at once).
+    Runs in background — returns immediately.
+    """
+    asyncio.create_task(funnel_service.batch_resync_ads(project.id))
+    return {"status": "started", "message": f"Batch ad resync started for project {project.id}"}
+
+
 @router.get("/sync_status")
 async def get_sync_status(
     project: Project = Depends(get_current_project),
