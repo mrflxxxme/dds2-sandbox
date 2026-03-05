@@ -621,7 +621,8 @@ async def batch_resync_ads(project_id: int) -> dict:
             }
 
     except Exception as e:
-        logger.error(f"Batch ad resync error: {e}")
+        import traceback
+        logger.error(f"Batch ad resync error: {e}\n{traceback.format_exc()}")
         return {"status": "error", "days_updated": 0,
                 "total_updated": 0, "errors": [str(e)[:500]]}
 
