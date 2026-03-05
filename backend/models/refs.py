@@ -52,7 +52,7 @@ class Override(Base):
     cat_lvl2: Mapped[Optional[str]] = mapped_column(String(100))
     order_id: Mapped[Optional[str]] = mapped_column(String(100))
     comment: Mapped[Optional[str]] = mapped_column(Text)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class OpeningBalance(Base):
