@@ -193,13 +193,7 @@ async def update_payment_paid_amount(payment_id: int, db: AsyncSession):
 
 def parse_fts_pdf(pdf_bytes: bytes) -> list[dict]:
     """Parse FTS customs report PDF and extract DT lines grouped by DT number."""
-    try:
-        import pdfplumber
-    except ImportError:
-        import subprocess, sys
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "pdfplumber",
-                               "--break-system-packages", "-q"])
-        import pdfplumber
+    import pdfplumber
 
     import io
     results = {}  # dt_number → {date, total, lines[]}
