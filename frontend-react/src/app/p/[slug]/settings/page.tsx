@@ -429,8 +429,10 @@ function DutyRules() {
     const [showForm, setShowForm] = useState(false);
     const [form, setForm] = useState({ subject: '', basis: 'INVOICE', rate: '0', util_collect_rub: '0', note: '' });
     const [msg, setMsg] = useState('');
+    const [vatRate, setVatRate] = useState<string>('22');
+    const [vatSaving, setVatSaving] = useState(false);
 
-    useEffect(() => { loadRules(); loadCategories(); }, []);
+    useEffect(() => { loadRules(); loadCategories(); loadVatRate(); }, []);
     const loadRules = async () => { try { setRules(await api.getDutyRules()); } catch { } };
     const loadCategories = async () => {
         try {
@@ -438,6 +440,20 @@ function DutyRules() {
             const subjects = [...new Set(nom.map((n: any) => n.subject).filter(Boolean))].sort() as string[];
             setCategories(subjects);
         } catch { }
+    };
+    const loadVatRate = async () => {
+        try {
+            const res = await api.getVatRate();
+            setVatRate(String(res.vat_rate));
+        } catch { }
+    };
+    const saveVatRate = async () => {
+        setVatSaving(true);
+        try {
+            await api.setVatRate(parseFloat(vatRate) || 22);
+            setMsg('✅ Ставка НДС сохранена!');
+        } catch (e: any) { setMsg(`❌ ${e.message}`); }
+        setVatSaving(false);
     };
 
     const save = async () => {
@@ -478,7 +494,7 @@ function DutyRules() {
         <div className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                 <div>
-                    <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Пошлина / Утиль — по категориям</h3>
+                    <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Пошлина / Утиль / НДС</h3>
                     <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 2 }}>
                         Категорий: {categories.length} | С правилами: {rules.length} | Без правил: {unruled.length}
                     </div>
@@ -489,6 +505,24 @@ function DutyRules() {
                 </div>
             </div>
             {msg && <div style={{ fontSize: 13, marginBottom: 8, padding: '6px 12px', borderRadius: 6, background: msg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', color: msg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)' }}>{msg} <span style={{ float: 'right', cursor: 'pointer' }} onClick={() => setMsg('')}>✕</span></div>}
+
+            {/* VAT Rate */}
+            <div style={{
+                display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16,
+                padding: '12px 16px', borderRadius: 8,
+                background: 'var(--color-bg-input)', border: '1px solid var(--color-border)',
+            }}>
+                <span style={{ fontSize: 14, fontWeight: 600 }}>📋 НДС (для всех категорий):</span>
+                <input className="form-input" type="number" step="0.01" value={vatRate}
+                    onChange={e => setVatRate(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && saveVatRate()}
+                    style={{ width: 80, fontSize: 14, textAlign: 'center' }} />
+                <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>%</span>
+                <button className="btn btn-primary btn-sm" onClick={saveVatRate} disabled={vatSaving}
+                    style={{ fontSize: 12 }}>
+                    {vatSaving ? '⏳' : '💾'} Сохранить
+                </button>
+            </div>
 
             {showForm && (
                 <div style={{ background: 'var(--color-bg-input)', padding: 16, borderRadius: 8, marginBottom: 16 }}>

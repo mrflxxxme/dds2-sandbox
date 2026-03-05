@@ -390,7 +390,7 @@ async def get_cost_order_items(db: AsyncSession, project_id: int, order_no: str)
 
 
 async def upload_order_items(db: AsyncSession, project_id: int, order_no: str,
-                             data: bytes, tax_rate: Optional[Decimal] = None):
+                             data: bytes, vat_rate: Optional[Decimal] = None):
     """Upload Excel items, calculate cost/duty/delivery per unit. Returns (inserted, unrecognized)."""
     # Check order exists
     result = await db.execute(
@@ -434,7 +434,7 @@ async def upload_order_items(db: AsyncSession, project_id: int, order_no: str,
 
     inserted = 0
     unrecognized = 0
-    vat_rate = Decimal(str(tax_rate / 100)) if tax_rate else DEFAULT_VAT_RATE
+    vat_rate_dec = Decimal(str(vat_rate / 100)) if vat_rate else DEFAULT_VAT_RATE
 
     for _, row in df.iterrows():
         bc = str(row.get("barcode", "")).strip()
@@ -477,7 +477,7 @@ async def upload_order_items(db: AsyncSession, project_id: int, order_no: str,
                 duty_rub_unit = base * Decimal(str(rule.rate)) / 100
 
         vat_base = cost_rub_unit + duty_rub_unit + delivery_rub_unit / 2
-        vat_rub_unit = vat_base * vat_rate
+        vat_rub_unit = vat_base * vat_rate_dec
 
         total_rub_unit = cost_rub_unit + delivery_rub_unit + duty_rub_unit + vat_rub_unit + util_rub_unit
         total_cny_unit = total_rub_unit / order.rate_cny if order.rate_cny > 0 else Decimal(0)

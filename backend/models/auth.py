@@ -37,6 +37,7 @@ class Project(Base):
     owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     tax_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), default=6)
+    vat_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), default=22)
 
     members: Mapped[list["ProjectMember"]] = relationship(back_populates="project")
     invites: Mapped[list["ProjectInvite"]] = relationship(back_populates="project")

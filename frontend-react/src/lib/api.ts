@@ -343,6 +343,14 @@ class ApiClient {
         return this.request<MessageResponse>('DELETE', `/api/v1/cost/duty_rules/${id}`);
     }
 
+    // Cost — VAT Rate
+    getVatRate() {
+        return this.request<{ vat_rate: number }>('GET', '/api/v1/cost/vat_rate');
+    }
+    setVatRate(vatRate: number) {
+        return this.request<{ status: string; vat_rate: number }>('PUT', '/api/v1/cost/vat_rate', { vat_rate: vatRate });
+    }
+
     // Planning — Orders
     getPlanningOrders() {
         return this.request<Order[]>('GET', '/api/v1/planning/orders');

@@ -208,10 +208,10 @@ async def upload_order_items(
         raise
 
     from decimal import Decimal
-    tax_rate = Decimal(str(project.tax_rate)) if project.tax_rate else None
+    vat_rate = Decimal(str(project.vat_rate)) if project.vat_rate else None
     try:
         inserted, unrecognized, error = await cost_service.upload_order_items(
-            db, project.id, order_no, data, tax_rate
+            db, project.id, order_no, data, vat_rate
         )
     except Exception as e:
         logger.error("upload_order_items exception: %s", e, exc_info=True)
@@ -223,3 +223,28 @@ async def upload_order_items(
         raise HTTPException(status, error)
     logger.info("Upload OK: inserted=%s, unrecognized=%s", inserted, unrecognized)
     return {"inserted": inserted, "unrecognized": unrecognized}
+
+
+# ─── VAT Rate ─────────────────────────────────────────────────────────────────
+
+@router.get("/vat_rate")
+async def get_vat_rate(
+    project: Project = Depends(get_current_project),
+):
+    return {"vat_rate": float(project.vat_rate or 22)}
+
+
+@router.put("/vat_rate")
+async def set_vat_rate(
+    payload: dict,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    from decimal import Decimal
+    new_rate = payload.get("vat_rate")
+    if new_rate is None:
+        raise HTTPException(400, "vat_rate is required")
+    project.vat_rate = Decimal(str(new_rate))
+    db.add(project)
+    await db.commit()
+    return {"status": "ok", "vat_rate": float(project.vat_rate)}
