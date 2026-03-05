@@ -93,6 +93,15 @@ async def add_key(
     await db.commit()
     await db.refresh(key)
 
+    # Auto-restart scheduler jobs so new project gets data synced automatically
+    if body.service == "wb":
+        try:
+            from backend.scheduler import restart_backfill_jobs
+            restart_backfill_jobs()
+            logger.info(f"Scheduler jobs restarted for project {project.id} after WB key added")
+        except Exception as e:
+            logger.warning(f"Could not restart scheduler jobs: {e}")
+
     return {
         "id": key.id,
         "service": key.service,

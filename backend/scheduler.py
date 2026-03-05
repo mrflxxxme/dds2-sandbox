@@ -161,7 +161,7 @@ async def _get_days_with_incomplete_ads(project_id: int, lookback_days: int = BA
             f"incomplete days: {len(incomplete)}"
         )
 
-    return incomplete[:5]
+    return incomplete[:30]
 
 
 
@@ -371,6 +371,7 @@ _ad_check_lock = asyncio.Lock()
 async def ad_anomaly_check():
     """
     Check for days with incomplete ad data and re-sync them.
+    Batches up to 30 incomplete days into one range request (min→max date).
     Runs every 3 min. Auto-stops when all ads are complete.
     """
     if _ad_check_lock.locked():
@@ -386,15 +387,16 @@ async def ad_anomaly_check():
                 incomplete_days = await _get_days_with_incomplete_ads(pid)
                 if incomplete_days:
                     all_ads_ok = False
-                    day = incomplete_days[0]
+                    d_from = incomplete_days[0]
+                    d_to = incomplete_days[-1]
                     logger.info(
-                        f"📊 Ad anomaly: project {pid} — re-syncing {day} "
-                        f"({len(incomplete_days)} incomplete days total)"
+                        f"📊 Ad anomaly: project {pid} — re-syncing range "
+                        f"{d_from}→{d_to} ({len(incomplete_days)} incomplete days)"
                     )
-                    res = await _run_and_log(pid, day, day, "ad_resync")
+                    res = await _run_and_log(pid, d_from, d_to, "ad_resync")
                     if res:
                         logger.info(
-                            f"📊 Ad anomaly: project {pid} — {day} re-synced, "
+                            f"📊 Ad anomaly: project {pid} — {d_from}→{d_to} re-synced, "
                             f"+{res.get('rows', 0)} rows"
                         )
                     await asyncio.sleep(3)
@@ -418,6 +420,39 @@ def _stop_ad_anomaly_check():
             logger.info("Ad anomaly check job removed from scheduler")
         except Exception:
             pass
+
+
+def restart_backfill_jobs():
+    """Restart backfill + ad anomaly jobs (call when new WB API key is added)."""
+    global scheduler
+    try:
+        if not scheduler or not scheduler.running:
+            logger.warning("Scheduler not running, cannot restart jobs")
+            return
+
+        # Re-add fast_backfill if not present
+        if not scheduler.get_job("fast_backfill"):
+            from apscheduler.triggers.interval import IntervalTrigger
+            scheduler.add_job(
+                fast_backfill_tick,
+                IntervalTrigger(minutes=3),
+                id="fast_backfill",
+                max_instances=1, replace_existing=True,
+            )
+            logger.info("🔄 Restarted fast_backfill job (new API key detected)")
+
+        # Re-add ad_anomaly_check if not present
+        if not scheduler.get_job("ad_anomaly_check"):
+            from apscheduler.triggers.interval import IntervalTrigger
+            scheduler.add_job(
+                ad_anomaly_check,
+                IntervalTrigger(minutes=3),
+                id="ad_anomaly_check",
+                max_instances=1, replace_existing=True,
+            )
+            logger.info("🔄 Restarted ad_anomaly_check job (new API key detected)")
+    except Exception as e:
+        logger.error(f"Failed to restart backfill jobs: {e}")
 
 
 # ─── Scheduler lifecycle ─────────────────────────────────────────────────────

@@ -199,7 +199,7 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
                    f"?ids={ids_param}&beginDate={begin_date}&endDate={end_date}")
 
             chunk_ok = False
-            for attempt in range(3):  # was 5 — reduced to fit budget
+            for attempt in range(5):
                 try:
                     resp = await client.get(url, headers={
                         "Accept": "application/json",
@@ -210,12 +210,11 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
                     break
 
                 if resp.status_code == 429:
-                    wait = [10, 20, 40][attempt]  # generous waits for WB rate limiter
+                    wait = [10, 20, 30, 40, 60][attempt]
                     logger.warning(
                         f"WB adv 429 rate limit, waiting {wait}s "
-                        f"(attempt {attempt+1}/3, elapsed {time.monotonic()-t_start:.0f}s)"
+                        f"(attempt {attempt+1}/5, elapsed {time.monotonic()-t_start:.0f}s)"
                     )
-                    # Check budget before sleeping
                     if time.monotonic() - t_start + wait >= TIME_BUDGET:
                         logger.warning(
                             f"WB adv: sleep {wait}s would exceed budget, "
@@ -230,8 +229,13 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
 
                 data = resp.json()
                 if data is None:
-                    logger.warning(f"WB adv: empty JSON response for chunk {idx+1}")
-                    break
+                    wait = 30
+                    logger.warning(
+                        f"WB adv: empty JSON response for chunk {idx+1}, "
+                        f"retrying in {wait}s (attempt {attempt+1}/5)"
+                    )
+                    await asyncio.sleep(wait)
+                    continue
                 items = data if isinstance(data, list) else (data.get("data") or data)
                 if not isinstance(items, list):
                     break
