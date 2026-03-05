@@ -192,7 +192,7 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
                 break
 
             if idx > 0:
-                await asyncio.sleep(12)  # WB needs ~10s between ad stat requests
+                await asyncio.sleep(20)  # 20s — matches proven Google Script timing
 
             ids_param = ",".join(str(c) for c in chunk)
             url = (f"https://advert-api.wildberries.ru/adv/v3/fullstats"
