@@ -751,49 +751,121 @@ function Cashflow() {
 
 function CustomsDt() {
     const [data, setData] = useState<any[]>([]);
+    const [topups, setTopups] = useState<any[]>([]);
+    const [orders, setOrders] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
-    const [file, setFile] = useState<File | null>(null);
-    const [uploading, setUploading] = useState(false);
-    const [msg, setMsg] = useState('');
+    const [saving, setSaving] = useState<number | null>(null);
 
-    useEffect(() => { load(); }, []);
-    const load = async () => { try { setData(await api.getCustomsDt()); } catch { } setLoading(false); };
+    useEffect(() => { loadAll(); }, []);
 
-    const uploadFts = async () => {
-        if (!file) return;
-        setUploading(true); setMsg('');
+    const loadAll = async () => {
         try {
-            const res = await api.uploadFtsPdf(file);
-            setMsg(`✅ Загружено: ${res.created} новых ДТ, ${res.skipped} пропущено`);
-            setFile(null);
-            await load();
-        } catch (e: any) { setMsg(`❌ ${e.message}`); }
-        setUploading(false);
+            const [dtList, topupList, orderList] = await Promise.all([
+                api.getCustomsDt(),
+                api.getCustomsTopup(),
+                api.getCostOrders(),
+            ]);
+            setData(dtList);
+            setTopups(topupList);
+            setOrders(orderList);
+        } catch { }
+        setLoading(false);
+    };
+
+    const handleBindOrder = async (dtId: number, orderNo: string) => {
+        setSaving(dtId);
+        try {
+            await api.updateCustomsDt(dtId, { order_no: orderNo ? Number(orderNo) : null });
+            setData(prev => prev.map(d => d.id === dtId ? { ...d, order_no: orderNo ? Number(orderNo) : null } : d));
+        } catch { }
+        setSaving(null);
     };
 
     if (loading) return <div style={{ padding: 20, color: 'var(--color-text-muted)' }}>Загрузка...</div>;
 
+    // Stats
+    const totalTopup = topups.reduce((s: number, t: any) => s + Number(t.amount_rub || 0), 0);
+    const totalDt = data.reduce((s: number, d: any) => s + Number(d.amount_rub || 0), 0);
+    const boundDt = data.filter((d: any) => d.order_no).reduce((s: number, d: any) => s + Number(d.amount_rub || 0), 0);
+    const unboundDt = totalDt - boundDt;
+    const balance = totalTopup - totalDt;
+
+    const cards = [
+        { label: 'Перевели на таможню', value: totalTopup, icon: '💰', color: '#818cf8' },
+        { label: 'Привязано к заказам', value: boundDt, icon: '✅', color: '#10b981' },
+        { label: 'Не привязано', value: unboundDt, icon: '⏳', color: '#f59e0b' },
+        { label: 'Остаток на счёте', value: balance, icon: '🏦', color: balance >= 0 ? '#10b981' : '#ef4444' },
+    ];
+
     return (
-        <div className="glass-card">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Таможенные ДТ</h3>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <input type="file" accept=".pdf" onChange={e => setFile(e.target.files?.[0] || null)} style={{ fontSize: 12 }} />
-                    <button className="btn btn-primary btn-sm" onClick={uploadFts} disabled={!file || uploading}>
-                        {uploading ? '⏳...' : '📤 Загрузить PDF ФТС'}
-                    </button>
+        <div>
+            {/* Summary cards */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
+                {cards.map((c, i) => (
+                    <div key={i} className="glass-card" style={{ padding: '14px 16px', textAlign: 'center' }}>
+                        <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 4 }}>{c.icon} {c.label}</div>
+                        <div style={{ fontSize: 20, fontWeight: 700, color: c.color }}>{formatNumber(c.value)} ₽</div>
+                    </div>
+                ))}
+            </div>
+
+            {/* DT Table */}
+            <div className="glass-card">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Таможенные ДТ</h3>
                     {data.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'customs_dt')}>📥 Excel</button>}
                 </div>
+                {data.length > 0 ? (
+                    <div style={{ overflowX: 'auto' }}>
+                        <table className="data-table">
+                            <thead>
+                                <tr>
+                                    <th style={{ fontSize: 11 }}>№ ДТ</th>
+                                    <th style={{ fontSize: 11 }}>Дата</th>
+                                    <th style={{ fontSize: 11 }}>Сумма ₽</th>
+                                    <th style={{ fontSize: 11 }}>Заказ</th>
+                                    <th style={{ fontSize: 11 }}>Примечание</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {data.map((r: any) => (
+                                    <tr key={r.id}>
+                                        <td style={{ fontSize: 12, fontFamily: 'monospace' }}>{r.dt_number}</td>
+                                        <td style={{ fontSize: 12 }}>{r.dt_date}</td>
+                                        <td style={{ fontSize: 12, fontWeight: 600 }}>{formatNumber(r.amount_rub)}</td>
+                                        <td style={{ fontSize: 12 }}>
+                                            <select
+                                                value={r.order_no ?? ''}
+                                                onChange={e => handleBindOrder(r.id, e.target.value)}
+                                                disabled={saving === r.id}
+                                                style={{
+                                                    background: 'var(--color-bg-tertiary)',
+                                                    color: 'var(--color-text)',
+                                                    border: '1px solid var(--color-border)',
+                                                    borderRadius: 6,
+                                                    padding: '4px 8px',
+                                                    fontSize: 12,
+                                                    minWidth: 100,
+                                                    cursor: 'pointer',
+                                                }}
+                                            >
+                                                <option value="">—</option>
+                                                {orders.map((o: any) => (
+                                                    <option key={o.order_no} value={o.order_no}>
+                                                        #{o.order_no}{o.invoice_no ? ` (${o.invoice_no})` : ''}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                            {saving === r.id && <span style={{ marginLeft: 4 }}>⏳</span>}
+                                        </td>
+                                        <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{r.note ?? '—'}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                ) : <div className="empty-state"><div className="empty-state-text">Нет таможенных ДТ. Загрузите PDF-отчёт ФТС через «Импорт документов».</div></div>}
             </div>
-            {msg && <div style={{ fontSize: 13, marginBottom: 8, padding: '6px 12px', borderRadius: 6, background: msg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', color: msg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)' }}>{msg} <span style={{ float: 'right', cursor: 'pointer' }} onClick={() => setMsg('')}>✕</span></div>}
-            {data.length > 0 ? (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr>{Object.keys(data[0]).map(k => <th key={k} style={{ fontSize: 11 }}>{k}</th>)}</tr></thead>
-                        <tbody>{data.map((r, i) => <tr key={i}>{Object.values(r).map((v: any, j) => <td key={j} style={{ fontSize: 12 }}>{typeof v === 'number' ? formatNumber(v) : v ?? '—'}</td>)}</tr>)}</tbody>
-                    </table>
-                </div>
-            ) : <div className="empty-state"><div className="empty-state-text">Нет таможенных ДТ. Загрузите PDF-отчёт ФТС.</div></div>}
         </div>
     );
 }

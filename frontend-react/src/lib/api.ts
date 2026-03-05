@@ -417,7 +417,10 @@ class ApiClient {
         return this.request<Array<{ id: number; order_no: number; dt_number: string; alloc_amount: number }>>('GET', '/api/v1/planning/customs/alloc');
     }
     getCustomsTopup() {
-        return this.request<Array<{ id: number; date: string; amount: number; note: string }>>('GET', '/api/v1/planning/customs/topup');
+        return this.request<Array<{ id: number; date: string; amount_rub: number; purpose: string; allocated: number; remaining: number }>>('GET', '/api/v1/planning/customs/topup');
+    }
+    updateCustomsDt(dtId: number, payload: { order_no?: number | null; note?: string }) {
+        return this.request<{ ok: boolean }>('PUT', `/api/v1/planning/customs_dt/${dtId}`, payload);
     }
 
     async uploadFtsPdf(file: File): Promise<{ ok: boolean; created: number; skipped: number; parsed: Array<Record<string, unknown>> }> {
