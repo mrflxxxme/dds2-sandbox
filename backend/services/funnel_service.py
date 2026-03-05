@@ -135,7 +135,7 @@ async def fetch_funnel(api_key: str, date_str: str) -> dict:
 
 
 async def fetch_ad_campaigns(api_key: str) -> list[int]:
-    """Get list of active/paused ad campaign IDs."""
+    """Get list of active/paused/completed ad campaign IDs."""
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -153,7 +153,7 @@ async def fetch_ad_campaigns(api_key: str) -> list[int]:
         campaign_ids = []
         for adv in data.get("adverts") or []:
             status = str(adv.get("status", ""))
-            if status in ("9", "11"):  # active / paused
+            if status in ("7", "9", "11"):  # completed / active / paused
                 for compa in adv.get("advert_list") or []:
                     cid = compa.get("advertId")
                     if cid and cid not in campaign_ids:
