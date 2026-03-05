@@ -1,6 +1,6 @@
 """
 Router: /funnel — WB Sales funnel analytics (воронка продаж).
-Thin HTTP layer — all business logic is in services/funnel_service.py.
+Thin HTTP layer — all business logic is in services/funnel/ package.
 """
 
 import asyncio

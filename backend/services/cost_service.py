@@ -1,12 +1,20 @@
 """
-Cost service — business logic for cost calculation, plan generation, and Excel normalization.
+Cost service — business logic for cost module.
 
-Extracted from routers/cost.py to enable reuse and testing.
+Handles:
+- Nomenclature (get, upload Excel)
+- Duty rules (CRUD)
+- Cost orders (CRUD with aggregation)
+- Cost order items (get, upload Excel with cost/duty/delivery calculation)
+- Payment plan generation
+- Excel normalization (Дивандек / Ковры formats)
+
+Extracted from routers/cost.py to keep router thin (HTTP only).
 """
 
 import io
 import math
-from datetime import timedelta
+from datetime import date, timedelta, datetime
 from decimal import Decimal
 from typing import Optional
 
@@ -16,8 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import (
     CostOrder, CostOrderItem, Nomenclature, DutyRule, DutyBasis,
-    LeadTime, Order, PlannedPayment,
+    LeadTime, Order, PlannedPayment, CustomsDT,
 )
+
+DEFAULT_VAT_RATE = Decimal("0.22")
 
 
 # ─── Safe numeric helpers ────────────────────────────────────────────────────
@@ -42,7 +52,465 @@ def safe_decimal(val) -> Decimal:
         return Decimal(0)
 
 
-# ─── Excel normalization ─────────────────────────────────────────────────────
+# ─── Auto-link CustomsDT ─────────────────────────────────────────────────────
+
+async def auto_link_customs_dt(order_no: str, dt_number: str, db: AsyncSession):
+    """Auto-link CustomsDT records matching dt_number to this order."""
+    try:
+        order_no_int = int(order_no)
+    except (ValueError, TypeError):
+        return
+    result = await db.execute(
+        select(CustomsDT).where(CustomsDT.dt_number == dt_number)
+    )
+    dts = result.scalars().all()
+    for d in dts:
+        if d.order_no != order_no_int:
+            d.order_no = order_no_int
+    if dts:
+        await db.commit()
+
+
+# ─── Nomenclature ─────────────────────────────────────────────────────────────
+
+async def get_nomenclature(db: AsyncSession, project_id: int):
+    result = await db.execute(
+        select(Nomenclature)
+        .where(Nomenclature.project_id == project_id)
+        .order_by(Nomenclature.subject, Nomenclature.article_seller)
+    )
+    return result.scalars().all()
+
+
+async def upload_nomenclature(db: AsyncSession, project_id: int, data: bytes):
+    """Upload nomenclature from Excel data, returns (inserted, updated)."""
+    df = pd.read_excel(io.BytesIO(data))
+
+    col_map = {
+        "Баркод": "barcode", "Бренд": "brand", "Предмет": "subject",
+        "Артикул продавца": "article_seller", "Артикул WB": "article_wb",
+        "Объем, л": "volume_l",
+    }
+    df = df.rename(columns=col_map)
+
+    inserted, updated = 0, 0
+    for _, row in df.iterrows():
+        bc = str(row.get("barcode", "")).strip()
+        if not bc or bc == "nan":
+            continue
+        result = await db.execute(
+            select(Nomenclature).where(
+                Nomenclature.project_id == project_id,
+                Nomenclature.barcode == bc,
+            )
+        )
+        nom = result.scalar_one_or_none()
+        if nom:
+            nom.brand = str(row.get("brand", "") or "").strip() or None
+            nom.subject = str(row.get("subject", "") or "").strip() or None
+            nom.article_seller = str(row.get("article_seller", "") or "").strip() or None
+            try:
+                nom.article_wb = int(row.get("article_wb")) if row.get("article_wb") else None
+            except Exception:
+                nom.article_wb = None
+            try:
+                nom.volume_l = Decimal(str(row.get("volume_l", 0) or 0))
+            except Exception:
+                nom.volume_l = None
+            nom.updated_at = datetime.utcnow()
+            updated += 1
+        else:
+            try:
+                vol = Decimal(str(row.get("volume_l", 0) or 0))
+            except Exception:
+                vol = None
+            try:
+                awb = int(row.get("article_wb")) if row.get("article_wb") else None
+            except Exception:
+                awb = None
+            nom = Nomenclature(
+                project_id=project_id,
+                barcode=bc,
+                brand=str(row.get("brand", "") or "").strip() or None,
+                subject=str(row.get("subject", "") or "").strip() or None,
+                article_seller=str(row.get("article_seller", "") or "").strip() or None,
+                article_wb=awb,
+                volume_l=vol,
+            )
+            db.add(nom)
+            inserted += 1
+
+    await db.commit()
+    return inserted, updated
+
+
+# ─── Duty Rules ───────────────────────────────────────────────────────────────
+
+async def get_duty_rules(db: AsyncSession, project_id: int):
+    result = await db.execute(
+        select(DutyRule)
+        .where(DutyRule.project_id == project_id)
+        .order_by(DutyRule.subject)
+    )
+    return result.scalars().all()
+
+
+async def upsert_duty_rule(db: AsyncSession, project_id: int, payload: dict):
+    subject = payload.get("subject", "").strip()
+    if not subject:
+        return None, "subject required"
+    result = await db.execute(
+        select(DutyRule).where(DutyRule.project_id == project_id, DutyRule.subject == subject)
+    )
+    rule = result.scalar_one_or_none()
+    if rule:
+        rule.basis = payload.get("basis", rule.basis)
+        rule.rate = Decimal(str(payload.get("rate", rule.rate)))
+        rule.util_collect_rub = Decimal(str(payload.get("util_collect_rub", rule.util_collect_rub)))
+        rule.note = payload.get("note", rule.note)
+    else:
+        rule = DutyRule(
+            project_id=project_id,
+            subject=subject,
+            basis=payload.get("basis", "INVOICE"),
+            rate=Decimal(str(payload.get("rate", 0))),
+            util_collect_rub=Decimal(str(payload.get("util_collect_rub", 0))),
+            note=payload.get("note"),
+        )
+        db.add(rule)
+    await db.commit()
+    return True, None
+
+
+async def delete_duty_rule(db: AsyncSession, project_id: int, rule_id: int):
+    result = await db.execute(
+        select(DutyRule).where(DutyRule.id == rule_id, DutyRule.project_id == project_id)
+    )
+    rule = result.scalar_one_or_none()
+    if not rule:
+        return None
+    await db.delete(rule)
+    await db.commit()
+    return True
+
+
+# ─── Cost Orders ──────────────────────────────────────────────────────────────
+
+async def get_cost_orders(db: AsyncSession, project_id: int):
+    """Get cost orders with aggregated item totals."""
+    result = await db.execute(
+        select(CostOrder)
+        .where(CostOrder.project_id == project_id)
+        .order_by(CostOrder.created_at.desc())
+    )
+    orders = result.scalars().all()
+    out = []
+    for o in orders:
+        items_result = await db.execute(
+            select(CostOrderItem).where(CostOrderItem.order_no == o.order_no)
+        )
+        all_items = items_result.scalars().all()
+        items = [i for i in all_items if i.barcode and str(i.barcode).strip() not in ("0", "")]
+
+        total_qty = sum(i.qty for i in items)
+        total = sum(safe_float(i.total_rub) * i.qty for i in items)
+        total_cost = sum(safe_float(i.cost_rub) * i.qty for i in items)
+        total_delivery = sum(safe_float(i.delivery_rub) * i.qty for i in items)
+        total_duty = sum(safe_float(i.duty_rub) * i.qty for i in items)
+        total_vat = sum(safe_float(i.vat_rub) * i.qty for i in items)
+        total_util = sum(safe_float(i.util_rub) * i.qty for i in items)
+        unrecognized = sum(1 for i in items if i.unrecognized)
+
+        try:
+            pp_result = await db.execute(
+                select(PlannedPayment).where(PlannedPayment.order_no == int(o.order_no))
+            )
+            has_plan = len(pp_result.scalars().all()) > 0
+        except (ValueError, TypeError):
+            has_plan = False
+
+        out.append({
+            "id": o.id, "order_no": o.order_no, "invoice_no": o.invoice_no,
+            "ship_date": o.ship_date.isoformat() if o.ship_date else None,
+            "actual_arrival_date": o.actual_arrival_date.isoformat() if o.actual_arrival_date else None,
+            "delivery_cost_cny": float(o.delivery_cost_cny),
+            "delivery_cost_usd": float(o.delivery_cost_usd),
+            "rate_cny": float(o.rate_cny), "rate_eur": float(o.rate_eur),
+            "rate_usd": float(o.rate_usd), "note": o.note,
+            "dt_number": o.dt_number,
+            "transport_type": o.transport_type or "AUTO",
+            "total_qty": total_qty,
+            "total_rub": total, "total_cost_rub": total_cost,
+            "total_delivery_rub": total_delivery, "total_duty_rub": total_duty,
+            "total_vat_rub": total_vat, "total_util_rub": total_util,
+            "items_count": len(items),
+            "unrecognized_count": unrecognized,
+            "has_plan": has_plan,
+        })
+    return out
+
+
+async def create_cost_order(db: AsyncSession, project_id: int, payload: dict):
+    order_no = payload.get("order_no", "").strip()
+    if not order_no:
+        return None, "order_no required"
+
+    result = await db.execute(
+        select(CostOrder).where(CostOrder.order_no == order_no, CostOrder.project_id == project_id)
+    )
+    if result.scalar_one_or_none():
+        return None, f"Заказ {order_no} уже существует"
+
+    ship_date = None
+    if payload.get("ship_date"):
+        try:
+            ship_date = date.fromisoformat(payload["ship_date"])
+        except Exception:
+            pass
+
+    dt_number = (payload.get("dt_number") or "").strip() or None
+    order = CostOrder(
+        project_id=project_id,
+        order_no=order_no,
+        invoice_no=payload.get("invoice_no"),
+        ship_date=ship_date,
+        transport_type=payload.get("transport_type", "AUTO"),
+        delivery_cost_cny=Decimal(str(payload.get("delivery_cost_cny", 0))),
+        delivery_cost_usd=Decimal(str(payload.get("delivery_cost_usd", 0))),
+        rate_cny=Decimal(str(payload.get("rate_cny", 1))),
+        rate_eur=Decimal(str(payload.get("rate_eur", 1))),
+        rate_usd=Decimal(str(payload.get("rate_usd", 1))),
+        note=payload.get("note"),
+        dt_number=dt_number,
+    )
+    db.add(order)
+    await db.commit()
+
+    if dt_number:
+        await auto_link_customs_dt(order_no, dt_number, db)
+
+    return {"ok": True, "order_no": order_no}, None
+
+
+async def update_cost_order(db: AsyncSession, project_id: int, order_no: str, payload: dict):
+    """Update cost order fields, handle order_no rename with FK cascade."""
+    result = await db.execute(
+        select(CostOrder).where(CostOrder.order_no == order_no, CostOrder.project_id == project_id)
+    )
+    order = result.scalar_one_or_none()
+    if not order:
+        return None, "Not found"
+
+    if "invoice_no" in payload:
+        order.invoice_no = payload["invoice_no"] or None
+    if "ship_date" in payload:
+        try:
+            order.ship_date = date.fromisoformat(payload["ship_date"]) if payload["ship_date"] else None
+        except Exception:
+            pass
+    if "actual_arrival_date" in payload:
+        try:
+            order.actual_arrival_date = date.fromisoformat(payload["actual_arrival_date"]) if payload["actual_arrival_date"] else None
+        except Exception:
+            pass
+    if "transport_type" in payload:
+        order.transport_type = payload["transport_type"]
+    if "delivery_cost_cny" in payload:
+        order.delivery_cost_cny = Decimal(str(payload["delivery_cost_cny"]))
+    if "delivery_cost_usd" in payload:
+        order.delivery_cost_usd = Decimal(str(payload["delivery_cost_usd"]))
+    if "rate_cny" in payload:
+        order.rate_cny = Decimal(str(payload["rate_cny"]))
+    if "rate_eur" in payload:
+        order.rate_eur = Decimal(str(payload["rate_eur"]))
+    if "rate_usd" in payload:
+        order.rate_usd = Decimal(str(payload["rate_usd"]))
+    if "note" in payload:
+        order.note = payload["note"] or None
+    if "dt_number" in payload:
+        order.dt_number = (payload["dt_number"] or "").strip() or None
+
+    new_order_no = None
+    if "order_no" in payload and payload["order_no"] and str(payload["order_no"]).strip() != order_no:
+        new_order_no = str(payload["order_no"]).strip()
+        dup = await db.execute(select(CostOrder).where(CostOrder.order_no == new_order_no))
+        if dup.scalar_one_or_none():
+            return None, f"Заказ с номером {new_order_no} уже существует"
+        from sqlalchemy import text as sql_text
+        await db.execute(sql_text("SET CONSTRAINTS cost_order_items_order_no_fkey DEFERRED"))
+        order.order_no = new_order_no
+        await db.flush()
+        await db.execute(sql_text(
+            "UPDATE cost_order_items SET order_no = :new WHERE order_no = :old"
+        ), {"new": new_order_no, "old": order_no})
+
+    await db.commit()
+
+    final_order_no = new_order_no or order_no
+    if order.dt_number:
+        await auto_link_customs_dt(final_order_no, order.dt_number, db)
+
+    return {"ok": True, "order_no": final_order_no}, None
+
+
+async def delete_cost_order(db: AsyncSession, project_id: int, order_no: str):
+    result = await db.execute(
+        select(CostOrder).where(CostOrder.order_no == order_no, CostOrder.project_id == project_id)
+    )
+    order = result.scalar_one_or_none()
+    if not order:
+        return None
+    await db.delete(order)
+    await db.commit()
+    return True
+
+
+# ─── Cost Order Items ─────────────────────────────────────────────────────────
+
+async def get_cost_order_items(db: AsyncSession, project_id: int, order_no: str):
+    """Get items with nomenclature lookup for article_wb."""
+    result = await db.execute(
+        select(CostOrderItem).where(CostOrderItem.order_no == order_no)
+        .order_by(CostOrderItem.subject, CostOrderItem.article_seller)
+    )
+    items = result.scalars().all()
+
+    barcodes = [i.barcode for i in items if i.barcode]
+    nom_map = {}
+    if barcodes:
+        nom_result = await db.execute(
+            select(Nomenclature).where(
+                Nomenclature.project_id == project_id,
+                Nomenclature.barcode.in_(barcodes),
+            )
+        )
+        nom_map = {n.barcode: n.article_wb for n in nom_result.scalars().all()}
+
+    return items, nom_map
+
+
+async def upload_order_items(db: AsyncSession, project_id: int, order_no: str,
+                             data: bytes, tax_rate: Optional[Decimal] = None):
+    """Upload Excel items, calculate cost/duty/delivery per unit. Returns (inserted, unrecognized)."""
+    # Check order exists
+    result = await db.execute(
+        select(CostOrder).where(CostOrder.order_no == order_no, CostOrder.project_id == project_id)
+    )
+    order = result.scalar_one_or_none()
+    if not order:
+        return None, None, f"Заказ {order_no} не найден"
+
+    try:
+        df = detect_and_normalize_excel(data)
+    except ValueError as e:
+        return None, None, str(e)
+
+    # Delete existing items
+    await db.execute(delete(CostOrderItem).where(CostOrderItem.order_no == order_no))
+
+    # Load nomenclature and duty rules
+    nom_result = await db.execute(
+        select(Nomenclature).where(Nomenclature.project_id == project_id)
+    )
+    nom_map = {n.barcode: n for n in nom_result.scalars().all()}
+
+    duty_result = await db.execute(
+        select(DutyRule).where(DutyRule.project_id == project_id)
+    )
+    duty_map = {r.subject: r for r in duty_result.scalars().all()}
+
+    # Calculate totals for delivery split
+    if "volume_m3" in df.columns and "qty" in df.columns:
+        vol_series = pd.to_numeric(df["volume_m3"], errors="coerce").fillna(0)
+        qty_series = pd.to_numeric(df["qty"], errors="coerce").fillna(1).astype(int)
+        total_volume = float((vol_series * qty_series).sum())
+    else:
+        total_volume = 0.0
+    total_qty_all = int(pd.to_numeric(df.get("qty", 1), errors="coerce").fillna(1).sum()) if "qty" in df.columns else len(df)
+    delivery_rub_total = (
+        float(order.delivery_cost_cny) * float(order.rate_cny) +
+        float(order.delivery_cost_usd) * float(order.rate_usd)
+    )
+
+    inserted = 0
+    unrecognized = 0
+    vat_rate = Decimal(str(tax_rate / 100)) if tax_rate else DEFAULT_VAT_RATE
+
+    for _, row in df.iterrows():
+        bc = str(row.get("barcode", "")).strip()
+        if not bc or bc == "nan" or bc == "0":
+            continue
+
+        qty = int(row.get("qty", 1) or 1)
+        price_cny = safe_decimal(row.get("price_cny", 0))
+        weight_kg = safe_decimal(row.get("weight_kg", 0))
+        area_m2 = safe_decimal(row.get("area_m2", 0))
+        volume_m3 = safe_decimal(row.get("volume_m3", 0))
+
+        nom = nom_map.get(bc)
+        subject = nom.subject if nom else None
+        article_seller = nom.article_seller if nom else None
+        is_unrecognized = nom is None
+        if is_unrecognized:
+            unrecognized += 1
+
+        cost_rub_unit = price_cny * order.rate_cny
+
+        if total_volume > 0 and float(volume_m3) > 0:
+            delivery_rub_unit = Decimal(str(delivery_rub_total * float(volume_m3) / total_volume))
+        elif total_qty_all > 0:
+            delivery_rub_unit = Decimal(str(delivery_rub_total / total_qty_all))
+        else:
+            delivery_rub_unit = Decimal(0)
+
+        duty_rub_unit = Decimal(0)
+        util_rub_unit = Decimal(0)
+        if subject and subject in duty_map:
+            rule = duty_map[subject]
+            util_rub_unit = rule.util_collect_rub
+            if rule.basis == DutyBasis.WEIGHT:
+                duty_rub_unit = weight_kg * Decimal(str(rule.rate)) * order.rate_eur
+            elif rule.basis == DutyBasis.AREA:
+                duty_rub_unit = area_m2 * Decimal(str(rule.rate)) * order.rate_eur
+            elif rule.basis == DutyBasis.INVOICE:
+                base = cost_rub_unit + delivery_rub_unit / 2
+                duty_rub_unit = base * Decimal(str(rule.rate)) / 100
+
+        vat_base = cost_rub_unit + duty_rub_unit + delivery_rub_unit / 2
+        vat_rub_unit = vat_base * vat_rate
+
+        total_rub_unit = cost_rub_unit + delivery_rub_unit + duty_rub_unit + vat_rub_unit + util_rub_unit
+        total_cny_unit = total_rub_unit / order.rate_cny if order.rate_cny > 0 else Decimal(0)
+
+        item = CostOrderItem(
+            order_no=order_no,
+            barcode=bc,
+            subject=subject,
+            article_seller=article_seller,
+            qty=qty,
+            price_cny=price_cny,
+            weight_kg=weight_kg,
+            area_m2=area_m2,
+            volume_m3=volume_m3,
+            cost_rub=cost_rub_unit,
+            delivery_rub=delivery_rub_unit,
+            duty_rub=duty_rub_unit,
+            vat_rub=vat_rub_unit,
+            util_rub=util_rub_unit,
+            total_rub=total_rub_unit,
+            total_cny=total_cny_unit,
+            unrecognized=is_unrecognized,
+        )
+        db.add(item)
+        inserted += 1
+
+    await db.commit()
+    return inserted, unrecognized, None
+
+
+
+
+
 
 def normalize_divandek(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize дивандек format Excel to standard columns."""

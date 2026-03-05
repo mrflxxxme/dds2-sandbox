@@ -1,22 +1,16 @@
 """
 Router: /planning — orders, payments, incomes, lead_time, customs, cashflow.
-Thin HTTP layer — complex business logic is in services/planning_service.py.
+Thin HTTP layer — all business logic is in services/planning_service.py.
 """
 
-from datetime import date
 from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
-from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
-from backend.models import (
-    Order, LeadTime, PlannedPayment, PlannedIncome,
-    CustomsTopup, CustomsAlloc, Transaction, PaymentFactLink, CustomsDT,
-    WbPayout, Project,
-)
+from backend.models import Project
 from backend.schemas import (
     OrderSchema, LeadTimeSchema, PlannedPaymentSchema,
     PlannedIncomeSchema, CustomsTopupSchema, CustomsAllocSchema,
@@ -35,11 +29,7 @@ async def get_orders(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(Order).where(Order.project_id == project.id)
-        .order_by(Order.planned_ship_date.desc().nullslast())
-    )
-    return result.scalars().all()
+    return await planning_service.get_orders(db, project.id)
 
 
 @router.post("/orders", response_model=OrderSchema)
@@ -48,21 +38,8 @@ async def upsert_order(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    if payload.id:
-        result = await db.execute(select(Order).where(Order.id == payload.id, Order.project_id == project.id))
-        obj = result.scalar_one_or_none()
-        if obj:
-            for k, v in payload.model_dump(exclude={"id"}).items():
-                setattr(obj, k, v)
-        else:
-            obj = Order(**payload.model_dump(exclude={"id"}), project_id=project.id)
-            db.add(obj)
-    else:
-        obj = Order(**payload.model_dump(exclude={"id"}), project_id=project.id)
-        db.add(obj)
-    await db.commit()
-    await db.refresh(obj)
-    return obj
+    data = payload.model_dump(exclude={"id"})
+    return await planning_service.upsert_order(db, project.id, data, payload.id)
 
 
 @router.delete("/orders/{order_id}")
@@ -71,12 +48,9 @@ async def delete_order(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Order).where(Order.id == order_id, Order.project_id == project.id))
-    obj = result.scalar_one_or_none()
-    if not obj:
+    result = await planning_service.delete_order(db, project.id, order_id)
+    if not result:
         raise HTTPException(404, "Not found")
-    await db.delete(obj)
-    await db.commit()
     return {"ok": True}
 
 
@@ -87,11 +61,7 @@ async def get_lead_times(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(LeadTime).where(LeadTime.project_id == project.id)
-        .order_by(LeadTime.direction)
-    )
-    return result.scalars().all()
+    return await planning_service.get_lead_times(db, project.id)
 
 
 @router.post("/lead_times", response_model=LeadTimeSchema)
@@ -100,21 +70,9 @@ async def upsert_lead_time(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(LeadTime).where(
-            LeadTime.project_id == project.id,
-            LeadTime.direction == payload.direction,
-        )
+    return await planning_service.upsert_lead_time(
+        db, project.id, payload.direction, payload.days
     )
-    obj = result.scalar_one_or_none()
-    if obj:
-        obj.days = payload.days
-    else:
-        obj = LeadTime(project_id=project.id, **payload.model_dump(exclude={"id"}))
-        db.add(obj)
-    await db.commit()
-    await db.refresh(obj)
-    return obj
 
 
 # ─── Planned Payments ─────────────────────────────────────────────────────────
@@ -125,12 +83,7 @@ async def get_payments(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    q = select(PlannedPayment).where(PlannedPayment.project_id == project.id)
-    if order_no:
-        q = q.where(PlannedPayment.order_no == order_no)
-    q = q.order_by(PlannedPayment.pay_date)
-    result = await db.execute(q)
-    return result.scalars().all()
+    return await planning_service.get_payments(db, project.id, order_no)
 
 
 @router.post("/payments", response_model=PlannedPaymentSchema)
@@ -139,23 +92,8 @@ async def upsert_payment(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    if payload.id:
-        result = await db.execute(
-            select(PlannedPayment).where(PlannedPayment.id == payload.id, PlannedPayment.project_id == project.id)
-        )
-        obj = result.scalar_one_or_none()
-        if obj:
-            for k, v in payload.model_dump(exclude={"id"}).items():
-                setattr(obj, k, v)
-        else:
-            obj = PlannedPayment(**payload.model_dump(exclude={"id"}), project_id=project.id)
-            db.add(obj)
-    else:
-        obj = PlannedPayment(**payload.model_dump(exclude={"id"}), project_id=project.id)
-        db.add(obj)
-    await db.commit()
-    await db.refresh(obj)
-    return obj
+    data = payload.model_dump(exclude={"id"})
+    return await planning_service.upsert_payment(db, project.id, data, payload.id)
 
 
 @router.delete("/payments/{payment_id}")
@@ -164,14 +102,9 @@ async def delete_payment(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(PlannedPayment).where(PlannedPayment.id == payment_id, PlannedPayment.project_id == project.id)
-    )
-    obj = result.scalar_one_or_none()
-    if not obj:
+    result = await planning_service.delete_payment(db, project.id, payment_id)
+    if not result:
         raise HTTPException(404, "Not found")
-    await db.delete(obj)
-    await db.commit()
     return {"ok": True}
 
 
@@ -181,14 +114,9 @@ async def mark_paid(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(PlannedPayment).where(PlannedPayment.id == payment_id, PlannedPayment.project_id == project.id)
-    )
-    obj = result.scalar_one_or_none()
-    if not obj:
+    result = await planning_service.mark_paid(db, project.id, payment_id)
+    if not result:
         raise HTTPException(404, "Not found")
-    obj.is_paid = True
-    await db.commit()
     return {"ok": True}
 
 
@@ -199,11 +127,7 @@ async def get_incomes(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(PlannedIncome).where(PlannedIncome.project_id == project.id)
-        .order_by(PlannedIncome.date)
-    )
-    return result.scalars().all()
+    return await planning_service.get_incomes(db, project.id)
 
 
 @router.post("/incomes", response_model=PlannedIncomeSchema)
@@ -212,24 +136,8 @@ async def upsert_income(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    if payload.id:
-        result = await db.execute(
-            select(PlannedIncome).where(PlannedIncome.id == payload.id, PlannedIncome.project_id == project.id)
-        )
-        obj = result.scalar_one_or_none()
-        if obj:
-            obj.date = payload.date
-            obj.amount_rub = payload.amount_rub
-            obj.source = payload.source
-        else:
-            obj = PlannedIncome(**payload.model_dump(exclude={"id"}), project_id=project.id)
-            db.add(obj)
-    else:
-        obj = PlannedIncome(**payload.model_dump(exclude={"id"}), project_id=project.id)
-        db.add(obj)
-    await db.commit()
-    await db.refresh(obj)
-    return obj
+    data = payload.model_dump(exclude={"id"})
+    return await planning_service.upsert_income(db, project.id, data, payload.id)
 
 
 @router.delete("/incomes/{income_id}")
@@ -238,14 +146,9 @@ async def delete_income(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(PlannedIncome).where(PlannedIncome.id == income_id, PlannedIncome.project_id == project.id)
-    )
-    obj = result.scalar_one_or_none()
-    if not obj:
+    result = await planning_service.delete_income(db, project.id, income_id)
+    if not result:
         raise HTTPException(404, "Not found")
-    await db.delete(obj)
-    await db.commit()
     return {"ok": True}
 
 
@@ -256,21 +159,7 @@ async def get_customs_topup(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(CustomsTopup).where(CustomsTopup.project_id == project.id)
-        .order_by(CustomsTopup.date.desc())
-    )
-    topups = result.scalars().all()
-
-    alloc_result = await db.execute(
-        select(
-            CustomsAlloc.topup_txn_id,
-            func.sum(CustomsAlloc.alloc_amount).label("allocated"),
-        ).where(CustomsAlloc.project_id == project.id)
-        .group_by(CustomsAlloc.topup_txn_id)
-    )
-    alloc_map = {row.topup_txn_id: Decimal(str(row.allocated or 0)) for row in alloc_result}
-
+    topups, alloc_map = await planning_service.get_customs_topup(db, project.id)
     out = []
     for t in topups:
         allocated = alloc_map.get(t.topup_txn_id, Decimal("0"))
@@ -288,12 +177,7 @@ async def get_customs_alloc(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    q = select(CustomsAlloc).where(CustomsAlloc.project_id == project.id)
-    if topup_txn_id:
-        q = q.where(CustomsAlloc.topup_txn_id == topup_txn_id)
-    q = q.order_by(CustomsAlloc.pay_date)
-    result = await db.execute(q)
-    return result.scalars().all()
+    return await planning_service.get_customs_alloc(db, project.id, topup_txn_id)
 
 
 @router.post("/customs/alloc", response_model=CustomsAllocSchema)
@@ -302,11 +186,9 @@ async def create_alloc(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    obj = CustomsAlloc(project_id=project.id, **payload.model_dump(exclude={"id"}))
-    db.add(obj)
-    await db.commit()
-    await db.refresh(obj)
-    return obj
+    return await planning_service.create_alloc(
+        db, project.id, payload.model_dump(exclude={"id"})
+    )
 
 
 @router.delete("/customs/alloc/{alloc_id}")
@@ -315,14 +197,9 @@ async def delete_alloc(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(CustomsAlloc).where(CustomsAlloc.id == alloc_id, CustomsAlloc.project_id == project.id)
-    )
-    obj = result.scalar_one_or_none()
-    if not obj:
+    result = await planning_service.delete_alloc(db, project.id, alloc_id)
+    if not result:
         raise HTTPException(404, "Not found")
-    await db.delete(obj)
-    await db.commit()
     return {"ok": True}
 
 
@@ -389,10 +266,7 @@ async def sync_plan_payments_endpoint(db: AsyncSession = Depends(get_db)):
 @router.get("/fact_links/{payment_id}")
 async def get_fact_links(payment_id: int, db: AsyncSession = Depends(get_db)):
     """Get manual fact links for a planned payment."""
-    result = await db.execute(
-        select(PaymentFactLink).where(PaymentFactLink.payment_id == payment_id)
-    )
-    links = result.scalars().all()
+    links = await planning_service.get_fact_links(db, payment_id)
     return [
         {"id": l.id, "payment_id": l.payment_id, "txn_id": l.txn_id,
          "amount_rub": float(l.amount_rub), "note": l.note}
@@ -410,38 +284,19 @@ async def create_fact_link(payload: dict, db: AsyncSession = Depends(get_db)):
     if not payment_id or not txn_id or amount_rub is None:
         raise HTTPException(400, "payment_id, txn_id, amount_rub required")
 
-    pp = await db.execute(select(PlannedPayment).where(PlannedPayment.id == payment_id))
-    if not pp.scalar_one_or_none():
-        raise HTTPException(404, "Payment not found")
-
-    txn = await db.execute(select(Transaction).where(Transaction.txn_id == txn_id))
-    if not txn.scalar_one_or_none():
-        raise HTTPException(404, "Transaction not found")
-
-    link = PaymentFactLink(
-        payment_id=payment_id,
-        txn_id=txn_id,
-        amount_rub=Decimal(str(amount_rub)),
-        note=payload.get("note"),
+    link, error = await planning_service.create_fact_link(
+        db, payment_id, txn_id, amount_rub, payload.get("note")
     )
-    db.add(link)
-    await db.commit()
-
-    await planning_service.update_payment_paid_amount(payment_id, db)
+    if error:
+        raise HTTPException(404, error)
     return {"ok": True, "id": link.id}
 
 
 @router.delete("/fact_links/{link_id}")
 async def delete_fact_link(link_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(PaymentFactLink).where(PaymentFactLink.id == link_id))
-    link = result.scalar_one_or_none()
-    if not link:
+    result = await planning_service.delete_fact_link(db, link_id)
+    if not result:
         raise HTTPException(404, "Not found")
-    payment_id = link.payment_id
-    await db.delete(link)
-    await db.commit()
-
-    await planning_service.update_payment_paid_amount(payment_id, db)
     return {"ok": True}
 
 
@@ -453,23 +308,7 @@ async def get_candidate_transactions(
     db: AsyncSession = Depends(get_db),
 ):
     """Get candidate transactions for manual linking."""
-    from backend.models import Account
-
-    conditions = [Transaction.project_id == project.id, Transaction.expense > 0]
-
-    if account:
-        conditions.append(Transaction.account == account)
-    else:
-        tag_map = {"ЗАКАЗ": "Заказ", "ДОСТАВКА": "Логистика"}
-        purpose_tag = tag_map.get(direction)
-        if purpose_tag:
-            conditions.append(Transaction.purpose_tag == purpose_tag)
-
-    result = await db.execute(
-        select(Transaction).where(*conditions)
-        .order_by(Transaction.date.desc()).limit(100)
-    )
-    txns = result.scalars().all()
+    txns = await planning_service.get_candidate_transactions(db, project.id, direction, account)
     return [
         {
             "txn_id": t.txn_id,
@@ -489,9 +328,7 @@ async def get_candidate_transactions(
 @router.get("/accounts_list")
 async def get_accounts_list(db: AsyncSession = Depends(get_db)):
     """Get all accounts for filtering."""
-    from backend.models import Account
-    result = await db.execute(select(Account))
-    accs = result.scalars().all()
+    accs = await planning_service.get_accounts_list(db)
     return [
         {"id": a.id, "account": a.account, "bank": a.bank, "currency": a.currency}
         for a in accs
@@ -513,33 +350,10 @@ async def upload_fts_report(
     validate_file_content(content, file.filename or "report.pdf")
 
     parsed = planning_service.parse_fts_pdf(content)
-
     if not parsed:
         raise HTTPException(400, "Не удалось найти ДТ строки в PDF")
 
-    created = 0
-    skipped = 0
-    for item in parsed:
-        existing = await db.execute(
-            select(CustomsDT).where(
-                CustomsDT.project_id == project.id,
-                CustomsDT.dt_number == item["dt_number"],
-            )
-        )
-        if existing.scalar_one_or_none():
-            skipped += 1
-            continue
-
-        dt = CustomsDT(
-            project_id=project.id,
-            dt_number=item["dt_number"],
-            dt_date=date.fromisoformat(item["dt_date"]),
-            amount_rub=Decimal(str(item["amount_rub"])),
-        )
-        db.add(dt)
-        created += 1
-
-    await db.commit()
+    created, skipped = await planning_service.upload_fts_and_create_dts(db, project.id, parsed)
     return {"ok": True, "created": created, "skipped": skipped, "parsed": parsed}
 
 
@@ -549,11 +363,7 @@ async def get_customs_dt_list(
     db: AsyncSession = Depends(get_db),
 ):
     """List all parsed DT declarations."""
-    result = await db.execute(
-        select(CustomsDT).where(CustomsDT.project_id == project.id)
-        .order_by(CustomsDT.dt_date.desc())
-    )
-    dts = result.scalars().all()
+    dts = await planning_service.get_customs_dt_list(db, project.id)
     return [
         {
             "id": d.id, "dt_number": d.dt_number,
@@ -573,19 +383,9 @@ async def update_customs_dt(
     db: AsyncSession = Depends(get_db),
 ):
     """Assign order_no to a DT declaration."""
-    result = await db.execute(
-        select(CustomsDT).where(CustomsDT.id == dt_id, CustomsDT.project_id == project.id)
-    )
-    dt = result.scalar_one_or_none()
-    if not dt:
+    result = await planning_service.update_customs_dt(db, project.id, dt_id, payload)
+    if not result:
         raise HTTPException(404, "Not found")
-
-    if "order_no" in payload:
-        dt.order_no = payload["order_no"] if payload["order_no"] else None
-    if "note" in payload:
-        dt.note = payload["note"]
-
-    await db.commit()
     return {"ok": True}
 
 
@@ -595,14 +395,9 @@ async def delete_customs_dt(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(CustomsDT).where(CustomsDT.id == dt_id, CustomsDT.project_id == project.id)
-    )
-    dt = result.scalar_one_or_none()
-    if not dt:
+    result = await planning_service.delete_customs_dt(db, project.id, dt_id)
+    if not result:
         raise HTTPException(404, "Not found")
-    await db.delete(dt)
-    await db.commit()
     return {"ok": True}
 
 
@@ -616,7 +411,6 @@ async def upload_wb_payouts(
 ):
     """Upload WB payout Excel from seller cabinet. Upserts by request_id."""
     from backend.etl.parsers import parse_wb_payout_cabinet
-    from datetime import datetime
 
     data = await file.read()
 
@@ -624,34 +418,10 @@ async def upload_wb_payouts(
     validate_file_content(data, file.filename or "payouts.xlsx")
 
     parsed = parse_wb_payout_cabinet(data)
-
     if not parsed:
         raise HTTPException(400, "Не удалось распознать записи в файле")
 
-    created, updated, skipped = 0, 0, 0
-    for item in parsed:
-        result = await db.execute(
-            select(WbPayout).where(
-                WbPayout.project_id == project.id,
-                WbPayout.request_id == item["request_id"],
-            )
-        )
-        obj = result.scalar_one_or_none()
-        if obj:
-            if obj.status != "RECEIVED":
-                obj.wb_status_raw = item["wb_status_raw"]
-                obj.status = item["status"]
-                obj.bank_comment = item["bank_comment"]
-                updated += 1
-            else:
-                skipped += 1
-        else:
-            obj = WbPayout(project_id=project.id, **item)
-            db.add(obj)
-            created += 1
-
-    await db.commit()
-
+    created, updated, skipped = await planning_service.upload_wb_payouts(db, project.id, parsed)
     await planning_service.reconcile_wb_payouts(db)
 
     return {"ok": True, "created": created, "updated": updated, "skipped": skipped,
@@ -665,22 +435,15 @@ async def get_wb_payouts(
     db: AsyncSession = Depends(get_db),
 ):
     """List WB payouts, optionally filtered by status."""
-    q = select(WbPayout).where(WbPayout.project_id == project.id).order_by(WbPayout.created_at.desc())
-    if status:
-        q = q.where(WbPayout.status == status)
-    result = await db.execute(q)
-    payouts = result.scalars().all()
+    payouts = await planning_service.get_wb_payouts(db, project.id, status)
     return [WbPayoutSchema.model_validate(p).model_dump() for p in payouts]
 
 
 @router.delete("/wb_payouts/{payout_id}")
 async def delete_wb_payout(payout_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(WbPayout).where(WbPayout.id == payout_id))
-    obj = result.scalar_one_or_none()
-    if not obj:
+    result = await planning_service.delete_wb_payout(db, payout_id)
+    if not result:
         raise HTTPException(404, "Not found")
-    await db.delete(obj)
-    await db.commit()
     return {"ok": True}
 
 
@@ -695,20 +458,9 @@ async def manual_reconcile_wb(
     if not txn_id:
         raise HTTPException(400, "txn_id required")
 
-    result = await db.execute(select(WbPayout).where(WbPayout.id == payout_id))
-    payout = result.scalar_one_or_none()
-    if not payout:
-        raise HTTPException(404, "Payout not found")
-
-    txn = await db.execute(select(Transaction).where(Transaction.txn_id == txn_id))
-    if not txn.scalar_one_or_none():
-        raise HTTPException(404, "Transaction not found")
-
-    from datetime import datetime as dt_mod
-    payout.matched_txn_id = txn_id
-    payout.matched_at = dt_mod.utcnow()
-    payout.status = "RECEIVED"
-    await db.commit()
+    result, error = await planning_service.manual_reconcile_wb(db, payout_id, txn_id)
+    if error:
+        raise HTTPException(404, error)
     return {"ok": True}
 
 

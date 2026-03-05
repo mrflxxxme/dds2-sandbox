@@ -18,11 +18,13 @@ COPY --from=builder /install /usr/local
 COPY backend/ ./backend/
 COPY migrations/ ./migrations/
 COPY alembic.ini .
+COPY entrypoint.sh .
 
-RUN chown -R app:app /app
+RUN chmod +x entrypoint.sh && chown -R app:app /app
 USER app
 
 HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
+ENTRYPOINT ["./entrypoint.sh"]
 CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

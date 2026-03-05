@@ -1,8 +1,14 @@
 """
-Planning service — business logic for cashflow, order summary,
-plan-vs-fact, WB payout reconciliation, FTS parsing, WB forecast.
+Planning service — business logic for planning module.
 
-Extracted from routers/planning.py to enable reuse and testing.
+Handles:
+- CRUD: orders, lead times, payments, incomes, customs topup/alloc
+- Fact links & candidate transactions
+- Customs DT (FTS report parsing)
+- WB payouts (upload, list, reconcile)
+- Cashflow calculation, order summary, WB forecast
+
+Extracted from routers/planning.py to keep router thin (HTTP only).
 """
 
 import logging
@@ -17,9 +23,439 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.models import (
     PlannedPayment, PlannedIncome, WbPayout, Order,
     Transaction, CustomsAlloc, PaymentFactLink,
+    LeadTime, CustomsTopup, CustomsDT,
 )
 
 logger = logging.getLogger("dds.planning")
+
+
+# ─── Orders CRUD ─────────────────────────────────────────────────────────────
+
+async def get_orders(db: AsyncSession, project_id: int):
+    result = await db.execute(
+        select(Order).where(Order.project_id == project_id)
+        .order_by(Order.planned_ship_date.desc().nullslast())
+    )
+    return result.scalars().all()
+
+
+async def upsert_order(db: AsyncSession, project_id: int, data: dict, obj_id: int | None):
+    if obj_id:
+        result = await db.execute(
+            select(Order).where(Order.id == obj_id, Order.project_id == project_id)
+        )
+        obj = result.scalar_one_or_none()
+        if obj:
+            for k, v in data.items():
+                setattr(obj, k, v)
+        else:
+            obj = Order(**data, project_id=project_id)
+            db.add(obj)
+    else:
+        obj = Order(**data, project_id=project_id)
+        db.add(obj)
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
+async def delete_order(db: AsyncSession, project_id: int, order_id: int):
+    result = await db.execute(
+        select(Order).where(Order.id == order_id, Order.project_id == project_id)
+    )
+    obj = result.scalar_one_or_none()
+    if not obj:
+        return None
+    await db.delete(obj)
+    await db.commit()
+    return True
+
+
+# ─── Lead Times CRUD ─────────────────────────────────────────────────────────
+
+async def get_lead_times(db: AsyncSession, project_id: int):
+    result = await db.execute(
+        select(LeadTime).where(LeadTime.project_id == project_id)
+        .order_by(LeadTime.direction)
+    )
+    return result.scalars().all()
+
+
+async def upsert_lead_time(db: AsyncSession, project_id: int, direction: str, days: int):
+    result = await db.execute(
+        select(LeadTime).where(
+            LeadTime.project_id == project_id,
+            LeadTime.direction == direction,
+        )
+    )
+    obj = result.scalar_one_or_none()
+    if obj:
+        obj.days = days
+    else:
+        obj = LeadTime(project_id=project_id, direction=direction, days=days)
+        db.add(obj)
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
+# ─── Payments CRUD ───────────────────────────────────────────────────────────
+
+async def get_payments(db: AsyncSession, project_id: int, order_no: int | None = None):
+    q = select(PlannedPayment).where(PlannedPayment.project_id == project_id)
+    if order_no:
+        q = q.where(PlannedPayment.order_no == order_no)
+    q = q.order_by(PlannedPayment.pay_date)
+    result = await db.execute(q)
+    return result.scalars().all()
+
+
+async def upsert_payment(db: AsyncSession, project_id: int, data: dict, obj_id: int | None):
+    if obj_id:
+        result = await db.execute(
+            select(PlannedPayment).where(
+                PlannedPayment.id == obj_id, PlannedPayment.project_id == project_id
+            )
+        )
+        obj = result.scalar_one_or_none()
+        if obj:
+            for k, v in data.items():
+                setattr(obj, k, v)
+        else:
+            obj = PlannedPayment(**data, project_id=project_id)
+            db.add(obj)
+    else:
+        obj = PlannedPayment(**data, project_id=project_id)
+        db.add(obj)
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
+async def delete_payment(db: AsyncSession, project_id: int, payment_id: int):
+    result = await db.execute(
+        select(PlannedPayment).where(
+            PlannedPayment.id == payment_id, PlannedPayment.project_id == project_id
+        )
+    )
+    obj = result.scalar_one_or_none()
+    if not obj:
+        return None
+    await db.delete(obj)
+    await db.commit()
+    return True
+
+
+async def mark_paid(db: AsyncSession, project_id: int, payment_id: int):
+    result = await db.execute(
+        select(PlannedPayment).where(
+            PlannedPayment.id == payment_id, PlannedPayment.project_id == project_id
+        )
+    )
+    obj = result.scalar_one_or_none()
+    if not obj:
+        return None
+    obj.is_paid = True
+    await db.commit()
+    return True
+
+
+# ─── Incomes CRUD ────────────────────────────────────────────────────────────
+
+async def get_incomes(db: AsyncSession, project_id: int):
+    result = await db.execute(
+        select(PlannedIncome).where(PlannedIncome.project_id == project_id)
+        .order_by(PlannedIncome.date)
+    )
+    return result.scalars().all()
+
+
+async def upsert_income(db: AsyncSession, project_id: int, data: dict, obj_id: int | None):
+    if obj_id:
+        result = await db.execute(
+            select(PlannedIncome).where(
+                PlannedIncome.id == obj_id, PlannedIncome.project_id == project_id
+            )
+        )
+        obj = result.scalar_one_or_none()
+        if obj:
+            obj.date = data.get("date", obj.date)
+            obj.amount_rub = data.get("amount_rub", obj.amount_rub)
+            obj.source = data.get("source", obj.source)
+        else:
+            obj = PlannedIncome(**data, project_id=project_id)
+            db.add(obj)
+    else:
+        obj = PlannedIncome(**data, project_id=project_id)
+        db.add(obj)
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
+async def delete_income(db: AsyncSession, project_id: int, income_id: int):
+    result = await db.execute(
+        select(PlannedIncome).where(
+            PlannedIncome.id == income_id, PlannedIncome.project_id == project_id
+        )
+    )
+    obj = result.scalar_one_or_none()
+    if not obj:
+        return None
+    await db.delete(obj)
+    await db.commit()
+    return True
+
+
+# ─── Customs Topup / Alloc ───────────────────────────────────────────────────
+
+async def get_customs_topup(db: AsyncSession, project_id: int):
+    result = await db.execute(
+        select(CustomsTopup).where(CustomsTopup.project_id == project_id)
+        .order_by(CustomsTopup.date.desc())
+    )
+    topups = result.scalars().all()
+
+    alloc_result = await db.execute(
+        select(
+            CustomsAlloc.topup_txn_id,
+            func.sum(CustomsAlloc.alloc_amount).label("allocated"),
+        ).where(CustomsAlloc.project_id == project_id)
+        .group_by(CustomsAlloc.topup_txn_id)
+    )
+    alloc_map = {row.topup_txn_id: Decimal(str(row.allocated or 0)) for row in alloc_result}
+
+    return topups, alloc_map
+
+
+async def get_customs_alloc(db: AsyncSession, project_id: int, topup_txn_id: str | None = None):
+    q = select(CustomsAlloc).where(CustomsAlloc.project_id == project_id)
+    if topup_txn_id:
+        q = q.where(CustomsAlloc.topup_txn_id == topup_txn_id)
+    q = q.order_by(CustomsAlloc.pay_date)
+    result = await db.execute(q)
+    return result.scalars().all()
+
+
+async def create_alloc(db: AsyncSession, project_id: int, data: dict):
+    obj = CustomsAlloc(project_id=project_id, **data)
+    db.add(obj)
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
+async def delete_alloc(db: AsyncSession, project_id: int, alloc_id: int):
+    result = await db.execute(
+        select(CustomsAlloc).where(
+            CustomsAlloc.id == alloc_id, CustomsAlloc.project_id == project_id
+        )
+    )
+    obj = result.scalar_one_or_none()
+    if not obj:
+        return None
+    await db.delete(obj)
+    await db.commit()
+    return True
+
+
+# ─── Fact Links ──────────────────────────────────────────────────────────────
+
+async def get_fact_links(db: AsyncSession, payment_id: int):
+    result = await db.execute(
+        select(PaymentFactLink).where(PaymentFactLink.payment_id == payment_id)
+    )
+    return result.scalars().all()
+
+
+async def create_fact_link(db: AsyncSession, payment_id: int, txn_id: str,
+                           amount_rub: float, note: str | None = None):
+    pp = await db.execute(select(PlannedPayment).where(PlannedPayment.id == payment_id))
+    if not pp.scalar_one_or_none():
+        return None, "Payment not found"
+
+    txn = await db.execute(select(Transaction).where(Transaction.txn_id == txn_id))
+    if not txn.scalar_one_or_none():
+        return None, "Transaction not found"
+
+    link = PaymentFactLink(
+        payment_id=payment_id,
+        txn_id=txn_id,
+        amount_rub=Decimal(str(amount_rub)),
+        note=note,
+    )
+    db.add(link)
+    await db.commit()
+    await update_payment_paid_amount(payment_id, db)
+    return link, None
+
+
+async def delete_fact_link(db: AsyncSession, link_id: int):
+    result = await db.execute(
+        select(PaymentFactLink).where(PaymentFactLink.id == link_id)
+    )
+    link = result.scalar_one_or_none()
+    if not link:
+        return None
+    payment_id = link.payment_id
+    await db.delete(link)
+    await db.commit()
+    await update_payment_paid_amount(payment_id, db)
+    return True
+
+
+async def get_candidate_transactions(db: AsyncSession, project_id: int,
+                                     direction: str = "ЗАКАЗ",
+                                     account: str | None = None):
+    conditions = [Transaction.project_id == project_id, Transaction.expense > 0]
+    if account:
+        conditions.append(Transaction.account == account)
+    else:
+        tag_map = {"ЗАКАЗ": "Заказ", "ДОСТАВКА": "Логистика"}
+        purpose_tag = tag_map.get(direction)
+        if purpose_tag:
+            conditions.append(Transaction.purpose_tag == purpose_tag)
+
+    result = await db.execute(
+        select(Transaction).where(*conditions)
+        .order_by(Transaction.date.desc()).limit(100)
+    )
+    return result.scalars().all()
+
+
+async def get_accounts_list(db: AsyncSession):
+    from backend.models import Account
+    result = await db.execute(select(Account))
+    return result.scalars().all()
+
+
+# ─── Customs DT ──────────────────────────────────────────────────────────────
+
+async def upload_fts_and_create_dts(db: AsyncSession, project_id: int, parsed: list[dict]):
+    """Create CustomsDT records from parsed FTS data, skipping duplicates."""
+    created, skipped = 0, 0
+    for item in parsed:
+        existing = await db.execute(
+            select(CustomsDT).where(
+                CustomsDT.project_id == project_id,
+                CustomsDT.dt_number == item["dt_number"],
+            )
+        )
+        if existing.scalar_one_or_none():
+            skipped += 1
+            continue
+        dt = CustomsDT(
+            project_id=project_id,
+            dt_number=item["dt_number"],
+            dt_date=date.fromisoformat(item["dt_date"]),
+            amount_rub=Decimal(str(item["amount_rub"])),
+        )
+        db.add(dt)
+        created += 1
+    await db.commit()
+    return created, skipped
+
+
+async def get_customs_dt_list(db: AsyncSession, project_id: int):
+    result = await db.execute(
+        select(CustomsDT).where(CustomsDT.project_id == project_id)
+        .order_by(CustomsDT.dt_date.desc())
+    )
+    return result.scalars().all()
+
+
+async def update_customs_dt(db: AsyncSession, project_id: int, dt_id: int, payload: dict):
+    result = await db.execute(
+        select(CustomsDT).where(CustomsDT.id == dt_id, CustomsDT.project_id == project_id)
+    )
+    dt = result.scalar_one_or_none()
+    if not dt:
+        return None
+    if "order_no" in payload:
+        dt.order_no = payload["order_no"] if payload["order_no"] else None
+    if "note" in payload:
+        dt.note = payload["note"]
+    await db.commit()
+    return True
+
+
+async def delete_customs_dt(db: AsyncSession, project_id: int, dt_id: int):
+    result = await db.execute(
+        select(CustomsDT).where(CustomsDT.id == dt_id, CustomsDT.project_id == project_id)
+    )
+    dt = result.scalar_one_or_none()
+    if not dt:
+        return None
+    await db.delete(dt)
+    await db.commit()
+    return True
+
+
+# ─── WB Payouts ──────────────────────────────────────────────────────────────
+
+async def upload_wb_payouts(db: AsyncSession, project_id: int, parsed: list[dict]):
+    """Upsert WB payouts from parsed Excel data."""
+    created, updated, skipped = 0, 0, 0
+    for item in parsed:
+        result = await db.execute(
+            select(WbPayout).where(
+                WbPayout.project_id == project_id,
+                WbPayout.request_id == item["request_id"],
+            )
+        )
+        obj = result.scalar_one_or_none()
+        if obj:
+            if obj.status != "RECEIVED":
+                obj.wb_status_raw = item["wb_status_raw"]
+                obj.status = item["status"]
+                obj.bank_comment = item["bank_comment"]
+                updated += 1
+            else:
+                skipped += 1
+        else:
+            obj = WbPayout(project_id=project_id, **item)
+            db.add(obj)
+            created += 1
+    await db.commit()
+    return created, updated, skipped
+
+
+async def get_wb_payouts(db: AsyncSession, project_id: int, status: str | None = None):
+    q = select(WbPayout).where(WbPayout.project_id == project_id).order_by(WbPayout.created_at.desc())
+    if status:
+        q = q.where(WbPayout.status == status)
+    result = await db.execute(q)
+    return result.scalars().all()
+
+
+async def delete_wb_payout(db: AsyncSession, payout_id: int):
+    result = await db.execute(select(WbPayout).where(WbPayout.id == payout_id))
+    obj = result.scalar_one_or_none()
+    if not obj:
+        return None
+    await db.delete(obj)
+    await db.commit()
+    return True
+
+
+async def manual_reconcile_wb(db: AsyncSession, payout_id: int, txn_id: str):
+    """Manually match a WB payout with a bank transaction."""
+    from datetime import datetime as dt_mod
+
+    result = await db.execute(select(WbPayout).where(WbPayout.id == payout_id))
+    payout = result.scalar_one_or_none()
+    if not payout:
+        return None, "Payout not found"
+
+    txn = await db.execute(select(Transaction).where(Transaction.txn_id == txn_id))
+    if not txn.scalar_one_or_none():
+        return None, "Transaction not found"
+
+    payout.matched_txn_id = txn_id
+    payout.matched_at = dt_mod.utcnow()
+    payout.status = "RECEIVED"
+    await db.commit()
+    return True, None
 
 
 # ─── Cashflow daily ─────────────────────────────────────────────────────────

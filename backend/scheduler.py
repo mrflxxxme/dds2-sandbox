@@ -232,7 +232,7 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
     GUARANTEED: sync_log status will be updated to OK/PARTIAL/TIMEOUT/ERROR,
     never left as RUNNING.
     """
-    from backend.services.funnel_service import run_funnel_sync
+    from backend.services.funnel.sync import run_funnel_sync
     from sqlalchemy import select, update
     from datetime import datetime
     import asyncio

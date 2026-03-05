@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     DDS_ENV: str = "development"  # development | staging | production
     SENTRY_DSN: str = ""  # Empty = Sentry disabled
 
+    # Telegram alerts
+    TELEGRAM_BOT_TOKEN: str = ""  # From @BotFather
+    TELEGRAM_CHAT_ID: str = ""  # Chat/group ID for alerts
+
     # CORS
     CORS_ORIGINS: str = "http://localhost:8501,http://localhost:3000"
 

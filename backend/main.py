@@ -18,7 +18,7 @@ from sqlalchemy import text
 from backend.config import settings
 from backend.database import async_engine, AsyncSessionLocal, Base
 from backend.auth import get_current_user, ensure_default_admin
-from backend.routers import import_txn, refs, reports, planning, cost, auth, integrations, projects, funnel
+from backend.routers import import_txn, refs, reports, planning, cost, auth, integrations, projects, funnel, ws
 
 
 # ─── Sentry Error Tracking ──────────────────────────────────────────────────
@@ -33,6 +33,12 @@ if settings.SENTRY_DSN:
         send_default_pii=False,    # Don't send personal data
     )
     logging.getLogger("dds").info("Sentry initialized (env=%s)", settings.DDS_ENV)
+
+
+# ─── Telegram Alerts ────────────────────────────────────────────────────────
+
+from backend.utils.telegram import configure as configure_telegram
+configure_telegram(settings.TELEGRAM_BOT_TOKEN, settings.TELEGRAM_CHAT_ID)
 
 
 # ─── Structured JSON Logging ─────────────────────────────────────────────────
@@ -211,6 +217,9 @@ app.include_router(
     funnel.router, prefix="/api/v1", tags=["Funnel"],
     dependencies=[Depends(get_current_user)],
 )
+
+# WebSocket (handles auth internally via query param)
+app.include_router(ws.router, prefix="/api/v1", tags=["WebSocket"])
 
 
 @app.get("/health")
