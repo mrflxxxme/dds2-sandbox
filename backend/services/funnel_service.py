@@ -234,6 +234,8 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
                     break
 
                 for campaign in items:
+                    if not campaign or not isinstance(campaign, dict):
+                        continue
                     for day in campaign.get("days") or []:
                         res_date = (day.get("date") or "")[:10]
                         if not res_date:
