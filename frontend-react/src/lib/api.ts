@@ -420,6 +420,24 @@ class ApiClient {
         return this.request<Array<{ id: number; date: string; amount: number; note: string }>>('GET', '/api/v1/planning/customs/topup');
     }
 
+    async uploadFtsPdf(file: File): Promise<{ ok: boolean; created: number; skipped: number; parsed: Array<Record<string, unknown>> }> {
+        const formData = new FormData();
+        formData.append('file', file);
+        const headers: Record<string, string> = {};
+        const token = this.getToken();
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const projectId = this.getProjectId();
+        if (projectId) headers['X-Project-Id'] = String(projectId);
+        const res = await fetch(`${API_URL}/api/v1/planning/customs_dt/upload_fts`, {
+            method: 'POST', headers, body: formData,
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.detail || `Error ${res.status}`);
+        }
+        return res.json();
+    }
+
     getAccountsList() {
         return this.request<Account[]>('GET', '/api/v1/planning/accounts_list');
     }

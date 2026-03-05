@@ -9,6 +9,7 @@ const importTypes = [
     { id: 'WB_MAIN', label: 'WB Выписка ООО (.xlsx)', icon: '🟣', requiresAccount: true },
     { id: 'WB_PAYOUT', label: 'WB Выписка ИП/Транзит (.xlsx)', icon: '🟣', requiresAccount: true },
     { id: 'WB_CABINET_PAYOUTS', label: 'WB Выплаты (Кабинет WB)', icon: '💰', requiresAccount: false },
+    { id: 'FTS_CUSTOMS', label: 'Таможня ФТС (.pdf)', icon: '🛃', requiresAccount: false },
 ];
 
 export default function ImportPage() {
@@ -39,7 +40,15 @@ export default function ImportPage() {
         setResult(null);
         try {
             let res;
-            if (sourceType === 'WB_CABINET_PAYOUTS') {
+            if (sourceType === 'FTS_CUSTOMS') {
+                const ftsRes = await api.uploadFtsPdf(file);
+                res = {
+                    total: ftsRes.created + ftsRes.skipped,
+                    rows_inserted: ftsRes.created,
+                    rows_skipped: ftsRes.skipped,
+                    rows_raw: ftsRes.created + ftsRes.skipped
+                };
+            } else if (sourceType === 'WB_CABINET_PAYOUTS') {
                 res = await api.uploadWbPayouts(file);
                 // fake mapping to match existing UI
                 res = {
@@ -97,8 +106,8 @@ export default function ImportPage() {
 
                 <div style={{ display: 'flex', gap: 12, alignItems: 'end' }}>
                     <div className="form-group" style={{ flex: 1 }}>
-                        <label className="form-label">Файл (.xlsx)</label>
-                        <input className="form-input" type="file" accept=".xlsx,.xls,.csv"
+                        <label className="form-label">{sourceType === 'FTS_CUSTOMS' ? 'Файл (.pdf)' : 'Файл (.xlsx)'}</label>
+                        <input className="form-input" type="file" accept={sourceType === 'FTS_CUSTOMS' ? '.pdf' : '.xlsx,.xls,.csv'}
                             onChange={e => setFile(e.target.files?.[0] || null)}
                             style={{ padding: '8px 12px' }} />
                     </div>

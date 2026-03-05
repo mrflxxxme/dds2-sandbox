@@ -752,7 +752,24 @@ function Cashflow() {
 function CustomsDt() {
     const [data, setData] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
-    useEffect(() => { (async () => { try { setData(await api.getCustomsDt()); } catch { } setLoading(false); })(); }, []);
+    const [file, setFile] = useState<File | null>(null);
+    const [uploading, setUploading] = useState(false);
+    const [msg, setMsg] = useState('');
+
+    useEffect(() => { load(); }, []);
+    const load = async () => { try { setData(await api.getCustomsDt()); } catch { } setLoading(false); };
+
+    const uploadFts = async () => {
+        if (!file) return;
+        setUploading(true); setMsg('');
+        try {
+            const res = await api.uploadFtsPdf(file);
+            setMsg(`✅ Загружено: ${res.created} новых ДТ, ${res.skipped} пропущено`);
+            setFile(null);
+            await load();
+        } catch (e: any) { setMsg(`❌ ${e.message}`); }
+        setUploading(false);
+    };
 
     if (loading) return <div style={{ padding: 20, color: 'var(--color-text-muted)' }}>Загрузка...</div>;
 
@@ -760,8 +777,15 @@ function CustomsDt() {
         <div className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                 <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Таможенные ДТ</h3>
-                {data.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'customs_dt')}>📥 Excel</button>}
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <input type="file" accept=".pdf" onChange={e => setFile(e.target.files?.[0] || null)} style={{ fontSize: 12 }} />
+                    <button className="btn btn-primary btn-sm" onClick={uploadFts} disabled={!file || uploading}>
+                        {uploading ? '⏳...' : '📤 Загрузить PDF ФТС'}
+                    </button>
+                    {data.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'customs_dt')}>📥 Excel</button>}
+                </div>
             </div>
+            {msg && <div style={{ fontSize: 13, marginBottom: 8, padding: '6px 12px', borderRadius: 6, background: msg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', color: msg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)' }}>{msg} <span style={{ float: 'right', cursor: 'pointer' }} onClick={() => setMsg('')}>✕</span></div>}
             {data.length > 0 ? (
                 <div style={{ overflowX: 'auto' }}>
                     <table className="data-table">
@@ -769,7 +793,7 @@ function CustomsDt() {
                         <tbody>{data.map((r, i) => <tr key={i}>{Object.values(r).map((v: any, j) => <td key={j} style={{ fontSize: 12 }}>{typeof v === 'number' ? formatNumber(v) : v ?? '—'}</td>)}</tr>)}</tbody>
                     </table>
                 </div>
-            ) : <div className="empty-state"><div className="empty-state-text">Нет таможенных ДТ</div></div>}
+            ) : <div className="empty-state"><div className="empty-state-text">Нет таможенных ДТ. Загрузите PDF-отчёт ФТС.</div></div>}
         </div>
     );
 }
