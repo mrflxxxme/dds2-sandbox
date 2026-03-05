@@ -508,6 +508,84 @@ async def upload_order_items(db: AsyncSession, project_id: int, order_no: str,
     return inserted, unrecognized, None
 
 
+async def recalculate_order_items(db: AsyncSession, project_id: int, order_no: str,
+                                  vat_rate: Optional[Decimal] = None):
+    """Recalculate cost/duty/vat/delivery for existing items in an order."""
+    result = await db.execute(
+        select(CostOrder).where(CostOrder.order_no == order_no, CostOrder.project_id == project_id)
+    )
+    order = result.scalar_one_or_none()
+    if not order:
+        return None, f"Заказ {order_no} не найден"
+
+    # Load items
+    items_result = await db.execute(
+        select(CostOrderItem).where(CostOrderItem.order_no == order_no)
+    )
+    items = items_result.scalars().all()
+    if not items:
+        return 0, None
+
+    # Load nomenclature and duty rules
+    nom_result = await db.execute(select(Nomenclature).where(Nomenclature.project_id == project_id))
+    nom_map = {n.barcode: n for n in nom_result.scalars().all()}
+
+    duty_result = await db.execute(select(DutyRule).where(DutyRule.project_id == project_id))
+    duty_map = {r.subject: r for r in duty_result.scalars().all()}
+
+    # Calculate total volume for delivery split
+    total_volume = sum(float(item.volume_m3 or 0) * int(item.qty or 1) for item in items)
+    total_qty_all = sum(int(item.qty or 1) for item in items)
+    delivery_rub_total = (
+        float(order.delivery_cost_cny) * float(order.rate_cny) +
+        float(order.delivery_cost_usd) * float(order.rate_usd)
+    )
+
+    vat_rate_dec = Decimal(str(vat_rate / 100)) if vat_rate else DEFAULT_VAT_RATE
+    updated = 0
+
+    for item in items:
+        cost_rub_unit = item.price_cny * order.rate_cny
+
+        vol = float(item.volume_m3 or 0)
+        if total_volume > 0 and vol > 0:
+            delivery_rub_unit = Decimal(str(delivery_rub_total * vol / total_volume))
+        elif total_qty_all > 0:
+            delivery_rub_unit = Decimal(str(delivery_rub_total / total_qty_all))
+        else:
+            delivery_rub_unit = Decimal(0)
+
+        duty_rub_unit = Decimal(0)
+        util_rub_unit = Decimal(0)
+        subject = item.subject
+        if subject and subject in duty_map:
+            rule = duty_map[subject]
+            util_rub_unit = rule.util_collect_rub
+            if rule.basis == DutyBasis.WEIGHT:
+                duty_rub_unit = (item.weight_kg or Decimal(0)) * Decimal(str(rule.rate)) * order.rate_eur
+            elif rule.basis == DutyBasis.AREA:
+                duty_rub_unit = (item.area_m2 or Decimal(0)) * Decimal(str(rule.rate)) * order.rate_eur
+            elif rule.basis == DutyBasis.INVOICE:
+                base = cost_rub_unit + delivery_rub_unit / 2
+                duty_rub_unit = base * Decimal(str(rule.rate)) / 100
+
+        vat_base = cost_rub_unit + duty_rub_unit + delivery_rub_unit / 2
+        vat_rub_unit = vat_base * vat_rate_dec
+
+        total_rub_unit = cost_rub_unit + delivery_rub_unit + duty_rub_unit + vat_rub_unit + util_rub_unit
+        total_cny_unit = total_rub_unit / order.rate_cny if order.rate_cny > 0 else Decimal(0)
+
+        item.cost_rub = cost_rub_unit
+        item.delivery_rub = delivery_rub_unit
+        item.duty_rub = duty_rub_unit
+        item.vat_rub = vat_rub_unit
+        item.util_rub = util_rub_unit
+        item.total_rub = total_rub_unit
+        item.total_cny = total_cny_unit
+        updated += 1
+
+    await db.commit()
+    return updated, None
 
 
 

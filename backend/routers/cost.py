@@ -155,6 +155,21 @@ async def generate_plan(
     return result
 
 
+@router.post("/orders/{order_no}/recalculate")
+async def recalculate_order(
+    order_no: str,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Recalculate cost/duty/vat for existing items using current project settings."""
+    from decimal import Decimal
+    vat_rate = Decimal(str(project.vat_rate)) if project.vat_rate else None
+    updated, error = await cost_service.recalculate_order_items(db, project.id, order_no, vat_rate)
+    if error:
+        raise HTTPException(404, error)
+    return {"ok": True, "updated": updated, "vat_rate": float(project.vat_rate or 22)}
+
+
 # ─── Cost Order Items ─────────────────────────────────────────────────────────
 
 @router.get("/orders/{order_no}/items")
