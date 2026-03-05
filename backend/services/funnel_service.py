@@ -482,14 +482,18 @@ async def run_backfill_bg(project_id: int, missing_dates: list[str]):
 
 async def batch_resync_ads(project_id: int) -> dict:
     """
-    Batch re-sync ALL ad data for a project in one API call
-    (like Google Script does — one request per chunk for the full date range).
-    Updates only adv_sum, adv_views, adv_clicks columns.
+    Batch re-sync ALL ad data for a project.
+    Splits into 30-day windows (WB API max 31 days), fetches each window
+    with all campaign chunks, then updates adv columns in DB.
     Returns {status, days_updated, total_updated, errors}.
     """
     from backend.database import AsyncSessionLocal
+    from datetime import timedelta as td
 
     errors = []
+    total_updated = 0
+    days_updated = 0
+
     try:
         async with AsyncSessionLocal() as db:
             # 1. Get API key
@@ -510,11 +514,12 @@ async def batch_resync_ads(project_id: int) -> dict:
                 return {"status": "error", "days_updated": 0,
                         "total_updated": 0, "errors": ["No existing data"]}
 
-            begin_date = row[0].isoformat()
-            end_date = row[1].isoformat()
+            start_date = row[0]
+            end_date = row[1]
+            total_days = (end_date - start_date).days + 1
             logger.info(
                 f"🔄 Batch ad resync: project {project_id}, "
-                f"range {begin_date} → {end_date}"
+                f"range {start_date} → {end_date} ({total_days} days)"
             )
 
             # 3. Get active campaign IDs
@@ -524,62 +529,79 @@ async def batch_resync_ads(project_id: int) -> dict:
                         "total_updated": 0, "errors": ["No campaigns found"]}
 
             logger.info(
-                f"🔄 Batch ad resync: {len(campaign_ids)} campaigns, "
-                f"fetching stats for full range..."
+                f"🔄 Batch ad resync: {len(campaign_ids)} campaigns"
             )
 
-            # 4. Fetch ALL ad stats at once (full date range, like Google Script)
-            ad_stats = await fetch_ad_stats(
-                adv_key, campaign_ids, begin_date, end_date
-            )
+            # 4. Split into 30-day windows (WB API max 31 days)
+            WINDOW = 30
+            window_start = start_date
+            window_num = 0
 
-            if not ad_stats:
-                return {"status": "error", "days_updated": 0,
-                        "total_updated": 0, "errors": ["No ad data returned"]}
+            while window_start <= end_date:
+                window_end = min(window_start + td(days=WINDOW - 1), end_date)
+                window_num += 1
+                w_from = window_start.isoformat()
+                w_to = window_end.isoformat()
 
-            logger.info(
-                f"🔄 Batch ad resync: got ad data for {len(ad_stats)} days, "
-                f"now updating DB..."
-            )
+                logger.info(
+                    f"🔄 Batch ad resync: window {window_num} — "
+                    f"{w_from} → {w_to}"
+                )
 
-            # 5. Update ad columns for each day's data
-            from sqlalchemy import update as sa_update
-            total_updated = 0
-            days_updated = 0
+                # Fetch ad stats for this window
+                ad_stats = await fetch_ad_stats(
+                    adv_key, campaign_ids, w_from, w_to
+                )
 
-            for date_str, nm_data in ad_stats.items():
-                day_updated = 0
-                for nm_id, ad in nm_data.items():
-                    result = await db.execute(
-                        sa_update(WbFunnelDaily).where(
-                            WbFunnelDaily.project_id == project_id,
-                            WbFunnelDaily.date == date.fromisoformat(date_str),
-                            WbFunnelDaily.nm_id == nm_id,
-                        ).values(
-                            adv_sum=ad["sum"],
-                            adv_views=ad["views"],
-                            adv_clicks=ad["clicks"],
-                        )
-                    )
-                    day_updated += result.rowcount
+                if ad_stats:
+                    # Update ad columns in DB
+                    from sqlalchemy import update as sa_update
+                    for date_str, nm_data in ad_stats.items():
+                        day_count = 0
+                        for nm_id, ad in nm_data.items():
+                            res = await db.execute(
+                                sa_update(WbFunnelDaily).where(
+                                    WbFunnelDaily.project_id == project_id,
+                                    WbFunnelDaily.date == date.fromisoformat(date_str),
+                                    WbFunnelDaily.nm_id == nm_id,
+                                ).values(
+                                    adv_sum=ad["sum"],
+                                    adv_views=ad["views"],
+                                    adv_clicks=ad["clicks"],
+                                )
+                            )
+                            day_count += res.rowcount
 
-                await db.commit()
-                total_updated += day_updated
-                days_updated += 1
-                if day_updated:
+                        await db.commit()
+                        total_updated += day_count
+                        days_updated += 1
+
                     logger.info(
-                        f"🔄 Batch ad resync: {date_str} — "
-                        f"{day_updated} rows updated"
+                        f"🔄 Window {window_num} done: "
+                        f"{len(ad_stats)} days updated"
                     )
+                else:
+                    errors.append(f"No data for window {w_from}→{w_to}")
+                    logger.warning(
+                        f"🔄 Window {window_num}: no ad data returned"
+                    )
+
+                window_start = window_end + td(days=1)
+
+                # Delay between windows to avoid rate limiting
+                if window_start <= end_date:
+                    await asyncio.sleep(10)
 
             logger.info(
                 f"✅ Batch ad resync complete: project {project_id} — "
-                f"{days_updated} days, {total_updated} rows updated"
+                f"{days_updated} days, {total_updated} rows, "
+                f"{window_num} windows"
             )
             return {
                 "status": "ok",
                 "days_updated": days_updated,
                 "total_updated": total_updated,
+                "windows": window_num,
                 "errors": errors,
             }
 
