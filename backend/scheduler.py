@@ -310,6 +310,7 @@ _backfill_lock = asyncio.Lock()
 async def fast_backfill_tick():
     """
     Fill missing days ONLY. Runs every 3 min.
+    Batches all missing days into one range request (min→max date).
     Stops itself when all projects have full 90-day coverage.
     Does NOT check ad completeness — that's a separate job.
     """
@@ -330,15 +331,16 @@ async def fast_backfill_tick():
                 missing = await _get_missing_dates(pid)
                 if missing:
                     all_filled = False
-                    day = missing[0]
+                    d_from = missing[0]
+                    d_to = missing[-1]
                     logger.info(
-                        f"⏩ Backfill: project {pid} — syncing {day} "
-                        f"({len(missing)} days remaining)"
+                        f"⏩ Backfill: project {pid} — syncing range "
+                        f"{d_from}→{d_to} ({len(missing)} days remaining)"
                     )
-                    res = await _run_and_log(pid, day, day, "backfill")
+                    res = await _run_and_log(pid, d_from, d_to, "backfill")
                     if res:
                         logger.info(
-                            f"⏩ Backfill: project {pid} — {day} done, "
+                            f"⏩ Backfill: project {pid} — {d_from}→{d_to} done, "
                             f"+{res.get('rows', 0)} rows"
                         )
                     await asyncio.sleep(1)
