@@ -27,6 +27,14 @@ description: Полный цикл создания новой фичи (backend
 ## 5. Тесты
 - Создай `tests/test_api_feature.py` для нового модуля
 - Минимум: test_create, test_list, test_delete
+- **Запусти тесты:**
+```bash
+cd /Users/a1/Desktop/dds_app && docker compose exec backend pytest tests/ -x --tb=short
+```
+
+## 5b. Кэширование
+- Если новый GET — тяжёлый (JOIN, агрегация, >100 строк) → `@cached(ttl=300)`
+- Если новый POST/PUT/DELETE → `invalidate_cache()` для связанных ключей
 
 ## 6. Проверка
 

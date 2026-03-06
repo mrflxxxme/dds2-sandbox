@@ -119,6 +119,30 @@ async def delete_feature(db: AsyncSession, project_id: int, feature_id: int):
     return obj
 ```
 
+### 4b. Кэширование тяжёлых GET (backend/services/feature_service.py)
+Если эндпоинт — отчёт или агрегация, добавь кэш:
+```python
+from backend.cache import cached, invalidate_cache
+
+@cached(ttl=300, key_builder=lambda db, pid, **kw: f"features:{pid}")
+async def get_features_report(db: AsyncSession, project_id: int):
+    """Heavy aggregation — cached for 5 min."""
+    # ... тяжёлый запрос ...
+    return result
+
+
+async def create_feature(db: AsyncSession, project_id: int, data: dict):
+    obj = Feature(project_id=project_id, **data)
+    db.add(obj)
+    await db.commit()
+    # ← Инвалидируй кэш при мутации!
+    await invalidate_cache(f"features:{project_id}")
+    return obj
+```
+
+> **Правило:** Каждый тяжёлый GET (`JOIN`, агрегация, >100 строк) → `@cached(ttl=300)`.
+> Каждый POST/PUT/DELETE → `invalidate_cache()`.
+
 ### 4. Router (backend/routers/feature.py)
 **Тонкий — только HTTP, валидация, вызов service:**
 ```python
@@ -206,8 +230,10 @@ async def test_list_features(client, auth_headers):
 - [ ] Service в `services/` — бизнес-логика НЕ в роутере
 - [ ] Роутер тонкий — вызывает service
 - [ ] **Пагинация** (`limit/offset`) для list-эндпоинтов
+- [ ] **`@cached(ttl=300)`** для тяжёлых GET + `invalidate_cache()` при мутации
 - [ ] **Logging**: `logger = logging.getLogger("dds.module")`
 - [ ] Тест в `tests/test_api_feature.py`
+- [ ] **Запустить тесты**: `docker compose exec backend pytest tests/ -x`
 - [ ] Роутер зарегистрирован в `main.py`
 - [ ] Обновлён `AGENTS.md` + `docs/MODULES.md`
 - [ ] Коммит через `/dev`

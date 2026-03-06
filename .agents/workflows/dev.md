@@ -22,6 +22,7 @@ description: Стандартный рабочий процесс при люб�
 | **`project_id`** | Каждый запрос фильтрует по project_id |
 | **`is_deleted == False`** | Фильтр для SoftDeleteMixin моделей |
 | **Пагинация (`limit/offset`)** | Для всех list-эндпоинтов |
+| **`@cached(ttl=300)`** | Для тяжёлых GET (отчёты, агрегации) + `invalidate_cache()` при мутации |
 | **Модели в `models/domain.py`** | Не в монолитном `models.py` |
 | **Схемы в `schemas/domain.py`** | Не в монолитном `schemas.py` |
 | **Logging** | `logger = logging.getLogger("dds.module")` |
@@ -71,6 +72,13 @@ cd /Users/a1/Desktop/dds_app && git commit -m "описание изменени
 # turbo
 cd /Users/a1/Desktop/dds_app && git push origin dev
 ```
+
+### 2b. Тесты — запусти ПЕРЕД коммитом
+```bash
+# turbo
+cd /Users/a1/Desktop/dds_app && docker compose exec backend pytest tests/ -x --tb=short
+```
+> ⛔ **Если тесты упали — исправь ДО коммита!**
 
 #### Мердж в main (только после тестирования!)
 ```bash

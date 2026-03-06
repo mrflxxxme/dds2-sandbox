@@ -37,6 +37,15 @@ cd /Users/a1/Desktop/dds_app && docker compose ps
 - Пересборка нужна ТОЛЬКО при изменении package.json / requirements.txt / Dockerfile
 
 ## 3. Проверка после фикса
+
+Запусти тесты:
+```bash
+cd /Users/a1/Desktop/dds_app && docker compose exec backend pytest tests/ -x --tb=short
+```
+
+> ⛔ **Если тесты упали — исправь ДО коммита!**
+
+Проверь логи:
 ```bash
 cd /Users/a1/Desktop/dds_app && docker compose logs backend --tail=10
 ```
@@ -44,6 +53,8 @@ cd /Users/a1/Desktop/dds_app && docker compose logs backend --tail=10
 ```bash
 cd /Users/a1/Desktop/dds_app && docker compose logs frontend-react --tail=10
 ```
+
+> Если фикс затрагивает данные, проверь: нужна ли `invalidate_cache()` для связанных кэшированных ключей?
 
 ## 4. Коммит
 ```bash
