@@ -62,11 +62,14 @@ def cached(prefix: str, ttl: int = 300):
                 return await func(*args, **kwargs)
 
             # Build cache key from prefix + function args
+            # Ensure project_id is ALWAYS part of the key for multi-tenant safety
             key_parts = [prefix]
             for k, v in sorted(kwargs.items()):
                 if k == "db":
                     continue  # skip database session
-                if v is not None:
+                if k == "project" and hasattr(v, "id"):
+                    key_parts.append(f"pid={v.id}")  # extract ID from Project object
+                elif v is not None:
                     key_parts.append(f"{k}={v}")
             cache_key = ":".join(key_parts)
 

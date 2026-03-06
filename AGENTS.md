@@ -21,7 +21,7 @@ dds_app/
 │   ├── main.py                 # Entry point, lifespan, middleware, router registration
 │   ├── config.py               # Pydantic Settings (.env)
 │   ├── database.py             # SQLAlchemy async/sync engines, get_db
-│   ├── models.py               # ORM models (28 таблиц)
+│   ├── models/                 # ORM models (28 таблиц, split по доменам)
 │   ├── schemas.py              # Pydantic request/response schemas
 │   ├── auth.py                 # JWT: hash, verify, create_token, get_current_user
 │   ├── cache.py                # Redis: @cached decorator, invalidation
@@ -38,8 +38,11 @@ dds_app/
 │   │   └── integrations.py     # /api/v1/integrations/* — WB API keys, sync sales/nomenclature
 │   ├── integrations/
 │   │   └── wb_api.py           # WB Content/Statistics API client (cards, sales, orders)
+│   ├── seeds/                  # Seed data for new projects
+│   │   └── default_categories.py  # 28 default category_ref entries
 │   └── etl/                    # ETL pipeline
 │       ├── parsers.py          # 5 bank statement parsers
+│       ├── cost_parsers.py     # Excel normalizers for cost orders (дивандек/ковры)
 │       ├── master_logic.py     # Categorization, txn_id, cp_key generation
 │       └── service.py          # Orchestrator: parse → enrich → load
 │
@@ -158,6 +161,9 @@ AGENTS.md  — обновить структуру, таблицу моделе�
 | Мутация без инвалидации кэша | `await invalidate_cache("reports:*")` после INSERT/UPDATE/DELETE |
 | `print()` для дебага | `logger = logging.getLogger("dds.module")` + `logger.info(...)` |
 | Inline стили в React | CSS классы из `globals.css`: `glass-card`, `data-table`, `btn-*` |
+| **Сервис > 400 строк** | Разбить по ответственности: CRUD, парсеры, генерация |  
+| **Seed/init данные в `main.py`** | Выносить в `backend/seeds/` + import |
+| **Cache key без `project_id`** | Ключ ОБЯЗАН содержать `project_id` — иначе утечка между проектами |
 
 ### Frontend
 

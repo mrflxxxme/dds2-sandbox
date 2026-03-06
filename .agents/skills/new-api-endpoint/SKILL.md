@@ -228,12 +228,15 @@ async def test_list_features(client, auth_headers):
 - [ ] **`is_deleted == False`** фильтр для SoftDeleteMixin
 - [ ] Миграция: `alembic revision --autogenerate -m "..."`
 - [ ] Service в `services/` — бизнес-логика НЕ в роутере
+- [ ] **Сервис ≤ 400 строк** — при превышении разбить по ответственности
 - [ ] Роутер тонкий — вызывает service
 - [ ] **Пагинация** (`limit/offset`) для list-эндпоинтов
 - [ ] **`@cached(ttl=300)`** для тяжёлых GET + `invalidate_cache()` при мутации
+- [ ] **Cache key содержит `project_id`** — обязательно для multi-tenant
 - [ ] **Logging**: `logger = logging.getLogger("dds.module")`
 - [ ] Тест в `tests/test_api_feature.py`
 - [ ] **Запустить тесты**: `docker compose exec backend pytest tests/ -x`
 - [ ] Роутер зарегистрирован в `main.py`
 - [ ] Обновлён `AGENTS.md` + `docs/MODULES.md`
 - [ ] Коммит через `/dev`
+
