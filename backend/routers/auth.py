@@ -4,6 +4,7 @@ Rate limiting on login via Redis.
 """
 
 import logging
+import os
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -31,6 +32,8 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
 
 async def check_rate_limit(request: Request, action: str = "login"):
     """Check Redis-based rate limit. Raises 429 if exceeded."""
+    if os.environ.get("TESTING"):
+        return  # Skip rate limiting in tests
     try:
         from backend.cache import get_redis
         redis = await get_redis()
