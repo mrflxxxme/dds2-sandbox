@@ -9,7 +9,7 @@ import pytest
 async def test_register_and_login(client):
     """Test user registration and login flow."""
     # Register
-    resp = await client.post("/api/auth/register", json={
+    resp = await client.post("/api/v1/auth/register", json={
         "username": "authtest_user",
         "password": "securepass123",
         "email": "auth@test.com",
@@ -19,7 +19,7 @@ async def test_register_and_login(client):
     assert "access_token" in data
 
     # Login
-    resp = await client.post("/api/auth/login", data={
+    resp = await client.post("/api/v1/auth/login", data={
         "username": "authtest_user",
         "password": "securepass123",
     })
@@ -32,7 +32,7 @@ async def test_register_and_login(client):
 @pytest.mark.asyncio
 async def test_login_wrong_password(client):
     """Test login with wrong password returns 401."""
-    resp = await client.post("/api/auth/login", data={
+    resp = await client.post("/api/v1/auth/login", data={
         "username": "authtest_user",
         "password": "wrong_password",
     })
@@ -42,7 +42,7 @@ async def test_login_wrong_password(client):
 @pytest.mark.asyncio
 async def test_get_profile(client, auth_headers):
     """Test profile retrieval with auth token."""
-    resp = await client.get("/api/auth/profile", headers=auth_headers)
+    resp = await client.get("/api/v1/auth/profile", headers=auth_headers)
     assert resp.status_code == 200
     data = resp.json()
     assert "username" in data
@@ -52,14 +52,14 @@ async def test_get_profile(client, auth_headers):
 @pytest.mark.asyncio
 async def test_update_profile(client, auth_headers):
     """Test profile update."""
-    resp = await client.put("/api/auth/profile", json={
+    resp = await client.put("/api/v1/auth/profile", json={
         "first_name": "Test",
         "last_name": "User",
     }, headers=auth_headers)
     assert resp.status_code == 200
 
     # Verify
-    resp = await client.get("/api/auth/profile", headers=auth_headers)
+    resp = await client.get("/api/v1/auth/profile", headers=auth_headers)
     data = resp.json()
     assert data["first_name"] == "Test"
     assert data["last_name"] == "User"
@@ -68,5 +68,5 @@ async def test_update_profile(client, auth_headers):
 @pytest.mark.asyncio
 async def test_unauthenticated_profile(client):
     """Test that profile endpoint requires auth."""
-    resp = await client.get("/api/auth/profile")
+    resp = await client.get("/api/v1/auth/profile")
     assert resp.status_code in (401, 403)
