@@ -8,6 +8,7 @@ Uses existing DB schema from Alembic (no create_all / drop_all).
 import os
 os.environ["TESTING"] = "1"  # Disable rate limiter before importing app
 
+import asyncio
 import uuid
 import pytest
 import pytest_asyncio
@@ -21,11 +22,28 @@ from backend.database import get_db
 from backend.main import app
 
 
-# ─── Test DB engine (separate pool to avoid event loop conflicts) ─────────────
+# ─── Session-scoped event loop ────────────────────────────────────────────────
+
+@pytest.fixture(scope="session")
+def event_loop():
+    """Create a session-scoped event loop for all async tests."""
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
+
+
+# ─── Test DB engine (session-scoped to avoid pool conflicts) ──────────────────
 
 TEST_DATABASE_URL = settings.DATABASE_URL
 
-test_engine = create_async_engine(TEST_DATABASE_URL, echo=False, pool_pre_ping=True)
+test_engine = create_async_engine(
+    TEST_DATABASE_URL,
+    echo=False,
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=5,
+    pool_recycle=300,
+)
 TestSessionLocal = sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
 
 
