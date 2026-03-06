@@ -29,6 +29,8 @@ async def search_transactions(
     category: Optional[str] = None,
     search: Optional[str] = None,
     event_type: Optional[str] = None,
+    status: Optional[str] = None,
+    is_cashflow2: Optional[int] = None,
     limit: int = 500,
     offset: int = 0,
 ) -> list:
@@ -59,6 +61,10 @@ async def search_transactions(
         )
     if event_type:
         q = q.where(Transaction.event_type2 == event_type)
+    if status:
+        q = q.where(Transaction.status == status)
+    if is_cashflow2 is not None:
+        q = q.where(Transaction.is_cashflow2 == is_cashflow2)
 
     q = q.order_by(Transaction.date.desc()).limit(limit).offset(offset)
     result = await db.execute(q)
