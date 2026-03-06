@@ -119,7 +119,7 @@ async def create_cost_order(
     return result
 
 
-@router.put("/orders/{order_no}")
+@router.put("/orders/{order_no:path}")
 async def update_cost_order(
     order_no: str,
     payload: dict,
@@ -134,7 +134,7 @@ async def update_cost_order(
     return result
 
 
-@router.delete("/orders/{order_no}")
+@router.delete("/orders/{order_no:path}")
 async def delete_cost_order(
     order_no: str,
     project: Project = Depends(get_current_project),
@@ -148,7 +148,7 @@ async def delete_cost_order(
 
 # ─── Generate Payment Plan ───────────────────────────────────────────────────
 
-@router.post("/orders/{order_no}/generate_plan")
+@router.post("/orders/{order_no:path}/generate_plan")
 async def generate_plan(
     order_no: str,
     project: Project = Depends(get_current_project),
@@ -161,7 +161,7 @@ async def generate_plan(
     return result
 
 
-@router.post("/orders/{order_no}/recalculate")
+@router.post("/orders/{order_no:path}/recalculate")
 async def recalculate_order(
     order_no: str,
     project: Project = Depends(get_current_project),
@@ -178,7 +178,7 @@ async def recalculate_order(
 
 # ─── Cost Order Items ─────────────────────────────────────────────────────────
 
-@router.get("/orders/{order_no}/items")
+@router.get("/orders/{order_no:path}/items")
 async def get_cost_order_items(
     order_no: str,
     project: Project = Depends(get_current_project),
@@ -207,7 +207,7 @@ async def get_cost_order_items(
     ]
 
 
-@router.post("/orders/{order_no}/upload")
+@router.post("/orders/{order_no:path}/upload")
 async def upload_order_items(
     order_no: str,
     file: UploadFile = File(...),

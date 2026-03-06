@@ -312,16 +312,16 @@ class ApiClient {
         return this.request<CostOrder>('POST', '/api/v1/cost/orders', data);
     }
     updateCostOrder(orderNo: string, data: Partial<CostOrder>) {
-        return this.request<CostOrder>('PUT', `/api/v1/cost/orders/${orderNo}`, data);
+        return this.request<CostOrder>('PUT', `/api/v1/cost/orders/${encodeURIComponent(orderNo)}`, data);
     }
     deleteCostOrder(orderNo: string) {
-        return this.request<MessageResponse>('DELETE', `/api/v1/cost/orders/${orderNo}`);
+        return this.request<MessageResponse>('DELETE', `/api/v1/cost/orders/${encodeURIComponent(orderNo)}`);
     }
     getCostOrderItems(orderNo: string) {
-        return this.request<CostOrderItem[]>('GET', `/api/v1/cost/orders/${orderNo}/items`);
+        return this.request<CostOrderItem[]>('GET', `/api/v1/cost/orders/${encodeURIComponent(orderNo)}/items`);
     }
     generatePlan(orderNo: string) {
-        return this.request<{ ok: boolean; order_no: string; payments_created: number; plan: Record<string, unknown> }>('POST', `/api/v1/cost/orders/${orderNo}/generate_plan`);
+        return this.request<{ ok: boolean; order_no: string; payments_created: number; plan: Record<string, unknown> }>('POST', `/api/v1/cost/orders/${encodeURIComponent(orderNo)}/generate_plan`);
     }
 
     // Cost — Nomenclature
@@ -511,7 +511,7 @@ class ApiClient {
         if (token) headers['Authorization'] = `Bearer ${token}`;
         const projectId = this.getProjectId();
         if (projectId) headers['X-Project-Id'] = String(projectId);
-        const res = await fetch(`${API_URL}/api/v1/cost/orders/${orderNo}/upload`, {
+        const res = await fetch(`${API_URL}/api/v1/cost/orders/${encodeURIComponent(orderNo)}/upload`, {
             method: 'POST', headers, body: formData,
         });
         if (!res.ok) {
