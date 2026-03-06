@@ -13,7 +13,7 @@ Extracted from routers/planning.py to keep router thin (HTTP only).
 
 import logging
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -33,7 +33,7 @@ logger = logging.getLogger("dds.planning")
 
 async def get_orders(db: AsyncSession, project_id: int):
     result = await db.execute(
-        select(Order).where(Order.project_id == project_id)
+        select(Order).where(Order.project_id == project_id, Order.is_deleted == False)
         .order_by(Order.planned_ship_date.desc().nullslast())
     )
     return result.scalars().all()
@@ -102,7 +102,7 @@ async def upsert_lead_time(db: AsyncSession, project_id: int, direction: str, da
 # ─── Payments CRUD ───────────────────────────────────────────────────────────
 
 async def get_payments(db: AsyncSession, project_id: int, order_no: int | None = None):
-    q = select(PlannedPayment).where(PlannedPayment.project_id == project_id)
+    q = select(PlannedPayment).where(PlannedPayment.project_id == project_id, PlannedPayment.is_deleted == False)
     if order_no:
         q = q.where(PlannedPayment.order_no == order_no)
     q = q.order_by(PlannedPayment.pay_date)
@@ -307,7 +307,7 @@ async def delete_fact_link(db: AsyncSession, link_id: int):
 async def get_candidate_transactions(db: AsyncSession, project_id: int,
                                      direction: str = "ЗАКАЗ",
                                      account: str | None = None):
-    conditions = [Transaction.project_id == project_id, Transaction.expense > 0]
+    conditions = [Transaction.project_id == project_id, Transaction.is_deleted == False, Transaction.expense > 0]
     if account:
         conditions.append(Transaction.account == account)
     else:
@@ -452,7 +452,7 @@ async def manual_reconcile_wb(db: AsyncSession, payout_id: int, txn_id: str):
         return None, "Transaction not found"
 
     payout.matched_txn_id = txn_id
-    payout.matched_at = dt_mod.utcnow()
+    payout.matched_at = datetime.now(timezone.utc)
     payout.status = "RECEIVED"
     await db.commit()
     return True, None
@@ -504,6 +504,7 @@ async def calculate_cashflow_daily(
     pay_result = await db.execute(
         select(PlannedPayment).where(
             PlannedPayment.project_id == project_id,
+            PlannedPayment.is_deleted == False,
             PlannedPayment.is_paid == False,
             PlannedPayment.pay_date <= horizon,
         )
@@ -744,7 +745,7 @@ async def reconcile_wb_payouts(db: AsyncSession):
 
         if best_match:
             payout.matched_txn_id = best_match.txn_id
-            payout.matched_at = dt_mod.utcnow()
+            payout.matched_at = datetime.now(timezone.utc)
             payout.status = "RECEIVED"
             used_txn_ids.add(best_match.txn_id)
 

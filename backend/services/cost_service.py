@@ -200,7 +200,7 @@ async def get_cost_orders(db: AsyncSession, project_id: int):
     """Get cost orders with aggregated item totals."""
     result = await db.execute(
         select(CostOrder)
-        .where(CostOrder.project_id == project_id)
+        .where(CostOrder.project_id == project_id, CostOrder.is_deleted == False)
         .order_by(CostOrder.created_at.desc())
     )
     orders = result.scalars().all()

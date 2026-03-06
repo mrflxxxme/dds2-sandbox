@@ -493,7 +493,7 @@ def _sync_wb_payouts(db: Session, project_id: int):
 
         if best_match:
             payout.matched_txn_id = best_match.txn_id
-            payout.matched_at = dt_mod.utcnow()
+            payout.matched_at = datetime.now(timezone.utc)
             payout.status = "RECEIVED"
             used_txn_ids.add(best_match.txn_id)
 

@@ -109,7 +109,7 @@ async def search_transactions(
     project_id: int = Depends(get_project_id),
     db: AsyncSession = Depends(get_db),
 ):
-    q = select(Transaction).where(Transaction.project_id == project_id)
+    q = select(Transaction).where(Transaction.project_id == project_id, Transaction.is_deleted == False)
     conditions = []
     if f.date_from:
         conditions.append(Transaction.date >= f.date_from)
@@ -138,7 +138,7 @@ async def search_transactions(
 async def get_unassigned(limit: int = 200, project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(Transaction)
-        .where(Transaction.project_id == project_id, Transaction.is_cashflow2 == 1, Transaction.cat_lvl1_2.is_(None))
+        .where(Transaction.project_id == project_id, Transaction.is_deleted == False, Transaction.is_cashflow2 == 1, Transaction.cat_lvl1_2.is_(None))
         .order_by(Transaction.expense.desc())
         .limit(limit)
     )
@@ -249,7 +249,7 @@ async def get_unassigned_grouped(project_id: int = Depends(get_project_id), db: 
             func.sum(Transaction.income).label("total_income"),
             func.sum(Transaction.expense).label("total_expense"),
         )
-        .where(Transaction.project_id == project_id, Transaction.is_cashflow2 == 1, Transaction.cat_lvl1_2.is_(None))
+        .where(Transaction.project_id == project_id, Transaction.is_deleted == False, Transaction.is_cashflow2 == 1, Transaction.cat_lvl1_2.is_(None))
         .group_by(Transaction.cp_key, Transaction.counterparty, Transaction.currency)
         .order_by(func.sum(Transaction.income).desc(), func.sum(Transaction.expense).desc())
     )

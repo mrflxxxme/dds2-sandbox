@@ -33,7 +33,7 @@ async def search_transactions(
     offset: int = 0,
 ) -> list:
     """Search and filter transactions."""
-    q = select(Transaction).where(Transaction.project_id == project_id)
+    q = select(Transaction).where(Transaction.project_id == project_id, Transaction.is_deleted == False)
 
     if date_from:
         q = q.where(Transaction.date >= date_from)
@@ -75,6 +75,7 @@ async def get_unassigned(
         select(Transaction)
         .where(
             Transaction.project_id == project_id,
+            Transaction.is_deleted == False,
             Transaction.is_cashflow2 == 1,
             or_(
                 Transaction.cat_lvl1_2.is_(None),
@@ -104,6 +105,7 @@ async def get_unassigned_grouped(
         )
         .where(
             Transaction.project_id == project_id,
+            Transaction.is_deleted == False,
             Transaction.is_cashflow2 == 1,
             or_(
                 Transaction.cat_lvl1_2.is_(None),
