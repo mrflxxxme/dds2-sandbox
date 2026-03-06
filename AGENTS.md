@@ -205,6 +205,9 @@ AGENTS.md  — обновить структуру, таблицу моделе�
 - **Schemas** — split по доменам в `schemas/*.py`, re-export в `schemas/__init__.py`
 - **Errors** — через `HTTPException`, unified формат из `exceptions.py`
 - **Cache** — `@cached(ttl=300)` для тяжёлых отчётов, инвалидация при мутации
+- **Performance** — `SlowRequestMiddleware` логирует запросы >500ms (`🐢 SLOW` в логах)
+- **Тесты** — `docker compose exec backend pytest tests/ -x --tb=short` перед каждым коммитом
+- **TESTING=1** — env переменная, отключает rate limiter (устанавливается автоматически в conftest)
 - **Параметры SQL** — ТОЛЬКО `:param` binding, НИКОГДА f-string
 
 ### Frontend
