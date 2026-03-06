@@ -272,7 +272,7 @@ def parse_wb_sales_to_payouts(sales: list[dict]) -> list[dict]:
             "request_id": sale_id,
             "amount_rub": total_price,
             "currency": "RUB",
-            "created_at": sale.get("date", datetime.now(timezone.utc).isoformat()),
+            "created_at": sale.get("date", datetime.utcnow().isoformat()),
             "wb_status_raw": sale.get("saleID", ""),
             "status": "TRANSIT",
         })

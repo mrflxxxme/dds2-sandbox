@@ -89,7 +89,7 @@ def import_statement(
         project_id=project_id,
         filename=filename,
         source_type=source_type,
-        imported_at=datetime.now(timezone.utc),
+        imported_at=datetime.utcnow(),
     )
 
     log_ctx = logger.bind(
@@ -493,7 +493,7 @@ def _sync_wb_payouts(db: Session, project_id: int):
 
         if best_match:
             payout.matched_txn_id = best_match.txn_id
-            payout.matched_at = datetime.now(timezone.utc)
+            payout.matched_at = datetime.utcnow()
             payout.status = "RECEIVED"
             used_txn_ids.add(best_match.txn_id)
 

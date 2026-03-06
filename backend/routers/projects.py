@@ -321,7 +321,7 @@ async def accept_invite(
 
     # Mark invite as accepted (both email and link invites)
     invite.status = "accepted"
-    invite.accepted_at = datetime.now(timezone.utc)
+    invite.accepted_at = datetime.utcnow()
     invite.accepted_by_id = user.id
 
     await db.commit()

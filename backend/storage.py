@@ -66,7 +66,7 @@ def upload_file(
         return None
 
     # Organize files by date and source type
-    now = datetime.now(timezone.utc)
+    now = datetime.utcnow()
     prefix = f"imports/{now.strftime('%Y/%m')}"
     if source_type:
         prefix = f"{prefix}/{source_type}"

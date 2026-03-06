@@ -2,7 +2,7 @@
 Model mixins — reusable base classes for models.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import Boolean, DateTime
@@ -29,7 +29,7 @@ class SoftDeleteMixin:
     def soft_delete(self):
         """Mark record as deleted without physical removal."""
         self.is_deleted = True
-        self.deleted_at = datetime.now(timezone.utc)
+        self.deleted_at = datetime.utcnow()
 
     def restore(self):
         """Restore a soft-deleted record."""
@@ -46,10 +46,10 @@ class TimestampMixin:
             ...
     """
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.utcnow()
     )
     updated_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        DateTime, default=lambda: datetime.utcnow(),
+        onupdate=lambda: datetime.utcnow(),
         nullable=True,
     )

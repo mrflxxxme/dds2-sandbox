@@ -153,7 +153,7 @@ async def sync_wb_sales(
         integration_id=key.id,
         service="wb",
         sync_type=sync_type,
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.utcnow(),
         status="RUNNING",
     )
     db.add(sync_log)
@@ -191,7 +191,7 @@ async def sync_wb_sales(
                     created_at=p["created_at"],
                     wb_status_raw=p.get("wb_status_raw"),
                     status=p.get("status", "TRANSIT"),
-                    imported_at=datetime.now(timezone.utc),
+                    imported_at=datetime.utcnow(),
                 )
                 db.add(payout)
                 inserted += 1
@@ -211,8 +211,8 @@ async def sync_wb_sales(
             sync_log.rows_inserted = 0
 
         sync_log.status = "OK"
-        sync_log.finished_at = datetime.now(timezone.utc)
-        key.last_sync_at = datetime.now(timezone.utc)
+        sync_log.finished_at = datetime.utcnow()
+        key.last_sync_at = datetime.utcnow()
 
         await db.commit()
         await db.refresh(sync_log)
@@ -220,7 +220,7 @@ async def sync_wb_sales(
     except Exception as e:
         sync_log.status = "ERROR"
         sync_log.error_msg = str(e)[:1000]
-        sync_log.finished_at = datetime.now(timezone.utc)
+        sync_log.finished_at = datetime.utcnow()
         await db.commit()
         await db.refresh(sync_log)
         logger.error("WB sync error: %s", e)
@@ -239,7 +239,7 @@ async def sync_wb_nomenclature(db: AsyncSession, project_id: int) -> SyncLog:
         integration_id=key.id,
         service="wb",
         sync_type="nomenclature",
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.utcnow(),
         status="RUNNING",
     )
     db.add(sync_log)
@@ -271,7 +271,7 @@ async def sync_wb_nomenclature(db: AsyncSession, project_id: int) -> SyncLog:
                 nom.article_wb = item.get("article_wb") or nom.article_wb
                 if item.get("volume_l"):
                     nom.volume_l = Decimal(str(item["volume_l"]))
-                nom.updated_at = datetime.now(timezone.utc)
+                nom.updated_at = datetime.utcnow()
                 updated += 1
             else:
                 nom = Nomenclature(
@@ -289,17 +289,17 @@ async def sync_wb_nomenclature(db: AsyncSession, project_id: int) -> SyncLog:
         sync_log.rows_fetched = len(raw_cards)
         sync_log.rows_inserted = inserted
         sync_log.status = "OK"
-        sync_log.finished_at = datetime.now(timezone.utc)
+        sync_log.finished_at = datetime.utcnow()
         sync_log.error_msg = f"cards={len(raw_cards)}, barcodes={len(nom_items)}, inserted={inserted}, updated={updated}"
 
-        key.last_sync_at = datetime.now(timezone.utc)
+        key.last_sync_at = datetime.utcnow()
         await db.commit()
         await db.refresh(sync_log)
 
     except Exception as e:
         sync_log.status = "ERROR"
         sync_log.error_msg = str(e)[:1000]
-        sync_log.finished_at = datetime.now(timezone.utc)
+        sync_log.finished_at = datetime.utcnow()
         await db.commit()
         await db.refresh(sync_log)
         logger.error("WB nomenclature sync error: %s", e)

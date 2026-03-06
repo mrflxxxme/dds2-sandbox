@@ -288,7 +288,7 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
                     update(SyncLog).where(SyncLog.id == log_id).values(
                         status=status,
                         rows_inserted=result.get("rows", 0),
-                        finished_at=datetime.now(timezone.utc),
+                        finished_at=datetime.utcnow(),
                         error_msg="; ".join(result.get("errors", [])[:3]) or None,
                     )
                 )

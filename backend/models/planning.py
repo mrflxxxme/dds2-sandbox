@@ -86,7 +86,7 @@ class WbPayout(Base):
     bank_comment: Mapped[Optional[str]] = mapped_column(Text)
     matched_txn_id: Mapped[Optional[str]] = mapped_column(String(300))
     matched_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
-    imported_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    imported_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
 
     __table_args__ = (
         UniqueConstraint("project_id", "request_id", name="uq_wb_payout_project_request"),

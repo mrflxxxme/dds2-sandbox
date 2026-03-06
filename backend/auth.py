@@ -48,7 +48,7 @@ def validate_password_strength(password: str) -> None:
 
 def create_access_token(user_id: int, username: str) -> str:
     """Create a JWT access token for the given user."""
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {
         "sub": str(user_id),
         "username": username,

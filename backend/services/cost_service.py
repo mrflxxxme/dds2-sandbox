@@ -118,7 +118,7 @@ async def upload_nomenclature(db: AsyncSession, project_id: int, data: bytes):
                 nom.volume_l = Decimal(str(row.get("volume_l", 0) or 0))
             except Exception:
                 nom.volume_l = None
-            nom.updated_at = datetime.now(timezone.utc)
+            nom.updated_at = datetime.utcnow()
             updated += 1
         else:
             try:

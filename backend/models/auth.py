@@ -22,7 +22,7 @@ class User(Base):
     last_name: Mapped[Optional[str]] = mapped_column(String(100))
     password_hash: Mapped[str] = mapped_column(String(200), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
 
     memberships: Mapped[list["ProjectMember"]] = relationship(back_populates="user")
 
@@ -35,7 +35,7 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
     tax_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), default=6)
     vat_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), default=22)
 
@@ -50,7 +50,7 @@ class ProjectMember(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
-    joined_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    joined_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
 
     project: Mapped["Project"] = relationship(back_populates="members")
     user: Mapped["User"] = relationship(back_populates="memberships")
@@ -69,7 +69,7 @@ class ProjectInvite(Base):
     email: Mapped[Optional[str]] = mapped_column(String(200))
     invite_token: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, accepted, expired
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
     accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     accepted_by_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"))
 
