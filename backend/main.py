@@ -177,6 +177,10 @@ app.add_middleware(RateLimitMiddleware)
 # Request ID for traceability
 app.add_middleware(RequestIdMiddleware)
 
+# Slow request detection (>500ms)
+from backend.slow_query import SlowRequestMiddleware
+app.add_middleware(SlowRequestMiddleware)
+
 # Register unified error handlers
 from backend.exceptions import register_exception_handlers
 register_exception_handlers(app)

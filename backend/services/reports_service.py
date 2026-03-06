@@ -13,8 +13,10 @@ from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import Transaction, Account, OpeningBalance
+from backend.cache import cached
 
 
+@cached(prefix="reports:balance", ttl=300)
 async def get_balance(
     db: AsyncSession,
     project_id: int,
@@ -74,6 +76,7 @@ async def get_balance(
     return balances
 
 
+@cached(prefix="reports:dds_month", ttl=300)
 async def get_dds_month(
     db: AsyncSession,
     project_id: int,
@@ -174,6 +177,7 @@ async def get_customs_control(
     return result.scalars().all()
 
 
+@cached(prefix="reports:balance_daily", ttl=300)
 async def get_balance_daily(
     db: AsyncSession,
     project_id: int,
@@ -223,6 +227,7 @@ async def get_balance_daily(
     return output
 
 
+@cached(prefix="reports:income_daily", ttl=300)
 async def get_income_daily(
     db: AsyncSession,
     project_id: int,
