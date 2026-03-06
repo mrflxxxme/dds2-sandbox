@@ -14,7 +14,7 @@ Extracted from routers/cost.py to keep router thin (HTTP only).
 
 import io
 import math
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta, datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -117,7 +117,7 @@ async def upload_nomenclature(db: AsyncSession, project_id: int, data: bytes):
                 nom.volume_l = Decimal(str(row.get("volume_l", 0) or 0))
             except Exception:
                 nom.volume_l = None
-            nom.updated_at = datetime.utcnow()
+            nom.updated_at = datetime.now(timezone.utc)
             updated += 1
         else:
             try:

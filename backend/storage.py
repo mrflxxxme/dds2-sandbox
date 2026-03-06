@@ -5,7 +5,7 @@ Stores original uploaded files for audit trail and re-import capability.
 
 import io
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from minio import Minio
@@ -66,7 +66,7 @@ def upload_file(
         return None
 
     # Organize files by date and source type
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     prefix = f"imports/{now.strftime('%Y/%m')}"
     if source_type:
         prefix = f"{prefix}/{source_type}"

@@ -8,16 +8,29 @@ description: Полный цикл создания новой фичи (backend
 
 ## 1. Планирование
 - Определи что нужно: API эндпоинты, таблицы БД, страницы UI
-- Прочитай `AGENTS.md` и `docs/MODULES.md` для контекста
+- Прочитай `AGENTS.md` (секции ⛔ ЗАПРЕЩЕНО и ✅ ОБЯЗАТЕЛЬНО) и `docs/MODULES.md` для контекста
 
-## 2. Backend (если нужен новый API)
-- Используй skill `new-api-endpoint`
+## 2. Schema-First
+**ДО написания кода** определи Pydantic request/response модели:
+- Schema в `schemas/feature.py` + re-export в `schemas/__init__.py`
+- TypeScript типы в `types/api.ts`
+
+## 3. Backend (если нужен новый API)
+- Используй skill `new-api-endpoint` — Router → Service → Model
+- **Вся бизнес-логика в `services/`**, НЕ в роутере
 - Если нужна новая таблица — используй skill `db-migration`
 
-## 3. Frontend (если нужна новая страница)
+## 4. Frontend (если нужна новая страница)
 - Используй skill `new-page`
+- Обязательно: loading/error/empty states, `formatNumber`, `formatDate`, Excel export
 
-## 4. Проверка
+## 5. Тесты
+- Создай `tests/test_api_feature.py` для нового модуля
+- Минимум: test_create, test_list, test_delete
+
+## 6. Проверка
+
+⛔ **Проверь архитектурные правила из `/dev` workflow ПЕРЕД коммитом!**
 
 Проверь что Docker контейнеры работают:
 ```bash
@@ -34,9 +47,9 @@ cd /Users/a1/Desktop/dds_app && docker compose logs backend --tail=30
 cd /Users/a1/Desktop/dds_app && docker compose logs frontend-react --tail=30
 ```
 
-## 5. Документация
+## 7. Документация
 - Обнови `AGENTS.md` — структура, таблицы моделей
 - Обнови `docs/MODULES.md` — новые модули/эндпоинты
 
-## 6. Коммит
+## 8. Коммит
 Используй workflow `/dev` для коммита и пуша.

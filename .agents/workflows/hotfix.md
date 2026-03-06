@@ -23,7 +23,15 @@ cd /Users/a1/Desktop/dds_app && docker compose ps
 ```
 
 ## 2. Исправление
-- Найди и исправь баг
+
+⛔ **При фиксе — НЕ вноси новые нарушения архитектуры:**
+- Бизнес-логика → в `services/`, НЕ в роутер
+- `datetime.now(timezone.utc)`, НЕ `datetime.utcnow`
+- `Mapped[]` + `mapped_column()`, НЕ `Column()`
+- `Numeric(18,2)` для денег, НЕ `Float`
+- SQL: `:param` binding, НЕ f-string
+- `project_id` фильтрация в каждом запросе
+
 - Backend: hot-reload автоматический (uvicorn --reload)
 - Frontend: hot-reload автоматический (Next.js)
 - Пересборка нужна ТОЛЬКО при изменении package.json / requirements.txt / Dockerfile

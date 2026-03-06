@@ -5,7 +5,7 @@ Provides password hashing, JWT token creation/verification, and user lookup.
 
 import secrets
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
@@ -48,7 +48,7 @@ def validate_password_strength(password: str) -> None:
 
 def create_access_token(user_id: int, username: str) -> str:
     """Create a JWT access token for the given user."""
-    expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {
         "sub": str(user_id),
         "username": username,

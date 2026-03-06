@@ -136,20 +136,82 @@ AGENTS.md  — обновить структуру, таблицу моделе�
 
 ---
 
+## ⛔ ЗАПРЕЩЕНО — антипаттерны
+
+> **Агент ОБЯЗАН проверять эти правила при КАЖДОМ изменении кода.**
+> Нарушение любого из них — баг, который нужно исправить ДО коммита.
+
+### Backend
+
+| ❌ НЕЛЬЗЯ | ✅ ПРАВИЛЬНО |
+|-----------|-------------|
+| Бизнес-логика в роутере | Роутер вызывает `service`-функцию: `return await my_service.create_item(db, data)` |
+| `datetime.utcnow` | `datetime.now(timezone.utc)` — utcnow deprecated с Python 3.12 |
+| `Column(Integer, ...)` | `Mapped[int] = mapped_column(Integer, ...)` — новый SQLAlchemy стиль |
+| `Float` для денег | `Numeric(18, 2)` — точные вычисления |
+| f-string в SQL: `f"WHERE id={x}"` | Параметризованный SQL: `text("WHERE id = :x"), {"x": x}` |
+| Запрос без `project_id` | `select(Model).where(Model.project_id == project_id)` |
+| Запрос без `is_deleted` фильтра | `.where(Model.is_deleted == False)` для моделей с SoftDeleteMixin |
+| Новая модель в `models.py` (монолит) | Новый файл `models/feature.py` + re-export в `models/__init__.py` |
+| Новая схема в `schemas.py` (монолит) | Новый файл `schemas/feature.py` + re-export в `schemas/__init__.py` |
+| List-эндпоинт без пагинации | `limit: int = 100, offset: int = 0` + `.limit(limit).offset(offset)` |
+| Мутация без инвалидации кэша | `await invalidate_cache("reports:*")` после INSERT/UPDATE/DELETE |
+| `print()` для дебага | `logger = logging.getLogger("dds.module")` + `logger.info(...)` |
+| Inline стили в React | CSS классы из `globals.css`: `glass-card`, `data-table`, `btn-*` |
+
+### Frontend
+
+| ❌ НЕЛЬЗЯ | ✅ ПРАВИЛЬНО |
+|-----------|-------------|
+| Сырые числа: `{item.amount}` | `{formatNumber(item.amount)}` из `lib/utils.ts` |
+| Сырые даты: `{item.date}` | `{formatDate(item.date)}` из `lib/utils.ts` |
+| Таблица без Excel экспорта | Кнопка «📥 Excel» с `exportToExcel()` |
+| Компонент без loading/error | Обязательно: `if (loading)`, `if (error)`, пустое состояние |
+| Inline типы | Типы в `types/api.ts`, импорт оттуда |
+| Data fetch без `useCallback` | `const loadData = useCallback(async () => {...}, [deps])` |
+
+---
+
+## ✅ ОБЯЗАТЕЛЬНО — при каждом изменении
+
+### Backend — новый эндпоинт
+
+1. **Schema-first** — определи Pydantic request/response ДО написания кода
+2. **Service layer** — вся логика в `services/feature_service.py`
+3. **Тонкий роутер** — только HTTP, валидация, вызов service
+4. **Модель** — `Mapped[]`, `project_id`, `SoftDeleteMixin` для критичных сущностей
+5. **Тесты** — `tests/test_api_feature.py` для каждого нового модуля
+6. **Пагинация** — `limit/offset` для list-эндпоинтов
+7. **Документация** — обновить этот файл + `docs/MODULES.md`
+
+### Frontend — новая страница
+
+1. **Типы** — интерфейсы в `types/api.ts`
+2. **API методы** — в `lib/api.ts` класс `ApiClient`
+3. **Страница** — `'use client'`, loading/error/empty states
+4. **Форматирование** — `formatNumber()`, `formatDate()`, Excel export
+5. **Стили** — только CSS классы из `globals.css`
+6. **Sidebar** — добавить в `layout.tsx`
+
+---
+
 ## Conventions
 
 ### Backend
 - **Router** — ТОЛЬКО HTTP layer (валидация, auth). Бизнес-логику → в service
+- **Service** — бизнес-логика, координация моделей, logging
 - **SQLAlchemy** — async по умолчанию (`AsyncSession`), sync только для ETL
+- **Models** — split по доменам в `models/*.py`, re-export в `models/__init__.py`
+- **Schemas** — split по доменам в `schemas/*.py`, re-export в `schemas/__init__.py`
 - **Errors** — через `HTTPException`, unified формат из `exceptions.py`
-- **Cache** — `@cached(ttl=300)` для тяжёлых отчётов
+- **Cache** — `@cached(ttl=300)` для тяжёлых отчётов, инвалидация при мутации
 - **Параметры SQL** — ТОЛЬКО `:param` binding, НИКОГДА f-string
 
 ### Frontend
 - **Pages** — `'use client'` directive, каждая — самостоятельный компонент
 - **API** — все вызовы через `api.methodName()` из `lib/api.ts`
 - **Стили** — CSS variables в `globals.css`, классы: `glass-card`, `data-table`, `btn-*`, `badge-*`
-- **Таблицы** — всегда с кнопкой "📥 Excel" (`exportToExcel()`)
+- **Таблицы** — всегда с кнопкой «📥 Excel» (`exportToExcel()`)
 - **Форматирование** — `formatNumber()` для чисел, `formatDate()` для дат
 
 ---
@@ -210,4 +272,4 @@ AGENTS.md  — обновить структуру, таблицу моделе�
 
 ---
 
-*Последнее обновление: 2026-03-01 — WB номенклатура sync, обязательные правила (docs + git push)*
+*Последнее обновление: 2026-03-06 — добавлены обязательные архитектурные правила*

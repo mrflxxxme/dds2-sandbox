@@ -3,7 +3,7 @@ ETL service: orchestrates raw file -> normalize -> upsert -> master logic refres
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -89,7 +89,7 @@ def import_statement(
         project_id=project_id,
         filename=filename,
         source_type=source_type,
-        imported_at=datetime.utcnow(),
+        imported_at=datetime.now(timezone.utc),
     )
 
     log_ctx = logger.bind(

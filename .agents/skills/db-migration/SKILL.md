@@ -5,27 +5,58 @@ description: Шаблон для изменения схемы БД через a
 
 # Skill: Миграция базы данных
 
-Используй этот skill когда нужно изменить схему БД (новая таблица, новый столбец, удаление, изменение типа).
+> ⚠️ **Прочитай `AGENTS.md` — секции ЗАПРЕЩЕНО и ОБЯЗАТЕЛЬНО — перед началом.**
 
 ## Шаги
 
-### 1. Обнови модель (backend/models.py)
-Внеси изменения в ORM модель:
+### 1. Обнови модель (backend/models/feature.py)
+
+> **Модели разбиты по доменам!** Создавай новый файл `models/feature.py`, НЕ добавляй в монолитный `models.py`.
 
 **Новая таблица:**
 ```python
-class NewTable(Base):
-    __tablename__ = "new_table"
-    id = Column(Integer, primary_key=True)
-    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
-    # ... поля
-    created_at = Column(DateTime, server_default=func.now())
+"""Feature models."""
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Optional
+
+from sqlalchemy import String, Integer, Numeric, DateTime, Date, ForeignKey, UniqueConstraint, Index
+from sqlalchemy.orm import Mapped, mapped_column
+
+from backend.database import Base
+from backend.models.mixins import SoftDeleteMixin
+
+
+class Feature(Base, SoftDeleteMixin):
+    __tablename__ = "features"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)   # ← Numeric, НЕ Float
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)              # ← НЕ datetime.utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_feature_project", "project_id"),
+    )
+```
+
+⛔ **ЗАПРЕЩЕНО:**
+- `Column(Integer, ...)` → используй `Mapped[int] = mapped_column(Integer, ...)`
+- `datetime.utcnow` → используй `datetime.now(timezone.utc)`
+- `Float` для денег → используй `Numeric(18, 2)`
+
+**Зарегистрируй** в `models/__init__.py`:
+```python
+from backend.models.feature import Feature
 ```
 
 **Новый столбец в существующей таблице:**
 ```python
 # Добавь в класс:
-new_column = Column(String, nullable=True)  # nullable=True чтобы не сломать существующие данные
+new_column: Mapped[Optional[str]] = mapped_column(String(100))  # nullable=True по умолчанию для Optional
 ```
 
 ### 2. Создай миграцию alembic
@@ -45,31 +76,50 @@ cd /Users/a1/Desktop/dds_app && docker compose exec backend alembic revision --a
 cd /Users/a1/Desktop/dds_app && docker compose exec backend alembic upgrade head
 ```
 
-### 5. Обнови Pydantic schemas (backend/schemas.py)
-Добавь/обнови schemas для новых полей:
+### 5. Обнови Pydantic schemas (backend/schemas/feature.py)
+
+> **Схемы разбиты по доменам!** Создавай `schemas/feature.py`, НЕ добавляй в монолитный `schemas.py`.
+
 ```python
-class NewTableResponse(BaseModel):
+"""Feature schemas."""
+from datetime import datetime
+from decimal import Decimal
+from pydantic import BaseModel, ConfigDict
+
+class FeatureResponse(BaseModel):
     id: int
-    project_id: int
-    # ... новые поля
+    name: str
+    amount: Decimal
+    created_at: datetime
     model_config = ConfigDict(from_attributes=True)
 ```
 
-### 6. Альтернатива: прямой SQL (если alembic не настроен)
+**Зарегистрируй** в `schemas/__init__.py`:
+```python
+from backend.schemas.feature import FeatureResponse
+```
+
+### 6. Альтернатива: прямой SQL (если срочно)
 ```bash
-cd /Users/a1/Desktop/dds_app && docker compose exec db psql -U dds_user -d dds_db -c "
+cd /Users/a1/Desktop/dds_app && docker compose exec db psql -U dds -d dds_db -c "
 ALTER TABLE table_name ADD COLUMN new_column VARCHAR;
 "
 ```
 
-### 7. Чеклист перед завершением
-- [ ] Модель обновлена в `models.py`
-- [ ] Миграция создана (autogenerate или ручная)
+## ⛔ Чеклист (обязательный)
+
+- [ ] Модель в `models/feature.py` (НЕ в `models.py` монолите)
+- [ ] **`Mapped[]` + `mapped_column()`** — не `Column()`
+- [ ] **`datetime.now(timezone.utc)`** — не `datetime.utcnow`
+- [ ] **`Numeric(18, 2)`** для денег — не `Float`
+- [ ] **`project_id`** с FK и индексом
+- [ ] **`SoftDeleteMixin`** для критичных сущностей
+- [ ] Re-export в `models/__init__.py`
+- [ ] Миграция создана (autogenerate)
 - [ ] Миграция проверена (upgrade + downgrade)
 - [ ] Миграция применена (`alembic upgrade head`)
-- [ ] Schemas обновлены в `schemas.py`
+- [ ] Schema в `schemas/feature.py` + re-export в `__init__.py`
 - [ ] Nullable=True для новых столбцов (backward compatibility)
 - [ ] Индексы на project_id и FK
-- [ ] UPSERT (ON CONFLICT) для импорта данных
-- [ ] Обновлён `AGENTS.md` (таблица моделей)
-- [ ] Сделан коммит через `/dev`
+- [ ] Обновлён `AGENTS.md`
+- [ ] Коммит через `/dev`

@@ -7,14 +7,16 @@ description: Изменение схемы БД — модель, миграци
 // turbo-all
 
 ## 1. Подготовка
-Прочитай текущие модели:
-```bash
-cd /Users/a1/Desktop/dds_app && head -200 backend/models.py
-```
+Прочитай `AGENTS.md` (секции ⛔ ЗАПРЕЩЕНО и ✅ ОБЯЗАТЕЛЬНО).
 
 ## 2. Изменение модели
-- Отредактируй `backend/models.py` — добавь/измени таблицу или столбец
-- Используй skill `db-migration` для деталей
+- Используй skill `db-migration`
+- Создай файл `backend/models/feature.py` (НЕ добавляй в монолитный models.py)
+- **`Mapped[]` + `mapped_column()`** — не `Column()`
+- **`datetime.now(timezone.utc)`** — не `datetime.utcnow`
+- **`Numeric(18,2)`** для денег — не `Float`
+- **`project_id`** с FK и индексом
+- Re-export в `models/__init__.py`
 
 ## 3. Создание миграции
 ```bash
@@ -33,7 +35,8 @@ cd /Users/a1/Desktop/dds_app && docker compose exec backend alembic upgrade head
 ```
 
 ## 6. Обновление schemas
-- Отредактируй `backend/schemas.py` — добавь новые поля в response models
+- Создай `backend/schemas/feature.py` (НЕ добавляй в монолитный schemas.py)
+- Re-export в `schemas/__init__.py`
 
 ## 7. Проверка
 ```bash
