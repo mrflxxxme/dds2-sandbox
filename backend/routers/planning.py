@@ -26,10 +26,12 @@ router = APIRouter(prefix="/planning")
 
 @router.get("/orders", response_model=List[OrderSchema])
 async def get_orders(
+    limit: int = Query(500),
+    offset: int = Query(0),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    return await planning_service.get_orders(db, project.id)
+    return await planning_service.get_orders(db, project.id, limit, offset)
 
 
 @router.post("/orders", response_model=OrderSchema)
@@ -80,10 +82,12 @@ async def upsert_lead_time(
 @router.get("/payments", response_model=List[PlannedPaymentSchema])
 async def get_payments(
     order_no: Optional[int] = Query(None),
+    limit: int = Query(500),
+    offset: int = Query(0),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    return await planning_service.get_payments(db, project.id, order_no)
+    return await planning_service.get_payments(db, project.id, order_no, limit, offset)
 
 
 @router.post("/payments", response_model=PlannedPaymentSchema)
@@ -124,10 +128,12 @@ async def mark_paid(
 
 @router.get("/incomes", response_model=List[PlannedIncomeSchema])
 async def get_incomes(
+    limit: int = Query(500),
+    offset: int = Query(0),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    return await planning_service.get_incomes(db, project.id)
+    return await planning_service.get_incomes(db, project.id, limit, offset)
 
 
 @router.post("/incomes", response_model=PlannedIncomeSchema)
@@ -431,11 +437,13 @@ async def upload_wb_payouts(
 @router.get("/wb_payouts")
 async def get_wb_payouts(
     status: Optional[str] = Query(None),
+    limit: int = Query(500),
+    offset: int = Query(0),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """List WB payouts, optionally filtered by status."""
-    payouts = await planning_service.get_wb_payouts(db, project.id, status)
+    payouts = await planning_service.get_wb_payouts(db, project.id, status, limit, offset)
     return [WbPayoutSchema.model_validate(p).model_dump() for p in payouts]
 
 

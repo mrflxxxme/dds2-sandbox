@@ -73,11 +73,12 @@ async def auto_link_customs_dt(order_no: str, dt_number: str, db: AsyncSession):
 
 # ─── Nomenclature ─────────────────────────────────────────────────────────────
 
-async def get_nomenclature(db: AsyncSession, project_id: int):
+async def get_nomenclature(db: AsyncSession, project_id: int, limit: int = 1000, offset: int = 0):
     result = await db.execute(
         select(Nomenclature)
         .where(Nomenclature.project_id == project_id)
         .order_by(Nomenclature.subject, Nomenclature.article_seller)
+        .limit(limit).offset(offset)
     )
     return result.scalars().all()
 
@@ -146,11 +147,12 @@ async def upload_nomenclature(db: AsyncSession, project_id: int, data: bytes):
 
 # ─── Duty Rules ───────────────────────────────────────────────────────────────
 
-async def get_duty_rules(db: AsyncSession, project_id: int):
+async def get_duty_rules(db: AsyncSession, project_id: int, limit: int = 500, offset: int = 0):
     result = await db.execute(
         select(DutyRule)
         .where(DutyRule.project_id == project_id)
         .order_by(DutyRule.subject)
+        .limit(limit).offset(offset)
     )
     return result.scalars().all()
 
@@ -196,12 +198,13 @@ async def delete_duty_rule(db: AsyncSession, project_id: int, rule_id: int):
 
 # ─── Cost Orders ──────────────────────────────────────────────────────────────
 
-async def get_cost_orders(db: AsyncSession, project_id: int):
+async def get_cost_orders(db: AsyncSession, project_id: int, limit: int = 500, offset: int = 0):
     """Get cost orders with aggregated item totals."""
     result = await db.execute(
         select(CostOrder)
         .where(CostOrder.project_id == project_id, CostOrder.is_deleted == False)
         .order_by(CostOrder.created_at.desc())
+        .limit(limit).offset(offset)
     )
     orders = result.scalars().all()
     out = []

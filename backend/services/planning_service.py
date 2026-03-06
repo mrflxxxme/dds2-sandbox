@@ -31,10 +31,11 @@ logger = logging.getLogger("dds.planning")
 
 # ─── Orders CRUD ─────────────────────────────────────────────────────────────
 
-async def get_orders(db: AsyncSession, project_id: int):
+async def get_orders(db: AsyncSession, project_id: int, limit: int = 500, offset: int = 0):
     result = await db.execute(
         select(Order).where(Order.project_id == project_id, Order.is_deleted == False)
         .order_by(Order.planned_ship_date.desc().nullslast())
+        .limit(limit).offset(offset)
     )
     return result.scalars().all()
 
@@ -101,11 +102,11 @@ async def upsert_lead_time(db: AsyncSession, project_id: int, direction: str, da
 
 # ─── Payments CRUD ───────────────────────────────────────────────────────────
 
-async def get_payments(db: AsyncSession, project_id: int, order_no: int | None = None):
+async def get_payments(db: AsyncSession, project_id: int, order_no: int | None = None, limit: int = 500, offset: int = 0):
     q = select(PlannedPayment).where(PlannedPayment.project_id == project_id, PlannedPayment.is_deleted == False)
     if order_no:
         q = q.where(PlannedPayment.order_no == order_no)
-    q = q.order_by(PlannedPayment.pay_date)
+    q = q.order_by(PlannedPayment.pay_date).limit(limit).offset(offset)
     result = await db.execute(q)
     return result.scalars().all()
 
@@ -162,10 +163,11 @@ async def mark_paid(db: AsyncSession, project_id: int, payment_id: int):
 
 # ─── Incomes CRUD ────────────────────────────────────────────────────────────
 
-async def get_incomes(db: AsyncSession, project_id: int):
+async def get_incomes(db: AsyncSession, project_id: int, limit: int = 500, offset: int = 0):
     result = await db.execute(
         select(PlannedIncome).where(PlannedIncome.project_id == project_id)
         .order_by(PlannedIncome.date)
+        .limit(limit).offset(offset)
     )
     return result.scalars().all()
 
@@ -420,10 +422,11 @@ async def upload_wb_payouts(db: AsyncSession, project_id: int, parsed: list[dict
     return created, updated, skipped
 
 
-async def get_wb_payouts(db: AsyncSession, project_id: int, status: str | None = None):
+async def get_wb_payouts(db: AsyncSession, project_id: int, status: str | None = None, limit: int = 500, offset: int = 0):
     q = select(WbPayout).where(WbPayout.project_id == project_id).order_by(WbPayout.created_at.desc())
     if status:
         q = q.where(WbPayout.status == status)
+    q = q.limit(limit).offset(offset)
     result = await db.execute(q)
     return result.scalars().all()
 

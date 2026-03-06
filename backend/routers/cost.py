@@ -5,7 +5,7 @@ Thin HTTP layer — all business logic is in services/cost_service.py.
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
@@ -20,10 +20,12 @@ router = APIRouter(prefix="/cost")
 
 @router.get("/nomenclature")
 async def get_nomenclature(
+    limit: int = Query(1000),
+    offset: int = Query(0),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    items = await cost_service.get_nomenclature(db, project.id)
+    items = await cost_service.get_nomenclature(db, project.id, limit, offset)
     return [
         {
             "id": n.id, "barcode": n.barcode, "brand": n.brand,
@@ -53,10 +55,12 @@ async def upload_nomenclature(
 
 @router.get("/duty_rules")
 async def get_duty_rules(
+    limit: int = Query(500),
+    offset: int = Query(0),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    rules = await cost_service.get_duty_rules(db, project.id)
+    rules = await cost_service.get_duty_rules(db, project.id, limit, offset)
     return [
         {
             "id": r.id, "subject": r.subject, "basis": r.basis,
@@ -95,10 +99,12 @@ async def delete_duty_rule(
 
 @router.get("/orders")
 async def get_cost_orders(
+    limit: int = Query(500),
+    offset: int = Query(0),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    return await cost_service.get_cost_orders(db, project.id)
+    return await cost_service.get_cost_orders(db, project.id, limit, offset)
 
 
 @router.post("/orders")
