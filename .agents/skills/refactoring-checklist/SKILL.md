@@ -1,6 +1,6 @@
 ---
 name: refactoring-checklist
-description: Чеклист проверки tech debt при добавлении кода — размер файлов, дублирование, тесты, кэш
+description: Чеклист проверки tech debt при добавлении кода — размер файлов, дублирование, тесты, кэш, datetime
 ---
 
 # Skill: Рефакторинг-чеклист
@@ -62,6 +62,17 @@ grep -rn "INSERT INTO.*category_ref" backend/
 
 **Правило:** Все данные инициализации → `backend/seeds/`, НЕ в `main.py`.
 
+### 6. Datetime / timezone
+
+```bash
+# ЗАПРЕЩЕНО: offset-aware datetime в TIMESTAMP WITHOUT TIME ZONE колонки
+grep -rn "datetime.now(timezone.utc)" backend/ --include="*.py"
+```
+
+**Правило:** Все `DateTime` колонки в PostgreSQL — `TIMESTAMP WITHOUT TIME ZONE`.
+Использовать **`datetime.utcnow()`** для defaults и присваиваний.
+`datetime.now(timezone.utc)` вызывает `asyncpg.DataError` при записи!
+
 ## ⛔ Чеклист
 
 - [ ] Ни один сервис не превышает 400 строк
@@ -69,5 +80,6 @@ grep -rn "INSERT INTO.*category_ref" backend/
 - [ ] Cache key содержит `project_id`
 - [ ] Нет дублирования middleware (одна точка: `project_context.py`)
 - [ ] Seed данные в `backend/seeds/`, не inline
+- [ ] Нет `datetime.now(timezone.utc)` в коде (только `datetime.utcnow()`)
 - [ ] `AGENTS.md` обновлён если изменилась структура
 - [ ] Тесты проходят: `pytest tests/ -x`

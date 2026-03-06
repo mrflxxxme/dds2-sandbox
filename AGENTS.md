@@ -149,7 +149,7 @@ AGENTS.md  — обновить структуру, таблицу моделе�
 | ❌ НЕЛЬЗЯ | ✅ ПРАВИЛЬНО |
 |-----------|-------------|
 | Бизнес-логика в роутере | Роутер вызывает `service`-функцию: `return await my_service.create_item(db, data)` |
-| `datetime.utcnow` | `datetime.now(timezone.utc)` — utcnow deprecated с Python 3.12 |
+| `datetime.now(timezone.utc)` для `DateTime` колонок | `datetime.utcnow()` — asyncpg НЕ принимает offset-aware datetime в `TIMESTAMP WITHOUT TIME ZONE` колонки. Если нужен aware → колонка должна быть `DateTime(timezone=True)` |
 | `Column(Integer, ...)` | `Mapped[int] = mapped_column(Integer, ...)` — новый SQLAlchemy стиль |
 | `Float` для денег | `Numeric(18, 2)` — точные вычисления |
 | f-string в SQL: `f"WHERE id={x}"` | Параметризованный SQL: `text("WHERE id = :x"), {"x": x}` |
@@ -281,4 +281,4 @@ AGENTS.md  — обновить структуру, таблицу моделе�
 
 ---
 
-*Последнее обновление: 2026-03-06 — добавлены обязательные архитектурные правила*
+*Последнее обновление: 2026-03-06 — исправлено правило datetime (asyncpg timezone), обновлён рефакторинг-чеклист*
