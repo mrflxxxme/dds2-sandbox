@@ -52,6 +52,14 @@ export default function InboxPage() {
         } catch (e: any) { setMsg(e.message); }
     };
 
+    const assignByIds = async (txnIds: string[], cat1: string, cat2: string) => {
+        try {
+            const result = await api.assignCategoryByIds({ txn_ids: txnIds, cat_lvl1: cat1, cat_lvl2: cat2 });
+            setMsg(`✅ Обновлено ${result.updated || 0} из ${txnIds.length} выбранных операций → ${cat1} / ${cat2}`);
+            loadData();
+        } catch (e: any) { setMsg(e.message); }
+    };
+
     const assignSingle = async (txnId: string, cat1: string, cat2: string, scope: string, cpKey: string) => {
         try {
             await api.assignCategory({ txn_id: txnId, cat_lvl1: cat1, cat_lvl2: cat2, scope, cp_key: cpKey });
@@ -128,7 +136,8 @@ export default function InboxPage() {
                             <CpBlock key={i} group={g} total={total} cats={cats} isOpen={isOpen}
                                 onToggle={() => setExpanded(isOpen ? null : `${tab}-${i}`)}
                                 allTxns={allTxns.filter(t => t.cp_key === cpKey)}
-                                onAssign={(cat1, cat2) => assignBulk(cpKey, g.counterparty, cat1, cat2)} />
+                                onAssign={(cat1, cat2) => assignBulk(cpKey, g.counterparty, cat1, cat2)}
+                                onAssignByIds={(txnIds: string[], cat1: string, cat2: string) => assignByIds(txnIds, cat1, cat2)} />
                         );
                     })}
                 </div>
@@ -142,10 +151,31 @@ export default function InboxPage() {
     );
 }
 
-function CpBlock({ group, total, cats, isOpen, onToggle, allTxns, onAssign }: any) {
+function CpBlock({ group, total, cats, isOpen, onToggle, allTxns, onAssign, onAssignByIds }: any) {
     const [cat1, setCat1] = useState(Object.keys(cats)[0] || '');
     const [cat2, setCat2] = useState((cats[Object.keys(cats)[0]] || [''])[0] || '');
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const catKeys = Object.keys(cats);
+
+    const visibleTxns = allTxns.slice(0, 20);
+    const allChecked = visibleTxns.length > 0 && visibleTxns.every((t: any) => selectedIds.has(t.txn_id));
+    const someChecked = selectedIds.size > 0;
+
+    const toggleOne = (txnId: string) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(txnId)) next.delete(txnId); else next.add(txnId);
+            return next;
+        });
+    };
+
+    const toggleAll = () => {
+        if (allChecked) {
+            setSelectedIds(new Set());
+        } else {
+            setSelectedIds(new Set(visibleTxns.map((t: any) => t.txn_id)));
+        }
+    };
 
     return (
         <div className="glass-card" style={{ padding: isOpen ? 20 : 16 }}>
@@ -165,17 +195,32 @@ function CpBlock({ group, total, cats, isOpen, onToggle, allTxns, onAssign }: an
             {isOpen && (
                 <div style={{ marginTop: 12 }}>
                     {allTxns.length > 0 && (
-                        <div style={{ maxHeight: 200, overflowY: 'auto', marginBottom: 12 }}>
+                        <div style={{ maxHeight: 300, overflowY: 'auto', marginBottom: 12 }}>
                             <table className="data-table">
-                                <thead><tr><th>Дата</th><th>Сумма</th><th>Назначение</th></tr></thead>
+                                <thead>
+                                    <tr>
+                                        <th style={{ width: 32, textAlign: 'center' }}>
+                                            <input type="checkbox" checked={allChecked} onChange={toggleAll}
+                                                style={{ cursor: 'pointer', accentColor: 'var(--color-primary)' }} />
+                                        </th>
+                                        <th>Дата</th>
+                                        <th>Сумма</th>
+                                        <th>Назначение</th>
+                                    </tr>
+                                </thead>
                                 <tbody>
-                                    {allTxns.slice(0, 20).map((t: any, j: number) => (
-                                        <tr key={j}>
-                                            <td style={{ fontSize: 12 }}>{formatDate(t.date)}</td>
-                                            <td style={{ fontWeight: 600, color: parseFloat(t.income) > 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                                    {visibleTxns.map((t: any, j: number) => (
+                                        <tr key={j} style={{ background: selectedIds.has(t.txn_id) ? 'rgba(99,102,241,0.08)' : undefined }}>
+                                            <td style={{ textAlign: 'center' }}>
+                                                <input type="checkbox" checked={selectedIds.has(t.txn_id)}
+                                                    onChange={() => toggleOne(t.txn_id)}
+                                                    style={{ cursor: 'pointer', accentColor: 'var(--color-primary)' }} />
+                                            </td>
+                                            <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{formatDate(t.date)}</td>
+                                            <td style={{ fontWeight: 600, whiteSpace: 'nowrap', color: parseFloat(t.income) > 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>
                                                 {formatNumber(parseFloat(t.income) > 0 ? t.income : t.expense)}
                                             </td>
-                                            <td style={{ fontSize: 12, maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            <td style={{ fontSize: 12, whiteSpace: 'normal', wordBreak: 'break-word', minWidth: 300 }}>
                                                 {t.purpose || '—'}
                                             </td>
                                         </tr>
@@ -199,6 +244,12 @@ function CpBlock({ group, total, cats, isOpen, onToggle, allTxns, onAssign }: an
                             </select>
                         </div>
                         <button className="btn btn-primary btn-sm" onClick={() => onAssign(cat1, cat2)}>✅ Применить ко всем</button>
+                        {someChecked && (
+                            <button className="btn btn-sm" style={{ background: 'var(--color-warning)', color: '#000', fontWeight: 600 }}
+                                onClick={() => { onAssignByIds(Array.from(selectedIds), cat1, cat2); setSelectedIds(new Set()); }}>
+                                ☑ Применить к выбранным ({selectedIds.size})
+                            </button>
+                        )}
                     </div>
                 </div>
             )}
