@@ -412,7 +412,7 @@ class ApiClient {
         return this.request<MessageResponse>('DELETE', `/api/v1/planning/orders/${id}`);
     }
     getPlanningOrderSummary(orderNo: string) {
-        return this.request<{ order: Order; planned_payments: PlannedPayment[]; totals: Record<string, number> }>('GET', `/api/v1/planning/orders/${orderNo}/summary`);
+        return this.request<{ order: Order; planned_payments: PlannedPayment[]; totals: Record<string, number> }>('GET', `/api/v1/planning/orders/${encodeURIComponent(orderNo)}/summary`);
     }
 
     // Planning — Payments
