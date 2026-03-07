@@ -344,6 +344,9 @@ class ApiClient {
     getDDSMonth(year: number, month: number, currency = 'RUB') {
         return this.request<{ rows: Array<{ cat_lvl1: string; cat_lvl2: string; income: number; expense: number }>; totals: Record<string, number> }>('GET', `/api/v1/reports/dds_month?year=${year}&month=${month}&currency=${currency}`);
     }
+    getDDSPnL(year: number) {
+        return this.request<any>('GET', `/api/v1/reports/dds_pnl?year=${year}`);
+    }
     getBalanceDaily(account: string, currency: string, start: string, end: string) {
         return this.request<Array<{ date: string; balance: number }>>('GET', `/api/v1/reports/balance_daily?account=${encodeURIComponent(account)}&currency=${currency}&date_from=${start}&date_to=${end}`);
     }

@@ -47,6 +47,16 @@ async def get_dds_month(
     return await reports_service.get_dds_month(db, project.id, year, month, currency)
 
 
+@router.get("/dds_pnl")
+async def get_dds_pnl(
+    year: int = Query(...),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """PnL-style DDS report: categories × months with counterparty drill-down."""
+    return await reports_service.get_dds_pnl(db, project.id, year)
+
+
 @router.get("/fx_control", response_model=list[FxControlRow])
 async def get_fx_control(
     date_from: Optional[date] = Query(None),
