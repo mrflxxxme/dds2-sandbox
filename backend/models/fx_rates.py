@@ -22,7 +22,7 @@ class FxRate(Base):
     source: Mapped[str] = mapped_column(String(50), default="vtb_import")
     txn_id: Mapped[Optional[str]] = mapped_column(String(300))
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.utcnow()
     )
 
     __table_args__ = (
