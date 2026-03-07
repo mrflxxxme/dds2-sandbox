@@ -500,7 +500,45 @@ async def calculate_cashflow_daily(
             )
         )
         total_net = Decimal(str(net_result.scalar() or 0))
-        starting_balance = float(total_ob + total_net)
+        rub_balance = total_ob + total_net
+
+        # Add foreign currency balances (CNY, USD) converted to RUB
+        fx_balance_rub = Decimal("0")
+        for ccy in ("CNY", "USD"):
+            # Get account balance in foreign currency
+            ob_fx = await db.execute(
+                select(OpeningBalance).where(
+                    OpeningBalance.project_id == project_id,
+                    OpeningBalance.currency == ccy,
+                )
+            )
+            ccy_ob = sum(o.opening_balance for o in ob_fx.scalars().all())
+            net_fx = await db.execute(
+                select(func.coalesce(func.sum(Transaction.net), 0)).where(
+                    Transaction.project_id == project_id,
+                    Transaction.currency == ccy,
+                    Transaction.date <= today,
+                )
+            )
+            ccy_net = Decimal(str(net_fx.scalar() or 0))
+            ccy_balance = ccy_ob + ccy_net
+            if ccy_balance == 0:
+                continue
+
+            # Get average fx_rate from recent PlannedPayments for this currency
+            avg_rate_result = await db.execute(
+                select(func.avg(PlannedPayment.fx_rate)).where(
+                    PlannedPayment.project_id == project_id,
+                    PlannedPayment.currency.ilike(f"%{ccy}%"),
+                    PlannedPayment.fx_rate.isnot(None),
+                    PlannedPayment.fx_rate > 0,
+                )
+            )
+            avg_rate = avg_rate_result.scalar()
+            if avg_rate:
+                fx_balance_rub += ccy_balance * Decimal(str(avg_rate))
+
+        starting_balance = float(rub_balance + fx_balance_rub)
 
     # Planned incomes indexed by date
     inc_result = await db.execute(
