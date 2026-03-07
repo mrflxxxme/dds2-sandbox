@@ -271,7 +271,11 @@ def normalize_divandek_cn_ru(df: pd.DataFrame) -> pd.DataFrame:
 
 def detect_and_normalize_excel(data: bytes) -> pd.DataFrame:
     """Detect Excel format by columns and normalize to standard schema."""
+    import logging
+    logger = logging.getLogger("dds.cost.parser")
+
     df = pd.read_excel(io.BytesIO(data))
+    logger.info(f"Raw columns from Excel: {list(df.columns)}")
 
     # Deduplicate column names — some supplier files have duplicate headers
     seen = {}
@@ -286,6 +290,8 @@ def detect_and_normalize_excel(data: bytes) -> pd.DataFrame:
             new_cols.append(name)
     df.columns = new_cols
 
+    logger.info(f"Deduped columns: {list(df.columns)}")
+
     cols = list(new_cols)
     cols_lower = [c.lower() for c in cols]
 
@@ -293,7 +299,7 @@ def detect_and_normalize_excel(data: bytes) -> pd.DataFrame:
         return normalize_divandek(df)
     elif "条码" in cols:
         return normalize_carpet(df)
-    elif "客户编号" in cols:
+    elif "客户编号" in cols or "客户编号" in cols_lower:
         return normalize_divandek_cn(df)
     elif "номер клиента" in cols_lower:
         return normalize_divandek_cn_ru(df)
