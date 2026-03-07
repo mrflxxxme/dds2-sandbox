@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 import {
@@ -26,99 +26,122 @@ const PIE_COLORS = [
 /* ─── Period presets ───────────────────────────────────────────── */
 type PeriodKey = 'month' | 'prev_month' | '7d' | '30d' | '90d' | 'all' | 'custom';
 
-function getPeriodDates(key: PeriodKey, customFrom?: string, customTo?: string): { from: string; to: string; label: string } {
+function getPeriodDates(key: PeriodKey, customFrom?: string, customTo?: string) {
     const today = new Date();
     const yyyy = today.getFullYear();
     const mm = String(today.getMonth() + 1).padStart(2, '0');
     const dd = String(today.getDate()).padStart(2, '0');
     const todayStr = `${yyyy}-${mm}-${dd}`;
-
     switch (key) {
-        case 'month':
-            return { from: `${yyyy}-${mm}-01`, to: todayStr, label: 'Текущий месяц' };
+        case 'month': return { from: `${yyyy}-${mm}-01`, to: todayStr, label: 'Текущий месяц' };
         case 'prev_month': {
             const prev = new Date(yyyy, today.getMonth() - 1, 1);
             const prevEnd = new Date(yyyy, today.getMonth(), 0);
-            const pY = prev.getFullYear();
-            const pM = String(prev.getMonth() + 1).padStart(2, '0');
-            const eD = String(prevEnd.getDate()).padStart(2, '0');
-            return { from: `${pY}-${pM}-01`, to: `${pY}-${pM}-${eD}`, label: 'Прошлый месяц' };
+            return { from: `${prev.getFullYear()}-${String(prev.getMonth()+1).padStart(2,'0')}-01`, to: `${prev.getFullYear()}-${String(prev.getMonth()+1).padStart(2,'0')}-${String(prevEnd.getDate()).padStart(2,'0')}`, label: 'Прошлый месяц' };
         }
-        case '7d': {
-            const s = new Date(today); s.setDate(s.getDate() - 6);
-            return { from: `${s.getFullYear()}-${String(s.getMonth()+1).padStart(2,'0')}-${String(s.getDate()).padStart(2,'0')}`, to: todayStr, label: '7 дней' };
-        }
-        case '30d': {
-            const s = new Date(today); s.setDate(s.getDate() - 29);
-            return { from: `${s.getFullYear()}-${String(s.getMonth()+1).padStart(2,'0')}-${String(s.getDate()).padStart(2,'0')}`, to: todayStr, label: '30 дней' };
-        }
-        case '90d': {
-            const s = new Date(today); s.setDate(s.getDate() - 89);
-            return { from: `${s.getFullYear()}-${String(s.getMonth()+1).padStart(2,'0')}-${String(s.getDate()).padStart(2,'0')}`, to: todayStr, label: '90 дней' };
-        }
-        case 'custom':
-            return { from: customFrom || todayStr, to: customTo || todayStr, label: 'Произвольный' };
-        case 'all':
-            return { from: '2020-01-01', to: todayStr, label: 'Всё время' };
+        case '7d': { const s = new Date(today); s.setDate(s.getDate()-6); return { from: `${s.getFullYear()}-${String(s.getMonth()+1).padStart(2,'0')}-${String(s.getDate()).padStart(2,'0')}`, to: todayStr, label: '7 дней' }; }
+        case '30d': { const s = new Date(today); s.setDate(s.getDate()-29); return { from: `${s.getFullYear()}-${String(s.getMonth()+1).padStart(2,'0')}-${String(s.getDate()).padStart(2,'0')}`, to: todayStr, label: '30 дней' }; }
+        case '90d': { const s = new Date(today); s.setDate(s.getDate()-89); return { from: `${s.getFullYear()}-${String(s.getMonth()+1).padStart(2,'0')}-${String(s.getDate()).padStart(2,'0')}`, to: todayStr, label: '90 дней' }; }
+        case 'custom': return { from: customFrom || todayStr, to: customTo || todayStr, label: 'Произвольный' };
+        case 'all': return { from: '2020-01-01', to: todayStr, label: 'Всё время' };
     }
 }
 
 /* ─── Helpers ──────────────────────────────────────────────────── */
-function fmtK(v: number): string {
-    if (Math.abs(v) >= 1_000_000) return (v / 1_000_000).toFixed(1) + 'М';
-    if (Math.abs(v) >= 1_000) return (v / 1_000).toFixed(0) + 'К';
-    return v.toFixed(0);
-}
-function shortDay(iso: string) {
-    const d = new Date(iso + 'T00:00:00');
-    return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
-}
-function truncate(s: string, n: number) {
-    return s.length > n ? s.slice(0, n) + '…' : s;
-}
+function fmtK(v: number) { if (Math.abs(v)>=1e6) return (v/1e6).toFixed(1)+'М'; if (Math.abs(v)>=1e3) return (v/1e3).toFixed(0)+'К'; return v.toFixed(0); }
+function shortDay(iso: string) { return new Date(iso+'T00:00:00').toLocaleDateString('ru-RU',{day:'numeric',month:'short'}); }
+function truncate(s: string, n: number) { return s.length > n ? s.slice(0, n) + '…' : s; }
 
-/* ─── Custom Tooltip ───────────────────────────────────────────── */
 function ChartTooltip({ active, payload, label }: any) {
     if (!active || !payload?.length) return null;
     return (
         <div style={{ background: 'rgba(15,17,26,0.95)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: '10px 14px', fontSize: 13 }}>
             <div style={{ color: '#94a3b8', marginBottom: 4 }}>{label}</div>
             {payload.map((p: any, i: number) => (
-                <div key={i} style={{ color: p.color || p.fill, fontWeight: 600 }}>
-                    {p.name}: {formatNumber(p.value)}
-                </div>
+                <div key={i} style={{ color: p.color || p.fill, fontWeight: 600 }}>{p.name}: {formatNumber(p.value)}</div>
             ))}
         </div>
     );
 }
 
-/* ─── Pie label ────────────────────────────────────────────────── */
 function renderPieLabel({ cx, cy, midAngle, outerRadius, name, percent, index }: any) {
     const RADIAN = Math.PI / 180;
     const r = outerRadius + 20;
     const x = cx + r * Math.cos(-midAngle * RADIAN);
     const y = cy + r * Math.sin(-midAngle * RADIAN);
     if (percent < 0.03) return null;
-    return (
-        <text x={x} y={y} fill={PIE_COLORS[index % PIE_COLORS.length]}
-            textAnchor={x > cx ? 'start' : 'end'} dominantBaseline="central" fontSize={11} fontWeight={600}>
-            {truncate(name, 12)} {(percent * 100).toFixed(0)}%
-        </text>
-    );
+    return (<text x={x} y={y} fill={PIE_COLORS[index % PIE_COLORS.length]} textAnchor={x > cx ? 'start' : 'end'} dominantBaseline="central" fontSize={11} fontWeight={600}>{truncate(name, 12)} {(percent*100).toFixed(0)}%</text>);
 }
 
-/* ─── KPI Card ─────────────────────────────────────────────────── */
-function KpiCard({ icon, label, value, sub, color, borderColor }: {
-    icon: string; label: string; value: string; sub?: string; color: string; borderColor: string;
-}) {
+function KpiCard({ icon, label, value, sub, color, borderColor }: { icon: string; label: string; value: string; sub?: string; color: string; borderColor: string; }) {
     return (
         <div className="stat-card" style={{ borderLeft: `3px solid ${borderColor}` }}>
-            <div className="stat-card-label" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ fontSize: 16 }}>{icon}</span> {label}
-            </div>
+            <div className="stat-card-label" style={{ display: 'flex', alignItems: 'center', gap: 6 }}><span style={{ fontSize: 16 }}>{icon}</span> {label}</div>
             <div className="stat-card-value" style={{ color, fontSize: 22 }}>{value}</div>
             {sub && <div className="stat-card-sub" style={{ fontSize: 11, opacity: 0.6 }}>{sub}</div>}
         </div>
+    );
+}
+
+/* ─── Inline transaction rows ──────────────────────────────────── */
+function InlineTxnRows({ txnList, txnTotal, txnFlow, onFlowChange, filterLoading, colSpan }: {
+    txnList: any[]; txnTotal: number; txnFlow: string;
+    onFlowChange: (f: 'all' | 'income' | 'expense') => void;
+    filterLoading: boolean; colSpan: number;
+}) {
+    return (
+        <tr>
+            <td colSpan={colSpan} style={{ padding: 0, background: 'rgba(255,255,255,0.02)' }}>
+                <div style={{ padding: '12px 16px', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                    {/* Flow toggle */}
+                    <div style={{ display: 'flex', gap: 4, marginBottom: 10, alignItems: 'center' }}>
+                        {(['all', 'income', 'expense'] as const).map(f => (
+                            <button key={f}
+                                className={`btn btn-sm ${txnFlow === f ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={(e) => { e.stopPropagation(); onFlowChange(f); }}
+                                style={txnFlow === f ? { background: f === 'income' ? C.income : f === 'expense' ? C.expense : 'var(--color-accent)', borderColor: 'transparent', fontSize: 11, padding: '2px 8px' } : { fontSize: 11, padding: '2px 8px' }}
+                            >{f === 'all' ? 'Все' : f === 'income' ? 'Приходы' : 'Расходы'}</button>
+                        ))}
+                        <button className="btn btn-sm btn-secondary" style={{ fontSize: 11, padding: '2px 8px', marginLeft: 'auto' }}
+                            onClick={(e) => { e.stopPropagation(); exportToExcel(txnList, 'transactions'); }}>📥 Excel</button>
+                        <span style={{ fontSize: 11, color: '#64748b' }}>{txnTotal} шт.</span>
+                    </div>
+                    {filterLoading ? (
+                        <div style={{ padding: 10, textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>⏳ Загрузка...</div>
+                    ) : txnList.length === 0 ? (
+                        <div style={{ padding: 10, textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>Нет операций</div>
+                    ) : (
+                        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                            <thead>
+                                <tr style={{ fontSize: 11, color: '#64748b', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
+                                    <th style={{ padding: '4px 8px', textAlign: 'left', fontWeight: 500 }}>Дата</th>
+                                    <th style={{ padding: '4px 8px', textAlign: 'left', fontWeight: 500 }}>Контрагент</th>
+                                    <th style={{ padding: '4px 8px', textAlign: 'right', fontWeight: 500 }}>Приход</th>
+                                    <th style={{ padding: '4px 8px', textAlign: 'right', fontWeight: 500 }}>Расход</th>
+                                    <th style={{ padding: '4px 8px', textAlign: 'left', fontWeight: 500 }}>Назначение</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {txnList.map((t: any, i: number) => (
+                                    <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 12 }}>
+                                        <td style={{ padding: '5px 8px', whiteSpace: 'nowrap', color: '#94a3b8' }}>{formatDate(t.date)}</td>
+                                        <td style={{ padding: '5px 8px', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.counterparty || '—'}</td>
+                                        <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600, color: t.income > 0 ? C.income : '#475569' }}>{t.income > 0 ? formatNumber(t.income) : '—'}</td>
+                                        <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600, color: t.expense > 0 ? C.expense : '#475569' }}>{t.expense > 0 ? formatNumber(t.expense) : '—'}</td>
+                                        <td style={{ padding: '5px 8px', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#94a3b8', fontSize: 11 }}>{t.purpose || '—'}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    )}
+                    {txnTotal > 50 && (
+                        <div style={{ padding: '6px 8px', fontSize: 11, color: '#64748b', borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                            Показано 50 из {txnTotal}
+                        </div>
+                    )}
+                </div>
+            </td>
+        </tr>
     );
 }
 
@@ -134,7 +157,7 @@ export default function DashboardPage() {
     const [customTo, setCustomTo] = useState('');
 
     /* ─── Filter state ────────────────────────────────────────── */
-    const [selectedCp, setSelectedCp] = useState<any>(null);   // { name, key }
+    const [selectedCp, setSelectedCp] = useState<any>(null);
     const [selectedExpCat, setSelectedExpCat] = useState<string | null>(null);
     const [filteredDaily, setFilteredDaily] = useState<any[] | null>(null);
     const [txnList, setTxnList] = useState<any[]>([]);
@@ -144,32 +167,27 @@ export default function DashboardPage() {
 
     const { from: dateFrom, to: dateTo, label: periodLabel } = getPeriodDates(period, customFrom, customTo);
 
-    /* ─── Load main data ──────────────────────────────────────── */
     const loadData = useCallback(async () => {
         try {
             setLoading(true); setError('');
             const { from, to } = getPeriodDates(period, customFrom, customTo);
             const [summary, bal, fun] = await Promise.all([
-                api.getDashboardSummary(from, to),
-                api.getBalance(),
+                api.getDashboardSummary(from, to), api.getBalance(),
                 api.getFunnelSummary(from, to).catch(() => null),
             ]);
             setData(summary); setBalance(bal); setFunnel(fun);
             resetFilters();
-        } catch (e: any) {
-            setError(e.message || 'Ошибка загрузки');
-        } finally { setLoading(false); }
+        } catch (e: any) { setError(e.message || 'Ошибка загрузки'); }
+        finally { setLoading(false); }
     }, [period, customFrom, customTo]);
 
     useEffect(() => { loadData(); }, [loadData]);
 
-    /* ─── Reset all filters ───────────────────────────────────── */
     const resetFilters = useCallback(() => {
         setSelectedCp(null); setSelectedExpCat(null);
         setFilteredDaily(null); setTxnList([]); setTxnTotal(0); setTxnFlow('all');
     }, []);
 
-    /* ─── Load filtered data (chart + transactions) ───────────── */
     const loadFiltered = useCallback(async (cpKey?: string, category?: string, flow: string = 'all') => {
         try {
             setFilterLoading(true);
@@ -178,28 +196,23 @@ export default function DashboardPage() {
                 api.getDailyFiltered(from, to, cpKey, category),
                 api.getFilteredTransactions(from, to, { cpKey, category, flow, limit: 50 }),
             ]);
-            setFilteredDaily(daily);
-            setTxnList(txns.items);
-            setTxnTotal(txns.total);
+            setFilteredDaily(daily); setTxnList(txns.items); setTxnTotal(txns.total);
         } catch { setFilteredDaily(null); setTxnList([]); }
         finally { setFilterLoading(false); }
     }, [period, customFrom, customTo]);
 
-    /* ─── Handle counterparty click ───────────────────────────── */
     const handleCpClick = useCallback((cp: any) => {
         if (selectedCp?.name === cp.name) { resetFilters(); return; }
         setSelectedCp(cp); setSelectedExpCat(null); setTxnFlow('all');
         loadFiltered(cp.key, undefined, 'all');
     }, [selectedCp, loadFiltered, resetFilters]);
 
-    /* ─── Handle expense category click ───────────────────────── */
     const handleExpClick = useCallback((catName: string) => {
         if (selectedExpCat === catName) { resetFilters(); return; }
         setSelectedExpCat(catName); setSelectedCp(null); setTxnFlow('all');
         loadFiltered(undefined, catName, 'all');
     }, [selectedExpCat, loadFiltered, resetFilters]);
 
-    /* ─── Handle flow toggle (all / income / expense) ─────────── */
     const handleFlowChange = useCallback((flow: 'all' | 'income' | 'expense') => {
         setTxnFlow(flow);
         loadFiltered(selectedCp?.key, selectedExpCat || undefined, flow);
@@ -214,7 +227,6 @@ export default function DashboardPage() {
     const incomeCounterparties = data?.income_counterparties || [];
     const expensePie: any[] = data?.expense_by_category || [];
 
-    /* ─── Chart data ──────────────────────────────────────────── */
     const dailyChart = useMemo(() => {
         const raw = filteredDaily || data?.daily_cashflow || [];
         return raw.map((d: any) => ({ ...d, label: shortDay(d.date) }));
@@ -223,11 +235,7 @@ export default function DashboardPage() {
     const hasFilter = selectedCp || selectedExpCat;
     const filterLabel = selectedCp ? truncate(selectedCp.name, 20) : selectedExpCat ? truncate(selectedExpCat, 20) : '';
 
-    if (loading) return (
-        <div style={{ padding: 40, color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div className="spinner" /> Загрузка дашборда...
-        </div>
-    );
+    if (loading) return (<div style={{ padding: 40, color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: 12 }}><div className="spinner" /> Загрузка дашборда...</div>);
     if (error) return <div style={{ padding: 40, color: 'var(--color-danger)' }}>❌ {error}</div>;
     if (!data) return null;
 
@@ -244,8 +252,7 @@ export default function DashboardPage() {
                 </div>
                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
                     {allPeriods.map(p => (
-                        <button key={p.key}
-                            className={`btn btn-sm ${period === p.key ? 'btn-primary' : 'btn-secondary'}`}
+                        <button key={p.key} className={`btn btn-sm ${period === p.key ? 'btn-primary' : 'btn-secondary'}`}
                             onClick={() => setPeriod(p.key)}
                             style={period === p.key ? { background: 'var(--color-accent)', borderColor: 'var(--color-accent)' } : {}}
                         >{p.label}</button>
@@ -253,13 +260,11 @@ export default function DashboardPage() {
                     <span style={{ color: 'var(--color-text-muted)', fontSize: 12, margin: '0 4px' }}>|</span>
                     <input type="date" value={period === 'custom' ? customFrom : dateFrom}
                         onChange={e => { setCustomFrom(e.target.value); setPeriod('custom'); }}
-                        style={{ background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 12 }}
-                    />
+                        style={{ background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 12 }} />
                     <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>—</span>
                     <input type="date" value={period === 'custom' ? customTo : dateTo}
                         onChange={e => { setCustomTo(e.target.value); setPeriod('custom'); }}
-                        style={{ background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 12 }}
-                    />
+                        style={{ background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 12 }} />
                 </div>
             </div>
 
@@ -294,7 +299,6 @@ export default function DashboardPage() {
 
             {/* ─── Charts row ─────────────────────────────────── */}
             <div style={{ display: 'grid', gridTemplateColumns: dailyChart.length > 0 && expensePie.length > 0 ? '1.6fr 1fr' : '1fr', gap: 20, marginTop: 20 }}>
-                {/* Area chart */}
                 {dailyChart.length > 0 && (
                     <div className="glass-card" style={{ padding: '20px 16px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
@@ -308,14 +312,8 @@ export default function DashboardPage() {
                         <ResponsiveContainer width="100%" height={320}>
                             <AreaChart data={dailyChart} margin={{ left: 10, right: 10 }}>
                                 <defs>
-                                    <linearGradient id="gradIncome" x1="0" y1="0" x2="0" y2="1">
-                                        <stop offset="5%" stopColor={C.income} stopOpacity={0.3} />
-                                        <stop offset="95%" stopColor={C.income} stopOpacity={0.02} />
-                                    </linearGradient>
-                                    <linearGradient id="gradExpense" x1="0" y1="0" x2="0" y2="1">
-                                        <stop offset="5%" stopColor={C.expense} stopOpacity={0.3} />
-                                        <stop offset="95%" stopColor={C.expense} stopOpacity={0.02} />
-                                    </linearGradient>
+                                    <linearGradient id="gradIncome" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={C.income} stopOpacity={0.3} /><stop offset="95%" stopColor={C.income} stopOpacity={0.02} /></linearGradient>
+                                    <linearGradient id="gradExpense" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={C.expense} stopOpacity={0.3} /><stop offset="95%" stopColor={C.expense} stopOpacity={0.02} /></linearGradient>
                                 </defs>
                                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
                                 <XAxis dataKey="label" tick={{ fill: '#94a3b8', fontSize: 11 }} />
@@ -328,8 +326,6 @@ export default function DashboardPage() {
                         </ResponsiveContainer>
                     </div>
                 )}
-
-                {/* Expense Pie */}
                 {expensePie.length > 0 && (
                     <div className="glass-card" style={{ padding: '20px 16px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
@@ -338,11 +334,9 @@ export default function DashboardPage() {
                         </div>
                         <ResponsiveContainer width="100%" height={320}>
                             <PieChart>
-                                <Pie data={expensePie} dataKey="value" nameKey="name"
-                                    cx="50%" cy="50%" innerRadius={50} outerRadius={90} paddingAngle={2}
+                                <Pie data={expensePie} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={50} outerRadius={90} paddingAngle={2}
                                     label={renderPieLabel} labelLine={{ stroke: '#475569', strokeWidth: 1 }}
-                                    onClick={(entry: any) => handleExpClick(entry.name)}
-                                    style={{ cursor: 'pointer' }}>
+                                    onClick={(entry: any) => handleExpClick(entry.name)} style={{ cursor: 'pointer' }}>
                                     {expensePie.map((_: any, i: number) => (
                                         <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]}
                                             opacity={!selectedExpCat || selectedExpCat === expensePie[i]?.name ? 1 : 0.3}
@@ -358,88 +352,12 @@ export default function DashboardPage() {
                 )}
             </div>
 
-            {/* ─── Transaction list (when filter active) ──────── */}
-            {hasFilter && (
-                <div className="glass-card" style={{ marginTop: 20 }}>
-                    <div className="table-toolbar">
-                        <h3 style={{ fontSize: 16, fontWeight: 600 }}>
-                            Операции: {filterLabel}
-                            <span style={{ fontSize: 13, fontWeight: 400, color: '#94a3b8', marginLeft: 8 }}>
-                                ({txnTotal} шт.)
-                            </span>
-                        </h3>
-                        <div style={{ display: 'flex', gap: 4 }}>
-                            {(['all', 'income', 'expense'] as const).map(f => (
-                                <button key={f}
-                                    className={`btn btn-sm ${txnFlow === f ? 'btn-primary' : 'btn-secondary'}`}
-                                    onClick={() => handleFlowChange(f)}
-                                    style={txnFlow === f ? { background: f === 'income' ? C.income : f === 'expense' ? C.expense : 'var(--color-accent)', borderColor: 'transparent' } : {}}
-                                >
-                                    {f === 'all' ? 'Все' : f === 'income' ? '📈 Приходы' : '📉 Расходы'}
-                                </button>
-                            ))}
-                            <button className="btn btn-sm btn-secondary"
-                                onClick={() => exportToExcel(txnList, `txn_${filterLabel}`)}>
-                                📥 Excel
-                            </button>
-                        </div>
-                    </div>
-                    {filterLoading ? (
-                        <div style={{ padding: 20, textAlign: 'center', color: '#94a3b8' }}>
-                            <div className="spinner" style={{ display: 'inline-block', marginRight: 8 }} /> Загрузка...
-                        </div>
-                    ) : txnList.length === 0 ? (
-                        <div style={{ padding: 20, textAlign: 'center', color: '#94a3b8' }}>Нет операций</div>
-                    ) : (
-                        <table className="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Дата</th>
-                                    <th>Контрагент</th>
-                                    <th>Категория</th>
-                                    <th style={{ textAlign: 'right' }}>Приход</th>
-                                    <th style={{ textAlign: 'right' }}>Расход</th>
-                                    <th>Назначение</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {txnList.map((t: any, i: number) => (
-                                    <tr key={i}>
-                                        <td style={{ whiteSpace: 'nowrap', fontSize: 13 }}>{formatDate(t.date)}</td>
-                                        <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                            {t.counterparty || '—'}
-                                        </td>
-                                        <td style={{ fontSize: 12, color: '#94a3b8' }}>{t.category || '—'}</td>
-                                        <td style={{ textAlign: 'right', fontWeight: 600, color: t.income > 0 ? C.income : '#475569' }}>
-                                            {t.income > 0 ? formatNumber(t.income) : '—'}
-                                        </td>
-                                        <td style={{ textAlign: 'right', fontWeight: 600, color: t.expense > 0 ? C.expense : '#475569' }}>
-                                            {t.expense > 0 ? formatNumber(t.expense) : '—'}
-                                        </td>
-                                        <td style={{ maxWidth: 250, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: '#94a3b8' }}>
-                                            {t.purpose || '—'}
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    )}
-                    {txnTotal > 50 && (
-                        <div style={{ padding: '10px 16px', fontSize: 12, color: '#94a3b8', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-                            Показано 50 из {txnTotal}. Для полного списка → Операции.
-                        </div>
-                    )}
-                </div>
-            )}
-
-            {/* ─── Income counterparties ───────────────────────── */}
+            {/* ─── Income counterparties (with inline dropdown) ── */}
             {incomeCounterparties.length > 0 && (
                 <div className="glass-card" style={{ marginTop: 20 }}>
                     <div className="table-toolbar">
                         <h3 style={{ fontSize: 16, fontWeight: 600 }}>Приходы по контрагентам</h3>
-                        <div style={{ display: 'flex', gap: 4 }}>
-                            {selectedCp && <button className="btn btn-sm btn-secondary" onClick={resetFilters}>Все</button>}
-                        </div>
+                        {selectedCp && <button className="btn btn-sm btn-secondary" onClick={resetFilters}>Все</button>}
                     </div>
                     <table className="data-table">
                         <thead>
@@ -455,15 +373,22 @@ export default function DashboardPage() {
                                 const pct = data.month_income > 0 ? (c.total / data.month_income * 100) : 0;
                                 const isSelected = selectedCp?.name === c.name;
                                 return (
-                                    <tr key={i} onClick={() => handleCpClick(c)}
-                                        style={{ cursor: 'pointer', background: isSelected ? 'rgba(167,139,250,0.1)' : undefined }}>
-                                        <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                            {isSelected ? '▼ ' : '▶ '}{c.name}
-                                        </td>
-                                        <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--color-success)' }}>{formatNumber(c.total)} ₽</td>
-                                        <td style={{ textAlign: 'right' }}>{c.count}</td>
-                                        <td style={{ textAlign: 'right' }}><span className="badge badge-info">{pct.toFixed(1)}%</span></td>
-                                    </tr>
+                                    <React.Fragment key={i}>
+                                        <tr onClick={() => handleCpClick(c)}
+                                            style={{ cursor: 'pointer', background: isSelected ? 'rgba(167,139,250,0.1)' : undefined }}>
+                                            <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                <span style={{ display: 'inline-block', width: 14, fontSize: 10, color: '#94a3b8' }}>{isSelected ? '▼' : '▶'}</span>
+                                                {c.name}
+                                            </td>
+                                            <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--color-success)' }}>{formatNumber(c.total)} ₽</td>
+                                            <td style={{ textAlign: 'right' }}>{c.count}</td>
+                                            <td style={{ textAlign: 'right' }}><span className="badge badge-info">{pct.toFixed(1)}%</span></td>
+                                        </tr>
+                                        {isSelected && (
+                                            <InlineTxnRows txnList={txnList} txnTotal={txnTotal} txnFlow={txnFlow}
+                                                onFlowChange={handleFlowChange} filterLoading={filterLoading} colSpan={4} />
+                                        )}
+                                    </React.Fragment>
                                 );
                             })}
                         </tbody>
@@ -471,14 +396,12 @@ export default function DashboardPage() {
                 </div>
             )}
 
-            {/* ─── Expense categories table ────────────────────── */}
+            {/* ─── Expense categories (with inline dropdown) ───── */}
             {expensePie.length > 0 && (
                 <div className="glass-card" style={{ marginTop: 20 }}>
                     <div className="table-toolbar">
                         <h3 style={{ fontSize: 16, fontWeight: 600 }}>Расходы по категориям</h3>
-                        <div style={{ display: 'flex', gap: 4 }}>
-                            {selectedExpCat && <button className="btn btn-sm btn-secondary" onClick={resetFilters}>Все</button>}
-                        </div>
+                        {selectedExpCat && <button className="btn btn-sm btn-secondary" onClick={resetFilters}>Все</button>}
                     </div>
                     <table className="data-table">
                         <thead>
@@ -494,19 +417,23 @@ export default function DashboardPage() {
                                 const pct = data.month_expense > 0 ? (c.value / data.month_expense * 100) : 0;
                                 const isSelected = selectedExpCat === c.name;
                                 return (
-                                    <tr key={i} onClick={() => handleExpClick(c.name)}
-                                        style={{ cursor: 'pointer', background: isSelected ? 'rgba(239,68,68,0.1)' : undefined }}>
-                                        <td style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                            <span style={{
-                                                width: 10, height: 10, borderRadius: '50%', display: 'inline-block',
-                                                background: PIE_COLORS[i % PIE_COLORS.length],
-                                            }} />
-                                            {isSelected ? '▼ ' : ''}{c.name}
-                                        </td>
-                                        <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--color-danger)' }}>{formatNumber(c.value)} ₽</td>
-                                        <td style={{ textAlign: 'right' }}>{c.count || '—'}</td>
-                                        <td style={{ textAlign: 'right' }}><span className="badge badge-warning">{pct.toFixed(1)}%</span></td>
-                                    </tr>
+                                    <React.Fragment key={i}>
+                                        <tr onClick={() => handleExpClick(c.name)}
+                                            style={{ cursor: 'pointer', background: isSelected ? 'rgba(239,68,68,0.1)' : undefined }}>
+                                            <td style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                <span style={{ width: 10, height: 10, borderRadius: '50%', display: 'inline-block', background: PIE_COLORS[i % PIE_COLORS.length] }} />
+                                                <span style={{ display: 'inline-block', width: 14, fontSize: 10, color: '#94a3b8' }}>{isSelected ? '▼' : '▶'}</span>
+                                                {c.name}
+                                            </td>
+                                            <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--color-danger)' }}>{formatNumber(c.value)} ₽</td>
+                                            <td style={{ textAlign: 'right' }}>{c.count || '—'}</td>
+                                            <td style={{ textAlign: 'right' }}><span className="badge badge-warning">{pct.toFixed(1)}%</span></td>
+                                        </tr>
+                                        {isSelected && (
+                                            <InlineTxnRows txnList={txnList} txnTotal={txnTotal} txnFlow={txnFlow}
+                                                onFlowChange={handleFlowChange} filterLoading={filterLoading} colSpan={4} />
+                                        )}
+                                    </React.Fragment>
                                 );
                             })}
                         </tbody>
