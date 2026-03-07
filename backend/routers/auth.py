@@ -16,6 +16,9 @@ from backend.auth import (
     verify_password,
     hash_password,
     create_access_token,
+    create_refresh_token,
+    verify_refresh_token,
+    revoke_refresh_token,
     get_current_user,
     validate_password_strength,
 )
@@ -70,6 +73,7 @@ class LoginRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
+    refresh_token: str | None = None
     token_type: str = "bearer"
 
 
@@ -122,8 +126,9 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
         )
 
     logger.info(f"Successful login: {body.username} (id={user.id})")
-    token = create_access_token(user.id, user.username)
-    return TokenResponse(access_token=token)
+    access = create_access_token(user.id, user.username)
+    refresh = await create_refresh_token(user.id)
+    return TokenResponse(access_token=access, refresh_token=refresh)
 
 
 # ─── Register ─────────────────────────────────────────────────────────────────
@@ -188,8 +193,9 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
     await db.commit()
 
     logger.info(f"New user registered: {body.username} (id={user.id}), project slug={slug}")
-    token = create_access_token(user.id, user.username)
-    return TokenResponse(access_token=token)
+    access = create_access_token(user.id, user.username)
+    refresh = await create_refresh_token(user.id)
+    return TokenResponse(access_token=access, refresh_token=refresh)
 
 
 # ─── Profile ──────────────────────────────────────────────────────────────────
@@ -242,3 +248,41 @@ async def change_password(
     await db.commit()
     logger.info(f"Password changed for user: {current_user.username} (id={current_user.id})")
     return {"status": "ok", "message": "Пароль изменён"}
+
+
+# ─── Refresh Token ───────────────────────────────────────────────────────────
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
+    """Exchange a valid refresh token for a new access + refresh token pair.
+    The old refresh token is revoked (token rotation for security).
+    """
+    user_id = await verify_refresh_token(body.refresh_token)
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token",
+        )
+
+    # Find user
+    result = await db.execute(select(User).where(User.id == user_id, User.is_active == True))
+    user = result.scalar_one_or_none()
+    if user is None:
+        await revoke_refresh_token(body.refresh_token)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive",
+        )
+
+    # Rotate: revoke old, issue new
+    await revoke_refresh_token(body.refresh_token)
+
+    access = create_access_token(user.id, user.username)
+    refresh = await create_refresh_token(user.id)
+
+    logger.info(f"Token refreshed for user: {user.username} (id={user.id})")
+    return TokenResponse(access_token=access, refresh_token=refresh)

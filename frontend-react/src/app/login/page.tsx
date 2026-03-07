@@ -15,6 +15,7 @@ export default function LoginPage() {
         try {
             const res = await api.login(username, password);
             api.setToken(res.access_token);
+            if (res.refresh_token) api.setRefreshToken(res.refresh_token);
             // Check for pending invite
             const pendingInvite = localStorage.getItem('dds_pending_invite');
             if (pendingInvite) {

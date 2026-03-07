@@ -14,6 +14,8 @@ import type {
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
 class ApiClient {
+    private _isRefreshing = false;
+
     private getToken(): string | null {
         if (typeof window === 'undefined') return null;
         return localStorage.getItem('dds_token');
@@ -23,8 +25,18 @@ class ApiClient {
         localStorage.setItem('dds_token', token);
     }
 
+    getRefreshToken(): string | null {
+        if (typeof window === 'undefined') return null;
+        return localStorage.getItem('dds_refresh_token');
+    }
+
+    setRefreshToken(token: string) {
+        localStorage.setItem('dds_refresh_token', token);
+    }
+
     clearToken() {
         localStorage.removeItem('dds_token');
+        localStorage.removeItem('dds_refresh_token');
         localStorage.removeItem('dds_project_id');
     }
 
@@ -42,6 +54,28 @@ class ApiClient {
         localStorage.setItem('dds_project_id', String(id));
     }
 
+    private async tryRefresh(): Promise<boolean> {
+        const refreshToken = this.getRefreshToken();
+        if (!refreshToken || this._isRefreshing) return false;
+
+        this._isRefreshing = true;
+        try {
+            const res = await fetch(`${API_URL}/api/v1/auth/refresh`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ refresh_token: refreshToken }),
+            });
+            if (res.ok) {
+                const data = await res.json();
+                this.setToken(data.access_token);
+                if (data.refresh_token) this.setRefreshToken(data.refresh_token);
+                return true;
+            }
+        } catch { /* refresh failed */ }
+        finally { this._isRefreshing = false; }
+        return false;
+    }
+
     private async request<T>(
         method: string,
         path: string,
@@ -57,18 +91,31 @@ class ApiClient {
         const projectId = this.getProjectId();
         if (projectId) headers['X-Project-Id'] = String(projectId);
 
-        const res = await fetch(`${API_URL}${path}`, {
+        let res = await fetch(`${API_URL}${path}`, {
             method,
             headers,
             body: body ? JSON.stringify(body) : undefined,
         });
 
+        // On 401 — try refresh before giving up
         if (res.status === 401) {
-            this.clearToken();
-            if (typeof window !== 'undefined') {
-                window.location.href = '/login';
+            const refreshed = await this.tryRefresh();
+            if (refreshed) {
+                // Retry the original request with new token
+                headers['Authorization'] = `Bearer ${this.getToken()}`;
+                res = await fetch(`${API_URL}${path}`, {
+                    method,
+                    headers,
+                    body: body ? JSON.stringify(body) : undefined,
+                });
             }
-            throw new Error('Unauthorized');
+            if (res.status === 401) {
+                this.clearToken();
+                if (typeof window !== 'undefined') {
+                    window.location.href = '/login';
+                }
+                throw new Error('Unauthorized');
+            }
         }
 
         if (!res.ok) {

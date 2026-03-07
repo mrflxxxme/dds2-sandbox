@@ -47,7 +47,7 @@ def validate_password_strength(password: str) -> None:
 
 
 def create_access_token(user_id: int, username: str) -> str:
-    """Create a JWT access token for the given user."""
+    """Create a short-lived JWT access token (30 min default)."""
     expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {
         "sub": str(user_id),
@@ -55,6 +55,48 @@ def create_access_token(user_id: int, username: str) -> str:
         "exp": expire,
     }
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
+
+
+async def create_refresh_token(user_id: int) -> str:
+    """Create a long-lived refresh token stored in Redis (30 days default)."""
+    import uuid
+    from backend.cache import get_redis
+
+    token = uuid.uuid4().hex + secrets.token_urlsafe(32)
+    redis = await get_redis()
+    if redis:
+        key = f"refresh:{token}"
+        ttl = settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400  # days → seconds
+        await redis.setex(key, ttl, str(user_id))
+        logger.info(f"Refresh token created for user_id={user_id}, ttl={settings.REFRESH_TOKEN_EXPIRE_DAYS}d")
+    else:
+        logger.warning("Redis unavailable — refresh token not stored")
+    return token
+
+
+async def verify_refresh_token(token: str) -> int | None:
+    """Verify a refresh token and return user_id if valid. Returns None if invalid/expired."""
+    from backend.cache import get_redis
+
+    redis = await get_redis()
+    if not redis:
+        return None
+
+    key = f"refresh:{token}"
+    user_id = await redis.get(key)
+    if user_id is None:
+        return None
+
+    return int(user_id)
+
+
+async def revoke_refresh_token(token: str) -> None:
+    """Revoke (delete) a refresh token from Redis."""
+    from backend.cache import get_redis
+
+    redis = await get_redis()
+    if redis:
+        await redis.delete(f"refresh:{token}")
 
 
 async def get_current_user(
