@@ -30,6 +30,23 @@ from backend.models import (
 DEFAULT_VAT_RATE = Decimal("0.22")
 
 
+def _order_no_to_int(s: str) -> int:
+    """Convert order_no string to integer for planning.orders FK.
+    '41' -> 41, '41/2' -> 4102, '41/3' -> 4103.
+    """
+    s = str(s).strip()
+    if '/' in s:
+        parts = s.split('/')
+        try:
+            return int(parts[0]) * 100 + int(parts[1])
+        except (ValueError, IndexError):
+            pass
+    try:
+        return int(s)
+    except ValueError:
+        return abs(hash(s)) % (10**9)
+
+
 # ─── Safe numeric helpers ────────────────────────────────────────────────────
 
 def safe_float(val) -> float:
@@ -226,7 +243,7 @@ async def get_cost_orders(db: AsyncSession, project_id: int, limit: int = 500, o
 
         try:
             pp_result = await db.execute(
-                select(PlannedPayment).where(PlannedPayment.order_no == int(o.order_no))
+                select(PlannedPayment).where(PlannedPayment.order_no == _order_no_to_int(o.order_no))
             )
             has_plan = len(pp_result.scalars().all()) > 0
         except (ValueError, TypeError):
@@ -658,20 +675,6 @@ async def generate_payment_plan(
     pay_date_customs = arrival_date
 
     # 5. Create/update Order in planning module
-    # order_no can be '41/2' — encode to integer for planning.orders table
-    def _order_no_to_int(s: str) -> int:
-        s = s.strip()
-        if '/' in s:
-            parts = s.split('/')
-            try:
-                return int(parts[0]) * 100 + int(parts[1])
-            except (ValueError, IndexError):
-                pass
-        try:
-            return int(s)
-        except ValueError:
-            # Fallback: use hash for non-numeric order numbers
-            return abs(hash(s)) % (10**9)
     order_no_int = _order_no_to_int(order_no)
     ord_result = await db.execute(
         select(Order).where(Order.order_no == order_no_int, Order.project_id == project_id)
