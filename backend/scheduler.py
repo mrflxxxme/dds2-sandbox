@@ -32,6 +32,32 @@ MISSING_BATCH_SIZE = 10  # max missing days to sync per scheduler run
 MAX_DATE_FAILURES = 3    # skip date after this many TIMEOUT/ERROR in sync_log
 
 
+def _split_into_windows(dates: list[str], max_window: int = 30) -> list[tuple[str, str]]:
+    """
+    Split a list of date strings into windows of max `max_window` days.
+    Dates don't have to be contiguous — the function groups them by proximity.
+    Returns list of (from_date, to_date) tuples.
+    """
+    if not dates:
+        return []
+
+    windows = []
+    i = 0
+    while i < len(dates):
+        w_start = date.fromisoformat(dates[i])
+        # Find the last date that fits in this window
+        j = i
+        while j < len(dates):
+            d = date.fromisoformat(dates[j])
+            if (d - w_start).days >= max_window:
+                break
+            j += 1
+        windows.append((dates[i], dates[j - 1]))
+        i = j
+
+    return windows
+
+
 # ─── Smart missing-day detection ─────────────────────────────────────────────
 
 async def _get_failed_dates(project_id: int) -> set[str]:
@@ -373,7 +399,7 @@ _ad_check_lock = asyncio.Lock()
 async def ad_anomaly_check():
     """
     Check for days with incomplete ad data and re-sync them.
-    Batches up to 30 incomplete days into one range request (min→max date).
+    Splits incomplete days into 30-day windows (WB API max 31 days).
     Runs every 3 min. Auto-stops when all ads are complete.
     """
     if _ad_check_lock.locked():
@@ -389,19 +415,26 @@ async def ad_anomaly_check():
                 incomplete_days = await _get_days_with_incomplete_ads(pid)
                 if incomplete_days:
                     all_ads_ok = False
-                    d_from = incomplete_days[0]
-                    d_to = incomplete_days[-1]
+                    # Split into 30-day windows (WB API max 31 days per request)
+                    windows = _split_into_windows(incomplete_days, max_window=30)
                     logger.info(
-                        f"📊 Ad anomaly: project {pid} — re-syncing range "
-                        f"{d_from}→{d_to} ({len(incomplete_days)} incomplete days)"
+                        f"📊 Ad anomaly: project {pid} — "
+                        f"{len(incomplete_days)} incomplete days, "
+                        f"{len(windows)} windows"
                     )
-                    res = await _run_and_log(pid, d_from, d_to, "ad_resync")
-                    if res:
+                    for w_from, w_to in windows:
                         logger.info(
-                            f"📊 Ad anomaly: project {pid} — {d_from}→{d_to} re-synced, "
-                            f"+{res.get('rows', 0)} rows"
+                            f"📊 Ad anomaly: project {pid} — "
+                            f"re-syncing window {w_from}→{w_to}"
                         )
-                    await asyncio.sleep(3)
+                        res = await _run_and_log(pid, w_from, w_to, "ad_resync")
+                        if res:
+                            logger.info(
+                                f"📊 Ad anomaly: project {pid} — "
+                                f"{w_from}→{w_to} re-synced, "
+                                f"+{res.get('rows', 0)} rows"
+                            )
+                        await asyncio.sleep(5)
                 else:
                     logger.info(f"📊 Ad anomaly: project {pid} — all ads complete ✅")
 

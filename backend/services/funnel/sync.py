@@ -102,12 +102,16 @@ async def run_funnel_sync(
         try:
             funnel_data = await fetch_funnel(analytics_key, date_str)
 
+            # Check if we have real ad data for this day
+            day_ads = ad_stats.get(date_str) or {}
+            has_ad_data = bool(day_ads)
+
             rows_to_upsert = []
             for nm_id, fd in funnel_data.items():
-                ad = (ad_stats.get(date_str) or {}).get(nm_id, {})
+                ad = day_ads.get(nm_id, {})
                 cost = cost_map.get(nm_id) or cost_map.get(fd.get("vendor_code"))
 
-                rows_to_upsert.append({
+                row = {
                     "project_id": pid,
                     "date": date.fromisoformat(date_str),
                     "nm_id": nm_id,
@@ -128,36 +132,48 @@ async def run_funnel_sync(
                     "adv_clicks": ad.get("clicks", 0),
                     "adv_sum": ad.get("sum", 0),
                     "cost_price": cost,
-                })
+                }
+                rows_to_upsert.append(row)
 
             if rows_to_upsert:
                 stmt = pg_insert(WbFunnelDaily).values(rows_to_upsert)
+
+                # Base fields to always update
+                update_fields = {
+                    "vendor_code": stmt.excluded.vendor_code,
+                    "subject": stmt.excluded.subject,
+                    "brand": stmt.excluded.brand,
+                    "open_card": stmt.excluded.open_card,
+                    "add_to_cart": stmt.excluded.add_to_cart,
+                    "orders_count": stmt.excluded.orders_count,
+                    "orders_sum_rub": stmt.excluded.orders_sum_rub,
+                    "buyout_percent": stmt.excluded.buyout_percent,
+                    "cart_to_order_pct": stmt.excluded.cart_to_order_pct,
+                    "add_to_cart_pct": stmt.excluded.add_to_cart_pct,
+                    "avg_price": stmt.excluded.avg_price,
+                    "stocks_wb": stmt.excluded.stocks_wb,
+                    "stocks_mp": stmt.excluded.stocks_mp,
+                    "cost_price": stmt.excluded.cost_price,
+                }
+
+                # Only overwrite ad fields if we have REAL ad data for this day
+                # Otherwise keep existing values in DB (avoid zeroing out)
+                if has_ad_data:
+                    update_fields["adv_views"] = stmt.excluded.adv_views
+                    update_fields["adv_clicks"] = stmt.excluded.adv_clicks
+                    update_fields["adv_sum"] = stmt.excluded.adv_sum
+
                 stmt = stmt.on_conflict_do_update(
                     constraint="uq_funnel_daily",
-                    set_={
-                        "vendor_code": stmt.excluded.vendor_code,
-                        "subject": stmt.excluded.subject,
-                        "brand": stmt.excluded.brand,
-                        "open_card": stmt.excluded.open_card,
-                        "add_to_cart": stmt.excluded.add_to_cart,
-                        "orders_count": stmt.excluded.orders_count,
-                        "orders_sum_rub": stmt.excluded.orders_sum_rub,
-                        "buyout_percent": stmt.excluded.buyout_percent,
-                        "cart_to_order_pct": stmt.excluded.cart_to_order_pct,
-                        "add_to_cart_pct": stmt.excluded.add_to_cart_pct,
-                        "avg_price": stmt.excluded.avg_price,
-                        "stocks_wb": stmt.excluded.stocks_wb,
-                        "stocks_mp": stmt.excluded.stocks_mp,
-                        "adv_views": stmt.excluded.adv_views,
-                        "adv_clicks": stmt.excluded.adv_clicks,
-                        "adv_sum": stmt.excluded.adv_sum,
-                        "cost_price": stmt.excluded.cost_price,
-                    },
+                    set_=update_fields,
                 )
                 await db.execute(stmt)
                 await db.commit()
                 total_rows += len(rows_to_upsert)
-                logger.info(f"Funnel synced {date_str}: {len(rows_to_upsert)} rows")
+                logger.info(
+                    f"Funnel synced {date_str}: {len(rows_to_upsert)} rows"
+                    f"{' (with ads)' if has_ad_data else ' (no ad data, preserved existing)'}"
+                )
         except Exception as e:
             logger.error(f"Funnel sync error for {date_str}: {e}")
             errors.append(str(e))
