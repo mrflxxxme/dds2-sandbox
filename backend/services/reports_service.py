@@ -340,11 +340,12 @@ async def get_dashboard_summary(
     month_result = await db.execute(
         select(
             func.coalesce(func.sum(Transaction.income), 0).label("income"),
-            func.coalesce(func.sum(func.abs(Transaction.expense)), 0).label("expense"),
+            func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
         ).where(
             Transaction.project_id == project_id,
             Transaction.date >= month_start,
             Transaction.date <= today,
+            Transaction.is_cashflow2 == 1,
         )
     )
     month_row = month_result.one()
@@ -397,16 +398,17 @@ async def get_dashboard_summary(
     )
     inbox_count = inbox_result.scalar() or 0
 
-    # 6. Daily cashflow (current month) — income & expense per day
+    # 6. Daily cashflow (current month) — income & expense per day (only real cashflow)
     daily_result = await db.execute(
         select(
             func.date(Transaction.date).label("day"),
             func.coalesce(func.sum(Transaction.income), 0).label("income"),
-            func.coalesce(func.sum(func.abs(Transaction.expense)), 0).label("expense"),
+            func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
         ).where(
             Transaction.project_id == project_id,
             Transaction.date >= month_start,
             Transaction.date <= today,
+            Transaction.is_cashflow2 == 1,
         ).group_by(func.date(Transaction.date)).order_by(func.date(Transaction.date))
     )
     daily_cashflow = []
@@ -422,7 +424,7 @@ async def get_dashboard_summary(
             "expense": float(row.expense),
         })
 
-    # 7. Expense by category (current month, top-10)
+    # 7. Expense by category (current month, top-10, only real cashflow)
     cat_result = await db.execute(
         select(
             func.coalesce(Transaction.cat_lvl1_2, text("'Без категории'")).label("category"),
@@ -432,6 +434,7 @@ async def get_dashboard_summary(
             Transaction.date >= month_start,
             Transaction.date <= today,
             Transaction.expense > 0,
+            Transaction.is_cashflow2 == 1,
         ).group_by(Transaction.cat_lvl1_2).order_by(
             func.sum(Transaction.expense).desc()
         ).limit(10)
