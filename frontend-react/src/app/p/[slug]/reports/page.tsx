@@ -121,10 +121,10 @@ function DDSPnL() {
                             <th style={{ textAlign: 'right' }}>{year}</th>
                             <th style={{ textAlign: 'right', paddingRight: 16, color: 'var(--color-text-dim)', fontSize: 11 }}>%</th>
                             {reversedMonths.map(m => (
-                                <th key={m.key} style={{ textAlign: 'right' }}>{m.label.split(' ')[0].toUpperCase()}</th>
-                            ))}
-                            {reversedMonths.map(m => (
-                                <th key={`p${m.key}`} style={{ textAlign: 'right', paddingRight: 16, color: 'var(--color-text-dim)', fontSize: 11 }}>%</th>
+                                <React.Fragment key={m.key}>
+                                    <th style={{ textAlign: 'right' }}>{m.label.split(' ')[0].toUpperCase()}</th>
+                                    <th style={{ textAlign: 'right', paddingRight: 16, color: 'var(--color-text-dim)', fontSize: 11 }}>%</th>
+                                </React.Fragment>
                             ))}
                         </tr>
                     </thead>
@@ -135,10 +135,10 @@ function DDSPnL() {
                             <td style={{ textAlign: 'right', fontWeight: 700, color: 'var(--color-success)' }}>{formatNumber(summary.total_income?.total || 0)}</td>
                             <td style={{ textAlign: 'right', paddingRight: 16 }}></td>
                             {reversedMonths.map(m => (
-                                <td key={m.key} style={{ textAlign: 'right', fontWeight: 700, color: 'var(--color-success)' }}>{formatNumber(summary.total_income?.[String(m.key)] || 0)}</td>
-                            ))}
-                            {reversedMonths.map(m => (
-                                <td key={`p${m.key}`} style={{ textAlign: 'right', paddingRight: 16 }}></td>
+                                <React.Fragment key={m.key}>
+                                    <td style={{ textAlign: 'right', fontWeight: 700, color: 'var(--color-success)' }}>{formatNumber(summary.total_income?.[String(m.key)] || 0)}</td>
+                                    <td style={{ textAlign: 'right', paddingRight: 16 }}></td>
+                                </React.Fragment>
                             ))}
                         </tr>
 
@@ -148,10 +148,10 @@ function DDSPnL() {
                                 <td style={{ textAlign: 'right', color: 'var(--color-success)' }}>{formatNumber(cat.monthly?.total || 0)}</td>
                                 <td style={{ textAlign: 'right', paddingRight: 16, color: 'var(--color-text-dim)', fontSize: 12 }}>{pct(cat.monthly?.total || 0, revenue.total || 0)}</td>
                                 {reversedMonths.map(m => (
-                                    <td key={m.key} style={{ textAlign: 'right', color: 'var(--color-success)' }}>{formatNumber(cat.monthly?.[String(m.key)] || 0)}</td>
-                                ))}
-                                {reversedMonths.map(m => (
-                                    <td key={`p${m.key}`} style={{ textAlign: 'right', paddingRight: 16, color: 'var(--color-text-dim)', fontSize: 12 }}>{pct(cat.monthly?.[String(m.key)] || 0, revenue[String(m.key)] || 0)}</td>
+                                    <React.Fragment key={m.key}>
+                                        <td style={{ textAlign: 'right', color: 'var(--color-success)' }}>{formatNumber(cat.monthly?.[String(m.key)] || 0)}</td>
+                                        <td style={{ textAlign: 'right', paddingRight: 16, color: 'var(--color-text-dim)', fontSize: 12 }}>{pct(cat.monthly?.[String(m.key)] || 0, revenue[String(m.key)] || 0)}</td>
+                                    </React.Fragment>
                                 ))}
                             </tr>
                         ))}
@@ -162,10 +162,10 @@ function DDSPnL() {
                             <td style={{ textAlign: 'right', fontWeight: 700, color: 'var(--color-danger)' }}>{formatNumber(summary.total_expense?.total || 0)}</td>
                             <td style={{ textAlign: 'right', paddingRight: 16, color: 'var(--color-danger)', fontSize: 12, fontWeight: 600 }}>{pct(summary.total_expense?.total || 0, revenue.total || 0)}</td>
                             {reversedMonths.map(m => (
-                                <td key={m.key} style={{ textAlign: 'right', fontWeight: 700, color: 'var(--color-danger)' }}>{formatNumber(summary.total_expense?.[String(m.key)] || 0)}</td>
-                            ))}
-                            {reversedMonths.map(m => (
-                                <td key={`p${m.key}`} style={{ textAlign: 'right', paddingRight: 16, color: 'var(--color-danger)', fontSize: 12, fontWeight: 600 }}>{pct(summary.total_expense?.[String(m.key)] || 0, revenue[String(m.key)] || 0)}</td>
+                                <React.Fragment key={m.key}>
+                                    <td style={{ textAlign: 'right', fontWeight: 700, color: 'var(--color-danger)' }}>{formatNumber(summary.total_expense?.[String(m.key)] || 0)}</td>
+                                    <td style={{ textAlign: 'right', paddingRight: 16, color: 'var(--color-danger)', fontSize: 12, fontWeight: 600 }}>{pct(summary.total_expense?.[String(m.key)] || 0, revenue[String(m.key)] || 0)}</td>
+                                </React.Fragment>
                             ))}
                         </tr>
 
@@ -185,10 +185,10 @@ function DDSPnL() {
                                         <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--color-danger)' }}>{formatNumber(cat.monthly?.total || 0)}</td>
                                         <td style={{ textAlign: 'right', paddingRight: 16, color: 'var(--color-text-dim)', fontSize: 12 }}>{pct(cat.monthly?.total || 0, revenue.total || 0)}</td>
                                         {reversedMonths.map(m => (
-                                            <td key={m.key} style={{ textAlign: 'right', color: 'var(--color-danger)' }}>{formatNumber(cat.monthly?.[String(m.key)] || 0)}</td>
-                                        ))}
-                                        {reversedMonths.map(m => (
-                                            <td key={`p${m.key}`} style={{ textAlign: 'right', paddingRight: 16, color: 'var(--color-text-dim)', fontSize: 12 }}>{pct(cat.monthly?.[String(m.key)] || 0, revenue[String(m.key)] || 0)}</td>
+                                            <React.Fragment key={m.key}>
+                                                <td style={{ textAlign: 'right', color: 'var(--color-danger)' }}>{formatNumber(cat.monthly?.[String(m.key)] || 0)}</td>
+                                                <td style={{ textAlign: 'right', paddingRight: 16, color: 'var(--color-text-dim)', fontSize: 12 }}>{pct(cat.monthly?.[String(m.key)] || 0, revenue[String(m.key)] || 0)}</td>
+                                            </React.Fragment>
                                         ))}
                                     </tr>
 
@@ -198,10 +198,10 @@ function DDSPnL() {
                                             <td style={{ textAlign: 'right', fontSize: 12 }}>{formatNumber(cp.monthly?.total || 0)}</td>
                                             <td style={{ textAlign: 'right', paddingRight: 16, fontSize: 11, color: 'var(--color-text-dim)' }}>{pct(cp.monthly?.total || 0, revenue.total || 0)}</td>
                                             {reversedMonths.map(m => (
-                                                <td key={m.key} style={{ textAlign: 'right', fontSize: 12 }}>{formatNumber(cp.monthly?.[String(m.key)] || 0)}</td>
-                                            ))}
-                                            {reversedMonths.map(m => (
-                                                <td key={`p${m.key}`} style={{ textAlign: 'right', paddingRight: 16, fontSize: 11, color: 'var(--color-text-dim)' }}>{pct(cp.monthly?.[String(m.key)] || 0, revenue[String(m.key)] || 0)}</td>
+                                                <React.Fragment key={m.key}>
+                                                    <td style={{ textAlign: 'right', fontSize: 12 }}>{formatNumber(cp.monthly?.[String(m.key)] || 0)}</td>
+                                                    <td style={{ textAlign: 'right', paddingRight: 16, fontSize: 11, color: 'var(--color-text-dim)' }}>{pct(cp.monthly?.[String(m.key)] || 0, revenue[String(m.key)] || 0)}</td>
+                                                </React.Fragment>
                                             ))}
                                         </tr>
                                     ))}
@@ -220,11 +220,12 @@ function DDSPnL() {
                             </td>
                             {reversedMonths.map(m => {
                                 const v = summary.net_profit?.[String(m.key)] || 0;
-                                return <td key={m.key} style={{ textAlign: 'right', fontWeight: 700, color: v >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>{formatNumber(v)}</td>;
-                            })}
-                            {reversedMonths.map(m => {
-                                const v = summary.net_profit?.[String(m.key)] || 0;
-                                return <td key={`p${m.key}`} style={{ textAlign: 'right', paddingRight: 16, fontSize: 12, fontWeight: 600, color: v >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>{pct(Math.abs(v), revenue[String(m.key)] || 0)}</td>;
+                                return (
+                                    <React.Fragment key={m.key}>
+                                        <td style={{ textAlign: 'right', fontWeight: 700, color: v >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>{formatNumber(v)}</td>
+                                        <td style={{ textAlign: 'right', paddingRight: 16, fontSize: 12, fontWeight: 600, color: v >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>{pct(Math.abs(v), revenue[String(m.key)] || 0)}</td>
+                                    </React.Fragment>
+                                );
                             })}
                         </tr>
                     </tbody>
