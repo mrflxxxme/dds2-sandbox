@@ -205,15 +205,15 @@ class ApiClient {
 
     getDDS(params: { start?: string; end?: string } = {}) {
         const q = new URLSearchParams();
-        if (params.start) q.set('start', params.start);
-        if (params.end) q.set('end', params.end);
-        return this.request<{ rows: DdsMonthRow[]; totals: Record<string, number> }>('GET', `/api/v1/reports/dds?${q}`);
+        if (params.start) q.set('date_from', params.start);
+        if (params.end) q.set('date_to', params.end);
+        return this.request<{ rows: DdsMonthRow[]; totals: Record<string, number> }>('GET', `/api/v1/reports/dds_month?${q}`);
     }
 
     getTransactions(params: { start?: string; end?: string; account?: string } = {}) {
         const q = new URLSearchParams();
-        if (params.start) q.set('start', params.start);
-        if (params.end) q.set('end', params.end);
+        if (params.start) q.set('date_from', params.start);
+        if (params.end) q.set('date_to', params.end);
         if (params.account) q.set('account', params.account);
         return this.request<Transaction[]>('GET', `/api/v1/reports/transactions?${q}`);
     }
@@ -243,16 +243,16 @@ class ApiClient {
         return this.request<{ rows: Array<{ cat_lvl1: string; cat_lvl2: string; income: number; expense: number }>; totals: Record<string, number> }>('GET', `/api/v1/reports/dds_month?year=${year}&month=${month}&currency=${currency}`);
     }
     getBalanceDaily(account: string, currency: string, start: string, end: string) {
-        return this.request<Array<{ date: string; balance: number }>>('GET', `/api/v1/reports/balance_daily?account=${encodeURIComponent(account)}&currency=${currency}&start=${start}&end=${end}`);
+        return this.request<Array<{ date: string; balance: number }>>('GET', `/api/v1/reports/balance_daily?account=${encodeURIComponent(account)}&currency=${currency}&date_from=${start}&date_to=${end}`);
     }
     getFxControl(start: string, end: string) {
-        return this.request<Array<{ date: string; rate: number; income: number; expense: number }>>('GET', `/api/v1/reports/fx_control?start=${start}&end=${end}`);
+        return this.request<Array<{ date: string; rate: number; income: number; expense: number }>>('GET', `/api/v1/reports/fx_control?date_from=${start}&date_to=${end}`);
     }
     getCustomsControl(start: string, end: string) {
-        return this.request<Array<Record<string, unknown>>>('GET', `/api/v1/reports/customs_control?start=${start}&end=${end}`);
+        return this.request<Array<Record<string, unknown>>>('GET', `/api/v1/reports/customs_control?date_from=${start}&date_to=${end}`);
     }
     getIncomeDailyReport(start: string, end: string) {
-        return this.request<Array<{ date: string; income: number; expense: number; net: number }>>('GET', `/api/v1/reports/income_daily?start=${start}&end=${end}`);
+        return this.request<Array<{ date: string; income: number; expense: number; net: number }>>('GET', `/api/v1/reports/income_daily?date_from=${start}&date_to=${end}`);
     }
 
     // Refs — Accounts

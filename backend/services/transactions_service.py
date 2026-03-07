@@ -19,6 +19,11 @@ from backend.models import (
 logger = logging.getLogger("dds.transactions")
 
 
+def _escape_like(s: str) -> str:
+    """Escape special LIKE characters (% and _) in search strings."""
+    return s.replace("%", r"\%").replace("_", r"\_")
+
+
 async def search_transactions(
     db: AsyncSession,
     project_id: int,
@@ -53,10 +58,11 @@ async def search_transactions(
             )
         )
     if search:
+        escaped = _escape_like(search)
         q = q.where(
             or_(
-                Transaction.counterparty.ilike(f"%{search}%"),
-                Transaction.purpose.ilike(f"%{search}%"),
+                Transaction.counterparty.ilike(f"%{escaped}%"),
+                Transaction.purpose.ilike(f"%{escaped}%"),
             )
         )
     if event_type:
