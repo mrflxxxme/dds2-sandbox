@@ -471,6 +471,49 @@ export default function DashboardPage() {
                 </div>
             )}
 
+            {/* ─── Expense categories table ────────────────────── */}
+            {expensePie.length > 0 && (
+                <div className="glass-card" style={{ marginTop: 20 }}>
+                    <div className="table-toolbar">
+                        <h3 style={{ fontSize: 16, fontWeight: 600 }}>Расходы по категориям</h3>
+                        <div style={{ display: 'flex', gap: 4 }}>
+                            {selectedExpCat && <button className="btn btn-sm btn-secondary" onClick={resetFilters}>Все</button>}
+                        </div>
+                    </div>
+                    <table className="data-table">
+                        <thead>
+                            <tr>
+                                <th>Категория</th>
+                                <th style={{ textAlign: 'right' }}>Сумма</th>
+                                <th style={{ textAlign: 'right' }}>Операций</th>
+                                <th style={{ textAlign: 'right' }}>% от расходов</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {expensePie.map((c: any, i: number) => {
+                                const pct = data.month_expense > 0 ? (c.value / data.month_expense * 100) : 0;
+                                const isSelected = selectedExpCat === c.name;
+                                return (
+                                    <tr key={i} onClick={() => handleExpClick(c.name)}
+                                        style={{ cursor: 'pointer', background: isSelected ? 'rgba(239,68,68,0.1)' : undefined }}>
+                                        <td style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                            <span style={{
+                                                width: 10, height: 10, borderRadius: '50%', display: 'inline-block',
+                                                background: PIE_COLORS[i % PIE_COLORS.length],
+                                            }} />
+                                            {isSelected ? '▼ ' : ''}{c.name}
+                                        </td>
+                                        <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--color-danger)' }}>{formatNumber(c.value)} ₽</td>
+                                        <td style={{ textAlign: 'right' }}>{c.count || '—'}</td>
+                                        <td style={{ textAlign: 'right' }}><span className="badge badge-warning">{pct.toFixed(1)}%</span></td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+
             {/* ─── Balance table ───────────────────────────────── */}
             <div className="glass-card" style={{ marginTop: 20 }}>
                 <div className="table-toolbar">

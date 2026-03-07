@@ -443,11 +443,12 @@ async def get_dashboard_summary(
             "expense": float(row.expense),
         })
 
-    # 7. Expense by category (within date range, top-10, real cashflow)
+    # 7. Expense by category (within date range, real cashflow)
     cat_result = await db.execute(
         select(
             func.coalesce(Transaction.cat_lvl1_2, text("'Без категории'")).label("category"),
             func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
+            func.count().label("cnt"),
         ).where(
             Transaction.project_id == project_id,
             Transaction.date >= date_from,
@@ -456,13 +457,14 @@ async def get_dashboard_summary(
             Transaction.is_cashflow2 == 1,
         ).group_by(Transaction.cat_lvl1_2).order_by(
             func.sum(Transaction.expense).desc()
-        ).limit(10)
+        )
     )
     expense_by_category = []
     for row in cat_result:
         expense_by_category.append({
             "name": row.category or "Без категории",
             "value": float(row.expense),
+            "count": row.cnt,
         })
 
     # 8. Top income counterparties — group by cp_key (INN) to avoid name splits
