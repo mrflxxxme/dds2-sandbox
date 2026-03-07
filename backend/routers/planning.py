@@ -250,17 +250,21 @@ async def order_summary(
 # ─── Manual Sync Plan Payments ───────────────────────────────────────────────
 
 @router.post("/sync_plan_payments")
-async def sync_plan_payments_endpoint(db: AsyncSession = Depends(get_db)):
+async def sync_plan_payments_endpoint(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     """Re-sync all planned payments with fact from bank statements and customs_alloc."""
     import asyncio
     from backend.database import SyncSessionLocal
     from backend.etl.service import _sync_plan_payments
 
+    pid = project.id
     loop = asyncio.get_event_loop()
 
     def _run():
         with SyncSessionLocal() as sync_db:
-            _sync_plan_payments(sync_db)
+            _sync_plan_payments(sync_db, pid)
             sync_db.commit()
 
     await loop.run_in_executor(None, _run)
