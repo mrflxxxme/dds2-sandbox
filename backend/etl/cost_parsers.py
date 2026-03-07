@@ -310,10 +310,15 @@ def normalize_textile(df: pd.DataFrame) -> pd.DataFrame:
     单价, 总价, 单件体积, 单件毛重, 单件净重, 长(CM), 宽(CM), 高(CM), 总体积
     """
     col_map = {}
+    barcode_mapped = False
     for c in df.columns:
-        cl = str(c).strip()
-        if cl == "货号":
+        cl = str(c).strip().lower()
+        if cl in ("шк", "штрихкод") and not barcode_mapped:
             col_map[c] = "barcode"
+            barcode_mapped = True
+        elif cl == "货号" and not barcode_mapped:
+            col_map[c] = "barcode"
+            barcode_mapped = True
         elif cl in ("订单数量数量", "订单数量", "数量", "总数量"):
             col_map[c] = "qty"
         elif cl == "单价":
