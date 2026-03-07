@@ -397,20 +397,39 @@ def _sync_plan_payments(db: Session, project_id: int):
                 delivery_fact_ccy[ono] = {}
             ccy = (t.currency or "RUB").upper()
 
-    # VTB Commission matching: commission transactions contain planned amount
-    # in purpose text (e.g. "на сумму 610767.5 'CNY'"), which maps to
-    # PlannedPayment.amount → order_no. Commission added to corresponding fact dict.
+    # VTB Commission matching: commission transactions contain transfer amount
+    # in purpose text (e.g. "на сумму 610767.5 'CNY'"). Two matching strategies:
+    # 1) Exact match by PlannedPayment.amount (plan amount == commission reference)
+    # 2) Fallback: match by PMNT amount from main Заказ payment purpose text
     import re as _re
     _re_vtb_commission_amount = _re.compile(
         r"ВТБ Шанхай.*?на сумму\s+([\d.,\s]+)\s*['\"]?CNY", _re.IGNORECASE
     )
-    # Build amount → (order_no, direction) map from planned payments
+    _re_pmnt_amount = _re.compile(
+        r"PMNT\s+([\d\s,.]+)\s*CNY", _re.IGNORECASE
+    )
+
+    # Strategy 1: amount → (order_no, direction) from planned payments
     amount_to_payment = {}  # Decimal(amount) → (order_no, direction)
     for p in payments:
         if p.amount and p.order_no:
             direction = (p.direction or "").upper()
             if direction in ("ЗАКАЗ", "ДОСТАВКА"):
                 amount_to_payment[p.amount] = (p.order_no, direction)
+
+    # Strategy 2: PMNT amount from main Заказ payments → order_no
+    pmnt_to_order = {}  # Decimal(pmnt_amount) → int(order_no)
+    for t in txns_order:
+        if t.annex_id and t.purpose:
+            pm = _re_pmnt_amount.search(t.purpose)
+            if pm:
+                try:
+                    pmnt_raw = pm.group(1).replace(" ", "").replace(",", ".")
+                    pmnt_amt = Decimal(pmnt_raw)
+                    ono = _order_no_to_int(t.annex_id)
+                    pmnt_to_order[pmnt_amt] = ono
+                except (ValueError, TypeError, InvalidOperation):
+                    pass
 
     txns_commission = db.execute(
         select(Transaction).where(
@@ -426,10 +445,22 @@ def _sync_plan_payments(db: Session, project_id: int):
         if m:
             try:
                 raw_amount = m.group(1).replace(" ", "").replace(",", ".")
-                comm_plan_amount = Decimal(raw_amount)
-                matched = amount_to_payment.get(comm_plan_amount)
+                comm_ref_amount = Decimal(raw_amount)
+
+                # Try strategy 1: match by plan amount
+                matched = amount_to_payment.get(comm_ref_amount)
+                matched_order = None
+                matched_dir = None
                 if matched:
                     matched_order, matched_dir = matched
+                else:
+                    # Try strategy 2: match by PMNT amount from main payments
+                    fallback_order = pmnt_to_order.get(comm_ref_amount)
+                    if fallback_order:
+                        matched_order = fallback_order
+                        matched_dir = "ЗАКАЗ"  # PMNT only in Заказ transactions
+
+                if matched_order and matched_dir:
                     ccy = (t.currency or "RUB").upper()
                     if matched_dir == "ЗАКАЗ":
                         if matched_order not in order_fact_ccy:
