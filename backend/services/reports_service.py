@@ -358,25 +358,32 @@ async def get_dashboard_summary(
     month_expense = float(month_row.expense)
 
     # 3. Orders summary (within date range)
-    orders_result = await db.execute(
-        select(
-            func.count().label("cnt"),
-            func.coalesce(func.sum(Order.order_amount), 0).label("total"),
-        ).where(
-            Order.project_id == project_id,
-            or_(Order.is_deleted == False, Order.is_deleted.is_(None)),
-        )
+    orders_q = select(
+        func.count().label("cnt"),
+        func.coalesce(func.sum(Order.order_amount), 0).label("total"),
+    ).where(
+        Order.project_id == project_id,
+        or_(Order.is_deleted == False, Order.is_deleted.is_(None)),
     )
+    if date_from:
+        orders_q = orders_q.where(Order.planned_ship_date >= date_from)
+    if date_to:
+        orders_q = orders_q.where(Order.planned_ship_date <= date_to)
+    orders_result = await db.execute(orders_q)
     orders_row = orders_result.one()
     orders_count = orders_row.cnt
     orders_total_cny = float(orders_row.total)
 
-    # 4. Unpaid debt (planned_payments) — only truly unpaid
+    # 4. Unpaid debt (planned_payments) — global, all unpaid
+    #    For CNY/USD: use amount/paid_amount (original currency)
+    #    For RUB: use amount_rub/paid_rub
     debt_result = await db.execute(
         select(
             PlannedPayment.currency,
-            func.sum(PlannedPayment.amount_rub).label("total_amount"),
-            func.sum(PlannedPayment.paid_rub).label("total_paid"),
+            func.sum(PlannedPayment.amount_rub).label("total_amount_rub"),
+            func.sum(PlannedPayment.paid_rub).label("total_paid_rub"),
+            func.sum(PlannedPayment.amount).label("total_amount"),
+            func.sum(PlannedPayment.paid_amount).label("total_paid"),
         ).where(
             PlannedPayment.project_id == project_id,
             PlannedPayment.is_paid == False,
@@ -386,20 +393,26 @@ async def get_dashboard_summary(
     debt_rub = 0.0
     debt_cny = 0.0
     for row in debt_result:
-        total_amt = float(row.total_amount or 0)
-        total_paid = float(row.total_paid or 0)
-        remaining = total_amt - total_paid
-        if remaining <= 0:
-            continue
-        if row.currency and ("CNY" in row.currency or "USD" in row.currency):
-            debt_cny += remaining
+        is_foreign = row.currency and ("CNY" in row.currency or "USD" in row.currency)
+        if is_foreign:
+            total_amt = float(row.total_amount or 0)
+            total_paid = float(row.total_paid or 0)
+            remaining = total_amt - total_paid
+            if remaining > 0:
+                debt_cny += remaining
         else:
-            debt_rub += remaining
+            total_amt = float(row.total_amount_rub or 0)
+            total_paid = float(row.total_paid_rub or 0)
+            remaining = total_amt - total_paid
+            if remaining > 0:
+                debt_rub += remaining
 
-    # 5. Inbox count (unassigned transactions)
+    # 5. Inbox count (unassigned transactions, within date range)
     inbox_result = await db.execute(
         select(func.count()).select_from(Transaction).where(
             Transaction.project_id == project_id,
+            Transaction.date >= date_from,
+            Transaction.date <= date_to,
             or_(
                 Transaction.cat_lvl1.is_(None),
                 Transaction.cat_lvl1 == "",
@@ -456,10 +469,11 @@ async def get_dashboard_summary(
             "value": float(row.expense),
         })
 
-    # 8. Top income counterparties (for filtering)
+    # 8. Top income counterparties — group by cp_key (INN) to avoid name splits
     cp_result = await db.execute(
         select(
-            Transaction.counterparty,
+            func.coalesce(Transaction.cp_key, Transaction.counterparty).label("key"),
+            func.min(Transaction.counterparty).label("name"),
             func.sum(Transaction.income).label("total"),
             func.count().label("cnt"),
         ).where(
@@ -468,14 +482,16 @@ async def get_dashboard_summary(
             Transaction.date <= date_to,
             Transaction.income > 0,
             Transaction.is_cashflow2 == 1,
-        ).group_by(Transaction.counterparty).order_by(
+        ).group_by(
+            func.coalesce(Transaction.cp_key, Transaction.counterparty)
+        ).order_by(
             func.sum(Transaction.income).desc()
         ).limit(20)
     )
     income_counterparties = []
     for row in cp_result:
         income_counterparties.append({
-            "name": row.counterparty or "Без контрагента",
+            "name": row.name or "Без контрагента",
             "total": float(row.total),
             "count": row.cnt,
         })

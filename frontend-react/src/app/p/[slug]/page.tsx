@@ -143,7 +143,7 @@ export default function DashboardPage() {
             const [summary, bal, fun] = await Promise.all([
                 api.getDashboardSummary(from, to),
                 api.getBalance(),
-                api.getFunnelSummary().catch(() => null),
+                api.getFunnelSummary(from, to).catch(() => null),
             ]);
             setData(summary);
             setBalance(bal);
