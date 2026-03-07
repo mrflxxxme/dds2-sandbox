@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { api } from '@/lib/api';
-import { formatNumber, exportToExcel } from '@/lib/utils';
+import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 import {
     XAxis, YAxis, CartesianGrid, Tooltip, Legend,
     ResponsiveContainer, PieChart, Pie, Cell,
@@ -46,18 +46,15 @@ function getPeriodDates(key: PeriodKey, customFrom?: string, customTo?: string):
         }
         case '7d': {
             const s = new Date(today); s.setDate(s.getDate() - 6);
-            const sY = s.getFullYear(), sM = String(s.getMonth() + 1).padStart(2, '0'), sD = String(s.getDate()).padStart(2, '0');
-            return { from: `${sY}-${sM}-${sD}`, to: todayStr, label: '7 дней' };
+            return { from: `${s.getFullYear()}-${String(s.getMonth()+1).padStart(2,'0')}-${String(s.getDate()).padStart(2,'0')}`, to: todayStr, label: '7 дней' };
         }
         case '30d': {
             const s = new Date(today); s.setDate(s.getDate() - 29);
-            const sY = s.getFullYear(), sM = String(s.getMonth() + 1).padStart(2, '0'), sD = String(s.getDate()).padStart(2, '0');
-            return { from: `${sY}-${sM}-${sD}`, to: todayStr, label: '30 дней' };
+            return { from: `${s.getFullYear()}-${String(s.getMonth()+1).padStart(2,'0')}-${String(s.getDate()).padStart(2,'0')}`, to: todayStr, label: '30 дней' };
         }
         case '90d': {
             const s = new Date(today); s.setDate(s.getDate() - 89);
-            const sY = s.getFullYear(), sM = String(s.getMonth() + 1).padStart(2, '0'), sD = String(s.getDate()).padStart(2, '0');
-            return { from: `${sY}-${sM}-${sD}`, to: todayStr, label: '90 дней' };
+            return { from: `${s.getFullYear()}-${String(s.getMonth()+1).padStart(2,'0')}-${String(s.getDate()).padStart(2,'0')}`, to: todayStr, label: '90 дней' };
         }
         case 'custom':
             return { from: customFrom || todayStr, to: customTo || todayStr, label: 'Произвольный' };
@@ -72,12 +69,10 @@ function fmtK(v: number): string {
     if (Math.abs(v) >= 1_000) return (v / 1_000).toFixed(0) + 'К';
     return v.toFixed(0);
 }
-
 function shortDay(iso: string) {
     const d = new Date(iso + 'T00:00:00');
     return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
 }
-
 function truncate(s: string, n: number) {
     return s.length > n ? s.slice(0, n) + '…' : s;
 }
@@ -86,10 +81,7 @@ function truncate(s: string, n: number) {
 function ChartTooltip({ active, payload, label }: any) {
     if (!active || !payload?.length) return null;
     return (
-        <div style={{
-            background: 'rgba(15,17,26,0.95)', border: '1px solid rgba(255,255,255,0.1)',
-            borderRadius: 8, padding: '10px 14px', fontSize: 13,
-        }}>
+        <div style={{ background: 'rgba(15,17,26,0.95)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: '10px 14px', fontSize: 13 }}>
             <div style={{ color: '#94a3b8', marginBottom: 4 }}>{label}</div>
             {payload.map((p: any, i: number) => (
                 <div key={i} style={{ color: p.color || p.fill, fontWeight: 600 }}>
@@ -100,19 +92,16 @@ function ChartTooltip({ active, payload, label }: any) {
     );
 }
 
-/* ─── Pie label (shorter) ──────────────────────────────────────── */
+/* ─── Pie label ────────────────────────────────────────────────── */
 function renderPieLabel({ cx, cy, midAngle, outerRadius, name, percent, index }: any) {
     const RADIAN = Math.PI / 180;
-    const radius = outerRadius + 20;
-    const x = cx + radius * Math.cos(-midAngle * RADIAN);
-    const y = cy + radius * Math.sin(-midAngle * RADIAN);
+    const r = outerRadius + 20;
+    const x = cx + r * Math.cos(-midAngle * RADIAN);
+    const y = cy + r * Math.sin(-midAngle * RADIAN);
     if (percent < 0.03) return null;
     return (
-        <text x={x} y={y}
-            fill={PIE_COLORS[index % PIE_COLORS.length]}
-            textAnchor={x > cx ? 'start' : 'end'}
-            dominantBaseline="central" fontSize={11} fontWeight={600}
-        >
+        <text x={x} y={y} fill={PIE_COLORS[index % PIE_COLORS.length]}
+            textAnchor={x > cx ? 'start' : 'end'} dominantBaseline="central" fontSize={11} fontWeight={600}>
             {truncate(name, 12)} {(percent * 100).toFixed(0)}%
         </text>
     );
@@ -120,8 +109,7 @@ function renderPieLabel({ cx, cy, midAngle, outerRadius, name, percent, index }:
 
 /* ─── KPI Card ─────────────────────────────────────────────────── */
 function KpiCard({ icon, label, value, sub, color, borderColor }: {
-    icon: string; label: string; value: string; sub?: string;
-    color: string; borderColor: string;
+    icon: string; label: string; value: string; sub?: string; color: string; borderColor: string;
 }) {
     return (
         <div className="stat-card" style={{ borderLeft: `3px solid ${borderColor}` }}>
@@ -134,7 +122,7 @@ function KpiCard({ icon, label, value, sub, color, borderColor }: {
     );
 }
 
-/* ═════════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════ */
 export default function DashboardPage() {
     const [data, setData] = useState<any>(null);
     const [balance, setBalance] = useState<any[]>([]);
@@ -145,132 +133,110 @@ export default function DashboardPage() {
     const [customFrom, setCustomFrom] = useState('');
     const [customTo, setCustomTo] = useState('');
 
-    /* ─── Filter state ──────────────────────────────────────────── */
-    const [selectedCp, setSelectedCp] = useState<string>('all');
-    const [selectedExpCat, setSelectedExpCat] = useState<string>('all');
+    /* ─── Filter state ────────────────────────────────────────── */
+    const [selectedCp, setSelectedCp] = useState<any>(null);   // { name, key }
+    const [selectedExpCat, setSelectedExpCat] = useState<string | null>(null);
     const [filteredDaily, setFilteredDaily] = useState<any[] | null>(null);
+    const [txnList, setTxnList] = useState<any[]>([]);
+    const [txnTotal, setTxnTotal] = useState(0);
+    const [txnFlow, setTxnFlow] = useState<'all' | 'income' | 'expense'>('all');
     const [filterLoading, setFilterLoading] = useState(false);
 
     const { from: dateFrom, to: dateTo, label: periodLabel } = getPeriodDates(period, customFrom, customTo);
 
-    /* ─── Load main data ────────────────────────────────────────── */
+    /* ─── Load main data ──────────────────────────────────────── */
     const loadData = useCallback(async () => {
         try {
-            setLoading(true);
-            setError('');
+            setLoading(true); setError('');
             const { from, to } = getPeriodDates(period, customFrom, customTo);
             const [summary, bal, fun] = await Promise.all([
                 api.getDashboardSummary(from, to),
                 api.getBalance(),
                 api.getFunnelSummary(from, to).catch(() => null),
             ]);
-            setData(summary);
-            setBalance(bal);
-            setFunnel(fun);
-            setSelectedCp('all');
-            setSelectedExpCat('all');
-            setFilteredDaily(null);
+            setData(summary); setBalance(bal); setFunnel(fun);
+            resetFilters();
         } catch (e: any) {
             setError(e.message || 'Ошибка загрузки');
-        } finally {
-            setLoading(false);
-        }
+        } finally { setLoading(false); }
     }, [period, customFrom, customTo]);
 
     useEffect(() => { loadData(); }, [loadData]);
 
-    /* ─── Load filtered daily data on selection ─────────────────── */
-    const loadFilteredDaily = useCallback(async (cpKey?: string, category?: string) => {
-        if (!cpKey && !category) {
-            setFilteredDaily(null);
-            return;
-        }
+    /* ─── Reset all filters ───────────────────────────────────── */
+    const resetFilters = useCallback(() => {
+        setSelectedCp(null); setSelectedExpCat(null);
+        setFilteredDaily(null); setTxnList([]); setTxnTotal(0); setTxnFlow('all');
+    }, []);
+
+    /* ─── Load filtered data (chart + transactions) ───────────── */
+    const loadFiltered = useCallback(async (cpKey?: string, category?: string, flow: string = 'all') => {
         try {
             setFilterLoading(true);
             const { from, to } = getPeriodDates(period, customFrom, customTo);
-            const result = await api.getDailyFiltered(from, to, cpKey, category);
-            setFilteredDaily(result);
-        } catch {
-            setFilteredDaily(null);
-        } finally {
-            setFilterLoading(false);
-        }
+            const [daily, txns] = await Promise.all([
+                api.getDailyFiltered(from, to, cpKey, category),
+                api.getFilteredTransactions(from, to, { cpKey, category, flow, limit: 50 }),
+            ]);
+            setFilteredDaily(daily);
+            setTxnList(txns.items);
+            setTxnTotal(txns.total);
+        } catch { setFilteredDaily(null); setTxnList([]); }
+        finally { setFilterLoading(false); }
     }, [period, customFrom, customTo]);
 
-    /* ─── Handle counterparty click ─────────────────────────────── */
+    /* ─── Handle counterparty click ───────────────────────────── */
     const handleCpClick = useCallback((cp: any) => {
-        if (selectedCp === cp.name) {
-            setSelectedCp('all');
-            setFilteredDaily(null);
-        } else {
-            setSelectedCp(cp.name);
-            setSelectedExpCat('all');
-            loadFilteredDaily(cp.key, undefined);
-        }
-    }, [selectedCp, loadFilteredDaily]);
+        if (selectedCp?.name === cp.name) { resetFilters(); return; }
+        setSelectedCp(cp); setSelectedExpCat(null); setTxnFlow('all');
+        loadFiltered(cp.key, undefined, 'all');
+    }, [selectedCp, loadFiltered, resetFilters]);
 
-    /* ─── Handle expense category click ─────────────────────────── */
+    /* ─── Handle expense category click ───────────────────────── */
     const handleExpClick = useCallback((catName: string) => {
-        if (selectedExpCat === catName) {
-            setSelectedExpCat('all');
-            setFilteredDaily(null);
-        } else {
-            setSelectedExpCat(catName);
-            setSelectedCp('all');
-            loadFilteredDaily(undefined, catName);
-        }
-    }, [selectedExpCat, loadFilteredDaily]);
+        if (selectedExpCat === catName) { resetFilters(); return; }
+        setSelectedExpCat(catName); setSelectedCp(null); setTxnFlow('all');
+        loadFiltered(undefined, catName, 'all');
+    }, [selectedExpCat, loadFiltered, resetFilters]);
 
-    /* ─── Reset all filters ─────────────────────────────────────── */
-    const resetFilters = useCallback(() => {
-        setSelectedCp('all');
-        setSelectedExpCat('all');
-        setFilteredDaily(null);
-    }, []);
+    /* ─── Handle flow toggle (all / income / expense) ─────────── */
+    const handleFlowChange = useCallback((flow: 'all' | 'income' | 'expense') => {
+        setTxnFlow(flow);
+        loadFiltered(selectedCp?.key, selectedExpCat || undefined, flow);
+    }, [selectedCp, selectedExpCat, loadFiltered]);
 
     const allPeriods: { key: PeriodKey; label: string }[] = [
-        { key: 'month', label: 'Месяц' },
-        { key: 'prev_month', label: 'Пред.' },
-        { key: '7d', label: '7д' },
-        { key: '30d', label: '30д' },
-        { key: '90d', label: '90д' },
-        { key: 'all', label: 'Всё' },
+        { key: 'month', label: 'Месяц' }, { key: 'prev_month', label: 'Пред.' },
+        { key: '7d', label: '7д' }, { key: '30d', label: '30д' },
+        { key: '90d', label: '90д' }, { key: 'all', label: 'Всё' },
     ];
 
     const incomeCounterparties = data?.income_counterparties || [];
     const expensePie: any[] = data?.expense_by_category || [];
 
-    /* ─── Chart data — use filtered if available ─────────────────── */
+    /* ─── Chart data ──────────────────────────────────────────── */
     const dailyChart = useMemo(() => {
         const raw = filteredDaily || data?.daily_cashflow || [];
-        return raw.map((d: any) => ({
-            ...d,
-            label: shortDay(d.date),
-        }));
+        return raw.map((d: any) => ({ ...d, label: shortDay(d.date) }));
     }, [data, filteredDaily]);
 
-    const hasFilter = selectedCp !== 'all' || selectedExpCat !== 'all';
-    const filterLabel = selectedCp !== 'all'
-        ? truncate(selectedCp, 20)
-        : selectedExpCat !== 'all' ? truncate(selectedExpCat, 20) : '';
+    const hasFilter = selectedCp || selectedExpCat;
+    const filterLabel = selectedCp ? truncate(selectedCp.name, 20) : selectedExpCat ? truncate(selectedExpCat, 20) : '';
 
     if (loading) return (
         <div style={{ padding: 40, color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: 12 }}>
             <div className="spinner" /> Загрузка дашборда...
         </div>
     );
-    if (error) return (
-        <div style={{ padding: 40, color: 'var(--color-danger)' }}>❌ {error}</div>
-    );
+    if (error) return <div style={{ padding: 40, color: 'var(--color-danger)' }}>❌ {error}</div>;
     if (!data) return null;
 
     const netCashflow = data.month_income - data.month_expense;
-    const funnelDRR = funnel && funnel.orders_sum_rub > 0
-        ? (funnel.adv_sum / funnel.orders_sum_rub * 100) : 0;
+    const funnelDRR = funnel && funnel.orders_sum_rub > 0 ? (funnel.adv_sum / funnel.orders_sum_rub * 100) : 0;
 
     return (
         <div className="animate-in">
-            {/* ─── Header with period selector + date picker ────── */}
+            {/* ─── Header ─────────────────────────────────────── */}
             <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
                 <div>
                     <h1 className="page-title">Дашборд</h1>
@@ -285,51 +251,40 @@ export default function DashboardPage() {
                         >{p.label}</button>
                     ))}
                     <span style={{ color: 'var(--color-text-muted)', fontSize: 12, margin: '0 4px' }}>|</span>
-                    <input type="date"
-                        value={period === 'custom' ? customFrom : dateFrom}
+                    <input type="date" value={period === 'custom' ? customFrom : dateFrom}
                         onChange={e => { setCustomFrom(e.target.value); setPeriod('custom'); }}
                         style={{ background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 12 }}
                     />
                     <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>—</span>
-                    <input type="date"
-                        value={period === 'custom' ? customTo : dateTo}
+                    <input type="date" value={period === 'custom' ? customTo : dateTo}
                         onChange={e => { setCustomTo(e.target.value); setPeriod('custom'); }}
                         style={{ background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 12 }}
                     />
                 </div>
             </div>
 
-            {/* ─── Row 1: Financial Health ────────────────────── */}
+            {/* ─── KPI Row 1 ──────────────────────────────────── */}
             <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
                 <KpiCard icon="💰" label="Баланс RUB" value={`${formatNumber(data.balance_rub)} ₽`} color={C.income} borderColor={C.income} />
                 <KpiCard icon="💴" label="Баланс CNY" value={`${formatNumber(data.balance_cny)} ¥`} color={C.warning} borderColor={C.warning} />
-                <KpiCard
-                    icon={netCashflow >= 0 ? '📈' : '📉'} label="Cashflow"
+                <KpiCard icon={netCashflow >= 0 ? '📈' : '📉'} label="Cashflow"
                     value={`${netCashflow >= 0 ? '+' : ''}${formatNumber(netCashflow)} ₽`}
                     sub={`Приход ${fmtK(data.month_income)} / Расход ${fmtK(data.month_expense)}`}
-                    color={netCashflow >= 0 ? C.income : C.expense} borderColor={netCashflow >= 0 ? C.income : C.expense}
-                />
-                <KpiCard
-                    icon="📊" label="ДРР (реклама)"
-                    value={funnel ? `${funnelDRR.toFixed(1)}%` : '—'}
-                    sub={funnel ? `${fmtK(funnel.adv_sum)} ₽ / ${fmtK(funnel.orders_sum_rub)} ₽` : ''}
-                    color={funnelDRR > 15 ? C.expense : C.income} borderColor={C.accent}
-                />
+                    color={netCashflow >= 0 ? C.income : C.expense} borderColor={netCashflow >= 0 ? C.income : C.expense} />
+                <KpiCard icon="📊" label="ДРР" value={funnel ? `${funnelDRR.toFixed(1)}%` : '—'}
+                    sub={funnel ? `${fmtK(funnel.adv_sum)} / ${fmtK(funnel.orders_sum_rub)} ₽` : ''}
+                    color={funnelDRR > 15 ? C.expense : C.income} borderColor={C.accent} />
             </div>
 
-            {/* ─── Row 2: Operational metrics ─────────────────── */}
+            {/* ─── KPI Row 2 ──────────────────────────────────── */}
             <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', marginTop: 0 }}>
                 <KpiCard icon="📦" label="Заказы" value={`${data.orders_count}`} sub={`¥ ${formatNumber(data.orders_total_cny, 0)}`} color={C.info} borderColor={C.info} />
-                <KpiCard
-                    icon="💳" label="Долг по оплатам"
+                <KpiCard icon="💳" label="Долг"
                     value={data.debt_cny > 0 ? `${formatNumber(data.debt_cny, 0)} ¥` : (data.debt_rub > 0 ? `${formatNumber(data.debt_rub, 0)} ₽` : '0')}
                     sub={data.debt_cny > 0 && data.debt_rub > 0 ? `+ ${formatNumber(data.debt_rub, 0)} ₽` : 'неоплаченные'}
-                    color={data.debt_rub > 0 || data.debt_cny > 0 ? C.expense : C.income} borderColor={C.expense}
-                />
-                <KpiCard
-                    icon="📥" label="INBOX" value={`${data.inbox_count}`} sub="нераспределённых"
-                    color={data.inbox_count > 0 ? C.warning : C.income} borderColor={data.inbox_count > 0 ? C.warning : C.income}
-                />
+                    color={data.debt_rub > 0 || data.debt_cny > 0 ? C.expense : C.income} borderColor={C.expense} />
+                <KpiCard icon="📥" label="INBOX" value={`${data.inbox_count}`} sub="нераспределённых"
+                    color={data.inbox_count > 0 ? C.warning : C.income} borderColor={data.inbox_count > 0 ? C.warning : C.income} />
                 {funnel ? (
                     <KpiCard icon="🛒" label="Заказы WB" value={funnel.orders_count?.toLocaleString('ru-RU') || '—'} sub={`${formatNumber(funnel.orders_sum_rub, 0)} ₽`} color={C.info} borderColor={C.info} />
                 ) : (
@@ -339,7 +294,7 @@ export default function DashboardPage() {
 
             {/* ─── Charts row ─────────────────────────────────── */}
             <div style={{ display: 'grid', gridTemplateColumns: dailyChart.length > 0 && expensePie.length > 0 ? '1.6fr 1fr' : '1fr', gap: 20, marginTop: 20 }}>
-                {/* Area chart — daily income + expense (filtered) */}
+                {/* Area chart */}
                 {dailyChart.length > 0 && (
                     <div className="glass-card" style={{ padding: '20px 16px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
@@ -348,9 +303,7 @@ export default function DashboardPage() {
                                 {hasFilter && <span style={{ fontSize: 12, color: C.accent, marginLeft: 8 }}>— {filterLabel}</span>}
                                 {filterLoading && <span style={{ fontSize: 12, color: C.muted, marginLeft: 8 }}>⏳</span>}
                             </h3>
-                            {hasFilter && (
-                                <button className="btn btn-sm btn-secondary" onClick={resetFilters}>Сбросить</button>
-                            )}
+                            {hasFilter && <button className="btn btn-sm btn-secondary" onClick={resetFilters}>Сбросить</button>}
                         </div>
                         <ResponsiveContainer width="100%" height={320}>
                             <AreaChart data={dailyChart} margin={{ left: 10, right: 10 }}>
@@ -376,63 +329,116 @@ export default function DashboardPage() {
                     </div>
                 )}
 
-                {/* Expense Pie — clickable */}
+                {/* Expense Pie */}
                 {expensePie.length > 0 && (
                     <div className="glass-card" style={{ padding: '20px 16px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                             <h3 style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-text)' }}>🥧 Структура расходов</h3>
-                            {selectedExpCat !== 'all' && (
-                                <button className="btn btn-sm btn-secondary" onClick={() => { setSelectedExpCat('all'); setFilteredDaily(null); }}>Все</button>
-                            )}
+                            {selectedExpCat && <button className="btn btn-sm btn-secondary" onClick={resetFilters}>Все</button>}
                         </div>
                         <ResponsiveContainer width="100%" height={320}>
                             <PieChart>
                                 <Pie data={expensePie} dataKey="value" nameKey="name"
                                     cx="50%" cy="50%" innerRadius={50} outerRadius={90} paddingAngle={2}
-                                    label={renderPieLabel}
-                                    labelLine={{ stroke: '#475569', strokeWidth: 1 }}
+                                    label={renderPieLabel} labelLine={{ stroke: '#475569', strokeWidth: 1 }}
                                     onClick={(entry: any) => handleExpClick(entry.name)}
-                                    style={{ cursor: 'pointer' }}
-                                >
+                                    style={{ cursor: 'pointer' }}>
                                     {expensePie.map((_: any, i: number) => (
-                                        <Cell key={i}
-                                            fill={PIE_COLORS[i % PIE_COLORS.length]}
-                                            opacity={selectedExpCat === 'all' || selectedExpCat === expensePie[i]?.name ? 1 : 0.3}
+                                        <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]}
+                                            opacity={!selectedExpCat || selectedExpCat === expensePie[i]?.name ? 1 : 0.3}
                                             stroke={selectedExpCat === expensePie[i]?.name ? '#fff' : 'none'}
-                                            strokeWidth={selectedExpCat === expensePie[i]?.name ? 2 : 0}
-                                        />
+                                            strokeWidth={selectedExpCat === expensePie[i]?.name ? 2 : 0} />
                                     ))}
                                 </Pie>
                                 <Tooltip formatter={(v: number) => formatNumber(v) + ' ₽'}
-                                    contentStyle={{ background: 'rgba(15,17,26,0.95)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, color: '#e2e8f0' }}
-                                />
+                                    contentStyle={{ background: 'rgba(15,17,26,0.95)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, color: '#e2e8f0' }} />
                             </PieChart>
                         </ResponsiveContainer>
-                        {selectedExpCat !== 'all' && (() => {
-                            const sel = expensePie.find((c: any) => c.name === selectedExpCat);
-                            if (!sel) return null;
-                            return (
-                                <div style={{ padding: '12px 16px', borderTop: '1px solid rgba(255,255,255,0.06)', fontSize: 13, color: '#94a3b8' }}>
-                                    Выбрано: <strong style={{ color: 'var(--color-text)' }}>{sel.name}</strong> — {formatNumber(sel.value)} ₽
-                                    {data.month_expense > 0 && <span style={{ marginLeft: 8 }}>({(sel.value / data.month_expense * 100).toFixed(1)}%)</span>}
-                                </div>
-                            );
-                        })()}
                     </div>
                 )}
             </div>
+
+            {/* ─── Transaction list (when filter active) ──────── */}
+            {hasFilter && (
+                <div className="glass-card" style={{ marginTop: 20 }}>
+                    <div className="table-toolbar">
+                        <h3 style={{ fontSize: 16, fontWeight: 600 }}>
+                            Операции: {filterLabel}
+                            <span style={{ fontSize: 13, fontWeight: 400, color: '#94a3b8', marginLeft: 8 }}>
+                                ({txnTotal} шт.)
+                            </span>
+                        </h3>
+                        <div style={{ display: 'flex', gap: 4 }}>
+                            {(['all', 'income', 'expense'] as const).map(f => (
+                                <button key={f}
+                                    className={`btn btn-sm ${txnFlow === f ? 'btn-primary' : 'btn-secondary'}`}
+                                    onClick={() => handleFlowChange(f)}
+                                    style={txnFlow === f ? { background: f === 'income' ? C.income : f === 'expense' ? C.expense : 'var(--color-accent)', borderColor: 'transparent' } : {}}
+                                >
+                                    {f === 'all' ? 'Все' : f === 'income' ? '📈 Приходы' : '📉 Расходы'}
+                                </button>
+                            ))}
+                            <button className="btn btn-sm btn-secondary"
+                                onClick={() => exportToExcel(txnList, `txn_${filterLabel}`)}>
+                                📥 Excel
+                            </button>
+                        </div>
+                    </div>
+                    {filterLoading ? (
+                        <div style={{ padding: 20, textAlign: 'center', color: '#94a3b8' }}>
+                            <div className="spinner" style={{ display: 'inline-block', marginRight: 8 }} /> Загрузка...
+                        </div>
+                    ) : txnList.length === 0 ? (
+                        <div style={{ padding: 20, textAlign: 'center', color: '#94a3b8' }}>Нет операций</div>
+                    ) : (
+                        <table className="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Дата</th>
+                                    <th>Контрагент</th>
+                                    <th>Категория</th>
+                                    <th style={{ textAlign: 'right' }}>Приход</th>
+                                    <th style={{ textAlign: 'right' }}>Расход</th>
+                                    <th>Назначение</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {txnList.map((t: any, i: number) => (
+                                    <tr key={i}>
+                                        <td style={{ whiteSpace: 'nowrap', fontSize: 13 }}>{formatDate(t.date)}</td>
+                                        <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            {t.counterparty || '—'}
+                                        </td>
+                                        <td style={{ fontSize: 12, color: '#94a3b8' }}>{t.category || '—'}</td>
+                                        <td style={{ textAlign: 'right', fontWeight: 600, color: t.income > 0 ? C.income : '#475569' }}>
+                                            {t.income > 0 ? formatNumber(t.income) : '—'}
+                                        </td>
+                                        <td style={{ textAlign: 'right', fontWeight: 600, color: t.expense > 0 ? C.expense : '#475569' }}>
+                                            {t.expense > 0 ? formatNumber(t.expense) : '—'}
+                                        </td>
+                                        <td style={{ maxWidth: 250, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: '#94a3b8' }}>
+                                            {t.purpose || '—'}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    )}
+                    {txnTotal > 50 && (
+                        <div style={{ padding: '10px 16px', fontSize: 12, color: '#94a3b8', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                            Показано 50 из {txnTotal}. Для полного списка → Операции.
+                        </div>
+                    )}
+                </div>
+            )}
 
             {/* ─── Income counterparties ───────────────────────── */}
             {incomeCounterparties.length > 0 && (
                 <div className="glass-card" style={{ marginTop: 20 }}>
                     <div className="table-toolbar">
                         <h3 style={{ fontSize: 16, fontWeight: 600 }}>Приходы по контрагентам</h3>
-                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                            <button
-                                className={`btn btn-sm ${selectedCp === 'all' ? 'btn-primary' : 'btn-secondary'}`}
-                                onClick={resetFilters}
-                                style={selectedCp === 'all' ? { background: 'var(--color-accent)', borderColor: 'var(--color-accent)' } : {}}
-                            >Все</button>
+                        <div style={{ display: 'flex', gap: 4 }}>
+                            {selectedCp && <button className="btn btn-sm btn-secondary" onClick={resetFilters}>Все</button>}
                         </div>
                     </div>
                     <table className="data-table">
@@ -447,15 +453,12 @@ export default function DashboardPage() {
                         <tbody>
                             {incomeCounterparties.map((c: any, i: number) => {
                                 const pct = data.month_income > 0 ? (c.total / data.month_income * 100) : 0;
-                                const isSelected = selectedCp === c.name;
+                                const isSelected = selectedCp?.name === c.name;
                                 return (
-                                    <tr key={i}
-                                        onClick={() => handleCpClick(c)}
-                                        style={{ cursor: 'pointer', background: isSelected ? 'rgba(167,139,250,0.1)' : undefined }}
-                                    >
+                                    <tr key={i} onClick={() => handleCpClick(c)}
+                                        style={{ cursor: 'pointer', background: isSelected ? 'rgba(167,139,250,0.1)' : undefined }}>
                                         <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                            {isSelected && <span style={{ marginRight: 6 }}>▶</span>}
-                                            {c.name}
+                                            {isSelected ? '▼ ' : '▶ '}{c.name}
                                         </td>
                                         <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--color-success)' }}>{formatNumber(c.total)} ₽</td>
                                         <td style={{ textAlign: 'right' }}>{c.count}</td>
@@ -465,15 +468,6 @@ export default function DashboardPage() {
                             })}
                         </tbody>
                     </table>
-                    {selectedCp !== 'all' && (() => {
-                        const sel = incomeCounterparties.find((c: any) => c.name === selectedCp);
-                        if (!sel) return null;
-                        return (
-                            <div style={{ padding: '12px 16px', borderTop: '1px solid rgba(255,255,255,0.06)', fontSize: 13, color: '#94a3b8' }}>
-                                Выбран: <strong style={{ color: 'var(--color-text)' }}>{sel.name}</strong> — {formatNumber(sel.total)} ₽ за {sel.count} операций
-                            </div>
-                        );
-                    })()}
                 </div>
             )}
 
@@ -484,14 +478,7 @@ export default function DashboardPage() {
                     <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(balance, 'balance')}>📥 Excel</button>
                 </div>
                 <table className="data-table">
-                    <thead>
-                        <tr>
-                            <th>Счёт</th>
-                            <th>Название</th>
-                            <th>Валюта</th>
-                            <th style={{ textAlign: 'right' }}>Остаток</th>
-                        </tr>
-                    </thead>
+                    <thead><tr><th>Счёт</th><th>Название</th><th>Валюта</th><th style={{ textAlign: 'right' }}>Остаток</th></tr></thead>
                     <tbody>
                         {balance.map((b, i) => (
                             <tr key={i}>

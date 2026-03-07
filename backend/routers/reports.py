@@ -134,3 +134,25 @@ async def get_dashboard_daily_filtered(
     df = date_from or date_cls(2020, 1, 1)
     dt = date_to or date_cls.today()
     return await reports_service.get_daily_filtered(db, project.id, df, dt, cp_key=cp_key, category=category)
+
+
+@router.get("/dashboard_transactions")
+async def get_dashboard_transactions(
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    cp_key: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    flow: str = Query("all"),
+    limit: int = Query(100),
+    offset: int = Query(0),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Transaction list filtered by counterparty/category for dashboard detail view."""
+    from datetime import date as date_cls
+    df = date_from or date_cls(2020, 1, 1)
+    dt = date_to or date_cls.today()
+    return await reports_service.get_filtered_transactions(
+        db, project.id, df, dt, cp_key=cp_key, category=category,
+        flow=flow, limit=limit, offset=offset,
+    )

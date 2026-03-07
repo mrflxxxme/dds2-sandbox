@@ -554,3 +554,65 @@ async def get_daily_filtered(
             "expense": float(row.expense),
         })
     return rows
+
+
+async def get_filtered_transactions(
+    db: AsyncSession,
+    project_id: int,
+    date_from: date,
+    date_to: date,
+    cp_key: str | None = None,
+    category: str | None = None,
+    flow: str = "all",
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    """Return individual transactions filtered by cp_key/category for dashboard detail list."""
+    conditions = [
+        Transaction.project_id == project_id,
+        Transaction.date >= date_from,
+        Transaction.date <= date_to,
+        Transaction.is_cashflow2 == 1,
+    ]
+    if cp_key:
+        conditions.append(
+            func.coalesce(Transaction.cp_key, Transaction.counterparty) == cp_key
+        )
+    if category:
+        conditions.append(Transaction.cat_lvl1_2 == category)
+    if flow == "income":
+        conditions.append(Transaction.income > 0)
+    elif flow == "expense":
+        conditions.append(Transaction.expense > 0)
+
+    # Count
+    cnt_result = await db.execute(
+        select(func.count()).select_from(Transaction).where(*conditions)
+    )
+    total = cnt_result.scalar() or 0
+
+    # Rows
+    result = await db.execute(
+        select(
+            Transaction.date, Transaction.counterparty,
+            Transaction.income, Transaction.expense,
+            Transaction.purpose, Transaction.cat_lvl1_2,
+            Transaction.account,
+        ).where(*conditions)
+        .order_by(Transaction.date.desc())
+        .limit(limit).offset(offset)
+    )
+
+    items = []
+    for r in result:
+        dt = r.date
+        items.append({
+            "date": dt.strftime("%Y-%m-%d") if dt else "",
+            "counterparty": r.counterparty or "",
+            "income": float(r.income or 0),
+            "expense": float(r.expense or 0),
+            "purpose": (r.purpose or "")[:120],
+            "category": r.cat_lvl1_2 or "",
+            "account": r.account or "",
+        })
+    return {"total": total, "items": items}

@@ -278,6 +278,26 @@ class ApiClient {
         );
     }
 
+    getFilteredTransactions(dateFrom: string, dateTo: string, opts: {
+        cpKey?: string; category?: string; flow?: string; limit?: number; offset?: number;
+    } = {}) {
+        const q = new URLSearchParams();
+        q.set('date_from', dateFrom);
+        q.set('date_to', dateTo);
+        if (opts.cpKey) q.set('cp_key', opts.cpKey);
+        if (opts.category) q.set('category', opts.category);
+        if (opts.flow) q.set('flow', opts.flow);
+        if (opts.limit) q.set('limit', String(opts.limit));
+        if (opts.offset) q.set('offset', String(opts.offset));
+        return this.request<{
+            total: number;
+            items: Array<{
+                date: string; counterparty: string; income: number; expense: number;
+                purpose: string; category: string; account: string;
+            }>;
+        }>('GET', `/api/v1/reports/dashboard_transactions?${q.toString()}`);
+    }
+
     getDDS(params: { start?: string; end?: string } = {}) {
         const q = new URLSearchParams();
         if (params.start) q.set('date_from', params.start);
