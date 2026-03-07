@@ -9,6 +9,7 @@ import pytest
 from backend.etl.parsers import (
     parse_vtb_rub,
     parse_vtb_cny,
+    parse_vtb_multi,
     parse_wb_main,
     parse_statement,
     _find_columns,
@@ -148,3 +149,53 @@ class TestParseStatement:
     def test_dispatches_vtb_rub(self, vtb_rub_excel):
         df, skipped = parse_statement("VTB_RUB_MAIN", vtb_rub_excel, "40702810400810052145")
         assert len(df) == 2
+
+
+class TestParseVtbMulti:
+    """Tests for the multi-sheet VTB parser (VTB_MULTI)."""
+
+    def test_parses_all_sheets(self, vtb_multi_excel):
+        """Should parse all 3 sheets and return combined DataFrame."""
+        df, skipped = parse_vtb_multi(vtb_multi_excel)
+        # 1 row from sheet1 (deposit) + 2 rows from sheet2 (RUB) + 1 row from sheet3 (CNY) = 4
+        assert len(df) == 4
+        assert list(df.columns) == NORM_COLS
+
+    def test_accounts_from_sheet_names(self, vtb_multi_excel):
+        """Each row should have the correct account from its sheet."""
+        df, _ = parse_vtb_multi(vtb_multi_excel)
+        accounts = set(df["account"].tolist())
+        assert "42102810316110029573" in accounts  # deposit
+        assert "40702810400810052145" in accounts  # RUB main
+        assert "40702156916110000346" in accounts  # CNY
+
+    def test_currency_detection(self, vtb_multi_excel):
+        """CNY sheet should produce CNY currency rows, RUB sheets → RUB."""
+        df, _ = parse_vtb_multi(vtb_multi_excel)
+        cny_rows = df[df["account"] == "40702156916110000346"]
+        assert len(cny_rows) == 1
+        assert cny_rows.iloc[0]["currency"] == "CNY"
+
+        rub_rows = df[df["account"] == "40702810400810052145"]
+        assert len(rub_rows) == 2
+        assert rub_rows.iloc[0]["currency"] == "RUB"
+
+    def test_amounts_correct(self, vtb_multi_excel):
+        """Verify debit/credit parsing for each currency type."""
+        from decimal import Decimal
+        df, _ = parse_vtb_multi(vtb_multi_excel)
+
+        # CNY row: expense=106000
+        cny_row = df[df["account"] == "40702156916110000346"].iloc[0]
+        assert cny_row["expense"] == Decimal("106000.00")
+
+        # RUB main row: income=6900000
+        rub_rows = df[df["account"] == "40702810400810052145"]
+        first_rub = rub_rows.iloc[0]
+        assert first_rub["income"] == Decimal("6900000.00")
+
+    def test_dispatches_via_parse_statement(self, vtb_multi_excel):
+        """parse_statement('VTB_MULTI', ...) should dispatch correctly."""
+        df, skipped = parse_statement("VTB_MULTI", vtb_multi_excel, "ignored")
+        assert len(df) == 4
+

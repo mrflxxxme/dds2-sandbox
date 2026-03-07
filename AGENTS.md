@@ -181,13 +181,37 @@ AGENTS.md  — обновить структуру, таблицу моделе�
 
 ## ✅ ОБЯЗАТЕЛЬНО — при каждом изменении
 
+### 🔴🟢 TDD — Test-Driven Development
+
+> **ОБЯЗАТЕЛЬНО: сначала тест, потом код.**
+> Это правило применяется ко ВСЕМ изменениям: новые фичи, рефакторинг, баг-фиксы.
+
+**Порядок работы:**
+1. **RED** — напиши falling test, который описывает желаемое поведение
+2. **GREEN** — напиши минимальный код, чтобы тест прошёл
+3. **REFACTOR** — улучши код, не ломая тесты
+
+**Что тестировать:**
+- Новый парсер → `tests/test_parser_<name>.py` — unit-тест на DataFrame output
+- Новый эндпоинт → `tests/test_api_<module>.py` — integration test с БД
+- Новый сервис → `tests/test_<service>.py` — unit-тест с mock DB
+- Баг-фикс → тест воспроизводящий баг ДО исправления кода
+
+**Запуск тестов:**
+```bash
+# Локально (в контейнере)
+docker compose exec backend pytest tests/ -x --tb=short
+# Один файл
+docker compose exec backend pytest tests/test_parser_vtb.py -v
+```
+
 ### Backend — новый эндпоинт
 
-1. **Schema-first** — определи Pydantic request/response ДО написания кода
-2. **Service layer** — вся логика в `services/feature_service.py`
-3. **Тонкий роутер** — только HTTP, валидация, вызов service
-4. **Модель** — `Mapped[]`, `project_id`, `SoftDeleteMixin` для критичных сущностей
-5. **Тесты** — `tests/test_api_feature.py` для каждого нового модуля
+1. **Тест-first** — `tests/test_api_feature.py` с falling тестом ДО написания кода
+2. **Schema-first** — определи Pydantic request/response ДО написания кода
+3. **Service layer** — вся логика в `services/feature_service.py`
+4. **Тонкий роутер** — только HTTP, валидация, вызов service
+5. **Модель** — `Mapped[]`, `project_id`, `SoftDeleteMixin` для критичных сущностей
 6. **Пагинация** — `limit/offset` для list-эндпоинтов
 7. **Документация** — обновить этот файл + `docs/MODULES.md`
 
@@ -213,7 +237,7 @@ AGENTS.md  — обновить структуру, таблицу моделе�
 - **Errors** — через `HTTPException`, unified формат из `exceptions.py`
 - **Cache** — `@cached(ttl=300)` для тяжёлых отчётов, инвалидация при мутации
 - **Performance** — `SlowRequestMiddleware` логирует запросы >500ms (`🐢 SLOW` в логах)
-- **Тесты** — `docker compose exec backend pytest tests/ -x --tb=short` перед каждым коммитом
+- **TDD** — СНАЧАЛА тест, потом код. `docker compose exec backend pytest tests/ -x --tb=short` перед каждым коммитом
 - **TESTING=1** — env переменная, отключает rate limiter (устанавливается автоматически в conftest)
 - **Параметры SQL** — ТОЛЬКО `:param` binding, НИКОГДА f-string
 
@@ -282,4 +306,4 @@ AGENTS.md  — обновить структуру, таблицу моделе�
 
 ---
 
-*Последнее обновление: 2026-03-06 — исправлено правило datetime (asyncpg timezone), обновлён рефакторинг-чеклист*
+*Последнее обновление: 2026-03-07 — добавлено правило TDD (test-first), VTB_MULTI парсер*

@@ -6,6 +6,7 @@ const importTypes = [
     { id: 'VTB_RUB_MAIN', label: 'ВТБ Рубли Основной (.xlsx)', icon: '🏦', requiresAccount: true },
     { id: 'VTB_RUB_TRANSIT', label: 'ВТБ Рубли Транзит (.xlsx)', icon: '🏦', requiresAccount: true },
     { id: 'VTB_CNY', label: 'ВТБ Юани (.xlsx)', icon: '🏦', requiresAccount: true },
+    { id: 'VTB_MULTI', label: 'ВТБ Все счета (.xlsx)', icon: '🏦', requiresAccount: false },
     { id: 'WB_MAIN', label: 'WB Выписка ООО (.xlsx)', icon: '🟣', requiresAccount: true },
     { id: 'WB_PAYOUT', label: 'WB Выписка ИП/Транзит (.xlsx)', icon: '🟣', requiresAccount: true },
     { id: 'WB_CABINET_PAYOUTS', label: 'WB Выплаты (Кабинет WB)', icon: '💰', requiresAccount: false },

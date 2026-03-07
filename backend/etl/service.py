@@ -112,12 +112,24 @@ def import_statement(
 
     try:
         # Ensure account exists
-        _ensure_account(db, account_no, source_type, project_id)
+        if source_type == "VTB_MULTI":
+            # Multi-account: accounts will be created after parsing
+            pass
+        else:
+            _ensure_account(db, account_no, source_type, project_id)
 
         # 1. Parse
         df, parse_skipped = parse_statement(source_type, file_data, account_no)
         log.rows_raw = len(df) + parse_skipped
         log_ctx.info("etl.parse.done", rows_raw=log.rows_raw, skipped=parse_skipped)
+
+        # For VTB_MULTI: create accounts for each unique account in the parsed data
+        if source_type == "VTB_MULTI" and not df.empty:
+            for _, grp in df.groupby(["account", "currency"]):
+                acc_no = str(grp.iloc[0]["account"])
+                cur = str(grp.iloc[0]["currency"])
+                multi_source = "VTB_CNY" if cur == "CNY" else "VTB_RUB_MAIN"
+                _ensure_account(db, acc_no, multi_source, project_id)
 
         if df.empty:
             log.status = "OK"
