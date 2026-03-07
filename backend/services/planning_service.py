@@ -824,16 +824,17 @@ async def refresh_wb_forecast(
     db: AsyncSession,
     project_id: int,
     forecast_days: int = 60,
+    trend_days: int = 7,
 ) -> dict:
     """
     Auto-generate PlannedIncome for next `forecast_days` days based on
-    28-day history of actual WB income, respecting day-of-week patterns
+    `trend_days` history of actual WB income, respecting day-of-week patterns
     (weekends = 0, Monday = accumulated payout for Sat+Sun+Mon).
     """
     today = date.today()
-    lookback = today - timedelta(days=28)
+    lookback = today - timedelta(days=trend_days)
 
-    # Get daily WB income for the last 28 days
+    # Get daily WB income for the lookback period
     result = await db.execute(
         select(
             func.date(Transaction.date).label("day"),
@@ -841,7 +842,6 @@ async def refresh_wb_forecast(
         ).where(
             Transaction.project_id == project_id,
             Transaction.income > 0,
-            Transaction.is_cashflow2 == 1,
             Transaction.date >= lookback,
             Transaction.date <= today,
             or_(
@@ -851,26 +851,34 @@ async def refresh_wb_forecast(
                 ),
                 Transaction.counterparty.ilike("%вайлдберриз%"),
                 Transaction.counterparty.ilike("%wildberries%"),
+                Transaction.counterparty.ilike("%вайлд%"),
             )
         ).group_by(func.date(Transaction.date))
     )
     daily_data = {row.day: Decimal(str(row.daily_income or 0)) for row in result}
 
     if not daily_data:
-        return {"ok": True, "daily_avg": 0, "message": "Нет данных WB за последние 28 дней"}
+        return {"ok": True, "daily_avg": 0, "message": f"Нет данных WB за последние {trend_days} дней"}
 
     # Build day-of-week pattern (0=Mon, 6=Sun)
-    # Sum income per weekday and count occurrences
+    # Fill ALL days in the lookback period (including zeros)
     weekday_totals: dict[int, Decimal] = {i: Decimal("0") for i in range(7)}
     weekday_counts: dict[int, int] = {i: 0 for i in range(7)}
 
-    for d, amount in daily_data.items():
-        if hasattr(d, 'weekday'):
-            wd = d.weekday()
-        else:
-            wd = date.fromisoformat(str(d)).weekday()
-        weekday_totals[wd] += amount
+    for day_offset in range(trend_days):
+        d = lookback + timedelta(days=day_offset + 1)
+        if d > today:
+            break
+        wd = d.weekday()
         weekday_counts[wd] += 1
+        if hasattr(d, 'isoformat'):
+            # Check both date and string key formats
+            amount = daily_data.get(d, Decimal("0"))
+            if amount == 0:
+                amount = daily_data.get(d.isoformat(), Decimal("0"))
+        else:
+            amount = daily_data.get(d, Decimal("0"))
+        weekday_totals[wd] += amount
 
     # Calculate average per weekday
     weekday_avg: dict[int, Decimal] = {}
@@ -880,9 +888,10 @@ async def refresh_wb_forecast(
         else:
             weekday_avg[wd] = Decimal("0")
 
-    # Calculate overall weekly total and daily average for reporting
+    # Calculate overall: total income / total days = true daily average
+    total_income = sum(daily_data.values())
+    daily_avg = (total_income / Decimal(str(trend_days))).quantize(Decimal("0.01")) if trend_days > 0 else Decimal("0")
     weekly_total = sum(weekday_avg.values())
-    daily_avg = (weekly_total / Decimal("7")).quantize(Decimal("0.01")) if weekly_total > 0 else Decimal("0")
 
     if daily_avg <= 0:
         return {"ok": True, "daily_avg": 0, "message": "Нет данных WB за последние 28 дней"}

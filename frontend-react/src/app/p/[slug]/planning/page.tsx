@@ -802,21 +802,23 @@ function PlanIncomes() {
     const [data, setData] = useState<any[]>([]);
     const [msg, setMsg] = useState('');
     const [refreshing, setRefreshing] = useState(false);
+    const [trendDays, setTrendDays] = useState(7);
     useEffect(() => { load(); }, []);
     const load = async () => { try { setData(await api.getPlanningIncomes()); } catch { } };
     const del = async (id: number) => {
         if (!confirm('Удалить?')) return;
         try { await api.deletePlanningIncome(id); load(); } catch (e: any) { setMsg(e.message); }
     };
-    const refreshForecast = async () => {
+    const refreshForecast = async (days: number) => {
+        setTrendDays(days);
         setRefreshing(true);
         setMsg('');
         try {
-            const res = await api.refreshWbForecast();
+            const res = await api.refreshWbForecast(days);
             const pattern = res.weekday_pattern
                 ? Object.entries(res.weekday_pattern).map(([d, v]) => `${d}: ${formatNumber(v as number)}`).join(', ')
                 : '';
-            setMsg(`✅ Прогноз обновлён: создано ${res.created} записей на ${res.forecast_days} дней. Среднее/день: ${formatNumber(res.daily_avg)} ₽. Паттерн: ${pattern}`);
+            setMsg(`✅ Тренд ${days}д: создано ${res.created} записей. Среднее/день: ${formatNumber(res.daily_avg)} ₽. Паттерн: ${pattern}`);
             load();
         } catch (e: any) { setMsg(e.message); }
         setRefreshing(false);
@@ -824,16 +826,21 @@ function PlanIncomes() {
 
     return (
         <div className="glass-card">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
                 <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Поступления WB</h3>
-                <div style={{ display: 'flex', gap: 8 }}>
-                    <button className="btn btn-primary btn-sm" onClick={refreshForecast} disabled={refreshing}>
-                        {refreshing ? '⏳ Обновление...' : '🔄 Обновить прогноз'}
-                    </button>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <span style={{ fontSize: 12, opacity: 0.7, marginRight: 4 }}>Тренд:</span>
+                    {[7, 14, 30].map(d => (
+                        <button key={d} className={`btn btn-sm ${d === trendDays ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={() => refreshForecast(d)} disabled={refreshing}
+                            style={{ minWidth: 50 }}>
+                            {refreshing && d === trendDays ? '⏳' : `${d}д`}
+                        </button>
+                    ))}
                     <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'plan_incomes')}>📥 Excel</button>
                 </div>
             </div>
-            {msg && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 8 }}>{msg}</div>}
+            {msg && <div style={{ color: msg.startsWith('✅') ? 'var(--color-success, #4ade80)' : 'var(--color-danger)', fontSize: 13, marginBottom: 8 }}>{msg}</div>}
             {data.length > 0 ? (
                 <div style={{ overflowX: 'auto' }}>
                     <table className="data-table">

@@ -480,8 +480,9 @@ async def manual_reconcile_wb(
 
 @router.post("/wb_forecast/refresh")
 async def refresh_wb_forecast(
+    trend_days: int = Query(7, ge=1, le=90),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Auto-generate PlannedIncome for next 30 days based on 7-day rolling average."""
-    return await planning_service.refresh_wb_forecast(db, project.id)
+    """Auto-generate PlannedIncome for next 60 days based on trend_days rolling average."""
+    return await planning_service.refresh_wb_forecast(db, project.id, trend_days=trend_days)
