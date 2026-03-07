@@ -505,6 +505,209 @@ def parse_vtb_multi(data: bytes) -> tuple[pd.DataFrame, int]:
     return result, total_skipped
 
 
+# ─── WB Multi-account (XML SpreadsheetML) parser ─────────────────────────────
+
+def parse_wb_multi(data: bytes) -> tuple[pd.DataFrame, int]:
+    """
+    Parse WB multi-account statement in XML SpreadsheetML (.xls) format.
+
+    WB exports often save as XML SpreadsheetML. Multiple accounts appear in
+    one sheet, separated by "Выписка по счету <account_no>" header rows.
+
+    Each account section:
+      - Header: "Выписка по счету XXXXXXXXXX RUR ..."
+      - Column headers: "Документ", "Дата операции", "Корреспондент", ...
+      - Sub-headers: "Наименование", "ИНН", "КПП", "Счет", "БИК"
+      - Data rows: interleaved 2-row format per transaction
+      - Separator: "ИТОГО:" row
+
+    Returns: (combined_dataframe, total_skipped_rows)
+    """
+    import xml.etree.ElementTree as ET
+    import re
+
+    tree = ET.parse(BytesIO(data))
+    root = tree.getroot()
+    ns = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
+
+    all_frames: list[pd.DataFrame] = []
+    total_skipped = 0
+
+    for ws in root.findall('.//ss:Worksheet', ns):
+        table = ws.find('ss:Table', ns)
+        if table is None:
+            continue
+
+        xml_rows = table.findall('ss:Row', ns)
+
+        # Convert XML rows to list of cell values
+        def _row_cells(row) -> list[str]:
+            cells = row.findall('ss:Cell', ns)
+            return [
+                (c.find('ss:Data', ns).text or "").strip()
+                if c.find('ss:Data', ns) is not None else ""
+                for c in cells
+            ]
+
+        # Find all "Выписка по счету" header positions
+        account_sections: list[tuple[str, int]] = []
+        for i, row in enumerate(xml_rows):
+            cells = _row_cells(row)
+            if cells and "Выписка по счету" in cells[0]:
+                # Extract account number: "Выписка по счету 40702810500001001752 RUR ..."
+                match = re.search(r'Выписка по счету\s+(\d+)', cells[0])
+                if match:
+                    account_sections.append((match.group(1), i))
+
+        if not account_sections:
+            logger.warning("WB_MULTI: no 'Выписка по счету' found")
+            continue
+
+        # Process each account section
+        for sec_idx, (account_no, start_row) in enumerate(account_sections):
+            # End of section: next account start or end of sheet
+            end_row = (
+                account_sections[sec_idx + 1][1]
+                if sec_idx + 1 < len(account_sections)
+                else len(xml_rows)
+            )
+
+            # Find column header row within section (contains "Документ" or "Дата операции")
+            col_header_idx = None
+            for i in range(start_row, min(start_row + 15, end_row)):
+                cells = _row_cells(xml_rows[i])
+                if any("Дата операции" in c for c in cells):
+                    col_header_idx = i
+                    break
+
+            if col_header_idx is None:
+                logger.warning("WB_MULTI account %s: no column headers found", account_no)
+                continue
+
+            # Build column index map from header row
+            headers = _row_cells(xml_rows[col_header_idx])
+            col_idx: dict[str, int] = {}
+            for ci, h in enumerate(headers):
+                hl = h.lower().strip()
+                if "дата" in hl:
+                    col_idx["date"] = ci
+                elif hl == "корреспондент" or hl == "наименование":
+                    if "counterparty" not in col_idx:
+                        col_idx["counterparty"] = ci
+                elif "оборот дт" in hl or "дебет" in hl:
+                    col_idx["debit"] = ci
+                elif "оборот кт" in hl or "кредит" in hl:
+                    col_idx["credit"] = ci
+                elif "назначение" in hl:
+                    col_idx["purpose"] = ci
+
+            if "date" not in col_idx:
+                logger.warning("WB_MULTI account %s: no date column", account_no)
+                continue
+
+            # Sub-header row: "Наименование", "ИНН", "КПП", "Счет", "БИК"
+            sub_header_idx = col_header_idx + 1
+            sub_headers = _row_cells(xml_rows[sub_header_idx]) if sub_header_idx < end_row else []
+            sub_col_idx: dict[str, int] = {}
+            for ci, h in enumerate(sub_headers):
+                hl = h.lower().strip()
+                if "инн" == hl:
+                    sub_col_idx["inn"] = ci
+                elif "счет" in hl or "счёт" in hl:
+                    sub_col_idx["cp_account"] = ci
+
+            # Parse data rows (after sub-header)
+            data_start = sub_header_idx + 1
+            skipped = 0
+            rows_data = []
+
+            i = data_start
+            while i < end_row:
+                cells = _row_cells(xml_rows[i])
+                if not cells:
+                    i += 1
+                    continue
+
+                # Check for ИТОГО or end markers
+                if cells[0].startswith("ИТОГО"):
+                    break
+
+                # WB format: main data row has >= 7 cells
+                # and has a date-like string in the date column
+                date_ci = col_idx.get("date", 1)
+                date_val = cells[date_ci] if date_ci < len(cells) else ""
+                if not date_val or date_val in ("", "Дата операции"):
+                    i += 1
+                    continue
+
+                try:
+                    dt = _parse_date(date_val)
+                except Exception:
+                    i += 1
+                    skipped += 1
+                    continue
+
+                # Extract from main row
+                debit_ci = col_idx.get("debit", 4)
+                credit_ci = col_idx.get("credit", 5)
+                purpose_ci = col_idx.get("purpose", 6)
+                cp_ci = col_idx.get("counterparty", 2)
+
+                debit = _to_decimal(cells[debit_ci] if debit_ci < len(cells) else None)
+                credit = _to_decimal(cells[credit_ci] if credit_ci < len(cells) else None)
+                counterparty = _clean_str(cells[cp_ci] if cp_ci < len(cells) else None)
+                purpose = _clean_str(cells[purpose_ci] if purpose_ci < len(cells) else None)
+
+                # WB interleaved format: the counterparty name in main data row
+                # is at index 2, but INN is in the same row at index 3
+                # In the actual file, data rows have 11 cells:
+                # [doc, date, cp, inn, kpp, account, bik, balance, debit, credit, purpose]
+                inn = None
+                cp_account = None
+                if len(cells) > 5:
+                    # Real data row: [doc, date, cp, inn, kpp, account, bik, balance, debit, credit, purpose]
+                    inn = _clean_str(cells[3] if 3 < len(cells) else None)
+                    cp_account = _clean_str(cells[5] if 5 < len(cells) else None)
+                    # In this wide format, debit/credit are at positions 8,9 and purpose at 10
+                    if len(cells) >= 11:
+                        debit = _to_decimal(cells[8] if cells[8] else None)
+                        credit = _to_decimal(cells[9] if cells[9] else None)
+                        purpose = _clean_str(cells[10] if 10 < len(cells) else None)
+                        counterparty = _clean_str(cells[2] if 2 < len(cells) else None)
+
+                rows_data.append({
+                    "date": dt,
+                    "bank": "WB",
+                    "account": account_no,
+                    "currency": "RUB",
+                    "counterparty": counterparty,
+                    "inn": inn,
+                    "counterparty_account": cp_account,
+                    "purpose": purpose,
+                    "income": credit,
+                    "expense": debit,
+                })
+
+                i += 1
+
+            total_skipped += skipped
+
+            if rows_data:
+                sheet_df = pd.DataFrame(rows_data, columns=NORM_COLS)
+                all_frames.append(sheet_df)
+                logger.info("WB_MULTI account '%s': %d rows, %d skipped",
+                            account_no, len(rows_data), skipped)
+
+    if all_frames:
+        result = pd.concat(all_frames, ignore_index=True)
+    else:
+        result = pd.DataFrame(columns=NORM_COLS)
+
+    logger.info("WB_MULTI total: %d rows across %d accounts, %d skipped",
+                len(result), len(all_frames), total_skipped)
+    return result, total_skipped
+
+
 # ─── Registry ─────────────────────────────────────────────────────────────────
 
 SOURCE_PARSERS = {
@@ -514,6 +717,7 @@ SOURCE_PARSERS = {
     "VTB_MULTI": lambda data, acc: parse_vtb_multi(data),
     "WB_MAIN": parse_wb_main,
     "WB_PAYOUT": parse_wb_payout,
+    "WB_MULTI": lambda data, acc: parse_wb_multi(data),
 }
 
 

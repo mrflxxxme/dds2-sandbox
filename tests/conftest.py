@@ -167,3 +167,120 @@ def vtb_multi_excel() -> bytes:
     wb.save(buf)
     return buf.getvalue()
 
+
+@pytest.fixture
+def wb_multi_xml_xls() -> bytes:
+    """Generate a multi-account WB statement in XML SpreadsheetML format.
+    
+    Two accounts in one sheet, separated by ИТОГО row.
+    Format: XML SpreadsheetML (.xls)
+    """
+    xml = '''<?xml version="1.0" encoding="utf-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+ <Worksheet ss:Name="Выписки">
+  <Table>
+   <Row><Cell><Data ss:Type="String">Выписка по счету 40702810500001001752 RUR (Пассивный)</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String">ООО "ВБ Банк" БИК 044525450</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String">ООО "ТЕСТ"</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String">За период с 01.02.2026 по 06.03.2026</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String">Дата формирования информации 07.03.2026</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String">Дата последней операции 06.03.2026</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String">Входящий остаток:</Data></Cell><Cell><Data ss:Type="String">0.00 на 01.02.2026</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell></Row>
+   <Row>
+    <Cell><Data ss:Type="String">Документ</Data></Cell>
+    <Cell><Data ss:Type="String">Дата операции</Data></Cell>
+    <Cell><Data ss:Type="String">Корреспондент</Data></Cell>
+    <Cell><Data ss:Type="String">Вх.остаток</Data></Cell>
+    <Cell><Data ss:Type="String">Оборот Дт</Data></Cell>
+    <Cell><Data ss:Type="String">Оборот Кт</Data></Cell>
+    <Cell><Data ss:Type="String">Назначение платежа</Data></Cell>
+   </Row>
+   <Row>
+    <Cell><Data ss:Type="String">Наименование</Data></Cell>
+    <Cell><Data ss:Type="String">ИНН</Data></Cell>
+    <Cell><Data ss:Type="String">КПП</Data></Cell>
+    <Cell><Data ss:Type="String">Счет</Data></Cell>
+    <Cell><Data ss:Type="String">БИК</Data></Cell>
+   </Row>
+   <Row>
+    <Cell><Data ss:Type="String">Пор. № 100</Data></Cell>
+    <Cell><Data ss:Type="String">01.02.2026</Data></Cell>
+    <Cell><Data ss:Type="String">РВБ ООО</Data></Cell>
+    <Cell><Data ss:Type="String">9714053621</Data></Cell>
+    <Cell><Data ss:Type="String">507401001</Data></Cell>
+    <Cell><Data ss:Type="String">40702810825620001712</Data></Cell>
+    <Cell><Data ss:Type="String">044525411</Data></Cell>
+    <Cell><Data ss:Type="Number">0</Data></Cell>
+    <Cell><Data ss:Type="String"></Data></Cell>
+    <Cell><Data ss:Type="Number">500000</Data></Cell>
+    <Cell><Data ss:Type="String">Оплата за товар</Data></Cell>
+   </Row>
+   <Row>
+    <Cell><Data ss:Type="String">Пор. № 101</Data></Cell>
+    <Cell><Data ss:Type="String">01.02.2026</Data></Cell>
+    <Cell><Data ss:Type="String">ООО "ТЕСТ"</Data></Cell>
+    <Cell><Data ss:Type="String">1800027275</Data></Cell>
+    <Cell><Data ss:Type="String">370001001</Data></Cell>
+    <Cell><Data ss:Type="String">40702810800000001893</Data></Cell>
+    <Cell><Data ss:Type="String">044525450</Data></Cell>
+    <Cell><Data ss:Type="Number">500000</Data></Cell>
+    <Cell><Data ss:Type="Number">495000</Data></Cell>
+    <Cell><Data ss:Type="String"></Data></Cell>
+    <Cell><Data ss:Type="String">Перевод денежных средств</Data></Cell>
+   </Row>
+   <Row><Cell><Data ss:Type="String">ИТОГО:</Data></Cell><Cell><Data ss:Type="Number">495000</Data></Cell><Cell><Data ss:Type="Number">500000</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String">Исходящий остаток:</Data></Cell><Cell><Data ss:Type="String">5000.00 на 06.03.2026</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String">Выписка по счету 40702810800000001893 RUR (Пассивный)</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String">ООО "ВБ Банк" БИК 044525450</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String">ООО "ТЕСТ"</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String">За период с 01.02.2026 по 06.03.2026</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String">Дата формирования информации 07.03.2026</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String">Дата последней операции 06.03.2026</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String">Входящий остаток:</Data></Cell><Cell><Data ss:Type="String">100000.00 на 01.02.2026</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell></Row>
+   <Row>
+    <Cell><Data ss:Type="String">Документ</Data></Cell>
+    <Cell><Data ss:Type="String">Дата операции</Data></Cell>
+    <Cell><Data ss:Type="String">Корреспондент</Data></Cell>
+    <Cell><Data ss:Type="String">Вх.остаток</Data></Cell>
+    <Cell><Data ss:Type="String">Оборот Дт</Data></Cell>
+    <Cell><Data ss:Type="String">Оборот Кт</Data></Cell>
+    <Cell><Data ss:Type="String">Назначение платежа</Data></Cell>
+   </Row>
+   <Row>
+    <Cell><Data ss:Type="String">Наименование</Data></Cell>
+    <Cell><Data ss:Type="String">ИНН</Data></Cell>
+    <Cell><Data ss:Type="String">КПП</Data></Cell>
+    <Cell><Data ss:Type="String">Счет</Data></Cell>
+    <Cell><Data ss:Type="String">БИК</Data></Cell>
+   </Row>
+   <Row>
+    <Cell><Data ss:Type="String">Пор. № 200</Data></Cell>
+    <Cell><Data ss:Type="String">03.02.2026</Data></Cell>
+    <Cell><Data ss:Type="String">ООО "ТЕСТ"</Data></Cell>
+    <Cell><Data ss:Type="String">1800027275</Data></Cell>
+    <Cell><Data ss:Type="String">370001001</Data></Cell>
+    <Cell><Data ss:Type="String">40702810500001001752</Data></Cell>
+    <Cell><Data ss:Type="String">044525450</Data></Cell>
+    <Cell><Data ss:Type="Number">100000</Data></Cell>
+    <Cell><Data ss:Type="String"></Data></Cell>
+    <Cell><Data ss:Type="Number">75000</Data></Cell>
+    <Cell><Data ss:Type="String">Перевод входящий</Data></Cell>
+   </Row>
+   <Row><Cell><Data ss:Type="String">ИТОГО:</Data></Cell><Cell><Data ss:Type="Number">0</Data></Cell><Cell><Data ss:Type="Number">75000</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String">Исходящий остаток:</Data></Cell><Cell><Data ss:Type="String">175000.00 на 06.03.2026</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String"></Data></Cell></Row>
+  </Table>
+ </Worksheet>
+</Workbook>'''
+    return xml.encode('utf-8')
+
+

@@ -11,6 +11,7 @@ from backend.etl.parsers import (
     parse_vtb_cny,
     parse_vtb_multi,
     parse_wb_main,
+    parse_wb_multi,
     parse_statement,
     _find_columns,
     _to_decimal,
@@ -198,4 +199,41 @@ class TestParseVtbMulti:
         """parse_statement('VTB_MULTI', ...) should dispatch correctly."""
         df, skipped = parse_statement("VTB_MULTI", vtb_multi_excel, "ignored")
         assert len(df) == 4
+
+
+class TestParseWbMulti:
+    """Tests for WB multi-account parser (XML SpreadsheetML, multiple accounts in one sheet)."""
+
+    def test_parses_all_accounts(self, wb_multi_xml_xls):
+        """Should parse both account sections and return combined DataFrame."""
+        df, skipped = parse_wb_multi(wb_multi_xml_xls)
+        # 2 rows from account 1 + 1 row from account 2 = 3
+        assert len(df) == 3
+        assert list(df.columns) == NORM_COLS
+
+    def test_accounts_extracted(self, wb_multi_xml_xls):
+        """Each row should have the correct account from its section header."""
+        df, _ = parse_wb_multi(wb_multi_xml_xls)
+        accounts = set(df["account"].tolist())
+        assert "40702810500001001752" in accounts
+        assert "40702810800000001893" in accounts
+
+    def test_amounts_correct(self, wb_multi_xml_xls):
+        """Verify income/expense parsing."""
+        from decimal import Decimal
+        df, _ = parse_wb_multi(wb_multi_xml_xls)
+
+        # Account 1, first row: income=500000 (credit/Оборот Кт)
+        acc1_rows = df[df["account"] == "40702810500001001752"]
+        assert acc1_rows.iloc[0]["income"] == Decimal("500000.00")
+
+        # Account 2, row: income=75000
+        acc2_rows = df[df["account"] == "40702810800000001893"]
+        assert acc2_rows.iloc[0]["income"] == Decimal("75000.00")
+
+    def test_dispatches_via_parse_statement(self, wb_multi_xml_xls):
+        """parse_statement('WB_MULTI', ...) should dispatch correctly."""
+        df, skipped = parse_statement("WB_MULTI", wb_multi_xml_xls, "ignored")
+        assert len(df) == 3
+
 
