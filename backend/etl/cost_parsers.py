@@ -304,54 +304,91 @@ def normalize_divandek_cn_ru(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def normalize_textile(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize textile format (货号 = article as barcode).
+    """Normalize textile format with dual-header rows.
 
-    Columns: 尺寸, 颜色, 货号, 箱数, 装箱数, 订单数量数量, 单位,
-    单价, 总价, 单件体积, 单件毛重, 单件净重, 长(CM), 宽(CM), 高(CM), 总体积
+    Excel has Chinese headers (row 0 in Excel) and Russian sub-headers (row 1).
+    pandas reads Chinese as column names, Russian sub-headers become row 0.
+    Unnamed columns get their real name from the Russian sub-header row.
     """
+    # Check if first row is sub-headers (contains non-numeric text like 'Баркод', 'Артикул')
+    first_row = df.iloc[0] if len(df) > 0 else None
+    has_subheaders = False
+    if first_row is not None:
+        str_vals = [str(v).strip().lower() for v in first_row.values if pd.notna(v)]
+        # If first row has known sub-header words, it's a sub-header row
+        subheader_words = {"баркод", "артикул", "размер", "цвет", "заказ", "сумма", "нетто", "длина"}
+        if len(set(str_vals) & subheader_words) >= 2:
+            has_subheaders = True
+
+    if has_subheaders:
+        # Use first row values to rename Unnamed columns
+        for i, c in enumerate(df.columns):
+            if str(c).startswith("Unnamed") and i < len(first_row):
+                val = str(first_row.iloc[i]).strip()
+                if val and val != "nan":
+                    df = df.rename(columns={c: val})
+        # Drop the sub-header row
+        df = df.iloc[1:].copy()
+        df = df.reset_index(drop=True)
+
+    # Now map columns to standard names
     col_map = {}
-    barcode_mapped = False
+    # Two-pass barcode detection: first look for explicit barcode columns
+    barcode_col = None
     for c in df.columns:
         cl = str(c).strip().lower()
-        if cl in ("шк", "штрихкод") and not barcode_mapped:
-            col_map[c] = "barcode"
-            barcode_mapped = True
-        elif cl == "货号" and not barcode_mapped:
-            col_map[c] = "barcode"
-            barcode_mapped = True
-        elif cl in ("订单数量数量", "订单数量", "数量", "总数量"):
+        if cl in ("баркод", "шк", "штрихкод", "barcode"):
+            barcode_col = c
+            break
+    # Fallback: use 货号 only if no explicit barcode column found
+    if barcode_col is None:
+        for c in df.columns:
+            if str(c).strip() == "货号":
+                barcode_col = c
+                break
+    if barcode_col:
+        col_map[barcode_col] = "barcode"
+
+    for c in df.columns:
+        cl = str(c).strip().lower()
+        if cl in ("订单数量数量", "订单数量", "数量", "总数量", "заказ"):
             col_map[c] = "qty"
-        elif cl == "单价":
+        elif cl in ("单价",) or "цена" in cl:
             col_map[c] = "price_cny"
-        elif cl == "单件净重":
+        elif cl in ("单件净重", "нетто"):
             col_map[c] = "weight_per_unit"
-        elif cl == "单件毛重":
+        elif cl in ("单件毛重",):
             col_map[c] = "gross_weight_per_unit"
-        elif cl == "单件体积":
+        elif cl in ("单件体积",) or cl == "объём коробки":
             col_map[c] = "volume_m3"
-        elif cl == "总体积":
+        elif cl in ("总体积",) or cl == "объём общий":
             col_map[c] = "total_volume"
-        elif cl == "装箱数":
+        elif cl in ("装箱数",):
             col_map[c] = "qty_per_box"
-        elif cl == "尺寸":
+        elif cl in ("尺寸", "размер"):
             col_map[c] = "size"
 
     df = df.rename(columns=col_map)
 
-    # Drop duplicate columns and unnamed
+    # Drop duplicate columns and remaining unnamed
     df = df.loc[:, ~df.columns.duplicated()]
     df = df.drop(columns=[c for c in df.columns if str(c).startswith("Unnamed")], errors="ignore")
 
-    # Filter rows with valid barcode (货号)
+    # Filter rows with valid barcode
     if "barcode" in df.columns:
-        # 货号 can be alphanumeric — keep non-empty
         df = df[df["barcode"].notna() & (df["barcode"].astype(str).str.strip() != "")].copy()
         df = df.reset_index(drop=True)
 
     df["barcode"] = df.get("barcode", pd.Series(dtype="str")).astype(str).str.strip()
-    # Remove rows with empty or nan barcode
     df = df[~df["barcode"].isin(["", "nan", "None"])].copy()
     df = df.reset_index(drop=True)
+
+    # Try to convert barcode to int (remove .0)
+    try:
+        df["barcode"] = pd.to_numeric(df["barcode"], errors="coerce").fillna(0).astype(int).astype(str)
+        df["barcode"] = df["barcode"].str.replace(r'\.0$', '', regex=True).str.strip()
+    except Exception:
+        pass
 
     df["qty"] = pd.to_numeric(df.get("qty", pd.Series(dtype="float")), errors="coerce").fillna(1).astype(int)
     df["price_cny"] = pd.to_numeric(df.get("price_cny", pd.Series(dtype="float")), errors="coerce").fillna(0)
@@ -362,21 +399,16 @@ def normalize_textile(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["weight_kg"] = 0
 
-    # Area from size (e.g. "180*200")
+    # Area from size (e.g. "30x60" → convert cm² to m²)
     if "size" in df.columns:
         def _area_from_size(s):
             try:
                 s = str(s).strip()
-                if "*" in s:
-                    parts = [p.strip() for p in s.split("*") if p.strip()]
-                    nums = []
-                    for p in parts:
-                        try:
-                            nums.append(float(p))
-                        except ValueError:
-                            pass
-                    if len(nums) >= 2:
-                        return nums[0] / 100 * nums[1] / 100
+                for sep in ("*", "x", "X", "х", "Х"):
+                    if sep in s:
+                        parts = s.split(sep)
+                        if len(parts) >= 2:
+                            return float(parts[0]) / 100 * float(parts[1]) / 100
             except Exception:
                 pass
             return 0.0
