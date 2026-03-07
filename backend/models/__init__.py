@@ -71,6 +71,11 @@ from backend.models.integrations import (
     WbCostOverride,
 )
 
+# FX Rates
+from backend.models.fx_rates import (
+    FxRate,
+)
+
 # Alias for backward compatibility
 WbApiKey = IntegrationKey
 
@@ -91,6 +96,8 @@ __all__ = [
     "Nomenclature", "DutyRule", "CostOrder", "CostOrderItem",
     # Integrations & Funnel
     "IntegrationKey", "SyncLog", "WbFunnelDaily", "WbCostOverride",
+    # FX Rates
+    "FxRate",
     # Aliases
     "WbApiKey",
 ]
