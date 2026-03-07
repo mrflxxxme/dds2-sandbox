@@ -5,7 +5,7 @@ Fetches WB reportDetailByPeriod, aggregates per-article:
 - Splits by doc_type_name: Продажа / Возврат / (пустой = logistics/fines)
 - Returns summary KPIs + per-article breakdown
 
-Verified formulas match TrueStats 100%.
+Verified formulas match TrueStats.
 """
 
 import logging
@@ -48,7 +48,6 @@ async def get_wb_bdr(
     # --- Aggregate per article ---
     articles_data: dict[str, dict] = {}
     all_brands: set[str] = set()
-    summary = _empty_totals()
 
     for row in raw:
         brand_name = row.get("brand_name", "") or ""
@@ -56,6 +55,7 @@ async def get_wb_bdr(
         subject = row.get("subject_name", "") or ""
         nm_id = row.get("nm_id", 0) or 0
         doc_type = row.get("doc_type_name", "") or ""
+        oper_name = row.get("supplier_oper_name", "") or ""
 
         if brand_name:
             all_brands.add(brand_name)
@@ -94,28 +94,9 @@ async def get_wb_bdr(
         else:
             target = art["other"]
 
-        _accumulate(target, row)
+        _accumulate(target, row, oper_name)
 
-    # --- Build per-article results ---
-    result_articles = []
-    for sa_name, art in articles_data.items():
-        s = art["sale"]
-        r = art["ret"]
-        o = art["other"]
-
-        row_result = _compute_metrics(s, r, o)
-        row_result["sa_name"] = sa_name
-        row_result["brand"] = art["brand"]
-        row_result["subject"] = art["subject"]
-        row_result["nm_id"] = art["nm_id"]
-
-        result_articles.append(row_result)
-
-        # Accumulate summary
-        for key in summary:
-            summary[key] += s.get(key, ZERO) if key in s else ZERO
-
-    # --- Build summary ---
+    # --- Build summary from all articles ---
     total_sale = _empty_totals()
     total_ret = _empty_totals()
     total_other = _empty_totals()
@@ -127,6 +108,16 @@ async def get_wb_bdr(
             total_other[key] += art["other"].get(key, ZERO)
 
     summary_result = _compute_metrics(total_sale, total_ret, total_other)
+
+    # --- Build per-article results ---
+    result_articles = []
+    for sa_name, art in articles_data.items():
+        row_result = _compute_metrics(art["sale"], art["ret"], art["other"])
+        row_result["sa_name"] = sa_name
+        row_result["brand"] = art["brand"]
+        row_result["subject"] = art["subject"]
+        row_result["nm_id"] = art["nm_id"]
+        result_articles.append(row_result)
 
     # Sort articles by to_pay descending
     result_articles.sort(key=lambda x: x["to_pay"], reverse=True)
@@ -157,14 +148,28 @@ def _empty_totals() -> dict:
         "ppvz_vw": ZERO,
         "ppvz_vw_nds": ZERO,
         "quantity": ZERO,
+        # Only real product qty (supplier_oper_name == Продажа/Возврат)
+        "product_qty": ZERO,
     }
 
 
-def _accumulate(target: dict, row: dict):
+def _accumulate(target: dict, row: dict, oper_name: str):
+    """Accumulate row values into target bucket."""
     for field in target:
+        if field == "product_qty":
+            continue  # handled separately below
         val = row.get(field, 0) or 0
         try:
             target[field] += D(str(val))
+        except Exception:
+            pass
+
+    # Count product_qty only for actual product operations
+    # (not loyalty compensations, etc.)
+    if oper_name in ("Продажа", "Возврат"):
+        qty = row.get("quantity", 0) or 0
+        try:
+            target["product_qty"] += D(str(qty))
         except Exception:
             pass
 
@@ -175,40 +180,52 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
     sales_amount = sale["retail_amount"] - ret["retail_amount"]
     returns_amount = ret["retail_price_withdisc_rub"]
 
-    sale_qty = int(sale["quantity"])
-    ret_qty = int(ret["quantity"])
+    # Use product_qty — only real product sales/returns
+    sale_qty = int(sale["product_qty"])
+    ret_qty = int(ret["product_qty"])
+    # Net qty as TrueStats displays for "Продажи шт"
+    net_sale_qty = sale_qty - ret_qty
 
     logistics = other["delivery_rub"]
     penalties = other["penalty"]
     storage = other["storage_fee"]
     acceptance_val = other["acceptance"]
+
+    # Прочие удержания = rebill_logistic_cost (Джем, транзит, etc.)
+    prochie_uderzhaniya = other["rebill_logistic_cost"]
+
+    # deduction field (usually 0 in WB API, but include for completeness)
     deductions = other["deduction"]
-    rebill = other["rebill_logistic_cost"]
 
-    commission = sale["ppvz_sales_commission"] - ret["ppvz_sales_commission"]
-    reward = sale["ppvz_reward"] - ret["ppvz_reward"]
-    vw = sale["ppvz_vw"] - ret["ppvz_vw"]
-    vw_nds = sale["ppvz_vw_nds"] - ret["ppvz_vw_nds"]
-    total_wb_reward = commission + vw + vw_nds
+    # Commission fields net (sale - ret)
+    ppvz_sales_commission_net = sale["ppvz_sales_commission"] - ret["ppvz_sales_commission"]
+    ppvz_reward_net = sale["ppvz_reward"] - ret["ppvz_reward"]
+    ppvz_vw_net = sale["ppvz_vw"] - ret["ppvz_vw"]
+    ppvz_vw_nds_net = sale["ppvz_vw_nds"] - ret["ppvz_vw_nds"]
 
-    # К оплате = ppvz_for_pay(Продажа) - ppvz_for_pay(Возврат) - delivery - penalty + storage - deduction
+    # TrueStats "Комиссия" = ppvz_sales_commission + ppvz_reward (net)
+    commission = ppvz_sales_commission_net + ppvz_reward_net
+
+    # TrueStats "Итоговое вознаграждение ВБ" = commission + vw + vw_nds (all net)
+    total_wb_reward = ppvz_sales_commission_net + ppvz_vw_net + ppvz_vw_nds_net
+
+    # К оплате = ppvz_for_pay(Продажа) - ppvz_for_pay(Возврат)
+    #            - delivery - penalty + storage - deduction - rebill
+    ppvz_net = sale["ppvz_for_pay"] - ret["ppvz_for_pay"]
     to_pay = (
-        sale["ppvz_for_pay"] - ret["ppvz_for_pay"]
-        - logistics - penalties + storage - deductions
+        ppvz_net
+        - logistics - penalties + storage - deductions - prochie_uderzhaniya
     )
 
-    # Средняя цена продажи
-    avg_sale_price = sales_amount / D(str(sale_qty)) if sale_qty > 0 else ZERO
+    # Средняя цена продажи (based on net qty)
+    avg_sale_price = sales_amount / D(str(net_sale_qty)) if net_sale_qty > 0 else ZERO
 
     # Средняя цена до скидок МП
-    avg_retail_price = realization / D(str(sale_qty)) if sale_qty > 0 else ZERO
+    avg_retail_price = realization / D(str(net_sale_qty)) if net_sale_qty > 0 else ZERO
 
-    # Процент выкупа
+    # Процент выкупа = sale_qty / (sale_qty + ret_qty) * 100
     total_qty = sale_qty + ret_qty
     buyout_pct = D(str(sale_qty)) / D(str(total_qty)) * 100 if total_qty > 0 else ZERO
-
-    # К перечислению (ppvz_for_pay net)
-    ppvz_net = sale["ppvz_for_pay"] - ret["ppvz_for_pay"]
 
     return {
         "realization": realization,
@@ -216,7 +233,8 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
         "returns_amount": returns_amount,
         "to_pay": to_pay,
         "ppvz_for_pay": ppvz_net,
-        "sale_qty": sale_qty,
+        "sale_qty": net_sale_qty,  # Net qty (as TrueStats)
+        "sale_qty_gross": sale_qty,
         "ret_qty": ret_qty,
         "buyout_pct": buyout_pct,
         "avg_sale_price": avg_sale_price,
@@ -227,8 +245,8 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
         "penalties": penalties,
         "storage": storage,
         "acceptance": acceptance_val,
-        "deductions": deductions,
-        "rebill": rebill,
+        "deductions": prochie_uderzhaniya,  # rebill_logistic_cost
+        "rebill": prochie_uderzhaniya,
     }
 
 
