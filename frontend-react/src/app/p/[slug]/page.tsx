@@ -3,7 +3,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, exportToExcel } from '@/lib/utils';
 import {
-    BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+    XAxis, YAxis, CartesianGrid, Tooltip,
     ResponsiveContainer, PieChart, Pie, Cell,
     AreaChart, Area,
 } from 'recharts';
@@ -22,6 +22,40 @@ const PIE_COLORS = [
     '#a78bfa', '#f472b6', '#38bdf8', '#22c55e', '#f59e0b',
     '#ef4444', '#6366f1', '#14b8a6', '#e879f9', '#fb923c',
 ];
+
+/* ─── Period presets ───────────────────────────────────────────── */
+type PeriodKey = 'month' | 'prev_month' | '7d' | '30d' | '90d' | 'all';
+
+function getPeriodDates(key: PeriodKey): { from: string; to: string; label: string } {
+    const today = new Date();
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+
+    switch (key) {
+        case 'month': {
+            const s = new Date(today.getFullYear(), today.getMonth(), 1);
+            return { from: fmt(s), to: fmt(today), label: 'Текущий месяц' };
+        }
+        case 'prev_month': {
+            const s = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+            const e = new Date(today.getFullYear(), today.getMonth(), 0);
+            return { from: fmt(s), to: fmt(e), label: 'Прошлый месяц' };
+        }
+        case '7d': {
+            const s = new Date(today); s.setDate(s.getDate() - 6);
+            return { from: fmt(s), to: fmt(today), label: '7 дней' };
+        }
+        case '30d': {
+            const s = new Date(today); s.setDate(s.getDate() - 29);
+            return { from: fmt(s), to: fmt(today), label: '30 дней' };
+        }
+        case '90d': {
+            const s = new Date(today); s.setDate(s.getDate() - 89);
+            return { from: fmt(s), to: fmt(today), label: '90 дней' };
+        }
+        case 'all':
+            return { from: '2020-01-01', to: fmt(today), label: 'Всё время' };
+    }
+}
 
 /* ─── Helpers ──────────────────────────────────────────────────── */
 function fmtK(v: number): string {
@@ -54,16 +88,12 @@ function ChartTooltip({ active, payload, label }: any) {
 }
 
 /* ─── KPI Card ─────────────────────────────────────────────────── */
-function KpiCard({ icon, label, value, sub, color, borderColor, onClick }: {
+function KpiCard({ icon, label, value, sub, color, borderColor }: {
     icon: string; label: string; value: string; sub?: string;
-    color: string; borderColor: string; onClick?: () => void;
+    color: string; borderColor: string;
 }) {
     return (
-        <div
-            className="stat-card"
-            style={{ borderLeft: `3px solid ${borderColor}`, cursor: onClick ? 'pointer' : 'default' }}
-            onClick={onClick}
-        >
+        <div className="stat-card" style={{ borderLeft: `3px solid ${borderColor}` }}>
             <div className="stat-card-label" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ fontSize: 16 }}>{icon}</span> {label}
             </div>
@@ -80,15 +110,17 @@ export default function DashboardPage() {
     const [funnel, setFunnel] = useState<any>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    const [period, setPeriod] = useState<PeriodKey>('month');
 
-    const now = new Date();
-    const monthName = now.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
+    const { from: dateFrom, to: dateTo, label: periodLabel } = getPeriodDates(period);
 
     const loadData = useCallback(async () => {
         try {
             setLoading(true);
+            setError('');
+            const { from, to } = getPeriodDates(period);
             const [summary, bal, fun] = await Promise.all([
-                api.getDashboardSummary(),
+                api.getDashboardSummary(from, to),
                 api.getBalance(),
                 api.getFunnelSummary().catch(() => null),
             ]);
@@ -100,9 +132,18 @@ export default function DashboardPage() {
         } finally {
             setLoading(false);
         }
-    }, []);
+    }, [period]);
 
     useEffect(() => { loadData(); }, [loadData]);
+
+    const allPeriods: { key: PeriodKey; label: string }[] = [
+        { key: 'month', label: 'Месяц' },
+        { key: 'prev_month', label: 'Пред. месяц' },
+        { key: '7d', label: '7д' },
+        { key: '30d', label: '30д' },
+        { key: '90d', label: '90д' },
+        { key: 'all', label: 'Всё' },
+    ];
 
     if (loading) return (
         <div style={{ padding: 40, color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -120,23 +161,32 @@ export default function DashboardPage() {
     const funnelDRR = funnel && funnel.orders_sum_rub > 0
         ? (funnel.adv_sum / funnel.orders_sum_rub * 100) : 0;
 
-    /* Daily cashflow chart data — add formatted label */
     const dailyChart = (data.daily_cashflow || []).map((d: any) => ({
         ...d,
         label: shortDay(d.date),
     }));
 
-    /* Expense pie */
     const expensePie = data.expense_by_category || [];
 
     return (
         <div className="animate-in">
-            <div className="page-header">
+            <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
                 <div>
                     <h1 className="page-title">Дашборд</h1>
-                    <p className="page-subtitle">Управленческая сводка • {monthName}</p>
+                    <p className="page-subtitle">Управленческая сводка • {periodLabel} ({dateFrom} — {dateTo})</p>
                 </div>
-                <button className="btn btn-secondary btn-sm" onClick={loadData}>🔄 Обновить</button>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {allPeriods.map(p => (
+                        <button
+                            key={p.key}
+                            className={`btn btn-sm ${period === p.key ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={() => setPeriod(p.key)}
+                            style={period === p.key ? { background: 'var(--color-accent)', borderColor: 'var(--color-accent)' } : {}}
+                        >
+                            {p.label}
+                        </button>
+                    ))}
+                </div>
             </div>
 
             {/* ─── Row 1: Financial Health ────────────────────── */}
@@ -152,7 +202,7 @@ export default function DashboardPage() {
                     color={C.warning} borderColor={C.warning}
                 />
                 <KpiCard
-                    icon={netCashflow >= 0 ? '📈' : '📉'} label="Cashflow (мес.)"
+                    icon={netCashflow >= 0 ? '📈' : '📉'} label="Cashflow"
                     value={`${netCashflow >= 0 ? '+' : ''}${formatNumber(netCashflow)} ₽`}
                     sub={`Приход ${fmtK(data.month_income)} / Расход ${fmtK(data.month_expense)}`}
                     color={netCashflow >= 0 ? C.income : C.expense}
@@ -185,19 +235,18 @@ export default function DashboardPage() {
                 <KpiCard
                     icon="📥" label="INBOX"
                     value={`${data.inbox_count}`}
-                    sub="нераспределённых операций"
+                    sub="нераспределённых"
                     color={data.inbox_count > 0 ? C.warning : C.income}
                     borderColor={data.inbox_count > 0 ? C.warning : C.income}
                 />
-                {funnel && (
+                {funnel ? (
                     <KpiCard
                         icon="🛒" label="Заказы WB"
                         value={funnel.orders_count?.toLocaleString('ru-RU') || '—'}
                         sub={`${formatNumber(funnel.orders_sum_rub, 0)} ₽`}
                         color={C.info} borderColor={C.info}
                     />
-                )}
-                {!funnel && (
+                ) : (
                     <KpiCard
                         icon="📊" label="Счета"
                         value={`${data.accounts_count}`}
@@ -213,8 +262,6 @@ export default function DashboardPage() {
                 gridTemplateColumns: dailyChart.length > 0 && expensePie.length > 0 ? '1.6fr 1fr' : '1fr',
                 gap: 20, marginTop: 20,
             }}>
-
-                {/* Area chart — daily income + expense */}
                 {dailyChart.length > 0 && (
                     <div className="glass-card" style={{ padding: '20px 16px' }}>
                         <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 16, color: 'var(--color-text)' }}>
@@ -249,7 +296,6 @@ export default function DashboardPage() {
                     </div>
                 )}
 
-                {/* Expense Pie */}
                 {expensePie.length > 0 && (
                     <div className="glass-card" style={{ padding: '20px 16px' }}>
                         <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 16, color: 'var(--color-text)' }}>

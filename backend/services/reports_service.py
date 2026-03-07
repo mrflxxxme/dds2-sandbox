@@ -323,13 +323,18 @@ async def get_income_by_category_daily(
 async def get_dashboard_summary(
     db: AsyncSession,
     project_id: int,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
 ) -> dict:
     """All dashboard KPIs in a single call."""
     import logging
     logger = logging.getLogger("dds.dashboard")
 
     today = date.today()
-    month_start = today.replace(day=1)
+    if date_to is None:
+        date_to = today
+    if date_from is None:
+        date_from = date_to.replace(day=1)
 
     # 1. Balances (reuse existing function)
     balances = await get_balance(db, project_id)
@@ -343,8 +348,8 @@ async def get_dashboard_summary(
             func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
         ).where(
             Transaction.project_id == project_id,
-            Transaction.date >= month_start,
-            Transaction.date <= today,
+            Transaction.date >= date_from,
+            Transaction.date <= date_to,
             Transaction.is_cashflow2 == 1,
         )
     )
@@ -406,8 +411,8 @@ async def get_dashboard_summary(
             func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
         ).where(
             Transaction.project_id == project_id,
-            Transaction.date >= month_start,
-            Transaction.date <= today,
+            Transaction.date >= date_from,
+            Transaction.date <= date_to,
             Transaction.is_cashflow2 == 1,
         ).group_by(func.date(Transaction.date)).order_by(func.date(Transaction.date))
     )
@@ -431,8 +436,8 @@ async def get_dashboard_summary(
             func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
         ).where(
             Transaction.project_id == project_id,
-            Transaction.date >= month_start,
-            Transaction.date <= today,
+            Transaction.date >= date_from,
+            Transaction.date <= date_to,
             Transaction.expense > 0,
             Transaction.is_cashflow2 == 1,
         ).group_by(Transaction.cat_lvl1_2).order_by(

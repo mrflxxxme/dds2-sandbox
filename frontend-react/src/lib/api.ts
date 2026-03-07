@@ -250,7 +250,10 @@ class ApiClient {
         }>>('GET', '/api/v1/reports/balance');
     }
 
-    getDashboardSummary() {
+    getDashboardSummary(dateFrom?: string, dateTo?: string) {
+        const q = new URLSearchParams();
+        if (dateFrom) q.set('date_from', dateFrom);
+        if (dateTo) q.set('date_to', dateTo);
         return this.request<{
             balance_rub: number; balance_cny: number;
             month_income: number; month_expense: number;
@@ -259,7 +262,7 @@ class ApiClient {
             inbox_count: number; accounts_count: number;
             daily_cashflow: Array<{ date: string; income: number; expense: number }>;
             expense_by_category: Array<{ name: string; value: number }>;
-        }>('GET', '/api/v1/reports/dashboard_summary');
+        }>('GET', `/api/v1/reports/dashboard_summary?${q.toString()}`);
     }
 
     getDDS(params: { start?: string; end?: string } = {}) {

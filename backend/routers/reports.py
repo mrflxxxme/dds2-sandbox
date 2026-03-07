@@ -111,8 +111,10 @@ async def get_income_by_category_daily(
 
 @router.get("/dashboard_summary")
 async def get_dashboard_summary(
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """All dashboard KPIs in a single call."""
-    return await reports_service.get_dashboard_summary(db, project.id)
+    return await reports_service.get_dashboard_summary(db, project.id, date_from, date_to)
