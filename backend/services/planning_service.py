@@ -823,22 +823,26 @@ async def reconcile_wb_payouts(db: AsyncSession):
 async def refresh_wb_forecast(
     db: AsyncSession,
     project_id: int,
+    forecast_days: int = 60,
 ) -> dict:
     """
-    Auto-generate PlannedIncome for next 30 days based on
-    7-day rolling average of actual WB income.
+    Auto-generate PlannedIncome for next `forecast_days` days based on
+    28-day history of actual WB income, respecting day-of-week patterns
+    (weekends = 0, Monday = accumulated payout for Sat+Sun+Mon).
     """
     today = date.today()
-    week_ago = today - timedelta(days=7)
+    lookback = today - timedelta(days=28)
 
+    # Get daily WB income for the last 28 days
     result = await db.execute(
         select(
-            func.coalesce(func.sum(Transaction.income), 0)
+            func.date(Transaction.date).label("day"),
+            func.sum(Transaction.income).label("daily_income"),
         ).where(
             Transaction.project_id == project_id,
             Transaction.income > 0,
             Transaction.is_cashflow2 == 1,
-            Transaction.date >= week_ago,
+            Transaction.date >= lookback,
             Transaction.date <= today,
             or_(
                 and_(
@@ -848,13 +852,40 @@ async def refresh_wb_forecast(
                 Transaction.counterparty.ilike("%вайлдберриз%"),
                 Transaction.counterparty.ilike("%wildberries%"),
             )
-        )
+        ).group_by(func.date(Transaction.date))
     )
-    total_7d = Decimal(str(result.scalar() or 0))
-    daily_avg = (total_7d / Decimal("7")).quantize(Decimal("0.01"))
+    daily_data = {row.day: Decimal(str(row.daily_income or 0)) for row in result}
+
+    if not daily_data:
+        return {"ok": True, "daily_avg": 0, "message": "Нет данных WB за последние 28 дней"}
+
+    # Build day-of-week pattern (0=Mon, 6=Sun)
+    # Sum income per weekday and count occurrences
+    weekday_totals: dict[int, Decimal] = {i: Decimal("0") for i in range(7)}
+    weekday_counts: dict[int, int] = {i: 0 for i in range(7)}
+
+    for d, amount in daily_data.items():
+        if hasattr(d, 'weekday'):
+            wd = d.weekday()
+        else:
+            wd = date.fromisoformat(str(d)).weekday()
+        weekday_totals[wd] += amount
+        weekday_counts[wd] += 1
+
+    # Calculate average per weekday
+    weekday_avg: dict[int, Decimal] = {}
+    for wd in range(7):
+        if weekday_counts[wd] > 0:
+            weekday_avg[wd] = (weekday_totals[wd] / Decimal(str(weekday_counts[wd]))).quantize(Decimal("0.01"))
+        else:
+            weekday_avg[wd] = Decimal("0")
+
+    # Calculate overall weekly total and daily average for reporting
+    weekly_total = sum(weekday_avg.values())
+    daily_avg = (weekly_total / Decimal("7")).quantize(Decimal("0.01")) if weekly_total > 0 else Decimal("0")
 
     if daily_avg <= 0:
-        return {"ok": True, "daily_avg": 0, "message": "Нет данных WB за последние 7 дней"}
+        return {"ok": True, "daily_avg": 0, "message": "Нет данных WB за последние 28 дней"}
 
     # Delete stale auto-forecast
     await db.execute(
@@ -872,13 +903,32 @@ async def refresh_wb_forecast(
     manual_dates = {row[0] for row in manual_result}
 
     created = 0
-    for i in range(1, 31):
+    weekday_detail = {}
+    for i in range(1, forecast_days + 1):
         d = today + timedelta(days=i)
         if d in manual_dates:
             continue
-        pi = PlannedIncome(date=d, amount_rub=daily_avg, source="WB_AUTO", project_id=project_id)
+        wd = d.weekday()
+        amount = weekday_avg.get(wd, Decimal("0"))
+        if amount <= 0:
+            continue
+        pi = PlannedIncome(date=d, amount_rub=amount, source="WB_AUTO", project_id=project_id)
         db.add(pi)
         created += 1
 
     await db.commit()
-    return {"ok": True, "daily_avg": float(daily_avg), "created": created}
+
+    # Build weekday detail for response
+    day_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    for wd in range(7):
+        weekday_detail[day_names[wd]] = float(weekday_avg[wd])
+
+    return {
+        "ok": True,
+        "daily_avg": float(daily_avg),
+        "weekly_total": float(weekly_total),
+        "weekday_pattern": weekday_detail,
+        "created": created,
+        "forecast_days": forecast_days,
+    }
+
