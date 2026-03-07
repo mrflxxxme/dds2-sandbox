@@ -18,7 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbFunnelDaily, WbCostOverride, CostOrderItem
 from backend.services.funnel.wb_api_client import (
-    get_wb_key, fetch_funnel, fetch_ad_campaigns, fetch_ad_stats,
+    get_wb_key, fetch_funnel, fetch_funnel_history,
+    fetch_ad_campaigns, fetch_ad_stats,
 )
 
 logger = logging.getLogger("dds.funnel")
@@ -93,15 +94,56 @@ async def run_funnel_sync(
     if campaign_ids:
         ad_stats = await fetch_ad_stats(adv_key, campaign_ids, dates[0], dates[-1])
 
-    # Fetch funnel data per day and upsert — commit per day for partial progress
+    # ── Try bulk history endpoint first (7 days/request, requires Джем) ────
+    # Split into 7-day windows and fetch all funnel data upfront
+    HISTORY_WINDOW = 7
+    funnel_by_day: dict = {}  # {date_str: {nm_id: {...}}}
+    use_history = True
+
+    for i in range(0, len(dates), HISTORY_WINDOW):
+        window = dates[i:i + HISTORY_WINDOW]
+        w_from, w_to = window[0], window[-1]
+
+        if use_history:
+            history_data = await fetch_funnel_history(analytics_key, w_from, w_to)
+            if history_data is None:
+                # 402 — Джем not available, fall back to per-day for ALL remaining
+                use_history = False
+                logger.info("Falling back to per-day funnel fetch (no Джем)")
+            else:
+                funnel_by_day.update(history_data)
+                logger.info(f"History batch {w_from}→{w_to}: {len(history_data)} days")
+                if i + HISTORY_WINDOW < len(dates):
+                    await asyncio.sleep(1)
+                continue
+
+        # Fallback: fetch per day
+        for idx, ds in enumerate(window):
+            if idx > 0:
+                await asyncio.sleep(1)
+            try:
+                day_data = await fetch_funnel(analytics_key, ds)
+                if day_data:
+                    funnel_by_day[ds] = day_data
+            except Exception as e:
+                logger.error(f"Funnel fetch error {ds}: {e}")
+
+    if use_history and funnel_by_day:
+        logger.info(
+            f"Funnel history mode: {len(funnel_by_day)} days fetched "
+            f"in {(len(dates) + HISTORY_WINDOW - 1) // HISTORY_WINDOW} requests "
+            f"(vs {len(dates)} requests per-day)"
+        )
+
+    # ── Upsert per day ────────────────────────────────────────────────────
     total_rows = 0
     errors = []
-    for idx, date_str in enumerate(dates):
-        if idx > 0:
-            await asyncio.sleep(1)
-        try:
-            funnel_data = await fetch_funnel(analytics_key, date_str)
+    for date_str in dates:
+        funnel_data = funnel_by_day.get(date_str)
+        if not funnel_data:
+            continue
 
+        try:
             # Check if we have real ad data for this day
             day_ads = ad_stats.get(date_str) or {}
             has_ad_data = bool(day_ads)
@@ -125,9 +167,9 @@ async def run_funnel_sync(
                     "buyout_percent": fd["buyout_percent"],
                     "cart_to_order_pct": fd["cart_to_order_pct"],
                     "add_to_cart_pct": fd["add_to_cart_pct"],
-                    "avg_price": fd["avg_price"],
-                    "stocks_wb": fd["stocks_wb"],
-                    "stocks_mp": fd["stocks_mp"],
+                    "avg_price": fd.get("avg_price", 0),
+                    "stocks_wb": fd.get("stocks_wb", 0),
+                    "stocks_mp": fd.get("stocks_mp", 0),
                     "adv_views": ad.get("views", 0),
                     "adv_clicks": ad.get("clicks", 0),
                     "adv_sum": ad.get("sum", 0),
@@ -157,7 +199,6 @@ async def run_funnel_sync(
                 }
 
                 # Only overwrite ad fields if we have REAL ad data for this day
-                # Otherwise keep existing values in DB (avoid zeroing out)
                 if has_ad_data:
                     update_fields["adv_views"] = stmt.excluded.adv_views
                     update_fields["adv_clicks"] = stmt.excluded.adv_clicks

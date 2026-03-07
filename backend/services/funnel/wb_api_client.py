@@ -124,6 +124,113 @@ async def fetch_funnel(api_key: str, date_str: str) -> dict:
     return all_items
 
 
+async def fetch_funnel_history(api_key: str, date_from: str, date_to: str) -> dict | None:
+    """Fetch sales funnel data with per-day breakdown using /history endpoint.
+
+    Requires WB Джем subscription. Returns None if not available (402).
+    Returns {date_str: {nm_id: {vendor_code, subject, brand, open_card, ...}}}.
+    Max 7 days per request.
+    """
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    result: dict = {}
+
+    offset = 0
+    limit = 1000
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        while True:
+            payload = {
+                "selectedPeriod": {"start": date_from, "end": date_to},
+                "nmIds": [],
+                "skipDeletedNm": True,
+                "aggregationLevel": "day",
+                "limit": limit,
+                "offset": offset,
+            }
+
+            resp = None
+            for attempt in range(3):
+                resp = await client.post(
+                    "https://seller-analytics-api.wildberries.ru"
+                    "/api/analytics/v3/sales-funnel/products/history",
+                    headers=headers,
+                    json=payload,
+                )
+                if resp.status_code == 429:
+                    wait = 10 * (2 ** attempt)
+                    logger.warning(
+                        f"WB history API 429, waiting {wait}s "
+                        f"(attempt {attempt+1}/3, offset={offset})"
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                break
+
+            if resp is None:
+                break
+
+            if resp.status_code == 402:
+                logger.info("WB history API: 402 — Джем not available, falling back to per-day")
+                return None  # Signal: use fallback
+
+            if resp.status_code != 200:
+                logger.error(f"WB history API error {resp.status_code}: {resp.text[:200]}")
+                break
+
+            data = resp.json()
+            products = data if isinstance(data, list) else ((data.get("data") or {}).get("products") if isinstance(data, dict) else None) or data
+            if not isinstance(products, list) or not products:
+                break
+
+            for item in products:
+                p = item.get("product") or item.get("p") or {}
+                nm_id = p.get("nmId")
+                if not nm_id:
+                    continue
+
+                vendor_code = p.get("vendorCode", "")
+                subject = p.get("subjectName", "")
+                brand = p.get("brandName", "")
+
+                for day in item.get("history") or []:
+                    day_date = (day.get("date") or "")[:10]
+                    if not day_date:
+                        continue
+
+                    if day_date not in result:
+                        result[day_date] = {}
+
+                    result[day_date][nm_id] = {
+                        "vendor_code": vendor_code,
+                        "subject": subject,
+                        "brand": brand,
+                        "open_card": day.get("openCount", 0),
+                        "add_to_cart": day.get("cartCount", 0),
+                        "orders_count": day.get("orderCount", 0),
+                        "orders_sum_rub": day.get("orderSum", 0),
+                        "buyout_percent": day.get("buyoutPercent", 0),
+                        "cart_to_order_pct": day.get("cartToOrderConversion", 0),
+                        "add_to_cart_pct": day.get("addToCartConversion", 0),
+                        "avg_price": 0,  # not in history response
+                        "stocks_wb": 0,
+                        "stocks_mp": 0,
+                    }
+
+            offset += len(products)
+
+    if result:
+        total_items = sum(len(v) for v in result.values())
+        logger.info(
+            f"WB history: {date_from}→{date_to} — "
+            f"{len(result)} days, {total_items} product-days"
+        )
+    return result
+
+
 async def fetch_ad_campaigns(api_key: str) -> list[int]:
     """Get list of active/paused/completed ad campaign IDs."""
     headers = {
