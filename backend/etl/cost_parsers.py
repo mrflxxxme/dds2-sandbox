@@ -112,7 +112,10 @@ def normalize_carpet(df: pd.DataFrame) -> pd.DataFrame:
     df["price_cny"] = _fix_numeric(df.get("price_cny", pd.Series([0])))
     df["weight_kg"] = _fix_numeric(df.get("weight_kg_per_unit", pd.Series([0])))
 
-    if "size" in df.columns:
+    # Area: prefer direct 平方数 (area_m2) column, fallback to computing from size
+    if "area_m2" in df.columns:
+        df["area_m2"] = _fix_numeric(df["area_m2"])
+    elif "size" in df.columns:
         def _area_from_size(s):
             try:
                 s = str(s).strip()
@@ -124,7 +127,7 @@ def normalize_carpet(df: pd.DataFrame) -> pd.DataFrame:
             return 0.0
         df["area_m2"] = df["size"].apply(_area_from_size)
     else:
-        df["area_m2"] = _fix_numeric(df.get("area_m2", pd.Series([0])))
+        df["area_m2"] = 0
 
     if "volume_box_m3" in df.columns and "qty_per_box" in df.columns:
         vol = pd.to_numeric(df["volume_box_m3"], errors="coerce").fillna(0)
