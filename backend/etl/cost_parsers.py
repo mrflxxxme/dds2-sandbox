@@ -185,16 +185,103 @@ def normalize_divandek_cn(df: pd.DataFrame) -> pd.DataFrame:
     return df[["barcode", "qty", "price_cny", "weight_kg", "area_m2", "volume_m3"]]
 
 
+def normalize_divandek_cn_ru(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize дивандек CN format with Russian-translated headers.
+
+    Columns: форма/款式, размер, количество, Количество упаковки,
+    Количество ящиков, цена за единицу товара, Итого,
+    Вес брутто в коробке, Общий чистый вес, Общий вес брутто,
+    Один том в коробке, объем, Номер клиента
+    """
+    col_map = {}
+    for c in df.columns:
+        cl = str(c).lower().strip()
+        if cl == "номер клиента":
+            col_map[c] = "barcode"
+        elif cl == "количество":
+            col_map[c] = "qty"
+        elif "цена за единицу" in cl:
+            col_map[c] = "price_cny"
+        elif cl == "общий чистый вес":
+            col_map[c] = "total_net_weight"
+        elif cl == "общий вес брутто":
+            col_map[c] = "total_gross_weight"
+        elif cl == "один том в коробке":
+            col_map[c] = "volume_box_m3"
+        elif cl == "количество упаковки":
+            col_map[c] = "qty_per_box"
+        elif cl == "объем":
+            col_map[c] = "total_volume"
+        elif cl == "размер" or cl == "форма" or cl == "款式":
+            col_map[c] = "size"
+
+    df = df.rename(columns=col_map)
+
+    # Filter rows with valid barcodes
+    if "barcode" in df.columns:
+        df = df[pd.to_numeric(df["barcode"], errors="coerce").notna()].copy()
+
+    df["barcode"] = pd.to_numeric(df.get("barcode", ""), errors="coerce").fillna(0).astype(int).astype(str)
+    df["barcode"] = df["barcode"].str.replace(r'\.0$', '', regex=True).str.strip()
+
+    df["qty"] = pd.to_numeric(df.get("qty", 1), errors="coerce").fillna(1).astype(int)
+    df["price_cny"] = pd.to_numeric(df.get("price_cny", 0), errors="coerce").fillna(0)
+
+    # Weight per unit = total_net_weight / qty
+    total_weight = pd.to_numeric(df.get("total_net_weight", 0), errors="coerce").fillna(0)
+    qty_safe = df["qty"].replace(0, 1)
+    df["weight_kg"] = total_weight / qty_safe
+
+    # Area from size
+    if "size" in df.columns:
+        def _area_from_size(s):
+            try:
+                s = str(s).strip()
+                if "*" in s:
+                    parts = [p.strip() for p in s.replace("+", "*").split("*") if p.strip()]
+                    nums = []
+                    for p in parts:
+                        try:
+                            nums.append(float(p))
+                        except ValueError:
+                            pass
+                    if len(nums) >= 2:
+                        return nums[0] / 100 * nums[1] / 100
+            except Exception:
+                pass
+            return 0.0
+        df["area_m2"] = df["size"].apply(_area_from_size)
+    else:
+        df["area_m2"] = 0
+
+    # Volume per unit
+    if "total_volume" in df.columns:
+        vol = pd.to_numeric(df["total_volume"], errors="coerce").fillna(0)
+        df["volume_m3"] = vol / qty_safe
+    elif "volume_box_m3" in df.columns and "qty_per_box" in df.columns:
+        vol = pd.to_numeric(df["volume_box_m3"], errors="coerce").fillna(0)
+        qpb = pd.to_numeric(df["qty_per_box"], errors="coerce").fillna(1).replace(0, 1)
+        df["volume_m3"] = vol / qpb
+    else:
+        df["volume_m3"] = 0
+
+    df["volume_m3"] = df["volume_m3"].fillna(0)
+    return df[["barcode", "qty", "price_cny", "weight_kg", "area_m2", "volume_m3"]]
+
+
 def detect_and_normalize_excel(data: bytes) -> pd.DataFrame:
     """Detect Excel format by columns and normalize to standard schema."""
     df = pd.read_excel(io.BytesIO(data))
     cols = [str(c).strip() for c in df.columns]
+    cols_lower = [c.lower() for c in cols]
 
-    if "штрихкод" in cols or "штрихкод" in [c.lower() for c in cols]:
+    if "штрихкод" in cols or "штрихкод" in cols_lower:
         return normalize_divandek(df)
     elif "条码" in cols:
         return normalize_carpet(df)
     elif "客户编号" in cols:
         return normalize_divandek_cn(df)
+    elif "номер клиента" in cols_lower:
+        return normalize_divandek_cn_ru(df)
     else:
         raise ValueError(f"Неизвестный формат файла. Колонки: {cols}")
