@@ -286,7 +286,9 @@ def parse_wb_payout(data: bytes, account_no: str) -> tuple[pd.DataFrame, int]:
 def parse_wb_payout_cabinet(data: bytes) -> list[dict]:
     """
     Parse WB seller cabinet payout Excel.
-    Columns: ID заявки на оплату, Сумма, Валюта, Дата создания, Статус оплаты, Комментарий банка
+    Supports two formats:
+    1. With headers: ID заявки на оплату, Сумма, Валюта, Дата создания, Статус оплаты, Комментарий банка
+    2. Without headers: columns A-F positionally mapped (request_id, amount, currency, date, status, comment)
     Returns list of dicts (not DataFrame — this is not a bank statement).
     """
     df = pd.read_excel(BytesIO(data), header=0)
@@ -307,6 +309,22 @@ def parse_wb_payout_cabinet(data: bytes) -> list[dict]:
             col_map["status"] = c
         elif "коммент" in cl:
             col_map["comment"] = c
+
+    # If header matching failed (no headers in the file), re-read without header
+    # and use positional mapping: A=request_id, B=amount, C=currency, D=date, E=status, F=comment
+    if "request_id" not in col_map or "amount" not in col_map:
+        logger.info("WB_CABINET: no header detected, using positional column mapping")
+        df = pd.read_excel(BytesIO(data), header=None)
+        cols = list(df.columns)
+        if len(cols) >= 5:
+            col_map = {
+                "request_id": cols[0],
+                "amount": cols[1],
+                "currency": cols[2] if len(cols) > 2 else None,
+                "created_at": cols[3] if len(cols) > 3 else None,
+                "status": cols[4] if len(cols) > 4 else None,
+                "comment": cols[5] if len(cols) > 5 else None,
+            }
 
     results = []
     skipped = 0
@@ -337,7 +355,9 @@ def parse_wb_payout_cabinet(data: bytes) -> list[dict]:
         status = "PENDING"
         if raw_status:
             lower_s = raw_status.lower()
-            if "успешно проведена" in lower_s:
+            if "успешно проведена" in lower_s or "оплата" == lower_s.strip():
+                status = "RECEIVED"
+            elif "поручение" in lower_s:
                 status = "TRANSIT"
             elif "обрабатывается" in lower_s:
                 status = "PROCESSING"
