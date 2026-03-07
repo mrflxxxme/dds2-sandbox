@@ -173,3 +173,41 @@ async def get_category_counterparties(
     return await reports_service.get_category_counterparties(
         db, project.id, category, df, dt,
     )
+
+
+@router.post("/fx_rates/backfill")
+async def backfill_fx_rates(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Extract FX rates from existing VTB conversion transactions."""
+    from backend.services import fx_service
+    return await fx_service.backfill_rates_from_transactions(db, project.id)
+
+
+@router.get("/fx_rates")
+async def get_fx_rates(
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """List FX rates for the project."""
+    from datetime import date as date_cls
+    from backend.models import FxRate
+    from sqlalchemy import select
+
+    df = date_from or date_cls(2020, 1, 1)
+    dt = date_to or date_cls.today()
+    result = await db.execute(
+        select(FxRate).where(
+            FxRate.project_id == project.id,
+            FxRate.date >= df,
+            FxRate.date <= dt,
+        ).order_by(FxRate.date.desc())
+    )
+    rates = result.scalars().all()
+    return [
+        {"id": r.id, "date": str(r.date), "pair": r.pair, "rate": float(r.rate), "source": r.source}
+        for r in rates
+    ]
