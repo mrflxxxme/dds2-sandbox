@@ -772,11 +772,25 @@ function CustomsDt() {
         setLoading(false);
     };
 
+    // Convert cost order_no (e.g. '41/2') to integer for planning (4102)
+    const orderNoToInt = (s: string): number => {
+        s = s.trim();
+        if (s.includes('/')) {
+            const parts = s.split('/');
+            const a = parseInt(parts[0], 10);
+            const b = parseInt(parts[1], 10);
+            if (!isNaN(a) && !isNaN(b)) return a * 100 + b;
+        }
+        const n = parseInt(s, 10);
+        return isNaN(n) ? 0 : n;
+    };
+
     const handleBindOrder = async (dtId: number, orderNo: string) => {
         setSaving(dtId);
         try {
-            await api.updateCustomsDt(dtId, { order_no: orderNo ? Number(orderNo) : null });
-            setData(prev => prev.map(d => d.id === dtId ? { ...d, order_no: orderNo ? Number(orderNo) : null } : d));
+            const encoded = orderNo ? Number(orderNo) : null;
+            await api.updateCustomsDt(dtId, { order_no: encoded });
+            setData(prev => prev.map(d => d.id === dtId ? { ...d, order_no: encoded } : d));
         } catch { }
         setSaving(null);
     };
@@ -836,7 +850,10 @@ function CustomsDt() {
                                         <td style={{ fontSize: 12 }}>
                                             <select
                                                 value={r.order_no ?? ''}
-                                                onChange={e => handleBindOrder(r.id, e.target.value)}
+                                                onChange={e => {
+                                                    const v = e.target.value;
+                                                    handleBindOrder(r.id, v);
+                                                }}
                                                 disabled={saving === r.id}
                                                 style={{
                                                     background: 'var(--color-bg-tertiary)',
@@ -851,7 +868,7 @@ function CustomsDt() {
                                             >
                                                 <option value="">—</option>
                                                 {orders.map((o: any) => (
-                                                    <option key={o.order_no} value={o.order_no}>
+                                                    <option key={o.order_no} value={orderNoToInt(String(o.order_no))}>
                                                         #{o.order_no}{o.invoice_no ? ` (${o.invoice_no})` : ''}
                                                     </option>
                                                 ))}
