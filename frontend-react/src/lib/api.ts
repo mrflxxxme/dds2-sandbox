@@ -262,6 +262,8 @@ class ApiClient {
             inbox_count: number; accounts_count: number;
             daily_cashflow: Array<{ date: string; income: number; expense: number }>;
             expense_by_category: Array<{ name: string; value: number }>;
+            income_counterparties: Array<{ name: string; total: number; count: number }>;
+            date_from: string; date_to: string;
         }>('GET', `/api/v1/reports/dashboard_summary?${q.toString()}`);
     }
 

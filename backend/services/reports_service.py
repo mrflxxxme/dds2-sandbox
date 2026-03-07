@@ -336,12 +336,12 @@ async def get_dashboard_summary(
     if date_from is None:
         date_from = date_to.replace(day=1)
 
-    # 1. Balances (reuse existing function)
+    # 1. Balances (always current — reflects actual bank state)
     balances = await get_balance(db, project_id)
     balance_rub = sum(b["balance"] for b in balances if b["currency"] == "RUB")
     balance_cny = sum(b["balance"] for b in balances if b["currency"] == "CNY")
 
-    # 2. Month income / expense
+    # 2. Period income / expense (real cashflow only)
     month_result = await db.execute(
         select(
             func.coalesce(func.sum(Transaction.income), 0).label("income"),
@@ -357,7 +357,7 @@ async def get_dashboard_summary(
     month_income = float(month_row.income)
     month_expense = float(month_row.expense)
 
-    # 3. Orders summary
+    # 3. Orders summary (within date range)
     orders_result = await db.execute(
         select(
             func.count().label("cnt"),
@@ -371,11 +371,12 @@ async def get_dashboard_summary(
     orders_count = orders_row.cnt
     orders_total_cny = float(orders_row.total)
 
-    # 4. Unpaid debt (planned_payments)
+    # 4. Unpaid debt (planned_payments) — only truly unpaid
     debt_result = await db.execute(
         select(
             PlannedPayment.currency,
-            func.sum(PlannedPayment.amount_rub - PlannedPayment.paid_rub).label("debt_rub"),
+            func.sum(PlannedPayment.amount_rub).label("total_amount"),
+            func.sum(PlannedPayment.paid_rub).label("total_paid"),
         ).where(
             PlannedPayment.project_id == project_id,
             PlannedPayment.is_paid == False,
@@ -385,11 +386,15 @@ async def get_dashboard_summary(
     debt_rub = 0.0
     debt_cny = 0.0
     for row in debt_result:
-        d = float(row.debt_rub or 0)
-        if row.currency and "CNY" in row.currency:
-            debt_cny += d
+        total_amt = float(row.total_amount or 0)
+        total_paid = float(row.total_paid or 0)
+        remaining = total_amt - total_paid
+        if remaining <= 0:
+            continue
+        if row.currency and ("CNY" in row.currency or "USD" in row.currency):
+            debt_cny += remaining
         else:
-            debt_rub += d
+            debt_rub += remaining
 
     # 5. Inbox count (unassigned transactions)
     inbox_result = await db.execute(
@@ -403,7 +408,7 @@ async def get_dashboard_summary(
     )
     inbox_count = inbox_result.scalar() or 0
 
-    # 6. Daily cashflow (current month) — income & expense per day (only real cashflow)
+    # 6. Daily cashflow (within date range, real cashflow only)
     daily_result = await db.execute(
         select(
             func.date(Transaction.date).label("day"),
@@ -429,7 +434,7 @@ async def get_dashboard_summary(
             "expense": float(row.expense),
         })
 
-    # 7. Expense by category (current month, top-10, only real cashflow)
+    # 7. Expense by category (within date range, top-10, real cashflow)
     cat_result = await db.execute(
         select(
             func.coalesce(Transaction.cat_lvl1_2, text("'Без категории'")).label("category"),
@@ -451,6 +456,30 @@ async def get_dashboard_summary(
             "value": float(row.expense),
         })
 
+    # 8. Top income counterparties (for filtering)
+    cp_result = await db.execute(
+        select(
+            Transaction.counterparty,
+            func.sum(Transaction.income).label("total"),
+            func.count().label("cnt"),
+        ).where(
+            Transaction.project_id == project_id,
+            Transaction.date >= date_from,
+            Transaction.date <= date_to,
+            Transaction.income > 0,
+            Transaction.is_cashflow2 == 1,
+        ).group_by(Transaction.counterparty).order_by(
+            func.sum(Transaction.income).desc()
+        ).limit(20)
+    )
+    income_counterparties = []
+    for row in cp_result:
+        income_counterparties.append({
+            "name": row.counterparty or "Без контрагента",
+            "total": float(row.total),
+            "count": row.cnt,
+        })
+
     return {
         "balance_rub": balance_rub,
         "balance_cny": balance_cny,
@@ -464,4 +493,8 @@ async def get_dashboard_summary(
         "accounts_count": len(balances),
         "daily_cashflow": daily_cashflow,
         "expense_by_category": expense_by_category,
+        "income_counterparties": income_counterparties,
+        "date_from": date_from.isoformat(),
+        "date_to": date_to.isoformat(),
     }
+

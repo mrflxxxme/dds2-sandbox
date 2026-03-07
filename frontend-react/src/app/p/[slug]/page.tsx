@@ -1,9 +1,9 @@
 'use client';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, exportToExcel } from '@/lib/utils';
 import {
-    XAxis, YAxis, CartesianGrid, Tooltip,
+    XAxis, YAxis, CartesianGrid, Tooltip, Legend,
     ResponsiveContainer, PieChart, Pie, Cell,
     AreaChart, Area,
 } from 'recharts';
@@ -29,7 +29,6 @@ type PeriodKey = 'month' | 'prev_month' | '7d' | '30d' | '90d' | 'all';
 function getPeriodDates(key: PeriodKey): { from: string; to: string; label: string } {
     const today = new Date();
     const fmt = (d: Date) => d.toISOString().slice(0, 10);
-
     switch (key) {
         case 'month': {
             const s = new Date(today.getFullYear(), today.getMonth(), 1);
@@ -87,6 +86,27 @@ function ChartTooltip({ active, payload, label }: any) {
     );
 }
 
+/* ─── Pie label renderer (outside, colored) ────────────────────── */
+function renderPieLabel({ cx, cy, midAngle, outerRadius, name, percent, index }: any) {
+    const RADIAN = Math.PI / 180;
+    const radius = outerRadius + 24;
+    const x = cx + radius * Math.cos(-midAngle * RADIAN);
+    const y = cy + radius * Math.sin(-midAngle * RADIAN);
+    if (percent < 0.02) return null; // skip tiny slices
+    return (
+        <text
+            x={x} y={y}
+            fill={PIE_COLORS[index % PIE_COLORS.length]}
+            textAnchor={x > cx ? 'start' : 'end'}
+            dominantBaseline="central"
+            fontSize={12}
+            fontWeight={600}
+        >
+            {name} {(percent * 100).toFixed(0)}%
+        </text>
+    );
+}
+
 /* ─── KPI Card ─────────────────────────────────────────────────── */
 function KpiCard({ icon, label, value, sub, color, borderColor }: {
     icon: string; label: string; value: string; sub?: string;
@@ -111,6 +131,7 @@ export default function DashboardPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [period, setPeriod] = useState<PeriodKey>('month');
+    const [selectedCp, setSelectedCp] = useState<string>('all');
 
     const { from: dateFrom, to: dateTo, label: periodLabel } = getPeriodDates(period);
 
@@ -127,6 +148,7 @@ export default function DashboardPage() {
             setData(summary);
             setBalance(bal);
             setFunnel(fun);
+            setSelectedCp('all');
         } catch (e: any) {
             setError(e.message || 'Ошибка загрузки');
         } finally {
@@ -138,12 +160,21 @@ export default function DashboardPage() {
 
     const allPeriods: { key: PeriodKey; label: string }[] = [
         { key: 'month', label: 'Месяц' },
-        { key: 'prev_month', label: 'Пред. месяц' },
+        { key: 'prev_month', label: 'Пред.' },
         { key: '7d', label: '7д' },
         { key: '30d', label: '30д' },
         { key: '90d', label: '90д' },
         { key: 'all', label: 'Всё' },
     ];
+
+    /* Filter daily data by counterparty (not available per-day, so we show/hide the income line) */
+    const incomeCounterparties = data?.income_counterparties || [];
+
+    /* If counterparty selected, we can't filter daily chart (it's aggregated), so just show info */
+    const selectedCpData = useMemo(() => {
+        if (selectedCp === 'all' || !incomeCounterparties.length) return null;
+        return incomeCounterparties.find((c: any) => c.name === selectedCp);
+    }, [selectedCp, incomeCounterparties]);
 
     if (loading) return (
         <div style={{ padding: 40, color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -170,12 +201,13 @@ export default function DashboardPage() {
 
     return (
         <div className="animate-in">
+            {/* ─── Header with period selector ───────────────── */}
             <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
                 <div>
                     <h1 className="page-title">Дашборд</h1>
-                    <p className="page-subtitle">Управленческая сводка • {periodLabel} ({dateFrom} — {dateTo})</p>
+                    <p className="page-subtitle">{periodLabel} ({dateFrom} — {dateTo})</p>
                 </div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                     {allPeriods.map(p => (
                         <button
                             key={p.key}
@@ -227,8 +259,8 @@ export default function DashboardPage() {
                 />
                 <KpiCard
                     icon="💳" label="Долг по оплатам"
-                    value={data.debt_rub > 0 ? `${formatNumber(data.debt_rub, 0)} ₽` : (data.debt_cny > 0 ? `${formatNumber(data.debt_cny, 0)} ¥` : '0 ₽')}
-                    sub={data.debt_rub > 0 && data.debt_cny > 0 ? `+ ¥ ${formatNumber(data.debt_cny, 0)}` : 'неоплаченные платежи'}
+                    value={data.debt_cny > 0 ? `${formatNumber(data.debt_cny, 0)} ¥` : (data.debt_rub > 0 ? `${formatNumber(data.debt_rub, 0)} ₽` : '0')}
+                    sub={data.debt_cny > 0 && data.debt_rub > 0 ? `+ ${formatNumber(data.debt_rub, 0)} ₽` : 'неоплаченные'}
                     color={data.debt_rub > 0 || data.debt_cny > 0 ? C.expense : C.income}
                     borderColor={C.expense}
                 />
@@ -262,11 +294,14 @@ export default function DashboardPage() {
                 gridTemplateColumns: dailyChart.length > 0 && expensePie.length > 0 ? '1.6fr 1fr' : '1fr',
                 gap: 20, marginTop: 20,
             }}>
+                {/* Area chart — daily income + expense */}
                 {dailyChart.length > 0 && (
                     <div className="glass-card" style={{ padding: '20px 16px' }}>
-                        <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 16, color: 'var(--color-text)' }}>
-                            📈 Доходы и расходы по дням
-                        </h3>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                            <h3 style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-text)' }}>
+                                📈 Доходы и расходы по дням
+                            </h3>
+                        </div>
                         <ResponsiveContainer width="100%" height={320}>
                             <AreaChart data={dailyChart} margin={{ left: 10, right: 10 }}>
                                 <defs>
@@ -283,6 +318,7 @@ export default function DashboardPage() {
                                 <XAxis dataKey="label" tick={{ fill: '#94a3b8', fontSize: 11 }} />
                                 <YAxis tickFormatter={fmtK} tick={{ fill: '#94a3b8', fontSize: 12 }} />
                                 <Tooltip content={<ChartTooltip />} />
+                                <Legend wrapperStyle={{ fontSize: 12, color: '#94a3b8' }} />
                                 <Area
                                     type="monotone" dataKey="income" name="Приход"
                                     stroke={C.income} fill="url(#gradIncome)" strokeWidth={2}
@@ -296,6 +332,7 @@ export default function DashboardPage() {
                     </div>
                 )}
 
+                {/* Expense Pie — with colored labels */}
                 {expensePie.length > 0 && (
                     <div className="glass-card" style={{ padding: '20px 16px' }}>
                         <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 16, color: 'var(--color-text)' }}>
@@ -308,24 +345,86 @@ export default function DashboardPage() {
                                     dataKey="value"
                                     nameKey="name"
                                     cx="50%" cy="50%"
-                                    innerRadius={55} outerRadius={110}
+                                    innerRadius={50} outerRadius={100}
                                     paddingAngle={2}
-                                    label={({ name, percent }) =>
-                                        `${name} ${(percent * 100).toFixed(0)}%`
-                                    }
-                                    labelLine={false}
-                                    style={{ fontSize: 11, fill: '#cbd5e1' }}
+                                    label={renderPieLabel}
+                                    labelLine={{ stroke: '#475569', strokeWidth: 1 }}
                                 >
                                     {expensePie.map((_: any, i: number) => (
                                         <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
                                     ))}
                                 </Pie>
-                                <Tooltip formatter={(v: number) => formatNumber(v) + ' ₽'} />
+                                <Tooltip
+                                    formatter={(v: number) => formatNumber(v) + ' ₽'}
+                                    contentStyle={{
+                                        background: 'rgba(15,17,26,0.95)',
+                                        border: '1px solid rgba(255,255,255,0.1)',
+                                        borderRadius: 8,
+                                        color: '#e2e8f0',
+                                    }}
+                                />
                             </PieChart>
                         </ResponsiveContainer>
                     </div>
                 )}
             </div>
+
+            {/* ─── Income counterparties ───────────────────────── */}
+            {incomeCounterparties.length > 0 && (
+                <div className="glass-card" style={{ marginTop: 20 }}>
+                    <div className="table-toolbar">
+                        <h3 style={{ fontSize: 16, fontWeight: 600 }}>Приходы по контрагентам</h3>
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                            <button
+                                className={`btn btn-sm ${selectedCp === 'all' ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setSelectedCp('all')}
+                                style={selectedCp === 'all' ? { background: 'var(--color-accent)', borderColor: 'var(--color-accent)' } : {}}
+                            >
+                                Все
+                            </button>
+                        </div>
+                    </div>
+                    <table className="data-table">
+                        <thead>
+                            <tr>
+                                <th>Контрагент</th>
+                                <th style={{ textAlign: 'right' }}>Сумма</th>
+                                <th style={{ textAlign: 'right' }}>Операций</th>
+                                <th style={{ textAlign: 'right' }}>% от общего</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {incomeCounterparties
+                                .filter((c: any) => selectedCp === 'all' || c.name === selectedCp)
+                                .map((c: any, i: number) => {
+                                    const pct = data.month_income > 0 ? (c.total / data.month_income * 100) : 0;
+                                    return (
+                                        <tr key={i}
+                                            onClick={() => setSelectedCp(selectedCp === c.name ? 'all' : c.name)}
+                                            style={{ cursor: 'pointer', background: selectedCp === c.name ? 'rgba(167,139,250,0.1)' : undefined }}
+                                        >
+                                            <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                {c.name}
+                                            </td>
+                                            <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--color-success)' }}>
+                                                {formatNumber(c.total)} ₽
+                                            </td>
+                                            <td style={{ textAlign: 'right' }}>{c.count}</td>
+                                            <td style={{ textAlign: 'right' }}>
+                                                <span className="badge badge-info">{pct.toFixed(1)}%</span>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                        </tbody>
+                    </table>
+                    {selectedCpData && (
+                        <div style={{ padding: '12px 16px', borderTop: '1px solid rgba(255,255,255,0.06)', fontSize: 13, color: '#94a3b8' }}>
+                            Выбран: <strong style={{ color: 'var(--color-text)' }}>{selectedCpData.name}</strong> — {formatNumber(selectedCpData.total)} ₽ за {selectedCpData.count} операций
+                        </div>
+                    )}
+                </div>
+            )}
 
             {/* ─── Balance table ───────────────────────────────── */}
             <div className="glass-card" style={{ marginTop: 20 }}>
@@ -333,7 +432,7 @@ export default function DashboardPage() {
                     <h3 style={{ fontSize: 16, fontWeight: 600 }}>Остатки на счетах</h3>
                     <button className="btn btn-secondary btn-sm"
                         onClick={() => exportToExcel(balance, 'balance')}>
-                        📥 Экспорт Excel
+                        📥 Excel
                     </button>
                 </div>
                 <table className="data-table">
