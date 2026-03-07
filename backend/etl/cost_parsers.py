@@ -51,12 +51,12 @@ def normalize_divandek(df: pd.DataFrame) -> pd.DataFrame:
         df["volume_m3"] = 0
 
     df["volume_m3"] = df["volume_m3"].fillna(0)
-    df["weight_kg"] = pd.to_numeric(df.get("weight_kg", 0), errors="coerce").fillna(0)
+    df["weight_kg"] = pd.to_numeric(df.get("weight_kg", pd.Series(dtype="float")), errors="coerce").fillna(0)
     df["area_m2"] = 0
-    df["barcode"] = pd.to_numeric(df.get("barcode", ""), errors="coerce").fillna(0).astype(int).astype(str)
+    df["barcode"] = pd.to_numeric(df.get("barcode", pd.Series(dtype="str")), errors="coerce").fillna(0).astype(int).astype(str)
     df["barcode"] = df["barcode"].str.replace(r'\.0$', '', regex=True).str.strip()
-    df["qty"] = pd.to_numeric(df.get("qty", 1), errors="coerce").fillna(1).astype(int)
-    df["price_cny"] = pd.to_numeric(df.get("price_cny", 0), errors="coerce").fillna(0)
+    df["qty"] = pd.to_numeric(df.get("qty", pd.Series(dtype="float")), errors="coerce").fillna(1).astype(int)
+    df["price_cny"] = pd.to_numeric(df.get("price_cny", pd.Series(dtype="float")), errors="coerce").fillna(0)
 
     return df[["barcode", "qty", "price_cny", "weight_kg", "area_m2", "volume_m3"]]
 
@@ -65,12 +65,26 @@ def normalize_carpet(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize ковры format (Chinese headers) Excel to standard columns."""
     import datetime as dt
 
-    col_map = {
-        "条码": "barcode", "数量": "qty", "单价": "price_cny",
-        "净重": "weight_kg_per_unit", "平方数": "area_m2",
-        "单箱体积": "volume_box_m3", "内包": "qty_per_box", "尺寸": "size",
-    }
-    df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
+    col_map = {}
+    for c in df.columns:
+        cl = str(c).strip()
+        if cl == "条码" and "barcode" not in col_map.values():
+            col_map[c] = "barcode"
+        elif cl in ("数量", "总数量"):
+            col_map[c] = "qty"
+        elif cl == "单价":
+            col_map[c] = "price_cny"
+        elif cl == "净重":
+            col_map[c] = "weight_kg_per_unit"
+        elif cl == "平方数":
+            col_map[c] = "area_m2"
+        elif cl == "单箱体积":
+            col_map[c] = "volume_box_m3"
+        elif cl == "内包":
+            col_map[c] = "qty_per_box"
+        elif cl == "尺寸":
+            col_map[c] = "size"
+    df = df.rename(columns=col_map)
 
     if "barcode" in df.columns:
         df = df[pd.to_numeric(df["barcode"], errors="coerce").notna()].copy()
@@ -92,9 +106,9 @@ def normalize_carpet(df: pd.DataFrame) -> pd.DataFrame:
                 return 0.0
         return series.apply(_fix_val)
 
-    df["barcode"] = pd.to_numeric(df.get("barcode", ""), errors="coerce").fillna(0).astype(int).astype(str)
+    df["barcode"] = pd.to_numeric(df.get("barcode", pd.Series(dtype="str")), errors="coerce").fillna(0).astype(int).astype(str)
     df["barcode"] = df["barcode"].str.replace(r'\.0$', '', regex=True).str.strip()
-    df["qty"] = pd.to_numeric(df.get("qty", 1), errors="coerce").fillna(1).astype(int)
+    df["qty"] = pd.to_numeric(df.get("qty", pd.Series(dtype="float")), errors="coerce").fillna(1).astype(int)
     df["price_cny"] = _fix_numeric(df.get("price_cny", pd.Series([0])))
     df["weight_kg"] = _fix_numeric(df.get("weight_kg_per_unit", pd.Series([0])))
 
@@ -142,14 +156,17 @@ def normalize_divandek_cn(df: pd.DataFrame) -> pd.DataFrame:
         df = df.reset_index(drop=True)
 
     # Barcode cleanup
-    df["barcode"] = pd.to_numeric(df.get("barcode", ""), errors="coerce").fillna(0).astype(int).astype(str)
+    df["barcode"] = pd.to_numeric(df.get("barcode", pd.Series(dtype="str")), errors="coerce").fillna(0).astype(int).astype(str)
     df["barcode"] = df["barcode"].str.replace(r'\.0$', '', regex=True).str.strip()
 
-    df["qty"] = pd.to_numeric(df.get("qty", 1), errors="coerce").fillna(1).astype(int)
-    df["price_cny"] = pd.to_numeric(df.get("price_cny", 0), errors="coerce").fillna(0)
+    df["qty"] = pd.to_numeric(df.get("qty", pd.Series(dtype="float")), errors="coerce").fillna(1).astype(int)
+    df["price_cny"] = pd.to_numeric(df.get("price_cny", pd.Series(dtype="float")), errors="coerce").fillna(0)
 
     # Weight per unit = total_net_weight / qty
-    total_weight = pd.to_numeric(df.get("total_net_weight", 0), errors="coerce").fillna(0)
+    if "total_net_weight" in df.columns:
+        total_weight = pd.to_numeric(df["total_net_weight"], errors="coerce").fillna(0)
+    else:
+        total_weight = pd.Series([0] * len(df))
     qty_safe = df["qty"].replace(0, 1)
     df["weight_kg"] = total_weight / qty_safe
 
