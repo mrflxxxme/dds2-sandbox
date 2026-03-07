@@ -25,7 +25,7 @@ router = APIRouter()
 async def upload_statement(
     file: UploadFile = File(...),
     source_type: str = Form(...),
-    account_no: str = Form(...),
+    account_no: str = Form(""),
     project_id: int = Depends(get_project_id),
     db: AsyncSession = Depends(get_db),
 ):
