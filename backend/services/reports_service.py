@@ -651,6 +651,8 @@ async def get_filtered_transactions(
     offset: int = 0,
 ) -> dict:
     """Return individual transactions filtered by cp_key/category for dashboard detail list."""
+    from backend.services import fx_service
+
     conditions = [
         Transaction.project_id == project_id,
         Transaction.date >= date_from,
@@ -677,13 +679,17 @@ async def get_filtered_transactions(
     )
     total = cnt_result.scalar() or 0
 
+    # Load FX rates for conversion
+    rates_map = await fx_service.get_rates_map(db, project_id, date_from, date_to)
+    fallback_rate = await fx_service.get_rate_for_date(db, project_id, date_to) if not rates_map else None
+
     # Rows
     result = await db.execute(
         select(
             Transaction.date, Transaction.counterparty,
             Transaction.income, Transaction.expense,
             Transaction.purpose, Transaction.cat_lvl1_2,
-            Transaction.account,
+            Transaction.account, Transaction.currency,
         ).where(*conditions)
         .order_by(Transaction.date.desc())
         .limit(limit).offset(offset)
@@ -692,11 +698,29 @@ async def get_filtered_transactions(
     items = []
     for r in result:
         dt = r.date
+        income_val = float(r.income or 0)
+        expense_val = float(r.expense or 0)
+        currency = r.currency or "RUB"
+
+        if currency == "CNY":
+            day_date = dt.date() if hasattr(dt, 'date') else dt
+            rate = fx_service.find_rate_for_date(rates_map, day_date) or fallback_rate or 1.0
+            income_rub = income_val * rate
+            expense_rub = expense_val * rate
+        else:
+            income_rub = income_val
+            expense_rub = expense_val
+            rate = None
+
         items.append({
             "date": dt.strftime("%Y-%m-%d") if dt else "",
             "counterparty": r.counterparty or "",
-            "income": float(r.income or 0),
-            "expense": float(r.expense or 0),
+            "income": income_rub,
+            "expense": expense_rub,
+            "income_original": income_val if currency != "RUB" else None,
+            "expense_original": expense_val if currency != "RUB" else None,
+            "currency": currency,
+            "fx_rate": rate,
             "purpose": r.purpose or "",
             "category": r.cat_lvl1_2 or "",
             "account": r.account or "",
@@ -711,11 +735,30 @@ async def get_category_counterparties(
     date_from: date,
     date_to: date,
 ) -> list[dict]:
-    """Return counterparties grouped within an expense category."""
+    """Return counterparties grouped within an expense category, with CNY→RUB conversion."""
+    from backend.services import fx_service
+
+    # Load FX rates for conversion
+    rates_map = await fx_service.get_rates_map(db, project_id, date_from, date_to)
+    fallback_rate = await fx_service.get_rate_for_date(db, project_id, date_to) if not rates_map else None
+
+    # Compute average rate for the period
+    if rates_map:
+        avg_rate = sum(rates_map.values()) / len(rates_map)
+    else:
+        avg_rate = fallback_rate or 1.0
+
+    cat_condition = (
+        or_(Transaction.cat_lvl1_2 == None, Transaction.cat_lvl1_2 == "")
+        if category == "Без категории"
+        else Transaction.cat_lvl1_2 == category
+    )
+
     result = await db.execute(
         select(
             func.coalesce(Transaction.cp_key, Transaction.counterparty).label("key"),
             Transaction.counterparty.label("name"),
+            Transaction.currency,
             func.sum(Transaction.expense).label("total"),
             func.count().label("cnt"),
         ).where(
@@ -724,18 +767,32 @@ async def get_category_counterparties(
             Transaction.date <= date_to,
             Transaction.expense > 0,
             Transaction.is_cashflow2 == 1,
-            or_(Transaction.cat_lvl1_2 == None, Transaction.cat_lvl1_2 == "") if category == "Без категории" else Transaction.cat_lvl1_2 == category,
+            cat_condition,
         ).group_by(
             func.coalesce(Transaction.cp_key, Transaction.counterparty),
             Transaction.counterparty,
+            Transaction.currency,
         ).order_by(func.sum(Transaction.expense).desc())
     )
-    items = []
+
+    # Merge counterparties across currencies
+    cp_map: dict = {}
     for r in result:
-        items.append({
-            "key": r.key or "",
-            "name": r.name or "Без контрагента",
-            "total": float(r.total or 0),
-            "count": r.cnt,
-        })
+        cp_key = r.key or ""
+        total = float(r.total or 0)
+        if r.currency == "CNY":
+            total *= avg_rate
+        if cp_key in cp_map:
+            cp_map[cp_key]["total"] += total
+            cp_map[cp_key]["count"] += r.cnt
+        else:
+            cp_map[cp_key] = {
+                "key": cp_key,
+                "name": r.name or "Без контрагента",
+                "total": total,
+                "count": r.cnt,
+            }
+
+    items = sorted(cp_map.values(), key=lambda x: x["total"], reverse=True)
     return items
+
