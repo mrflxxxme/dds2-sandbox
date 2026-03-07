@@ -303,6 +303,91 @@ def normalize_divandek_cn_ru(df: pd.DataFrame) -> pd.DataFrame:
     return df[["barcode", "qty", "price_cny", "weight_kg", "area_m2", "volume_m3"]]
 
 
+def normalize_textile(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize textile format (货号 = article as barcode).
+
+    Columns: 尺寸, 颜色, 货号, 箱数, 装箱数, 订单数量数量, 单位,
+    单价, 总价, 单件体积, 单件毛重, 单件净重, 长(CM), 宽(CM), 高(CM), 总体积
+    """
+    col_map = {}
+    for c in df.columns:
+        cl = str(c).strip()
+        if cl == "货号":
+            col_map[c] = "barcode"
+        elif cl in ("订单数量数量", "订单数量", "数量", "总数量"):
+            col_map[c] = "qty"
+        elif cl == "单价":
+            col_map[c] = "price_cny"
+        elif cl == "单件净重":
+            col_map[c] = "weight_per_unit"
+        elif cl == "单件毛重":
+            col_map[c] = "gross_weight_per_unit"
+        elif cl == "单件体积":
+            col_map[c] = "volume_m3"
+        elif cl == "总体积":
+            col_map[c] = "total_volume"
+        elif cl == "装箱数":
+            col_map[c] = "qty_per_box"
+        elif cl == "尺寸":
+            col_map[c] = "size"
+
+    df = df.rename(columns=col_map)
+
+    # Drop duplicate columns and unnamed
+    df = df.loc[:, ~df.columns.duplicated()]
+    df = df.drop(columns=[c for c in df.columns if str(c).startswith("Unnamed")], errors="ignore")
+
+    # Filter rows with valid barcode (货号)
+    if "barcode" in df.columns:
+        # 货号 can be alphanumeric — keep non-empty
+        df = df[df["barcode"].notna() & (df["barcode"].astype(str).str.strip() != "")].copy()
+        df = df.reset_index(drop=True)
+
+    df["barcode"] = df.get("barcode", pd.Series(dtype="str")).astype(str).str.strip()
+    # Remove rows with empty or nan barcode
+    df = df[~df["barcode"].isin(["", "nan", "None"])].copy()
+    df = df.reset_index(drop=True)
+
+    df["qty"] = pd.to_numeric(df.get("qty", pd.Series(dtype="float")), errors="coerce").fillna(1).astype(int)
+    df["price_cny"] = pd.to_numeric(df.get("price_cny", pd.Series(dtype="float")), errors="coerce").fillna(0)
+
+    # Weight per unit
+    if "weight_per_unit" in df.columns:
+        df["weight_kg"] = pd.to_numeric(df["weight_per_unit"], errors="coerce").fillna(0)
+    else:
+        df["weight_kg"] = 0
+
+    # Area from size (e.g. "180*200")
+    if "size" in df.columns:
+        def _area_from_size(s):
+            try:
+                s = str(s).strip()
+                if "*" in s:
+                    parts = [p.strip() for p in s.split("*") if p.strip()]
+                    nums = []
+                    for p in parts:
+                        try:
+                            nums.append(float(p))
+                        except ValueError:
+                            pass
+                    if len(nums) >= 2:
+                        return nums[0] / 100 * nums[1] / 100
+            except Exception:
+                pass
+            return 0.0
+        df["area_m2"] = df["size"].apply(_area_from_size)
+    else:
+        df["area_m2"] = 0
+
+    # Volume per unit
+    if "volume_m3" in df.columns:
+        df["volume_m3"] = pd.to_numeric(df["volume_m3"], errors="coerce").fillna(0)
+    else:
+        df["volume_m3"] = 0
+
+    return df[["barcode", "qty", "price_cny", "weight_kg", "area_m2", "volume_m3"]]
+
+
 def detect_and_normalize_excel(data: bytes) -> pd.DataFrame:
     """Detect Excel format by columns and normalize to standard schema."""
     import logging
@@ -337,5 +422,7 @@ def detect_and_normalize_excel(data: bytes) -> pd.DataFrame:
         return normalize_divandek_cn(df)
     elif "номер клиента" in cols_lower:
         return normalize_divandek_cn_ru(df)
+    elif "货号" in cols:
+        return normalize_textile(df)
     else:
         raise ValueError(f"Неизвестный формат файла. Колонки: {cols}")
