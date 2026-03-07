@@ -10,7 +10,15 @@ from fastapi import HTTPException
 # File signatures (magic bytes) per extension
 FILE_SIGNATURES: dict[str, list[bytes]] = {
     ".xlsx": [b"PK\x03\x04"],                    # ZIP (Office Open XML)
-    ".xls": [b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"],  # OLE2 Compound Document
+    ".xls": [
+        b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",  # OLE2 Compound Document (real .xls)
+        b"<html",                              # HTML table saved as .xls (bank exports)
+        b"<HTML",
+        b"<!DOCTYPE",
+        b"<?xml",                              # SpreadsheetML / XML saved as .xls
+        b"\x09\x08",                           # BIFF5/BIFF8 BOF record
+        b"PK\x03\x04",                         # Actually .xlsx renamed to .xls
+    ],
     ".pdf": [b"%PDF"],                            # PDF
     ".csv": [],                                   # Text format — no magic bytes
 }
@@ -43,8 +51,11 @@ def validate_file_content(data: bytes, filename: str) -> None:
         return
 
     # Check if file starts with any of the expected signatures
+    # Strip BOM and leading whitespace for text-like formats (.xls can be HTML)
+    header = data[:64]
+    header_stripped = header.lstrip(b"\xef\xbb\xbf\xff\xfe \t\r\n")
     for sig in signatures:
-        if data[:len(sig)] == sig:
+        if header[:len(sig)] == sig or header_stripped[:len(sig)] == sig:
             return
 
     # None of the signatures matched
