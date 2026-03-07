@@ -272,7 +272,21 @@ def normalize_divandek_cn_ru(df: pd.DataFrame) -> pd.DataFrame:
 def detect_and_normalize_excel(data: bytes) -> pd.DataFrame:
     """Detect Excel format by columns and normalize to standard schema."""
     df = pd.read_excel(io.BytesIO(data))
-    cols = [str(c).strip() for c in df.columns]
+
+    # Deduplicate column names — some supplier files have duplicate headers
+    seen = {}
+    new_cols = []
+    for c in df.columns:
+        name = str(c).strip()
+        if name in seen:
+            seen[name] += 1
+            new_cols.append(f"{name}_{seen[name]}")
+        else:
+            seen[name] = 0
+            new_cols.append(name)
+    df.columns = new_cols
+
+    cols = list(new_cols)
     cols_lower = [c.lower() for c in cols]
 
     if "штрихкод" in cols or "штрихкод" in cols_lower:
