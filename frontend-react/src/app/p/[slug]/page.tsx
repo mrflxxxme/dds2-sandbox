@@ -87,7 +87,7 @@ function InlineTxnRows({txnList,txnTotal,txnFlow,onFlowChange,filterLoading,colS
                                 <td style={{padding:'5px 8px',maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{t.counterparty||'—'}</td>
                                 <td style={{padding:'5px 8px',textAlign:'right',fontWeight:600,color:t.income>0?C.income:'#475569'}}>{t.income>0?formatNumber(t.income):'—'}</td>
                                 <td style={{padding:'5px 8px',textAlign:'right',fontWeight:600,color:t.expense>0?C.expense:'#475569'}}>{t.expense>0?formatNumber(t.expense):'—'}</td>
-                                <td style={{padding:'5px 8px',maxWidth:220,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',color:'#94a3b8',fontSize:11}}>{t.purpose||'—'}</td>
+                                <td style={{padding:'5px 8px',color:'#94a3b8',fontSize:11}}>{t.purpose||'—'}</td>
                             </tr>
                         ))}</tbody>
                     </table>

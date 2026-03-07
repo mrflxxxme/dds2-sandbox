@@ -613,7 +613,7 @@ async def get_filtered_transactions(
             "counterparty": r.counterparty or "",
             "income": float(r.income or 0),
             "expense": float(r.expense or 0),
-            "purpose": (r.purpose or "")[:120],
+            "purpose": r.purpose or "",
             "category": r.cat_lvl1_2 or "",
             "account": r.account or "",
         })
