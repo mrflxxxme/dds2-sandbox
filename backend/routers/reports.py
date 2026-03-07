@@ -118,3 +118,19 @@ async def get_dashboard_summary(
 ):
     """All dashboard KPIs in a single call."""
     return await reports_service.get_dashboard_summary(db, project.id, date_from, date_to)
+
+
+@router.get("/dashboard_daily_filtered")
+async def get_dashboard_daily_filtered(
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    cp_key: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Daily cashflow filtered by counterparty or expense category."""
+    from datetime import date as date_cls
+    df = date_from or date_cls(2020, 1, 1)
+    dt = date_to or date_cls.today()
+    return await reports_service.get_daily_filtered(db, project.id, df, dt, cp_key=cp_key, category=category)

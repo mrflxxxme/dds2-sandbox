@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { api } from '@/lib/api';
-import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
+import { formatNumber, exportToExcel } from '@/lib/utils';
 import {
     XAxis, YAxis, CartesianGrid, Tooltip, Legend,
     ResponsiveContainer, PieChart, Pie, Cell,
@@ -34,9 +34,8 @@ function getPeriodDates(key: PeriodKey, customFrom?: string, customTo?: string):
     const todayStr = `${yyyy}-${mm}-${dd}`;
 
     switch (key) {
-        case 'month': {
+        case 'month':
             return { from: `${yyyy}-${mm}-01`, to: todayStr, label: 'Текущий месяц' };
-        }
         case 'prev_month': {
             const prev = new Date(yyyy, today.getMonth() - 1, 1);
             const prevEnd = new Date(yyyy, today.getMonth(), 0);
@@ -101,7 +100,7 @@ function ChartTooltip({ active, payload, label }: any) {
     );
 }
 
-/* ─── Pie label renderer (shortened text) ──────────────────────── */
+/* ─── Pie label (shorter) ──────────────────────────────────────── */
 function renderPieLabel({ cx, cy, midAngle, outerRadius, name, percent, index }: any) {
     const RADIAN = Math.PI / 180;
     const radius = outerRadius + 20;
@@ -109,13 +108,10 @@ function renderPieLabel({ cx, cy, midAngle, outerRadius, name, percent, index }:
     const y = cy + radius * Math.sin(-midAngle * RADIAN);
     if (percent < 0.03) return null;
     return (
-        <text
-            x={x} y={y}
+        <text x={x} y={y}
             fill={PIE_COLORS[index % PIE_COLORS.length]}
             textAnchor={x > cx ? 'start' : 'end'}
-            dominantBaseline="central"
-            fontSize={11}
-            fontWeight={600}
+            dominantBaseline="central" fontSize={11} fontWeight={600}
         >
             {truncate(name, 12)} {(percent * 100).toFixed(0)}%
         </text>
@@ -148,11 +144,16 @@ export default function DashboardPage() {
     const [period, setPeriod] = useState<PeriodKey>('month');
     const [customFrom, setCustomFrom] = useState('');
     const [customTo, setCustomTo] = useState('');
+
+    /* ─── Filter state ──────────────────────────────────────────── */
     const [selectedCp, setSelectedCp] = useState<string>('all');
     const [selectedExpCat, setSelectedExpCat] = useState<string>('all');
+    const [filteredDaily, setFilteredDaily] = useState<any[] | null>(null);
+    const [filterLoading, setFilterLoading] = useState(false);
 
     const { from: dateFrom, to: dateTo, label: periodLabel } = getPeriodDates(period, customFrom, customTo);
 
+    /* ─── Load main data ────────────────────────────────────────── */
     const loadData = useCallback(async () => {
         try {
             setLoading(true);
@@ -168,6 +169,7 @@ export default function DashboardPage() {
             setFunnel(fun);
             setSelectedCp('all');
             setSelectedExpCat('all');
+            setFilteredDaily(null);
         } catch (e: any) {
             setError(e.message || 'Ошибка загрузки');
         } finally {
@@ -176,6 +178,55 @@ export default function DashboardPage() {
     }, [period, customFrom, customTo]);
 
     useEffect(() => { loadData(); }, [loadData]);
+
+    /* ─── Load filtered daily data on selection ─────────────────── */
+    const loadFilteredDaily = useCallback(async (cpKey?: string, category?: string) => {
+        if (!cpKey && !category) {
+            setFilteredDaily(null);
+            return;
+        }
+        try {
+            setFilterLoading(true);
+            const { from, to } = getPeriodDates(period, customFrom, customTo);
+            const result = await api.getDailyFiltered(from, to, cpKey, category);
+            setFilteredDaily(result);
+        } catch {
+            setFilteredDaily(null);
+        } finally {
+            setFilterLoading(false);
+        }
+    }, [period, customFrom, customTo]);
+
+    /* ─── Handle counterparty click ─────────────────────────────── */
+    const handleCpClick = useCallback((cp: any) => {
+        if (selectedCp === cp.name) {
+            setSelectedCp('all');
+            setFilteredDaily(null);
+        } else {
+            setSelectedCp(cp.name);
+            setSelectedExpCat('all');
+            loadFilteredDaily(cp.key, undefined);
+        }
+    }, [selectedCp, loadFilteredDaily]);
+
+    /* ─── Handle expense category click ─────────────────────────── */
+    const handleExpClick = useCallback((catName: string) => {
+        if (selectedExpCat === catName) {
+            setSelectedExpCat('all');
+            setFilteredDaily(null);
+        } else {
+            setSelectedExpCat(catName);
+            setSelectedCp('all');
+            loadFilteredDaily(undefined, catName);
+        }
+    }, [selectedExpCat, loadFilteredDaily]);
+
+    /* ─── Reset all filters ─────────────────────────────────────── */
+    const resetFilters = useCallback(() => {
+        setSelectedCp('all');
+        setSelectedExpCat('all');
+        setFilteredDaily(null);
+    }, []);
 
     const allPeriods: { key: PeriodKey; label: string }[] = [
         { key: 'month', label: 'Месяц' },
@@ -189,37 +240,28 @@ export default function DashboardPage() {
     const incomeCounterparties = data?.income_counterparties || [];
     const expensePie: any[] = data?.expense_by_category || [];
 
-    /* ─── Daily chart data — filter by selected cp / expense cat ── */
+    /* ─── Chart data — use filtered if available ─────────────────── */
     const dailyChart = useMemo(() => {
-        const raw = data?.daily_cashflow || [];
+        const raw = filteredDaily || data?.daily_cashflow || [];
         return raw.map((d: any) => ({
             ...d,
             label: shortDay(d.date),
         }));
-    }, [data]);
+    }, [data, filteredDaily]);
 
-    /* ─── Selected cp info ───────────────────────────────────────── */
-    const selectedCpData = useMemo(() => {
-        if (selectedCp === 'all' || !incomeCounterparties.length) return null;
-        return incomeCounterparties.find((c: any) => c.name === selectedCp);
-    }, [selectedCp, incomeCounterparties]);
-
-    /* ─── Selected expense category info ──────────────────────── */
-    const selectedExpData = useMemo(() => {
-        if (selectedExpCat === 'all' || !expensePie.length) return null;
-        return expensePie.find((c: any) => c.name === selectedExpCat);
-    }, [selectedExpCat, expensePie]);
+    const hasFilter = selectedCp !== 'all' || selectedExpCat !== 'all';
+    const filterLabel = selectedCp !== 'all'
+        ? truncate(selectedCp, 20)
+        : selectedExpCat !== 'all' ? truncate(selectedExpCat, 20) : '';
 
     if (loading) return (
         <div style={{ padding: 40, color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: 12 }}>
             <div className="spinner" /> Загрузка дашборда...
         </div>
     );
-
     if (error) return (
         <div style={{ padding: 40, color: 'var(--color-danger)' }}>❌ {error}</div>
     );
-
     if (!data) return null;
 
     const netCashflow = data.month_income - data.month_expense;
@@ -228,7 +270,7 @@ export default function DashboardPage() {
 
     return (
         <div className="animate-in">
-            {/* ─── Header with period selector ───────────────── */}
+            {/* ─── Header with period selector + date picker ────── */}
             <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
                 <div>
                     <h1 className="page-title">Дашборд</h1>
@@ -236,124 +278,78 @@ export default function DashboardPage() {
                 </div>
                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
                     {allPeriods.map(p => (
-                        <button
-                            key={p.key}
+                        <button key={p.key}
                             className={`btn btn-sm ${period === p.key ? 'btn-primary' : 'btn-secondary'}`}
                             onClick={() => setPeriod(p.key)}
                             style={period === p.key ? { background: 'var(--color-accent)', borderColor: 'var(--color-accent)' } : {}}
-                        >
-                            {p.label}
-                        </button>
+                        >{p.label}</button>
                     ))}
                     <span style={{ color: 'var(--color-text-muted)', fontSize: 12, margin: '0 4px' }}>|</span>
-                    <input
-                        type="date"
+                    <input type="date"
                         value={period === 'custom' ? customFrom : dateFrom}
                         onChange={e => { setCustomFrom(e.target.value); setPeriod('custom'); }}
-                        style={{
-                            background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)',
-                            borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 12,
-                        }}
+                        style={{ background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 12 }}
                     />
                     <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>—</span>
-                    <input
-                        type="date"
+                    <input type="date"
                         value={period === 'custom' ? customTo : dateTo}
                         onChange={e => { setCustomTo(e.target.value); setPeriod('custom'); }}
-                        style={{
-                            background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)',
-                            borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 12,
-                        }}
+                        style={{ background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 12 }}
                     />
                 </div>
             </div>
 
             {/* ─── Row 1: Financial Health ────────────────────── */}
             <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
-                <KpiCard
-                    icon="💰" label="Баланс RUB"
-                    value={`${formatNumber(data.balance_rub)} ₽`}
-                    color={C.income} borderColor={C.income}
-                />
-                <KpiCard
-                    icon="💴" label="Баланс CNY"
-                    value={`${formatNumber(data.balance_cny)} ¥`}
-                    color={C.warning} borderColor={C.warning}
-                />
+                <KpiCard icon="💰" label="Баланс RUB" value={`${formatNumber(data.balance_rub)} ₽`} color={C.income} borderColor={C.income} />
+                <KpiCard icon="💴" label="Баланс CNY" value={`${formatNumber(data.balance_cny)} ¥`} color={C.warning} borderColor={C.warning} />
                 <KpiCard
                     icon={netCashflow >= 0 ? '📈' : '📉'} label="Cashflow"
                     value={`${netCashflow >= 0 ? '+' : ''}${formatNumber(netCashflow)} ₽`}
                     sub={`Приход ${fmtK(data.month_income)} / Расход ${fmtK(data.month_expense)}`}
-                    color={netCashflow >= 0 ? C.income : C.expense}
-                    borderColor={netCashflow >= 0 ? C.income : C.expense}
+                    color={netCashflow >= 0 ? C.income : C.expense} borderColor={netCashflow >= 0 ? C.income : C.expense}
                 />
                 <KpiCard
                     icon="📊" label="ДРР (реклама)"
                     value={funnel ? `${funnelDRR.toFixed(1)}%` : '—'}
                     sub={funnel ? `${fmtK(funnel.adv_sum)} ₽ / ${fmtK(funnel.orders_sum_rub)} ₽` : ''}
-                    color={funnelDRR > 15 ? C.expense : C.income}
-                    borderColor={C.accent}
+                    color={funnelDRR > 15 ? C.expense : C.income} borderColor={C.accent}
                 />
             </div>
 
             {/* ─── Row 2: Operational metrics ─────────────────── */}
             <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', marginTop: 0 }}>
-                <KpiCard
-                    icon="📦" label="Заказы"
-                    value={`${data.orders_count}`}
-                    sub={`¥ ${formatNumber(data.orders_total_cny, 0)}`}
-                    color={C.info} borderColor={C.info}
-                />
+                <KpiCard icon="📦" label="Заказы" value={`${data.orders_count}`} sub={`¥ ${formatNumber(data.orders_total_cny, 0)}`} color={C.info} borderColor={C.info} />
                 <KpiCard
                     icon="💳" label="Долг по оплатам"
                     value={data.debt_cny > 0 ? `${formatNumber(data.debt_cny, 0)} ¥` : (data.debt_rub > 0 ? `${formatNumber(data.debt_rub, 0)} ₽` : '0')}
                     sub={data.debt_cny > 0 && data.debt_rub > 0 ? `+ ${formatNumber(data.debt_rub, 0)} ₽` : 'неоплаченные'}
-                    color={data.debt_rub > 0 || data.debt_cny > 0 ? C.expense : C.income}
-                    borderColor={C.expense}
+                    color={data.debt_rub > 0 || data.debt_cny > 0 ? C.expense : C.income} borderColor={C.expense}
                 />
                 <KpiCard
-                    icon="📥" label="INBOX"
-                    value={`${data.inbox_count}`}
-                    sub="нераспределённых"
-                    color={data.inbox_count > 0 ? C.warning : C.income}
-                    borderColor={data.inbox_count > 0 ? C.warning : C.income}
+                    icon="📥" label="INBOX" value={`${data.inbox_count}`} sub="нераспределённых"
+                    color={data.inbox_count > 0 ? C.warning : C.income} borderColor={data.inbox_count > 0 ? C.warning : C.income}
                 />
                 {funnel ? (
-                    <KpiCard
-                        icon="🛒" label="Заказы WB"
-                        value={funnel.orders_count?.toLocaleString('ru-RU') || '—'}
-                        sub={`${formatNumber(funnel.orders_sum_rub, 0)} ₽`}
-                        color={C.info} borderColor={C.info}
-                    />
+                    <KpiCard icon="🛒" label="Заказы WB" value={funnel.orders_count?.toLocaleString('ru-RU') || '—'} sub={`${formatNumber(funnel.orders_sum_rub, 0)} ₽`} color={C.info} borderColor={C.info} />
                 ) : (
-                    <KpiCard
-                        icon="📊" label="Счета"
-                        value={`${data.accounts_count}`}
-                        sub="активных"
-                        color={C.accent} borderColor={C.accent}
-                    />
+                    <KpiCard icon="📊" label="Счета" value={`${data.accounts_count}`} sub="активных" color={C.accent} borderColor={C.accent} />
                 )}
             </div>
 
             {/* ─── Charts row ─────────────────────────────────── */}
-            <div style={{
-                display: 'grid',
-                gridTemplateColumns: dailyChart.length > 0 && expensePie.length > 0 ? '1.6fr 1fr' : '1fr',
-                gap: 20, marginTop: 20,
-            }}>
-                {/* Area chart — daily income + expense */}
+            <div style={{ display: 'grid', gridTemplateColumns: dailyChart.length > 0 && expensePie.length > 0 ? '1.6fr 1fr' : '1fr', gap: 20, marginTop: 20 }}>
+                {/* Area chart — daily income + expense (filtered) */}
                 {dailyChart.length > 0 && (
                     <div className="glass-card" style={{ padding: '20px 16px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                             <h3 style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-text)' }}>
                                 📈 Доходы и расходы по дням
-                                {selectedCp !== 'all' && <span style={{ fontSize: 12, color: C.accent, marginLeft: 8 }}>({truncate(selectedCp, 20)})</span>}
-                                {selectedExpCat !== 'all' && <span style={{ fontSize: 12, color: C.expense, marginLeft: 8 }}>({truncate(selectedExpCat, 20)})</span>}
+                                {hasFilter && <span style={{ fontSize: 12, color: C.accent, marginLeft: 8 }}>— {filterLabel}</span>}
+                                {filterLoading && <span style={{ fontSize: 12, color: C.muted, marginLeft: 8 }}>⏳</span>}
                             </h3>
-                            {(selectedCp !== 'all' || selectedExpCat !== 'all') && (
-                                <button className="btn btn-sm btn-secondary"
-                                    onClick={() => { setSelectedCp('all'); setSelectedExpCat('all'); }}
-                                >Сбросить</button>
+                            {hasFilter && (
+                                <button className="btn btn-sm btn-secondary" onClick={resetFilters}>Сбросить</button>
                             )}
                         </div>
                         <ResponsiveContainer width="100%" height={320}>
@@ -373,49 +369,33 @@ export default function DashboardPage() {
                                 <YAxis tickFormatter={fmtK} tick={{ fill: '#94a3b8', fontSize: 12 }} />
                                 <Tooltip content={<ChartTooltip />} />
                                 <Legend wrapperStyle={{ fontSize: 12, color: '#94a3b8' }} />
-                                <Area
-                                    type="monotone" dataKey="income" name="Приход"
-                                    stroke={C.income} fill="url(#gradIncome)" strokeWidth={2}
-                                />
-                                <Area
-                                    type="monotone" dataKey="expense" name="Расход"
-                                    stroke={C.expense} fill="url(#gradExpense)" strokeWidth={2}
-                                />
+                                <Area type="monotone" dataKey="income" name="Приход" stroke={C.income} fill="url(#gradIncome)" strokeWidth={2} />
+                                <Area type="monotone" dataKey="expense" name="Расход" stroke={C.expense} fill="url(#gradExpense)" strokeWidth={2} />
                             </AreaChart>
                         </ResponsiveContainer>
                     </div>
                 )}
 
-                {/* Expense Pie — clickable segments */}
+                {/* Expense Pie — clickable */}
                 {expensePie.length > 0 && (
                     <div className="glass-card" style={{ padding: '20px 16px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                            <h3 style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-text)' }}>
-                                🥧 Структура расходов
-                            </h3>
+                            <h3 style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-text)' }}>🥧 Структура расходов</h3>
                             {selectedExpCat !== 'all' && (
-                                <button className="btn btn-sm btn-secondary" onClick={() => setSelectedExpCat('all')}>Все</button>
+                                <button className="btn btn-sm btn-secondary" onClick={() => { setSelectedExpCat('all'); setFilteredDaily(null); }}>Все</button>
                             )}
                         </div>
                         <ResponsiveContainer width="100%" height={320}>
                             <PieChart>
-                                <Pie
-                                    data={expensePie}
-                                    dataKey="value"
-                                    nameKey="name"
-                                    cx="50%" cy="50%"
-                                    innerRadius={50} outerRadius={90}
-                                    paddingAngle={2}
+                                <Pie data={expensePie} dataKey="value" nameKey="name"
+                                    cx="50%" cy="50%" innerRadius={50} outerRadius={90} paddingAngle={2}
                                     label={renderPieLabel}
                                     labelLine={{ stroke: '#475569', strokeWidth: 1 }}
-                                    onClick={(entry: any) => setSelectedExpCat(
-                                        selectedExpCat === entry.name ? 'all' : entry.name
-                                    )}
+                                    onClick={(entry: any) => handleExpClick(entry.name)}
                                     style={{ cursor: 'pointer' }}
                                 >
                                     {expensePie.map((_: any, i: number) => (
-                                        <Cell
-                                            key={i}
+                                        <Cell key={i}
                                             fill={PIE_COLORS[i % PIE_COLORS.length]}
                                             opacity={selectedExpCat === 'all' || selectedExpCat === expensePie[i]?.name ? 1 : 0.3}
                                             stroke={selectedExpCat === expensePie[i]?.name ? '#fff' : 'none'}
@@ -423,31 +403,21 @@ export default function DashboardPage() {
                                         />
                                     ))}
                                 </Pie>
-                                <Tooltip
-                                    formatter={(v: number) => formatNumber(v) + ' ₽'}
-                                    contentStyle={{
-                                        background: 'rgba(15,17,26,0.95)',
-                                        border: '1px solid rgba(255,255,255,0.1)',
-                                        borderRadius: 8,
-                                        color: '#e2e8f0',
-                                    }}
+                                <Tooltip formatter={(v: number) => formatNumber(v) + ' ₽'}
+                                    contentStyle={{ background: 'rgba(15,17,26,0.95)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, color: '#e2e8f0' }}
                                 />
                             </PieChart>
                         </ResponsiveContainer>
-                        {/* Selected expense category detail */}
-                        {selectedExpData && (
-                            <div style={{
-                                padding: '12px 16px', borderTop: '1px solid rgba(255,255,255,0.06)',
-                                fontSize: 13, color: '#94a3b8',
-                            }}>
-                                Выбрано: <strong style={{ color: 'var(--color-text)' }}>{selectedExpData.name}</strong> — {formatNumber(selectedExpData.value)} ₽
-                                {data.month_expense > 0 && (
-                                    <span style={{ marginLeft: 8 }}>
-                                        ({(selectedExpData.value / data.month_expense * 100).toFixed(1)}%)
-                                    </span>
-                                )}
-                            </div>
-                        )}
+                        {selectedExpCat !== 'all' && (() => {
+                            const sel = expensePie.find((c: any) => c.name === selectedExpCat);
+                            if (!sel) return null;
+                            return (
+                                <div style={{ padding: '12px 16px', borderTop: '1px solid rgba(255,255,255,0.06)', fontSize: 13, color: '#94a3b8' }}>
+                                    Выбрано: <strong style={{ color: 'var(--color-text)' }}>{sel.name}</strong> — {formatNumber(sel.value)} ₽
+                                    {data.month_expense > 0 && <span style={{ marginLeft: 8 }}>({(sel.value / data.month_expense * 100).toFixed(1)}%)</span>}
+                                </div>
+                            );
+                        })()}
                     </div>
                 )}
             </div>
@@ -460,11 +430,9 @@ export default function DashboardPage() {
                         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                             <button
                                 className={`btn btn-sm ${selectedCp === 'all' ? 'btn-primary' : 'btn-secondary'}`}
-                                onClick={() => setSelectedCp('all')}
+                                onClick={resetFilters}
                                 style={selectedCp === 'all' ? { background: 'var(--color-accent)', borderColor: 'var(--color-accent)' } : {}}
-                            >
-                                Все
-                            </button>
+                            >Все</button>
                         </div>
                     </div>
                     <table className="data-table">
@@ -482,33 +450,30 @@ export default function DashboardPage() {
                                 const isSelected = selectedCp === c.name;
                                 return (
                                     <tr key={i}
-                                        onClick={() => setSelectedCp(isSelected ? 'all' : c.name)}
-                                        style={{
-                                            cursor: 'pointer',
-                                            background: isSelected ? 'rgba(167,139,250,0.1)' : undefined,
-                                        }}
+                                        onClick={() => handleCpClick(c)}
+                                        style={{ cursor: 'pointer', background: isSelected ? 'rgba(167,139,250,0.1)' : undefined }}
                                     >
                                         <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                             {isSelected && <span style={{ marginRight: 6 }}>▶</span>}
                                             {c.name}
                                         </td>
-                                        <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--color-success)' }}>
-                                            {formatNumber(c.total)} ₽
-                                        </td>
+                                        <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--color-success)' }}>{formatNumber(c.total)} ₽</td>
                                         <td style={{ textAlign: 'right' }}>{c.count}</td>
-                                        <td style={{ textAlign: 'right' }}>
-                                            <span className="badge badge-info">{pct.toFixed(1)}%</span>
-                                        </td>
+                                        <td style={{ textAlign: 'right' }}><span className="badge badge-info">{pct.toFixed(1)}%</span></td>
                                     </tr>
                                 );
                             })}
                         </tbody>
                     </table>
-                    {selectedCpData && (
-                        <div style={{ padding: '12px 16px', borderTop: '1px solid rgba(255,255,255,0.06)', fontSize: 13, color: '#94a3b8' }}>
-                            Выбран: <strong style={{ color: 'var(--color-text)' }}>{selectedCpData.name}</strong> — {formatNumber(selectedCpData.total)} ₽ за {selectedCpData.count} операций
-                        </div>
-                    )}
+                    {selectedCp !== 'all' && (() => {
+                        const sel = incomeCounterparties.find((c: any) => c.name === selectedCp);
+                        if (!sel) return null;
+                        return (
+                            <div style={{ padding: '12px 16px', borderTop: '1px solid rgba(255,255,255,0.06)', fontSize: 13, color: '#94a3b8' }}>
+                                Выбран: <strong style={{ color: 'var(--color-text)' }}>{sel.name}</strong> — {formatNumber(sel.total)} ₽ за {sel.count} операций
+                            </div>
+                        );
+                    })()}
                 </div>
             )}
 
@@ -516,10 +481,7 @@ export default function DashboardPage() {
             <div className="glass-card" style={{ marginTop: 20 }}>
                 <div className="table-toolbar">
                     <h3 style={{ fontSize: 16, fontWeight: 600 }}>Остатки на счетах</h3>
-                    <button className="btn btn-secondary btn-sm"
-                        onClick={() => exportToExcel(balance, 'balance')}>
-                        📥 Excel
-                    </button>
+                    <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(balance, 'balance')}>📥 Excel</button>
                 </div>
                 <table className="data-table">
                     <thead>
@@ -536,10 +498,7 @@ export default function DashboardPage() {
                                 <td style={{ fontFamily: 'monospace', fontSize: 13 }}>{b.account}</td>
                                 <td>{b.account_name || '—'}</td>
                                 <td><span className="badge badge-info">{b.currency}</span></td>
-                                <td style={{
-                                    textAlign: 'right', fontWeight: 600,
-                                    color: b.balance >= 0 ? 'var(--color-success)' : 'var(--color-danger)'
-                                }}>
+                                <td style={{ textAlign: 'right', fontWeight: 600, color: b.balance >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>
                                     {formatNumber(b.balance)} {b.currency === 'RUB' ? '₽' : '¥'}
                                 </td>
                             </tr>

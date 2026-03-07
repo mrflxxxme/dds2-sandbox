@@ -267,6 +267,17 @@ class ApiClient {
         }>('GET', `/api/v1/reports/dashboard_summary?${q.toString()}`);
     }
 
+    getDailyFiltered(dateFrom: string, dateTo: string, cpKey?: string, category?: string) {
+        const q = new URLSearchParams();
+        q.set('date_from', dateFrom);
+        q.set('date_to', dateTo);
+        if (cpKey) q.set('cp_key', cpKey);
+        if (category) q.set('category', category);
+        return this.request<Array<{ date: string; income: number; expense: number }>>(
+            'GET', `/api/v1/reports/dashboard_daily_filtered?${q.toString()}`
+        );
+    }
+
     getDDS(params: { start?: string; end?: string } = {}) {
         const q = new URLSearchParams();
         if (params.start) q.set('date_from', params.start);

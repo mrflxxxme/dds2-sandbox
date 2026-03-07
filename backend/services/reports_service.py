@@ -487,6 +487,7 @@ async def get_dashboard_summary(
     income_counterparties = []
     for row in cp_result:
         income_counterparties.append({
+            "key": row.key or "",
             "name": row.name or "Без контрагента",
             "total": float(row.total),
             "count": row.cnt,
@@ -510,3 +511,46 @@ async def get_dashboard_summary(
         "date_to": date_to.isoformat(),
     }
 
+
+async def get_daily_filtered(
+    db: AsyncSession,
+    project_id: int,
+    date_from: date,
+    date_to: date,
+    cp_key: str | None = None,
+    category: str | None = None,
+) -> list[dict]:
+    """Daily income/expense filtered by counterparty (cp_key) or expense category."""
+    conditions = [
+        Transaction.project_id == project_id,
+        Transaction.date >= date_from,
+        Transaction.date <= date_to,
+        Transaction.is_cashflow2 == 1,
+    ]
+    if cp_key:
+        conditions.append(
+            func.coalesce(Transaction.cp_key, Transaction.counterparty) == cp_key
+        )
+    if category:
+        conditions.append(Transaction.cat_lvl1_2 == category)
+
+    result = await db.execute(
+        select(
+            func.date(Transaction.date).label("day"),
+            func.coalesce(func.sum(Transaction.income), 0).label("income"),
+            func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
+        ).where(*conditions)
+        .group_by(func.date(Transaction.date))
+        .order_by(func.date(Transaction.date))
+    )
+
+    rows = []
+    for row in result:
+        day_val = row.day
+        day_str = day_val.isoformat() if hasattr(day_val, 'isoformat') else str(day_val)
+        rows.append({
+            "date": day_str,
+            "income": float(row.income),
+            "expense": float(row.expense),
+        })
+    return rows
