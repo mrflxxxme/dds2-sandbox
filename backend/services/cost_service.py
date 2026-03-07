@@ -658,7 +658,21 @@ async def generate_payment_plan(
     pay_date_customs = arrival_date
 
     # 5. Create/update Order in planning module
-    order_no_int = int(order_no)
+    # order_no can be '41/2' — encode to integer for planning.orders table
+    def _order_no_to_int(s: str) -> int:
+        s = s.strip()
+        if '/' in s:
+            parts = s.split('/')
+            try:
+                return int(parts[0]) * 100 + int(parts[1])
+            except (ValueError, IndexError):
+                pass
+        try:
+            return int(s)
+        except ValueError:
+            # Fallback: use hash for non-numeric order numbers
+            return abs(hash(s)) % (10**9)
+    order_no_int = _order_no_to_int(order_no)
     ord_result = await db.execute(
         select(Order).where(Order.order_no == order_no_int, Order.project_id == project_id)
     )
