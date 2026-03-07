@@ -486,7 +486,13 @@ function PlanPayments() {
     const filtered = filterDir ? data.filter(r => (r.direction || '').toUpperCase() === filterDir.toUpperCase()) : data;
 
     const totalPlan = filtered.reduce((s, r) => s + parseFloat(r.amount || 0), 0);
-    const totalPaidAmt = filtered.reduce((s, r) => s + parseFloat(r.paid_amount || 0), 0);
+    // For fact: if manually marked paid but no paid_amount, treat plan amount as fact
+    const totalPaidAmt = filtered.reduce((s, r) => {
+        const pa = parseFloat(r.paid_amount || 0);
+        if (pa > 0) return s + pa;
+        if (r.is_paid) return s + parseFloat(r.amount || 0);
+        return s;
+    }, 0);
     const totalPlanRub = filtered.reduce((s, r) => s + parseFloat(r.amount_rub || 0), 0);
     const totalPaidRub = filtered.reduce((s, r) => s + parseFloat(r.paid_rub || 0), 0);
     const totalRemain = totalPlan - totalPaidAmt;
