@@ -106,11 +106,20 @@ async def get_unassigned_grouped(
     db: AsyncSession,
     project_id: int,
 ) -> list[dict]:
-    """Group uncategorized transactions by counterparty."""
+    """Group uncategorized transactions by counterparty, converting CNY→RUB."""
+    from backend.services import fx_service
+    from datetime import date as date_cls
+
+    # Load FX rates
+    rates_map = await fx_service.get_rates_map(db, project_id, date_cls(2020, 1, 1), date_cls.today())
+    fallback_rate = await fx_service.get_rate_for_date(db, project_id, date_cls.today()) if not rates_map else None
+    avg_rate = (sum(rates_map.values()) / len(rates_map)) if rates_map else (fallback_rate or 1.0)
+
     q = (
         select(
             Transaction.cp_key,
             Transaction.counterparty,
+            Transaction.currency,
             func.count().label("cnt"),
             func.sum(Transaction.income).label("total_income"),
             func.sum(Transaction.expense).label("total_expense"),
@@ -125,20 +134,34 @@ async def get_unassigned_grouped(
                 Transaction.cat_lvl1_2 == "UNASSIGNED",
             ),
         )
-        .group_by(Transaction.cp_key, Transaction.counterparty)
+        .group_by(Transaction.cp_key, Transaction.counterparty, Transaction.currency)
         .order_by(func.count().desc())
     )
     result = await db.execute(q)
 
-    rows = []
+    # Merge by counterparty across currencies
+    cp_map: dict = {}
     for r in result:
-        rows.append({
-            "cp_key": r.cp_key,
-            "counterparty": r.counterparty,
-            "count": r.cnt,
-            "total_income": float(r.total_income or 0),
-            "total_expense": float(r.total_expense or 0),
-        })
+        cp_key = r.cp_key or r.counterparty or ""
+        income = float(r.total_income or 0)
+        expense = float(r.total_expense or 0)
+        if r.currency == "CNY":
+            income *= avg_rate
+            expense *= avg_rate
+        if cp_key in cp_map:
+            cp_map[cp_key]["count"] += r.cnt
+            cp_map[cp_key]["total_income"] += income
+            cp_map[cp_key]["total_expense"] += expense
+        else:
+            cp_map[cp_key] = {
+                "cp_key": r.cp_key,
+                "counterparty": r.counterparty,
+                "count": r.cnt,
+                "total_income": income,
+                "total_expense": expense,
+            }
+
+    rows = sorted(cp_map.values(), key=lambda x: x["count"], reverse=True)
     return rows
 
 

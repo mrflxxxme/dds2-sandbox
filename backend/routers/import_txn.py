@@ -121,9 +121,52 @@ async def search_transactions(
     )
 
 
-@router.get("/transactions/unassigned", response_model=List[TransactionSchema])
+@router.get("/transactions/unassigned")
 async def get_unassigned(limit: int = 200, project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
-    return await transactions_service.get_unassigned(db, project_id, limit)
+    from backend.services import fx_service
+    from datetime import date as date_cls
+
+    txns = await transactions_service.get_unassigned(db, project_id, limit)
+
+    # Load FX rates for conversion
+    rates_map = await fx_service.get_rates_map(db, project_id, date_cls(2020, 1, 1), date_cls.today())
+    fallback_rate = await fx_service.get_rate_for_date(db, project_id, date_cls.today()) if not rates_map else None
+
+    items = []
+    for t in txns:
+        inc = float(t.income or 0)
+        exp = float(t.expense or 0)
+        currency = t.currency or "RUB"
+        rate = None
+        if currency == "CNY":
+            day_date = t.date.date() if hasattr(t.date, 'date') else t.date
+            rate = fx_service.find_rate_for_date(rates_map, day_date) or fallback_rate or 1.0
+            inc_rub = inc * rate
+            exp_rub = exp * rate
+        else:
+            inc_rub = inc
+            exp_rub = exp
+
+        items.append({
+            "id": t.id,
+            "txn_id": t.txn_id,
+            "date": t.date.isoformat() if t.date else None,
+            "counterparty": t.counterparty,
+            "cp_key": t.cp_key,
+            "income": inc_rub,
+            "expense": exp_rub,
+            "income_original": inc if currency != "RUB" else None,
+            "expense_original": exp if currency != "RUB" else None,
+            "currency": currency,
+            "fx_rate": rate,
+            "purpose": t.purpose,
+            "cat_lvl1_2": t.cat_lvl1_2,
+            "cat_lvl2_2": t.cat_lvl2_2,
+            "account": t.account,
+            "event_type2": t.event_type2,
+            "is_cashflow2": t.is_cashflow2,
+        })
+    return items
 
 
 @router.post("/transactions/assign_category")
