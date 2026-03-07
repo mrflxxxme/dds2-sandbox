@@ -801,18 +801,37 @@ function PlanPayments() {
 function PlanIncomes() {
     const [data, setData] = useState<any[]>([]);
     const [msg, setMsg] = useState('');
+    const [refreshing, setRefreshing] = useState(false);
     useEffect(() => { load(); }, []);
     const load = async () => { try { setData(await api.getPlanningIncomes()); } catch { } };
     const del = async (id: number) => {
         if (!confirm('Удалить?')) return;
         try { await api.deletePlanningIncome(id); load(); } catch (e: any) { setMsg(e.message); }
     };
+    const refreshForecast = async () => {
+        setRefreshing(true);
+        setMsg('');
+        try {
+            const res = await api.refreshWbForecast();
+            const pattern = res.weekday_pattern
+                ? Object.entries(res.weekday_pattern).map(([d, v]) => `${d}: ${formatNumber(v as number)}`).join(', ')
+                : '';
+            setMsg(`✅ Прогноз обновлён: создано ${res.created} записей на ${res.forecast_days} дней. Среднее/день: ${formatNumber(res.daily_avg)} ₽. Паттерн: ${pattern}`);
+            load();
+        } catch (e: any) { setMsg(e.message); }
+        setRefreshing(false);
+    };
 
     return (
         <div className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                 <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Поступления WB</h3>
-                <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'plan_incomes')}>📥 Excel</button>
+                <div style={{ display: 'flex', gap: 8 }}>
+                    <button className="btn btn-primary btn-sm" onClick={refreshForecast} disabled={refreshing}>
+                        {refreshing ? '⏳ Обновление...' : '🔄 Обновить прогноз'}
+                    </button>
+                    <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'plan_incomes')}>📥 Excel</button>
+                </div>
             </div>
             {msg && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 8 }}>{msg}</div>}
             {data.length > 0 ? (

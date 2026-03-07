@@ -442,6 +442,9 @@ class ApiClient {
     deletePlanningIncome(id: number) {
         return this.request<MessageResponse>('DELETE', `/api/v1/planning/incomes/${id}`);
     }
+    refreshWbForecast() {
+        return this.request<{ ok: boolean; daily_avg: number; weekly_total: number; weekday_pattern: Record<string, number>; created: number; forecast_days: number }>('POST', '/api/v1/planning/wb_forecast/refresh');
+    }
 
     // Planning — WB Payouts
     getWbPayouts() {
