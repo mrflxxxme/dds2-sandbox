@@ -534,7 +534,10 @@ async def get_daily_filtered(
             func.coalesce(Transaction.cp_key, Transaction.counterparty) == cp_key
         )
     if category:
-        conditions.append(Transaction.cat_lvl1_2 == category)
+        if category == "Без категории":
+            conditions.append(or_(Transaction.cat_lvl1_2 == None, Transaction.cat_lvl1_2 == ""))
+        else:
+            conditions.append(Transaction.cat_lvl1_2 == category)
 
     result = await db.execute(
         select(
@@ -581,7 +584,10 @@ async def get_filtered_transactions(
             func.coalesce(Transaction.cp_key, Transaction.counterparty) == cp_key
         )
     if category:
-        conditions.append(Transaction.cat_lvl1_2 == category)
+        if category == "Без категории":
+            conditions.append(or_(Transaction.cat_lvl1_2 == None, Transaction.cat_lvl1_2 == ""))
+        else:
+            conditions.append(Transaction.cat_lvl1_2 == category)
     if flow == "income":
         conditions.append(Transaction.income > 0)
     elif flow == "expense":
@@ -640,7 +646,7 @@ async def get_category_counterparties(
             Transaction.date <= date_to,
             Transaction.expense > 0,
             Transaction.is_cashflow2 == 1,
-            Transaction.cat_lvl1_2 == category,
+            or_(Transaction.cat_lvl1_2 == None, Transaction.cat_lvl1_2 == "") if category == "Без категории" else Transaction.cat_lvl1_2 == category,
         ).group_by(
             func.coalesce(Transaction.cp_key, Transaction.counterparty),
             Transaction.counterparty,
