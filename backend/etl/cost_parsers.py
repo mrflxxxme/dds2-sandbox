@@ -212,7 +212,7 @@ def normalize_divandek_cn_ru(df: pd.DataFrame) -> pd.DataFrame:
             col_map[c] = "qty_per_box"
         elif cl == "объем":
             col_map[c] = "total_volume"
-        elif cl == "размер" or cl == "форма" or cl == "款式":
+        elif cl == "размер" or cl == "款式":
             col_map[c] = "size"
 
     df = df.rename(columns=col_map)
