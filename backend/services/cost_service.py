@@ -370,6 +370,13 @@ async def update_cost_order(db: AsyncSession, project_id: int, order_no: str, pa
     if order.dt_number:
         await auto_link_customs_dt(final_order_no, order.dt_number, db)
 
+    # Auto-regenerate planned payments to keep them in sync with cost order data
+    if order.ship_date:
+        try:
+            await generate_payment_plan(db, project_id, final_order_no)
+        except Exception:
+            pass  # Don't fail the update if plan gen fails (e.g. no items yet)
+
     return {"ok": True, "order_no": final_order_no}, None
 
 
