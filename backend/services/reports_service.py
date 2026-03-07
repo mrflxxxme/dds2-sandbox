@@ -9,10 +9,11 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import Transaction, Account, OpeningBalance
+from backend.models.planning import Order, PlannedPayment
 from backend.cache import cached
 
 
@@ -315,3 +316,144 @@ async def get_income_by_category_daily(
             "income": float(r.income or 0),
         })
     return rows
+
+
+# ─── Dashboard Summary ──────────────────────────────────────────────────────
+
+async def get_dashboard_summary(
+    db: AsyncSession,
+    project_id: int,
+) -> dict:
+    """All dashboard KPIs in a single call."""
+    import logging
+    logger = logging.getLogger("dds.dashboard")
+
+    today = date.today()
+    month_start = today.replace(day=1)
+
+    # 1. Balances (reuse existing function)
+    balances = await get_balance(db, project_id)
+    balance_rub = sum(b["balance"] for b in balances if b["currency"] == "RUB")
+    balance_cny = sum(b["balance"] for b in balances if b["currency"] == "CNY")
+
+    # 2. Month income / expense
+    month_result = await db.execute(
+        select(
+            func.coalesce(func.sum(Transaction.income), 0).label("income"),
+            func.coalesce(func.sum(func.abs(Transaction.expense)), 0).label("expense"),
+        ).where(
+            Transaction.project_id == project_id,
+            Transaction.date >= month_start,
+            Transaction.date <= today,
+        )
+    )
+    month_row = month_result.one()
+    month_income = float(month_row.income)
+    month_expense = float(month_row.expense)
+
+    # 3. Orders summary
+    orders_result = await db.execute(
+        select(
+            func.count().label("cnt"),
+            func.coalesce(func.sum(Order.order_amount), 0).label("total"),
+        ).where(
+            Order.project_id == project_id,
+            or_(Order.is_deleted == False, Order.is_deleted.is_(None)),
+        )
+    )
+    orders_row = orders_result.one()
+    orders_count = orders_row.cnt
+    orders_total_cny = float(orders_row.total)
+
+    # 4. Unpaid debt (planned_payments)
+    debt_result = await db.execute(
+        select(
+            PlannedPayment.currency,
+            func.sum(PlannedPayment.amount_rub - PlannedPayment.paid_rub).label("debt_rub"),
+        ).where(
+            PlannedPayment.project_id == project_id,
+            PlannedPayment.is_paid == False,
+            or_(PlannedPayment.is_deleted == False, PlannedPayment.is_deleted.is_(None)),
+        ).group_by(PlannedPayment.currency)
+    )
+    debt_rub = 0.0
+    debt_cny = 0.0
+    for row in debt_result:
+        d = float(row.debt_rub or 0)
+        if row.currency and "CNY" in row.currency:
+            debt_cny += d
+        else:
+            debt_rub += d
+
+    # 5. Inbox count (unassigned transactions)
+    inbox_result = await db.execute(
+        select(func.count()).select_from(Transaction).where(
+            Transaction.project_id == project_id,
+            or_(
+                Transaction.cat_lvl1.is_(None),
+                Transaction.cat_lvl1 == "",
+            ),
+        )
+    )
+    inbox_count = inbox_result.scalar() or 0
+
+    # 6. Daily cashflow (current month) — income & expense per day
+    daily_result = await db.execute(
+        select(
+            func.date(Transaction.date).label("day"),
+            func.coalesce(func.sum(Transaction.income), 0).label("income"),
+            func.coalesce(func.sum(func.abs(Transaction.expense)), 0).label("expense"),
+        ).where(
+            Transaction.project_id == project_id,
+            Transaction.date >= month_start,
+            Transaction.date <= today,
+        ).group_by(func.date(Transaction.date)).order_by(func.date(Transaction.date))
+    )
+    daily_cashflow = []
+    for row in daily_result:
+        day_val = row.day
+        if hasattr(day_val, 'isoformat'):
+            day_str = day_val.isoformat()
+        else:
+            day_str = str(day_val)
+        daily_cashflow.append({
+            "date": day_str,
+            "income": float(row.income),
+            "expense": float(row.expense),
+        })
+
+    # 7. Expense by category (current month, top-10)
+    cat_result = await db.execute(
+        select(
+            func.coalesce(Transaction.cat_lvl1_2, text("'Без категории'")).label("category"),
+            func.coalesce(func.sum(func.abs(Transaction.expense)), 0).label("expense"),
+        ).where(
+            Transaction.project_id == project_id,
+            Transaction.date >= month_start,
+            Transaction.date <= today,
+            Transaction.expense < 0,
+        ).group_by(Transaction.cat_lvl1_2).order_by(
+            func.sum(func.abs(Transaction.expense)).desc()
+        ).limit(10)
+    )
+    expense_by_category = []
+    for row in cat_result:
+        expense_by_category.append({
+            "name": row.category or "Без категории",
+            "value": float(row.expense),
+        })
+
+    return {
+        "balance_rub": balance_rub,
+        "balance_cny": balance_cny,
+        "month_income": month_income,
+        "month_expense": month_expense,
+        "orders_count": orders_count,
+        "orders_total_cny": orders_total_cny,
+        "debt_rub": debt_rub,
+        "debt_cny": debt_cny,
+        "inbox_count": inbox_count,
+        "accounts_count": len(balances),
+        "daily_cashflow": daily_cashflow,
+        "expense_by_category": expense_by_category,
+    }

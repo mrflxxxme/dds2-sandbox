@@ -250,6 +250,18 @@ class ApiClient {
         }>>('GET', '/api/v1/reports/balance');
     }
 
+    getDashboardSummary() {
+        return this.request<{
+            balance_rub: number; balance_cny: number;
+            month_income: number; month_expense: number;
+            orders_count: number; orders_total_cny: number;
+            debt_rub: number; debt_cny: number;
+            inbox_count: number; accounts_count: number;
+            daily_cashflow: Array<{ date: string; income: number; expense: number }>;
+            expense_by_category: Array<{ name: string; value: number }>;
+        }>('GET', '/api/v1/reports/dashboard_summary');
+    }
+
     getDDS(params: { start?: string; end?: string } = {}) {
         const q = new URLSearchParams();
         if (params.start) q.set('date_from', params.start);
