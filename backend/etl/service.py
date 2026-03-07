@@ -546,13 +546,12 @@ def _sync_plan_payments(db: Session, project_id: int):
 
         p.paid_rub = paid_rub
         p.paid_amount = paid_amount
-        # Compare in original currency: paid_amount >= amount
-        if p.amount and p.amount > 0:
-            p.is_paid = paid_amount >= p.amount
-        elif p.amount_rub and p.amount_rub > 0:
-            p.is_paid = paid_rub >= p.amount_rub
-        else:
-            p.is_paid = False
+        # Auto-set is_paid only if paid >= plan; NEVER reset manually-marked is_paid=True
+        if not p.is_paid:
+            if p.amount and p.amount > 0:
+                p.is_paid = paid_amount >= p.amount
+            elif p.amount_rub and p.amount_rub > 0:
+                p.is_paid = paid_rub >= p.amount_rub
 
     db.flush()
 

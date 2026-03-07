@@ -417,6 +417,7 @@ function PlanPayments() {
     const [linkAmount, setLinkAmount] = useState('');
     const [selAccount, setSelAccount] = useState<string>('');
     const [filterDir, setFilterDir] = useState<string>('');
+    const [filterStatus, setFilterStatus] = useState<string>('');
     // order_no → { invoice_no, dt_number } lookup from cost_orders
     const [orderMeta, setOrderMeta] = useState<Record<string, { invoice_no?: string; dt_number?: string }>>({}); 
 
@@ -493,7 +494,24 @@ function PlanPayments() {
         return { label: '—', cls: 'secondary' };
     };
 
-    const filtered = filterDir ? data.filter(r => (r.direction || '').toUpperCase() === filterDir.toUpperCase()) : data;
+    let filtered = filterDir ? data.filter(r => (r.direction || '').toUpperCase() === filterDir.toUpperCase()) : data;
+    if (filterStatus) {
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+        filtered = filtered.filter(r => {
+            if (filterStatus === 'PAID') return r.is_paid;
+            if (filterStatus === 'OVERDUE') {
+                if (r.is_paid) return false;
+                if (!r.pay_date) return false;
+                return new Date(r.pay_date) < today;
+            }
+            if (filterStatus === 'FUTURE') {
+                if (r.is_paid) return false;
+                if (!r.pay_date) return true;
+                return new Date(r.pay_date) >= today;
+            }
+            return true;
+        });
+    }
 
     const totalPlan = filtered.reduce((s, r) => s + parseFloat(r.amount || 0), 0);
     // For fact: if marked paid, treat full plan as fact (no remaining debt)
@@ -561,7 +579,26 @@ function PlanPayments() {
                         {f.label}
                     </button>
                 ))}
-                {filterDir && <span style={{ fontSize: 12, color: 'var(--color-text-muted)', alignSelf: 'center' }}>({filtered.length} из {data.length})</span>}
+                {(filterDir || filterStatus) && <span style={{ fontSize: 12, color: 'var(--color-text-muted)', alignSelf: 'center' }}>({filtered.length} из {data.length})</span>}
+            </div>
+
+            {/* Status filter */}
+            <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
+                {[
+                    { key: '', label: 'Все статусы' },
+                    { key: 'PAID', label: '✅ Оплачено' },
+                    { key: 'OVERDUE', label: '🔴 Просрочено' },
+                    { key: 'FUTURE', label: '🔵 Будущее' },
+                ].map(f => (
+                    <button
+                        key={f.key}
+                        className={`btn btn-sm ${filterStatus === f.key ? 'btn-primary' : 'btn-secondary'}`}
+                        onClick={() => setFilterStatus(f.key)}
+                        style={{ fontSize: 12, padding: '4px 12px' }}
+                    >
+                        {f.label}
+                    </button>
+                ))}
             </div>
 
             {msg && <div style={{ fontSize: 13, marginBottom: 8, padding: '6px 12px', borderRadius: 6, background: msg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', color: msg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)' }}>{msg} <span style={{ float: 'right', cursor: 'pointer' }} onClick={() => setMsg('')}>✕</span></div>}
