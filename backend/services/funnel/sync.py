@@ -26,7 +26,8 @@ logger = logging.getLogger("dds.funnel")
 
 
 async def run_funnel_sync(
-    db: AsyncSession, project_id: int, date_from: str, date_to: str
+    db: AsyncSession, project_id: int, date_from: str, date_to: str,
+    include_completed_campaigns: bool = False,
 ) -> dict:
     """
     Core funnel sync: fetch WB data for date range and upsert into DB.
@@ -87,7 +88,7 @@ async def run_funnel_sync(
         cost_map[ov.nm_id] = float(ov.cost_price)
 
     # Fetch ad campaigns
-    campaign_ids = await fetch_ad_campaigns(adv_key)
+    campaign_ids = await fetch_ad_campaigns(adv_key, include_completed=include_completed_campaigns)
 
     # Fetch ad stats for the whole range
     ad_stats = {}

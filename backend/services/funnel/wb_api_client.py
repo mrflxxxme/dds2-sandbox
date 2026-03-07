@@ -235,10 +235,12 @@ async def fetch_funnel_history(api_key: str, date_from: str, date_to: str) -> di
     return result
 
 
-async def fetch_ad_campaigns(api_key: str) -> list[int]:
-    """Get list of active/paused ad campaign IDs.
-    Only status 9 (active) and 11 (paused) — matching Google Script logic.
-    Completed campaigns (7) are excluded to keep the list small.
+async def fetch_ad_campaigns(api_key: str, include_completed: bool = False) -> list[int]:
+    """Get list of ad campaign IDs.
+
+    include_completed=False (default): status 9 (active) + 11 (paused) — for daily sync.
+    include_completed=True: also includes status 7 (completed) — for historical resync
+    where campaigns may have been active in the past but are now completed.
     """
     headers = {
         "Accept": "application/json",
@@ -254,14 +256,19 @@ async def fetch_ad_campaigns(api_key: str) -> list[int]:
             return []
 
         data = resp.json()
+        allowed = ("7", "9", "11") if include_completed else ("9", "11")
         campaign_ids = []
         for adv in data.get("adverts") or []:
             status = str(adv.get("status", ""))
-            if status in ("9", "11"):  # active / paused only
+            if status in allowed:
                 for compa in adv.get("advert_list") or []:
                     cid = compa.get("advertId")
                     if cid and cid not in campaign_ids:
                         campaign_ids.append(cid)
+        logger.info(
+            f"WB ad campaigns: {len(campaign_ids)} "
+            f"({'incl. completed' if include_completed else 'active+paused only'})"
+        )
         return campaign_ids
 
 

@@ -242,6 +242,9 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
     from datetime import datetime
     import asyncio
 
+    # ad_resync needs completed campaigns to recover historical data
+    include_completed = sync_type == "ad_resync"
+
     log_id = None
 
     # Step 1: Create sync_log entry (RUNNING)
@@ -273,8 +276,11 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
     try:
         async with AsyncSessionLocal() as db:
             result = await asyncio.wait_for(
-                run_funnel_sync(db, project_id, d_from, d_to),
-                timeout=600,  # 10 min — gives ad stats budget (180s) + headroom
+                run_funnel_sync(
+                    db, project_id, d_from, d_to,
+                    include_completed_campaigns=include_completed,
+                ),
+                timeout=600,  # 10 min — gives ad stats budget (300s) + headroom
             )
             status = "OK" if not result.get("errors") else "PARTIAL"
     except asyncio.TimeoutError:
