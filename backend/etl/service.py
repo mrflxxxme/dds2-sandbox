@@ -4,7 +4,7 @@ ETL service: orchestrates raw file -> normalize -> upsert -> master logic refres
 
 import logging
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 import pandas as pd
@@ -375,6 +375,43 @@ def _sync_plan_payments(db: Session, project_id: int):
                 ccy = (t.currency or "RUB").upper()
                 order_fact_ccy[ono][ccy] = order_fact_ccy[ono].get(ccy, Decimal("0")) + (t.expense or Decimal("0"))
             except (ValueError, TypeError):
+                pass
+
+    # VTB Commission matching: commission transactions contain planned amount
+    # in purpose text, which maps to PlannedPayment.amount → order_no
+    import re as _re
+    _re_vtb_commission_amount = _re.compile(
+        r"ВТБ Шанхай.*?на сумму\s+([\d.,]+)\s*['\"]?CNY", _re.IGNORECASE
+    )
+    # Build amount → order_no map from planned payments
+    amount_to_order = {}  # Decimal(amount) → order_no
+    for p in payments:
+        if p.amount and p.order_no and (p.direction or "").upper() == "ЗАКАЗ":
+            amount_to_order[p.amount] = p.order_no
+
+    txns_commission = db.execute(
+        select(Transaction).where(
+            Transaction.project_id == project_id,
+            Transaction.purpose_tag == "Комиссия",
+            Transaction.expense > 0,
+            Transaction.purpose.ilike("%ВТБ Шанхай%"),
+        )
+    ).scalars().all()
+    for t in txns_commission:
+        purpose = t.purpose or ""
+        m = _re_vtb_commission_amount.search(purpose)
+        if m:
+            try:
+                raw_amount = m.group(1).replace(" ", "").replace(",", ".")
+                comm_plan_amount = Decimal(raw_amount)
+                # Find matching order_no by planned payment amount
+                matched_order = amount_to_order.get(comm_plan_amount)
+                if matched_order:
+                    if matched_order not in order_fact_ccy:
+                        order_fact_ccy[matched_order] = {}
+                    ccy = (t.currency or "RUB").upper()
+                    order_fact_ccy[matched_order][ccy] = order_fact_ccy[matched_order].get(ccy, Decimal("0")) + (t.expense or Decimal("0"))
+            except (ValueError, InvalidOperation):
                 pass
 
     # ДОСТАВКА fact: invoice_id matches CostOrder.invoice_no, purpose_tag = Логистика
