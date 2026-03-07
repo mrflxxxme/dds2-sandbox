@@ -205,16 +205,18 @@ def normalize_divandek_cn_ru(df: pd.DataFrame) -> pd.DataFrame:
             col_map[c] = "qty"
         elif "цена за единицу" in cl:
             col_map[c] = "price_cny"
-        elif cl == "общий чистый вес":
+        elif "общий нетто" in cl or cl == "общий чистый вес":
             col_map[c] = "total_net_weight"
-        elif cl == "общий вес брутто":
+        elif "общий брутто" in cl or cl == "общий вес брутто":
             col_map[c] = "total_gross_weight"
-        elif cl == "один том в коробке":
+        elif "объём 1 кор" in cl or cl == "один том в коробке":
             col_map[c] = "volume_box_m3"
-        elif cl == "количество упаковки":
+        elif "в коробке" in cl or cl == "количество упаковки":
             col_map[c] = "qty_per_box"
-        elif cl == "объем":
+        elif "общий объём" in cl or cl == "объем":
             col_map[c] = "total_volume"
+        elif cl == "1 шт вес":
+            col_map[c] = "weight_per_unit"
         elif cl == "размер" or cl == "款式":
             col_map[c] = "size"
 
@@ -228,16 +230,21 @@ def normalize_divandek_cn_ru(df: pd.DataFrame) -> pd.DataFrame:
         df = df[pd.to_numeric(df["barcode"], errors="coerce").notna()].copy()
         df = df.reset_index(drop=True)
 
-    df["barcode"] = pd.to_numeric(df.get("barcode", ""), errors="coerce").fillna(0).astype(int).astype(str)
+    df["barcode"] = pd.to_numeric(df.get("barcode", pd.Series(dtype="str")), errors="coerce").fillna(0).astype(int).astype(str)
     df["barcode"] = df["barcode"].str.replace(r'\.0$', '', regex=True).str.strip()
 
-    df["qty"] = pd.to_numeric(df.get("qty", 1), errors="coerce").fillna(1).astype(int)
-    df["price_cny"] = pd.to_numeric(df.get("price_cny", 0), errors="coerce").fillna(0)
+    df["qty"] = pd.to_numeric(df.get("qty", pd.Series(dtype="float")), errors="coerce").fillna(1).astype(int)
+    df["price_cny"] = pd.to_numeric(df.get("price_cny", pd.Series(dtype="float")), errors="coerce").fillna(0)
 
-    # Weight per unit = total_net_weight / qty
-    total_weight = pd.to_numeric(df.get("total_net_weight", 0), errors="coerce").fillna(0)
+    # Weight per unit
     qty_safe = df["qty"].replace(0, 1)
-    df["weight_kg"] = total_weight / qty_safe
+    if "weight_per_unit" in df.columns:
+        df["weight_kg"] = pd.to_numeric(df["weight_per_unit"], errors="coerce").fillna(0)
+    elif "total_net_weight" in df.columns:
+        total_weight = pd.to_numeric(df["total_net_weight"], errors="coerce").fillna(0)
+        df["weight_kg"] = total_weight / qty_safe
+    else:
+        df["weight_kg"] = 0
 
     # Area from size
     if "size" in df.columns:
