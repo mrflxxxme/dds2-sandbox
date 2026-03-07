@@ -473,9 +473,34 @@ async def calculate_cashflow_daily(
     Calculate daily cashflow for the next `days` days.
     Includes overdue unpaid payments moved to today.
     Returns list of {date, planned_income, planned_expense, net, deficit_running}.
+    If starting_balance is 0 (default), auto-calculates from current RUB account balances.
     """
     today = date.today()
     horizon = today + timedelta(days=days)
+
+    # Auto-calculate starting balance from account balances if not provided
+    if starting_balance == 0.0:
+        from backend.models import Account, OpeningBalance
+        # Sum opening balances for RUB accounts
+        ob_result = await db.execute(
+            select(OpeningBalance).where(
+                OpeningBalance.project_id == project_id,
+                OpeningBalance.currency == "RUB",
+            )
+        )
+        total_ob = sum(
+            ob.opening_balance for ob in ob_result.scalars().all()
+        )
+        # Sum net from all RUB transactions up to today
+        net_result = await db.execute(
+            select(func.coalesce(func.sum(Transaction.net), 0)).where(
+                Transaction.project_id == project_id,
+                Transaction.currency == "RUB",
+                Transaction.date <= today,
+            )
+        )
+        total_net = Decimal(str(net_result.scalar() or 0))
+        starting_balance = float(total_ob + total_net)
 
     # Planned incomes indexed by date
     inc_result = await db.execute(
