@@ -41,6 +41,7 @@ def normalize_divandek(df: pd.DataFrame) -> pd.DataFrame:
 
     if "barcode" in df.columns:
         df = df[pd.to_numeric(df["barcode"], errors="coerce").notna()].copy()
+        df = df.reset_index(drop=True)
 
     if "volume_box_m3" in df.columns and "qty_per_box" in df.columns:
         vol = pd.to_numeric(df["volume_box_m3"], errors="coerce").fillna(0)
@@ -73,6 +74,7 @@ def normalize_carpet(df: pd.DataFrame) -> pd.DataFrame:
 
     if "barcode" in df.columns:
         df = df[pd.to_numeric(df["barcode"], errors="coerce").notna()].copy()
+        df = df.reset_index(drop=True)
 
     def _fix_numeric(series):
         def _fix_val(v):
@@ -137,6 +139,7 @@ def normalize_divandek_cn(df: pd.DataFrame) -> pd.DataFrame:
     # Filter rows with valid numeric barcodes
     if "barcode" in df.columns:
         df = df[pd.to_numeric(df["barcode"], errors="coerce").notna()].copy()
+        df = df.reset_index(drop=True)
 
     # Barcode cleanup
     df["barcode"] = pd.to_numeric(df.get("barcode", ""), errors="coerce").fillna(0).astype(int).astype(str)
@@ -217,9 +220,13 @@ def normalize_divandek_cn_ru(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.rename(columns=col_map)
 
+    # Drop any duplicate columns (keep first)
+    df = df.loc[:, ~df.columns.duplicated()]
+
     # Filter rows with valid barcodes
     if "barcode" in df.columns:
         df = df[pd.to_numeric(df["barcode"], errors="coerce").notna()].copy()
+        df = df.reset_index(drop=True)
 
     df["barcode"] = pd.to_numeric(df.get("barcode", ""), errors="coerce").fillna(0).astype(int).astype(str)
     df["barcode"] = df["barcode"].str.replace(r'\.0$', '', regex=True).str.strip()
