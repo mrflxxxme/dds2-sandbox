@@ -156,3 +156,20 @@ async def get_dashboard_transactions(
         db, project.id, df, dt, cp_key=cp_key, category=category,
         flow=flow, limit=limit, offset=offset,
     )
+
+
+@router.get("/category_counterparties")
+async def get_category_counterparties(
+    category: str = Query(...),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Counterparties grouped within an expense category."""
+    from datetime import date as date_cls
+    df = date_from or date_cls(2020, 1, 1)
+    dt = date_to or date_cls.today()
+    return await reports_service.get_category_counterparties(
+        db, project.id, category, df, dt,
+    )

@@ -618,3 +618,40 @@ async def get_filtered_transactions(
             "account": r.account or "",
         })
     return {"total": total, "items": items}
+
+
+async def get_category_counterparties(
+    db: AsyncSession,
+    project_id: int,
+    category: str,
+    date_from: date,
+    date_to: date,
+) -> list[dict]:
+    """Return counterparties grouped within an expense category."""
+    result = await db.execute(
+        select(
+            func.coalesce(Transaction.cp_key, Transaction.counterparty).label("key"),
+            Transaction.counterparty.label("name"),
+            func.sum(Transaction.expense).label("total"),
+            func.count().label("cnt"),
+        ).where(
+            Transaction.project_id == project_id,
+            Transaction.date >= date_from,
+            Transaction.date <= date_to,
+            Transaction.expense > 0,
+            Transaction.is_cashflow2 == 1,
+            Transaction.cat_lvl1_2 == category,
+        ).group_by(
+            func.coalesce(Transaction.cp_key, Transaction.counterparty),
+            Transaction.counterparty,
+        ).order_by(func.sum(Transaction.expense).desc())
+    )
+    items = []
+    for r in result:
+        items.append({
+            "key": r.key or "",
+            "name": r.name or "Без контрагента",
+            "total": float(r.total or 0),
+            "count": r.cnt,
+        })
+    return items

@@ -298,6 +298,13 @@ class ApiClient {
         }>('GET', `/api/v1/reports/dashboard_transactions?${q.toString()}`);
     }
 
+    getCategoryCounterparties(dateFrom: string, dateTo: string, category: string) {
+        const q = new URLSearchParams({ date_from: dateFrom, date_to: dateTo, category });
+        return this.request<Array<{ key: string; name: string; total: number; count: number }>>(
+            'GET', `/api/v1/reports/category_counterparties?${q.toString()}`
+        );
+    }
+
     getDDS(params: { start?: string; end?: string } = {}) {
         const q = new URLSearchParams();
         if (params.start) q.set('date_from', params.start);
