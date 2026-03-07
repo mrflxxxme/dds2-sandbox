@@ -604,17 +604,47 @@ function PlanPayments() {
             {msg && <div style={{ fontSize: 13, marginBottom: 8, padding: '6px 12px', borderRadius: 6, background: msg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', color: msg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)' }}>{msg} <span style={{ float: 'right', cursor: 'pointer' }} onClick={() => setMsg('')}>✕</span></div>}
 
             {/* Compact summary – inline row */}
-            {filtered.length > 0 && (
-                <div style={{ display: 'flex', gap: 24, marginBottom: 12, padding: '8px 12px', background: 'var(--color-bg-input)', borderRadius: 8, fontSize: 13, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <span><span style={{ color: 'var(--color-text-muted)' }}>План {dominantCcy}:</span> <b>{formatNumber(totalPlan)}</b></span>
-                    <span><span style={{ color: 'var(--color-text-muted)' }}>Факт {dominantCcy}:</span> <b style={{ color: 'var(--color-success)' }}>{formatNumber(totalPaidAmt)}</b></span>
-                    <span><span style={{ color: 'var(--color-text-muted)' }}>Остаток {dominantCcy}:</span> <b style={{ color: totalRemain > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{formatNumber(totalRemain)}</b></span>
-                    <span><span style={{ color: 'var(--color-text-muted)' }}>Прогресс:</span> <b>{progress}</b></span>
-                    <span style={{ opacity: 0.6 }}><span style={{ color: 'var(--color-text-muted)' }}>План ₽:</span> {formatNumber(totalPlanRub)}</span>
-                    <span style={{ opacity: 0.6 }}><span style={{ color: 'var(--color-text-muted)' }}>Факт ₽:</span> {formatNumber(totalPaidRub)}</span>
-                    <span style={{ opacity: 0.6 }}><span style={{ color: 'var(--color-text-muted)' }}>Остаток ₽:</span> <b style={{ color: (totalPlanRub - totalPaidRub) > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{formatNumber(totalPlanRub - totalPaidRub)}</b></span>
-                </div>
-            )}
+            {filtered.length > 0 && (() => {
+                // Compute overdue amounts by currency
+                const today = new Date(); today.setHours(0, 0, 0, 0);
+                const overdue: Record<string, number> = {};
+                filtered.forEach(r => {
+                    if (r.is_paid || !r.pay_date) return;
+                    if (new Date(r.pay_date) >= today) return;
+                    const ccy = (r.currency || 'RUB').toUpperCase();
+                    const remain = parseFloat(r.amount || 0) - parseFloat(r.paid_amount || 0);
+                    if (remain > 0) {
+                        // Split composite currencies like CNY/USD
+                        if (ccy.includes('/')) {
+                            // For composite, attribute to the first currency
+                            const parts = ccy.split('/');
+                            overdue[parts[0]] = (overdue[parts[0]] || 0) + remain;
+                        } else {
+                            overdue[ccy] = (overdue[ccy] || 0) + remain;
+                        }
+                    }
+                });
+                // Also compute overdue RUB (amount_rub based)
+                let overdueRub = 0;
+                filtered.forEach(r => {
+                    if (r.is_paid || !r.pay_date) return;
+                    if (new Date(r.pay_date) >= today) return;
+                    const remainRub = parseFloat(r.amount_rub || 0) - parseFloat(r.paid_rub || 0);
+                    if (remainRub > 0) overdueRub += remainRub;
+                });
+
+                return (
+                    <div style={{ display: 'flex', gap: 24, marginBottom: 12, padding: '8px 12px', background: 'var(--color-bg-input)', borderRadius: 8, fontSize: 13, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <span><span style={{ color: 'var(--color-text-muted)' }}>План {dominantCcy}:</span> <b>{formatNumber(totalPlan)}</b></span>
+                        <span><span style={{ color: 'var(--color-text-muted)' }}>Факт {dominantCcy}:</span> <b style={{ color: 'var(--color-success)' }}>{formatNumber(totalPaidAmt)}</b></span>
+                        <span><span style={{ color: 'var(--color-text-muted)' }}>Остаток {dominantCcy}:</span> <b style={{ color: totalRemain > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{formatNumber(totalRemain)}</b></span>
+                        <span><span style={{ color: 'var(--color-text-muted)' }}>Прогресс:</span> <b>{progress}</b></span>
+                        {(overdue['CNY'] || 0) > 0 && <span style={{ color: 'var(--color-danger)' }}>🔴 Просрочено CNY: <b>{formatNumber(overdue['CNY'])}</b></span>}
+                        {(overdue['USD'] || 0) > 0 && <span style={{ color: 'var(--color-danger)' }}>🔴 Просрочено USD: <b>{formatNumber(overdue['USD'])}</b></span>}
+                        {overdueRub > 0 && <span style={{ color: 'var(--color-danger)' }}>🔴 Просрочено ₽: <b>{formatNumber(overdueRub)}</b></span>}
+                    </div>
+                );
+            })()}
 
             {filtered.length > 0 ? (
                 <div style={{ overflowX: 'auto' }}>
