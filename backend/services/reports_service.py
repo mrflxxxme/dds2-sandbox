@@ -426,14 +426,14 @@ async def get_dashboard_summary(
     cat_result = await db.execute(
         select(
             func.coalesce(Transaction.cat_lvl1_2, text("'Без категории'")).label("category"),
-            func.coalesce(func.sum(func.abs(Transaction.expense)), 0).label("expense"),
+            func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
         ).where(
             Transaction.project_id == project_id,
             Transaction.date >= month_start,
             Transaction.date <= today,
-            Transaction.expense < 0,
+            Transaction.expense > 0,
         ).group_by(Transaction.cat_lvl1_2).order_by(
-            func.sum(func.abs(Transaction.expense)).desc()
+            func.sum(Transaction.expense).desc()
         ).limit(10)
     )
     expense_by_category = []
