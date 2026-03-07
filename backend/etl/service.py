@@ -388,14 +388,18 @@ def _sync_plan_payments(db: Session, project_id: int):
             Transaction.expense > 0,
         )
     ).scalars().all()
-    # Reverse map: invoice_no → order_no
-    inv_to_order = {v: k for k, v in invoice_map.items() if v}
+    # Reverse map: invoice_no → order_no (normalize Cyrillic С→Latin C)
+    def _norm_invoice(s: str) -> str:
+        return s.replace("С", "C").replace("с", "c").strip() if s else ""
+    inv_to_order = {_norm_invoice(v): k for k, v in invoice_map.items() if v}
     for t in txns_delivery:
-        if t.invoice_id and t.invoice_id in inv_to_order:
-            ono = inv_to_order[t.invoice_id]
+        inv_key = _norm_invoice(t.invoice_id) if t.invoice_id else ""
+        if inv_key and inv_key in inv_to_order:
+            ono = inv_to_order[inv_key]
             if ono not in delivery_fact_ccy:
                 delivery_fact_ccy[ono] = {}
             ccy = (t.currency or "RUB").upper()
+            delivery_fact_ccy[ono][ccy] = delivery_fact_ccy[ono].get(ccy, Decimal("0")) + (t.expense or Decimal("0"))
 
     # VTB Commission matching: commission transactions contain transfer amount
     # in purpose text (e.g. "на сумму 610767.5 'CNY'"). Two matching strategies:
