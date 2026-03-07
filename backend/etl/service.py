@@ -527,7 +527,11 @@ def _sync_plan_payments(db: Session, project_id: int):
                 paid_amount = paid_rub
         elif direction == "ДОСТАВКА":
             ccy_map = delivery_fact_ccy.get(p.order_no, {})
-            paid_amount = ccy_map.get(pay_ccy, Decimal("0"))
+            # Handle composite currency like CNY/USD — sum matching parts
+            if "/" in pay_ccy:
+                paid_amount = sum(ccy_map.get(c, Decimal("0")) for c in pay_ccy.split("/"))
+            else:
+                paid_amount = ccy_map.get(pay_ccy, Decimal("0"))
             paid_rub = ccy_map.get("RUB", Decimal("0"))
             if pay_ccy == "RUB":
                 paid_amount = paid_rub
