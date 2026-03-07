@@ -328,14 +328,15 @@ def _sync_plan_payments(db: Session, project_id: int):
     if not order_nos:
         return
 
-    # Build invoice_no map: order_no (int) → invoice_no (str)
+    # Build invoice_no map: order_no_int → invoice_no (str)
     cost_orders = db.execute(
         select(CostOrder).where(CostOrder.project_id == project_id)
     ).scalars().all()
+    from backend.services.cost_service import _order_no_to_int
     invoice_map = {}  # int(order_no) → invoice_no
     for co in cost_orders:
         try:
-            invoice_map[int(co.order_no)] = co.invoice_no
+            invoice_map[_order_no_to_int(co.order_no)] = co.invoice_no
         except (ValueError, TypeError):
             pass
 
@@ -352,7 +353,7 @@ def _sync_plan_payments(db: Session, project_id: int):
     for t in txns_order:
         if t.annex_id:
             try:
-                ono = int(t.annex_id)
+                ono = _order_no_to_int(t.annex_id)
                 order_fact[ono] = order_fact.get(ono, Decimal("0")) + (t.expense or Decimal("0"))
             except (ValueError, TypeError):
                 pass
