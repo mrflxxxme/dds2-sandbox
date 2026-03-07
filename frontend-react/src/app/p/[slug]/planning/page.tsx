@@ -416,6 +416,7 @@ function PlanPayments() {
     const [selTxnId, setSelTxnId] = useState<string>('');
     const [linkAmount, setLinkAmount] = useState('');
     const [selAccount, setSelAccount] = useState<string>('');
+    const [filterDir, setFilterDir] = useState<string>('');
 
     useEffect(() => { load(); }, []);
     const load = async () => { try { setData(await api.getPlanningPayments()); } catch { } };
@@ -482,12 +483,14 @@ function PlanPayments() {
         return { label: '—', cls: 'secondary' };
     };
 
-    const totalPlan = data.reduce((s, r) => s + parseFloat(r.amount_rub || 0), 0);
-    const totalPaid = data.reduce((s, r) => s + parseFloat(r.paid_rub || 0), 0);
+    const filtered = filterDir ? data.filter(r => (r.direction || '').toUpperCase() === filterDir.toUpperCase()) : data;
+
+    const totalPlan = filtered.reduce((s, r) => s + parseFloat(r.amount_rub || 0), 0);
+    const totalPaid = filtered.reduce((s, r) => s + parseFloat(r.paid_rub || 0), 0);
     const totalRemain = totalPlan - totalPaid;
     const progress = totalPlan > 0 ? (totalPaid / totalPlan * 100).toFixed(0) + '%' : '—';
 
-    const unpaidPayments = data.filter(p => !p.is_paid);
+    const unpaidPayments = filtered.filter(p => !p.is_paid);
 
     const [txnSearch, setTxnSearch] = useState('');
     const filteredCandidates = candidates.filter((c: any) => {
@@ -499,19 +502,42 @@ function PlanPayments() {
             (c.purpose || '').toLowerCase().includes(s);
     });
 
+    const dirFilters = [
+        { key: '', label: 'Все' },
+        { key: 'ЗАКАЗ', label: '📦 Заказ' },
+        { key: 'ТАМОЖНЯ', label: '🛃 Таможня' },
+        { key: 'ЛОГИСТИКА', label: '🚛 Логистика' },
+    ];
+
     return (
         <div className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                 <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Плановые платежи</h3>
                 <div style={{ display: 'flex', gap: 8 }}>
                     <button className="btn btn-secondary btn-sm" onClick={sync}>🔄 Синхронизировать факт с выписками</button>
-                    <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'plan_payments')}>📥 Excel</button>
+                    <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(filtered, 'plan_payments')}>📥 Excel</button>
                 </div>
             </div>
+
+            {/* Direction filter */}
+            <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
+                {dirFilters.map(f => (
+                    <button
+                        key={f.key}
+                        className={`btn btn-sm ${filterDir === f.key ? 'btn-primary' : 'btn-secondary'}`}
+                        onClick={() => setFilterDir(f.key)}
+                        style={{ fontSize: 12, padding: '4px 12px' }}
+                    >
+                        {f.label}
+                    </button>
+                ))}
+                {filterDir && <span style={{ fontSize: 12, color: 'var(--color-text-muted)', alignSelf: 'center' }}>({filtered.length} из {data.length})</span>}
+            </div>
+
             {msg && <div style={{ fontSize: 13, marginBottom: 8, padding: '6px 12px', borderRadius: 6, background: msg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', color: msg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)' }}>{msg} <span style={{ float: 'right', cursor: 'pointer' }} onClick={() => setMsg('')}>✕</span></div>}
 
             {/* Compact summary – inline row */}
-            {data.length > 0 && (
+            {filtered.length > 0 && (
                 <div style={{ display: 'flex', gap: 24, marginBottom: 12, padding: '8px 12px', background: 'var(--color-bg-input)', borderRadius: 8, fontSize: 13, alignItems: 'center', flexWrap: 'wrap' }}>
                     <span><span style={{ color: 'var(--color-text-muted)' }}>План:</span> <b>{formatNumber(totalPlan)} ₽</b></span>
                     <span><span style={{ color: 'var(--color-text-muted)' }}>Оплачено:</span> <b style={{ color: 'var(--color-success)' }}>{formatNumber(totalPaid)} ₽</b></span>
@@ -520,14 +546,14 @@ function PlanPayments() {
                 </div>
             )}
 
-            {data.length > 0 ? (
+            {filtered.length > 0 ? (
                 <div style={{ overflowX: 'auto' }}>
                     <table className="data-table">
                         <thead><tr>
                             <th>ID</th><th>Дата</th><th>Заказ</th><th>Направление</th><th>Сумма</th><th>Вал.</th>
                             <th>План ₽</th><th>Факт ₽</th><th>Остаток</th><th>Статус</th><th></th>
                         </tr></thead>
-                        <tbody>{data.map(r => {
+                        <tbody>{filtered.map(r => {
                             const st = _status(r);
                             const amt = parseFloat(r.amount_rub || 0);
                             const paid = parseFloat(r.paid_rub || 0);
