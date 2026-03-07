@@ -624,12 +624,14 @@ function PlanPayments() {
                         }
                     }
                 });
-                // Also compute overdue RUB (amount_rub based)
+                // Overdue RUB — only for payments natively in RUB (not CNY/USD converted)
                 let overdueRub = 0;
                 filtered.forEach(r => {
                     if (r.is_paid || !r.pay_date) return;
                     if (new Date(r.pay_date) >= today) return;
-                    const remainRub = parseFloat(r.amount_rub || 0) - parseFloat(r.paid_rub || 0);
+                    const ccy = (r.currency || 'RUB').toUpperCase();
+                    if (ccy !== 'RUB') return; // skip foreign currency — already shown above
+                    const remainRub = parseFloat(r.amount || 0) - parseFloat(r.paid_amount || 0);
                     if (remainRub > 0) overdueRub += remainRub;
                 });
 
