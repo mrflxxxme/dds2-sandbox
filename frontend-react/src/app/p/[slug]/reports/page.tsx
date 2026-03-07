@@ -4,20 +4,21 @@ import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 
 export default function ReportsPage() {
-    const [tab, setTab] = useState<'dds' | 'balance' | 'fx' | 'customs'>('dds');
+    const [tab, setTab] = useState<'dds' | 'bdr' | 'balance' | 'fx' | 'customs'>('dds');
 
     return (
         <div className="animate-in">
             <div className="page-header">
                 <div>
                     <h1 className="page-title">📊 Отчёты</h1>
-                    <p className="page-subtitle">ДДС за месяц, баланс, FX, таможня</p>
+                    <p className="page-subtitle">ДДС, БДР, баланс, FX, таможня</p>
                 </div>
             </div>
 
             <div style={{ display: 'flex', gap: 4, marginBottom: 20 }}>
                 {[
                     { key: 'dds' as const, label: 'ДДС за месяц' },
+                    { key: 'bdr' as const, label: 'БДР (WB)' },
                     { key: 'balance' as const, label: 'Баланс по дням' },
                     { key: 'fx' as const, label: 'FX Контроль' },
                     { key: 'customs' as const, label: 'Таможня' },
@@ -28,6 +29,7 @@ export default function ReportsPage() {
             </div>
 
             {tab === 'dds' && <DDSPnL />}
+            {tab === 'bdr' && <WbBdr />}
             {tab === 'balance' && <BalanceDaily />}
             {tab === 'fx' && <FxControl />}
             {tab === 'customs' && <CustomsControl />}
@@ -378,6 +380,253 @@ function CustomsControl() {
                     </div>
                 </>
             ) : <div className="empty-state"><div className="empty-state-text">Нажмите «Загрузить»</div></div>}
+        </div>
+    );
+}
+
+/* ═══════════════  WB БДР  ═══════════════ */
+
+function WbBdr() {
+    const today = new Date();
+    const weekAgo = new Date(today.getTime() - 7 * 86400000);
+    const fmt = (d: Date) => d.toISOString().split('T')[0];
+
+    const [dateFrom, setDateFrom] = useState(fmt(weekAgo));
+    const [dateTo, setDateTo] = useState(fmt(today));
+    const [brand, setBrand] = useState('');
+    const [articleSearch, setArticleSearch] = useState('');
+    const [mode, setMode] = useState<'finance' | 'management'>('finance');
+    const [data, setData] = useState<any>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
+
+    const loadData = React.useCallback(async () => {
+        setLoading(true); setError('');
+        try {
+            const res = await api.getWbBdr(dateFrom, dateTo, brand || undefined, articleSearch || undefined);
+            setData(res);
+        } catch (e: any) { setError(e.message || 'Ошибка загрузки'); }
+        finally { setLoading(false); }
+    }, [dateFrom, dateTo, brand, articleSearch]);
+
+    const s = data?.summary;
+    const articles = data?.articles || [];
+    const brands = data?.brands || [];
+
+    const pct = (val: number, base: number) => base ? ((val / base) * 100).toFixed(2) + '%' : '—';
+
+    const handleExcel = () => {
+        if (!articles.length) return;
+        const rows = articles.map((a: any, i: number) => ({
+            '№': i + 1,
+            'Артикул': a.sa_name,
+            'Бренд': a.brand,
+            'Категория': a.subject,
+            'Арт. МП': a.nm_id,
+            'К оплате': a.to_pay,
+            'Реализация': a.realization,
+            'Продажи': a.sales_amount,
+            'К перечислению': a.ppvz_for_pay,
+            'Комиссия': a.commission,
+            'Логистика': a.logistics,
+            'Штрафы': a.penalties,
+            'Хранение': a.storage,
+            'Удержания': a.deductions,
+            'Возвраты': a.returns_amount,
+            'Прод. шт': a.sale_qty,
+            'Возвр. шт': a.ret_qty,
+            'Ср. цена': a.avg_sale_price,
+        }));
+        exportToExcel(rows, `BDR_${dateFrom}_${dateTo}`);
+    };
+
+    return (
+        <div>
+            {/* ── Filters ── */}
+            <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                    <div>
+                        <label style={{ fontSize: 12, opacity: 0.7, display: 'block', marginBottom: 4 }}>С</label>
+                        <input type="date" className="input" value={dateFrom} onChange={e => setDateFrom(e.target.value)} style={{ width: 150 }} />
+                    </div>
+                    <div>
+                        <label style={{ fontSize: 12, opacity: 0.7, display: 'block', marginBottom: 4 }}>По</label>
+                        <input type="date" className="input" value={dateTo} onChange={e => setDateTo(e.target.value)} style={{ width: 150 }} />
+                    </div>
+                    <div>
+                        <label style={{ fontSize: 12, opacity: 0.7, display: 'block', marginBottom: 4 }}>Бренд</label>
+                        <select className="input" value={brand} onChange={e => setBrand(e.target.value)} style={{ width: 170 }}>
+                            <option value="">Все бренды</option>
+                            {brands.map((b: string) => <option key={b} value={b}>{b}</option>)}
+                        </select>
+                    </div>
+                    <div>
+                        <label style={{ fontSize: 12, opacity: 0.7, display: 'block', marginBottom: 4 }}>Артикул</label>
+                        <input className="input" placeholder="Поиск..." value={articleSearch} onChange={e => setArticleSearch(e.target.value)} style={{ width: 160 }} />
+                    </div>
+                    <button className="btn btn-primary btn-sm" onClick={loadData} disabled={loading}
+                        style={{ height: 38 }}>{loading ? '⏳ Загрузка...' : '📊 Загрузить'}</button>
+                    {articles.length > 0 && (
+                        <button className="btn btn-secondary btn-sm" onClick={handleExcel} style={{ height: 38 }}>📥 Excel</button>
+                    )}
+                </div>
+            </div>
+
+            {error && <div className="glass-card" style={{ padding: 16, color: '#ff6b6b' }}>⚠️ {error}</div>}
+
+            {loading && <div className="glass-card" style={{ padding: 40, textAlign: 'center' }}>
+                <div style={{ fontSize: 32, marginBottom: 12 }}>⏳</div>
+                <div style={{ opacity: 0.7 }}>Загрузка данных из WB API...</div>
+                <div style={{ opacity: 0.5, fontSize: 12, marginTop: 8 }}>Это может занять 10-15 секунд</div>
+            </div>}
+
+            {s && !loading && (
+                <>
+                    {/* ── KPI Cards ── */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12, marginBottom: 16 }}>
+                        <KpiCard label="Итого к оплате" value={formatNumber(s.to_pay)} sub="₽" />
+                        <KpiCard label="Реализация" value={formatNumber(s.realization)} sub="₽" />
+                        <KpiCard label="Продажи" value={formatNumber(s.sales_amount)} sub={`₽ / ${formatNumber(s.sale_qty)} шт`} />
+                        <KpiCard label="Возвраты" value={formatNumber(s.returns_amount)} sub={`₽ / ${formatNumber(s.ret_qty)} шт`} />
+                        <KpiCard label="Комиссия" value={formatNumber(s.commission)} sub={pct(s.commission, s.realization)} color={s.commission < 0 ? '#ff6b6b' : undefined} />
+                        <KpiCard label="Возн. ВБ" value={formatNumber(s.total_wb_reward)} sub={pct(s.total_wb_reward, s.realization)} color={s.total_wb_reward < 0 ? '#ff6b6b' : undefined} />
+                        <KpiCard label="Логистика" value={formatNumber(s.logistics)} sub={pct(s.logistics, s.realization)} />
+                        <KpiCard label="Штрафы" value={formatNumber(s.penalties)} sub={pct(s.penalties, s.realization)} color={s.penalties > 0 ? '#ff6b6b' : undefined} />
+                        <KpiCard label="Хранение" value={formatNumber(s.storage)} sub={pct(s.storage, s.realization)} />
+                        <KpiCard label="Удержания" value={formatNumber(s.deductions)} sub={pct(s.deductions, s.realization)} color={s.deductions > 0 ? '#ff6b6b' : undefined} />
+                        <KpiCard label="Ср. цена" value={formatNumber(s.avg_sale_price)} sub="₽" />
+                        <KpiCard label="% выкупа" value={s.buyout_pct?.toFixed(2) + '%'} sub="" />
+                    </div>
+
+                    {/* ── View mode toggle ── */}
+                    <div style={{ display: 'flex', gap: 4, marginBottom: 12 }}>
+                        <button className={`btn ${mode === 'finance' ? 'btn-primary' : 'btn-secondary'} btn-sm`}
+                            onClick={() => setMode('finance')}>Финансовая отчётность</button>
+                        <button className={`btn ${mode === 'management' ? 'btn-primary' : 'btn-secondary'} btn-sm`}
+                            onClick={() => setMode('management')}>Управленческая отчётность</button>
+                    </div>
+
+                    {/* ── Articles Table ── */}
+                    <div className="glass-card" style={{ overflow: 'auto' }}>
+                        <table className="data-table" style={{ fontSize: 13 }}>
+                            <thead>
+                                <tr>
+                                    <th style={{ position: 'sticky', left: 0, background: 'var(--glass-bg)', zIndex: 2 }}>Артикул</th>
+                                    <th>К оплате ₽</th>
+                                    {mode === 'finance' ? (
+                                        <>
+                                            <th>Бренд</th>
+                                            <th>Категория</th>
+                                            <th>Арт. МП</th>
+                                            <th>Ср. себест.</th>
+                                            <th>Удержания ₽</th>
+                                            <th>Штрафы ₽</th>
+                                            <th>Логист. ₽</th>
+                                            <th>Хранение ₽</th>
+                                            <th>Комиссия ₽</th>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <th>Удержания</th>
+                                            <th>Ср. цена до скидок</th>
+                                            <th>Ср. цена продажи</th>
+                                            <th>Реализация ₽</th>
+                                            <th>Прод. шт</th>
+                                            <th>Возвр. шт</th>
+                                            <th>Продажи ₽</th>
+                                            <th>К переч. ₽</th>
+                                        </>
+                                    )}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {/* Summary row */}
+                                <tr style={{ fontWeight: 700, background: 'rgba(99,102,241,0.08)' }}>
+                                    <td style={{ position: 'sticky', left: 0, background: 'rgba(99,102,241,0.12)', zIndex: 1 }}>Итого за период:</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(s.to_pay)} ₽</td>
+                                    {mode === 'finance' ? (
+                                        <>
+                                            <td>-</td><td>-</td><td>-</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.avg_sale_price)} ₽</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.deductions)} ₽</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.penalties)} ₽</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.logistics)} ₽</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.storage)} ₽</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.commission)} ₽</td>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.deductions)} ₽</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.avg_retail_price)} ₽</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.avg_sale_price)} ₽</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.realization)} ₽</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.sale_qty)}</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.ret_qty)}</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.sales_amount)} ₽</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.ppvz_for_pay)} ₽</td>
+                                        </>
+                                    )}
+                                </tr>
+                                {/* Article rows */}
+                                {articles.map((a: any, i: number) => (
+                                    <tr key={a.sa_name || i}>
+                                        <td style={{ position: 'sticky', left: 0, background: 'var(--glass-bg)', zIndex: 1, fontWeight: 500 }}>
+                                            {a.sa_name || '—'}
+                                        </td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.to_pay)} ₽</td>
+                                        {mode === 'finance' ? (
+                                            <>
+                                                <td>{a.brand}</td>
+                                                <td>{a.subject}</td>
+                                                <td>{a.nm_id || '—'}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_sale_price)} ₽</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.deductions)} ₽</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.penalties)} ₽</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.logistics)} ₽</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.storage)} ₽</td>
+                                                <td style={{ textAlign: 'right', color: a.commission < 0 ? '#ff6b6b' : undefined }}>{formatNumber(a.commission)} ₽</td>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <td style={{ textAlign: 'right', color: a.deductions > 0 ? '#ff6b6b' : undefined }}>{formatNumber(a.deductions)} ₽</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_retail_price)} ₽</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_sale_price)} ₽</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.realization)} ₽</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.sale_qty)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.ret_qty)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.sales_amount)} ₽</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.ppvz_for_pay)} ₽</td>
+                                            </>
+                                        )}
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                        {articles.length === 0 && <div className="empty-state" style={{ padding: 20 }}>Нет данных за выбранный период</div>}
+                    </div>
+                    <div style={{ marginTop: 8, opacity: 0.5, fontSize: 12 }}>
+                        Строк из API: {data?.total_rows || 0} · Артикулов: {articles.length}
+                    </div>
+                </>
+            )}
+
+            {!data && !loading && !error && (
+                <div className="glass-card" style={{ padding: 40, textAlign: 'center' }}>
+                    <div style={{ fontSize: 48, marginBottom: 12 }}>📈</div>
+                    <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>БДР — Бюджет Доходов и Расходов</div>
+                    <div style={{ opacity: 0.7 }}>Выберите период и нажмите «Загрузить» для получения данных из WB</div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+function KpiCard({ label, value, sub, color }: { label: string; value: string; sub: string; color?: string }) {
+    return (
+        <div className="glass-card" style={{ padding: '14px 16px' }}>
+            <div style={{ fontSize: 12, opacity: 0.6, marginBottom: 4 }}>{label}</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: color || 'var(--text-primary)' }}>{value}</div>
+            {sub && <div style={{ fontSize: 12, opacity: 0.5, marginTop: 2 }}>{sub}</div>}
         </div>
     );
 }

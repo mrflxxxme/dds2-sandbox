@@ -57,6 +57,22 @@ async def get_dds_pnl(
     return await reports_service.get_dds_pnl(db, project.id, year)
 
 
+@router.get("/wb_bdr")
+async def get_wb_bdr(
+    date_from: date = Query(...),
+    date_to: date = Query(...),
+    brand: Optional[str] = Query(None),
+    article: Optional[str] = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """WB BDR (P&L) report from finance API — per-article breakdown."""
+    from backend.services import wb_bdr_service
+    return await wb_bdr_service.get_wb_bdr(
+        db, project.id, date_from, date_to, brand=brand, article=article,
+    )
+
+
 @router.get("/fx_control", response_model=list[FxControlRow])
 async def get_fx_control(
     date_from: Optional[date] = Query(None),
