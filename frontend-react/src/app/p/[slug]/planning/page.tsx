@@ -417,9 +417,19 @@ function PlanPayments() {
     const [linkAmount, setLinkAmount] = useState('');
     const [selAccount, setSelAccount] = useState<string>('');
     const [filterDir, setFilterDir] = useState<string>('');
+    // order_no → { invoice_no, dt_number } lookup from cost_orders
+    const [orderMeta, setOrderMeta] = useState<Record<string, { invoice_no?: string; dt_number?: string }>>({}); 
 
-    useEffect(() => { load(); }, []);
+    useEffect(() => { load(); loadOrderMeta(); }, []);
     const load = async () => { try { setData(await api.getPlanningPayments()); } catch { } };
+    const loadOrderMeta = async () => {
+        try {
+            const orders = await api.getCostOrders();
+            const map: Record<string, { invoice_no?: string; dt_number?: string }> = {};
+            for (const o of orders) map[String(o.order_no)] = { invoice_no: o.invoice_no, dt_number: o.dt_number };
+            setOrderMeta(map);
+        } catch { }
+    };
     const del = async (id: number) => {
         if (!confirm('Удалить?')) return;
         try { await api.deletePlanningPayment(id); load(); } catch (e: any) { setMsg(e.message); }
@@ -560,7 +570,10 @@ function PlanPayments() {
                 <div style={{ overflowX: 'auto' }}>
                     <table className="data-table">
                         <thead><tr>
-                            <th>ID</th><th>Дата</th><th>Заказ</th><th>Направление</th><th>План вал.</th><th>Вал.</th>
+                            <th>ID</th><th>Дата</th><th>Заказ</th><th>Направление</th>
+                            {filterDir === 'ДОСТАВКА' && <th>Инвойс</th>}
+                            {filterDir === 'ТАМОЖНЯ' && <th>ДТ</th>}
+                            <th>План вал.</th><th>Вал.</th>
                             <th>Факт вал.</th><th>Остаток вал.</th><th>План ₽</th><th>Факт ₽</th><th>Статус</th><th></th>
                         </tr></thead>
                         <tbody>{filtered.map(r => {
@@ -576,6 +589,8 @@ function PlanPayments() {
                                     <td style={{ fontSize: 12 }}>{r.pay_date ? formatDate(r.pay_date) : '—'}</td>
                                     <td>{r.order_no || '—'}</td>
                                     <td><span className="badge badge-info">{r.direction || '—'}</span></td>
+                                    {filterDir === 'ДОСТАВКА' && <td style={{ fontSize: 11, fontFamily: 'monospace' }}>{orderMeta[String(r.order_no)]?.invoice_no || '—'}</td>}
+                                    {filterDir === 'ТАМОЖНЯ' && <td style={{ fontSize: 11, fontFamily: 'monospace' }}>{orderMeta[String(r.order_no)]?.dt_number || '—'}</td>}
                                     <td style={{ fontWeight: 500 }}>{formatNumber(amt)}</td>
                                     <td><span className={`badge badge-${r.currency === 'RUB' ? 'success' : 'warning'}`}>{r.currency}</span></td>
                                     <td style={{ color: paidAmt > 0 ? 'var(--color-success)' : undefined }}>{paidAmt > 0 ? formatNumber(paidAmt) : '—'}</td>
