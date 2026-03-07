@@ -502,7 +502,19 @@ function PlanPayments() {
         return s + parseFloat(r.paid_amount || 0);
     }, 0);
     const totalPlanRub = filtered.reduce((s, r) => s + parseFloat(r.amount_rub || 0), 0);
-    const totalPaidRub = filtered.reduce((s, r) => s + parseFloat(r.paid_rub || 0), 0);
+    // Факт ₽: convert paid_amount via fx_rate + add RUB commissions (paid_rub)
+    const totalPaidRub = filtered.reduce((s, r) => {
+        const paidAmt = r.is_paid ? parseFloat(r.amount || 0) : parseFloat(r.paid_amount || 0);
+        const rate = parseFloat(r.fx_rate || 0);
+        const paidRub = parseFloat(r.paid_rub || 0);
+        // If fx_rate exists and currency is not RUB, convert fact to RUB + add commissions
+        const ccy = (r.currency || 'RUB').toUpperCase();
+        if (ccy !== 'RUB' && rate > 0) {
+            return s + paidAmt * rate + paidRub;
+        }
+        // RUB payments: paid_rub IS the fact
+        return s + paidRub;
+    }, 0);
     const totalRemain = totalPlan - totalPaidAmt;
     const progress = totalPlan > 0 ? (totalPaidAmt / totalPlan * 100).toFixed(0) + '%' : '—';
     // detect dominant currency
@@ -563,6 +575,7 @@ function PlanPayments() {
                     <span><span style={{ color: 'var(--color-text-muted)' }}>Прогресс:</span> <b>{progress}</b></span>
                     <span style={{ opacity: 0.6 }}><span style={{ color: 'var(--color-text-muted)' }}>План ₽:</span> {formatNumber(totalPlanRub)}</span>
                     <span style={{ opacity: 0.6 }}><span style={{ color: 'var(--color-text-muted)' }}>Факт ₽:</span> {formatNumber(totalPaidRub)}</span>
+                    <span style={{ opacity: 0.6 }}><span style={{ color: 'var(--color-text-muted)' }}>Остаток ₽:</span> <b style={{ color: (totalPlanRub - totalPaidRub) > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{formatNumber(totalPlanRub - totalPaidRub)}</b></span>
                 </div>
             )}
 
