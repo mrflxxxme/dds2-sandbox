@@ -232,7 +232,10 @@ async def fetch_funnel_history(api_key: str, date_from: str, date_to: str) -> di
 
 
 async def fetch_ad_campaigns(api_key: str) -> list[int]:
-    """Get list of active/paused/completed ad campaign IDs."""
+    """Get list of active/paused ad campaign IDs.
+    Only status 9 (active) and 11 (paused) — matching Google Script logic.
+    Completed campaigns (7) are excluded to keep the list small.
+    """
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -250,7 +253,7 @@ async def fetch_ad_campaigns(api_key: str) -> list[int]:
         campaign_ids = []
         for adv in data.get("adverts") or []:
             status = str(adv.get("status", ""))
-            if status in ("7", "9", "11"):  # completed / active / paused
+            if status in ("9", "11"):  # active / paused only
                 for compa in adv.get("advert_list") or []:
                     cid = compa.get("advertId")
                     if cid and cid not in campaign_ids:
@@ -296,7 +299,7 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
                    f"?ids={ids_param}&beginDate={begin_date}&endDate={end_date}")
 
             chunk_ok = False
-            for attempt in range(5):
+            for attempt in range(2):  # 2 attempts max (Google Script: 0 retries)
                 try:
                     resp = await client.get(url, headers={
                         "Accept": "application/json",
@@ -307,10 +310,10 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
                     break
 
                 if resp.status_code == 429:
-                    wait = [10, 20, 30, 40, 60][attempt]
+                    wait = [20, 40][attempt]
                     logger.warning(
                         f"WB adv 429 rate limit, waiting {wait}s "
-                        f"(attempt {attempt+1}/5, elapsed {time.monotonic()-t_start:.0f}s)"
+                        f"(attempt {attempt+1}/2, elapsed {time.monotonic()-t_start:.0f}s)"
                     )
                     if time.monotonic() - t_start + wait >= TIME_BUDGET:
                         logger.warning(
@@ -326,13 +329,10 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
 
                 data = resp.json()
                 if data is None:
-                    wait = 30
                     logger.warning(
-                        f"WB adv: empty JSON response for chunk {idx+1}, "
-                        f"retrying in {wait}s (attempt {attempt+1}/5)"
+                        f"WB adv: empty JSON response for chunk {idx+1}, skipping"
                     )
-                    await asyncio.sleep(wait)
-                    continue
+                    break  # Don't retry empty responses — move on like Google Script
                 items = data if isinstance(data, list) else (data.get("data") or data)
                 if not isinstance(items, list):
                     break
