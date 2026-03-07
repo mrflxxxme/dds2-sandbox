@@ -506,7 +506,7 @@ function PlanPayments() {
         { key: '', label: 'Все' },
         { key: 'ЗАКАЗ', label: '📦 Заказ' },
         { key: 'ТАМОЖНЯ', label: '🛃 Таможня' },
-        { key: 'ЛОГИСТИКА', label: '🚛 Логистика' },
+        { key: 'ДОСТАВКА', label: '🚛 Доставка' },
     ];
 
     return (
