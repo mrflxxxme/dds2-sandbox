@@ -485,10 +485,14 @@ function PlanPayments() {
 
     const filtered = filterDir ? data.filter(r => (r.direction || '').toUpperCase() === filterDir.toUpperCase()) : data;
 
-    const totalPlan = filtered.reduce((s, r) => s + parseFloat(r.amount_rub || 0), 0);
-    const totalPaid = filtered.reduce((s, r) => s + parseFloat(r.paid_rub || 0), 0);
-    const totalRemain = totalPlan - totalPaid;
-    const progress = totalPlan > 0 ? (totalPaid / totalPlan * 100).toFixed(0) + '%' : '—';
+    const totalPlan = filtered.reduce((s, r) => s + parseFloat(r.amount || 0), 0);
+    const totalPaidAmt = filtered.reduce((s, r) => s + parseFloat(r.paid_amount || 0), 0);
+    const totalPlanRub = filtered.reduce((s, r) => s + parseFloat(r.amount_rub || 0), 0);
+    const totalPaidRub = filtered.reduce((s, r) => s + parseFloat(r.paid_rub || 0), 0);
+    const totalRemain = totalPlan - totalPaidAmt;
+    const progress = totalPlan > 0 ? (totalPaidAmt / totalPlan * 100).toFixed(0) + '%' : '—';
+    // detect dominant currency
+    const dominantCcy = filtered.length > 0 ? (filtered[0].currency || 'CNY') : 'CNY';
 
     const unpaidPayments = filtered.filter(p => !p.is_paid);
 
@@ -539,10 +543,12 @@ function PlanPayments() {
             {/* Compact summary – inline row */}
             {filtered.length > 0 && (
                 <div style={{ display: 'flex', gap: 24, marginBottom: 12, padding: '8px 12px', background: 'var(--color-bg-input)', borderRadius: 8, fontSize: 13, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <span><span style={{ color: 'var(--color-text-muted)' }}>План:</span> <b>{formatNumber(totalPlan)} ₽</b></span>
-                    <span><span style={{ color: 'var(--color-text-muted)' }}>Оплачено:</span> <b style={{ color: 'var(--color-success)' }}>{formatNumber(totalPaid)} ₽</b></span>
-                    <span><span style={{ color: 'var(--color-text-muted)' }}>Остаток:</span> <b style={{ color: totalRemain > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{formatNumber(totalRemain)} ₽</b></span>
+                    <span><span style={{ color: 'var(--color-text-muted)' }}>План {dominantCcy}:</span> <b>{formatNumber(totalPlan)}</b></span>
+                    <span><span style={{ color: 'var(--color-text-muted)' }}>Факт {dominantCcy}:</span> <b style={{ color: 'var(--color-success)' }}>{formatNumber(totalPaidAmt)}</b></span>
+                    <span><span style={{ color: 'var(--color-text-muted)' }}>Остаток {dominantCcy}:</span> <b style={{ color: totalRemain > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{formatNumber(totalRemain)}</b></span>
                     <span><span style={{ color: 'var(--color-text-muted)' }}>Прогресс:</span> <b>{progress}</b></span>
+                    <span style={{ opacity: 0.6 }}><span style={{ color: 'var(--color-text-muted)' }}>План ₽:</span> {formatNumber(totalPlanRub)}</span>
+                    <span style={{ opacity: 0.6 }}><span style={{ color: 'var(--color-text-muted)' }}>Факт ₽:</span> {formatNumber(totalPaidRub)}</span>
                 </div>
             )}
 
@@ -550,25 +556,28 @@ function PlanPayments() {
                 <div style={{ overflowX: 'auto' }}>
                     <table className="data-table">
                         <thead><tr>
-                            <th>ID</th><th>Дата</th><th>Заказ</th><th>Направление</th><th>Сумма</th><th>Вал.</th>
-                            <th>План ₽</th><th>Факт ₽</th><th>Остаток</th><th>Статус</th><th></th>
+                            <th>ID</th><th>Дата</th><th>Заказ</th><th>Направление</th><th>План вал.</th><th>Вал.</th>
+                            <th>Факт вал.</th><th>Остаток вал.</th><th>План ₽</th><th>Факт ₽</th><th>Статус</th><th></th>
                         </tr></thead>
                         <tbody>{filtered.map(r => {
                             const st = _status(r);
-                            const amt = parseFloat(r.amount_rub || 0);
-                            const paid = parseFloat(r.paid_rub || 0);
-                            const remain = amt - paid;
+                            const amt = parseFloat(r.amount || 0);
+                            const paidAmt = parseFloat(r.paid_amount || 0);
+                            const remain = amt - paidAmt;
+                            const amtRub = parseFloat(r.amount_rub || 0);
+                            const paidRub = parseFloat(r.paid_rub || 0);
                             return (
                                 <tr key={r.id}>
                                     <td>{r.id}</td>
                                     <td style={{ fontSize: 12 }}>{r.pay_date ? formatDate(r.pay_date) : '—'}</td>
                                     <td>{r.order_no || '—'}</td>
                                     <td><span className="badge badge-info">{r.direction || '—'}</span></td>
-                                    <td>{formatNumber(r.amount || 0)}</td>
+                                    <td style={{ fontWeight: 500 }}>{formatNumber(amt)}</td>
                                     <td><span className={`badge badge-${r.currency === 'RUB' ? 'success' : 'warning'}`}>{r.currency}</span></td>
-                                    <td style={{ fontWeight: 500 }}>{formatNumber(amt)} ₽</td>
-                                    <td>{paid > 0 ? `${formatNumber(paid)} ₽` : '—'}</td>
-                                    <td>{remain > 0 ? `${formatNumber(remain)} ₽` : '—'}</td>
+                                    <td style={{ color: paidAmt > 0 ? 'var(--color-success)' : undefined }}>{paidAmt > 0 ? formatNumber(paidAmt) : '—'}</td>
+                                    <td style={{ color: remain > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{remain > 0 ? formatNumber(remain) : '✓'}</td>
+                                    <td style={{ fontSize: 12, opacity: 0.7 }}>{formatNumber(amtRub)} ₽</td>
+                                    <td style={{ fontSize: 12, opacity: 0.7 }}>{paidRub > 0 ? `${formatNumber(paidRub)} ₽` : '—'}</td>
                                     <td><span className={`badge badge-${st.cls}`}>{st.label}</span></td>
                                     <td style={{ display: 'flex', gap: 4 }}>
                                         {!r.is_paid && <button className="btn btn-primary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => markPaid(r.id)}>✓</button>}

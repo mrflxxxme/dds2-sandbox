@@ -58,6 +58,7 @@ class PlannedPayment(Base, SoftDeleteMixin):
     fx_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 6))
     amount_rub: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2))
     paid_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
+    paid_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)  # fact in original currency (e.g. CNY)
     is_paid: Mapped[bool] = mapped_column(Boolean, default=False)
 
 

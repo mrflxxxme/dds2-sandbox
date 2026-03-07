@@ -357,7 +357,8 @@ def _sync_plan_payments(db: Session, project_id: int):
 
     # Preload all relevant transactions
     # ЗАКАЗ fact: annex_id matches order_no, purpose_tag = Заказ
-    order_fact = {}  # order_no → sum(expense)
+    # Split by currency: order_fact_ccy for original currency, order_fact_rub for RUB
+    order_fact_ccy = {}  # order_no → {currency → sum(expense)}
     txns_order = db.execute(
         select(Transaction).where(
             Transaction.project_id == project_id,
@@ -369,12 +370,15 @@ def _sync_plan_payments(db: Session, project_id: int):
         if t.annex_id:
             try:
                 ono = _order_no_to_int(t.annex_id)
-                order_fact[ono] = order_fact.get(ono, Decimal("0")) + (t.expense or Decimal("0"))
+                if ono not in order_fact_ccy:
+                    order_fact_ccy[ono] = {}
+                ccy = (t.currency or "RUB").upper()
+                order_fact_ccy[ono][ccy] = order_fact_ccy[ono].get(ccy, Decimal("0")) + (t.expense or Decimal("0"))
             except (ValueError, TypeError):
                 pass
 
     # ДОСТАВКА fact: invoice_id matches CostOrder.invoice_no, purpose_tag = Логистика
-    delivery_fact = {}  # order_no → sum(expense)
+    delivery_fact_ccy = {}  # order_no → {currency → sum(expense)}
     txns_delivery = db.execute(
         select(Transaction).where(
             Transaction.project_id == project_id,
@@ -387,9 +391,12 @@ def _sync_plan_payments(db: Session, project_id: int):
     for t in txns_delivery:
         if t.invoice_id and t.invoice_id in inv_to_order:
             ono = inv_to_order[t.invoice_id]
-            delivery_fact[ono] = delivery_fact.get(ono, Decimal("0")) + (t.expense or Decimal("0"))
+            if ono not in delivery_fact_ccy:
+                delivery_fact_ccy[ono] = {}
+            ccy = (t.currency or "RUB").upper()
+            delivery_fact_ccy[ono][ccy] = delivery_fact_ccy[ono].get(ccy, Decimal("0")) + (t.expense or Decimal("0"))
 
-    # ТАМОЖНЯ fact: from customs_alloc + customs_dt
+    # ТАМОЖНЯ fact: from customs_alloc + customs_dt (always RUB)
     customs_fact = {}  # order_no → sum(amount)
     allocs = db.execute(
         select(CustomsAlloc).where(CustomsAlloc.project_id == project_id)
@@ -423,21 +430,44 @@ def _sync_plan_payments(db: Session, project_id: int):
         if p.order_no is None:
             continue
 
-        paid = Decimal("0")
+        paid_rub = Decimal("0")
+        paid_amount = Decimal("0")
         direction = (p.direction or "").upper()
+        pay_ccy = (p.currency or "RUB").upper()
 
         if direction == "ЗАКАЗ":
-            paid = order_fact.get(p.order_no, Decimal("0"))
+            ccy_map = order_fact_ccy.get(p.order_no, {})
+            # paid_amount = sum in payment's currency (e.g. CNY)
+            paid_amount = ccy_map.get(pay_ccy, Decimal("0"))
+            # paid_rub = sum in RUB (if any RUB transactions exist for this order)
+            paid_rub = ccy_map.get("RUB", Decimal("0"))
+            # If payment currency IS RUB, paid_amount = paid_rub
+            if pay_ccy == "RUB":
+                paid_amount = paid_rub
         elif direction == "ДОСТАВКА":
-            paid = delivery_fact.get(p.order_no, Decimal("0"))
+            ccy_map = delivery_fact_ccy.get(p.order_no, {})
+            paid_amount = ccy_map.get(pay_ccy, Decimal("0"))
+            paid_rub = ccy_map.get("RUB", Decimal("0"))
+            if pay_ccy == "RUB":
+                paid_amount = paid_rub
         elif direction == "ТАМОЖНЯ":
-            paid = customs_fact.get(p.order_no, Decimal("0"))
+            # Customs is always in RUB
+            paid_rub = customs_fact.get(p.order_no, Decimal("0"))
+            paid_amount = paid_rub
 
-        # Add manual links
-        paid += manual_map.get(p.id, Decimal("0"))
+        # Add manual links (always in RUB)
+        manual_rub = manual_map.get(p.id, Decimal("0"))
+        paid_rub += manual_rub
 
-        p.paid_rub = paid
-        p.is_paid = paid >= (p.amount_rub or Decimal("0")) if (p.amount_rub and p.amount_rub > 0) else False
+        p.paid_rub = paid_rub
+        p.paid_amount = paid_amount
+        # Compare in original currency: paid_amount >= amount
+        if p.amount and p.amount > 0:
+            p.is_paid = paid_amount >= p.amount
+        elif p.amount_rub and p.amount_rub > 0:
+            p.is_paid = paid_rub >= p.amount_rub
+        else:
+            p.is_paid = False
 
     db.flush()
 

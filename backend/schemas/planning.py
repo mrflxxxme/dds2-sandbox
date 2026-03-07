@@ -43,6 +43,7 @@ class PlannedPaymentSchema(BaseModel):
     fx_rate: Optional[Decimal] = None
     amount_rub: Optional[Decimal] = None
     paid_rub: Decimal = Decimal("0")
+    paid_amount: Decimal = Decimal("0")  # fact in original currency
     is_paid: bool = False
 
 
