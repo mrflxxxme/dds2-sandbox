@@ -177,6 +177,10 @@ async def fetch_funnel_history(api_key: str, date_from: str, date_to: str) -> di
                 logger.info("WB history API: 402 — Джем not available, falling back to per-day")
                 return None  # Signal: use fallback
 
+            if resp.status_code == 400:
+                logger.info(f"WB history API: 400 — {resp.text[:150]}, falling back to per-day")
+                return None  # Signal: use fallback (dates too old or invalid params)
+
             if resp.status_code != 200:
                 logger.error(f"WB history API error {resp.status_code}: {resp.text[:200]}")
                 break
