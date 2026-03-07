@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { api } from '@/lib/api';
-import { formatNumber, exportToExcel } from '@/lib/utils';
+import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 import {
     XAxis, YAxis, CartesianGrid, Tooltip, Legend,
     ResponsiveContainer, PieChart, Pie, Cell,
@@ -24,35 +24,46 @@ const PIE_COLORS = [
 ];
 
 /* ─── Period presets ───────────────────────────────────────────── */
-type PeriodKey = 'month' | 'prev_month' | '7d' | '30d' | '90d' | 'all';
+type PeriodKey = 'month' | 'prev_month' | '7d' | '30d' | '90d' | 'all' | 'custom';
 
-function getPeriodDates(key: PeriodKey): { from: string; to: string; label: string } {
+function getPeriodDates(key: PeriodKey, customFrom?: string, customTo?: string): { from: string; to: string; label: string } {
     const today = new Date();
-    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const dd = String(today.getDate()).padStart(2, '0');
+    const todayStr = `${yyyy}-${mm}-${dd}`;
+
     switch (key) {
         case 'month': {
-            const s = new Date(today.getFullYear(), today.getMonth(), 1);
-            return { from: fmt(s), to: fmt(today), label: 'Текущий месяц' };
+            return { from: `${yyyy}-${mm}-01`, to: todayStr, label: 'Текущий месяц' };
         }
         case 'prev_month': {
-            const s = new Date(today.getFullYear(), today.getMonth() - 1, 1);
-            const e = new Date(today.getFullYear(), today.getMonth(), 0);
-            return { from: fmt(s), to: fmt(e), label: 'Прошлый месяц' };
+            const prev = new Date(yyyy, today.getMonth() - 1, 1);
+            const prevEnd = new Date(yyyy, today.getMonth(), 0);
+            const pY = prev.getFullYear();
+            const pM = String(prev.getMonth() + 1).padStart(2, '0');
+            const eD = String(prevEnd.getDate()).padStart(2, '0');
+            return { from: `${pY}-${pM}-01`, to: `${pY}-${pM}-${eD}`, label: 'Прошлый месяц' };
         }
         case '7d': {
             const s = new Date(today); s.setDate(s.getDate() - 6);
-            return { from: fmt(s), to: fmt(today), label: '7 дней' };
+            const sY = s.getFullYear(), sM = String(s.getMonth() + 1).padStart(2, '0'), sD = String(s.getDate()).padStart(2, '0');
+            return { from: `${sY}-${sM}-${sD}`, to: todayStr, label: '7 дней' };
         }
         case '30d': {
             const s = new Date(today); s.setDate(s.getDate() - 29);
-            return { from: fmt(s), to: fmt(today), label: '30 дней' };
+            const sY = s.getFullYear(), sM = String(s.getMonth() + 1).padStart(2, '0'), sD = String(s.getDate()).padStart(2, '0');
+            return { from: `${sY}-${sM}-${sD}`, to: todayStr, label: '30 дней' };
         }
         case '90d': {
             const s = new Date(today); s.setDate(s.getDate() - 89);
-            return { from: fmt(s), to: fmt(today), label: '90 дней' };
+            const sY = s.getFullYear(), sM = String(s.getMonth() + 1).padStart(2, '0'), sD = String(s.getDate()).padStart(2, '0');
+            return { from: `${sY}-${sM}-${sD}`, to: todayStr, label: '90 дней' };
         }
+        case 'custom':
+            return { from: customFrom || todayStr, to: customTo || todayStr, label: 'Произвольный' };
         case 'all':
-            return { from: '2020-01-01', to: fmt(today), label: 'Всё время' };
+            return { from: '2020-01-01', to: todayStr, label: 'Всё время' };
     }
 }
 
@@ -64,8 +75,12 @@ function fmtK(v: number): string {
 }
 
 function shortDay(iso: string) {
-    const d = new Date(iso);
+    const d = new Date(iso + 'T00:00:00');
     return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+}
+
+function truncate(s: string, n: number) {
+    return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
 /* ─── Custom Tooltip ───────────────────────────────────────────── */
@@ -86,23 +101,23 @@ function ChartTooltip({ active, payload, label }: any) {
     );
 }
 
-/* ─── Pie label renderer (outside, colored) ────────────────────── */
+/* ─── Pie label renderer (shortened text) ──────────────────────── */
 function renderPieLabel({ cx, cy, midAngle, outerRadius, name, percent, index }: any) {
     const RADIAN = Math.PI / 180;
-    const radius = outerRadius + 24;
+    const radius = outerRadius + 20;
     const x = cx + radius * Math.cos(-midAngle * RADIAN);
     const y = cy + radius * Math.sin(-midAngle * RADIAN);
-    if (percent < 0.02) return null; // skip tiny slices
+    if (percent < 0.03) return null;
     return (
         <text
             x={x} y={y}
             fill={PIE_COLORS[index % PIE_COLORS.length]}
             textAnchor={x > cx ? 'start' : 'end'}
             dominantBaseline="central"
-            fontSize={12}
+            fontSize={11}
             fontWeight={600}
         >
-            {name} {(percent * 100).toFixed(0)}%
+            {truncate(name, 12)} {(percent * 100).toFixed(0)}%
         </text>
     );
 }
@@ -131,15 +146,18 @@ export default function DashboardPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [period, setPeriod] = useState<PeriodKey>('month');
+    const [customFrom, setCustomFrom] = useState('');
+    const [customTo, setCustomTo] = useState('');
     const [selectedCp, setSelectedCp] = useState<string>('all');
+    const [selectedExpCat, setSelectedExpCat] = useState<string>('all');
 
-    const { from: dateFrom, to: dateTo, label: periodLabel } = getPeriodDates(period);
+    const { from: dateFrom, to: dateTo, label: periodLabel } = getPeriodDates(period, customFrom, customTo);
 
     const loadData = useCallback(async () => {
         try {
             setLoading(true);
             setError('');
-            const { from, to } = getPeriodDates(period);
+            const { from, to } = getPeriodDates(period, customFrom, customTo);
             const [summary, bal, fun] = await Promise.all([
                 api.getDashboardSummary(from, to),
                 api.getBalance(),
@@ -149,12 +167,13 @@ export default function DashboardPage() {
             setBalance(bal);
             setFunnel(fun);
             setSelectedCp('all');
+            setSelectedExpCat('all');
         } catch (e: any) {
             setError(e.message || 'Ошибка загрузки');
         } finally {
             setLoading(false);
         }
-    }, [period]);
+    }, [period, customFrom, customTo]);
 
     useEffect(() => { loadData(); }, [loadData]);
 
@@ -167,14 +186,29 @@ export default function DashboardPage() {
         { key: 'all', label: 'Всё' },
     ];
 
-    /* Filter daily data by counterparty (not available per-day, so we show/hide the income line) */
     const incomeCounterparties = data?.income_counterparties || [];
+    const expensePie: any[] = data?.expense_by_category || [];
 
-    /* If counterparty selected, we can't filter daily chart (it's aggregated), so just show info */
+    /* ─── Daily chart data — filter by selected cp / expense cat ── */
+    const dailyChart = useMemo(() => {
+        const raw = data?.daily_cashflow || [];
+        return raw.map((d: any) => ({
+            ...d,
+            label: shortDay(d.date),
+        }));
+    }, [data]);
+
+    /* ─── Selected cp info ───────────────────────────────────────── */
     const selectedCpData = useMemo(() => {
         if (selectedCp === 'all' || !incomeCounterparties.length) return null;
         return incomeCounterparties.find((c: any) => c.name === selectedCp);
     }, [selectedCp, incomeCounterparties]);
+
+    /* ─── Selected expense category info ──────────────────────── */
+    const selectedExpData = useMemo(() => {
+        if (selectedExpCat === 'all' || !expensePie.length) return null;
+        return expensePie.find((c: any) => c.name === selectedExpCat);
+    }, [selectedExpCat, expensePie]);
 
     if (loading) return (
         <div style={{ padding: 40, color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -192,13 +226,6 @@ export default function DashboardPage() {
     const funnelDRR = funnel && funnel.orders_sum_rub > 0
         ? (funnel.adv_sum / funnel.orders_sum_rub * 100) : 0;
 
-    const dailyChart = (data.daily_cashflow || []).map((d: any) => ({
-        ...d,
-        label: shortDay(d.date),
-    }));
-
-    const expensePie = data.expense_by_category || [];
-
     return (
         <div className="animate-in">
             {/* ─── Header with period selector ───────────────── */}
@@ -207,7 +234,7 @@ export default function DashboardPage() {
                     <h1 className="page-title">Дашборд</h1>
                     <p className="page-subtitle">{periodLabel} ({dateFrom} — {dateTo})</p>
                 </div>
-                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
                     {allPeriods.map(p => (
                         <button
                             key={p.key}
@@ -218,6 +245,26 @@ export default function DashboardPage() {
                             {p.label}
                         </button>
                     ))}
+                    <span style={{ color: 'var(--color-text-muted)', fontSize: 12, margin: '0 4px' }}>|</span>
+                    <input
+                        type="date"
+                        value={period === 'custom' ? customFrom : dateFrom}
+                        onChange={e => { setCustomFrom(e.target.value); setPeriod('custom'); }}
+                        style={{
+                            background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)',
+                            borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 12,
+                        }}
+                    />
+                    <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>—</span>
+                    <input
+                        type="date"
+                        value={period === 'custom' ? customTo : dateTo}
+                        onChange={e => { setCustomTo(e.target.value); setPeriod('custom'); }}
+                        style={{
+                            background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)',
+                            borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 12,
+                        }}
+                    />
                 </div>
             </div>
 
@@ -300,7 +347,14 @@ export default function DashboardPage() {
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                             <h3 style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-text)' }}>
                                 📈 Доходы и расходы по дням
+                                {selectedCp !== 'all' && <span style={{ fontSize: 12, color: C.accent, marginLeft: 8 }}>({truncate(selectedCp, 20)})</span>}
+                                {selectedExpCat !== 'all' && <span style={{ fontSize: 12, color: C.expense, marginLeft: 8 }}>({truncate(selectedExpCat, 20)})</span>}
                             </h3>
+                            {(selectedCp !== 'all' || selectedExpCat !== 'all') && (
+                                <button className="btn btn-sm btn-secondary"
+                                    onClick={() => { setSelectedCp('all'); setSelectedExpCat('all'); }}
+                                >Сбросить</button>
+                            )}
                         </div>
                         <ResponsiveContainer width="100%" height={320}>
                             <AreaChart data={dailyChart} margin={{ left: 10, right: 10 }}>
@@ -332,12 +386,17 @@ export default function DashboardPage() {
                     </div>
                 )}
 
-                {/* Expense Pie — with colored labels */}
+                {/* Expense Pie — clickable segments */}
                 {expensePie.length > 0 && (
                     <div className="glass-card" style={{ padding: '20px 16px' }}>
-                        <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 16, color: 'var(--color-text)' }}>
-                            🥧 Структура расходов
-                        </h3>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                            <h3 style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-text)' }}>
+                                🥧 Структура расходов
+                            </h3>
+                            {selectedExpCat !== 'all' && (
+                                <button className="btn btn-sm btn-secondary" onClick={() => setSelectedExpCat('all')}>Все</button>
+                            )}
+                        </div>
                         <ResponsiveContainer width="100%" height={320}>
                             <PieChart>
                                 <Pie
@@ -345,13 +404,23 @@ export default function DashboardPage() {
                                     dataKey="value"
                                     nameKey="name"
                                     cx="50%" cy="50%"
-                                    innerRadius={50} outerRadius={100}
+                                    innerRadius={50} outerRadius={90}
                                     paddingAngle={2}
                                     label={renderPieLabel}
                                     labelLine={{ stroke: '#475569', strokeWidth: 1 }}
+                                    onClick={(entry: any) => setSelectedExpCat(
+                                        selectedExpCat === entry.name ? 'all' : entry.name
+                                    )}
+                                    style={{ cursor: 'pointer' }}
                                 >
                                     {expensePie.map((_: any, i: number) => (
-                                        <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                                        <Cell
+                                            key={i}
+                                            fill={PIE_COLORS[i % PIE_COLORS.length]}
+                                            opacity={selectedExpCat === 'all' || selectedExpCat === expensePie[i]?.name ? 1 : 0.3}
+                                            stroke={selectedExpCat === expensePie[i]?.name ? '#fff' : 'none'}
+                                            strokeWidth={selectedExpCat === expensePie[i]?.name ? 2 : 0}
+                                        />
                                     ))}
                                 </Pie>
                                 <Tooltip
@@ -365,6 +434,20 @@ export default function DashboardPage() {
                                 />
                             </PieChart>
                         </ResponsiveContainer>
+                        {/* Selected expense category detail */}
+                        {selectedExpData && (
+                            <div style={{
+                                padding: '12px 16px', borderTop: '1px solid rgba(255,255,255,0.06)',
+                                fontSize: 13, color: '#94a3b8',
+                            }}>
+                                Выбрано: <strong style={{ color: 'var(--color-text)' }}>{selectedExpData.name}</strong> — {formatNumber(selectedExpData.value)} ₽
+                                {data.month_expense > 0 && (
+                                    <span style={{ marginLeft: 8 }}>
+                                        ({(selectedExpData.value / data.month_expense * 100).toFixed(1)}%)
+                                    </span>
+                                )}
+                            </div>
+                        )}
                     </div>
                 )}
             </div>
@@ -394,28 +477,31 @@ export default function DashboardPage() {
                             </tr>
                         </thead>
                         <tbody>
-                            {incomeCounterparties
-                                .filter((c: any) => selectedCp === 'all' || c.name === selectedCp)
-                                .map((c: any, i: number) => {
-                                    const pct = data.month_income > 0 ? (c.total / data.month_income * 100) : 0;
-                                    return (
-                                        <tr key={i}
-                                            onClick={() => setSelectedCp(selectedCp === c.name ? 'all' : c.name)}
-                                            style={{ cursor: 'pointer', background: selectedCp === c.name ? 'rgba(167,139,250,0.1)' : undefined }}
-                                        >
-                                            <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                {c.name}
-                                            </td>
-                                            <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--color-success)' }}>
-                                                {formatNumber(c.total)} ₽
-                                            </td>
-                                            <td style={{ textAlign: 'right' }}>{c.count}</td>
-                                            <td style={{ textAlign: 'right' }}>
-                                                <span className="badge badge-info">{pct.toFixed(1)}%</span>
-                                            </td>
-                                        </tr>
-                                    );
-                                })}
+                            {incomeCounterparties.map((c: any, i: number) => {
+                                const pct = data.month_income > 0 ? (c.total / data.month_income * 100) : 0;
+                                const isSelected = selectedCp === c.name;
+                                return (
+                                    <tr key={i}
+                                        onClick={() => setSelectedCp(isSelected ? 'all' : c.name)}
+                                        style={{
+                                            cursor: 'pointer',
+                                            background: isSelected ? 'rgba(167,139,250,0.1)' : undefined,
+                                        }}
+                                    >
+                                        <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            {isSelected && <span style={{ marginRight: 6 }}>▶</span>}
+                                            {c.name}
+                                        </td>
+                                        <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--color-success)' }}>
+                                            {formatNumber(c.total)} ₽
+                                        </td>
+                                        <td style={{ textAlign: 'right' }}>{c.count}</td>
+                                        <td style={{ textAlign: 'right' }}>
+                                            <span className="badge badge-info">{pct.toFixed(1)}%</span>
+                                        </td>
+                                    </tr>
+                                );
+                            })}
                         </tbody>
                     </table>
                     {selectedCpData && (

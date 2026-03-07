@@ -357,7 +357,7 @@ async def get_dashboard_summary(
     month_income = float(month_row.income)
     month_expense = float(month_row.expense)
 
-    # 3. Orders summary (within date range)
+    # 3. Orders summary (all active, no date filter — like debt)
     orders_q = select(
         func.count().label("cnt"),
         func.coalesce(func.sum(Order.order_amount), 0).label("total"),
@@ -365,10 +365,6 @@ async def get_dashboard_summary(
         Order.project_id == project_id,
         or_(Order.is_deleted == False, Order.is_deleted.is_(None)),
     )
-    if date_from:
-        orders_q = orders_q.where(Order.planned_ship_date >= date_from)
-    if date_to:
-        orders_q = orders_q.where(Order.planned_ship_date <= date_to)
     orders_result = await db.execute(orders_q)
     orders_row = orders_result.one()
     orders_count = orders_row.cnt
