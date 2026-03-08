@@ -390,10 +390,10 @@ function CustomsControl() {
 
 function WbBdr() {
     const today = new Date();
-    const weekAgo = new Date(today.getTime() - 7 * 86400000);
+    const twoMonthsAgo = new Date(today.getTime() - 60 * 86400000);
     const fmt = (d: Date) => d.toISOString().split('T')[0];
 
-    const [dateFrom, setDateFrom] = useState(fmt(weekAgo));
+    const [dateFrom, setDateFrom] = useState(fmt(twoMonthsAgo));
     const [dateTo, setDateTo] = useState(fmt(today));
     const [brand, setBrand] = useState('');
     const [articleSearch, setArticleSearch] = useState('');
@@ -401,19 +401,41 @@ function WbBdr() {
     const [data, setData] = useState<any>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
+    const [syncStatus, setSyncStatus] = useState<any>(null);
+    const [syncing, setSyncing] = useState(false);
+
+    // Load sync status on mount
+    React.useEffect(() => {
+        api.getWbBdrSyncStatus().then(setSyncStatus).catch(() => {});
+    }, []);
 
     const loadData = React.useCallback(async () => {
         setLoading(true); setError('');
         try {
             const res = await api.getWbBdr(dateFrom, dateTo, brand || undefined, articleSearch || undefined);
             setData(res);
+            if (res?.sync_status) setSyncStatus(res.sync_status);
         } catch (e: any) { setError(e.message || 'Ошибка загрузки'); }
         finally { setLoading(false); }
     }, [dateFrom, dateTo, brand, articleSearch]);
 
+    const handleSync = React.useCallback(async () => {
+        setSyncing(true);
+        try {
+            await api.triggerWbBdrSync();
+            const st = await api.getWbBdrSyncStatus();
+            setSyncStatus(st);
+            // Reload data after sync
+            await loadData();
+        } catch (e: any) {
+            setError('Ошибка синхронизации: ' + (e.message || ''));
+        } finally { setSyncing(false); }
+    }, [loadData]);
+
     const s = data?.summary;
     const articles = data?.articles || [];
     const brands = data?.brands || [];
+    const taxInfo = data?.tax_info || {};
 
     const pct = (val: number, base: number) => base ? ((val / base) * 100).toFixed(2) + '%' : '—';
 
@@ -435,6 +457,10 @@ function WbBdr() {
             'Хранение': a.storage,
             'Удержания': a.deductions,
             'Возвраты': a.returns_amount,
+            'Реклама': a.adv_sum || 0,
+            'Себестоимость ед.': a.cost_price || 0,
+            'Себестоимость всего': a.cost_total || 0,
+            'Прибыль': a.profit || 0,
             'Прод. шт': a.sale_qty,
             'Возвр. шт': a.ret_qty,
             'Ср. цена': a.avg_sale_price,
@@ -442,8 +468,38 @@ function WbBdr() {
         exportToExcel(rows, `BDR_${dateFrom}_${dateTo}`);
     };
 
+    // Format sync time
+    const syncTime = syncStatus?.last_sync
+        ? new Date(syncStatus.last_sync).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+        : null;
+    const isAllSynced = syncStatus?.total_rows > 0;
+
     return (
         <div>
+            {/* ── Sync Status Badge ── */}
+            <div className="glass-card" style={{ padding: '10px 16px', marginBottom: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 13 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <span>🔄 Последняя синхронизация: {syncTime || 'нет данных'}</span>
+                    {syncStatus?.last_status === 'OK' && <span style={{ color: '#22c55e' }}>● авто</span>}
+                    {syncStatus?.last_status === 'ERROR' && <span style={{ color: '#f43f5e' }}>● ошибка</span>}
+                    {isAllSynced && <span style={{ color: '#22c55e' }}>✅ Все дни синхронизированы</span>}
+                    {!isAllSynced && syncTime && <span style={{ color: '#eab308' }}>⚠️ Нет данных</span>}
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    {taxInfo?.tax_regime && (
+                        <span className="badge badge-info" style={{ fontSize: 11 }}>
+                            {taxInfo.tax_regime === 'usn_income' ? 'УСН Доходы' : 'УСН Д-Р'}
+                            {taxInfo.usn_rate > 0 && ` ${taxInfo.usn_rate}%`}
+                            {taxInfo.nds_rate > 0 && ` + НДС ${taxInfo.nds_rate}%`}
+                        </span>
+                    )}
+                    <button className="btn btn-secondary btn-sm" onClick={handleSync} disabled={syncing}
+                        style={{ fontSize: 12, padding: '4px 10px' }}>
+                        {syncing ? '⏳ Синхр...' : '🔄 Синхронизировать'}
+                    </button>
+                </div>
+            </div>
+
             {/* ── Filters ── */}
             <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
                 <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
@@ -478,25 +534,24 @@ function WbBdr() {
 
             {loading && <div className="glass-card" style={{ padding: 40, textAlign: 'center' }}>
                 <div style={{ fontSize: 32, marginBottom: 12 }}>⏳</div>
-                <div style={{ opacity: 0.7 }}>Загрузка данных из WB API...</div>
-                <div style={{ opacity: 0.5, fontSize: 12, marginTop: 8 }}>Это может занять 10-15 секунд</div>
+                <div style={{ opacity: 0.7 }}>Загрузка данных...</div>
             </div>}
 
             {s && !loading && (
                 <>
                     {/* ── KPI Cards ── */}
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12, marginBottom: 16 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
                         <KpiCard label="Итого к оплате" value={formatNumber(s.to_pay)} sub="₽" />
                         <KpiCard label="Реализация" value={formatNumber(s.realization)} sub="₽" />
                         <KpiCard label="Продажи" value={formatNumber(s.sales_amount)} sub={`₽ / ${formatNumber(s.sale_qty)} шт`} />
                         <KpiCard label="Возвраты" value={formatNumber(s.returns_amount)} sub={`₽ / ${formatNumber(s.ret_qty)} шт`} />
                         <KpiCard label="Комиссия" value={formatNumber(s.commission)} sub={pct(s.commission, s.realization)} color={s.commission < 0 ? '#ff6b6b' : undefined} />
-                        <KpiCard label="Возн. ВБ" value={formatNumber(s.total_wb_reward)} sub={pct(s.total_wb_reward, s.realization)} color={s.total_wb_reward < 0 ? '#ff6b6b' : undefined} />
                         <KpiCard label="Логистика" value={formatNumber(s.logistics)} sub={pct(s.logistics, s.realization)} />
-                        <KpiCard label="Штрафы" value={formatNumber(s.penalties)} sub={pct(s.penalties, s.realization)} color={s.penalties > 0 ? '#ff6b6b' : undefined} />
                         <KpiCard label="Хранение" value={formatNumber(s.storage)} sub={pct(s.storage, s.realization)} />
-                        <KpiCard label="Удержания" value={formatNumber(s.deductions)} sub={pct(s.deductions, s.realization)} color={s.deductions > 0 ? '#ff6b6b' : undefined} />
-                        <KpiCard label="Ср. цена" value={formatNumber(s.avg_sale_price)} sub="₽" />
+                        <KpiCard label="Реклама" value={formatNumber(s.adv_sum || 0)} sub={pct(s.adv_sum || 0, s.realization)} color="#f59e0b" />
+                        <KpiCard label="Себестоимость" value={formatNumber(s.cost_total || 0)} sub={pct(s.cost_total || 0, s.realization)} color="#8b5cf6" />
+                        <KpiCard label="Налог" value={formatNumber(s.tax_total || 0)} sub={`НДС ${formatNumber(s.tax_nds || 0)} + УСН ${formatNumber(s.tax_usn || 0)}`} color="#ef4444" />
+                        <KpiCard label="Чистая прибыль" value={formatNumber(s.profit || 0)} sub={pct(s.profit || 0, s.realization)} color={s.profit >= 0 ? '#22c55e' : '#ff6b6b'} />
                         <KpiCard label="% выкупа" value={s.buyout_pct?.toFixed(2) + '%'} sub="" />
                     </div>
 
@@ -520,16 +575,18 @@ function WbBdr() {
                                             <th>Бренд</th>
                                             <th>Категория</th>
                                             <th>Арт. МП</th>
-                                            <th>Ср. себест.</th>
-                                            <th>Удержания ₽</th>
-                                            <th>Штрафы ₽</th>
+                                            <th>Комиссия ₽</th>
                                             <th>Логист. ₽</th>
                                             <th>Хранение ₽</th>
-                                            <th>Комиссия ₽</th>
+                                            <th>Штрафы ₽</th>
+                                            <th>Удержания ₽</th>
+                                            <th style={{ color: '#f59e0b' }}>Реклама ₽</th>
+                                            <th style={{ color: '#8b5cf6' }}>С/С ед.</th>
+                                            <th style={{ color: '#8b5cf6' }}>С/С всего</th>
+                                            <th style={{ color: '#22c55e', fontWeight: 700 }}>Прибыль ₽</th>
                                         </>
                                     ) : (
                                         <>
-                                            <th>Удержания</th>
                                             <th>Ср. цена до скидок</th>
                                             <th>Ср. цена продажи</th>
                                             <th>Реализация ₽</th>
@@ -537,6 +594,9 @@ function WbBdr() {
                                             <th>Возвр. шт</th>
                                             <th>Продажи ₽</th>
                                             <th>К переч. ₽</th>
+                                            <th style={{ color: '#f59e0b' }}>Реклама ₽</th>
+                                            <th style={{ color: '#8b5cf6' }}>С/С всего</th>
+                                            <th style={{ color: '#22c55e', fontWeight: 700 }}>Прибыль ₽</th>
                                         </>
                                     )}
                                 </tr>
@@ -549,16 +609,18 @@ function WbBdr() {
                                     {mode === 'finance' ? (
                                         <>
                                             <td>-</td><td>-</td><td>-</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.avg_sale_price)} ₽</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.deductions)} ₽</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.penalties)} ₽</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.commission)} ₽</td>
                                             <td style={{ textAlign: 'right' }}>{formatNumber(s.logistics)} ₽</td>
                                             <td style={{ textAlign: 'right' }}>{formatNumber(s.storage)} ₽</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.commission)} ₽</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.penalties)} ₽</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.deductions)} ₽</td>
+                                            <td style={{ textAlign: 'right', color: '#f59e0b' }}>{formatNumber(s.adv_sum || 0)} ₽</td>
+                                            <td style={{ textAlign: 'right' }}>—</td>
+                                            <td style={{ textAlign: 'right', color: '#8b5cf6' }}>{formatNumber(s.cost_total || 0)} ₽</td>
+                                            <td style={{ textAlign: 'right', color: s.profit >= 0 ? '#22c55e' : '#ff6b6b', fontWeight: 700 }}>{formatNumber(s.profit || 0)} ₽</td>
                                         </>
                                     ) : (
                                         <>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.deductions)} ₽</td>
                                             <td style={{ textAlign: 'right' }}>{formatNumber(s.avg_retail_price)} ₽</td>
                                             <td style={{ textAlign: 'right' }}>{formatNumber(s.avg_sale_price)} ₽</td>
                                             <td style={{ textAlign: 'right' }}>{formatNumber(s.realization)} ₽</td>
@@ -566,6 +628,9 @@ function WbBdr() {
                                             <td style={{ textAlign: 'right' }}>{formatNumber(s.ret_qty)}</td>
                                             <td style={{ textAlign: 'right' }}>{formatNumber(s.sales_amount)} ₽</td>
                                             <td style={{ textAlign: 'right' }}>{formatNumber(s.ppvz_for_pay)} ₽</td>
+                                            <td style={{ textAlign: 'right', color: '#f59e0b' }}>{formatNumber(s.adv_sum || 0)} ₽</td>
+                                            <td style={{ textAlign: 'right', color: '#8b5cf6' }}>{formatNumber(s.cost_total || 0)} ₽</td>
+                                            <td style={{ textAlign: 'right', color: s.profit >= 0 ? '#22c55e' : '#ff6b6b', fontWeight: 700 }}>{formatNumber(s.profit || 0)} ₽</td>
                                         </>
                                     )}
                                 </tr>
@@ -581,16 +646,18 @@ function WbBdr() {
                                                 <td>{a.brand}</td>
                                                 <td>{a.subject}</td>
                                                 <td>{a.nm_id || '—'}</td>
-                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_sale_price)} ₽</td>
-                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.deductions)} ₽</td>
-                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.penalties)} ₽</td>
+                                                <td style={{ textAlign: 'right', color: a.commission < 0 ? '#ff6b6b' : undefined }}>{formatNumber(a.commission)} ₽</td>
                                                 <td style={{ textAlign: 'right' }}>{formatNumber(a.logistics)} ₽</td>
                                                 <td style={{ textAlign: 'right' }}>{formatNumber(a.storage)} ₽</td>
-                                                <td style={{ textAlign: 'right', color: a.commission < 0 ? '#ff6b6b' : undefined }}>{formatNumber(a.commission)} ₽</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.penalties)} ₽</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.deductions)} ₽</td>
+                                                <td style={{ textAlign: 'right', color: '#f59e0b' }}>{formatNumber(a.adv_sum || 0)} ₽</td>
+                                                <td style={{ textAlign: 'right', color: '#8b5cf6' }}>{formatNumber(a.cost_price || 0)} ₽</td>
+                                                <td style={{ textAlign: 'right', color: '#8b5cf6' }}>{formatNumber(a.cost_total || 0)} ₽</td>
+                                                <td style={{ textAlign: 'right', color: a.profit >= 0 ? '#22c55e' : '#ff6b6b', fontWeight: 600 }}>{formatNumber(a.profit || 0)} ₽</td>
                                             </>
                                         ) : (
                                             <>
-                                                <td style={{ textAlign: 'right', color: a.deductions > 0 ? '#ff6b6b' : undefined }}>{formatNumber(a.deductions)} ₽</td>
                                                 <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_retail_price)} ₽</td>
                                                 <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_sale_price)} ₽</td>
                                                 <td style={{ textAlign: 'right' }}>{formatNumber(a.realization)} ₽</td>
@@ -598,6 +665,9 @@ function WbBdr() {
                                                 <td style={{ textAlign: 'right' }}>{formatNumber(a.ret_qty)}</td>
                                                 <td style={{ textAlign: 'right' }}>{formatNumber(a.sales_amount)} ₽</td>
                                                 <td style={{ textAlign: 'right' }}>{formatNumber(a.ppvz_for_pay)} ₽</td>
+                                                <td style={{ textAlign: 'right', color: '#f59e0b' }}>{formatNumber(a.adv_sum || 0)} ₽</td>
+                                                <td style={{ textAlign: 'right', color: '#8b5cf6' }}>{formatNumber(a.cost_total || 0)} ₽</td>
+                                                <td style={{ textAlign: 'right', color: a.profit >= 0 ? '#22c55e' : '#ff6b6b', fontWeight: 600 }}>{formatNumber(a.profit || 0)} ₽</td>
                                             </>
                                         )}
                                     </tr>
@@ -606,8 +676,23 @@ function WbBdr() {
                         </table>
                         {articles.length === 0 && <div className="empty-state" style={{ padding: 20 }}>Нет данных за выбранный период</div>}
                     </div>
+
+                    {/* ── Tax Summary ── */}
+                    {s.tax_total > 0 && (
+                        <div className="glass-card" style={{ padding: 16, marginTop: 12 }}>
+                            <div style={{ fontWeight: 600, marginBottom: 8, fontSize: 14 }}>📋 Налоговая нагрузка</div>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 8, fontSize: 13 }}>
+                                <div>Доходы (Продажи): <b>{formatNumber(s.sales_amount)} ₽</b></div>
+                                {s.tax_nds > 0 && <div>Сумма НДС: <b style={{ color: '#ef4444' }}>{formatNumber(s.tax_nds)} ₽</b></div>}
+                                <div>Сумма УСН: <b style={{ color: '#ef4444' }}>{formatNumber(s.tax_usn)} ₽</b></div>
+                                <div>Итого налог: <b style={{ color: '#ef4444' }}>{formatNumber(s.tax_total)} ₽</b></div>
+                                {s.expenses_total > 0 && <div>Расходы (для базы): <b>{formatNumber(s.expenses_total)} ₽</b></div>}
+                            </div>
+                        </div>
+                    )}
+
                     <div style={{ marginTop: 8, opacity: 0.5, fontSize: 12 }}>
-                        Строк из API: {data?.total_rows || 0} · Артикулов: {articles.length}
+                        Строк в БД: {data?.total_rows || 0} · Артикулов: {articles.length}
                     </div>
                 </>
             )}
@@ -616,7 +701,12 @@ function WbBdr() {
                 <div className="glass-card" style={{ padding: 40, textAlign: 'center' }}>
                     <div style={{ fontSize: 48, marginBottom: 12 }}>📈</div>
                     <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>БДР — Бюджет Доходов и Расходов</div>
-                    <div style={{ opacity: 0.7 }}>Выберите период и нажмите «Загрузить» для получения данных из WB</div>
+                    <div style={{ opacity: 0.7 }}>Выберите период и нажмите «Загрузить» для получения данных</div>
+                    {!isAllSynced && (
+                        <div style={{ marginTop: 12, opacity: 0.6, fontSize: 13 }}>
+                            💡 Данные загрузятся автоматически при первом запросе
+                        </div>
+                    )}
                 </div>
             )}
         </div>

@@ -353,6 +353,12 @@ class ApiClient {
         if (article) url += `&article=${encodeURIComponent(article)}`;
         return this.request<any>('GET', url);
     }
+    getWbBdrSyncStatus() {
+        return this.request<any>('GET', `/api/v1/reports/wb_bdr/sync_status`);
+    }
+    triggerWbBdrSync() {
+        return this.request<any>('POST', `/api/v1/reports/wb_bdr/sync`);
+    }
     getCostHistory(article?: string, brand?: string) {
         const params = new URLSearchParams();
         if (article) params.set('article', article);

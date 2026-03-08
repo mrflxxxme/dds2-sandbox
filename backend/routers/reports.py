@@ -66,11 +66,35 @@ async def get_wb_bdr(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """WB BDR (P&L) report from finance API — per-article breakdown."""
+    """WB BDR (P&L) report from locally cached finance data."""
     from backend.services import wb_bdr_service
     return await wb_bdr_service.get_wb_bdr(
         db, project.id, date_from, date_to, brand=brand, article=article,
     )
+
+
+@router.get("/wb_bdr/sync_status")
+async def get_wb_bdr_sync_status(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get WB finance data sync status for the project."""
+    from backend.services.wb_finance_sync import get_sync_status
+    return await get_sync_status(db, project.id)
+
+
+@router.post("/wb_bdr/sync")
+async def trigger_wb_bdr_sync(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually trigger WB finance data sync (last 2 months)."""
+    from backend.services.wb_finance_sync import sync_wb_finance
+    today = date.today()
+    from datetime import timedelta
+    date_from = today - timedelta(days=60)
+    result = await sync_wb_finance(db, project.id, date_from, today)
+    return result
 
 
 @router.get("/cost_history")

@@ -1,9 +1,10 @@
 """
-Service: wb_bdr — WB P&L report from finance API.
+Service: wb_bdr — WB P&L report from locally cached finance data.
 
-Fetches WB reportDetailByPeriod, aggregates per-article:
-- Splits by doc_type_name: Продажа / Возврат / (пустой = logistics/fines)
-- Returns summary KPIs + per-article breakdown
+Reads from wb_finance_rows (pre-synced), enriches with:
+- Advertising data from WbFunnelDaily
+- Cost prices from cost_order_items (average)
+- Tax calculation from project tax_rates settings
 
 Verified formulas match TrueStats.
 """
@@ -14,9 +15,11 @@ from decimal import Decimal
 from collections import defaultdict
 from typing import Optional
 
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.services.integrations_service import _get_wb_key
+from backend.models.wb_finance import WbFinanceRow
+from backend.models import WbFunnelDaily, CostOrderItem
 
 logger = logging.getLogger("dds.wb_bdr")
 
@@ -33,29 +36,56 @@ async def get_wb_bdr(
     article: Optional[str] = None,
 ) -> dict:
     """
-    Fetch WB finance report and aggregate into BDR structure.
-    Returns { summary: {...}, articles: [...], brands: [...] }
+    Build BDR from locally cached WB finance data.
+    Enriches with ads, cost, tax.
+    Returns { summary, articles, brands, period, total_rows, sync_status, tax_info }
     """
-    from backend.integrations.wb_api import WBApiClient
+    # ── 1. Ensure we have data (trigger initial sync if needed) ──
+    from backend.services.wb_finance_sync import ensure_initial_sync, get_sync_status
+    await ensure_initial_sync(db, project_id)
 
-    _key, api_key = await _get_wb_key(db, project_id)
-    client = WBApiClient(api_key)
+    sync_status = await get_sync_status(db, project_id)
 
-    logger.info("wb_bdr: fetching %s — %s", date_from, date_to)
-    raw = await client.get_finance_report(date_from, date_to)
-    logger.info("wb_bdr: got %d rows", len(raw))
+    # ── 2. Load finance rows from local DB ──
+    q = select(WbFinanceRow).where(
+        WbFinanceRow.project_id == project_id,
+        WbFinanceRow.date_from >= date_from,
+        WbFinanceRow.date_to <= date_to,
+    )
+    result = await db.execute(q)
+    raw_rows = result.scalars().all()
 
-    # --- Aggregate per article ---
+    if not raw_rows:
+        return {
+            "summary": _serialize(_compute_metrics(_empty_totals(), _empty_totals(), _empty_totals())),
+            "articles": [],
+            "brands": [],
+            "period": {"date_from": str(date_from), "date_to": str(date_to)},
+            "total_rows": 0,
+            "sync_status": sync_status,
+            "tax_info": {},
+        }
+
+    # ── 3. Load ads data from WbFunnelDaily ──
+    ads_map = await _load_ads(db, project_id, date_from, date_to)
+
+    # ── 4. Load cost prices from cost_order_items ──
+    cost_map = await _load_avg_costs(db, project_id)
+
+    # ── 5. Load tax settings ──
+    tax_info = await _load_tax_settings(db, project_id, date_from, date_to)
+
+    # ── 6. Aggregate per article ──
     articles_data: dict[str, dict] = {}
     all_brands: set[str] = set()
 
-    for row in raw:
-        brand_name = row.get("brand_name", "") or ""
-        sa_name = row.get("sa_name", "") or ""
-        subject = row.get("subject_name", "") or ""
-        nm_id = row.get("nm_id", 0) or 0
-        doc_type = row.get("doc_type_name", "") or ""
-        oper_name = row.get("supplier_oper_name", "") or ""
+    for row in raw_rows:
+        brand_name = row.brand_name or ""
+        sa_name = row.sa_name or ""
+        subject = row.subject_name or ""
+        nm_id = row.nm_id or 0
+        doc_type = row.doc_type_name or ""
+        oper_name = row.supplier_oper_name or ""
 
         if brand_name:
             all_brands.add(brand_name)
@@ -79,7 +109,6 @@ async def get_wb_bdr(
             }
 
         art = articles_data[sa_name]
-        # Update brand/subject if empty
         if brand_name and not art["brand"]:
             art["brand"] = brand_name
         if subject and not art["subject"]:
@@ -94,42 +123,217 @@ async def get_wb_bdr(
         else:
             target = art["other"]
 
-        _accumulate(target, row, oper_name)
+        _accumulate_row(target, row, oper_name)
 
-    # --- Build summary from all articles ---
+    # ── 7. Build results with enrichments ──
     total_sale = _empty_totals()
     total_ret = _empty_totals()
     total_other = _empty_totals()
+    total_adv = ZERO
+    total_cost = ZERO
 
-    for art in articles_data.values():
+    result_articles = []
+    for sa_name, art in articles_data.items():
         for key in total_sale:
             total_sale[key] += art["sale"].get(key, ZERO)
             total_ret[key] += art["ret"].get(key, ZERO)
             total_other[key] += art["other"].get(key, ZERO)
 
-    summary_result = _compute_metrics(total_sale, total_ret, total_other)
-
-    # --- Build per-article results ---
-    result_articles = []
-    for sa_name, art in articles_data.items():
         row_result = _compute_metrics(art["sale"], art["ret"], art["other"])
         row_result["sa_name"] = sa_name
         row_result["brand"] = art["brand"]
         row_result["subject"] = art["subject"]
         row_result["nm_id"] = art["nm_id"]
+
+        # Ads from funnel
+        nm = art["nm_id"]
+        adv_sum = float(ads_map.get(nm, 0))
+        row_result["adv_sum"] = adv_sum
+        total_adv += D(str(adv_sum))
+
+        # Cost from history (avg)
+        cost_price = cost_map.get(sa_name, 0)
+        sale_qty = row_result["sale_qty"]
+        cost_total = cost_price * sale_qty if sale_qty > 0 else 0
+        row_result["cost_price"] = round(cost_price, 2)
+        row_result["cost_total"] = round(cost_total, 2)
+        total_cost += D(str(cost_total))
+
         result_articles.append(row_result)
 
-    # Sort articles by to_pay descending
+    # Sort by to_pay descending
     result_articles.sort(key=lambda x: x["to_pay"], reverse=True)
+
+    # ── 8. Summary ──
+    summary_result = _compute_metrics(total_sale, total_ret, total_other)
+    summary_result["adv_sum"] = float(total_adv)
+    summary_result["cost_total"] = float(total_cost)
+
+    # ── 9. Tax calculation ──
+    _apply_tax(summary_result, tax_info, total_adv, total_cost)
+    for art_row in result_articles:
+        _apply_tax_article(art_row, tax_info)
 
     return {
         "summary": _serialize(summary_result),
         "articles": [_serialize(a) for a in result_articles],
         "brands": sorted(all_brands),
         "period": {"date_from": str(date_from), "date_to": str(date_to)},
-        "total_rows": len(raw),
+        "total_rows": len(raw_rows),
+        "sync_status": sync_status,
+        "tax_info": tax_info,
     }
 
+
+# ─── Ads loader ──────────────────────────────────────────────────────────────
+
+async def _load_ads(db: AsyncSession, pid: int, d_from: date, d_to: date) -> dict[int, float]:
+    """Load total ad spend per nm_id from WbFunnelDaily."""
+    result = await db.execute(
+        select(
+            WbFunnelDaily.nm_id,
+            func.sum(WbFunnelDaily.adv_sum).label("total_adv"),
+        ).where(
+            WbFunnelDaily.project_id == pid,
+            WbFunnelDaily.date >= d_from,
+            WbFunnelDaily.date <= d_to,
+        ).group_by(WbFunnelDaily.nm_id)
+    )
+    return {r.nm_id: float(r.total_adv or 0) for r in result}
+
+
+# ─── Cost loader ─────────────────────────────────────────────────────────────
+
+async def _load_avg_costs(db: AsyncSession, pid: int) -> dict[str, float]:
+    """Load average cost per article_seller from cost_order_items."""
+    result = await db.execute(
+        select(
+            CostOrderItem.article_seller,
+            func.avg(CostOrderItem.total_rub / func.nullif(CostOrderItem.qty, 0)).label("avg_cost"),
+        ).where(
+            CostOrderItem.article_seller.isnot(None),
+            CostOrderItem.total_rub.isnot(None),
+            CostOrderItem.qty > 0,
+        ).group_by(CostOrderItem.article_seller)
+    )
+    return {r.article_seller: float(r.avg_cost or 0) for r in result if r.article_seller}
+
+
+# ─── Tax loader & calculator ────────────────────────────────────────────────
+
+async def _load_tax_settings(db: AsyncSession, pid: int, d_from: date, d_to: date) -> dict:
+    """Load tax rate settings for the period.
+
+    Uses the month/year from date_from. For multi-month ranges,
+    takes the first month's settings (simplified).
+    """
+    from backend.models.tax import TaxRate
+
+    year = d_from.year
+    month = d_from.month
+
+    result = await db.execute(
+        select(TaxRate).where(
+            TaxRate.project_id == pid,
+            TaxRate.year == year,
+            TaxRate.month == month,
+            TaxRate.brand == "__project__",
+        ).limit(1)
+    )
+    row = result.scalar_one_or_none()
+
+    if not row:
+        return {
+            "tax_regime": "usn_income",
+            "usn_rate": 0,
+            "nds_rate": 0,
+            "cost_as_expense": False,
+        }
+
+    return {
+        "tax_regime": row.tax_regime,
+        "usn_rate": float(row.usn_rate or 0),
+        "nds_rate": float(row.nds_rate or 0),
+        "cost_as_expense": row.cost_as_expense or False,
+    }
+
+
+def _apply_tax(summary: dict, tax_info: dict, total_adv: Decimal, total_cost: Decimal):
+    """Apply tax calculation to summary row.
+
+    Формулы:
+    - УСН «Доходы»:
+      НДС = Доходы * НДС% / (1 + НДС%)
+      База = Доходы - НДС
+      УСН = База * УСН%
+    - УСН «Доходы - Расходы»:
+      НДС = Доходы * НДС% / (1 + НДС%)
+      Расходы = Логистика + Хранение + Комиссия + Штрафы + Удержания + Реклама + [С/С]
+      База = Доходы - НДС - Расходы
+      УСН = База * УСН%
+    """
+    usn_rate = tax_info.get("usn_rate", 0) / 100
+    nds_rate = tax_info.get("nds_rate", 0) / 100
+    regime = tax_info.get("tax_regime", "usn_income")
+    cost_as_expense = tax_info.get("cost_as_expense", False)
+
+    # Доходы = Продажи (sales_amount = realization after SPP)
+    income = float(summary.get("sales_amount", 0))
+
+    # НДС
+    if nds_rate > 0:
+        nds_sum = income * nds_rate / (1 + nds_rate)
+    else:
+        nds_sum = 0
+
+    tax_base = income - nds_sum
+
+    if regime == "usn_income_expense_vat":
+        # Расходы
+        expenses = (
+            abs(float(summary.get("logistics", 0)))
+            + abs(float(summary.get("storage", 0)))
+            + abs(float(summary.get("commission", 0)))
+            + abs(float(summary.get("penalties", 0)))
+            + abs(float(summary.get("deductions", 0)))
+            + float(total_adv)
+        )
+        if cost_as_expense:
+            expenses += float(total_cost)
+        tax_base = income - nds_sum - expenses
+        summary["expenses_total"] = round(expenses, 2)
+
+    usn_sum = max(tax_base * usn_rate, 0)
+    total_tax = nds_sum + usn_sum
+
+    summary["tax_nds"] = round(nds_sum, 2)
+    summary["tax_usn"] = round(usn_sum, 2)
+    summary["tax_total"] = round(total_tax, 2)
+    summary["profit"] = round(
+        float(summary.get("to_pay", 0))
+        - float(total_adv)
+        - float(total_cost)
+        - total_tax,
+        2,
+    )
+
+
+def _apply_tax_article(art: dict, tax_info: dict):
+    """Simplified per-article tax (proportional to sales_amount share).
+
+    For per-article view, we don't repeat the full formula —
+    just show raw adv/cost. Tax only in summary.
+    """
+    # Profit per article (simple: to_pay - adv - cost)
+    art["profit"] = round(
+        float(art.get("to_pay", 0))
+        - float(art.get("adv_sum", 0))
+        - float(art.get("cost_total", 0)),
+        2,
+    )
+
+
+# ─── Aggregation helpers ────────────────────────────────────────────────────
 
 def _empty_totals() -> dict:
     return {
@@ -148,30 +352,30 @@ def _empty_totals() -> dict:
         "ppvz_vw": ZERO,
         "ppvz_vw_nds": ZERO,
         "quantity": ZERO,
-        # Only real product qty (supplier_oper_name == Продажа/Возврат)
         "product_qty": ZERO,
     }
 
 
-def _accumulate(target: dict, row: dict, oper_name: str):
-    """Accumulate row values into target bucket."""
-    for field in target:
-        if field == "product_qty":
-            continue  # handled separately below
-        val = row.get(field, 0) or 0
-        try:
-            target[field] += D(str(val))
-        except Exception:
-            pass
+def _accumulate_row(target: dict, row: WbFinanceRow, oper_name: str):
+    """Accumulate ORM row values into target bucket."""
+    target["retail_price_withdisc_rub"] += row.retail_price_withdisc_rub or ZERO
+    target["retail_amount"] += row.retail_amount or ZERO
+    target["ppvz_for_pay"] += row.ppvz_for_pay or ZERO
+    target["ppvz_sales_commission"] += row.ppvz_sales_commission or ZERO
+    target["delivery_rub"] += row.delivery_rub or ZERO
+    target["penalty"] += row.penalty or ZERO
+    target["additional_payment"] += row.additional_payment or ZERO
+    target["storage_fee"] += row.storage_fee or ZERO
+    target["acceptance"] += row.acceptance or ZERO
+    target["deduction"] += row.deduction or ZERO
+    target["ppvz_reward"] += row.ppvz_reward or ZERO
+    target["rebill_logistic_cost"] += row.rebill_logistic_cost or ZERO
+    target["ppvz_vw"] += row.ppvz_vw or ZERO
+    target["ppvz_vw_nds"] += row.ppvz_vw_nds or ZERO
+    target["quantity"] += D(str(row.quantity or 0))
 
-    # Count product_qty only for actual product operations
-    # (not loyalty compensations, etc.)
     if oper_name in ("Продажа", "Возврат"):
-        qty = row.get("quantity", 0) or 0
-        try:
-            target["product_qty"] += D(str(qty))
-        except Exception:
-            pass
+        target["product_qty"] += D(str(row.quantity or 0))
 
 
 def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
@@ -180,10 +384,8 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
     sales_amount = sale["retail_amount"] - ret["retail_amount"]
     returns_amount = ret["retail_price_withdisc_rub"]
 
-    # Use product_qty — only real product sales/returns
     sale_qty = int(sale["product_qty"])
     ret_qty = int(ret["product_qty"])
-    # Net qty as TrueStats displays for "Продажи шт"
     net_sale_qty = sale_qty - ret_qty
 
     logistics = other["delivery_rub"]
@@ -191,39 +393,26 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
     storage = other["storage_fee"]
     acceptance_val = other["acceptance"]
 
-    # Прочие удержания = rebill_logistic_cost (Джем, транзит, etc.)
     prochie_uderzhaniya = other["rebill_logistic_cost"]
-
-    # deduction field (usually 0 in WB API, but include for completeness)
     deductions = other["deduction"]
 
-    # Commission fields net (sale - ret)
     ppvz_sales_commission_net = sale["ppvz_sales_commission"] - ret["ppvz_sales_commission"]
     ppvz_reward_net = sale["ppvz_reward"] - ret["ppvz_reward"]
     ppvz_vw_net = sale["ppvz_vw"] - ret["ppvz_vw"]
     ppvz_vw_nds_net = sale["ppvz_vw_nds"] - ret["ppvz_vw_nds"]
 
-    # TrueStats "Комиссия" = ppvz_sales_commission + ppvz_reward (net)
     commission = ppvz_sales_commission_net + ppvz_reward_net
-
-    # TrueStats "Итоговое вознаграждение ВБ" = commission + vw + vw_nds (all net)
     total_wb_reward = ppvz_sales_commission_net + ppvz_vw_net + ppvz_vw_nds_net
 
-    # К оплате = ppvz_for_pay(Продажа) - ppvz_for_pay(Возврат)
-    #            - delivery - penalty + storage - deduction - rebill
     ppvz_net = sale["ppvz_for_pay"] - ret["ppvz_for_pay"]
     to_pay = (
         ppvz_net
         - logistics - penalties + storage - deductions - prochie_uderzhaniya
     )
 
-    # Средняя цена продажи (based on net qty)
     avg_sale_price = sales_amount / D(str(net_sale_qty)) if net_sale_qty > 0 else ZERO
-
-    # Средняя цена до скидок МП
     avg_retail_price = realization / D(str(net_sale_qty)) if net_sale_qty > 0 else ZERO
 
-    # Процент выкупа = sale_qty / (sale_qty + ret_qty) * 100
     total_qty = sale_qty + ret_qty
     buyout_pct = D(str(sale_qty)) / D(str(total_qty)) * 100 if total_qty > 0 else ZERO
 
@@ -233,7 +422,7 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
         "returns_amount": returns_amount,
         "to_pay": to_pay,
         "ppvz_for_pay": ppvz_net,
-        "sale_qty": net_sale_qty,  # Net qty (as TrueStats)
+        "sale_qty": net_sale_qty,
         "sale_qty_gross": sale_qty,
         "ret_qty": ret_qty,
         "buyout_pct": buyout_pct,
@@ -245,7 +434,7 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
         "penalties": penalties,
         "storage": storage,
         "acceptance": acceptance_val,
-        "deductions": prochie_uderzhaniya,  # rebill_logistic_cost
+        "deductions": prochie_uderzhaniya,
         "rebill": prochie_uderzhaniya,
     }
 

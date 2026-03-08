@@ -475,6 +475,57 @@ def restart_backfill_jobs():
         logger.error(f"Failed to restart backfill jobs: {e}")
 
 
+# ─── WB Finance Report sync (Monday) ────────────────────────────────────────
+
+async def sync_all_projects_wb_finance():
+    """Weekly sync: download WB reportDetailByPeriod for previous week.
+
+    WB generates this report once per week on Monday for the previous week.
+    Also does initial sync (last 2 months) if project has no data yet.
+    """
+    logger.info("💰 WB Finance sync: starting weekly sync for all projects")
+    project_ids = await _get_sync_project_ids()
+
+    if not project_ids:
+        logger.info("WB Finance sync: no projects with WB keys, skipping")
+        return
+
+    from backend.services.wb_finance_sync import sync_wb_finance, ensure_initial_sync
+
+    for pid in project_ids:
+        try:
+            async with AsyncSessionLocal() as db:
+                # First ensure initial data exists (2 months)
+                init_result = await ensure_initial_sync(db, pid)
+                if init_result:
+                    logger.info(
+                        f"💰 WB Finance: project {pid} initial sync: "
+                        f"{init_result.get('rows_synced', 0)} rows"
+                    )
+                    continue  # Initial sync already covers recent data
+
+                # Sync previous week (Mon-Sun)
+                today = date.today()
+                # Previous Monday
+                days_since_monday = today.weekday()  # Mon=0
+                last_monday = today - timedelta(days=days_since_monday + 7)
+                last_sunday = last_monday + timedelta(days=6)
+
+                logger.info(
+                    f"💰 WB Finance: project {pid} — "
+                    f"syncing {last_monday} → {last_sunday}"
+                )
+                result = await sync_wb_finance(db, pid, last_monday, last_sunday)
+                logger.info(
+                    f"💰 WB Finance: project {pid} — "
+                    f"{result.get('rows_synced', 0)} rows synced"
+                )
+        except Exception as e:
+            logger.error(f"💰 WB Finance sync failed for project {pid}: {e}")
+
+    logger.info("💰 WB Finance sync: completed for all projects")
+
+
 # ─── Scheduler lifecycle ─────────────────────────────────────────────────────
 
 def start_scheduler():
@@ -537,9 +588,19 @@ def start_scheduler():
         misfire_grace_time=60,
     )
 
+    # WB finance report sync: Monday 08:00 MSK — previous week
+    scheduler.add_job(
+        sync_all_projects_wb_finance,
+        trigger=CronTrigger(day_of_week="mon", hour=8, minute=0, timezone=MSK),
+        id="wb_finance_sync_mon",
+        name="WB finance report sync (Monday 08:00 MSK)",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
     scheduler.start()
     logger.info(
-        "✅ Scheduler started — daily sync 3x/day + backfill (auto-stop) + ad check (auto-stop)"
+        "✅ Scheduler started — daily sync 3x/day + backfill + ad check + wb_finance Monday"
     )
 
 

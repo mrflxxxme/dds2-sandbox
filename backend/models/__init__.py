@@ -81,6 +81,12 @@ from backend.models.tax import (
     TaxRate,
 )
 
+# WB Finance (cached report)
+from backend.models.wb_finance import (
+    WbFinanceRow,
+    WbFinanceSyncLog,
+)
+
 # Alias for backward compatibility
 WbApiKey = IntegrationKey
 
@@ -105,6 +111,8 @@ __all__ = [
     "FxRate",
     # Tax
     "TaxRate",
+    # WB Finance
+    "WbFinanceRow", "WbFinanceSyncLog",
     # Aliases
     "WbApiKey",
 ]
