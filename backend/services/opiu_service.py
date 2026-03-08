@@ -243,15 +243,15 @@ async def get_opiu(
     cost_m = {mk: monthly_cost.get(mk, 0) for mk in months_sorted}
     cost_t = total_cost_val
 
-    # ── Реклама ──
-    adv_m = {mk: monthly_ads.get(mk, 0) for mk in months_sorted}
-    adv_t = total_ads
+    # ── Реклама (из finance deductions: Продвижение/Медиа) ──
+    adv_m = _metric_monthly("ad_deduction")
+    adv_t = _metric_total("ad_deduction")
 
     # ── Прямые расходы (сумма) ──
-    direct_m = {mk: cost_m[mk] + log_m[mk] + abs(comm_m[mk]) + pen_m[mk] +
+    direct_m = {mk: cost_m[mk] + log_m[mk] + comm_m[mk] + pen_m[mk] +
                     stor_m[mk] + adv_m[mk] + ded_m[mk] + acc_m[mk]
                 for mk in months_sorted}
-    direct_t = cost_t + log_t + abs(comm_t) + pen_t + stor_t + adv_t + ded_t + acc_t
+    direct_t = cost_t + log_t + comm_t + pen_t + stor_t + adv_t + ded_t + acc_t
 
     # ── Компенсация ──
     comp_bonus_m = _metric_monthly("additional_payment")
