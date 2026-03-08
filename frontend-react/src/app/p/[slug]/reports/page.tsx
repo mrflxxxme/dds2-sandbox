@@ -389,12 +389,23 @@ function CustomsControl() {
 /* ═══════════════  WB БДР  ═══════════════ */
 
 function WbBdr() {
-    const today = new Date();
-    const twoMonthsAgo = new Date(today.getTime() - 60 * 86400000);
     const fmt = (d: Date) => d.toISOString().split('T')[0];
 
-    const [dateFrom, setDateFrom] = useState(fmt(twoMonthsAgo));
-    const [dateTo, setDateTo] = useState(fmt(today));
+    // Auto-select last week (Mon-Sun)
+    const getLastWeek = () => {
+        const now = new Date();
+        const day = now.getDay(); // 0=Sun
+        const diffToLastSun = day === 0 ? 7 : day;
+        const lastSun = new Date(now);
+        lastSun.setDate(now.getDate() - diffToLastSun);
+        const lastMon = new Date(lastSun);
+        lastMon.setDate(lastSun.getDate() - 6);
+        return { from: fmt(lastMon), to: fmt(lastSun) };
+    };
+    const lw = getLastWeek();
+
+    const [dateFrom, setDateFrom] = useState(lw.from);
+    const [dateTo, setDateTo] = useState(lw.to);
     const [brand, setBrand] = useState('');
     const [articleSearch, setArticleSearch] = useState('');
     const [mode, setMode] = useState<'finance' | 'management'>('finance');
@@ -403,10 +414,12 @@ function WbBdr() {
     const [error, setError] = useState('');
     const [syncStatus, setSyncStatus] = useState<any>(null);
     const [syncing, setSyncing] = useState(false);
+    const [availableDates, setAvailableDates] = useState<string[]>([]);
 
-    // Load sync status on mount
+    // Load sync status + available dates on mount
     React.useEffect(() => {
         api.getWbBdrSyncStatus().then(setSyncStatus).catch(() => {});
+        api.getWbBdrAvailableWeeks().then(r => setAvailableDates(r.available_dates || [])).catch(() => {});
     }, []);
 
     const loadData = React.useCallback(async () => {
@@ -568,111 +581,149 @@ function WbBdr() {
 
                     {/* ── Articles Table ── */}
                     <div className="glass-card" style={{ overflow: 'auto' }}>
-                        <table className="data-table" style={{ fontSize: 13 }}>
+                        <table className="data-table" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
                             <thead>
                                 <tr>
                                     <th style={{ position: 'sticky', left: 0, background: 'var(--glass-bg)', zIndex: 2 }}>Артикул</th>
-                                    <th>К оплате ₽</th>
-                                    {mode === 'finance' ? (
-                                        <>
-                                            <th>Бренд</th>
-                                            <th>Категория</th>
-                                            <th>Арт. МП</th>
-                                            <th>Комиссия ₽</th>
-                                            <th>Логист. ₽</th>
-                                            <th>Хранение ₽</th>
-                                            <th>Штрафы ₽</th>
-                                            <th>Удержания ₽</th>
-                                            <th style={{ color: '#f59e0b' }}>Реклама ₽</th>
-                                            <th style={{ color: '#8b5cf6' }}>С/С ед.</th>
-                                            <th style={{ color: '#8b5cf6' }}>С/С всего</th>
-                                            <th style={{ color: '#22c55e', fontWeight: 700 }}>Прибыль ₽</th>
-                                        </>
-                                    ) : (
-                                        <>
-                                            <th>Ср. цена до скидок</th>
-                                            <th>Ср. цена продажи</th>
-                                            <th>Реализация ₽</th>
-                                            <th>Прод. шт</th>
-                                            <th>Возвр. шт</th>
-                                            <th>Продажи ₽</th>
-                                            <th>К переч. ₽</th>
-                                            <th style={{ color: '#f59e0b' }}>Реклама ₽</th>
-                                            <th style={{ color: '#8b5cf6' }}>С/С всего</th>
-                                            <th style={{ color: '#22c55e', fontWeight: 700 }}>Прибыль ₽</th>
-                                        </>
-                                    )}
+                                    <th>К оплате</th>
+                                    <th>Бренд</th>
+                                    <th>Категория</th>
+                                    <th>Арт. МП</th>
+                                    <th>Ср. С/С</th>
+                                    <th>Проч. удерж.</th>
+                                    <th>Ср. цена до скидок</th>
+                                    <th>Ср. цена продажи</th>
+                                    <th>Реализация</th>
+                                    <th>Оборач. (дн.)</th>
+                                    <th>Продажи</th>
+                                    <th>К переч.</th>
+                                    <th>Возвраты</th>
+                                    <th>С/С продаж</th>
+                                    <th>Штрафы</th>
+                                    <th>Заказы шт</th>
+                                    <th>Заказы ₽</th>
+                                    <th>Комиссия</th>
+                                    <th>Возн. ВБ</th>
+                                    <th>Компенсация</th>
+                                    <th>Ср. логист.</th>
+                                    <th>Кап. по С/С</th>
+                                    <th>Кап. по розн.</th>
+                                    <th>GMROI</th>
+                                    <th>GMROI Year</th>
+                                    <th>Откз.+возвр.</th>
+                                    <th>Продаж шт</th>
+                                    <th>% выкупа</th>
+                                    <th>Ср. приб./шт</th>
+                                    <th>Налоги</th>
+                                    <th>Нал. база</th>
+                                    <th style={{ color: '#22c55e' }}>Прибыль</th>
+                                    <th>ROI %</th>
+                                    <th>Доля выр. %</th>
+                                    <th>Маржа %</th>
+                                    <th style={{ color: '#f59e0b' }}>Реклама</th>
+                                    <th>ДРР %</th>
+                                    <th>ДРР заказы %</th>
+                                    <th>Плат. приёмка</th>
+                                    <th>Логистика</th>
+                                    <th>Хранение</th>
+                                    <th>ABC приб.</th>
+                                    <th>ABC выр.</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {/* Summary row */}
+                                {(() => { const r = s; return (
                                 <tr style={{ fontWeight: 700, background: 'rgba(99,102,241,0.08)' }}>
-                                    <td style={{ position: 'sticky', left: 0, background: 'rgba(99,102,241,0.12)', zIndex: 1 }}>Итого за период:</td>
-                                    <td style={{ textAlign: 'right' }}>{formatNumber(s.to_pay)} ₽</td>
-                                    {mode === 'finance' ? (
-                                        <>
-                                            <td>-</td><td>-</td><td>-</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.commission)} ₽</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.logistics)} ₽</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.storage)} ₽</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.penalties)} ₽</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.deductions)} ₽</td>
-                                            <td style={{ textAlign: 'right', color: '#f59e0b' }}>{formatNumber(s.adv_sum || 0)} ₽</td>
-                                            <td style={{ textAlign: 'right' }}>—</td>
-                                            <td style={{ textAlign: 'right', color: '#8b5cf6' }}>{formatNumber(s.cost_total || 0)} ₽</td>
-                                            <td style={{ textAlign: 'right', color: s.profit >= 0 ? '#22c55e' : '#ff6b6b', fontWeight: 700 }}>{formatNumber(s.profit || 0)} ₽</td>
-                                        </>
-                                    ) : (
-                                        <>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.avg_retail_price)} ₽</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.avg_sale_price)} ₽</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.realization)} ₽</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.sale_qty)}</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.ret_qty)}</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.sales_amount)} ₽</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(s.ppvz_for_pay)} ₽</td>
-                                            <td style={{ textAlign: 'right', color: '#f59e0b' }}>{formatNumber(s.adv_sum || 0)} ₽</td>
-                                            <td style={{ textAlign: 'right', color: '#8b5cf6' }}>{formatNumber(s.cost_total || 0)} ₽</td>
-                                            <td style={{ textAlign: 'right', color: s.profit >= 0 ? '#22c55e' : '#ff6b6b', fontWeight: 700 }}>{formatNumber(s.profit || 0)} ₽</td>
-                                        </>
-                                    )}
+                                    <td style={{ position: 'sticky', left: 0, background: 'rgba(99,102,241,0.12)', zIndex: 1 }}>Итого:</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.to_pay)}</td>
+                                    <td>-</td><td>-</td><td>-</td>
+                                    <td style={{ textAlign: 'right' }}>—</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.other_deduction || 0)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.avg_retail_price)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.avg_sale_price)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.realization)}</td>
+                                    <td style={{ textAlign: 'right' }}>{r.turnover_days || '—'}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.sales_amount)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.ppvz_for_pay)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.returns_amount)}</td>
+                                    <td style={{ textAlign: 'right', color: '#8b5cf6' }}>{formatNumber(r.cost_total || 0)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.penalties)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.orders_count || 0)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.orders_sum || 0)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.commission)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.total_wb_reward)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.compensation)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.avg_logistics)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.cap_cost || 0)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.cap_retail || 0)}</td>
+                                    <td style={{ textAlign: 'right' }}>{r.gmroi || '—'}</td>
+                                    <td style={{ textAlign: 'right' }}>{r.gmroi_year || '—'}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.ret_qty)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.sale_qty)}</td>
+                                    <td style={{ textAlign: 'right' }}>{r.buyout_pct?.toFixed(2)}%</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.avg_profit_per_item || 0)}</td>
+                                    <td style={{ textAlign: 'right', color: '#ef4444' }}>{formatNumber(r.tax_total || 0)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.tax_base || r.sales_amount || 0)}</td>
+                                    <td style={{ textAlign: 'right', color: r.profit >= 0 ? '#22c55e' : '#ff6b6b', fontWeight: 700 }}>{formatNumber(r.profit || 0)}</td>
+                                    <td style={{ textAlign: 'right' }}>{r.roi || '—'}%</td>
+                                    <td style={{ textAlign: 'right' }}>100%</td>
+                                    <td style={{ textAlign: 'right' }}>{r.margin_pct?.toFixed(2) || '—'}%</td>
+                                    <td style={{ textAlign: 'right', color: '#f59e0b' }}>{formatNumber(r.adv_sum || 0)}</td>
+                                    <td style={{ textAlign: 'right' }}>{r.drr?.toFixed(2) || '—'}%</td>
+                                    <td style={{ textAlign: 'right' }}>{r.drr_orders?.toFixed(2) || '—'}%</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.acceptance || 0)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.logistics)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(r.storage)}</td>
+                                    <td>-</td><td>-</td>
                                 </tr>
+                                ); })()}
                                 {/* Article rows */}
                                 {articles.map((a: any, i: number) => (
                                     <tr key={a.sa_name || i}>
-                                        <td style={{ position: 'sticky', left: 0, background: 'var(--glass-bg)', zIndex: 1, fontWeight: 500 }}>
-                                            {a.sa_name || '—'}
-                                        </td>
-                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.to_pay)} ₽</td>
-                                        {mode === 'finance' ? (
-                                            <>
-                                                <td>{a.brand}</td>
-                                                <td>{a.subject}</td>
-                                                <td>{a.nm_id || '—'}</td>
-                                                <td style={{ textAlign: 'right', color: a.commission < 0 ? '#ff6b6b' : undefined }}>{formatNumber(a.commission)} ₽</td>
-                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.logistics)} ₽</td>
-                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.storage)} ₽</td>
-                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.penalties)} ₽</td>
-                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.deductions)} ₽</td>
-                                                <td style={{ textAlign: 'right', color: '#f59e0b' }}>{formatNumber(a.adv_sum || 0)} ₽</td>
-                                                <td style={{ textAlign: 'right', color: '#8b5cf6' }}>{formatNumber(a.cost_price || 0)} ₽</td>
-                                                <td style={{ textAlign: 'right', color: '#8b5cf6' }}>{formatNumber(a.cost_total || 0)} ₽</td>
-                                                <td style={{ textAlign: 'right', color: a.profit >= 0 ? '#22c55e' : '#ff6b6b', fontWeight: 600 }}>{formatNumber(a.profit || 0)} ₽</td>
-                                            </>
-                                        ) : (
-                                            <>
-                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_retail_price)} ₽</td>
-                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_sale_price)} ₽</td>
-                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.realization)} ₽</td>
-                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.sale_qty)}</td>
-                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.ret_qty)}</td>
-                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.sales_amount)} ₽</td>
-                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.ppvz_for_pay)} ₽</td>
-                                                <td style={{ textAlign: 'right', color: '#f59e0b' }}>{formatNumber(a.adv_sum || 0)} ₽</td>
-                                                <td style={{ textAlign: 'right', color: '#8b5cf6' }}>{formatNumber(a.cost_total || 0)} ₽</td>
-                                                <td style={{ textAlign: 'right', color: a.profit >= 0 ? '#22c55e' : '#ff6b6b', fontWeight: 600 }}>{formatNumber(a.profit || 0)} ₽</td>
-                                            </>
-                                        )}
+                                        <td style={{ position: 'sticky', left: 0, background: 'var(--glass-bg)', zIndex: 1, fontWeight: 500 }}>{a.sa_name || '—'}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.to_pay)}</td>
+                                        <td>{a.brand || '—'}</td>
+                                        <td>{a.subject || '—'}</td>
+                                        <td>{a.nm_id || '—'}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.cost_price || 0)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.other_deduction || 0)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_retail_price)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_sale_price)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.realization)}</td>
+                                        <td style={{ textAlign: 'right' }}>{a.turnover_days || '—'}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.sales_amount)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.ppvz_for_pay)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.returns_amount)}</td>
+                                        <td style={{ textAlign: 'right', color: '#8b5cf6' }}>{formatNumber(a.cost_total || 0)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.penalties)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.orders_count || 0)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.orders_sum || 0)}</td>
+                                        <td style={{ textAlign: 'right', color: a.commission < 0 ? '#ff6b6b' : undefined }}>{formatNumber(a.commission)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.total_wb_reward)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.compensation)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_logistics)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.cap_cost || 0)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.cap_retail || 0)}</td>
+                                        <td style={{ textAlign: 'right' }}>{a.gmroi || '—'}</td>
+                                        <td style={{ textAlign: 'right' }}>{a.gmroi_year || '—'}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.ret_qty)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.sale_qty)}</td>
+                                        <td style={{ textAlign: 'right' }}>{a.buyout_pct?.toFixed(2) || '—'}%</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_profit_per_item || 0)}</td>
+                                        <td style={{ textAlign: 'right', color: '#ef4444' }}>{formatNumber(a.tax_total || 0)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.tax_base || 0)}</td>
+                                        <td style={{ textAlign: 'right', color: a.profit >= 0 ? '#22c55e' : '#ff6b6b', fontWeight: 600 }}>{formatNumber(a.profit || 0)}</td>
+                                        <td style={{ textAlign: 'right' }}>{a.roi || '—'}%</td>
+                                        <td style={{ textAlign: 'right' }}>{a.revenue_share?.toFixed(2) || '—'}%</td>
+                                        <td style={{ textAlign: 'right' }}>{a.margin_pct?.toFixed(2) || '—'}%</td>
+                                        <td style={{ textAlign: 'right', color: '#f59e0b' }}>{formatNumber(a.adv_sum || 0)}</td>
+                                        <td style={{ textAlign: 'right' }}>{a.drr?.toFixed(2) || '—'}%</td>
+                                        <td style={{ textAlign: 'right' }}>{a.drr_orders?.toFixed(2) || '—'}%</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.acceptance || 0)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.logistics)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(a.storage)}</td>
+                                        <td style={{ textAlign: 'center' }}><span className={`badge-${a.abc_profit === 'A' ? 'green' : a.abc_profit === 'B' ? 'yellow' : 'red'}`}>{a.abc_profit}</span></td>
+                                        <td style={{ textAlign: 'center' }}><span className={`badge-${a.abc_revenue === 'A' ? 'green' : a.abc_revenue === 'B' ? 'yellow' : 'red'}`}>{a.abc_revenue}</span></td>
                                     </tr>
                                 ))}
                             </tbody>

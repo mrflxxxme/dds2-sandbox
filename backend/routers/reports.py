@@ -8,6 +8,7 @@ from datetime import date
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
@@ -72,6 +73,23 @@ async def get_wb_bdr(
     return await wb_bdr_service.get_wb_bdr(
         db, project.id, date_from, date_to, brand=brand, article=article, mode=mode,
     )
+
+
+@router.get("/wb_bdr/available_weeks")
+async def get_wb_bdr_available_weeks(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return available date ranges (rr_dt pairs) that have wb_finance data."""
+    from backend.models.wb_finance import WbFinanceRow
+    from sqlalchemy import distinct
+    result = await db.execute(
+        select(distinct(WbFinanceRow.rr_dt)).where(
+            WbFinanceRow.project_id == project.id,
+        ).order_by(WbFinanceRow.rr_dt.desc())
+    )
+    dates = [str(r[0]) for r in result if r[0] is not None]
+    return {"available_dates": dates}
 
 
 @router.get("/wb_bdr/sync_status")

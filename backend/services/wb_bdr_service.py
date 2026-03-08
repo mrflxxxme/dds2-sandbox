@@ -76,11 +76,17 @@ async def get_wb_bdr(
     # ── 3. Load ads data from WbFunnelDaily ──
     ads_map = await _load_ads(db, project_id, date_from, date_to)
 
+    # ── 3b. Load orders & stocks from WbFunnelDaily ──
+    orders_stocks_map = await _load_orders_stocks(db, project_id, date_from, date_to)
+
     # ── 4. Load cost prices from cost_order_items ──
     cost_map = await _load_avg_costs(db, project_id)
 
     # ── 5. Load tax settings ──
     tax_info = await _load_tax_settings(db, project_id, date_from, date_to)
+
+    # Period days (for turnover / GMROI Year)
+    period_days = max((date_to - date_from).days + 1, 1)
 
     # ── 6. Aggregate per article ──
     articles_data: dict[str, dict] = {}
@@ -169,6 +175,16 @@ async def get_wb_bdr(
         row_result["cost_total"] = round(cost_total, 2)
         total_cost += D(str(cost_total))
 
+        # Orders & stocks from funnel
+        os_data = orders_stocks_map.get(nm, {})
+        row_result["orders_count"] = os_data.get("orders_count", 0)
+        row_result["orders_sum"] = os_data.get("orders_sum", 0)
+        row_result["stocks_wb"] = os_data.get("stocks_wb", 0)
+
+        # Avg profit per item
+        # (profit computed after tax below, placeholder)
+        row_result["_period_days"] = period_days
+
         result_articles.append(row_result)
 
     # Sort by to_pay descending
@@ -189,6 +205,28 @@ async def get_wb_bdr(
     _apply_tax(summary_result, tax_info, D(str(summary_result["adv_sum"])), total_cost)
     for art_row in result_articles:
         _apply_tax_article(art_row, tax_info)
+
+    # ── 10. Computed enrichment fields ──
+    total_real = float(summary_result.get("realization", 0)) or 1
+    total_sales = float(summary_result.get("sales_amount", 0)) or 1
+    # Summary-level aggregates for orders/stocks
+    sum_orders_count = 0
+    sum_orders_sum = 0.0
+    sum_stocks_wb = 0
+    for art_row in result_articles:
+        _enrich_article(art_row, total_real, total_sales, period_days)
+        sum_orders_count += art_row.get("orders_count", 0)
+        sum_orders_sum += art_row.get("orders_sum", 0)
+        sum_stocks_wb += art_row.get("stocks_wb", 0)
+
+    # Summary enrichment
+    summary_result["orders_count"] = sum_orders_count
+    summary_result["orders_sum"] = round(sum_orders_sum, 2)
+    summary_result["stocks_wb"] = sum_stocks_wb
+    _enrich_article(summary_result, total_real, total_sales, period_days)
+
+    # ── 11. ABC analysis ──
+    _compute_abc(result_articles)
 
     return {
         "summary": _serialize(summary_result),
@@ -217,6 +255,54 @@ async def _load_ads(db: AsyncSession, pid: int, d_from: date, d_to: date) -> dic
         ).group_by(WbFunnelDaily.nm_id)
     )
     return {r.nm_id: float(r.total_adv or 0) for r in result}
+
+
+async def _load_orders_stocks(db: AsyncSession, pid: int, d_from: date, d_to: date) -> dict[int, dict]:
+    """Load orders count/sum and latest stocks per nm_id from WbFunnelDaily."""
+    # Orders aggregation
+    result = await db.execute(
+        select(
+            WbFunnelDaily.nm_id,
+            func.sum(WbFunnelDaily.orders_count).label("orders_count"),
+            func.sum(WbFunnelDaily.orders_sum_rub).label("orders_sum"),
+        ).where(
+            WbFunnelDaily.project_id == pid,
+            WbFunnelDaily.date >= d_from,
+            WbFunnelDaily.date <= d_to,
+        ).group_by(WbFunnelDaily.nm_id)
+    )
+    orders_map = {}
+    for r in result:
+        orders_map[r.nm_id] = {
+            "orders_count": int(r.orders_count or 0),
+            "orders_sum": float(r.orders_sum or 0),
+        }
+
+    # Latest stocks (last day in period)
+    from sqlalchemy import desc
+    sub = select(
+        WbFunnelDaily.nm_id,
+        WbFunnelDaily.stocks_wb,
+        func.row_number().over(
+            partition_by=WbFunnelDaily.nm_id,
+            order_by=desc(WbFunnelDaily.date),
+        ).label("rn"),
+    ).where(
+        WbFunnelDaily.project_id == pid,
+        WbFunnelDaily.date >= d_from,
+        WbFunnelDaily.date <= d_to,
+    ).subquery()
+
+    stocks_result = await db.execute(
+        select(sub.c.nm_id, sub.c.stocks_wb).where(sub.c.rn == 1)
+    )
+    for r in stocks_result:
+        if r.nm_id in orders_map:
+            orders_map[r.nm_id]["stocks_wb"] = int(r.stocks_wb or 0)
+        else:
+            orders_map[r.nm_id] = {"orders_count": 0, "orders_sum": 0, "stocks_wb": int(r.stocks_wb or 0)}
+
+    return orders_map
 
 
 # ─── Cost loader ─────────────────────────────────────────────────────────────
@@ -346,18 +432,138 @@ def _apply_tax(summary: dict, tax_info: dict, total_adv: Decimal, total_cost: De
 
 
 def _apply_tax_article(art: dict, tax_info: dict):
-    """Simplified per-article tax (proportional to sales_amount share).
+    """Per-article tax calculation."""
+    usn_rate = tax_info.get("usn_rate", 0) / 100
+    nds_rate = tax_info.get("nds_rate", 0) / 100
+    regime = tax_info.get("tax_regime", "usn_income")
+    cost_as_expense = tax_info.get("cost_as_expense", False)
 
-    For per-article view, we don't repeat the full formula —
-    just show raw adv/cost. Tax only in summary.
-    """
-    # Profit per article (simple: to_pay - adv - cost)
+    income = float(art.get("sales_amount", 0))
+    nds_sum = income * nds_rate / (1 + nds_rate) if nds_rate > 0 else 0
+    tax_base = income - nds_sum
+
+    if regime == "usn_income_expense_vat":
+        expenses = (
+            abs(float(art.get("logistics", 0)))
+            + abs(float(art.get("storage", 0)))
+            + abs(float(art.get("commission", 0)))
+            + abs(float(art.get("penalties", 0)))
+            + abs(float(art.get("deductions", 0)))
+            + float(art.get("adv_sum", 0))
+        )
+        if cost_as_expense:
+            expenses += float(art.get("cost_total", 0))
+        tax_base = income - nds_sum - expenses
+
+    usn_sum = max(tax_base * usn_rate, 0)
+    total_tax = nds_sum + usn_sum
+
+    art["tax_nds"] = round(nds_sum, 2)
+    art["tax_usn"] = round(usn_sum, 2)
+    art["tax_total"] = round(total_tax, 2)
+    art["tax_base"] = round(tax_base, 2)
+
+    # Profit per article: to_pay - adv - cost - tax
     art["profit"] = round(
         float(art.get("to_pay", 0))
         - float(art.get("adv_sum", 0))
-        - float(art.get("cost_total", 0)),
+        - float(art.get("cost_total", 0))
+        - total_tax,
         2,
     )
+    # Profit without operational expenses (same for now)
+    art["profit_no_ops"] = art["profit"]
+
+
+def _enrich_article(art: dict, total_real: float, total_sales: float, period_days: int):
+    """Add computed columns to article row."""
+    sale_qty = art.get("sale_qty", 0)
+    realization = float(art.get("realization", 0))
+    sales_amount = float(art.get("sales_amount", 0))
+    profit = float(art.get("profit", 0))
+    cost_total = float(art.get("cost_total", 0))
+    cost_price = float(art.get("cost_price", 0))
+    adv_sum = float(art.get("adv_sum", 0))
+    avg_retail = float(art.get("avg_retail_price", 0))
+    stocks_wb = art.get("stocks_wb", 0)
+    orders_sum = float(art.get("orders_sum", 0))
+
+    # Avg profit per item
+    art["avg_profit_per_item"] = round(profit / sale_qty, 2) if sale_qty > 0 else 0
+
+    # Margin %
+    art["margin_pct"] = round(profit / realization * 100, 2) if realization else 0
+
+    # ROI %
+    art["roi"] = round(profit / cost_total * 100, 2) if cost_total > 0 else 0
+
+    # Share of total revenue %
+    art["revenue_share"] = round(realization / total_real * 100, 2) if total_real else 0
+
+    # DRR % (ad spend / sales)
+    art["drr"] = round(adv_sum / sales_amount * 100, 2) if sales_amount else 0
+
+    # DRR by orders %
+    art["drr_orders"] = round(adv_sum / orders_sum * 100, 2) if orders_sum > 0 else 0
+
+    # Turnover (days) = stocks / (sale_qty / days)
+    daily_sales = sale_qty / period_days if period_days > 0 else 0
+    art["turnover_days"] = round(stocks_wb / daily_sales, 2) if daily_sales > 0 else 0
+
+    # Capitalization by cost
+    art["cap_cost"] = round(stocks_wb * cost_price, 2)
+
+    # Capitalization by retail
+    art["cap_retail"] = round(stocks_wb * avg_retail, 2)
+
+    # GMROI = profit / avg_inventory_cost (simplified: cap_cost for period)
+    cap = art["cap_cost"]
+    art["gmroi"] = round(profit / cap * 100, 2) if cap > 0 else 0
+
+    # GMROI Year
+    art["gmroi_year"] = round(art["gmroi"] * 365 / period_days, 2) if period_days > 0 else 0
+
+    # Clean up temp field
+    art.pop("_period_days", None)
+
+
+def _compute_abc(articles: list[dict]):
+    """Compute ABC analysis by profit and revenue."""
+    # ABC by profit
+    total_profit = sum(max(float(a.get("profit", 0)), 0) for a in articles)
+    if total_profit > 0:
+        sorted_by_profit = sorted(articles, key=lambda x: float(x.get("profit", 0)), reverse=True)
+        cumulative = 0
+        for a in sorted_by_profit:
+            cumulative += max(float(a.get("profit", 0)), 0)
+            pct = cumulative / total_profit * 100
+            if pct <= 80:
+                a["abc_profit"] = "A"
+            elif pct <= 95:
+                a["abc_profit"] = "B"
+            else:
+                a["abc_profit"] = "C"
+    else:
+        for a in articles:
+            a["abc_profit"] = "C"
+
+    # ABC by revenue
+    total_rev = sum(max(float(a.get("realization", 0)), 0) for a in articles)
+    if total_rev > 0:
+        sorted_by_rev = sorted(articles, key=lambda x: float(x.get("realization", 0)), reverse=True)
+        cumulative = 0
+        for a in sorted_by_rev:
+            cumulative += max(float(a.get("realization", 0)), 0)
+            pct = cumulative / total_rev * 100
+            if pct <= 80:
+                a["abc_revenue"] = "A"
+            elif pct <= 95:
+                a["abc_revenue"] = "B"
+            else:
+                a["abc_revenue"] = "C"
+    else:
+        for a in articles:
+            a["abc_revenue"] = "C"
 
 
 # ─── Aggregation helpers ────────────────────────────────────────────────────

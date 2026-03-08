@@ -357,6 +357,9 @@ class ApiClient {
     getWbBdrSyncStatus() {
         return this.request<any>('GET', `/api/v1/reports/wb_bdr/sync_status`);
     }
+    getWbBdrAvailableWeeks() {
+        return this.request<{ available_dates: string[] }>('GET', `/api/v1/reports/wb_bdr/available_weeks`);
+    }
     triggerWbBdrSync() {
         return this.request<any>('POST', `/api/v1/reports/wb_bdr/sync`);
     }
