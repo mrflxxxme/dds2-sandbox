@@ -88,13 +88,25 @@ async def trigger_wb_bdr_sync(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Manually trigger WB finance data sync (last 2 months)."""
-    from backend.services.wb_finance_sync import sync_wb_finance
-    today = date.today()
+    """Manually trigger WB finance data sync (last 2 months).
+    
+    Runs in background — returns immediately with {status: 'started'}.
+    """
+    import asyncio
     from datetime import timedelta
+    from backend.database import AsyncSessionLocal
+    from backend.services.wb_finance_sync import sync_wb_finance
+
+    today = date.today()
     date_from = today - timedelta(days=60)
-    result = await sync_wb_finance(db, project.id, date_from, today)
-    return result
+    project_id = project.id
+
+    async def _run_sync():
+        async with AsyncSessionLocal() as bg_db:
+            await sync_wb_finance(bg_db, project_id, date_from, today)
+
+    asyncio.create_task(_run_sync())
+    return {"status": "started", "message": "Sync started in background"}
 
 
 @router.get("/cost_history")

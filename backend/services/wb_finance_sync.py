@@ -38,10 +38,10 @@ async def sync_wb_finance(
 ) -> dict:
     """Download WB finance report and upsert into wb_finance_rows.
 
-    Paginates using rrdid cursor (WB returns max 100k per request).
-    Batch upserts in chunks of 1000 for performance.
+    Streams page-by-page: download → batch upsert → commit → next page.
+    Data is persisted incrementally so nothing is lost on timeout.
 
-    Returns {status, rows_synced, errors}.
+    Returns {status, rows_synced, pages, errors}.
     """
     from backend.integrations.wb_api import WBApiClient
 
@@ -50,11 +50,11 @@ async def sync_wb_finance(
 
     logger.info("wb_finance_sync: fetching %s — %s for project %s", date_from, date_to, project_id)
 
-    # ── Paginated fetch using rrdid cursor ──
-    all_rows: list[dict] = []
     rrdid_cursor = 0
     page_limit = 100000
     page_num = 0
+    total_synced = 0
+    errors: list[str] = []
 
     try:
         while True:
@@ -65,10 +65,35 @@ async def sync_wb_finance(
             if not page:
                 break
 
-            all_rows.extend(page)
             logger.info(
-                "wb_finance_sync: page %d — got %d rows (cursor rrdid=%d, total so far: %d)",
-                page_num, len(page), rrdid_cursor, len(all_rows),
+                "wb_finance_sync: page %d — got %d rows (cursor rrdid=%d)",
+                page_num, len(page), rrdid_cursor,
+            )
+
+            # ── Batch upsert THIS page immediately ──
+            batch: list[dict] = []
+            BATCH_SIZE = 1000
+
+            for row in page:
+                rrd_id = row.get("rrd_id")
+                if not rrd_id:
+                    continue
+                batch.append(_row_to_values(row, project_id))
+
+                if len(batch) >= BATCH_SIZE:
+                    await _upsert_batch(db, batch)
+                    total_synced += len(batch)
+                    batch = []
+
+            if batch:
+                await _upsert_batch(db, batch)
+                total_synced += len(batch)
+
+            # Commit after each page — data is safe
+            await db.commit()
+            logger.info(
+                "wb_finance_sync: page %d committed (%d rows total so far)",
+                page_num, total_synced,
             )
 
             # If we got less than limit, we've fetched everything
@@ -84,55 +109,24 @@ async def sync_wb_finance(
     except Exception as e:
         error_msg = str(e)[:500]
         logger.error("wb_finance_sync: API error on page %d: %s", page_num, error_msg)
+        errors.append(error_msg)
+        # Even on error, log what we synced so far
         db.add(WbFinanceSyncLog(
             project_id=project_id, date_from=date_from, date_to=date_to,
-            rows_synced=0, status="ERROR", error_msg=error_msg,
+            rows_synced=total_synced, status="ERROR", error_msg=error_msg,
         ))
         await db.commit()
-        return {"status": "error", "rows_synced": 0, "errors": [error_msg]}
-
-    logger.info("wb_finance_sync: total %d rows from API (%d pages)", len(all_rows), page_num)
-
-    if not all_rows:
-        db.add(WbFinanceSyncLog(
-            project_id=project_id, date_from=date_from, date_to=date_to,
-            rows_synced=0, status="OK",
-        ))
-        await db.commit()
-        return {"status": "ok", "rows_synced": 0, "errors": []}
-
-    # ── Batch upsert in chunks of 1000 ──
-    rows_synced = 0
-    batch: list[dict] = []
-    BATCH_SIZE = 1000
-
-    for row in all_rows:
-        rrd_id = row.get("rrd_id")
-        if not rrd_id:
-            continue
-
-        values = _row_to_values(row, project_id)
-        batch.append(values)
-
-        if len(batch) >= BATCH_SIZE:
-            await _upsert_batch(db, batch)
-            rows_synced += len(batch)
-            batch = []
-
-    # Flush remaining
-    if batch:
-        await _upsert_batch(db, batch)
-        rows_synced += len(batch)
+        return {"status": "error", "rows_synced": total_synced, "pages": page_num, "errors": errors}
 
     # Log sync success
     db.add(WbFinanceSyncLog(
         project_id=project_id, date_from=date_from, date_to=date_to,
-        rows_synced=rows_synced, status="OK",
+        rows_synced=total_synced, status="OK",
     ))
     await db.commit()
 
-    logger.info("wb_finance_sync: upserted %d rows for project %s", rows_synced, project_id)
-    return {"status": "ok", "rows_synced": rows_synced, "errors": []}
+    logger.info("wb_finance_sync: done — %d rows in %d pages for project %s", total_synced, page_num, project_id)
+    return {"status": "ok", "rows_synced": total_synced, "pages": page_num, "errors": []}
 
 
 def _row_to_values(row: dict, project_id: int) -> dict:
