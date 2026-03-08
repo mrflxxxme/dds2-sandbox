@@ -34,6 +34,16 @@ class CostOverrideRequest(BaseModel):
     cost_price: float
 
 
+class BulkCostItem(BaseModel):
+    barcode: str
+    cost_price: float
+    currency: str = "RUB"
+
+
+class BulkCostRequest(BaseModel):
+    items: list[BulkCostItem]
+
+
 class TaxRateRequest(BaseModel):
     tax_rate: float
 
@@ -201,6 +211,19 @@ async def set_cost_override(
 ):
     """Set or update manual cost price for an nmId."""
     return await funnel_service.set_cost_override(db, project.id, body.nm_id, body.cost_price)
+
+
+@router.post("/costs/bulk")
+async def bulk_set_cost_overrides(
+    body: BulkCostRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk set cost prices by barcode or nm_id code.
+
+    Resolves barcode → nm_id via Nomenclature table, then upserts WbCostOverride.
+    """
+    return await funnel_service.bulk_set_cost_overrides(db, project.id, body.items)
 
 
 @router.get("/tax")

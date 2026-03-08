@@ -17,7 +17,7 @@ from sqlalchemy import select, func, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import WbFunnelDaily, WbCostOverride
+from backend.models import WbFunnelDaily, WbCostOverride, Nomenclature
 
 logger = logging.getLogger("dds.funnel")
 
@@ -255,7 +255,9 @@ async def get_filters(db: AsyncSession, pid: int) -> dict:
 # ─── Cost overrides ─────────────────────────────────────────────────────────
 
 async def get_cost_overrides(db: AsyncSession, pid: int) -> dict:
-    """Get all manual cost overrides + items without cost."""
+    """Get all manual cost overrides + items truly without cost anywhere."""
+    from backend.services.bdr_loaders import load_avg_costs, load_cost_overrides
+
     overrides = await db.execute(
         select(WbCostOverride).where(WbCostOverride.project_id == pid)
     )
@@ -264,6 +266,11 @@ async def get_cost_overrides(db: AsyncSession, pid: int) -> dict:
         for o in overrides.scalars()
     ]
 
+    # Load existing cost sources
+    avg_costs = await load_avg_costs(db, pid)       # article_seller → avg cost
+    cost_ovr = await load_cost_overrides(db, pid)    # nm_id → cost
+
+    # Items in funnel with no cost_price set
     no_cost = await db.execute(
         select(
             WbFunnelDaily.nm_id,
@@ -275,11 +282,20 @@ async def get_cost_overrides(db: AsyncSession, pid: int) -> dict:
             WbFunnelDaily.cost_price.is_(None),
         ).distinct()
     )
-    missing = [
-        {"nm_id": r.nm_id, "vendor_code": r.vendor_code,
-         "subject": r.subject, "brand": r.brand}
-        for r in no_cost
-    ]
+
+    # Filter: only truly missing = no override AND no avg cost from orders
+    missing = []
+    for r in no_cost:
+        # Already has manual override?
+        if r.nm_id in cost_ovr and cost_ovr[r.nm_id] > 0:
+            continue
+        # Has avg cost from cost_order_items?
+        if r.vendor_code and r.vendor_code in avg_costs and avg_costs[r.vendor_code] > 0:
+            continue
+        missing.append({
+            "nm_id": r.nm_id, "vendor_code": r.vendor_code,
+            "subject": r.subject, "brand": r.brand,
+        })
 
     return {"overrides": override_list, "missing": missing}
 
@@ -305,3 +321,90 @@ async def set_cost_override(db: AsyncSession, pid: int, nm_id: int,
 
     await db.commit()
     return {"status": "ok"}
+
+
+async def bulk_set_cost_overrides(db: AsyncSession, pid: int, items: list) -> dict:
+    """Bulk set cost prices by barcode or nm_id.
+
+    Resolution order for each barcode value:
+    1. Direct nm_id match (if barcode is numeric and matches WbFunnelDaily.nm_id)
+    2. Nomenclature barcode → article_wb (nm_id)
+
+    Returns summary: saved count, not_found barcodes.
+    """
+    if not items:
+        return {"saved": 0, "not_found": [], "errors": []}
+
+    # Collect all barcodes from request
+    barcodes = [item.barcode.strip() for item in items]
+
+    # 1. Load Nomenclature: barcode → article_wb (nm_id)
+    nom_result = await db.execute(
+        select(Nomenclature.barcode, Nomenclature.article_wb).where(
+            Nomenclature.project_id == pid,
+            Nomenclature.barcode.in_(barcodes),
+        )
+    )
+    barcode_to_nm: dict[str, int] = {}
+    for row in nom_result:
+        if row.article_wb:
+            barcode_to_nm[row.barcode] = row.article_wb
+
+    # 2. Check if numeric barcodes are direct nm_ids (existing in WbFunnelDaily)
+    numeric_codes = [b for b in barcodes if b.isdigit() and b not in barcode_to_nm]
+    if numeric_codes:
+        nm_ids = [int(b) for b in numeric_codes]
+        existing = await db.execute(
+            select(WbFunnelDaily.nm_id).where(
+                WbFunnelDaily.project_id == pid,
+                WbFunnelDaily.nm_id.in_(nm_ids),
+            ).distinct()
+        )
+        for row in existing:
+            barcode_to_nm[str(row.nm_id)] = row.nm_id
+
+    # 3. Process each item
+    saved = 0
+    not_found = []
+    errors = []
+
+    for item in items:
+        barcode = item.barcode.strip()
+        nm_id = barcode_to_nm.get(barcode)
+
+        if not nm_id:
+            not_found.append(barcode)
+            continue
+
+        try:
+            cost = item.cost_price
+            # TODO: currency conversion if needed (currently assumes RUB)
+
+            stmt = pg_insert(WbCostOverride).values(
+                project_id=pid, nm_id=nm_id, cost_price=cost,
+            )
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_cost_override_nm",
+                set_={"cost_price": cost},
+            )
+            await db.execute(stmt)
+
+            # Update existing funnel rows
+            await db.execute(
+                WbFunnelDaily.__table__.update()
+                .where(WbFunnelDaily.project_id == pid, WbFunnelDaily.nm_id == nm_id)
+                .values(cost_price=cost)
+            )
+
+            saved += 1
+        except Exception as e:
+            errors.append(f"{barcode}: {str(e)}")
+            logger.error(f"Bulk cost override error for barcode={barcode}: {e}")
+
+    await db.commit()
+
+    return {
+        "saved": saved,
+        "not_found": not_found,
+        "errors": errors,
+    }

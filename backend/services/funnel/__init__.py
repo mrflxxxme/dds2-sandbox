@@ -35,6 +35,7 @@ from backend.services.funnel.queries import (
     get_filters,
     get_cost_overrides,
     set_cost_override,
+    bulk_set_cost_overrides,
 )
 
 # ─── Analysis ────────────────────────────────────────────────────────────────
@@ -60,6 +61,7 @@ __all__ = [
     "get_filters",
     "get_cost_overrides",
     "set_cost_override",
+    "bulk_set_cost_overrides",
     # analysis
     "get_day_analysis",
     "get_product_trends",

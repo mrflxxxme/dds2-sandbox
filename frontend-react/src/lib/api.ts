@@ -347,11 +347,10 @@ class ApiClient {
     getDDSPnL(year: number) {
         return this.request<any>('GET', `/api/v1/reports/dds_pnl?year=${year}`);
     }
-    getWbBdr(dateFrom: string, dateTo: string, brand?: string, article?: string, mode?: string) {
+    getWbBdr(dateFrom: string, dateTo: string, brand?: string, article?: string) {
         let url = `/api/v1/reports/wb_bdr?date_from=${dateFrom}&date_to=${dateTo}`;
         if (brand) url += `&brand=${encodeURIComponent(brand)}`;
         if (article) url += `&article=${encodeURIComponent(article)}`;
-        if (mode) url += `&mode=${mode}`;
         return this.request<any>('GET', url);
     }
     getWbBdrSyncStatus() {
@@ -707,6 +706,9 @@ class ApiClient {
     }
     async setFunnelCost(nmId: number, costPrice: number): Promise<MessageResponse> {
         return this.request('POST', '/api/v1/funnel/cost', { nm_id: nmId, cost_price: costPrice });
+    }
+    async bulkSetFunnelCosts(items: { barcode: string; cost_price: number; currency?: string }[]): Promise<{ saved: number; not_found: string[]; errors: string[] }> {
+        return this.request('POST', '/api/v1/funnel/costs/bulk', { items });
     }
     async getFunnelTax(): Promise<{ tax_rate: number }> {
         return this.request('GET', '/api/v1/funnel/tax');

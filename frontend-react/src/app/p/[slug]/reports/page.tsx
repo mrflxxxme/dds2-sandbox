@@ -408,7 +408,7 @@ function WbBdr() {
     const [dateTo, setDateTo] = useState(lw.to);
     const [brand, setBrand] = useState('');
     const [articleSearch, setArticleSearch] = useState('');
-    const [mode, setMode] = useState<'finance' | 'management'>('finance');
+
     const [data, setData] = useState<any>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
@@ -425,12 +425,12 @@ function WbBdr() {
     const loadData = React.useCallback(async () => {
         setLoading(true); setError('');
         try {
-            const res = await api.getWbBdr(dateFrom, dateTo, brand || undefined, articleSearch || undefined, mode);
+            const res = await api.getWbBdr(dateFrom, dateTo, brand || undefined, articleSearch || undefined);
             setData(res);
             if (res?.sync_status) setSyncStatus(res.sync_status);
         } catch (e: any) { setError(e.message || 'Ошибка загрузки'); }
         finally { setLoading(false); }
-    }, [dateFrom, dateTo, brand, articleSearch, mode]);
+    }, [dateFrom, dateTo, brand, articleSearch]);
 
     // Auto-load data on mount
     React.useEffect(() => { loadData(); }, []);
@@ -578,17 +578,9 @@ function WbBdr() {
 
             {s && !loading && (
                 <>
-                    {/* ── View mode toggle ── */}
-                    <div style={{ display: 'flex', gap: 4, marginBottom: 12 }}>
-                        <button className={`btn ${mode === 'finance' ? 'btn-primary' : 'btn-secondary'} btn-sm`}
-                            onClick={() => setMode('finance')}>Финансовая отчётность</button>
-                        <button className={`btn ${mode === 'management' ? 'btn-primary' : 'btn-secondary'} btn-sm`}
-                            onClick={() => setMode('management')}>Управленческая отчётность</button>
-                    </div>
-
                     {/* ── KPI Cards ── */}
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
-                        {mode === 'finance' && <KpiCard label="Итого к оплате" value={formatNumber(s.to_pay)} sub="₽" />}
+                        <KpiCard label="Итого к оплате" value={formatNumber(s.to_pay)} sub="₽" />
                         <KpiCard label="Реализация" value={formatNumber(s.realization)} sub="₽" />
                         <KpiCard label="Продажи" value={formatNumber(s.sales_amount)} sub={`₽ / ${formatNumber(s.sale_qty)} шт`} />
                         <KpiCard label="Возвраты" value={formatNumber(s.returns_amount)} sub={`₽ / ${formatNumber(s.ret_qty)} шт`} />

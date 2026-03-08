@@ -64,14 +64,13 @@ async def get_wb_bdr(
     date_to: date = Query(...),
     brand: Optional[str] = Query(None),
     article: Optional[str] = Query(None),
-    mode: str = Query("finance", regex="^(finance|management)$"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """WB BDR (P&L) report from locally cached finance data."""
     from backend.services import wb_bdr_service
     return await wb_bdr_service.get_wb_bdr(
-        db, project.id, date_from, date_to, brand=brand, article=article, mode=mode,
+        db, project.id, date_from, date_to, brand=brand, article=article,
     )
 
 

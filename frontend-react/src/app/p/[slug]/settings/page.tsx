@@ -1,6 +1,6 @@
 'use client';
 import { useCallback, useEffect, useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDateTime, formatNumber, exportToExcel } from '@/lib/utils';
 
@@ -274,6 +274,8 @@ function Nomenclature() {
 /* ─── Funnel Costs (moved from funnel/page.tsx) ────────────────── */
 
 function FunnelCosts() {
+    const { slug } = useParams();
+    const router = useRouter();
     const [costs, setCosts] = useState<any>({ overrides: [], missing: [] });
     const [editCost, setEditCost] = useState<{ nm_id: number; cost_price: string } | null>(null);
     const [loading, setLoading] = useState(true);
@@ -297,10 +299,18 @@ function FunnelCosts() {
 
     return (
         <div>
-            <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>Ручная себестоимость</h2>
-            <p style={{ fontSize: 13, color: 'var(--color-text-dim)', marginBottom: 16 }}>
-                Товары без себестоимости из заказов. Укажите себестоимость за штуку для расчёта прибыли.
-            </p>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <div>
+                    <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Ручная себестоимость</h2>
+                    <p style={{ fontSize: 13, color: 'var(--color-text-dim)', margin: '4px 0 0' }}>
+                        Товары без себестоимости из заказов. Укажите себестоимость за штуку для расчёта прибыли.
+                    </p>
+                </div>
+                <button className="btn btn-primary btn-sm" onClick={() => router.push(`/p/${slug}/bulk-cost`)}>
+                    📋 Массово себестоимость
+                </button>
+            </div>
+
             {costs.missing?.length > 0 && (
                 <div className="glass-card" style={{ marginBottom: 16 }}>
                     <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 8, padding: '12px 16px 0' }}>
@@ -372,6 +382,8 @@ function FunnelCosts() {
         </div>
     );
 }
+
+
 
 /* ─── Lead Times (moved from planning/page.tsx) ────────────────── */
 

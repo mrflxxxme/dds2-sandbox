@@ -14,11 +14,13 @@ ZERO = D("0")
 from backend.services.wb_bdr_service import (
     _empty_totals,
     _compute_metrics,
-    _apply_tax,
-    _apply_tax_article,
-    _enrich_article,
-    _compute_abc,
     _serialize,
+)
+from backend.services.bdr_enrichment import (
+    apply_tax as _apply_tax,
+    apply_tax_article as _apply_tax_article,
+    enrich_article as _enrich_article,
+    compute_abc as _compute_abc,
 )
 
 
