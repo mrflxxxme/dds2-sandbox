@@ -1,108 +1,75 @@
 """
-Tax rate service — CRUD for per-brand monthly tax rates.
+Tax rate service — CRUD for project-level monthly tax rates.
 """
 
 import logging
-from typing import Optional
 
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.tax import TaxRate
-from backend.models.cost import Nomenclature
 
 logger = logging.getLogger("dds.tax_service")
 
-
-async def get_brands(db: AsyncSession, project_id: int) -> list[str]:
-    """Get unique brands from nomenclature for this project."""
-    stmt = (
-        select(Nomenclature.brand)
-        .where(Nomenclature.project_id == project_id)
-        .where(Nomenclature.brand.isnot(None))
-        .where(Nomenclature.brand != "")
-        .distinct()
-        .order_by(Nomenclature.brand)
-    )
-    result = await db.execute(stmt)
-    return [r[0] for r in result.all()]
+# Internal constant — brand column exists in DB but tax is project-level
+_PROJECT_BRAND = "__project__"
 
 
 async def get_tax_rates(db: AsyncSession, project_id: int, year: int) -> dict:
-    """Get all tax rates for a project/year, grouped by brand."""
-    brands = await get_brands(db, project_id)
-
+    """Get tax rates for a project/year (project-level, not per-brand)."""
     stmt = (
         select(TaxRate)
         .where(TaxRate.project_id == project_id)
         .where(TaxRate.year == year)
-        .order_by(TaxRate.brand, TaxRate.month)
+        .where(TaxRate.brand == _PROJECT_BRAND)
+        .order_by(TaxRate.month)
     )
     result = await db.execute(stmt)
     rows = result.scalars().all()
 
-    # Group by brand
-    brand_map: dict[str, dict] = {}
+    tax_regime = "usn_income"
+    months = []
     for r in rows:
-        if r.brand not in brand_map:
-            brand_map[r.brand] = {
-                "brand": r.brand,
-                "tax_regime": r.tax_regime,
-                "months": [],
-            }
-        brand_map[r.brand]["months"].append({
+        tax_regime = r.tax_regime
+        months.append({
             "month": r.month,
             "usn_rate": float(r.usn_rate or 0),
             "nds_rate": float(r.nds_rate or 0),
             "cost_as_expense": r.cost_as_expense or False,
         })
 
-    # Ensure all 12 months exist for each configured brand
-    for brand_data in brand_map.values():
-        existing_months = {m["month"] for m in brand_data["months"]}
-        for m in range(1, 13):
-            if m not in existing_months:
-                brand_data["months"].append({
-                    "month": m,
-                    "usn_rate": 0,
-                    "nds_rate": 0,
-                    "cost_as_expense": False,
-                })
-        brand_data["months"].sort(key=lambda x: x["month"])
-
-    # Build rates list (configured brands first, then unconfigured)
-    rates = []
-    for b in brands:
-        if b in brand_map:
-            rates.append(brand_map[b])
-        # Don't auto-add unconfigured brands — they can be added via UI
-
-    # Also include brands that have rates but are not in nomenclature anymore
-    for b, data in brand_map.items():
-        if b not in brands:
-            rates.append(data)
+    # Ensure all 12 months exist
+    existing = {m["month"] for m in months}
+    for m in range(1, 13):
+        if m not in existing:
+            months.append({
+                "month": m,
+                "usn_rate": 0,
+                "nds_rate": 0,
+                "cost_as_expense": False,
+            })
+    months.sort(key=lambda x: x["month"])
 
     return {
         "year": year,
-        "brands": brands,
-        "rates": rates,
+        "tax_regime": tax_regime,
+        "months": months,
     }
 
 
 async def save_tax_rates(
     db: AsyncSession,
     project_id: int,
-    brand: str,
     year: int,
     tax_regime: str,
     months: list[dict],
 ) -> dict:
-    """Save/update tax rates for one brand for one year (upsert 12 months)."""
-    # Delete existing rows for this brand/year
+    """Save/update project-level tax rates for one year (upsert 12 months)."""
+    # Delete existing rows for this project/year
     await db.execute(
         delete(TaxRate).where(
             TaxRate.project_id == project_id,
-            TaxRate.brand == brand,
+            TaxRate.brand == _PROJECT_BRAND,
             TaxRate.year == year,
         )
     )
@@ -111,7 +78,7 @@ async def save_tax_rates(
     for m in months:
         row = TaxRate(
             project_id=project_id,
-            brand=brand,
+            brand=_PROJECT_BRAND,
             tax_regime=tax_regime,
             year=year,
             month=m["month"],
@@ -122,5 +89,5 @@ async def save_tax_rates(
         db.add(row)
 
     await db.commit()
-    logger.info("Saved tax rates: project=%s brand=%s year=%s regime=%s", project_id, brand, year, tax_regime)
-    return {"status": "ok", "brand": brand, "year": year}
+    logger.info("Saved tax rates: project=%s year=%s regime=%s", project_id, year, tax_regime)
+    return {"status": "ok", "year": year}

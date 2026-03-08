@@ -473,7 +473,7 @@ class ApiClient {
     getTaxRates(year: number) {
         return this.request<any>('GET', `/api/v1/reports/tax_rates?year=${year}`);
     }
-    saveTaxRates(payload: { brand: string; year: number; tax_regime: string; months: any[] }) {
+    saveTaxRates(payload: { year: number; tax_regime: string; months: any[] }) {
         return this.request<any>('POST', '/api/v1/reports/tax_rates', payload);
     }
 

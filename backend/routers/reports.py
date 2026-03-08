@@ -272,10 +272,10 @@ async def save_tax_rates(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Save tax rates for one brand for one year (upsert 12 months)."""
+    """Save project-level tax rates for one year (upsert 12 months)."""
     from backend.services import tax_service
-    brand = payload["brand"]
     year = payload["year"]
     tax_regime = payload.get("tax_regime", "usn_income")
     months = payload.get("months", [])
-    return await tax_service.save_tax_rates(db, project.id, brand, year, tax_regime, months)
+    return await tax_service.save_tax_rates(db, project.id, year, tax_regime, months)
+
