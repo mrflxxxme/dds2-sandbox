@@ -215,7 +215,7 @@ async def _load_avg_costs(db: AsyncSession, pid: int) -> dict[str, float]:
     result = await db.execute(
         select(
             CostOrderItem.article_seller,
-            (func.sum(CostOrderItem.total_rub) / func.nullif(func.sum(CostOrderItem.qty), 0)).label("avg_cost"),
+            (func.sum(CostOrderItem.total_rub * CostOrderItem.qty) / func.nullif(func.sum(CostOrderItem.qty), 0)).label("avg_cost"),
         ).join(
             CostOrder, CostOrderItem.order_no == CostOrder.order_no
         ).where(
