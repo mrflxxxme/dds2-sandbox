@@ -580,7 +580,12 @@ function WbBdr() {
                         <KpiCard label="% выкупа" value={s.buyout_pct?.toFixed(2) + '%'} sub="" />
                     </div>
 
-
+                    {/* ── No cost warning ── */}
+                    {(() => { const n = articles.filter((a: any) => !a.cost_price || a.cost_price === 0).length; return n > 0 ? (
+                        <div style={{ padding: '10px 16px', marginBottom: 12, background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.4)', borderRadius: 8, color: '#f59e0b', fontSize: 13 }}>
+                            ⚠️ Товары без себестоимости — {n} шт
+                        </div>
+                    ) : null; })()}
 
                     {/* ── Articles Table ── */}
                     <div className="glass-card" style={{ overflow: 'auto' }}>
