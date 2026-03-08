@@ -86,6 +86,15 @@ from backend.schemas.integrations import (
     SyncLogSchema,
 )
 
+# Tax
+from backend.schemas.tax import (
+    TaxRateMonth,
+    TaxRateSaveRequest,
+    TaxRateRegimeChangeRequest,
+    TaxRateBrandData,
+    TaxRatesResponse,
+)
+
 __all__ = [
     # Common
     "MessageResponse", "StatusResponse", "DeleteResponse",
@@ -112,4 +121,7 @@ __all__ = [
     "CostOrderSchema", "CostUploadResult",
     # Integrations
     "IntegrationKeySchema", "SyncLogSchema",
+    # Tax
+    "TaxRateMonth", "TaxRateSaveRequest", "TaxRateRegimeChangeRequest",
+    "TaxRateBrandData", "TaxRatesResponse",
 ]

@@ -76,6 +76,11 @@ from backend.models.fx_rates import (
     FxRate,
 )
 
+# Tax
+from backend.models.tax import (
+    TaxRate,
+)
+
 # Alias for backward compatibility
 WbApiKey = IntegrationKey
 
@@ -98,6 +103,8 @@ __all__ = [
     "IntegrationKey", "SyncLog", "WbFunnelDaily", "WbCostOverride",
     # FX Rates
     "FxRate",
+    # Tax
+    "TaxRate",
     # Aliases
     "WbApiKey",
 ]

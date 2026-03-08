@@ -251,3 +251,31 @@ async def get_fx_rates(
         {"id": r.id, "date": str(r.date), "pair": r.pair, "rate": float(r.rate), "source": r.source}
         for r in rates
     ]
+
+
+# ─── Tax Rates ──────────────────────────────────────────────────────
+
+@router.get("/tax_rates")
+async def get_tax_rates(
+    year: int = Query(...),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get tax rates for all brands for the given year."""
+    from backend.services import tax_service
+    return await tax_service.get_tax_rates(db, project.id, year)
+
+
+@router.post("/tax_rates")
+async def save_tax_rates(
+    payload: dict,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Save tax rates for one brand for one year (upsert 12 months)."""
+    from backend.services import tax_service
+    brand = payload["brand"]
+    year = payload["year"]
+    tax_regime = payload.get("tax_regime", "usn_income")
+    months = payload.get("months", [])
+    return await tax_service.save_tax_rates(db, project.id, brand, year, tax_regime, months)

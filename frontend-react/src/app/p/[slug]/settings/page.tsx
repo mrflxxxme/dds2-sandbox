@@ -7,7 +7,7 @@ import { formatDateTime, formatNumber, exportToExcel } from '@/lib/utils';
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
 
 export default function SettingsPage() {
-    const [tab, setTab] = useState<'integrations' | 'nomenclature' | 'costs' | 'leadtimes' | 'duties'>('integrations');
+    const [tab, setTab] = useState<'integrations' | 'nomenclature' | 'costs' | 'leadtimes' | 'duties' | 'taxrates'>('integrations');
 
     return (
         <div className="animate-in">
@@ -24,6 +24,7 @@ export default function SettingsPage() {
                     { key: 'costs' as const, label: '💰 Себестоимость' },
                     { key: 'leadtimes' as const, label: '⏱ Lead Times' },
                     { key: 'duties' as const, label: '⚖️ Пошлины / Утиль' },
+                    { key: 'taxrates' as const, label: '📋 Налоговые ставки' },
                 ].map(t => (
                     <button key={t.key} className={`btn ${tab === t.key ? 'btn-primary' : 'btn-secondary'} btn-sm`}
                         onClick={() => setTab(t.key)}>{t.label}</button>
@@ -34,6 +35,7 @@ export default function SettingsPage() {
             {tab === 'costs' && <FunnelCosts />}
             {tab === 'leadtimes' && <LeadTimes />}
             {tab === 'duties' && <DutyRules />}
+            {tab === 'taxrates' && <TaxRates />}
         </div>
     );
 }
@@ -598,6 +600,335 @@ function DutyRules() {
                         {unruled.length > 30 && <span style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>...и ещё {unruled.length - 30}</span>}
                     </div>
                 </div>
+            )}
+        </div>
+    );
+}
+
+/* ─── Tax Rates Settings ───────────────────────────────────────── */
+
+const MONTH_NAMES = ['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
+const QUARTER_MONTHS = [[0,1,2],[3,4,5],[6,7,8],[9,10,11]];
+const REGIME_LABELS: Record<string,string> = {
+    'usn_income': 'УСН «Доходы»',
+    'usn_income_expense_vat': 'УСН «Доходы – Расходы» с фикс. НДС',
+};
+
+interface MonthRate {
+    month: number;
+    usn_rate: number;
+    nds_rate: number;
+    cost_as_expense: boolean;
+}
+interface BrandRates {
+    brand: string;
+    tax_regime: string;
+    months: MonthRate[];
+}
+
+function TaxRates() {
+    const currentYear = new Date().getFullYear();
+    const [year, setYear] = useState(currentYear);
+    const [brands, setBrands] = useState<string[]>([]);
+    const [rates, setRates] = useState<BrandRates[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState<string | null>(null);
+    const [msg, setMsg] = useState('');
+    const [showAddBrand, setShowAddBrand] = useState(false);
+    const [newBrand, setNewBrand] = useState('');
+    const [editRegimeBrand, setEditRegimeBrand] = useState<string | null>(null);
+
+    const load = async () => {
+        setLoading(true);
+        try {
+            const data = await api.getTaxRates(year);
+            setBrands(data.brands || []);
+            setRates(data.rates || []);
+        } catch { }
+        setLoading(false);
+    };
+
+    useEffect(() => { load(); }, [year]);
+
+    const getMonthRate = (brand: string, monthIdx: number): MonthRate => {
+        const br = rates.find(r => r.brand === brand);
+        if (!br) return { month: monthIdx + 1, usn_rate: 0, nds_rate: 0, cost_as_expense: false };
+        const m = br.months.find(m => m.month === monthIdx + 1);
+        return m || { month: monthIdx + 1, usn_rate: 0, nds_rate: 0, cost_as_expense: false };
+    };
+
+    const updateRate = (brand: string, monthIdx: number, field: 'usn_rate' | 'nds_rate', value: number) => {
+        setRates(prev => {
+            const copy = prev.map(br => ({ ...br, months: br.months.map(m => ({ ...m })) }));
+            let br = copy.find(r => r.brand === brand);
+            if (!br) {
+                br = { brand, tax_regime: 'usn_income', months: Array.from({ length: 12 }, (_, i) => ({ month: i + 1, usn_rate: 0, nds_rate: 0, cost_as_expense: false })) };
+                copy.push(br);
+            }
+            const m = br.months.find(m => m.month === monthIdx + 1);
+            if (m) m[field] = value;
+            return copy;
+        });
+    };
+
+    const updateCostAsExpense = (brand: string, quarterIdx: number, value: boolean) => {
+        setRates(prev => {
+            const copy = prev.map(br => ({ ...br, months: br.months.map(m => ({ ...m })) }));
+            let br = copy.find(r => r.brand === brand);
+            if (!br) {
+                br = { brand, tax_regime: 'usn_income_expense_vat', months: Array.from({ length: 12 }, (_, i) => ({ month: i + 1, usn_rate: 0, nds_rate: 0, cost_as_expense: false })) };
+                copy.push(br);
+            }
+            QUARTER_MONTHS[quarterIdx].forEach(mi => {
+                const m = br!.months.find(m => m.month === mi + 1);
+                if (m) m.cost_as_expense = value;
+            });
+            return copy;
+        });
+    };
+
+    const changeRegime = (brand: string, regime: string) => {
+        setRates(prev => {
+            const copy = prev.map(br => ({ ...br, months: br.months.map(m => ({ ...m })) }));
+            const br = copy.find(r => r.brand === brand);
+            if (br) br.tax_regime = regime;
+            return copy;
+        });
+        setEditRegimeBrand(null);
+    };
+
+    const saveBrand = async (brand: string) => {
+        const br = rates.find(r => r.brand === brand);
+        if (!br) return;
+        setSaving(brand);
+        try {
+            await api.saveTaxRates({
+                brand,
+                year,
+                tax_regime: br.tax_regime,
+                months: br.months,
+            });
+            setMsg(`✅ Ставки для «${brand}» сохранены!`);
+        } catch (e: any) {
+            setMsg(`❌ ${e.message}`);
+        }
+        setSaving(null);
+    };
+
+    const saveAll = async () => {
+        setSaving('__all__');
+        try {
+            for (const br of rates) {
+                await api.saveTaxRates({
+                    brand: br.brand,
+                    year,
+                    tax_regime: br.tax_regime,
+                    months: br.months,
+                });
+            }
+            setMsg('✅ Все ставки сохранены!');
+        } catch (e: any) {
+            setMsg(`❌ ${e.message}`);
+        }
+        setSaving(null);
+    };
+
+    const addBrand = (brand: string) => {
+        if (!brand || rates.some(r => r.brand === brand)) return;
+        setRates(prev => [
+            ...prev,
+            {
+                brand,
+                tax_regime: 'usn_income',
+                months: Array.from({ length: 12 }, (_, i) => ({ month: i + 1, usn_rate: 0, nds_rate: 0, cost_as_expense: false })),
+            },
+        ]);
+        setNewBrand('');
+        setShowAddBrand(false);
+    };
+
+    // Quarter aggregate (average of 3 months)
+    const quarterAvg = (brand: string, qIdx: number, field: 'usn_rate' | 'nds_rate'): number => {
+        const vals = QUARTER_MONTHS[qIdx].map(mi => getMonthRate(brand, mi)[field]);
+        const sum = vals.reduce((a: number, b: number) => a + b, 0);
+        return +(sum / 3).toFixed(2);
+    };
+
+    const updateQuarterRate = (brand: string, qIdx: number, field: 'usn_rate' | 'nds_rate', value: number) => {
+        QUARTER_MONTHS[qIdx].forEach(mi => updateRate(brand, mi, field, value));
+    };
+
+    if (loading) return <div style={{ padding: 40, color: 'var(--color-text-muted)' }}>Загрузка...</div>;
+
+    const inputStyle = {
+        width: 65, fontSize: 13, textAlign: 'center' as const,
+        background: 'var(--color-bg)', border: '1px solid var(--color-border)',
+        borderRadius: 6, padding: '4px 6px', color: 'var(--color-text)',
+    };
+
+    return (
+        <div>
+            {/* Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <h3 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Налоговые ставки</h3>
+                    <select className="form-input" value={year} onChange={e => setYear(+e.target.value)}
+                        style={{ width: 90, fontSize: 14 }}>
+                        {[currentYear - 1, currentYear, currentYear + 1].map(y =>
+                            <option key={y} value={y}>{y}</option>
+                        )}
+                    </select>
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                    <button className="btn btn-secondary btn-sm" onClick={() => setShowAddBrand(!showAddBrand)}>
+                        + Добавить бренд
+                    </button>
+                    <button className="btn btn-primary btn-sm" onClick={saveAll}
+                        disabled={saving !== null || rates.length === 0}>
+                        {saving === '__all__' ? '⏳ Сохранение...' : '💾 Сохранить'}
+                    </button>
+                </div>
+            </div>
+
+            {msg && (
+                <div style={{
+                    fontSize: 13, marginBottom: 12, padding: '8px 12px', borderRadius: 6,
+                    background: msg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)',
+                    color: msg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)',
+                }}>
+                    {msg}
+                    <span style={{ float: 'right', cursor: 'pointer' }} onClick={() => setMsg('')}>✕</span>
+                </div>
+            )}
+
+            {showAddBrand && (
+                <div className="glass-card" style={{ marginBottom: 16, padding: 16 }}>
+                    <div style={{ display: 'flex', gap: 12, alignItems: 'end' }}>
+                        <div className="form-group" style={{ flex: 1 }}>
+                            <label className="form-label">Выберите бренд</label>
+                            <select className="form-input" value={newBrand} onChange={e => setNewBrand(e.target.value)}>
+                                <option value="">— Выбрать —</option>
+                                {brands.filter(b => !rates.some(r => r.brand === b)).map(b =>
+                                    <option key={b} value={b}>{b}</option>
+                                )}
+                            </select>
+                        </div>
+                        <button className="btn btn-primary btn-sm" onClick={() => addBrand(newBrand)}
+                            disabled={!newBrand}>Добавить</button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => setShowAddBrand(false)}>Отмена</button>
+                    </div>
+                </div>
+            )}
+
+            {rates.length === 0 ? (
+                <div className="glass-card" style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>
+                    Нет настроенных брендов. Нажмите «+ Добавить бренд» для начала.
+                </div>
+            ) : (
+                rates.map(br => (
+                    <div key={br.brand} className="glass-card" style={{ marginBottom: 20, padding: 20 }}>
+                        {/* Brand header */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+                            <div style={{
+                                width: 32, height: 32, borderRadius: 8,
+                                background: 'linear-gradient(135deg, rgba(139,92,246,0.2), rgba(59,130,246,0.2))',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                fontSize: 14, fontWeight: 700, color: 'var(--color-accent)',
+                            }}>
+                                {br.brand.slice(0, 2).toUpperCase()}
+                            </div>
+                            <div>
+                                <span style={{ fontWeight: 700, fontSize: 15 }}>{br.brand}</span>
+                                {' '}
+                                <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>
+                                    {REGIME_LABELS[br.tax_regime] || br.tax_regime}
+                                </span>
+                                {editRegimeBrand === br.brand ? (
+                                    <select className="form-input" value={br.tax_regime}
+                                        onChange={e => changeRegime(br.brand, e.target.value)}
+                                        style={{ marginLeft: 8, fontSize: 12, width: 'auto' }} autoFocus>
+                                        {Object.entries(REGIME_LABELS).map(([k, v]) =>
+                                            <option key={k} value={k}>{v}</option>
+                                        )}
+                                    </select>
+                                ) : (
+                                    <span style={{ marginLeft: 8, fontSize: 12, color: 'var(--color-accent)', cursor: 'pointer' }}
+                                        onClick={() => setEditRegimeBrand(br.brand)}>Изменить</span>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Quarters grid */}
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16 }}>
+                            {QUARTER_MONTHS.map((qMonths, qIdx) => (
+                                <div key={qIdx} style={{
+                                    border: '1px solid var(--color-border)', borderRadius: 8, padding: 12,
+                                    background: 'var(--color-bg-input)',
+                                }}>
+                                    {/* Quarter header */}
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr 1fr', gap: 6, alignItems: 'center', marginBottom: 10 }}>
+                                        <span style={{ fontWeight: 600, fontSize: 13 }}>{qIdx + 1} квартал</span>
+                                        <div style={{ textAlign: 'center' }}>
+                                            <div style={{ fontSize: 10, color: 'var(--color-text-dim)', marginBottom: 2 }}>УСН, %</div>
+                                            <input type="number" step="0.01" style={inputStyle}
+                                                value={quarterAvg(br.brand, qIdx, 'usn_rate') || ''}
+                                                onChange={e => updateQuarterRate(br.brand, qIdx, 'usn_rate', +e.target.value || 0)} />
+                                        </div>
+                                        <div style={{ textAlign: 'center' }}>
+                                            <div style={{ fontSize: 10, color: 'var(--color-text-dim)', marginBottom: 2 }}>НДС, %</div>
+                                            <input type="number" step="0.01" style={inputStyle}
+                                                value={quarterAvg(br.brand, qIdx, 'nds_rate') || ''}
+                                                onChange={e => updateQuarterRate(br.brand, qIdx, 'nds_rate', +e.target.value || 0)} />
+                                        </div>
+                                    </div>
+
+                                    {/* Months */}
+                                    {qMonths.map(mi => {
+                                        const mr = getMonthRate(br.brand, mi);
+                                        return (
+                                            <div key={mi} style={{
+                                                display: 'grid', gridTemplateColumns: 'auto 1fr 1fr', gap: 6,
+                                                alignItems: 'center', padding: '4px 0',
+                                                borderTop: '1px solid var(--color-border)',
+                                            }}>
+                                                <span style={{ fontSize: 12, color: 'var(--color-text-dim)', minWidth: 70 }}>
+                                                    {MONTH_NAMES[mi]}
+                                                </span>
+                                                <input type="number" step="0.01" style={inputStyle}
+                                                    value={mr.usn_rate || ''}
+                                                    onChange={e => updateRate(br.brand, mi, 'usn_rate', +e.target.value || 0)} />
+                                                <input type="number" step="0.01" style={inputStyle}
+                                                    value={mr.nds_rate || ''}
+                                                    onChange={e => updateRate(br.brand, mi, 'nds_rate', +e.target.value || 0)} />
+                                            </div>
+                                        );
+                                    })}
+
+                                    {/* Cost as expense checkbox (only for Д-Р) */}
+                                    {br.tax_regime === 'usn_income_expense_vat' && (
+                                        <label style={{
+                                            display: 'flex', alignItems: 'center', gap: 6, marginTop: 8,
+                                            fontSize: 11, color: 'var(--color-text-dim)', cursor: 'pointer',
+                                        }}>
+                                            <input type="checkbox"
+                                                checked={getMonthRate(br.brand, qMonths[0]).cost_as_expense}
+                                                onChange={e => updateCostAsExpense(br.brand, qIdx, e.target.checked)} />
+                                            Учитывать себестоимость товара как официальный расход
+                                        </label>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+
+                        {/* Save brand button */}
+                        <div style={{ marginTop: 12, display: 'flex', justifyContent: 'flex-end' }}>
+                            <button className="btn btn-primary btn-sm" onClick={() => saveBrand(br.brand)}
+                                disabled={saving !== null}>
+                                {saving === br.brand ? '⏳' : '💾'} Сохранить «{br.brand}»
+                            </button>
+                        </div>
+                    </div>
+                ))
             )}
         </div>
     );

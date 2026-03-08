@@ -469,6 +469,14 @@ class ApiClient {
         return this.request<{ status: string; vat_rate: number }>('PUT', '/api/v1/cost/vat_rate', { vat_rate: vatRate });
     }
 
+    // Tax Rates
+    getTaxRates(year: number) {
+        return this.request<any>('GET', `/api/v1/reports/tax_rates?year=${year}`);
+    }
+    saveTaxRates(payload: { brand: string; year: number; tax_regime: string; months: any[] }) {
+        return this.request<any>('POST', '/api/v1/reports/tax_rates', payload);
+    }
+
     // Planning — Orders
     getPlanningOrders() {
         return this.request<Order[]>('GET', '/api/v1/planning/orders');
