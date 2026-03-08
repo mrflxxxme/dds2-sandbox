@@ -412,12 +412,12 @@ function WbBdr() {
     const loadData = React.useCallback(async () => {
         setLoading(true); setError('');
         try {
-            const res = await api.getWbBdr(dateFrom, dateTo, brand || undefined, articleSearch || undefined);
+            const res = await api.getWbBdr(dateFrom, dateTo, brand || undefined, articleSearch || undefined, mode);
             setData(res);
             if (res?.sync_status) setSyncStatus(res.sync_status);
         } catch (e: any) { setError(e.message || 'Ошибка загрузки'); }
         finally { setLoading(false); }
-    }, [dateFrom, dateTo, brand, articleSearch]);
+    }, [dateFrom, dateTo, brand, articleSearch, mode]);
 
     const handleSync = React.useCallback(async () => {
         setSyncing(true);
@@ -539,22 +539,6 @@ function WbBdr() {
 
             {s && !loading && (
                 <>
-                    {/* ── KPI Cards ── */}
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
-                        <KpiCard label="Итого к оплате" value={formatNumber(s.to_pay)} sub="₽" />
-                        <KpiCard label="Реализация" value={formatNumber(s.realization)} sub="₽" />
-                        <KpiCard label="Продажи" value={formatNumber(s.sales_amount)} sub={`₽ / ${formatNumber(s.sale_qty)} шт`} />
-                        <KpiCard label="Возвраты" value={formatNumber(s.returns_amount)} sub={`₽ / ${formatNumber(s.ret_qty)} шт`} />
-                        <KpiCard label="Комиссия" value={formatNumber(s.commission)} sub={pct(s.commission, s.realization)} color={s.commission < 0 ? '#ff6b6b' : undefined} />
-                        <KpiCard label="Логистика" value={formatNumber(s.logistics)} sub={pct(s.logistics, s.realization)} />
-                        <KpiCard label="Хранение" value={formatNumber(s.storage)} sub={pct(s.storage, s.realization)} />
-                        <KpiCard label="Реклама" value={formatNumber(s.adv_sum || 0)} sub={pct(s.adv_sum || 0, s.realization)} color="#f59e0b" />
-                        <KpiCard label="Себестоимость" value={formatNumber(s.cost_total || 0)} sub={pct(s.cost_total || 0, s.realization)} color="#8b5cf6" />
-                        <KpiCard label="Налог" value={formatNumber(s.tax_total || 0)} sub={`НДС ${formatNumber(s.tax_nds || 0)} + УСН ${formatNumber(s.tax_usn || 0)}`} color="#ef4444" />
-                        <KpiCard label="Чистая прибыль" value={formatNumber(s.profit || 0)} sub={pct(s.profit || 0, s.realization)} color={s.profit >= 0 ? '#22c55e' : '#ff6b6b'} />
-                        <KpiCard label="% выкупа" value={s.buyout_pct?.toFixed(2) + '%'} sub="" />
-                    </div>
-
                     {/* ── View mode toggle ── */}
                     <div style={{ display: 'flex', gap: 4, marginBottom: 12 }}>
                         <button className={`btn ${mode === 'finance' ? 'btn-primary' : 'btn-secondary'} btn-sm`}
@@ -562,6 +546,25 @@ function WbBdr() {
                         <button className={`btn ${mode === 'management' ? 'btn-primary' : 'btn-secondary'} btn-sm`}
                             onClick={() => setMode('management')}>Управленческая отчётность</button>
                     </div>
+
+                    {/* ── KPI Cards ── */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
+                        {mode === 'finance' && <KpiCard label="Итого к оплате" value={formatNumber(s.to_pay)} sub="₽" />}
+                        <KpiCard label="Реализация" value={formatNumber(s.realization)} sub="₽" />
+                        <KpiCard label="Продажи" value={formatNumber(s.sales_amount)} sub={`₽ / ${formatNumber(s.sale_qty)} шт`} />
+                        <KpiCard label="Возвраты" value={formatNumber(s.returns_amount)} sub={`₽ / ${formatNumber(s.ret_qty)} шт`} />
+                        <KpiCard label="Комиссия" value={formatNumber(s.commission)} sub={pct(s.commission, s.realization)} color={s.commission < 0 ? '#ff6b6b' : undefined} />
+                        <KpiCard label="Логистика" value={formatNumber(s.logistics)} sub={pct(s.logistics, s.realization)} />
+                        <KpiCard label="Хранение" value={formatNumber(s.storage)} sub={pct(s.storage, s.realization)} />
+                        <KpiCard label="Реклама" value={formatNumber(s.adv_sum || 0)} sub={pct(s.adv_sum || 0, s.realization)} color="#f59e0b" />
+                        <KpiCard label="Прочие удержания" value={formatNumber(s.other_deduction || 0)} sub={pct(s.other_deduction || 0, s.realization)} />
+                        <KpiCard label="Себестоимость" value={formatNumber(s.cost_total || 0)} sub={pct(s.cost_total || 0, s.realization)} color="#8b5cf6" />
+                        <KpiCard label="Налог" value={formatNumber(s.tax_total || 0)} sub={`НДС ${formatNumber(s.tax_nds || 0)} + УСН ${formatNumber(s.tax_usn || 0)}`} color="#ef4444" />
+                        <KpiCard label="Чистая прибыль" value={formatNumber(s.profit || 0)} sub={pct(s.profit || 0, s.realization)} color={s.profit >= 0 ? '#22c55e' : '#ff6b6b'} />
+                        <KpiCard label="% выкупа" value={s.buyout_pct?.toFixed(2) + '%'} sub="" />
+                    </div>
+
+
 
                     {/* ── Articles Table ── */}
                     <div className="glass-card" style={{ overflow: 'auto' }}>

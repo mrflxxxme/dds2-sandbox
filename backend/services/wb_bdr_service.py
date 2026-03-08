@@ -34,6 +34,7 @@ async def get_wb_bdr(
     date_to: date,
     brand: Optional[str] = None,
     article: Optional[str] = None,
+    mode: str = "finance",
 ) -> dict:
     """
     Build BDR from locally cached WB finance data.
@@ -151,9 +152,12 @@ async def get_wb_bdr(
         row_result["subject"] = art["subject"]
         row_result["nm_id"] = art["nm_id"]
 
-        # Ads from funnel
+        # Ads: financial mode → from fin report deductions, management → from funnel
         nm = art["nm_id"]
-        adv_sum = float(ads_map.get(nm, 0))
+        if mode == "finance":
+            adv_sum = float(row_result.get("ad_deduction", 0))
+        else:
+            adv_sum = float(ads_map.get(nm, 0))
         row_result["adv_sum"] = adv_sum
         total_adv += D(str(adv_sum))
 
@@ -172,11 +176,17 @@ async def get_wb_bdr(
 
     # ── 8. Summary ──
     summary_result = _compute_metrics(total_sale, total_ret, total_other)
-    summary_result["adv_sum"] = float(total_adv)
+
+    # Ads: financial mode → from fin report deductions, management → from funnel
+    if mode == "finance":
+        summary_result["adv_sum"] = float(summary_result.get("ad_deduction", 0))
+    else:
+        summary_result["adv_sum"] = float(total_adv)
     summary_result["cost_total"] = float(total_cost)
+    summary_result["mode"] = mode
 
     # ── 9. Tax calculation ──
-    _apply_tax(summary_result, tax_info, total_adv, total_cost)
+    _apply_tax(summary_result, tax_info, D(str(summary_result["adv_sum"])), total_cost)
     for art_row in result_articles:
         _apply_tax_article(art_row, tax_info)
 
@@ -188,6 +198,7 @@ async def get_wb_bdr(
         "total_rows": len(raw_rows),
         "sync_status": sync_status,
         "tax_info": tax_info,
+        "mode": mode,
     }
 
 
@@ -370,6 +381,8 @@ def _empty_totals() -> dict:
         "quantity": ZERO,
         "product_qty": ZERO,
         "compensation_ppvz": ZERO,  # ppvz from Добровольная компенсация rows
+        "ad_deduction": ZERO,      # deduction from Продвижение/Медиа (fin mode ads)
+        "other_deduction": ZERO,   # deduction from Списание за отзыв etc.
     }
 
 
@@ -399,6 +412,15 @@ def _accumulate_row(target: dict, row: WbFinanceRow, oper_name: str):
     if oper_name == "Добровольная компенсация при возврате":
         target["compensation_ppvz"] += row.ppvz_for_pay or ZERO
 
+    # Split deductions by type for financial mode
+    bonus = row.bonus_type_name or ""
+    deduction_val = row.deduction or ZERO
+    if deduction_val and bonus:
+        if "Продвижение" in bonus or "Медиа" in bonus:
+            target["ad_deduction"] += deduction_val
+        elif "отзыв" in bonus:
+            target["other_deduction"] += deduction_val
+
 
 def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
     """Compute BDR metrics from sale/return/other buckets.
@@ -424,6 +446,10 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
     deductions = other["deduction"]
     # Обратная логистика (rebill) — отдельная статья
     rebill = other["rebill_logistic_cost"]
+    # Advertising deduction from fin report (Продвижение + Медиа)
+    ad_deduction = other["ad_deduction"]
+    # Other deductions (Списание за отзыв etc.)
+    other_deduction = other["other_deduction"]
 
     # ── Commission ──
     # TrueStats formula: Продажи(net) - (К перечислению(net) - Компенсация)
@@ -474,6 +500,8 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
         "storage": storage,
         "acceptance": acceptance_val,
         "deductions": deductions,
+        "ad_deduction": ad_deduction,
+        "other_deduction": other_deduction,
         "rebill": rebill,
     }
 

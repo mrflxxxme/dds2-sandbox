@@ -347,10 +347,11 @@ class ApiClient {
     getDDSPnL(year: number) {
         return this.request<any>('GET', `/api/v1/reports/dds_pnl?year=${year}`);
     }
-    getWbBdr(dateFrom: string, dateTo: string, brand?: string, article?: string) {
+    getWbBdr(dateFrom: string, dateTo: string, brand?: string, article?: string, mode?: string) {
         let url = `/api/v1/reports/wb_bdr?date_from=${dateFrom}&date_to=${dateTo}`;
         if (brand) url += `&brand=${encodeURIComponent(brand)}`;
         if (article) url += `&article=${encodeURIComponent(article)}`;
+        if (mode) url += `&mode=${mode}`;
         return this.request<any>('GET', url);
     }
     getWbBdrSyncStatus() {
