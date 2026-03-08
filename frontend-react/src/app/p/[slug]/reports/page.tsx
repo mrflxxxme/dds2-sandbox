@@ -432,6 +432,9 @@ function WbBdr() {
         finally { setLoading(false); }
     }, [dateFrom, dateTo, brand, articleSearch, mode]);
 
+    // Auto-load data on mount
+    React.useEffect(() => { loadData(); }, []);
+
     const handleSync = React.useCallback(async () => {
         setSyncing(true);
         try {
