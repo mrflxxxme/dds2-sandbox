@@ -38,6 +38,9 @@ async def sync_wb_finance(
 ) -> dict:
     """Download WB finance report and upsert into wb_finance_rows.
 
+    Paginates using rrdid cursor (WB returns max 100k per request).
+    Batch upserts in chunks of 1000 for performance.
+
     Returns {status, rows_synced, errors}.
     """
     from backend.integrations.wb_api import WBApiClient
@@ -47,12 +50,40 @@ async def sync_wb_finance(
 
     logger.info("wb_finance_sync: fetching %s — %s for project %s", date_from, date_to, project_id)
 
+    # ── Paginated fetch using rrdid cursor ──
+    all_rows: list[dict] = []
+    rrdid_cursor = 0
+    page_limit = 100000
+    page_num = 0
+
     try:
-        raw = await client.get_finance_report(date_from, date_to)
+        while True:
+            page_num += 1
+            page = await client.get_finance_report(
+                date_from, date_to, limit=page_limit, rrdid=rrdid_cursor,
+            )
+            if not page:
+                break
+
+            all_rows.extend(page)
+            logger.info(
+                "wb_finance_sync: page %d — got %d rows (cursor rrdid=%d, total so far: %d)",
+                page_num, len(page), rrdid_cursor, len(all_rows),
+            )
+
+            # If we got less than limit, we've fetched everything
+            if len(page) < page_limit:
+                break
+
+            # Move cursor to last rrd_id
+            last_rrdid = max(r.get("rrd_id", 0) for r in page)
+            if last_rrdid <= rrdid_cursor:
+                break  # Safety: no progress
+            rrdid_cursor = last_rrdid
+
     except Exception as e:
         error_msg = str(e)[:500]
-        logger.error("wb_finance_sync: API error: %s", error_msg)
-        # Log sync failure
+        logger.error("wb_finance_sync: API error on page %d: %s", page_num, error_msg)
         db.add(WbFinanceSyncLog(
             project_id=project_id, date_from=date_from, date_to=date_to,
             rows_synced=0, status="ERROR", error_msg=error_msg,
@@ -60,9 +91,9 @@ async def sync_wb_finance(
         await db.commit()
         return {"status": "error", "rows_synced": 0, "errors": [error_msg]}
 
-    logger.info("wb_finance_sync: got %d rows from API", len(raw))
+    logger.info("wb_finance_sync: total %d rows from API (%d pages)", len(all_rows), page_num)
 
-    if not raw:
+    if not all_rows:
         db.add(WbFinanceSyncLog(
             project_id=project_id, date_from=date_from, date_to=date_to,
             rows_synced=0, status="OK",
@@ -70,44 +101,28 @@ async def sync_wb_finance(
         await db.commit()
         return {"status": "ok", "rows_synced": 0, "errors": []}
 
-    # Upsert rows
+    # ── Batch upsert in chunks of 1000 ──
     rows_synced = 0
-    for row in raw:
+    batch: list[dict] = []
+    BATCH_SIZE = 1000
+
+    for row in all_rows:
         rrd_id = row.get("rrd_id")
         if not rrd_id:
             continue
 
-        values = {
-            "project_id": project_id,
-            "rrd_id": rrd_id,
-            "realizationreport_id": row.get("realizationreport_id", 0) or 0,
-            "date_from": _parse_date(row.get("date_from")),
-            "date_to": _parse_date(row.get("date_to")),
-            "sa_name": (row.get("sa_name") or "")[:200],
-            "nm_id": row.get("nm_id", 0) or 0,
-            "brand_name": (row.get("brand_name") or "")[:200],
-            "subject_name": (row.get("subject_name") or "")[:200],
-            "doc_type_name": (row.get("doc_type_name") or "")[:100],
-            "supplier_oper_name": (row.get("supplier_oper_name") or "")[:200],
-            "quantity": row.get("quantity", 0) or 0,
-            "synced_at": datetime.utcnow(),
-        }
+        values = _row_to_values(row, project_id)
+        batch.append(values)
 
-        # Numeric fields
-        for field in _NUMERIC_FIELDS:
-            val = row.get(field, 0) or 0
-            try:
-                values[field] = Decimal(str(val))
-            except Exception:
-                values[field] = Decimal("0")
+        if len(batch) >= BATCH_SIZE:
+            await _upsert_batch(db, batch)
+            rows_synced += len(batch)
+            batch = []
 
-        stmt = pg_insert(WbFinanceRow).values(**values)
-        stmt = stmt.on_conflict_do_update(
-            constraint="uq_wb_finance_rrd",
-            set_={k: v for k, v in values.items() if k not in ("project_id", "rrd_id")},
-        )
-        await db.execute(stmt)
-        rows_synced += 1
+    # Flush remaining
+    if batch:
+        await _upsert_batch(db, batch)
+        rows_synced += len(batch)
 
     # Log sync success
     db.add(WbFinanceSyncLog(
@@ -118,6 +133,47 @@ async def sync_wb_finance(
 
     logger.info("wb_finance_sync: upserted %d rows for project %s", rows_synced, project_id)
     return {"status": "ok", "rows_synced": rows_synced, "errors": []}
+
+
+def _row_to_values(row: dict, project_id: int) -> dict:
+    """Convert a WB API row dict to DB column values."""
+    values = {
+        "project_id": project_id,
+        "rrd_id": row.get("rrd_id"),
+        "realizationreport_id": row.get("realizationreport_id", 0) or 0,
+        "date_from": _parse_date(row.get("date_from")),
+        "date_to": _parse_date(row.get("date_to")),
+        "sa_name": (row.get("sa_name") or "")[:200],
+        "nm_id": row.get("nm_id", 0) or 0,
+        "brand_name": (row.get("brand_name") or "")[:200],
+        "subject_name": (row.get("subject_name") or "")[:200],
+        "doc_type_name": (row.get("doc_type_name") or "")[:100],
+        "supplier_oper_name": (row.get("supplier_oper_name") or "")[:200],
+        "quantity": row.get("quantity", 0) or 0,
+        "synced_at": datetime.utcnow(),
+    }
+    for field in _NUMERIC_FIELDS:
+        val = row.get(field, 0) or 0
+        try:
+            values[field] = Decimal(str(val))
+        except Exception:
+            values[field] = Decimal("0")
+    return values
+
+
+async def _upsert_batch(db: AsyncSession, batch: list[dict]):
+    """Bulk upsert a batch of rows using ON CONFLICT DO UPDATE."""
+    stmt = pg_insert(WbFinanceRow).values(batch)
+    update_cols = {
+        k: stmt.excluded[k]
+        for k in batch[0].keys()
+        if k not in ("project_id", "rrd_id")
+    }
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_wb_finance_rrd",
+        set_=update_cols,
+    )
+    await db.execute(stmt)
 
 
 async def get_sync_status(db: AsyncSession, project_id: int) -> dict:
