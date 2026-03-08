@@ -522,18 +522,23 @@ def _enrich_article(art: dict, total_real: float, total_sales: float, period_day
 
 
 def _compute_abc(articles: list[dict]):
-    """Compute ABC analysis by profit and revenue."""
+    """Compute ABC analysis by profit and revenue.
+
+    Standard ABC: items that bring cumulative contribution up to 80% = A,
+    next items up to 95% = B, rest = C.
+    The item that *crosses* a threshold is still assigned to the lower group.
+    """
     # ABC by profit
     total_profit = sum(max(float(a.get("profit", 0)), 0) for a in articles)
     if total_profit > 0:
         sorted_by_profit = sorted(articles, key=lambda x: float(x.get("profit", 0)), reverse=True)
         cumulative = 0
         for a in sorted_by_profit:
+            prev_pct = cumulative / total_profit * 100
             cumulative += max(float(a.get("profit", 0)), 0)
-            pct = cumulative / total_profit * 100
-            if pct <= 80:
+            if prev_pct < 80:
                 a["abc_profit"] = "A"
-            elif pct <= 95:
+            elif prev_pct < 95:
                 a["abc_profit"] = "B"
             else:
                 a["abc_profit"] = "C"
@@ -547,17 +552,18 @@ def _compute_abc(articles: list[dict]):
         sorted_by_rev = sorted(articles, key=lambda x: float(x.get("realization", 0)), reverse=True)
         cumulative = 0
         for a in sorted_by_rev:
+            prev_pct = cumulative / total_rev * 100
             cumulative += max(float(a.get("realization", 0)), 0)
-            pct = cumulative / total_rev * 100
-            if pct <= 80:
+            if prev_pct < 80:
                 a["abc_revenue"] = "A"
-            elif pct <= 95:
+            elif prev_pct < 95:
                 a["abc_revenue"] = "B"
             else:
                 a["abc_revenue"] = "C"
     else:
         for a in articles:
             a["abc_revenue"] = "C"
+
 
 
 # ─── Aggregation helpers ────────────────────────────────────────────────────
