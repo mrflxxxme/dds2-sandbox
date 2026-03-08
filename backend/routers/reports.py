@@ -73,6 +73,19 @@ async def get_wb_bdr(
     )
 
 
+@router.get("/cost_history")
+async def get_cost_history(
+    article: Optional[str] = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cost price history: articles × orders pivot table."""
+    from backend.services import cost_history_service
+    return await cost_history_service.get_cost_history(
+        db, project.id, article_search=article,
+    )
+
+
 @router.get("/fx_control", response_model=list[FxControlRow])
 async def get_fx_control(
     date_from: Optional[date] = Query(None),

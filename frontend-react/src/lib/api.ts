@@ -353,6 +353,11 @@ class ApiClient {
         if (article) url += `&article=${encodeURIComponent(article)}`;
         return this.request<any>('GET', url);
     }
+    getCostHistory(article?: string) {
+        let url = `/api/v1/reports/cost_history`;
+        if (article) url += `?article=${encodeURIComponent(article)}`;
+        return this.request<any>('GET', url);
+    }
     getBalanceDaily(account: string, currency: string, start: string, end: string) {
         return this.request<Array<{ date: string; balance: number }>>('GET', `/api/v1/reports/balance_daily?account=${encodeURIComponent(account)}&currency=${currency}&date_from=${start}&date_to=${end}`);
     }
