@@ -629,16 +629,17 @@ function CostHistory() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [search, setSearch] = useState('');
+    const [brand, setBrand] = useState('');
 
     const load = React.useCallback(async () => {
         setLoading(true);
         setError('');
         try {
-            const r = await api.getCostHistory(search || undefined);
+            const r = await api.getCostHistory(search || undefined, brand || undefined);
             setData(r);
         } catch (e: any) { setError(e.message || 'Ошибка'); }
         setLoading(false);
-    }, [search]);
+    }, [search, brand]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -648,10 +649,17 @@ function CostHistory() {
 
     const orders: Array<{ order_no: string; ship_date: string }> = data.orders || [];
     const articles: any[] = data.articles || [];
+    const brands: string[] = data.brands || [];
 
     const handleExport = () => {
         const rows = articles.map((a: any) => {
-            const row: Record<string, any> = { 'Артикул': a.article_seller, 'Баркод': a.barcode, 'Категория': a.subject };
+            const row: Record<string, any> = {
+                'Артикул': a.article_seller,
+                'Артикул WB': a.article_wb || '',
+                'Баркод': a.barcode,
+                'Бренд': a.brand || '',
+                'Категория': a.subject,
+            };
             orders.forEach((o: any) => {
                 const c = a.costs?.[o.order_no];
                 row[`Заказ ${o.order_no}`] = c ? c.cost : '';
@@ -664,16 +672,26 @@ function CostHistory() {
         exportToExcel(rows, `Себестоимость`);
     };
 
+    const selectStyle: React.CSSProperties = {
+        padding: '8px 12px', borderRadius: 8,
+        border: '1px solid var(--border)',
+        background: 'var(--bg-secondary)', color: 'var(--text-primary)',
+    };
+
     return (
         <div>
             <div style={{ display: 'flex', gap: 12, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
                 <input
-                    type="text" placeholder="🔍 Поиск по артикулу"
+                    type="text" placeholder="🔍 Поиск по артикулу / WB артикулу"
                     value={search}
                     onChange={(e: any) => setSearch(e.target.value)}
                     onKeyDown={(e: any) => e.key === 'Enter' && load()}
-                    style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', width: 260 }}
+                    style={{ ...selectStyle, width: 280 }}
                 />
+                <select value={brand} onChange={(e: any) => setBrand(e.target.value)} style={selectStyle}>
+                    <option value="">Все бренды</option>
+                    {brands.map((b: string) => <option key={b} value={b}>{b}</option>)}
+                </select>
                 <button className="btn btn-secondary btn-sm" onClick={load}>🔄</button>
                 <button className="btn btn-secondary btn-sm" onClick={handleExport}>📥 Excel</button>
                 <span style={{ opacity: 0.5, fontSize: 13 }}>{articles.length} артикулов × {orders.length} заказов</span>
@@ -684,6 +702,8 @@ function CostHistory() {
                     <thead>
                         <tr>
                             <th style={{ position: 'sticky', left: 0, background: 'var(--bg-secondary)', zIndex: 2, minWidth: 180 }}>Артикул</th>
+                            <th style={{ minWidth: 100 }}>WB Артикул</th>
+                            <th style={{ minWidth: 80 }}>Бренд</th>
                             <th style={{ minWidth: 100 }}>Категория</th>
                             <th style={{ textAlign: 'right', fontWeight: 700, color: 'var(--primary)' }}>Средняя ₽</th>
                             <th style={{ textAlign: 'right', fontWeight: 700, color: 'var(--success)' }}>Последняя ₽</th>
@@ -697,10 +717,11 @@ function CostHistory() {
                     </thead>
                     <tbody>
                         {articles.map((a: any, i: number) => {
-                            const costs = orders.map((o: any) => a.costs?.[o.order_no]?.cost || 0);
                             return (
                                 <tr key={i}>
                                     <td style={{ position: 'sticky', left: 0, background: 'var(--bg-primary)', zIndex: 1, fontWeight: 600 }}>{a.article_seller}</td>
+                                    <td style={{ opacity: 0.7, fontSize: 12 }}>{a.article_wb || '—'}</td>
+                                    <td><span className="badge badge-info" style={{ fontSize: 11 }}>{a.brand || '—'}</span></td>
                                     <td style={{ opacity: 0.7 }}>{a.subject || '—'}</td>
                                     <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--primary)' }}>{a.avg_cost ? formatNumber(a.avg_cost) : '—'}</td>
                                     <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--success)' }}>{a.latest_cost ? formatNumber(a.latest_cost) : '—'}</td>

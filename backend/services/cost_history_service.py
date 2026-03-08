@@ -3,14 +3,14 @@ Service: cost_history — cost price history per article across orders.
 
 Queries cost_order_items joined with cost_orders to build a pivot:
 rows = articles, columns = orders, cells = cost per unit (total_rub).
+Joins nomenclature for WB article (article_wb) and brand.
 """
 
 import logging
 from typing import Optional
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, distinct, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
 
 from backend.models import CostOrder, CostOrderItem
 
@@ -21,13 +21,16 @@ async def get_cost_history(
     db: AsyncSession,
     project_id: int,
     article_search: Optional[str] = None,
+    brand_filter: Optional[str] = None,
 ) -> dict:
     """
-    Returns cost history pivot:
+    Returns cost history pivot with brand filter, article search, WB article.
     {
       orders: [{order_no, ship_date}, ...],
+      brands: ["Brand1", "Brand2", ...],
       articles: [
-        {article_seller, barcode, costs: {order_no: total_rub, ...}, avg_cost, latest_cost},
+        {article_seller, barcode, article_wb, brand, subject, 
+         costs: {order_no: {cost, qty, price_cny}, ...}, avg_cost, latest_cost},
         ...
       ]
     }
@@ -51,9 +54,21 @@ async def get_cost_history(
     order_nos = [o.order_no for o in orders]
 
     if not order_nos:
-        return {"orders": [], "articles": []}
+        return {"orders": [], "articles": [], "brands": []}
 
-    # 2. Get all cost_order_items for these orders
+    # 2. Load nomenclature lookup: article_seller -> {article_wb, brand}
+    nomen_q = await db.execute(sa_text(
+        "SELECT article_seller, article_wb, brand FROM nomenclature "
+        "WHERE project_id = :pid AND article_seller IS NOT NULL"
+    ), {"pid": project_id})
+    nomen_map: dict[str, dict] = {}
+    all_brands: set[str] = set()
+    for row in nomen_q.fetchall():
+        nomen_map[row[0]] = {"article_wb": str(row[1]) if row[1] else "", "brand": row[2] or ""}
+        if row[2]:
+            all_brands.add(row[2])
+
+    # 3. Get all cost_order_items for these orders
     items_q = (
         select(CostOrderItem)
         .where(CostOrderItem.order_no.in_(order_nos))
@@ -62,16 +77,19 @@ async def get_cost_history(
     items_result = await db.execute(items_q)
     items = items_result.scalars().all()
 
-    # 3. Build pivot: article -> {order_no: cost_per_unit}
+    # 4. Build pivot: article -> {order_no: cost_per_unit}
     articles_map: dict[str, dict] = {}
 
     for item in items:
         art = item.article_seller or item.barcode or "—"
+        nomen = nomen_map.get(art, {})
 
         if art not in articles_map:
             articles_map[art] = {
                 "article_seller": art,
                 "barcode": item.barcode or "",
+                "article_wb": nomen.get("article_wb", ""),
+                "brand": nomen.get("brand", ""),
                 "subject": item.subject or "",
                 "costs": {},
                 "total_cost_sum": 0.0,
@@ -91,11 +109,19 @@ async def get_cost_history(
             articles_map[art]["total_cost_sum"] += cost_per_unit
             articles_map[art]["cost_count"] += 1
 
-    # 4. Compute avg and latest cost
+    # 5. Compute avg and latest cost, apply filters
     result_articles = []
     for art_key, art_data in articles_map.items():
         # Filter by search
-        if article_search and article_search.lower() not in art_key.lower():
+        if article_search:
+            s = article_search.lower()
+            if (s not in art_key.lower() 
+                and s not in art_data.get("article_wb", "").lower()
+                and s not in art_data.get("barcode", "").lower()):
+                continue
+
+        # Filter by brand
+        if brand_filter and art_data.get("brand", "").lower() != brand_filter.lower():
             continue
 
         avg_cost = (
@@ -114,6 +140,8 @@ async def get_cost_history(
         result_articles.append({
             "article_seller": art_data["article_seller"],
             "barcode": art_data["barcode"],
+            "article_wb": art_data["article_wb"],
+            "brand": art_data["brand"],
             "subject": art_data["subject"],
             "costs": art_data["costs"],
             "avg_cost": avg_cost,
@@ -125,5 +153,6 @@ async def get_cost_history(
 
     return {
         "orders": order_list,
+        "brands": sorted(all_brands),
         "articles": result_articles,
     }
