@@ -109,10 +109,11 @@ async def add_category(
 ):
     cat_lvl1 = payload.get("cat_lvl1", "").strip()
     cat_lvl2 = payload.get("cat_lvl2", "").strip() or None
+    direction = payload.get("direction", "expense").strip()
     if not cat_lvl1:
         raise HTTPException(400, "cat_lvl1 is required")
 
-    cat = await refs_service.add_category(db, project.id, cat_lvl1, cat_lvl2)
+    cat = await refs_service.add_category(db, project.id, cat_lvl1, cat_lvl2, direction=direction)
     return {"ok": True, "id": cat.id}
 
 

@@ -9,7 +9,7 @@ import sqlalchemy as sa
 
 # revision identifiers
 revision = 'f1_add_rr_dt'
-down_revision = 'e1_add_wb_finance_cache'
+down_revision = 'e1a1b1c1d1e1'
 branch_labels = None
 depends_on = None
 

@@ -41,7 +41,7 @@ from backend.schemas.feature import FeatureCreate, FeatureResponse
 ### 2. Модель (backend/models/feature.py)
 ```python
 """Feature models."""
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
@@ -60,7 +60,7 @@ class Feature(Base, SoftDeleteMixin):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)  # ← Numeric, НЕ Float
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)  # ← НЕ datetime.utcnow
+        DateTime, default=lambda: datetime.utcnow()  # ← НЕ datetime.now(timezone.utc) — asyncpg DataError!
     )
 ```
 
@@ -222,7 +222,7 @@ async def test_list_features(client, auth_headers):
 - [ ] Schema в `schemas/feature.py` + re-export в `__init__.py`
 - [ ] Модель в `models/feature.py` + re-export в `__init__.py`
 - [ ] **`Mapped[]` + `mapped_column()`** — не `Column()`
-- [ ] **`datetime.now(timezone.utc)`** — не `datetime.utcnow`
+- [ ] **`datetime.utcnow()`** — НЕ `datetime.now(timezone.utc)` (asyncpg DataError!)
 - [ ] **`Numeric(18, 2)`** для денег — не `Float`
 - [ ] **`project_id`** фильтрация в каждом запросе
 - [ ] **`is_deleted == False`** фильтр для SoftDeleteMixin

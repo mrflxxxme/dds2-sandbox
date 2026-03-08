@@ -12,15 +12,15 @@ async def test_project_create_and_list(client, auth_headers):
     """Test project creation and listing."""
     # Create project
     resp = await client.post(
-        "/api/projects/", json={"name": "Isolation Test A"},
+        "/api/v1/projects", json={"name": "Isolation Test A"},
         headers=auth_headers,
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 200, f"Create project failed: {resp.text}"
     project_a = resp.json()
     assert project_a["slug"]
 
     # List projects
-    resp = await client.get("/api/projects/", headers=auth_headers)
+    resp = await client.get("/api/v1/projects", headers=auth_headers)
     assert resp.status_code == 200
     projects = resp.json()
     slugs = [p["slug"] for p in projects]
@@ -34,20 +34,19 @@ async def test_project_data_isolation(client, auth_headers):
 
     Steps:
     1. Create project A, set it as active
-    2. Create category ref in project A
-    3. Create project B, set it as active
-    4. Verify category ref is NOT visible in project B
+    2. Create project B, set it as active
+    3. Verify balance reports return independently
     """
     # Create project A
     resp = await client.post(
-        "/api/projects/", json={"name": "Isolation A"},
+        "/api/v1/projects", json={"name": "Isolation A"},
         headers=auth_headers,
     )
     project_a = resp.json()
 
     # Create project B
     resp = await client.post(
-        "/api/projects/", json={"name": "Isolation B"},
+        "/api/v1/projects", json={"name": "Isolation B"},
         headers=auth_headers,
     )
     project_b = resp.json()
@@ -57,8 +56,8 @@ async def test_project_data_isolation(client, auth_headers):
     headers_b = {**auth_headers, "X-Project-Id": str(project_b["id"])}
 
     # Get reports with project A context
-    resp_a = await client.get("/api/reports/balance", headers=headers_a)
-    resp_b = await client.get("/api/reports/balance", headers=headers_b)
+    resp_a = await client.get("/api/v1/reports/balance", headers=headers_a)
+    resp_b = await client.get("/api/v1/reports/balance", headers=headers_b)
 
     # Both should return valid responses (even if empty)
     assert resp_a.status_code == 200
@@ -68,5 +67,5 @@ async def test_project_data_isolation(client, auth_headers):
 @pytest.mark.asyncio
 async def test_cannot_access_other_project_data(client):
     """Test that unauthenticated users cannot access project data."""
-    resp = await client.get("/api/reports/balance")
+    resp = await client.get("/api/v1/reports/balance")
     assert resp.status_code in (401, 403, 422)

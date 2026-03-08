@@ -146,6 +146,7 @@ def _row_to_values(row: dict, project_id: int) -> dict:
         "subject_name": (row.get("subject_name") or "")[:200],
         "doc_type_name": (row.get("doc_type_name") or "")[:100],
         "supplier_oper_name": (row.get("supplier_oper_name") or "")[:200],
+        "bonus_type_name": (row.get("bonus_type_name") or "")[:500] or None,
         "quantity": row.get("quantity", 0) or 0,
         "synced_at": datetime.utcnow(),
     }

@@ -2,6 +2,7 @@
 API tests — Refs endpoints (accounts, cp_categories, overrides, opening_balances, categories).
 """
 
+import uuid
 import pytest
 
 
@@ -10,7 +11,7 @@ import pytest
 async def _project_headers(client, auth_headers) -> dict:
     """Create a test project and return headers with X-Project-Id."""
     resp = await client.post(
-        "/api/v1/projects/", json={"name": "Refs Test"},
+        "/api/v1/projects", json={"name": "Refs Test"},
         headers=auth_headers,
     )
     project = resp.json()
@@ -23,38 +24,41 @@ async def _project_headers(client, auth_headers) -> dict:
 async def test_create_and_list_accounts(client, auth_headers):
     """Create an account and verify it appears in the list."""
     headers = await _project_headers(client, auth_headers)
+    uid = uuid.uuid4().hex[:8]
+    account_no = f"4070281000{uid}"
 
     # Create account
     resp = await client.post("/api/v1/refs/accounts", json={
-        "account": "40702810000000001234",
+        "account": account_no,
         "bank": "VTB",
         "currency": "RUB",
         "account_name": "VTB Main RUB",
         "is_our_account": True,
     }, headers=headers)
-    assert resp.status_code == 200
+    assert resp.status_code == 200, f"Create account failed: {resp.text}"
 
     # List accounts
     resp = await client.get("/api/v1/refs/accounts", headers=headers)
     assert resp.status_code == 200
     accounts = resp.json()
-    assert any(a["account"] == "40702810000000001234" for a in accounts)
+    assert any(a["account"] == account_no for a in accounts)
 
 
 @pytest.mark.asyncio
 async def test_delete_account(client, auth_headers):
     """Create and delete an account."""
     headers = await _project_headers(client, auth_headers)
+    uid = uuid.uuid4().hex[:8]
 
     # Create
     resp = await client.post("/api/v1/refs/accounts", json={
-        "account": "40702810DELETE",
+        "account": f"407028DEL{uid}",
         "bank": "TEST",
         "currency": "RUB",
         "account_name": "To Delete",
         "is_our_account": True,
     }, headers=headers)
-    assert resp.status_code == 200
+    assert resp.status_code == 200, f"Create failed: {resp.text}"
     account_id = resp.json()["id"]
 
     # Delete
@@ -75,15 +79,16 @@ async def test_accounts_require_auth(client):
 async def test_create_and_list_cp_categories(client, auth_headers):
     """Create a counterparty category and verify it appears in the list."""
     headers = await _project_headers(client, auth_headers)
+    uid = uuid.uuid4().hex[:8]
 
     # Create
     resp = await client.post("/api/v1/refs/cp_categories", json={
-        "cp_key": "INN:7701234567",
+        "cp_key": f"INN:{uid}",
         "cp_name": "ООО Ромашка",
         "cat_lvl1": "Расходы",
         "cat_lvl2": "Зарплата",
     }, headers=headers)
-    assert resp.status_code == 200
+    assert resp.status_code == 200, f"Create cp_category failed: {resp.text}"
 
     # List
     resp = await client.get("/api/v1/refs/cp_categories", headers=headers)
@@ -117,14 +122,16 @@ async def test_delete_nonexistent_override(client, auth_headers):
 async def test_upsert_and_list_opening_balance(client, auth_headers):
     """Create an opening balance and verify it appears."""
     headers = await _project_headers(client, auth_headers)
+    uid = uuid.uuid4().hex[:8]
 
     # Create
     resp = await client.post("/api/v1/refs/opening_balances", json={
-        "account": "40702810000000001234",
+        "date_open": "2024-01-01",
+        "account": f"4070281000{uid}",
         "currency": "RUB",
         "opening_balance": 500000.0,
     }, headers=headers)
-    assert resp.status_code == 200
+    assert resp.status_code == 200, f"Create opening_balance failed: {resp.text}"
 
     # List
     resp = await client.get("/api/v1/refs/opening_balances", headers=headers)
@@ -138,13 +145,15 @@ async def test_upsert_and_list_opening_balance(client, auth_headers):
 async def test_create_and_list_categories(client, auth_headers):
     """Create a category and verify it appears."""
     headers = await _project_headers(client, auth_headers)
+    uid = uuid.uuid4().hex[:8]
 
     # Create
     resp = await client.post("/api/v1/refs/categories", json={
-        "cat_lvl1": "Доходы",
+        "direction": "income",
+        "cat_lvl1": f"Доходы_{uid}",
         "cat_lvl2": "WB",
     }, headers=headers)
-    assert resp.status_code == 200
+    assert resp.status_code == 200, f"Create category failed: {resp.text}"
     data = resp.json()
     assert data["ok"] is True
     cat_id = data["id"]

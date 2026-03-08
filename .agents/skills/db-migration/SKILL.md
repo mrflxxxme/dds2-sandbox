@@ -16,7 +16,7 @@ description: Шаблон для изменения схемы БД через a
 **Новая таблица:**
 ```python
 """Feature models."""
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
@@ -35,7 +35,7 @@ class Feature(Base, SoftDeleteMixin):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)   # ← Numeric, НЕ Float
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)              # ← НЕ datetime.utcnow
+        DateTime, default=lambda: datetime.utcnow()                      # ← НЕ datetime.now(timezone.utc)
     )
 
     __table_args__ = (
@@ -45,7 +45,7 @@ class Feature(Base, SoftDeleteMixin):
 
 ⛔ **ЗАПРЕЩЕНО:**
 - `Column(Integer, ...)` → используй `Mapped[int] = mapped_column(Integer, ...)`
-- `datetime.utcnow` → используй `datetime.now(timezone.utc)`
+- `datetime.now(timezone.utc)` → используй `datetime.utcnow()` (asyncpg НЕ принимает offset-aware в TIMESTAMP WITHOUT TIME ZONE)
 - `Float` для денег → используй `Numeric(18, 2)`
 
 **Зарегистрируй** в `models/__init__.py`:
@@ -110,7 +110,7 @@ ALTER TABLE table_name ADD COLUMN new_column VARCHAR;
 
 - [ ] Модель в `models/feature.py` (НЕ в `models.py` монолите)
 - [ ] **`Mapped[]` + `mapped_column()`** — не `Column()`
-- [ ] **`datetime.now(timezone.utc)`** — не `datetime.utcnow`
+- [ ] **`datetime.utcnow()`** — НЕ `datetime.now(timezone.utc)` (asyncpg DataError!)
 - [ ] **`Numeric(18, 2)`** для денег — не `Float`
 - [ ] **`project_id`** с FK и индексом
 - [ ] **`SoftDeleteMixin`** для критичных сущностей

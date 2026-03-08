@@ -10,7 +10,7 @@ import pytest
 async def _project_headers(client, auth_headers) -> dict:
     """Create a test project and return headers with X-Project-Id."""
     resp = await client.post(
-        "/api/v1/projects/", json={"name": "Reports Test"},
+        "/api/v1/projects", json={"name": "Reports Test"},
         headers=auth_headers,
     )
     project = resp.json()

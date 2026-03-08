@@ -6,14 +6,16 @@ Services handle business logic (data processing, API calls, calculations).
 """
 
 from backend.services import (
-    cost_service,
     funnel,
-    planning_service,
-    reports_service,
     refs_service,
     transactions_service,
     integrations_service,
 )
+
+# Packages (decomposed from monolith files)
+from backend.services import reports as reports_service  # noqa: F401
+from backend.services import planning as planning_service  # noqa: F401
+from backend.services import cost as cost_service  # noqa: F401
 
 # Backward compatibility alias
 funnel_service = funnel

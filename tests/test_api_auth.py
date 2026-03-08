@@ -2,17 +2,20 @@
 API tests — Auth endpoints.
 """
 
+import uuid
 import pytest
 
 
 @pytest.mark.asyncio
 async def test_register_and_login(client):
     """Test user registration and login flow."""
+    uid = uuid.uuid4().hex[:8]
+    username = f"authtest_{uid}"
     # Register
     resp = await client.post("/api/v1/auth/register", json={
-        "username": "authtest_user",
+        "username": username,
         "password": "securepass123",
-        "email": "auth@test.com",
+        "email": f"auth_{uid}@test.com",
     })
     assert resp.status_code == 200, f"Register failed: {resp.text}"
     data = resp.json()
@@ -20,7 +23,7 @@ async def test_register_and_login(client):
 
     # Login
     resp = await client.post("/api/v1/auth/login", json={
-        "username": "authtest_user",
+        "username": username,
         "password": "securepass123",
     })
     assert resp.status_code == 200
@@ -32,14 +35,16 @@ async def test_register_and_login(client):
 @pytest.mark.asyncio
 async def test_login_wrong_password(client):
     """Test login with wrong password returns 401."""
+    uid = uuid.uuid4().hex[:8]
+    username = f"authtest_wp_{uid}"
     # Register first to ensure user exists
     await client.post("/api/v1/auth/register", json={
-        "username": "authtest_wrongpw",
+        "username": username,
         "password": "correctpass123",
-        "email": "wrongpw@test.com",
+        "email": f"wrongpw_{uid}@test.com",
     })
     resp = await client.post("/api/v1/auth/login", json={
-        "username": "authtest_wrongpw",
+        "username": username,
         "password": "wrong_password",
     })
     assert resp.status_code == 401

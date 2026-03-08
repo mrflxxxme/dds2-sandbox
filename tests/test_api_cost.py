@@ -2,6 +2,7 @@
 API tests — Cost endpoints (nomenclature, duty rules, cost orders).
 """
 
+import uuid
 import pytest
 
 
@@ -10,7 +11,7 @@ import pytest
 async def _project_headers(client, auth_headers) -> dict:
     """Create a test project and return headers with X-Project-Id."""
     resp = await client.post(
-        "/api/v1/projects/", json={"name": "Cost Test"},
+        "/api/v1/projects", json={"name": "Cost Test"},
         headers=auth_headers,
     )
     project = resp.json()
@@ -54,18 +55,18 @@ async def test_duty_rules_crud(client, auth_headers):
 
     # Create
     resp = await client.post("/api/v1/cost/duty_rules", json={
-        "category": "Ковры",
-        "duty_rate": 10.0,
-        "basis": "CIF",
+        "subject": "Ковры",
+        "rate": 10.0,
+        "basis": "INVOICE",
     }, headers=headers)
     assert resp.status_code == 200
-    rule = resp.json()
 
     # List
     resp = await client.get("/api/v1/cost/duty_rules", headers=headers)
     assert resp.status_code == 200
     rules = resp.json()
     assert len(rules) >= 1
+    rule = [r for r in rules if r["subject"] == "Ковры"][0]
 
     # Delete
     resp = await client.delete(
@@ -92,14 +93,16 @@ async def test_cost_orders_create(client, auth_headers):
     """Create a cost order."""
     headers = await _project_headers(client, auth_headers)
 
+    uid = uuid.uuid4().hex[:6]
+    order_no = f"COST-{uid}"
     resp = await client.post("/api/v1/cost/orders", json={
-        "order_no": "COST-001",
+        "order_no": order_no,
         "ship_date": "2024-06-01",
         "supplier": "China Supplier Co",
     }, headers=headers)
     assert resp.status_code == 200
     order = resp.json()
-    assert order.get("order_no") == "COST-001" or order.get("ok")
+    assert order.get("order_no") == order_no or order.get("ok")
 
 
 @pytest.mark.asyncio

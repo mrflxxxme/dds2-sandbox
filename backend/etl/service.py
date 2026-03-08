@@ -347,7 +347,7 @@ def _sync_plan_payments(db: Session, project_id: int):
     cost_orders = db.execute(
         select(CostOrder).where(CostOrder.project_id == project_id)
     ).scalars().all()
-    from backend.services.cost_service import _order_no_to_int
+    from backend.services.cost.helpers import _order_no_to_int
     invoice_map = {}  # int(order_no) → invoice_no
     for co in cost_orders:
         try:

@@ -1,0 +1,106 @@
+# CI — Run backend tests on push/PR
+#
+# Uses docker-compose to spin up the full stack (db, redis, minio, backend)
+# and then runs pytest inside the backend container, mirroring local dev workflow.
+
+name: Tests
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'backend/**'
+      - 'tests/**'
+      - 'requirements-backend.txt'
+      - 'docker-compose.yml'
+      - 'Dockerfile.backend'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'tests/**'
+      - 'requirements-backend.txt'
+
+env:
+  # Minimal secrets for CI — overrides from .env
+  POSTGRES_USER: dds
+  POSTGRES_PASSWORD: dds_ci_secret
+  POSTGRES_DB: dds_db
+  DATABASE_URL: postgresql+asyncpg://dds:dds_ci_secret@db:5432/dds_db
+  DATABASE_URL_SYNC: postgresql://dds:dds_ci_secret@db:5432/dds_db
+  REDIS_URL: redis://:dds_ci_redis@redis:6379/0
+  REDIS_PASSWORD: dds_ci_redis
+  MINIO_ENDPOINT: minio:9000
+  MINIO_ACCESS_KEY: minioadmin
+  MINIO_SECRET_KEY: minioadmin
+  MINIO_BUCKET: dds-files
+  MINIO_SECURE: "false"
+  SECRET_KEY: ci-test-secret-key-minimum-32-chars-long
+  TESTING: "1"
+  REGISTER_ENABLED: "true"
+
+jobs:
+  test:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create .env for docker-compose
+        run: |
+          cat > .env << 'EOF'
+          POSTGRES_USER=dds
+          POSTGRES_PASSWORD=dds_ci_secret
+          POSTGRES_DB=dds_db
+          DATABASE_URL=postgresql+asyncpg://dds:dds_ci_secret@db:5432/dds_db
+          DATABASE_URL_SYNC=postgresql://dds:dds_ci_secret@db:5432/dds_db
+          REDIS_URL=redis://:dds_ci_redis@redis:6379/0
+          REDIS_PASSWORD=dds_ci_redis
+          MINIO_ENDPOINT=minio:9000
+          MINIO_ACCESS_KEY=minioadmin
+          MINIO_SECRET_KEY=minioadmin
+          MINIO_BUCKET=dds-files
+          MINIO_SECURE=false
+          SECRET_KEY=ci-test-secret-key-minimum-32-chars-long
+          TESTING=1
+          REGISTER_ENABLED=true
+          EOF
+
+      - name: Build and start services
+        run: |
+          docker compose up -d db redis minio backend
+          # Wait for all services to be healthy
+          echo "⏳ Waiting for services to be healthy..."
+          docker compose exec -T backend python -c "print('Backend is up')" 2>/dev/null || sleep 10
+          for i in {1..30}; do
+            if docker compose exec -T backend python -c "
+              import asyncio
+              from backend.database import async_engine
+              async def check():
+                  async with async_engine.connect() as conn:
+                      await conn.execute(__import__('sqlalchemy').text('SELECT 1'))
+                      print('DB connected')
+              asyncio.run(check())
+            " 2>/dev/null; then
+              echo "✅ Database ready"
+              break
+            fi
+            echo "  Waiting for DB... ($i/30)"
+            sleep 2
+          done
+
+      - name: Run Alembic migrations
+        run: |
+          docker compose exec -T backend alembic upgrade head
+
+      - name: Run tests
+        run: |
+          docker compose exec -T backend pytest tests/ -x --tb=short -q
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose down -v

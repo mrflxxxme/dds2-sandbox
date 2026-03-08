@@ -21,28 +21,84 @@ dds_app/
 │   ├── main.py                 # Entry point, lifespan, middleware, router registration
 │   ├── config.py               # Pydantic Settings (.env)
 │   ├── database.py             # SQLAlchemy async/sync engines, get_db
-│   ├── models/                 # ORM models (28 таблиц, split по доменам)
-│   ├── schemas.py              # Pydantic request/response schemas
 │   ├── auth.py                 # JWT: hash, verify, create_token, get_current_user
 │   ├── cache.py                # Redis: @cached decorator, invalidation
 │   ├── storage.py              # MinIO: upload/download files
 │   ├── exceptions.py           # Unified error handling
+│   ├── project_context.py      # FastAPI dependency: resolve project_id from X-Project-Id header
+│   ├── scheduler.py            # APScheduler: WB funnel sync, backfill, anomaly check
+│   ├── models/                 # ORM models (33+ таблиц, split по доменам)
+│   │   ├── __init__.py         # Re-export всех моделей
+│   │   ├── auth.py             # User, Project, ProjectMember, ProjectInvite
+│   │   ├── refs.py             # Account, CounterpartyCategory, Override, OpeningBalance, CategoryRef
+│   │   ├── transactions.py     # Transaction, ImportLog, CategoryChangeLog
+│   │   ├── planning.py         # Order, PlannedPayment, PlannedIncome, WbPayout, LeadTime, PaymentFactLink
+│   │   ├── cost.py             # CostOrder, CostOrderItem, Nomenclature, DutyRule
+│   │   ├── customs.py          # CustomsTopup, CustomsAlloc, CustomsDT
+│   │   ├── integrations.py     # IntegrationKey, SyncLog, WbFunnelDaily, WbCostOverride
+│   │   ├── wb_finance.py       # WbFinanceRow, WbFinanceSyncLog
+│   │   ├── fx_rates.py         # FxRate
+│   │   ├── tax.py              # TaxRate
+│   │   ├── enums.py            # DutyBasis, EventType2, TransactionStatus, PurposeTag
+│   │   └── mixins.py           # SoftDeleteMixin, TimestampMixin
+│   ├── schemas/                # Pydantic request/response schemas (split по доменам)
+│   │   ├── __init__.py         # Re-export всех схем
+│   │   ├── auth.py, common.py, cost.py, imports.py
+│   │   ├── integrations.py, planning.py, refs.py
+│   │   └── reports.py, tax.py, transactions.py
 │   ├── routers/                # HTTP endpoints
-│   │   ├── auth.py             # /api/v1/auth/* — login, register, profile, change_password
+│   │   ├── auth.py             # /api/v1/auth/* — login, register, profile, change_password, refresh
 │   │   ├── projects.py         # /api/v1/projects/* — CRUD projects, members, invites
 │   │   ├── import_txn.py       # /api/v1/import/*, /api/v1/transactions/*
 │   │   ├── refs.py             # /api/v1/refs/* — accounts, categories, overrides
-│   │   ├── reports.py          # /api/v1/reports/* — DDS month, balance, FX, customs
+│   │   ├── reports.py          # /api/v1/reports/* — DDS month, balance, FX, customs, dashboard
 │   │   ├── planning.py         # /api/v1/planning/* — orders, payments, cashflow
 │   │   ├── cost.py             # /api/v1/cost/* — orders, nomenclature, duty rules
-│   │   └── integrations.py     # /api/v1/integrations/* — WB API keys, sync sales/nomenclature
+│   │   ├── integrations.py     # /api/v1/integrations/* — WB API keys, sync
+│   │   ├── funnel.py           # /api/v1/funnel/* — воронка продаж, тренды, анализ дня
+│   │   └── ws.py               # WebSocket broadcast
+│   ├── services/               # Business logic layer
+│   │   ├── reports/            # Reports (decomposed package)
+│   │   │   ├── balance.py      # Balance, balance daily
+│   │   │   ├── dds.py          # DDS month, PnL
+│   │   │   ├── dashboard.py    # Dashboard summary (KPIs, charts)
+│   │   │   └── queries.py      # FX control, customs, income daily, filtered txn
+│   │   ├── planning/           # Planning (decomposed package)
+│   │   │   ├── crud.py         # Orders, lead times, payments, incomes CRUD
+│   │   │   ├── customs.py      # Customs topup/alloc/DT, FTS PDF parsing
+│   │   │   ├── fact_links.py   # Payment ↔ transaction matching
+│   │   │   ├── cashflow.py     # Daily cashflow, order summary
+│   │   │   └── wb.py           # WB payouts, reconciliation, forecast
+│   │   ├── cost/               # Cost calculation (decomposed package)
+│   │   │   ├── helpers.py      # Shared utils (safe_float, _order_no_to_int)
+│   │   │   ├── nomenclature.py # Nomenclature CRUD, Excel upload
+│   │   │   ├── duty.py         # Duty rules CRUD
+│   │   │   ├── orders.py       # Cost orders CRUD with aggregation
+│   │   │   ├── items.py        # Cost order items, Excel upload, recalculation
+│   │   │   └── plan_gen.py     # Payment plan generation
+│   │   ├── transactions_service.py # Transaction search, category assignment
+│   │   ├── refs_service.py     # Accounts, CP categories, overrides
+│   │   ├── integrations_service.py # WB sync, nomenclature sync
+│   │   ├── wb_bdr_service.py   # WB БДР report
+│   │   ├── wb_finance_sync.py  # WB finance streaming sync
+│   │   ├── fx_service.py       # FX rates
+│   │   ├── tax_service.py      # Tax rates
+│   │   ├── cost_history_service.py # Cost history report
+│   │   └── funnel/             # Воронка продаж (decomposed package)
+│   │       ├── sync.py         # WB funnel data sync
+│   │       ├── query.py        # Data queries, filters, summary
+│   │       └── analysis.py     # Day analysis, trends
 │   ├── integrations/
-│   │   └── wb_api.py           # WB Content/Statistics API client (cards, sales, orders)
+│   │   └── wb_api.py           # WB Content/Statistics API client
+│   ├── utils/                  # Shared utilities
+│   │   ├── crypto.py           # Fernet encryption for API keys
+│   │   ├── file_validation.py  # File extension/size validation
+│   │   └── telegram.py         # Telegram alert notifications
 │   ├── seeds/                  # Seed data for new projects
 │   │   └── default_categories.py  # 28 default category_ref entries
 │   └── etl/                    # ETL pipeline
-│       ├── parsers.py          # 5 bank statement parsers
-│       ├── cost_parsers.py     # Excel normalizers for cost orders (дивандек/ковры)
+│       ├── parsers.py          # 7 bank statement parsers (VTB RUB/CNY/Multi, WB Main/Payout/Multi/Cabinet)
+│       ├── cost_parsers.py     # Excel normalizers for cost orders
 │       ├── master_logic.py     # Categorization, txn_id, cp_key generation
 │       └── service.py          # Orchestrator: parse → enrich → load
 │
@@ -55,29 +111,41 @@ dds_app/
 │   │   │   ├── profile/page.tsx        # User profile
 │   │   │   └── p/[slug]/              # Project-scoped pages
 │   │   │       ├── layout.tsx          # Sidebar + header layout
-│   │   │       ├── page.tsx            # Dashboard (balances, accounts)
+│   │   │       ├── page.tsx            # Dashboard (balances, charts, summary)
 │   │   │       ├── import/page.tsx     # Bank statement import
 │   │   │       ├── txn/page.tsx        # Операции (all transactions)
 │   │   │       ├── inbox/page.tsx      # INBOX — unassigned transactions
 │   │   │       ├── reports/page.tsx    # Reports (DDS, Balance, FX, Customs)
+│   │   │       ├── dds/page.tsx        # DDS P&L report
 │   │   │       ├── planning/page.tsx   # Planning (7 tabs)
+│   │   │       ├── orders/page.tsx     # Orders management
 │   │   │       ├── cost/page.tsx       # Cost calculation (3 tabs)
+│   │   │       ├── funnel/page.tsx     # Воронка продаж WB
+│   │   │       ├── trends/page.tsx     # Product trends
 │   │   │       ├── refs/page.tsx       # References (5 tabs)
 │   │   │       ├── settings/page.tsx   # Project settings
 │   │   │       └── team/page.tsx       # Team management
 │   │   ├── lib/
-│   │   │   ├── api.ts          # API client (50+ methods, JWT auth)
+│   │   │   ├── api.ts          # API client (80+ methods, JWT auth + refresh)
 │   │   │   └── utils.ts        # formatNumber, formatDate, exportToExcel
-│   │   └── components/         # Shared UI components
+│   │   ├── components/         # Shared UI: DataTable, FormModal, PageHeader, TabLayout, Toast
+│   │   └── types/
+│   │       └── api.ts          # TypeScript interfaces
 │   ├── next.config.mjs         # API rewrite: /api/* → backend:8000
 │   └── Dockerfile              # Multi-stage build (standalone)
 │
-├── frontend/                   # Streamlit frontend (LEGACY, будет удалён)
+├── tests/                      # Backend tests (13 files, 2300+ lines)
+│   ├── conftest.py             # Fixtures: test DB, test user, auth headers
+│   ├── test_api_*.py           # Integration tests per module
+│   ├── test_master_logic.py    # ETL categorization unit tests
+│   ├── test_parsers.py         # Bank statement parser tests
+│   └── test_scheduler.py       # Scheduler resilience tests
 │
-├── docker-compose.yml          # db, redis, minio, backend, frontend, frontend-react
+├── migrations/                 # Alembic migrations
+├── scripts/                    # Backup/restore scripts
+├── nginx/                      # Nginx config
+├── docker-compose.yml          # 7 services: db, redis, minio, backend, frontend-react, nginx, db-backup
 ├── .env                        # Environment variables (secrets!)
-├── ARCHITECTURE.md             # Technical architecture doc
-├── README.md                   # User-facing README
 └── AGENTS.md                   # ← THIS FILE
 ```
 
@@ -108,7 +176,9 @@ dds_app/
 | Reports | (reads from transactions + opening_balances) | `reports.py` |
 | Planning | `orders`, `planned_payments`, `planned_incomes`, `lead_time`, `customs_*`, `wb_payouts`, `payment_fact_links` | `planning.py` |
 | Cost | `cost_orders`, `cost_order_items`, `nomenclature`, `duty_rules` | `cost.py` |
-| Integrations | `integration_keys`, `sync_log`, `wb_payouts` | `integrations.py` |
+| Integrations | `integration_keys`, `sync_log`, `wb_funnel_daily`, `wb_cost_override` | `integrations.py` |
+| WB Finance | `wb_finance_row`, `wb_finance_sync_log` | `reports.py` |
+| FX & Tax | `fx_rates`, `tax_rates` | `reports.py` |
 
 ---
 
@@ -118,8 +188,9 @@ dds_app/
 
 ```
 backend/routers/my_feature.py  — новый роутер
-backend/models.py              — новые ORM модели (если нужны)
-backend/schemas.py             — Pydantic schemas
+backend/models/my_feature.py   — новые ORM модели + re-export в models/__init__.py
+backend/schemas/my_feature.py  — Pydantic schemas + re-export в schemas/__init__.py
+backend/services/my_feature_service.py — бизнес-логика
 backend/main.py                — зарегистрировать router: app.include_router(...)
 ```
 
@@ -319,14 +390,15 @@ docker compose exec backend pytest tests/test_parser_vtb.py -v
 - [x] Filename sanitization — path traversal protection
 - [x] Register toggle — можно отключить через `REGISTER_ENABLED=false`
 - [x] Security logging — login attempts, admin creation
-- [x] Seed endpoint removed — убран публичный `/api/seed_defaults`
+- [x] Refresh tokens — access + refresh token flow (фронтенд поддерживает auto-refresh)
 
 ### ⚠️ TODO (архитектурные)
+- [ ] Seed endpoint — `POST /api/v1/seed` всё ещё в `main.py` (hardcoded счета) — вынести в `seeds/` или удалить
 - [ ] Project-level data isolation (project_id FK + middleware)
 - [ ] JWT в HttpOnly cookies вместо localStorage
-- [ ] Refresh tokens + token revocation (Redis blacklist)
+- [ ] Token revocation (Redis blacklist)
 - [ ] Admin role-based access
 
 ---
 
-*Последнее обновление: 2026-03-07 — добавлено правило TDD (test-first), VTB_MULTI парсер*
+*Последнее обновление: 2026-03-08 — актуализация структуры, моделей, безопасности, добавлены services/utils/funnel*

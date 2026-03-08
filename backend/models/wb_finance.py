@@ -49,6 +49,7 @@ class WbFinanceRow(Base):
     # Operation type
     doc_type_name: Mapped[Optional[str]] = mapped_column(String(100))
     supplier_oper_name: Mapped[Optional[str]] = mapped_column(String(200))
+    bonus_type_name: Mapped[Optional[str]] = mapped_column(String(500))  # тип удержания (Списание за отзыв, и т.д.)
     quantity: Mapped[int] = mapped_column(Integer, default=0)
 
     # Financial fields

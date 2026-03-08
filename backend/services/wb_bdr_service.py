@@ -369,6 +369,7 @@ def _empty_totals() -> dict:
         "ppvz_vw_nds": ZERO,
         "quantity": ZERO,
         "product_qty": ZERO,
+        "compensation_ppvz": ZERO,  # ppvz from Добровольная компенсация rows
     }
 
 
@@ -393,9 +394,19 @@ def _accumulate_row(target: dict, row: WbFinanceRow, oper_name: str):
     if oper_name in ("Продажа", "Возврат"):
         target["product_qty"] += D(str(row.quantity or 0))
 
+    # Добровольная компенсация has doc_type='Продажа' but its ppvz_for_pay
+    # must be excluded from commission (TrueStats convention)
+    if oper_name == "Добровольная компенсация при возврате":
+        target["compensation_ppvz"] += row.ppvz_for_pay or ZERO
+
 
 def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
-    """Compute BDR metrics from sale/return/other buckets."""
+    """Compute BDR metrics from sale/return/other buckets.
+
+    Commission formula verified against TrueStats:
+        commission = retail_amount_net - ppvz_for_pay_net
+    where ppvz_for_pay_net includes compensation from "Добров. компенсация" rows.
+    """
     realization = sale["retail_price_withdisc_rub"] - ret["retail_price_withdisc_rub"]
     sales_amount = sale["retail_amount"] - ret["retail_amount"]
     returns_amount = ret["retail_price_withdisc_rub"]
@@ -409,25 +420,35 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
     storage = other["storage_fee"]
     acceptance_val = other["acceptance"]
 
-    prochie_uderzhaniya = other["rebill_logistic_cost"]
+    # Удержания (deduction) — полное значение из WB API
     deductions = other["deduction"]
+    # Обратная логистика (rebill) — отдельная статья
+    rebill = other["rebill_logistic_cost"]
 
+    # ── Commission ──
+    # TrueStats formula: Продажи(net) - (К перечислению(net) - Компенсация)
+    # "Добровольная компенсация при возврате" has doc_type='Продажа'
+    # so its ppvz_for_pay is in sale bucket, but TrueStats excludes it
+    ppvz_net = sale["ppvz_for_pay"] - ret["ppvz_for_pay"]
+    compensation = sale["compensation_ppvz"]  # ppvz from compensation rows
+    commission = sales_amount - (ppvz_net - compensation)
+
+    # WB total reward (for reference)
     ppvz_sales_commission_net = sale["ppvz_sales_commission"] - ret["ppvz_sales_commission"]
-    ppvz_reward_net = sale["ppvz_reward"] - ret["ppvz_reward"]
     ppvz_vw_net = sale["ppvz_vw"] - ret["ppvz_vw"]
     ppvz_vw_nds_net = sale["ppvz_vw_nds"] - ret["ppvz_vw_nds"]
-
-    commission = ppvz_sales_commission_net + ppvz_reward_net
     total_wb_reward = ppvz_sales_commission_net + ppvz_vw_net + ppvz_vw_nds_net
 
-    ppvz_net = sale["ppvz_for_pay"] - ret["ppvz_for_pay"]
+    # ── To Pay (итого к оплате) ──
+    # ppvz_for_pay_net - logistics - penalties - storage - rebill
     to_pay = (
         ppvz_net
-        - logistics - penalties + storage - deductions - prochie_uderzhaniya
+        - logistics - penalties - storage - rebill
     )
 
     avg_sale_price = sales_amount / D(str(net_sale_qty)) if net_sale_qty > 0 else ZERO
     avg_retail_price = realization / D(str(net_sale_qty)) if net_sale_qty > 0 else ZERO
+    avg_logistics = logistics / D(str(net_sale_qty)) if net_sale_qty > 0 else ZERO
 
     total_qty = sale_qty + ret_qty
     buyout_pct = D(str(sale_qty)) / D(str(total_qty)) * 100 if total_qty > 0 else ZERO
@@ -438,20 +459,22 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
         "returns_amount": returns_amount,
         "to_pay": to_pay,
         "ppvz_for_pay": ppvz_net,
+        "compensation": compensation,
         "sale_qty": net_sale_qty,
         "sale_qty_gross": sale_qty,
         "ret_qty": ret_qty,
         "buyout_pct": buyout_pct,
         "avg_sale_price": avg_sale_price,
         "avg_retail_price": avg_retail_price,
+        "avg_logistics": avg_logistics,
         "commission": commission,
         "total_wb_reward": total_wb_reward,
         "logistics": logistics,
         "penalties": penalties,
         "storage": storage,
         "acceptance": acceptance_val,
-        "deductions": prochie_uderzhaniya,
-        "rebill": prochie_uderzhaniya,
+        "deductions": deductions,
+        "rebill": rebill,
     }
 
 

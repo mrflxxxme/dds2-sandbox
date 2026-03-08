@@ -2,6 +2,7 @@
 API tests — Planning endpoints (orders, payments, incomes, cashflow, customs).
 """
 
+import random
 import pytest
 
 
@@ -10,7 +11,7 @@ import pytest
 async def _project_headers(client, auth_headers) -> dict:
     """Create a test project and return headers with X-Project-Id."""
     resp = await client.post(
-        "/api/v1/projects/", json={"name": "Planning Test"},
+        "/api/v1/projects", json={"name": "Planning Test"},
         headers=auth_headers,
     )
     project = resp.json()
@@ -35,9 +36,10 @@ async def test_orders_crud(client, auth_headers):
     headers = await _project_headers(client, auth_headers)
 
     # Create
+    order_no = random.randint(10000, 99999)
     resp = await client.post("/api/v1/planning/orders", json={
-        "order_no": 100,
-        "ship_date": "2024-06-01",
+        "order_no": order_no,
+        "planned_ship_date": "2024-06-01",
         "order_amount": 50000.0,
         "logistics_cny": 1000.0,
         "customs_rub": 25000.0,
@@ -92,15 +94,15 @@ async def test_payments_crud(client, auth_headers):
     headers = await _project_headers(client, auth_headers)
 
     # Create order first (payment needs order_no)
+    order_no = random.randint(20000, 29999)
     await client.post("/api/v1/planning/orders", json={
-        "order_no": 200,
-        "ship_date": "2024-06-01",
+        "order_no": order_no,
+        "planned_ship_date": "2024-06-01",
     }, headers=headers)
 
     # Create payment
     resp = await client.post("/api/v1/planning/payments", json={
-        "order_no": 200,
-        "description": "Test Payment",
+        "order_no": order_no,
         "pay_date": "2024-06-15",
         "amount": 10000.0,
         "currency": "RUB",
@@ -184,7 +186,7 @@ async def test_cashflow_daily(client, auth_headers):
 async def test_customs_topup_empty(client, auth_headers):
     """Customs topup list should return empty for a new project."""
     headers = await _project_headers(client, auth_headers)
-    resp = await client.get("/api/v1/planning/customs_topup", headers=headers)
+    resp = await client.get("/api/v1/planning/customs/topup", headers=headers)
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
 

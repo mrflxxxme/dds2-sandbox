@@ -1,0 +1,64 @@
+# CD — Auto-deploy to production on merge to main
+#
+# Requires GitHub Secrets:
+#   DEPLOY_HOST      — server IP or hostname
+#   DEPLOY_USER      — SSH user (e.g. root, deploy)
+#   DEPLOY_SSH_KEY   — private SSH key (ed25519 recommended)
+#   DEPLOY_PATH      — path to project on server (e.g. /root/dds_app)
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # Allow manual trigger
+
+# Only one deploy at a time
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  # Gate: run tests first
+  test:
+    name: Run Tests
+    uses: ./.github/workflows/test.yml
+
+  deploy:
+    name: Deploy to Production
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            
+            echo "📥 Pulling latest code..."
+            git pull origin main
+            
+            echo "🔨 Building images..."
+            docker compose build --no-cache backend frontend-react
+            
+            echo "🔄 Restarting services..."
+            docker compose up -d --remove-orphans
+            
+            echo "🏥 Health check..."
+            sleep 10
+            curl -sf http://localhost/health || { echo "❌ Health check failed!"; exit 1; }
+            
+            echo "✅ Deploy complete!"
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::Deployment failed! Check the server logs."

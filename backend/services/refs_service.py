@@ -200,13 +200,15 @@ async def list_categories(db: AsyncSession, project_id: int) -> list[dict]:
 
 
 async def add_category(
-    db: AsyncSession, project_id: int, cat_lvl1: str, cat_lvl2: Optional[str] = None
+    db: AsyncSession, project_id: int, cat_lvl1: str, cat_lvl2: Optional[str] = None,
+    direction: Optional[str] = None,
 ) -> CategoryRef:
     """Add a category reference."""
     cat = CategoryRef(
         project_id=project_id,
+        direction=direction or "expense",
         cat_lvl1=cat_lvl1,
-        cat_lvl2=cat_lvl2,
+        cat_lvl2=cat_lvl2 or "",
     )
     db.add(cat)
     await db.commit()
