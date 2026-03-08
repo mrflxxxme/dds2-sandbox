@@ -158,12 +158,9 @@ async def get_wb_bdr(
         row_result["subject"] = art["subject"]
         row_result["nm_id"] = art["nm_id"]
 
-        # Ads: financial mode → from fin report deductions, management → from funnel
+        # Ads: per-article always from WbFunnelDaily (finance report ads have empty sa_name)
         nm = art["nm_id"]
-        if mode == "finance":
-            adv_sum = float(row_result.get("ad_deduction", 0))
-        else:
-            adv_sum = float(ads_map.get(nm, 0))
+        adv_sum = float(ads_map.get(nm, 0))
         row_result["adv_sum"] = adv_sum
         total_adv += D(str(adv_sum))
 
@@ -193,11 +190,8 @@ async def get_wb_bdr(
     # ── 8. Summary ──
     summary_result = _compute_metrics(total_sale, total_ret, total_other)
 
-    # Ads: financial mode → from fin report deductions, management → from funnel
-    if mode == "finance":
-        summary_result["adv_sum"] = float(summary_result.get("ad_deduction", 0))
-    else:
-        summary_result["adv_sum"] = float(total_adv)
+    # Ads: always from WbFunnelDaily (summed from per-article)
+    summary_result["adv_sum"] = float(total_adv)
     summary_result["cost_total"] = float(total_cost)
     summary_result["mode"] = mode
 
