@@ -41,6 +41,11 @@ class WbFinanceRow(Base):
     brand_name: Mapped[Optional[str]] = mapped_column(String(200))
     subject_name: Mapped[Optional[str]] = mapped_column(String(200))
 
+    # Per-row dates from WB API
+    rr_dt: Mapped[Optional[date]] = mapped_column(Date)  # дата начисления
+    sale_dt: Mapped[Optional[date]] = mapped_column(Date)  # дата продажи
+    order_dt: Mapped[Optional[date]] = mapped_column(Date)  # дата заказа
+
     # Operation type
     doc_type_name: Mapped[Optional[str]] = mapped_column(String(100))
     supplier_oper_name: Mapped[Optional[str]] = mapped_column(String(200))
@@ -70,6 +75,7 @@ class WbFinanceRow(Base):
     __table_args__ = (
         UniqueConstraint("project_id", "rrd_id", name="uq_wb_finance_rrd"),
         Index("ix_wb_finance_project_dates", "project_id", "date_from", "date_to"),
+        Index("ix_wb_finance_project_rr_dt", "project_id", "rr_dt"),
         Index("ix_wb_finance_project_sa", "project_id", "sa_name"),
     )
 

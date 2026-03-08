@@ -47,10 +47,16 @@ async def get_wb_bdr(
     sync_status = await get_sync_status(db, project_id)
 
     # ── 2. Load finance rows from local DB ──
+    # Filter by rr_dt (realization date) if available, fallback to date_from/date_to
+    from sqlalchemy import or_
     q = select(WbFinanceRow).where(
         WbFinanceRow.project_id == project_id,
-        WbFinanceRow.date_from >= date_from,
-        WbFinanceRow.date_to <= date_to,
+        or_(
+            # New rows with rr_dt — filter by actual realization date
+            WbFinanceRow.rr_dt.between(date_from, date_to),
+            # Old rows without rr_dt — fallback to week boundaries
+            (WbFinanceRow.rr_dt.is_(None)) & (WbFinanceRow.date_from >= date_from) & (WbFinanceRow.date_to <= date_to),
+        ),
     )
     result = await db.execute(q)
     raw_rows = result.scalars().all()
