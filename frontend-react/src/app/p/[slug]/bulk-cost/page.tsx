@@ -209,7 +209,7 @@ export default function BulkCostPage() {
                         </button>
                     )}
                     <button className="btn btn-secondary btn-sm" onClick={() => {
-                        const text = rows.filter(r => r.barcode.trim()).map(r => `${r.name}\t${r.barcode}\t${r.cost_price}\t${r.currency}`).join('\n');
+                        const text = missing.map((m: any) => `${m.vendor_code || ''}\t${m.nm_id}\t0\tRUB`).join('\n');
                         navigator.clipboard.writeText(text);
                     }}>
                         📋 Скопировать всё

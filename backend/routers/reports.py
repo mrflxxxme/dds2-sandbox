@@ -101,6 +101,22 @@ async def get_wb_bdr_sync_status(
     return await get_sync_status(db, project.id)
 
 
+@router.get("/opiu")
+async def get_opiu(
+    date_from: date = Query(...),
+    date_to: date = Query(...),
+    brand: Optional[str] = Query(None),
+    article: Optional[str] = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """ОПИУ (P&L) report — monthly breakdown with hierarchical rows."""
+    from backend.services import opiu_service
+    return await opiu_service.get_opiu(
+        db, project.id, date_from, date_to, brand=brand, article=article,
+    )
+
+
 @router.post("/wb_bdr/sync")
 async def trigger_wb_bdr_sync(
     project: Project = Depends(get_current_project),

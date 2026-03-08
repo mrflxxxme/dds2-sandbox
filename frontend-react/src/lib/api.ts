@@ -347,6 +347,12 @@ class ApiClient {
     getDDSPnL(year: number) {
         return this.request<any>('GET', `/api/v1/reports/dds_pnl?year=${year}`);
     }
+    getOpiu(dateFrom: string, dateTo: string, brand?: string, article?: string) {
+        let url = `/api/v1/reports/opiu?date_from=${dateFrom}&date_to=${dateTo}`;
+        if (brand) url += `&brand=${encodeURIComponent(brand)}`;
+        if (article) url += `&article=${encodeURIComponent(article)}`;
+        return this.request<any>('GET', url);
+    }
     getWbBdr(dateFrom: string, dateTo: string, brand?: string, article?: string) {
         let url = `/api/v1/reports/wb_bdr?date_from=${dateFrom}&date_to=${dateTo}`;
         if (brand) url += `&brand=${encodeURIComponent(brand)}`;

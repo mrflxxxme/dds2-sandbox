@@ -29,6 +29,7 @@ const navGroups = [
         items: [
             { href: '/funnel', label: 'Воронка продаж', icon: '📊' },
             { href: '/trends', label: 'Метрики и тренды', icon: '📈' },
+            { href: '/opiu', label: 'ОПИУ', icon: '📋' },
         ],
     },
     {
