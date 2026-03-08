@@ -205,12 +205,22 @@ async def _load_ads(db: AsyncSession, pid: int, d_from: date, d_to: date) -> dic
 # ─── Cost loader ─────────────────────────────────────────────────────────────
 
 async def _load_avg_costs(db: AsyncSession, pid: int) -> dict[str, float]:
-    """Load average cost per article_seller from cost_order_items."""
+    """Load weighted average cost per article_seller from cost_order_items.
+    
+    Joins CostOrder to filter by project_id.
+    Weighted avg = SUM(total_rub) / SUM(qty) — correct for varying batch sizes.
+    """
+    from backend.models.cost import CostOrder
+
     result = await db.execute(
         select(
             CostOrderItem.article_seller,
-            func.avg(CostOrderItem.total_rub / func.nullif(CostOrderItem.qty, 0)).label("avg_cost"),
+            (func.sum(CostOrderItem.total_rub) / func.nullif(func.sum(CostOrderItem.qty), 0)).label("avg_cost"),
+        ).join(
+            CostOrder, CostOrderItem.order_no == CostOrder.order_no
         ).where(
+            CostOrder.project_id == pid,
+            CostOrder.is_deleted == False,
             CostOrderItem.article_seller.isnot(None),
             CostOrderItem.total_rub.isnot(None),
             CostOrderItem.qty > 0,
