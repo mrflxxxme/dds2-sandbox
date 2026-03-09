@@ -6,6 +6,8 @@ Provides password hashing, JWT token creation/verification, and user lookup.
 import secrets
 import logging
 from datetime import datetime, timedelta, timezone
+
+from backend.utils.time import utcnow
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
@@ -48,7 +50,7 @@ def validate_password_strength(password: str) -> None:
 
 def create_access_token(user_id: int, username: str) -> str:
     """Create a short-lived JWT access token (30 min default)."""
-    expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {
         "sub": str(user_id),
         "username": username,
@@ -133,6 +135,20 @@ async def get_current_user(
     return user
 
 
+async def require_admin(
+    user: User = Depends(get_current_user),
+) -> User:
+    """FastAPI dependency: require current user to have 'admin' role.
+    Use as: Depends(require_admin) on admin-only endpoints.
+    """
+    if getattr(user, "role", "member") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    return user
+
+
 async def ensure_default_admin(db: AsyncSession):
     """Create default admin user with random password if no users exist.
     The generated password is logged to stdout on first run.
@@ -145,6 +161,7 @@ async def ensure_default_admin(db: AsyncSession):
             username="admin",
             password_hash=hash_password(default_password),
             is_active=True,
+            role="admin",
         )
         db.add(admin)
         await db.commit()

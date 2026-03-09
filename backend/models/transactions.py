@@ -3,6 +3,8 @@ Transaction models: Transaction, CategoryChangeLog, ImportLog.
 """
 
 from datetime import datetime, timezone
+
+from backend.utils.time import utcnow
 from decimal import Decimal
 from typing import Optional
 
@@ -75,7 +77,7 @@ class CategoryChangeLog(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     txn_id: Mapped[str] = mapped_column(String(300), nullable=False)
-    changed_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
+    changed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     changed_by: Mapped[Optional[str]] = mapped_column(String(100))
     old_cat_lvl1: Mapped[Optional[str]] = mapped_column(String(100))
     old_cat_lvl2: Mapped[Optional[str]] = mapped_column(String(100))
@@ -91,7 +93,7 @@ class ImportLog(Base):
     project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     filename: Mapped[str] = mapped_column(String(300))
     source_type: Mapped[str] = mapped_column(String(30))
-    imported_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
+    imported_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     rows_raw: Mapped[int] = mapped_column(Integer, default=0)
     rows_inserted: Mapped[int] = mapped_column(Integer, default=0)
     rows_skipped: Mapped[int] = mapped_column(Integer, default=0)

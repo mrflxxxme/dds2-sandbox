@@ -9,6 +9,8 @@ Handles:
 
 import logging
 from datetime import date, datetime, timedelta
+
+from backend.utils.time import utcnow
 from decimal import Decimal
 from typing import Optional
 
@@ -148,7 +150,7 @@ def _row_to_values(row: dict, project_id: int) -> dict:
         "supplier_oper_name": (row.get("supplier_oper_name") or "")[:200],
         "bonus_type_name": (row.get("bonus_type_name") or "")[:500] or None,
         "quantity": row.get("quantity", 0) or 0,
-        "synced_at": datetime.utcnow(),
+        "synced_at": utcnow(),
     }
     for field in _NUMERIC_FIELDS:
         val = row.get(field, 0) or 0

@@ -3,6 +3,8 @@ Tax models: TaxRate — per-brand monthly tax rates.
 """
 
 from datetime import datetime
+
+from backend.utils.time import utcnow
 from decimal import Decimal
 from typing import Optional
 
@@ -34,7 +36,7 @@ class TaxRate(Base):
     nds_rate: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=0)
     cost_as_expense: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.utcnow(), onupdate=lambda: datetime.utcnow()
+        DateTime, default=utcnow, onupdate=utcnow
     )
 
     __table_args__ = (

@@ -4,6 +4,8 @@ Cost — Nomenclature (get, upload Excel).
 
 import io
 from datetime import datetime
+
+from backend.utils.time import utcnow
 from decimal import Decimal
 
 import pandas as pd
@@ -58,7 +60,7 @@ async def upload_nomenclature(db: AsyncSession, project_id: int, data: bytes):
                 nom.volume_l = Decimal(str(row.get("volume_l", 0) or 0))
             except Exception:
                 nom.volume_l = None
-            nom.updated_at = datetime.utcnow()
+            nom.updated_at = utcnow()
             updated += 1
         else:
             try:

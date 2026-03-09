@@ -3,6 +3,8 @@ Cost models: Nomenclature, DutyRule, CostOrder, CostOrderItem.
 """
 
 from datetime import datetime, date
+
+from backend.utils.time import utcnow
 from decimal import Decimal
 from typing import Optional
 
@@ -24,7 +26,7 @@ class Nomenclature(Base):
     article_seller: Mapped[Optional[str]] = mapped_column(String(100))
     article_wb: Mapped[Optional[int]] = mapped_column(Integer)
     volume_l: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     __table_args__ = (
         UniqueConstraint("project_id", "barcode", name="uq_nomenclature_project_barcode"),
@@ -62,7 +64,7 @@ class CostOrder(Base, SoftDeleteMixin):
     rate_usd: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=1)
     note: Mapped[Optional[str]] = mapped_column(Text)
     dt_number: Mapped[Optional[str]] = mapped_column(String(100))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     items: Mapped[list["CostOrderItem"]] = relationship(back_populates="order", cascade="all, delete-orphan")
 
 

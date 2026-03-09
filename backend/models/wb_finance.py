@@ -6,6 +6,8 @@ Stored locally to avoid re-fetching from slow WB API on each BDR load.
 """
 
 from datetime import date, datetime
+
+from backend.utils.time import utcnow
 from decimal import Decimal
 from typing import Optional
 
@@ -70,7 +72,7 @@ class WbFinanceRow(Base):
 
     # Sync metadata
     synced_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.utcnow()
+        DateTime, default=utcnow
     )
 
     __table_args__ = (
@@ -93,7 +95,7 @@ class WbFinanceSyncLog(Base):
     status: Mapped[str] = mapped_column(String(20), default="OK")  # OK / ERROR
     error_msg: Mapped[Optional[str]] = mapped_column(String(500))
     synced_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.utcnow()
+        DateTime, default=utcnow
     )
 
     __table_args__ = (

@@ -65,7 +65,7 @@ async def upload_statement(
 
     # Run synchronously inside a thread (ETL uses sync ORM)
     import asyncio
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def _run():
         with SyncSessionLocal() as sync_db:

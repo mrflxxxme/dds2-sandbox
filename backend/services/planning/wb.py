@@ -3,6 +3,8 @@ Planning — WB Payouts (CRUD, reconciliation, forecast).
 """
 
 from datetime import date, datetime, timedelta
+
+from backend.utils.time import utcnow
 from decimal import Decimal
 
 from sqlalchemy import select, func, and_, or_, text
@@ -71,7 +73,7 @@ async def manual_reconcile_wb(db: AsyncSession, payout_id: int, txn_id: str):
         return None, "Transaction not found"
 
     payout.matched_txn_id = txn_id
-    payout.matched_at = datetime.utcnow()
+    payout.matched_at = utcnow()
     payout.status = "RECEIVED"
     await db.commit()
     return True, None
@@ -142,7 +144,7 @@ async def reconcile_wb_payouts(db: AsyncSession):
 
         if best_match:
             payout.matched_txn_id = best_match.txn_id
-            payout.matched_at = datetime.utcnow()
+            payout.matched_at = utcnow()
             payout.status = "RECEIVED"
             used_txn_ids.add(best_match.txn_id)
 

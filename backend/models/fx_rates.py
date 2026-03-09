@@ -2,6 +2,8 @@
 FX Rate models — stores exchange rates extracted from FX transactions.
 """
 from datetime import date as date_type, datetime, timezone
+
+from backend.utils.time import utcnow
 from decimal import Decimal
 from typing import Optional
 
@@ -22,7 +24,7 @@ class FxRate(Base):
     source: Mapped[str] = mapped_column(String(50), default="vtb_import")
     txn_id: Mapped[Optional[str]] = mapped_column(String(300))
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.utcnow()
+        DateTime, default=utcnow
     )
 
     __table_args__ = (

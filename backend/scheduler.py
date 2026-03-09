@@ -14,6 +14,8 @@ import logging
 import traceback
 from datetime import date, datetime, timedelta, timezone
 
+from backend.utils.time import utcnow
+
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -239,7 +241,7 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
     """
     from backend.services.funnel.sync import run_funnel_sync
     from sqlalchemy import select, update
-    from datetime import datetime
+
     import asyncio
 
     # ad_resync needs completed campaigns to recover historical data
@@ -284,7 +286,7 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
             )
             status = "OK" if not result.get("errors") else "PARTIAL"
     except asyncio.TimeoutError:
-        result = {"rows": 0, "errors": [f"Timeout: 5min exceeded ({d_from}→{d_to})"]}
+        result = {"rows": 0, "errors": [f"Timeout: 10min exceeded ({d_from}→{d_to})"]}
         status = "TIMEOUT"
         logger.error(f"Scheduler: project {project_id} [{sync_type}] TIMEOUT {d_from}→{d_to}")
     except Exception as e:
@@ -299,7 +301,7 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
                     update(SyncLog).where(SyncLog.id == log_id).values(
                         status=status,
                         rows_inserted=result.get("rows", 0),
-                        finished_at=datetime.utcnow(),
+                        finished_at=utcnow(),
                         error_msg="; ".join(result.get("errors", [])[:3]) or None,
                     )
                 )
@@ -316,7 +318,7 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
 
 # ─── Fast backfill (every 3min until all missing days filled) ────────────────
 
-_backfill_lock = asyncio.Lock()
+_backfill_locks: dict[int, asyncio.Lock] = {}  # per-project locks
 
 async def fast_backfill_tick():
     """
@@ -325,20 +327,25 @@ async def fast_backfill_tick():
     Stops itself when all projects have full 90-day coverage.
     Does NOT check ad completeness — that's a separate job.
     """
-    if _backfill_lock.locked():
-        return  # previous tick still running
+    try:
+        project_ids = await _get_sync_project_ids()
+        logger.info(f"⏩ Fast backfill tick: {len(project_ids)} projects")
 
-    async with _backfill_lock:
-        try:
-            project_ids = await _get_sync_project_ids()
-            logger.info(f"⏩ Fast backfill tick: {len(project_ids)} projects")
+        if not project_ids:
+            _stop_fast_backfill()
+            return
 
-            if not project_ids:
-                _stop_fast_backfill()
-                return
+        all_filled = True
+        for pid in project_ids:
+            # Per-project lock: skip if this project is already syncing
+            if pid not in _backfill_locks:
+                _backfill_locks[pid] = asyncio.Lock()
+            if _backfill_locks[pid].locked():
+                logger.info(f"⏩ Backfill: project {pid} — still running, skipping")
+                all_filled = False
+                continue
 
-            all_filled = True
-            for pid in project_ids:
+            async with _backfill_locks[pid]:
                 missing = await _get_missing_dates(pid)
                 if missing:
                     all_filled = False
@@ -358,12 +365,12 @@ async def fast_backfill_tick():
                 else:
                     logger.info(f"⏩ Backfill: project {pid} — all {BACKFILL_DAYS} days covered ✅")
 
-            if all_filled:
-                logger.info("🎉 Fast backfill complete — all projects fully covered! Stopping.")
-                _stop_fast_backfill()
+        if all_filled:
+            logger.info("🎉 Fast backfill complete — all projects fully covered! Stopping.")
+            _stop_fast_backfill()
 
-        except Exception as e:
-            logger.error(f"Fast backfill error: {e}\n{traceback.format_exc()}")
+    except Exception as e:
+        logger.error(f"Fast backfill error: {e}\n{traceback.format_exc()}")
 
 
 def _stop_fast_backfill():

@@ -50,6 +50,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
 from backend.models.mixins import SoftDeleteMixin  # для критичных сущностей
+from backend.utils.time import utcnow  # ← единый datetime helper
 
 
 class Feature(Base, SoftDeleteMixin):
@@ -59,9 +60,7 @@ class Feature(Base, SoftDeleteMixin):
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)  # ← Numeric, НЕ Float
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.utcnow()  # ← НЕ datetime.now(timezone.utc) — asyncpg DataError!
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)  # ← utcnow, см. skill convention-guards
 ```
 
 Зарегистрируй в `models/__init__.py`:
@@ -76,9 +75,9 @@ from backend.models.feature import Feature
 ```python
 """Feature service — business logic."""
 import logging
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.models import Feature
+from backend.utils.queries import project_select_active  # ← guard helper
 
 logger = logging.getLogger("dds.feature")
 
@@ -86,11 +85,9 @@ logger = logging.getLogger("dds.feature")
 async def get_features(db: AsyncSession, project_id: int, limit: int = 100, offset: int = 0):
     """List features with pagination."""
     result = await db.execute(
-        select(Feature)
-        .where(Feature.project_id == project_id)
-        .where(Feature.is_deleted == False)       # ← soft delete фильтр
+        project_select_active(Feature, project_id)  # ← project_id + is_deleted автоматически
         .order_by(Feature.id.desc())
-        .limit(limit).offset(offset)              # ← пагинация
+        .limit(limit).offset(offset)                # ← пагинация
     )
     return result.scalars().all()
 
@@ -219,13 +216,14 @@ async def test_list_features(client, auth_headers):
 
 ## ⛔ Чеклист (обязательный)
 
+> **См. также:** skill `convention-guards` — полная документация по guard helpers.
+
 - [ ] Schema в `schemas/feature.py` + re-export в `__init__.py`
 - [ ] Модель в `models/feature.py` + re-export в `__init__.py`
 - [ ] **`Mapped[]` + `mapped_column()`** — не `Column()`
-- [ ] **`datetime.utcnow()`** — НЕ `datetime.now(timezone.utc)` (asyncpg DataError!)
+- [ ] **`from backend.utils.time import utcnow`** — НЕ `datetime.utcnow()`, НЕ `datetime.now(timezone.utc)`
 - [ ] **`Numeric(18, 2)`** для денег — не `Float`
-- [ ] **`project_id`** фильтрация в каждом запросе
-- [ ] **`is_deleted == False`** фильтр для SoftDeleteMixin
+- [ ] **`project_select()` / `project_select_active()`** из `backend/utils/queries` — невозможно забыть `project_id`
 - [ ] Миграция: `alembic revision --autogenerate -m "..."`
 - [ ] Service в `services/` — бизнес-логика НЕ в роутере
 - [ ] **Сервис ≤ 400 строк** — при превышении разбить по ответственности
@@ -235,6 +233,7 @@ async def test_list_features(client, auth_headers):
 - [ ] **Cache key содержит `project_id`** — обязательно для multi-tenant
 - [ ] **Logging**: `logger = logging.getLogger("dds.module")`
 - [ ] Тест в `tests/test_api_feature.py`
+- [ ] **Convention checks**: `bash scripts/check_conventions.sh`
 - [ ] **Запустить тесты**: `docker compose exec backend pytest tests/ -x`
 - [ ] Роутер зарегистрирован в `main.py`
 - [ ] Обновлён `AGENTS.md` + `docs/MODULES.md`

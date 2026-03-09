@@ -17,7 +17,7 @@ from sqlalchemy import text
 
 from backend.config import settings
 from backend.database import async_engine, AsyncSessionLocal, Base
-from backend.auth import get_current_user, ensure_default_admin
+from backend.auth import get_current_user, ensure_default_admin, require_admin
 from backend.routers import import_txn, refs, reports, planning, cost, auth, integrations, projects, funnel, ws
 
 
@@ -195,7 +195,7 @@ async def health():
 
 
 
-@app.post("/api/v1/seed", dependencies=[Depends(get_current_user)])
+@app.post("/api/v1/seed", dependencies=[Depends(require_admin)])
 async def seed_data():
     """Seed default accounts, lead times, etc. from the Excel files."""
     from backend.database import SyncSessionLocal

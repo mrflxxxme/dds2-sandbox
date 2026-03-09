@@ -73,11 +73,9 @@ async def send_alert(message: str, *, exc: Optional[Exception] = None, silent: b
 def send_alert_sync(message: str, *, exc: Optional[Exception] = None):
     """Sync wrapper for use in sync contexts (e.g., scheduler error handlers)."""
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.ensure_future(send_alert(message, exc=exc))
-        else:
-            loop.run_until_complete(send_alert(message, exc=exc))
+        loop = asyncio.get_running_loop()
+        # We're inside a running event loop — schedule as fire-and-forget
+        asyncio.ensure_future(send_alert(message, exc=exc))
     except RuntimeError:
-        # No event loop
+        # No running event loop — skip (alerts are best-effort)
         pass

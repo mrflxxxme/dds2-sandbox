@@ -4,6 +4,8 @@ ETL service: orchestrates raw file -> normalize -> upsert -> master logic refres
 
 import logging
 from datetime import datetime, timezone
+
+from backend.utils.time import utcnow
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
@@ -89,7 +91,7 @@ def import_statement(
         project_id=project_id,
         filename=filename,
         source_type=source_type,
-        imported_at=datetime.utcnow(),
+        imported_at=utcnow(),
     )
 
     log_ctx = logger.bind(
@@ -175,9 +177,9 @@ def import_statement(
             s = str(val).strip()
             return s if s and s != 'nan' else None
 
-        # Build all Transaction objects first, then add_all in one batch
+        # Build all Transaction objects using to_dict (10x faster than iterrows)
         batch = []
-        for _, row in df.iterrows():
+        for row in df.to_dict('records'):
             txn_id = row["txn_id"]
             if txn_id in existing_txn_ids:
                 skipped += 1
@@ -239,15 +241,21 @@ def import_statement(
             status="OK", inserted=inserted, skipped=skipped + parse_skipped,
         )
 
-        # 7. Invalidate report caches (async call from sync context)
+        # 7. Invalidate ALL related caches (async call from sync context)
         try:
             import asyncio
             from backend.cache import invalidate_cache
+
+            async def _invalidate_all():
+                """Clear all caches that depend on transaction data."""
+                for prefix in ("reports", "dashboard", "funnel", "planning"):
+                    await invalidate_cache(prefix)
+
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(invalidate_cache("reports"))
+                loop.create_task(_invalidate_all())
             except RuntimeError:
-                asyncio.run(invalidate_cache("reports"))
+                asyncio.run(_invalidate_all())
         except Exception as e:
             logger.warning("Cache invalidation skipped: %s", e)
 
@@ -572,7 +580,10 @@ def _sync_wb_payouts(db: Session, project_id: int):
 
     already_matched = {
         r[0] for r in db.execute(
-            select(WbPayout.matched_txn_id).where(WbPayout.matched_txn_id.isnot(None))
+            select(WbPayout.matched_txn_id).where(
+                WbPayout.project_id == project_id,
+                WbPayout.matched_txn_id.isnot(None),
+            )
         )
     }
 
@@ -623,7 +634,7 @@ def _sync_wb_payouts(db: Session, project_id: int):
 
         if best_match:
             payout.matched_txn_id = best_match.txn_id
-            payout.matched_at = datetime.utcnow()
+            payout.matched_at = utcnow()
             payout.status = "RECEIVED"
             used_txn_ids.add(best_match.txn_id)
 

@@ -3,6 +3,8 @@ Integration models: IntegrationKey, SyncLog, WbFunnelDaily, WbCostOverride.
 """
 
 from datetime import datetime, date, timezone
+
+from backend.utils.time import utcnow
 from decimal import Decimal
 from typing import Optional
 
@@ -24,7 +26,7 @@ class IntegrationKey(Base):
     label: Mapped[Optional[str]] = mapped_column(String(200))  # user-friendly name
     encrypted_key: Mapped[str] = mapped_column(Text, nullable=False)  # Fernet-encrypted
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     last_sync_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
     __table_args__ = (
@@ -39,7 +41,7 @@ class SyncLog(Base):
     integration_id: Mapped[int] = mapped_column(Integer, ForeignKey("integration_keys.id"))
     service: Mapped[str] = mapped_column(String(50), nullable=False)
     sync_type: Mapped[str] = mapped_column(String(50), nullable=False)  # "sales", "payouts", "orders"
-    started_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     status: Mapped[str] = mapped_column(String(20), default="RUNNING")  # RUNNING, OK, ERROR
     rows_fetched: Mapped[int] = mapped_column(Integer, default=0)
@@ -93,7 +95,7 @@ class WbCostOverride(Base):
     project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
     nm_id: Mapped[int] = mapped_column(Integer, nullable=False)
     cost_price: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow(), onupdate=lambda: datetime.utcnow())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
     __table_args__ = (
         UniqueConstraint("project_id", "nm_id", name="uq_cost_override_nm"),

@@ -3,6 +3,8 @@ Reference models: Account, CounterpartyCategory, Override, OpeningBalance, Categ
 """
 
 from datetime import datetime, date, timezone
+
+from backend.utils.time import utcnow
 from decimal import Decimal
 from typing import Optional
 
@@ -52,7 +54,7 @@ class Override(Base):
     cat_lvl2: Mapped[Optional[str]] = mapped_column(String(100))
     order_id: Mapped[Optional[str]] = mapped_column(String(100))
     comment: Mapped[Optional[str]] = mapped_column(Text)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow(), onupdate=lambda: datetime.utcnow())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
 class OpeningBalance(Base):

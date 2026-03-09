@@ -260,7 +260,7 @@ async def sync_plan_payments_endpoint(
     from backend.etl.service import _sync_plan_payments
 
     pid = project.id
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def _run():
         with SyncSessionLocal() as sync_db:

@@ -65,21 +65,27 @@ grep -rn "INSERT INTO.*category_ref" backend/
 ### 6. Datetime / timezone
 
 ```bash
-# ЗАПРЕЩЕНО: offset-aware datetime в TIMESTAMP WITHOUT TIME ZONE колонки
-grep -rn "datetime.now(timezone.utc)" backend/ --include="*.py"
+# ЗАПРЕЩЕНО: прямые вызовы datetime.utcnow() или datetime.now(timezone.utc)
+# Используй единый helper:
+#   from backend.utils.time import utcnow
+grep -rn "datetime\.utcnow()" backend/ --include="*.py" --exclude-dir="__pycache__"
+grep -rn "datetime\.now(timezone\.utc)" backend/ --include="*.py" --exclude-dir="__pycache__"
 ```
 
-**Правило:** Все `DateTime` колонки в PostgreSQL — `TIMESTAMP WITHOUT TIME ZONE`.
-Использовать **`datetime.utcnow()`** для defaults и присваиваний.
-`datetime.now(timezone.utc)` вызывает `asyncpg.DataError` при записи!
+**Правило:** Использовать **`from backend.utils.time import utcnow`** — единый naive UTC helper,
+совместимый с asyncpg `TIMESTAMP WITHOUT TIME ZONE`. Оба варианта напрямую запрещены.
 
 ## ⛔ Чеклист
+
+> **Автоматическая проверка:** `bash scripts/check_conventions.sh` — запускает все проверки автоматически.
 
 - [ ] Ни один сервис не превышает 400 строк
 - [ ] Новый модуль имеет тесты в `tests/`
 - [ ] Cache key содержит `project_id`
 - [ ] Нет дублирования middleware (одна точка: `project_context.py`)
 - [ ] Seed данные в `backend/seeds/`, не inline
-- [ ] Нет `datetime.now(timezone.utc)` в коде (только `datetime.utcnow()`)
+- [ ] Datetime через `from backend.utils.time import utcnow` (НЕ `datetime.utcnow()`, НЕ `datetime.now(timezone.utc)`)
+- [ ] SQL-запросы через `project_select()` / `project_select_active()` из `backend/utils/queries`
 - [ ] `AGENTS.md` обновлён если изменилась структура
 - [ ] Тесты проходят: `pytest tests/ -x`
+- [ ] Convention checks: `bash scripts/check_conventions.sh`

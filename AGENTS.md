@@ -93,6 +93,8 @@ dds_app/
 │   ├── utils/                  # Shared utilities
 │   │   ├── crypto.py           # Fernet encryption for API keys
 │   │   ├── file_validation.py  # File extension/size validation
+│   │   ├── queries.py          # project_select() — tenant-safe SQL helpers
+│   │   ├── time.py             # utcnow() — unified datetime (see Anti-patterns)
 │   │   └── telegram.py         # Telegram alert notifications
 │   ├── seeds/                  # Seed data for new projects
 │   │   └── default_categories.py  # 28 default category_ref entries
@@ -243,12 +245,12 @@ AGENTS.md  — обновить структуру, таблицу моделе�
 | ❌ НЕЛЬЗЯ | ✅ ПРАВИЛЬНО |
 |-----------|-------------|
 | Бизнес-логика в роутере | Роутер вызывает `service`-функцию: `return await my_service.create_item(db, data)` |
-| `datetime.now(timezone.utc)` для `DateTime` колонок | `datetime.utcnow()` — asyncpg НЕ принимает offset-aware datetime в `TIMESTAMP WITHOUT TIME ZONE` колонки. Если нужен aware → колонка должна быть `DateTime(timezone=True)` |
+| `datetime.utcnow()` или `datetime.now(timezone.utc)` | `from backend.utils.time import utcnow` — единый helper, naive UTC, совместим с asyncpg. **Оба** варианта напрямую ЗАПРЕЩЕНЫ (deprecated / breaks asyncpg). |
 | `Column(Integer, ...)` | `Mapped[int] = mapped_column(Integer, ...)` — новый SQLAlchemy стиль |
 | `Float` для денег | `Numeric(18, 2)` — точные вычисления |
 | f-string в SQL: `f"WHERE id={x}"` | Параметризованный SQL: `text("WHERE id = :x"), {"x": x}` |
-| Запрос без `project_id` | `select(Model).where(Model.project_id == project_id)` |
-| Запрос без `is_deleted` фильтра | `.where(Model.is_deleted == False)` для моделей с SoftDeleteMixin |
+| Запрос без `project_id` | `from backend.utils.queries import project_select` → `project_select(Model, project_id)` — невозможно забыть |
+| Запрос без `is_deleted` фильтра | `from backend.utils.queries import project_select_active` → `project_select_active(Model, project_id)` для моделей с SoftDeleteMixin |
 | Новая модель в `models.py` (монолит) | Новый файл `models/feature.py` + re-export в `models/__init__.py` |
 | Новая схема в `schemas.py` (монолит) | Новый файл `schemas/feature.py` + re-export в `schemas/__init__.py` |
 | List-эндпоинт без пагинации | `limit: int = 100, offset: int = 0` + `.limit(limit).offset(offset)` |
