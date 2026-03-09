@@ -250,6 +250,10 @@ async def assign_category(
     db.add(log)
     await db.commit()
 
+    from backend.cache import invalidate_cache
+    for prefix in ("reports:balance", "reports:dashboard", "reports:dds_month"):
+        await invalidate_cache(prefix)
+
     return {"ok": True, "txn_id": txn_id, "scope": scope}
 
 
@@ -295,6 +299,11 @@ async def assign_category_bulk(
         .values(cat_lvl1_2=cat_lvl1, cat_lvl2_2=cat_lvl2)
     )
     await db.commit()
+
+    from backend.cache import invalidate_cache
+    for prefix in ("reports:balance", "reports:dashboard", "reports:dds_month"):
+        await invalidate_cache(prefix)
+
     return {"ok": True, "updated": result.rowcount}
 
 
@@ -315,4 +324,9 @@ async def assign_category_by_ids(
         .values(cat_lvl1_2=cat_lvl1, cat_lvl2_2=cat_lvl2)
     )
     await db.commit()
+
+    from backend.cache import invalidate_cache
+    for prefix in ("reports:balance", "reports:dashboard", "reports:dds_month"):
+        await invalidate_cache(prefix)
+
     return {"ok": True, "updated": result.rowcount}

@@ -13,8 +13,10 @@ from backend.models import (
     PlannedPayment, PlannedIncome, WbPayout, Order,
     Transaction, CustomsAlloc,
 )
+from backend.cache import cached
 
 
+@cached(prefix="reports:cashflow", ttl=300)
 async def calculate_cashflow_daily(
     db: AsyncSession,
     project_id: int,

@@ -127,6 +127,11 @@ async def sync_wb_finance(
     ))
     await db.commit()
 
+    # Invalidate WB-dependent report caches
+    from backend.cache import invalidate_cache
+    for prefix in ("reports:opiu", "reports:wb_bdr", "reports:dashboard"):
+        await invalidate_cache(prefix)
+
     logger.info("wb_finance_sync: done — %d rows in %d pages for project %s", total_synced, page_num, project_id)
     return {"status": "ok", "rows_synced": total_synced, "pages": page_num, "errors": []}
 

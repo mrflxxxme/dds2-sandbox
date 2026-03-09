@@ -31,6 +31,7 @@ from backend.services.bdr_loaders import (
     load_cost_overrides,
     load_tax_settings,
 )
+from backend.cache import cached
 from backend.services.bdr_enrichment import (
     apply_tax,
     apply_tax_article,
@@ -44,6 +45,7 @@ D = Decimal
 ZERO = D("0")
 
 
+@cached(prefix="reports:wb_bdr", ttl=300)
 async def get_wb_bdr(
     db: AsyncSession,
     project_id: int,

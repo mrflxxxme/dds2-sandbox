@@ -12,10 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import Transaction, Account, OpeningBalance
 from backend.models.planning import Order, PlannedPayment
+from backend.cache import cached
 
 logger = logging.getLogger("dds.dashboard")
 
 
+@cached(prefix="reports:dashboard", ttl=300)
 async def get_dashboard_summary(
     db: AsyncSession,
     project_id: int,

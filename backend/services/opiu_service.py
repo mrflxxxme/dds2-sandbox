@@ -15,6 +15,7 @@ from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.wb_finance import WbFinanceRow
+from backend.cache import cached
 from backend.services.bdr_loaders import (
     load_ads,
     load_avg_costs,
@@ -28,6 +29,7 @@ D = Decimal
 ZERO = D("0")
 
 
+@cached(prefix="reports:opiu", ttl=300)
 async def get_opiu(
     db: AsyncSession,
     project_id: int,
