@@ -54,9 +54,14 @@ class ApiClient {
         localStorage.setItem('dds_project_id', String(id));
     }
 
-    private async tryRefresh(): Promise<boolean> {
+    /**
+     * Try to refresh the access token.
+     * Returns: 'ok' if refreshed, 'invalid' if token is rejected (must logout),
+     *          'unavailable' if backend is unreachable (keep tokens, retry later).
+     */
+    private async tryRefresh(): Promise<'ok' | 'invalid' | 'unavailable'> {
         const refreshToken = this.getRefreshToken();
-        if (!refreshToken || this._isRefreshing) return false;
+        if (!refreshToken || this._isRefreshing) return 'invalid';
 
         this._isRefreshing = true;
         try {
@@ -69,11 +74,15 @@ class ApiClient {
                 const data = await res.json();
                 this.setToken(data.access_token);
                 if (data.refresh_token) this.setRefreshToken(data.refresh_token);
-                return true;
+                return 'ok';
             }
-        } catch { /* refresh failed */ }
+            // Explicit 401/403 from /refresh → token is genuinely invalid
+            return 'invalid';
+        } catch {
+            // Network error (backend down during deploy) — don't invalidate tokens
+            return 'unavailable';
+        }
         finally { this._isRefreshing = false; }
-        return false;
     }
 
     private async request<T>(
@@ -99,8 +108,8 @@ class ApiClient {
 
         // On 401 — try refresh before giving up
         if (res.status === 401) {
-            const refreshed = await this.tryRefresh();
-            if (refreshed) {
+            const refreshResult = await this.tryRefresh();
+            if (refreshResult === 'ok') {
                 // Retry the original request with new token
                 headers['Authorization'] = `Bearer ${this.getToken()}`;
                 res = await fetch(`${API_URL}${path}`, {
@@ -108,6 +117,9 @@ class ApiClient {
                     headers,
                     body: body ? JSON.stringify(body) : undefined,
                 });
+            } else if (refreshResult === 'unavailable') {
+                // Backend temporarily down (deploy) — don't clear tokens
+                throw new Error('Сервер временно недоступен. Попробуйте через минуту.');
             }
             if (res.status === 401) {
                 this.clearToken();
