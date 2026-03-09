@@ -7,7 +7,7 @@ name: Tests
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, dev, develop]
     paths:
       - 'backend/**'
       - 'tests/**'

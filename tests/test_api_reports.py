@@ -128,3 +128,72 @@ async def test_income_by_category_empty(client, auth_headers):
     )
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
+
+
+# ─── Dashboard Summary ──────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_dashboard_summary_empty(client, auth_headers):
+    """Dashboard summary with no data should return valid structure."""
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.get("/api/v1/reports/dashboard_summary", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "balance_rub" in data
+    assert "month_income" in data
+    assert "month_expense" in data
+    assert "daily_cashflow" in data
+    assert "expense_by_category" in data
+    assert "inbox_count" in data
+    assert isinstance(data["daily_cashflow"], list)
+    assert isinstance(data["expense_by_category"], list)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_summary_with_date_range(client, auth_headers):
+    """Dashboard summary with explicit date range."""
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.get(
+        "/api/v1/reports/dashboard_summary?date_from=2024-01-01&date_to=2024-01-31",
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["date_from"] == "2024-01-01"
+    assert data["date_to"] == "2024-01-31"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_summary_requires_auth(client):
+    """Dashboard summary requires authentication."""
+    resp = await client.get("/api/v1/reports/dashboard_summary")
+    assert resp.status_code in (401, 403, 422)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_daily_filtered_empty(client, auth_headers):
+    """Dashboard daily filtered with no data should return empty list."""
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.get(
+        "/api/v1/reports/dashboard_daily_filtered?year=2024&month=1",
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_transactions_empty(client, auth_headers):
+    """Dashboard transactions with no data should return empty paginated result."""
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.get(
+        "/api/v1/reports/dashboard_transactions?year=2024&month=1",
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "items" in data
+    assert "total" in data
+    assert isinstance(data["items"], list)
+    assert data["total"] == 0
+
