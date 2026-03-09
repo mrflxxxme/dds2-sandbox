@@ -99,7 +99,11 @@ dds_app/
 │   ├── seeds/                  # Seed data for new projects
 │   │   └── default_categories.py  # 28 default category_ref entries
 │   └── etl/                    # ETL pipeline
-│       ├── parsers.py          # 7 bank statement parsers (VTB RUB/CNY/Multi, WB Main/Payout/Multi/Cabinet)
+│       ├── parsers/            # Bank statement parsers (refactored per-bank)
+│       │   ├── __init__.py     # Re-export всех парсеров
+│       │   ├── vtb.py          # VTB parsers (RUB/CNY/Multi)
+│       │   ├── wb.py           # WB parsers (Main/Payout/Multi/Cabinet)
+│       │   └── helpers.py      # Shared parsing utilities
 │       ├── cost_parsers.py     # Excel normalizers for cost orders
 │       ├── master_logic.py     # Categorization, txn_id, cp_key generation
 │       └── service.py          # Orchestrator: parse → enrich → load
@@ -136,9 +140,14 @@ dds_app/
 │   ├── next.config.mjs         # API rewrite: /api/* → backend:8000
 │   └── Dockerfile              # Multi-stage build (standalone)
 │
-├── tests/                      # Backend tests (13 files, 2300+ lines)
+├── tests/                      # Backend tests (16+ files, 249 tests)
 │   ├── conftest.py             # Fixtures: test DB, test user, auth headers
-│   ├── test_api_*.py           # Integration tests per module
+│   ├── conftest_api.py         # API test fixtures: async client, test DB session
+│   ├── test_api_*.py           # Integration tests per module (8 files)
+│   ├── test_opiu_service.py    # OPIU P&L unit tests (39 tests)
+│   ├── test_fx_service.py      # FX rate extraction/lookup (22 tests)
+│   ├── test_wb_finance_sync.py # WB finance sync parsing (24 tests)
+│   ├── test_wb_bdr_service.py  # BDR enrichment unit tests
 │   ├── test_master_logic.py    # ETL categorization unit tests
 │   ├── test_parsers.py         # Bank statement parser tests
 │   └── test_scheduler.py       # Scheduler resilience tests
@@ -331,7 +340,7 @@ docker compose exec backend pytest tests/test_parser_vtb.py -v
 - **Models** — split по доменам в `models/*.py`, re-export в `models/__init__.py`
 - **Schemas** — split по доменам в `schemas/*.py`, re-export в `schemas/__init__.py`
 - **Errors** — через `HTTPException`, unified формат из `exceptions.py`
-- **Cache** — `@cached(ttl=300)` для тяжёлых отчётов, инвалидация при мутации
+- **Cache** — `@cached(ttl=300)` для тяжёлых отчётов, инвалидация при мутации (см. секцию «Кэширование»)
 - **Performance** — `SlowRequestMiddleware` логирует запросы >500ms (`🐢 SLOW` в логах)
 - **TDD** — СНАЧАЛА тест, потом код. `docker compose exec backend pytest tests/ -x --tb=short` перед каждым коммитом
 - **TESTING=1** — env переменная, отключает rate limiter (устанавливается автоматически в conftest)
@@ -343,6 +352,34 @@ docker compose exec backend pytest tests/test_parser_vtb.py -v
 - **Стили** — CSS variables в `globals.css`, классы: `glass-card`, `data-table`, `btn-*`, `badge-*`
 - **Таблицы** — всегда с кнопкой «📥 Excel» (`exportToExcel()`)
 - **Форматирование** — `formatNumber()` для чисел, `formatDate()` для дат
+
+---
+
+## Кэширование отчётов
+
+**Декоратор:** `@cached(prefix="...", ttl=300)` из `backend/cache.py`
+**Хранилище:** Redis, TTL 5 мин, ключ содержит `project_id`
+
+### Закэшированные сервисы
+
+| Сервис | Cache Prefix | Файл |
+|--------|-------------|------|
+| `get_balance` | `reports:balance` | `services/reports/balance.py` |
+| `get_balance_daily` | `reports:balance_daily` | `services/reports/balance.py` |
+| `get_dds_month` | `reports:dds_month` | `services/reports/dds.py` |
+| `get_income_daily` | `reports:income_daily` | `services/reports/queries.py` |
+| `get_dashboard_summary` | `reports:dashboard` | `services/reports/dashboard.py` |
+| `get_opiu` | `reports:opiu` | `services/opiu_service.py` |
+| `get_wb_bdr` | `reports:wb_bdr` | `services/wb_bdr_service.py` |
+| `calculate_cashflow_daily` | `reports:cashflow` | `services/planning/cashflow.py` |
+
+### Инвалидация кэша
+
+| Мутация | Что очищается | Файл |
+|---------|--------------|------|
+| Импорт выписок | `reports:*`, `dashboard:*`, `planning:*` | `etl/service.py` |
+| WB Finance Sync | `reports:opiu`, `reports:wb_bdr`, `reports:dashboard` | `services/wb_finance_sync.py` |
+| Категоризация (все 3 функции) | `reports:balance`, `reports:dashboard`, `reports:dds_month` | `services/transactions_service.py` |
 
 ---
 
@@ -403,4 +440,4 @@ docker compose exec backend pytest tests/test_parser_vtb.py -v
 
 ---
 
-*Последнее обновление: 2026-03-08 — актуализация структуры, моделей, безопасности, добавлены services/utils/funnel*
+*Последнее обновление: 2026-03-10 — обновлена структура ETL (parsers → per-bank), тесты (249), добавлена секция кэширования*
