@@ -277,6 +277,7 @@ def _empty_totals() -> dict:
         "compensation_ppvz": ZERO,  # ppvz from Добровольная компенсация rows
         "ad_deduction": ZERO,      # deduction from Продвижение/Медиа (fin mode ads)
         "other_deduction": ZERO,   # deduction from Списание за отзыв etc.
+        "loan_deduction": ZERO,    # deduction from WB loan payments (not operating expense)
     }
 
 
@@ -314,6 +315,8 @@ def _accumulate_row(target: dict, row: WbFinanceRow, oper_name: str):
             target["ad_deduction"] += deduction_val
         elif "отзыв" in bonus:
             target["other_deduction"] += deduction_val
+        elif "кредит" in bonus.lower() or "заём" in bonus.lower():
+            target["loan_deduction"] += deduction_val
 
 
 def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
@@ -337,13 +340,19 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
     acceptance_val = other["acceptance"]
 
     # Удержания (deduction) — полное значение из WB API
-    deductions = other["deduction"]
+    deductions_total = other["deduction"]
     # Обратная логистика (rebill) — отдельная статья
     rebill = other["rebill_logistic_cost"]
     # Advertising deduction from fin report (Продвижение + Медиа)
     ad_deduction = other["ad_deduction"]
     # Other deductions (Списание за отзыв etc.)
     other_deduction = other["other_deduction"]
+    # Loan payments (not operating expense)
+    loan_deduction = other["loan_deduction"]
+
+    # Operating deductions = total - ads - loans
+    # Ads are already a separate line (from WbFunnelDaily), loans are not P&L
+    operating_deductions = deductions_total - ad_deduction - loan_deduction
 
     # ── Commission ──
     # TrueStats formula: Продажи(net) - (К перечислению(net) - Компенсация)
@@ -361,9 +370,10 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
 
     # ── To Pay (итого к оплате) ──
     # Сумма к перечислению селлеру на р/с
+    # Exclude ad_deduction (ads tracked separately) and loan_deduction (not P&L)
     to_pay = (
         ppvz_net
-        - logistics - penalties - storage - deductions - acceptance_val
+        - logistics - penalties - storage - operating_deductions - acceptance_val
     )
 
     avg_sale_price = sales_amount / D(str(net_sale_qty)) if net_sale_qty > 0 else ZERO
@@ -393,9 +403,11 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
         "penalties": penalties,
         "storage": storage,
         "acceptance": acceptance_val,
-        "deductions": deductions,
+        "deductions": operating_deductions,
+        "deductions_total": deductions_total,
         "ad_deduction": ad_deduction,
         "other_deduction": other_deduction,
+        "loan_deduction": loan_deduction,
         "rebill": rebill,
     }
 
