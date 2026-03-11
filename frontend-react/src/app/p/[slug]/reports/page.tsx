@@ -4,7 +4,7 @@ import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 
 export default function ReportsPage() {
-    const [tab, setTab] = useState<'dds' | 'bdr' | 'cost_history' | 'balance' | 'fx' | 'customs'>('dds');
+    const [tab, setTab] = useState<'dds' | 'bdr' | 'balance' | 'fx' | 'customs'>('dds');
 
     return (
         <div className="animate-in">
@@ -19,7 +19,6 @@ export default function ReportsPage() {
                 {[
                     { key: 'dds' as const, label: 'ДДС за месяц' },
                     { key: 'bdr' as const, label: 'БДР (WB)' },
-                    { key: 'cost_history' as const, label: 'История себестоимости' },
                     { key: 'balance' as const, label: 'Баланс по дням' },
                     { key: 'fx' as const, label: 'FX Контроль' },
                     { key: 'customs' as const, label: 'Таможня' },
@@ -31,7 +30,6 @@ export default function ReportsPage() {
 
             {tab === 'dds' && <DDSPnL />}
             {tab === 'bdr' && <WbBdr />}
-            {tab === 'cost_history' && <CostHistory />}
             {tab === 'balance' && <BalanceDaily />}
             {tab === 'fx' && <FxControl />}
             {tab === 'customs' && <CustomsControl />}

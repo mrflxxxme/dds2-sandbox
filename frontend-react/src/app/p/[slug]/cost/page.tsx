@@ -1,10 +1,8 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
-import { formatNumber, exportToExcel } from '@/lib/utils';
-
-const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
+import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 
 export default function CostPage() {
     const [tab, setTab] = useState<'history' | 'bulk'>('history');
@@ -14,7 +12,7 @@ export default function CostPage() {
             <div className="page-header">
                 <div>
                     <h1 className="page-title">💰 Себестоимость</h1>
-                    <p className="page-subtitle">Управление себестоимостью товаров — ручной ввод и массовая загрузка</p>
+                    <p className="page-subtitle">История себестоимости по заказам и массовая загрузка</p>
                 </div>
             </div>
             <div style={{ display: 'flex', gap: 4, marginBottom: 20 }}>
@@ -29,122 +27,129 @@ export default function CostPage() {
     );
 }
 
-/* ─── Tab 1: История себестоимости (Cost History / Overrides) ──── */
+/* ─── Tab 1: История себестоимости (from Reports) ──── */
 
 function CostHistory() {
-    const [costs, setCosts] = useState<any>({ overrides: [], missing: [] });
-    const [editCost, setEditCost] = useState<{ nm_id: number; cost_price: string } | null>(null);
+    const [data, setData] = useState<any>(null);
     const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [search, setSearch] = useState('');
+    const [brand, setBrand] = useState('');
 
-    useEffect(() => { loadCosts(); }, []);
-    const loadCosts = async () => {
-        try { setCosts(await api.getFunnelCosts()); } catch { }
-        setLoading(false);
-    };
-
-    const handleSaveCost = async () => {
-        if (!editCost) return;
+    const load = React.useCallback(async () => {
+        setLoading(true);
+        setError('');
         try {
-            await api.setFunnelCost(editCost.nm_id, parseFloat(editCost.cost_price));
-            setEditCost(null);
-            loadCosts();
-        } catch (e: any) { alert(e.message); }
+            const r = await api.getCostHistory(search || undefined, brand || undefined);
+            setData(r);
+        } catch (e: any) { setError(e.message || 'Ошибка'); }
+        setLoading(false);
+    }, [search, brand]);
+
+    useEffect(() => { load(); }, [load]);
+
+    if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>⏳ Загрузка...</div>;
+    if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--danger)' }}>❌ {error}</div>;
+    if (!data || !data.articles?.length) return <div className="glass-card" style={{ padding: 32, textAlign: 'center', opacity: 0.6 }}>Нет данных о себестоимости</div>;
+
+    const orders: Array<{ order_no: string; ship_date: string }> = data.orders || [];
+    const articles: any[] = data.articles || [];
+    const brands: string[] = data.brands || [];
+
+    const handleExport = () => {
+        const rows = articles.map((a: any) => {
+            const row: Record<string, any> = {
+                'Артикул': a.article_seller,
+                'Артикул WB': a.article_wb || '',
+                'Баркод': a.barcode,
+                'Бренд': a.brand || '',
+                'Категория': a.subject,
+            };
+            orders.forEach((o: any) => {
+                const c = a.costs?.[o.order_no];
+                row[`Заказ ${o.order_no}`] = c ? c.cost : '';
+                row[`Кол-во ${o.order_no}`] = c ? c.qty : '';
+            });
+            row['Средняя'] = a.avg_cost;
+            row['Последняя'] = a.latest_cost;
+            return row;
+        });
+        exportToExcel(rows, `Себестоимость`);
     };
 
-    if (loading) return <div style={{ padding: 40, color: 'var(--color-text-muted)' }}>Загрузка...</div>;
+    const selectStyle: React.CSSProperties = {
+        padding: '8px 12px', borderRadius: 8,
+        border: '1px solid var(--border)',
+        background: 'var(--bg-secondary)', color: 'var(--text-primary)',
+    };
 
     return (
         <div>
-            {/* Toolbar */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                <div style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>
-                    Без себестоимости: <b style={{ color: 'var(--color-warning)' }}>{costs.missing?.length || 0}</b> · Установлено: <b style={{ color: 'var(--color-success)' }}>{costs.overrides?.length || 0}</b>
-                </div>
-                {costs.overrides?.length > 0 && (
-                    <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(costs.overrides, 'cost_history')}>📥 Excel</button>
-                )}
+            <div style={{ display: 'flex', gap: 12, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+                <input
+                    type="text" placeholder="🔍 Поиск по артикулу / WB артикулу"
+                    value={search}
+                    onChange={(e: any) => setSearch(e.target.value)}
+                    onKeyDown={(e: any) => e.key === 'Enter' && load()}
+                    style={{ ...selectStyle, width: 280 }}
+                />
+                <select value={brand} onChange={(e: any) => setBrand(e.target.value)} style={selectStyle}>
+                    <option value="">Все бренды</option>
+                    {brands.map((b: string) => <option key={b} value={b}>{b}</option>)}
+                </select>
+                <button className="btn btn-secondary btn-sm" onClick={load}>🔄</button>
+                <button className="btn btn-secondary btn-sm" onClick={handleExport}>📥 Excel</button>
+                <span style={{ opacity: 0.5, fontSize: 13 }}>{articles.length} артикулов × {orders.length} заказов</span>
             </div>
 
-            {/* Missing costs */}
-            {costs.missing?.length > 0 && (
-                <div className="glass-card" style={{ marginBottom: 16 }}>
-                    <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 8, padding: '12px 16px 0' }}>
-                        ⚠️ Без себестоимости ({costs.missing.length})
-                    </h3>
-                    <div style={{ overflowX: 'auto' }}>
-                        <table className="data-table">
-                            <thead><tr><th>nmId</th><th>Артикул</th><th>Предмет</th><th>Бренд</th><th>Себестоимость ₽</th><th></th></tr></thead>
-                            <tbody>
-                                {costs.missing.map((m: any) => (
-                                    <tr key={m.nm_id}>
-                                        <td><a href={`https://www.wildberries.ru/catalog/${m.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{m.nm_id}</a></td>
-                                        <td>{m.vendor_code}</td><td>{m.subject}</td><td>{m.brand}</td>
-                                        <td>{editCost?.nm_id === m.nm_id ? (
-                                            <input type="number" value={editCost.cost_price} autoFocus
-                                                onChange={e => setEditCost({ ...editCost, cost_price: e.target.value })}
-                                                onKeyDown={e => e.key === 'Enter' && handleSaveCost()}
-                                                style={{ width: 100, background: 'var(--color-bg)', border: '1px solid var(--color-accent)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)' }} />
-                                        ) : '—'}</td>
-                                        <td>{editCost?.nm_id === m.nm_id ? (
-                                            <div style={{ display: 'flex', gap: 4 }}>
-                                                <button className="btn-primary" onClick={handleSaveCost} style={{ padding: '2px 8px', fontSize: 12 }}>✓</button>
-                                                <button className="btn-secondary" onClick={() => setEditCost(null)} style={{ padding: '2px 8px', fontSize: 12 }}>✕</button>
-                                            </div>
-                                        ) : (
-                                            <button className="btn-secondary" onClick={() => setEditCost({ nm_id: m.nm_id, cost_price: '' })} style={{ padding: '2px 8px', fontSize: 12 }}>✏️</button>
-                                        )}</td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            )}
-
-            {/* Existing overrides */}
-            {costs.overrides?.length > 0 && (
-                <div className="glass-card">
-                    <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 8, padding: '12px 16px 0' }}>
-                        ✅ Установленные ({costs.overrides.length})
-                    </h3>
-                    <div style={{ overflowX: 'auto' }}>
-                        <table className="data-table">
-                            <thead><tr><th>nmId</th><th>Себестоимость ₽</th><th></th></tr></thead>
-                            <tbody>
-                                {costs.overrides.map((o: any) => (
-                                    <tr key={o.nm_id}>
-                                        <td><a href={`https://www.wildberries.ru/catalog/${o.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{o.nm_id}</a></td>
-                                        <td>{editCost?.nm_id === o.nm_id ? (
-                                            <input type="number" value={editCost.cost_price} autoFocus
-                                                onChange={e => setEditCost({ ...editCost, cost_price: e.target.value })}
-                                                onKeyDown={e => e.key === 'Enter' && handleSaveCost()}
-                                                style={{ width: 100, background: 'var(--color-bg)', border: '1px solid var(--color-accent)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)' }} />
-                                        ) : fmt(o.cost_price)}</td>
-                                        <td>
-                                            <div style={{ display: 'flex', gap: 4 }}>
-                                                {editCost?.nm_id === o.nm_id ? (
-                                                    <>
-                                                        <button className="btn-primary" onClick={handleSaveCost} style={{ padding: '2px 8px', fontSize: 12 }}>✓</button>
-                                                        <button className="btn-secondary" onClick={() => setEditCost(null)} style={{ padding: '2px 8px', fontSize: 12 }}>✕</button>
-                                                    </>
-                                                ) : (
-                                                    <button className="btn-secondary" onClick={() => setEditCost({ nm_id: o.nm_id, cost_price: String(o.cost_price) })} style={{ padding: '2px 8px', fontSize: 12 }}>✏️</button>
-                                                )}
-                                            </div>
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            )}
-
-            {costs.missing?.length === 0 && costs.overrides?.length === 0 && (
-                <div className="glass-card" style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>
-                    Нет данных. Дождитесь автоматической синхронизации воронки.
-                </div>
-            )}
+            <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
+                <table className="data-table" style={{ fontSize: 13, whiteSpace: 'nowrap' }}>
+                    <thead>
+                        <tr>
+                            <th style={{ position: 'sticky', left: 0, background: 'var(--bg-secondary)', zIndex: 2, minWidth: 180 }}>Артикул</th>
+                            <th style={{ minWidth: 100 }}>WB Артикул</th>
+                            <th style={{ minWidth: 80 }}>Бренд</th>
+                            <th style={{ minWidth: 100 }}>Категория</th>
+                            <th style={{ textAlign: 'right', fontWeight: 700, color: 'var(--primary)' }}>Средняя ₽</th>
+                            <th style={{ textAlign: 'right', fontWeight: 700, color: 'var(--success)' }}>Последняя ₽</th>
+                            {orders.map((o: any) => (
+                                <th key={o.order_no} style={{ textAlign: 'right', minWidth: 100 }}>
+                                    <div>{o.order_no}</div>
+                                    <div style={{ fontSize: 10, opacity: 0.5 }}>{o.ship_date ? formatDate(o.ship_date) : ''}</div>
+                                </th>
+                            ))}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {articles.map((a: any, i: number) => {
+                            return (
+                                <tr key={i}>
+                                    <td style={{ position: 'sticky', left: 0, background: 'var(--bg-primary)', zIndex: 1, fontWeight: 600 }}>{a.article_seller}</td>
+                                    <td style={{ opacity: 0.7, fontSize: 12 }}>{a.article_wb || '—'}</td>
+                                    <td><span className="badge badge-info" style={{ fontSize: 11 }}>{a.brand || '—'}</span></td>
+                                    <td style={{ opacity: 0.7 }}>{a.subject || '—'}</td>
+                                    <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--primary)' }}>{a.avg_cost ? formatNumber(a.avg_cost) : '—'}</td>
+                                    <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--success)' }}>{a.latest_cost ? formatNumber(a.latest_cost) : '—'}</td>
+                                    {orders.map((o: any, j: number) => {
+                                        const c = a.costs?.[o.order_no];
+                                        if (!c) return <td key={j} style={{ textAlign: 'right', opacity: 0.2 }}>—</td>;
+                                        const prev = j < orders.length - 1 ? (a.costs?.[orders[j + 1]?.order_no]?.cost || 0) : 0;
+                                        const diff = prev > 0 ? ((c.cost - prev) / prev * 100) : 0;
+                                        const color = diff > 5 ? 'var(--danger)' : diff < -5 ? 'var(--success)' : 'var(--text-primary)';
+                                        return (
+                                            <td key={j} style={{ textAlign: 'right', color }}>
+                                                <div>{formatNumber(c.cost)}</div>
+                                                {diff !== 0 && <div style={{ fontSize: 10, opacity: 0.6 }}>{diff > 0 ? '↑' : '↓'}{Math.abs(diff).toFixed(1)}%</div>}
+                                                <div style={{ fontSize: 10, opacity: 0.4 }}>{c.qty} шт</div>
+                                            </td>
+                                        );
+                                    })}
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            </div>
         </div>
     );
 }
