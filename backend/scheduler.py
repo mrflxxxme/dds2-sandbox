@@ -482,51 +482,72 @@ def restart_backfill_jobs():
         logger.error(f"Failed to restart backfill jobs: {e}")
 
 
-# ─── WB Finance Report sync (Monday) ────────────────────────────────────────
+# ─── WB Finance Report sync (with retry) ─────────────────────────────────────
 
 async def sync_all_projects_wb_finance():
-    """Weekly sync: download WB reportDetailByPeriod for previous week.
+    """Smart sync: check max date in DB and fill gap to today.
 
-    WB generates this report once per week on Monday for the previous week.
-    Also does initial sync (last 2 months) if project has no data yet.
+    Runs multiple times on Mon/Tue. Skips if data is already fresh.
+    - No data → initial sync (last 60 days)
+    - Has data but stale → sync from max_date+1 to today
+    - Data fresh → skip
     """
-    logger.info("💰 WB Finance sync: starting weekly sync for all projects")
+    logger.info("💰 WB Finance sync: starting for all projects")
     project_ids = await _get_sync_project_ids()
 
     if not project_ids:
         logger.info("WB Finance sync: no projects with WB keys, skipping")
         return
 
-    from backend.services.wb_finance_sync import sync_wb_finance, ensure_initial_sync
+    from backend.services.wb_finance_sync import sync_wb_finance
+    from sqlalchemy import select, func as sa_func
+    from backend.models.wb_finance import WbFinanceRow
+
+    today = date.today()
 
     for pid in project_ids:
         try:
             async with AsyncSessionLocal() as db:
-                # First ensure initial data exists (2 months)
-                init_result = await ensure_initial_sync(db, pid)
-                if init_result:
+                # Check what data we already have
+                result = await db.execute(
+                    select(sa_func.max(WbFinanceRow.rr_dt))
+                    .where(WbFinanceRow.project_id == pid)
+                )
+                max_date = result.scalar()
+
+                if max_date is None:
+                    # No data at all → initial sync (last 60 days)
+                    date_from = today - timedelta(days=60)
                     logger.info(
-                        f"💰 WB Finance: project {pid} initial sync: "
-                        f"{init_result.get('rows_synced', 0)} rows"
+                        f"💰 WB Finance: project {pid} — initial sync "
+                        f"{date_from} → {today}"
                     )
-                    continue  # Initial sync already covers recent data
+                else:
+                    # Data exists — check freshness
+                    # Skip if data is less than 5 days old (WB needs time)
+                    days_behind = (today - max_date).days
+                    if days_behind < 5:
+                        logger.info(
+                            f"💰 WB Finance: project {pid} — fresh "
+                            f"(max_date={max_date}, {days_behind}d behind), skip"
+                        )
+                        continue
 
-                # Sync previous week (Mon-Sun)
-                today = date.today()
-                # Previous Monday
-                days_since_monday = today.weekday()  # Mon=0
-                last_monday = today - timedelta(days=days_since_monday + 7)
-                last_sunday = last_monday + timedelta(days=6)
+                    # Sync from day after last known date
+                    date_from = max_date + timedelta(days=1)
+                    logger.info(
+                        f"💰 WB Finance: project {pid} — gap-fill "
+                        f"{date_from} → {today}"
+                    )
 
+                result = await sync_wb_finance(db, pid, date_from, today)
+                rows = result.get("rows_synced", 0)
+                status = result.get("status", "?")
                 logger.info(
-                    f"💰 WB Finance: project {pid} — "
-                    f"syncing {last_monday} → {last_sunday}"
+                    f"💰 WB Finance: project {pid} — {status}, "
+                    f"{rows} rows synced"
                 )
-                result = await sync_wb_finance(db, pid, last_monday, last_sunday)
-                logger.info(
-                    f"💰 WB Finance: project {pid} — "
-                    f"{result.get('rows_synced', 0)} rows synced"
-                )
+
         except Exception as e:
             logger.error(f"💰 WB Finance sync failed for project {pid}: {e}")
 
@@ -645,15 +666,23 @@ def start_scheduler():
         misfire_grace_time=60,
     )
 
-    # WB finance report sync: Monday 08:00 MSK — previous week
-    scheduler.add_job(
-        sync_all_projects_wb_finance,
-        trigger=CronTrigger(day_of_week="mon", hour=8, minute=0, timezone=MSK),
-        id="wb_finance_sync_mon",
-        name="WB finance report sync (Monday 08:00 MSK)",
-        replace_existing=True,
-        misfire_grace_time=3600,
-    )
+    # WB finance report sync: Mon 08/14/20 + Tue 08 — retry until data arrives
+    for job_hour, job_day, job_suffix in [
+        (8, "mon", "mon_08"),
+        (14, "mon", "mon_14"),
+        (20, "mon", "mon_20"),
+        (8, "tue", "tue_08"),
+    ]:
+        scheduler.add_job(
+            sync_all_projects_wb_finance,
+            trigger=CronTrigger(
+                day_of_week=job_day, hour=job_hour, minute=0, timezone=MSK,
+            ),
+            id=f"wb_finance_sync_{job_suffix}",
+            name=f"WB finance sync ({job_day.upper()} {job_hour:02d}:00)",
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
 
     # Report cache prewarm: every hour — keeps OPIU/BDR always hot
     scheduler.add_job(
@@ -677,7 +706,7 @@ def start_scheduler():
 
     scheduler.start()
     logger.info(
-        "✅ Scheduler started — daily sync 3x/day + backfill + ad check + wb_finance Monday + prewarm 1h"
+        "✅ Scheduler started — daily sync 3x/day + backfill + ad check + wb_finance Mon-Tue retry + prewarm 1h"
     )
 
 
