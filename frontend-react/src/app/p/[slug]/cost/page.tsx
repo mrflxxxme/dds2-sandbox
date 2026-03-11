@@ -174,7 +174,23 @@ function BulkCost() {
 
     useEffect(() => {
         api.getNomenclature().then(setNomenclature).catch(() => {});
-        api.getFunnelCosts().then((data: any) => setMissing(data.missing || [])).catch(() => {});
+        // Load missing from BDR (same source as "⚠️ Товары без себестоимости" in БДР report)
+        const fmt = (d: Date) => d.toISOString().split('T')[0];
+        const now = new Date();
+        const day = now.getDay();
+        const diffToLastSun = day === 0 ? 7 : day;
+        const lastSun = new Date(now); lastSun.setDate(now.getDate() - diffToLastSun);
+        const lastMon = new Date(lastSun); lastMon.setDate(lastSun.getDate() - 6);
+        api.getWbBdr(fmt(lastMon), fmt(lastSun)).then((data: any) => {
+            const articles = data?.articles || [];
+            const noCost = articles.filter((a: any) => !a.cost_price || a.cost_price === 0);
+            setMissing(noCost.map((a: any) => ({
+                nm_id: a.nm_id,
+                vendor_code: a.sa_name || '',
+                subject: a.subject || '',
+                brand: a.brand || '',
+            })));
+        }).catch(() => {});
     }, []);
 
     const barcodeMap = new Map<string, string>();
