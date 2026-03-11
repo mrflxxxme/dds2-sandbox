@@ -125,6 +125,10 @@ async def get_wb_bdr(
         if article and article.lower() not in sa_name.lower():
             continue
 
+        # Skip WB system placeholder — not a real product
+        if sa_name.lower() in ("неопознанный товар",):
+            continue
+
         # Get or create article bucket
         if sa_name not in articles_data:
             articles_data[sa_name] = {
