@@ -229,10 +229,10 @@ async def get_opiu(
     stor_m = _metric_monthly("storage")
     stor_t = _metric_total("storage")
 
-    # ── Прочие удержания (without ad deductions to avoid double-counting) ──
-    ded_m = {mk: float(monthly_data[mk]["deductions"]) - float(monthly_data[mk]["ad_deduction"])
+    # ── Прочие удержания (without ad deductions and loan payments) ──
+    ded_m = {mk: float(monthly_data[mk]["deductions"]) - float(monthly_data[mk]["ad_deduction"]) - float(monthly_data[mk].get("loan_deduction", 0))
              for mk in months_sorted}
-    ded_t = float(total_data["deductions"]) - float(total_data["ad_deduction"])
+    ded_t = float(total_data["deductions"]) - float(total_data["ad_deduction"]) - float(total_data.get("loan_deduction", 0))
 
     # ── Платная приёмка ──
     acc_m = _metric_monthly("acceptance")
@@ -341,6 +341,7 @@ def _empty_totals() -> dict:
         "acceptance": ZERO,
         "deductions": ZERO,
         "ad_deduction": ZERO,
+        "loan_deduction": ZERO,
         "additional_payment": ZERO,
         "compensation_ppvz": ZERO,
         # Internal fields for commission calculation
@@ -387,6 +388,8 @@ def _accumulate_row(target: dict, row: WbFinanceRow, doc_type: str, oper_name: s
         if deduction_val and bonus:
             if "Продвижение" in bonus or "Медиа" in bonus:
                 target["ad_deduction"] += deduction_val
+            elif "кредит" in bonus.lower() or "заём" in bonus.lower():
+                target["loan_deduction"] += deduction_val
 
     # Additional payment (bonus points)
     if is_sale or is_return:
