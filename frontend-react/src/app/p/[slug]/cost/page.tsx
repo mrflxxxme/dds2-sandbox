@@ -349,6 +349,20 @@ function BulkCost() {
                             ⚠️ Без себестоимости ({missing.length})
                         </button>
                     )}
+                    {rows.some(r => r.barcode.trim()) && (
+                        <button className="btn btn-secondary btn-sm" onClick={() => {
+                            const data = rows.filter(r => r.barcode.trim()).map((r, i) => ({
+                                '№': i + 1,
+                                'Название': r.name || '—',
+                                'Баркод / nmId': r.barcode,
+                                'Себестоимость': r.cost_price || '',
+                                'Валюта': r.currency,
+                            }));
+                            exportToExcel(data, 'Без_себестоимости');
+                        }}>
+                            📥 Excel
+                        </button>
+                    )}
                     <button className="btn btn-secondary btn-sm" onClick={handleClear}>
                         🗑 Очистить всё
                     </button>
