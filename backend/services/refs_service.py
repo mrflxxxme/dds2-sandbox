@@ -12,6 +12,10 @@ from backend.models import (
     Account, CounterpartyCategory, Override,
     OpeningBalance, CategoryRef,
 )
+from backend.cache import invalidate_cache
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 # ─── Accounts ────────────────────────────────────────────────────────────────
@@ -49,6 +53,7 @@ async def upsert_account(
     db.add(acc)
     await db.commit()
     await db.refresh(acc)
+    await invalidate_cache("reports")
     return acc
 
 
@@ -65,6 +70,7 @@ async def delete_account(db: AsyncSession, project_id: int, account_id: int) -> 
         return False
     await db.delete(acc)
     await db.commit()
+    await invalidate_cache("reports")
     return True
 
 
@@ -106,6 +112,7 @@ async def upsert_cp_category(
     db.add(cpc)
     await db.commit()
     await db.refresh(cpc)
+    await invalidate_cache("reports")
     return cpc
 
 
@@ -122,6 +129,7 @@ async def delete_cp_category(db: AsyncSession, project_id: int, cpc_id: int) -> 
         return False
     await db.delete(cpc)
     await db.commit()
+    await invalidate_cache("reports")
     return True
 
 
@@ -149,6 +157,7 @@ async def delete_override(db: AsyncSession, project_id: int, override_id: int) -
         return False
     await db.delete(ovr)
     await db.commit()
+    await invalidate_cache("reports")
     return True
 
 
@@ -188,6 +197,7 @@ async def upsert_opening_balance(
     db.add(ob)
     await db.commit()
     await db.refresh(ob)
+    await invalidate_cache("reports")
     return ob
 
 

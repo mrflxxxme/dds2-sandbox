@@ -8,7 +8,9 @@ This __init__.py re-exports everything for backward compatibility:
 
 from backend.etl.parsers.vtb import parse_vtb_rub, parse_vtb_cny, parse_vtb_multi
 from backend.etl.parsers.wb import parse_wb_main, parse_wb_payout, parse_wb_payout_cabinet, parse_wb_multi
-from backend.etl.parsers.helpers import NORM_COLS
+from backend.etl.parsers.helpers import (
+    NORM_COLS, _find_columns, _to_decimal, _clean_str, _parse_date,
+)
 
 import pandas as pd
 
@@ -41,6 +43,10 @@ __all__ = [
     "parse_statement",
     "SOURCE_PARSERS",
     "NORM_COLS",
+    "_find_columns",
+    "_to_decimal",
+    "_clean_str",
+    "_parse_date",
     "parse_vtb_rub",
     "parse_vtb_cny",
     "parse_vtb_multi",

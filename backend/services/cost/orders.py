@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import CostOrder, CostOrderItem, PlannedPayment
 from backend.services.cost.helpers import _order_no_to_int, safe_float, auto_link_customs_dt
+from backend.cache import invalidate_cache
 
 
 async def get_cost_orders(db: AsyncSession, project_id: int, limit: int = 500, offset: int = 0):
@@ -106,6 +107,7 @@ async def create_cost_order(db: AsyncSession, project_id: int, payload: dict):
     if dt_number:
         await auto_link_customs_dt(order_no, dt_number, db)
 
+    await invalidate_cache("reports")
     return {"ok": True, "order_no": order_no}, None
 
 
@@ -175,6 +177,7 @@ async def update_cost_order(db: AsyncSession, project_id: int, order_no: str, pa
         except Exception:
             pass  # Don't fail the update if plan gen fails (e.g. no items yet)
 
+    await invalidate_cache("reports")
     return {"ok": True, "order_no": final_order_no}, None
 
 
@@ -187,4 +190,5 @@ async def delete_cost_order(db: AsyncSession, project_id: int, order_no: str):
         return None
     await db.delete(order)
     await db.commit()
+    await invalidate_cache("reports")
     return True

@@ -23,7 +23,7 @@ class Transaction(Base, SoftDeleteMixin):
     __tablename__ = "transactions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     bank: Mapped[str] = mapped_column(String(20), nullable=False)
     account: Mapped[str] = mapped_column(String(50), ForeignKey("accounts.account"), nullable=False)
@@ -90,7 +90,7 @@ class ImportLog(Base):
     __tablename__ = "import_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     filename: Mapped[str] = mapped_column(String(300))
     source_type: Mapped[str] = mapped_column(String(30))
     imported_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
