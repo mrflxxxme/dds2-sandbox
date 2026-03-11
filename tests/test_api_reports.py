@@ -197,3 +197,80 @@ async def test_dashboard_transactions_empty(client, auth_headers):
     assert isinstance(data["items"], list)
     assert data["total"] == 0
 
+
+# ─── WB BDR ─────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_wb_bdr_empty(client, auth_headers):
+    """WB BDR with no finance data should return valid structure."""
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.get(
+        "/api/v1/reports/wb_bdr?date_from=2024-01-01&date_to=2024-01-31",
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "articles" in data
+    assert "summary" in data
+    assert isinstance(data["articles"], list)
+
+
+@pytest.mark.asyncio
+async def test_wb_bdr_requires_params(client, auth_headers):
+    """WB BDR requires date_from and date_to."""
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.get("/api/v1/reports/wb_bdr", headers=headers)
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_wb_bdr_requires_auth(client):
+    """WB BDR requires authentication."""
+    resp = await client.get(
+        "/api/v1/reports/wb_bdr?date_from=2024-01-01&date_to=2024-01-31"
+    )
+    assert resp.status_code in (401, 403, 422)
+
+
+# ─── OPIU ────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_opiu_empty(client, auth_headers):
+    """OPIU with no finance data should return valid structure."""
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.get(
+        "/api/v1/reports/opiu?date_from=2024-01-01&date_to=2024-03-31",
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "rows" in data
+    assert "months" in data
+    assert isinstance(data["rows"], list)
+
+
+@pytest.mark.asyncio
+async def test_opiu_requires_params(client, auth_headers):
+    """OPIU requires date_from and date_to."""
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.get("/api/v1/reports/opiu", headers=headers)
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_opiu_requires_auth(client):
+    """OPIU requires authentication."""
+    resp = await client.get(
+        "/api/v1/reports/opiu?date_from=2024-01-01&date_to=2024-03-31"
+    )
+    assert resp.status_code in (401, 403, 422)
+
+
+# ─── Cache Prewarm ──────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_prewarm_project_no_crash():
+    """prewarm_project should not crash even for non-existent project."""
+    from backend.scheduler import prewarm_project
+    # Should complete without raising (fail-safe design)
+    await prewarm_project(999999)
