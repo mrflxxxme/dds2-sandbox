@@ -80,12 +80,62 @@ export default function ContainerLoaderPage() {
             </div>
 
             {/* Boxes */}
-            <div className="glass-card" style={{ marginBottom: 16 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <div className="glass-card" style={{ marginBottom: 16 }}
+                onPaste={(e: React.ClipboardEvent) => {
+                    const text = e.clipboardData.getData('text/plain');
+                    if (!text.includes('\t') && !text.includes('\n')) return;
+                    e.preventDefault();
+                    const lines = text.trim().split('\n').map(l => l.split('\t'));
+                    const parsed: BoxType[] = [];
+                    for (const cols of lines) {
+                        if (cols.length < 3) continue;
+                        let label = '', l = 0, w = 0, h = 0, qty = 1;
+                        if (cols.length >= 5) {
+                            label = cols[0].trim();
+                            l = parseFloat(cols[1]) || 0;
+                            w = parseFloat(cols[2]) || 0;
+                            h = parseFloat(cols[3]) || 0;
+                            qty = parseInt(cols[4]) || 1;
+                        } else if (cols.length === 4) {
+                            const first = cols[0].trim();
+                            if (isNaN(Number(first))) {
+                                label = first;
+                                l = parseFloat(cols[1]) || 0;
+                                w = parseFloat(cols[2]) || 0;
+                                h = parseFloat(cols[3]) || 0;
+                            } else {
+                                l = parseFloat(first) || 0;
+                                w = parseFloat(cols[1]) || 0;
+                                h = parseFloat(cols[2]) || 0;
+                                qty = parseInt(cols[3]) || 1;
+                            }
+                        } else {
+                            l = parseFloat(cols[0]) || 0;
+                            w = parseFloat(cols[1]) || 0;
+                            h = parseFloat(cols[2]) || 0;
+                        }
+                        if (l > 0 && w > 0 && h > 0) {
+                            if (!label) label = `Коробка ${parsed.length + 1}`;
+                            parsed.push({ l, w, h, qty, label });
+                        }
+                    }
+                    if (parsed.length > 0) setBoxes(parsed);
+                }}
+            >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                     <label className="form-label" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '1px' }}>
                         Коробки (размеры в см)
                     </label>
-                    <button className="btn btn-success btn-sm" onClick={addBox}>+ Добавить</button>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                        <button className="btn btn-success btn-sm" onClick={addBox}>+ Добавить</button>
+                    </div>
+                </div>
+                <div style={{
+                    fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 10,
+                    padding: '6px 10px', borderRadius: 6,
+                    background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.12)',
+                }}>
+                    💡 Вставьте из Excel/Sheets (Ctrl+V): <b>Название, Д, Ш, В, Кол</b> или <b>Д, Ш, В, Кол</b> или <b>Д, Ш, В</b>
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {boxes.map((b, i) => (
