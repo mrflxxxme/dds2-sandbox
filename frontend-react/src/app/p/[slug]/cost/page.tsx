@@ -183,7 +183,7 @@ function BulkCost() {
         const lastMon = new Date(lastSun); lastMon.setDate(lastSun.getDate() - 6);
         api.getWbBdr(fmt(lastMon), fmt(lastSun)).then((data: any) => {
             const articles = data?.articles || [];
-            const noCost = articles.filter((a: any) => !a.cost_price || a.cost_price === 0);
+            const noCost = articles.filter((a: any) => (!a.cost_price || a.cost_price === 0) && a.nm_id && a.nm_id !== 0);
             setMissing(noCost.map((a: any) => ({
                 nm_id: a.nm_id,
                 vendor_code: a.sa_name || '',
