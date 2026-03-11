@@ -56,7 +56,10 @@ tests/           — 16+ files, 249 tests
 - Запрос без `project_id` → `project_select(Model, project_id)`
 - Без `is_deleted` → `project_select_active(Model, project_id)`
 - List без пагинации → `limit/offset`
-- Мутация без инвалидации → `await invalidate_cache("reports:*")`
+- Мутация без инвалидации → `await invalidate_cache("reports:...")`
+- `invalidate_cache` **сам добавляет** `:*` → передавать ТОЛЬКО prefix без wildcard
+- Cache key format: `reports:{report}:project_id={pid}:...` → проверь формат в Redis перед написанием invalidation
+- Массовый flush кэша → НЕ удалять все ключи разом (worker starvation), стартовать по одному
 - `ilike(f"%{input}%")` → экранировать `%`/`_`
 - Сервис > 400 строк → разбить
 - `db.delete(model)` → `model.soft_delete()` (наследовать `SoftDeleteMixin`)
@@ -110,7 +113,21 @@ CORS → RateLimit → RequestID → SlowQuery → ErrorHandler
 
 ## Кэширование
 Cached: balance, balance_daily, dds_month, income_daily, dashboard, opiu, wb_bdr, cashflow
+Key format: `reports:{type}:project_id={pid}:date_from={d1}:date_to={d2}`
 Invalidation: импорт → `reports:*`, WB sync → opiu/wb_bdr/dashboard, категоризация → balance/dashboard/dds_month
+`invalidate_cache(prefix)` добавляет `:*` автоматически — **НЕ передавать wildcard**
+
+## WB Finance deductions
+- `deduction` поле содержит: рекламу (Продвижение/Медиа), кредиты (заём), отзывы, прочее
+- Реклама (`ad_deduction`) — **отдельная статья**, НЕ включать в `to_pay` / `Прочие удержания`
+- Кредиты (`loan_deduction`) — **финансовая операция**, НЕ включать в операционную прибыль
+- Только `other_deduction` (отзывы и пр.) → операционные расходы
+- При добавлении нового типа удержаний → обновить ОБОИХ: `wb_bdr_service.py` И `opiu_service.py`
+
+## Инфраструктура
+- Uvicorn workers: минимум **4** (Dockerfile.backend)
+- При 2 workers + тяжёлые отчёты → **worker starvation** (сервер не отвечает)
+- Deployment: после изменения кэш-формул → сбрасывать кэш **по одному ключу**, не все разом
 
 ## WB API
 - Rate limits: `asyncio.Semaphore`, отдельные semaphore для Stats и Adv API
