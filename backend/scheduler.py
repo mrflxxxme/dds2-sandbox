@@ -666,20 +666,15 @@ def start_scheduler():
         misfire_grace_time=60,
     )
 
-    # WB finance report sync: Mon 08/14/20 + Tue 08 — retry until data arrives
-    for job_hour, job_day, job_suffix in [
-        (8, "mon", "mon_08"),
-        (14, "mon", "mon_14"),
-        (20, "mon", "mon_20"),
-        (8, "tue", "tue_08"),
-    ]:
+    # WB finance report sync: Mon 03/06/09/10/11/12 — retry until data arrives
+    for job_hour in [3, 6, 9, 10, 11, 12]:
         scheduler.add_job(
             sync_all_projects_wb_finance,
             trigger=CronTrigger(
-                day_of_week=job_day, hour=job_hour, minute=0, timezone=MSK,
+                day_of_week="mon", hour=job_hour, minute=0, timezone=MSK,
             ),
-            id=f"wb_finance_sync_{job_suffix}",
-            name=f"WB finance sync ({job_day.upper()} {job_hour:02d}:00)",
+            id=f"wb_finance_sync_mon_{job_hour:02d}",
+            name=f"WB finance sync (MON {job_hour:02d}:00)",
             replace_existing=True,
             misfire_grace_time=3600,
         )
