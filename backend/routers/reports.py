@@ -68,6 +68,8 @@ async def get_wb_bdr(
     db: AsyncSession = Depends(get_db),
 ):
     """WB BDR (P&L) report from locally cached finance data."""
+    from backend.services.wb_finance_sync import ensure_initial_sync
+    await ensure_initial_sync(db, project.id)
     from backend.services import wb_bdr_service
     return await wb_bdr_service.get_wb_bdr(
         db, project.id, date_from, date_to, brand=brand, article=article,
@@ -111,6 +113,8 @@ async def get_opiu(
     db: AsyncSession = Depends(get_db),
 ):
     """ОПИУ (P&L) report — monthly breakdown with hierarchical rows."""
+    from backend.services.wb_finance_sync import ensure_initial_sync
+    await ensure_initial_sync(db, project.id)
     from backend.services import opiu_service
     return await opiu_service.get_opiu(
         db, project.id, date_from, date_to, brand=brand, article=article,

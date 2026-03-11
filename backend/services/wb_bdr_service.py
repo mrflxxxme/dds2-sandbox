@@ -45,7 +45,7 @@ D = Decimal
 ZERO = D("0")
 
 
-@cached(prefix="reports:wb_bdr", ttl=300)
+@cached(prefix="reports:wb_bdr", ttl=3600)
 async def get_wb_bdr(
     db: AsyncSession,
     project_id: int,
@@ -59,9 +59,8 @@ async def get_wb_bdr(
     Enriches with ads, cost, tax.
     Returns { summary, articles, brands, period, total_rows, sync_status, tax_info }
     """
-    # ── 1. Ensure we have data (trigger initial sync if needed) ──
-    from backend.services.wb_finance_sync import ensure_initial_sync, get_sync_status
-    await ensure_initial_sync(db, project_id)
+    # ── 1. Get sync status ──
+    from backend.services.wb_finance_sync import get_sync_status
 
     sync_status = await get_sync_status(db, project_id)
 

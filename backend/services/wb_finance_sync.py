@@ -132,6 +132,11 @@ async def sync_wb_finance(
     for prefix in ("reports:opiu", "reports:wb_bdr", "reports:dashboard"):
         await invalidate_cache(prefix)
 
+    # Background prewarm: re-compute reports so cache is hot
+    import asyncio
+    from backend.scheduler import prewarm_project
+    asyncio.create_task(prewarm_project(project_id))
+
     logger.info("wb_finance_sync: done — %d rows in %d pages for project %s", total_synced, page_num, project_id)
     return {"status": "ok", "rows_synced": total_synced, "pages": page_num, "errors": []}
 

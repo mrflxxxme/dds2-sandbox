@@ -108,6 +108,9 @@ async def create_cost_order(db: AsyncSession, project_id: int, payload: dict):
         await auto_link_customs_dt(order_no, dt_number, db)
 
     await invalidate_cache("reports")
+    import asyncio
+    from backend.scheduler import prewarm_project
+    asyncio.create_task(prewarm_project(project_id))
     return {"ok": True, "order_no": order_no}, None
 
 
@@ -178,6 +181,9 @@ async def update_cost_order(db: AsyncSession, project_id: int, order_no: str, pa
             pass  # Don't fail the update if plan gen fails (e.g. no items yet)
 
     await invalidate_cache("reports")
+    import asyncio
+    from backend.scheduler import prewarm_project
+    asyncio.create_task(prewarm_project(project_id))
     return {"ok": True, "order_no": final_order_no}, None
 
 
@@ -191,4 +197,7 @@ async def delete_cost_order(db: AsyncSession, project_id: int, order_no: str):
     await db.delete(order)
     await db.commit()
     await invalidate_cache("reports")
+    import asyncio
+    from backend.scheduler import prewarm_project
+    asyncio.create_task(prewarm_project(project_id))
     return True

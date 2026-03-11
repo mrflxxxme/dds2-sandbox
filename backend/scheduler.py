@@ -533,6 +533,56 @@ async def sync_all_projects_wb_finance():
     logger.info("💰 WB Finance sync: completed for all projects")
 
 
+# ─── Report cache prewarm ────────────────────────────────────────────────────
+
+async def prewarm_project(project_id: int):
+    """Pre-compute OPIU and BDR for a single project (current + previous month).
+
+    Called by scheduler (periodic) and after WB sync / cost mutations.
+    Fail-safe: errors are logged but never propagate.
+    """
+    from datetime import timedelta
+    today = date.today()
+    # Current month
+    month_start = today.replace(day=1)
+    # Previous month
+    if month_start.month == 1:
+        prev_start = month_start.replace(year=month_start.year - 1, month=12)
+    else:
+        prev_start = month_start.replace(month=month_start.month - 1)
+
+    d_from = prev_start
+    d_to = today
+
+    try:
+        async with AsyncSessionLocal() as db:
+            from backend.services import opiu_service, wb_bdr_service
+            await opiu_service.get_opiu(db, project_id, d_from, d_to)
+            await wb_bdr_service.get_wb_bdr(db, project_id, d_from, d_to)
+        logger.info(f"🔥 Prewarm: project {project_id} — OPIU + BDR cached ({d_from}→{d_to})")
+    except Exception as e:
+        logger.warning(f"🔥 Prewarm: project {project_id} failed: {e}")
+
+
+async def prewarm_all_reports():
+    """Pre-compute OPIU/BDR for ALL active projects.
+
+    Runs hourly via scheduler + once at startup.
+    """
+    logger.info("🔥 Prewarm: starting for all projects")
+    project_ids = await _get_sync_project_ids()
+
+    if not project_ids:
+        logger.info("🔥 Prewarm: no projects with WB keys, skipping")
+        return
+
+    for pid in project_ids:
+        await prewarm_project(pid)
+        await asyncio.sleep(1)  # Small delay between projects
+
+    logger.info(f"🔥 Prewarm: completed for {len(project_ids)} projects")
+
+
 # ─── Scheduler lifecycle ─────────────────────────────────────────────────────
 
 def start_scheduler():
@@ -605,10 +655,31 @@ def start_scheduler():
         misfire_grace_time=3600,
     )
 
+    # Report cache prewarm: every hour — keeps OPIU/BDR always hot
+    scheduler.add_job(
+        prewarm_all_reports,
+        trigger=IntervalTrigger(hours=1),
+        id="prewarm_reports",
+        name="Report cache prewarm (every 1h)",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+
+    # Initial prewarm: 30s after startup — warm cache on deploy/restart
+    from apscheduler.triggers.date import DateTrigger
+    scheduler.add_job(
+        prewarm_all_reports,
+        trigger=DateTrigger(run_date=datetime.now(MSK) + timedelta(seconds=30)),
+        id="prewarm_startup",
+        name="Report cache prewarm (startup)",
+        replace_existing=True,
+    )
+
     scheduler.start()
     logger.info(
-        "✅ Scheduler started — daily sync 3x/day + backfill + ad check + wb_finance Monday"
+        "✅ Scheduler started — daily sync 3x/day + backfill + ad check + wb_finance Monday + prewarm 1h"
     )
+
 
 
 def stop_scheduler():

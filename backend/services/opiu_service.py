@@ -29,7 +29,7 @@ D = Decimal
 ZERO = D("0")
 
 
-@cached(prefix="reports:opiu", ttl=300)
+@cached(prefix="reports:opiu", ttl=3600)
 async def get_opiu(
     db: AsyncSession,
     project_id: int,
@@ -42,9 +42,6 @@ async def get_opiu(
     Build ОПИУ (P&L) from locally cached WB finance data.
     Returns monthly breakdown + total with hierarchical P&L rows.
     """
-    from backend.services.wb_finance_sync import ensure_initial_sync
-    await ensure_initial_sync(db, project_id)
-
     # ── 1. Load finance rows ──
     q = select(WbFinanceRow).where(
         WbFinanceRow.project_id == project_id,
