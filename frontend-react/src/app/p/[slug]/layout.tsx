@@ -14,6 +14,7 @@ const navGroups = [
             { href: '/txn', label: 'Операции', icon: '💳' },
             { href: '/inbox', label: 'INBOX — Неразнесённые', icon: '🔴' },
             { href: '/reports', label: 'Отчёты', icon: '📈' },
+            { href: '/cost', label: 'Себестоимость', icon: '💰' },
             { href: '/refs', label: 'Справочники', icon: '📋' },
         ],
     },

@@ -7,7 +7,7 @@ import { formatDateTime, formatNumber, exportToExcel } from '@/lib/utils';
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
 
 export default function SettingsPage() {
-    const [tab, setTab] = useState<'integrations' | 'nomenclature' | 'costs' | 'leadtimes' | 'duties' | 'taxrates'>('integrations');
+    const [tab, setTab] = useState<'integrations' | 'nomenclature' | 'leadtimes' | 'duties' | 'taxrates'>('integrations');
 
     return (
         <div className="animate-in">
@@ -21,7 +21,6 @@ export default function SettingsPage() {
                 {[
                     { key: 'integrations' as const, label: '🔌 API Интеграции' },
                     { key: 'nomenclature' as const, label: '📋 Номенклатура' },
-                    { key: 'costs' as const, label: '💰 Себестоимость' },
                     { key: 'leadtimes' as const, label: '⏱ Lead Times' },
                     { key: 'duties' as const, label: '⚖️ Пошлины / Утиль' },
                     { key: 'taxrates' as const, label: '📋 Налоговые ставки' },
@@ -32,7 +31,6 @@ export default function SettingsPage() {
             </div>
             {tab === 'integrations' && <Integrations />}
             {tab === 'nomenclature' && <Nomenclature />}
-            {tab === 'costs' && <FunnelCosts />}
             {tab === 'leadtimes' && <LeadTimes />}
             {tab === 'duties' && <DutyRules />}
             {tab === 'taxrates' && <TaxRates />}
