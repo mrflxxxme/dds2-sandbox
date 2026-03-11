@@ -54,6 +54,9 @@ def cached(prefix: str, ttl: int = 300):
         ttl: Time-to-live in seconds (default 5 min)
     """
     def decorator(func):
+        import inspect
+        sig = inspect.signature(func)
+
         @wraps(func)
         async def wrapper(*args, **kwargs):
             r = await get_redis()
@@ -61,10 +64,13 @@ def cached(prefix: str, ttl: int = 300):
                 # Redis unavailable — skip cache, run function directly
                 return await func(*args, **kwargs)
 
-            # Build cache key from prefix + function args
-            # Ensure project_id is ALWAYS part of the key for multi-tenant safety
+            # Build cache key from prefix + ALL function args (positional + keyword)
+            # Bind args to parameter names for consistent key generation
+            bound = sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+
             key_parts = [prefix]
-            for k, v in sorted(kwargs.items()):
+            for k, v in bound.arguments.items():
                 if k == "db":
                     continue  # skip database session
                 if k == "project" and hasattr(v, "id"):
