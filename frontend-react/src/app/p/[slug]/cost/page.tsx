@@ -297,6 +297,24 @@ function BulkCost() {
             }));
             const res = await api.bulkSetFunnelCosts(items);
             setResult(res);
+            // Refresh missing items list after save
+            try {
+                const fmt = (d: Date) => d.toISOString().split('T')[0];
+                const now = new Date();
+                const day = now.getDay();
+                const diffToLastSun = day === 0 ? 7 : day;
+                const lastSun = new Date(now); lastSun.setDate(now.getDate() - diffToLastSun);
+                const lastMon = new Date(lastSun); lastMon.setDate(lastSun.getDate() - 6);
+                const bdr = await api.getWbBdr(fmt(lastMon), fmt(lastSun));
+                const arts = bdr?.articles || [];
+                const noCost = arts.filter((a: any) => (!a.cost_price || a.cost_price === 0) && a.nm_id && a.nm_id !== 0);
+                setMissing(noCost.map((a: any) => ({
+                    nm_id: a.nm_id,
+                    vendor_code: a.sa_name || '',
+                    subject: a.subject || '',
+                    brand: a.brand || '',
+                })));
+            } catch {}
         } catch (e: any) { alert(e.message); }
         setSaving(false);
     };

@@ -224,7 +224,13 @@ async def bulk_set_cost_overrides(
 
     Resolves barcode → nm_id via Nomenclature table, then upserts WbCostOverride.
     """
-    return await funnel_service.bulk_set_cost_overrides(db, project.id, body.items)
+    result = await funnel_service.bulk_set_cost_overrides(db, project.id, body.items)
+    # Invalidate BDR and related report caches so "без себестоимости" count updates
+    from backend.cache import invalidate_cache
+    await invalidate_cache(f"reports:wb_bdr:{project.id}:*")
+    await invalidate_cache(f"reports:opiu:{project.id}:*")
+    await invalidate_cache(f"reports:dashboard:{project.id}:*")
+    return result
 
 
 @router.get("/tax")
