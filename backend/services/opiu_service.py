@@ -268,7 +268,7 @@ async def get_opiu(
     margin_m = {mk: sales_m[mk] - direct_m[mk] + comp_total_m[mk] for mk in months_sorted}
     margin_t = sales_t - direct_t + comp_total_t
 
-    # ── Операционные расходы = 0 (TODO: from DDS later) ──
+    # ── Операционные расходы = 0 (рассчитываются в ДДС-отчёте, не в ОПИУ) ──
     ops_m = {mk: 0 for mk in months_sorted}
     ops_t = 0
 

@@ -143,6 +143,77 @@ app.add_middleware(RequestIdMiddleware)
 from backend.slow_query import SlowRequestMiddleware
 app.add_middleware(SlowRequestMiddleware)
 
+
+# ─── Audit Log Middleware ────────────────────────────────────────────────────
+
+class AuditLogMiddleware(BaseHTTPMiddleware):
+    """Log all mutation requests (POST/PUT/PATCH/DELETE) to audit_log table."""
+
+    SKIP_PATHS = {"/health", "/api/v1/auth/login", "/api/v1/auth/register", "/api/v1/auth/refresh"}
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+
+        # Only log mutations
+        if request.method in ("GET", "OPTIONS", "HEAD"):
+            return response
+
+        # Skip non-API and auth paths
+        path = request.url.path
+        if path in self.SKIP_PATHS or not path.startswith("/api/"):
+            return response
+
+        # Fire-and-forget audit write
+        try:
+            user_id = self._extract_user_id(request)
+            project_id = self._extract_project_id(request)
+            ip = request.headers.get("X-Real-IP", request.client.host if request.client else None)
+
+            async with AsyncSessionLocal() as session:
+                from backend.models.audit import AuditLog
+                from backend.utils.time import utcnow
+                log = AuditLog(
+                    user_id=user_id or 0,
+                    project_id=project_id,
+                    method=request.method,
+                    endpoint=path,
+                    status_code=response.status_code,
+                    ip=ip,
+                    created_at=utcnow(),
+                )
+                session.add(log)
+                await session.commit()
+        except Exception as e:
+            logger.warning("AuditLog write failed: %s", e)
+
+        return response
+
+    @staticmethod
+    def _extract_user_id(request: Request) -> int | None:
+        """Extract user_id from JWT Authorization header."""
+        try:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                import jwt
+                token = auth_header[7:]
+                payload = jwt.decode(token, options={"verify_signature": False})
+                return payload.get("sub") or payload.get("user_id")
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _extract_project_id(request: Request) -> int | None:
+        """Extract project_id from X-Project-Id header."""
+        try:
+            pid = request.headers.get("X-Project-Id")
+            return int(pid) if pid else None
+        except (ValueError, TypeError):
+            return None
+
+
+app.add_middleware(AuditLogMiddleware)
+
 # Register unified error handlers
 from backend.exceptions import register_exception_handlers
 register_exception_handlers(app)

@@ -87,6 +87,11 @@ from backend.models.wb_finance import (
     WbFinanceSyncLog,
 )
 
+# Audit
+from backend.models.audit import (
+    AuditLog,
+)
+
 # Alias for backward compatibility
 WbApiKey = IntegrationKey
 
@@ -113,6 +118,8 @@ __all__ = [
     "TaxRate",
     # WB Finance
     "WbFinanceRow", "WbFinanceSyncLog",
+    # Audit
+    "AuditLog",
     # Aliases
     "WbApiKey",
 ]

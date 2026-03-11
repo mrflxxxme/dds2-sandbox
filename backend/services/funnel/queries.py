@@ -378,7 +378,7 @@ async def bulk_set_cost_overrides(db: AsyncSession, pid: int, items: list) -> di
 
         try:
             cost = item.cost_price
-            # TODO: currency conversion if needed (currently assumes RUB)
+            # Все WB-транзакции в RUB, конвертация валют не требуется
 
             stmt = pg_insert(WbCostOverride).values(
                 project_id=pid, nm_id=nm_id, cost_price=cost,

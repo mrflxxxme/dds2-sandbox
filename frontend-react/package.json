@@ -6,7 +6,8 @@
     "dev": "next dev --turbopack -p 3000",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "next": "15.3.2",
@@ -25,6 +26,7 @@
     "eslint-config-next": "15.3.2",
     "typescript": "^5",
     "tailwindcss": "^4",
-    "@tailwindcss/postcss": "^4"
+    "@tailwindcss/postcss": "^4",
+    "@playwright/test": "^1.42.0"
   }
 }
