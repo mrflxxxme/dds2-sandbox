@@ -127,3 +127,22 @@ class WbPayoutSchema(BaseModel):
     matched_txn_id: Optional[str] = None
     matched_at: Optional[datetime] = None
     imported_at: Optional[datetime] = None
+
+
+class FactLinkCreate(BaseModel):
+    """Input: create a fact link between payment and transaction."""
+    payment_id: int
+    txn_id: str
+    amount_rub: Decimal
+    note: Optional[str] = None
+
+
+class CustomsDTUpdate(BaseModel):
+    """Input: update customs DT (assign order_no)."""
+    order_no: Optional[int] = None
+    note: Optional[str] = None
+
+
+class WbReconcileRequest(BaseModel):
+    """Input: manually reconcile WB payout with a transaction."""
+    txn_id: str

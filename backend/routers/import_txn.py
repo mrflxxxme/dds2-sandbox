@@ -9,10 +9,12 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
-from backend.middleware import get_project_id
+from backend.models import Project
+from backend.project_context import get_current_project
 from backend.schemas import (
     TransactionSchema, TransactionFilter,
     ImportLogSchema,
+    CategoryAssignment, BulkCategoryAssignment, CategoryAssignByIds,
 )
 from backend.services import transactions_service
 
@@ -26,7 +28,7 @@ async def upload_statement(
     file: UploadFile = File(...),
     source_type: str = Form(...),
     account_no: str = Form(""),
-    project_id: int = Depends(get_project_id),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Upload and import a bank statement file.
@@ -70,7 +72,7 @@ async def upload_statement(
     def _run():
         with SyncSessionLocal() as sync_db:
             log = import_statement(
-                sync_db, safe_filename, source_type, account_no, data, project_id
+                sync_db, safe_filename, source_type, account_no, data, project.id
             )
             return {
                 "id": log.id,
@@ -89,11 +91,11 @@ async def upload_statement(
 
 
 @router.get("/import/logs", response_model=List[ImportLogSchema])
-async def get_import_logs(project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
+async def get_import_logs(project: Project = Depends(get_current_project), db: AsyncSession = Depends(get_db)):
     from backend.models import ImportLog
     from sqlalchemy import select
     result = await db.execute(
-        select(ImportLog).where(ImportLog.project_id == project_id).order_by(ImportLog.imported_at.desc()).limit(100)
+        select(ImportLog).where(ImportLog.project_id == project.id).order_by(ImportLog.imported_at.desc()).limit(100)
     )
     return result.scalars().all()
 
@@ -103,11 +105,11 @@ async def get_import_logs(project_id: int = Depends(get_project_id), db: AsyncSe
 @router.post("/transactions/search", response_model=List[TransactionSchema])
 async def search_transactions(
     f: TransactionFilter,
-    project_id: int = Depends(get_project_id),
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     return await transactions_service.search_transactions(
-        db, project_id,
+        db, project.id,
         date_from=f.date_from,
         date_to=f.date_to,
         account=f.account,
@@ -122,15 +124,15 @@ async def search_transactions(
 
 
 @router.get("/transactions/unassigned")
-async def get_unassigned(limit: int = 200, project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
+async def get_unassigned(limit: int = 200, project: Project = Depends(get_current_project), db: AsyncSession = Depends(get_db)):
     from backend.services import fx_service
     from datetime import date as date_cls
 
-    txns = await transactions_service.get_unassigned(db, project_id, limit)
+    txns = await transactions_service.get_unassigned(db, project.id, limit)
 
     # Load FX rates for conversion
-    rates_map = await fx_service.get_rates_map(db, project_id, date_cls(2020, 1, 1), date_cls.today())
-    fallback_rate = await fx_service.get_rate_for_date(db, project_id, date_cls.today()) if not rates_map else None
+    rates_map = await fx_service.get_rates_map(db, project.id, date_cls(2020, 1, 1), date_cls.today())
+    fallback_rate = await fx_service.get_rate_for_date(db, project.id, date_cls.today()) if not rates_map else None
 
     items = []
     for t in txns:
@@ -171,8 +173,8 @@ async def get_unassigned(limit: int = 200, project_id: int = Depends(get_project
 
 @router.post("/transactions/assign_category")
 async def assign_category(
-    payload: dict,
-    project_id: int = Depends(get_project_id),
+    payload: CategoryAssignment,
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -180,16 +182,11 @@ async def assign_category(
     scope='txn' → override for this txn only.
     scope='cp' → update counterparty_category (affects all txns with same cp_key).
     """
-    txn_id = payload.get("txn_id")
-    cat_lvl1 = payload.get("cat_lvl1")
-    cat_lvl2 = payload.get("cat_lvl2")
-    scope = payload.get("scope", "txn")
-
-    if not txn_id or not cat_lvl1:
+    if not payload.txn_id or not payload.cat_lvl1:
         raise HTTPException(400, "txn_id and cat_lvl1 required")
 
     result = await transactions_service.assign_category(
-        db, project_id, txn_id, cat_lvl1, cat_lvl2, scope,
+        db, project.id, payload.txn_id, payload.cat_lvl1, payload.cat_lvl2, payload.scope,
     )
     if "error" in result:
         raise HTTPException(result.get("status", 400), result["error"])
@@ -197,36 +194,28 @@ async def assign_category(
 
 
 @router.get("/transactions/unassigned_grouped")
-async def get_unassigned_grouped(project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
+async def get_unassigned_grouped(project: Project = Depends(get_current_project), db: AsyncSession = Depends(get_db)):
     """Group uncategorized transactions by counterparty, showing income/expense totals."""
-    return await transactions_service.get_unassigned_grouped(db, project_id)
+    return await transactions_service.get_unassigned_grouped(db, project.id)
 
 
 @router.post("/transactions/assign_category_bulk")
-async def assign_category_bulk(payload: dict, project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
+async def assign_category_bulk(payload: BulkCategoryAssignment, project: Project = Depends(get_current_project), db: AsyncSession = Depends(get_db)):
     """Assign category to all uncategorized transactions with given cp_key."""
-    cp_key = payload.get("cp_key")
-    cat_lvl1 = payload.get("cat_lvl1")
-    cat_lvl2 = payload.get("cat_lvl2")
-
-    if not cp_key or not cat_lvl1:
+    if not payload.cp_key or not payload.cat_lvl1:
         raise HTTPException(400, "cp_key and cat_lvl1 required")
 
     return await transactions_service.assign_category_bulk(
-        db, project_id, cp_key, cat_lvl1, cat_lvl2,
+        db, project.id, payload.cp_key, payload.cat_lvl1, payload.cat_lvl2,
     )
 
 
 @router.post("/transactions/assign_category_by_ids")
-async def assign_category_by_ids(payload: dict, project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
+async def assign_category_by_ids(payload: CategoryAssignByIds, project: Project = Depends(get_current_project), db: AsyncSession = Depends(get_db)):
     """Assign category to specific transactions by txn_id list."""
-    txn_ids = payload.get("txn_ids", [])
-    cat_lvl1 = payload.get("cat_lvl1")
-    cat_lvl2 = payload.get("cat_lvl2")
-
-    if not txn_ids or not cat_lvl1:
+    if not payload.txn_ids or not payload.cat_lvl1:
         raise HTTPException(400, "txn_ids and cat_lvl1 required")
 
     return await transactions_service.assign_category_by_ids(
-        db, project_id, txn_ids, cat_lvl1, cat_lvl2,
+        db, project.id, payload.txn_ids, payload.cat_lvl1, payload.cat_lvl2,
     )

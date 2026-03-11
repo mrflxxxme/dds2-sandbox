@@ -76,3 +76,24 @@ class CostUploadResult(BaseModel):
     items_count: int
     recognized: int
     unrecognized: int
+
+
+class VatRateUpdate(BaseModel):
+    """Input: update project VAT rate."""
+    vat_rate: Decimal
+
+
+class CostOrderCreate(BaseModel):
+    """Input: create/update cost order."""
+    order_no: str
+    invoice_no: Optional[str] = None
+    ship_date: Optional[date] = None
+    actual_arrival_date: Optional[date] = None
+    transport_type: Optional[str] = "AUTO"
+    delivery_cost_cny: Decimal = Decimal("0")
+    delivery_cost_usd: Decimal = Decimal("0")
+    rate_cny: Decimal = Decimal("1")
+    rate_eur: Decimal = Decimal("1")
+    rate_usd: Decimal = Decimal("1")
+    note: Optional[str] = None
+    dt_number: Optional[str] = None

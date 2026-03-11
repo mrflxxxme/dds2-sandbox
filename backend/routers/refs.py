@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import Project
 from backend.schemas import (
-    AccountSchema, CounterpartyCategorySchema, OpeningBalanceSchema,
+    AccountSchema, CounterpartyCategorySchema, OpeningBalanceSchema, CategoryRefCreate,
 )
 from backend.project_context import get_current_project
 from backend.services import refs_service
@@ -134,17 +134,17 @@ async def get_categories(
 
 @router.post("/categories")
 async def add_category(
-    payload: dict,
+    payload: CategoryRefCreate,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    cat_lvl1 = payload.get("cat_lvl1", "").strip()
-    cat_lvl2 = payload.get("cat_lvl2", "").strip() or None
-    direction = payload.get("direction", "expense").strip()
-    if not cat_lvl1:
+    if not payload.cat_lvl1.strip():
         raise HTTPException(400, "cat_lvl1 is required")
 
-    cat = await refs_service.add_category(db, project.id, cat_lvl1, cat_lvl2, direction=direction)
+    cat = await refs_service.add_category(
+        db, project.id, payload.cat_lvl1.strip(), (payload.cat_lvl2 or "").strip() or None,
+        direction=payload.direction.strip(),
+    )
     return {"ok": True, "id": cat.id}
 
 

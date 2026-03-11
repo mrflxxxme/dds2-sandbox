@@ -53,7 +53,14 @@ class OpeningBalanceSchema(BaseModel):
 class CategoryRefSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: Optional[int] = None
-    direction: str
+    direction: str = "expense"
     cat_lvl1: str
-    cat_lvl2: str
+    cat_lvl2: Optional[str] = None
+
+
+class CategoryRefCreate(BaseModel):
+    """Input: add a category reference."""
+    cat_lvl1: str
+    cat_lvl2: Optional[str] = None
+    direction: str = "expense"
     sort_order: int = 0

@@ -15,7 +15,7 @@ from backend.database import get_db
 from backend.models import Project
 from backend.schemas import (
     BalanceRow, DdsMonthRow, FxControlRow, BalanceDailyRow,
-    IncomeDailyRow, IncomeByCategoryRow,
+    IncomeDailyRow, IncomeByCategoryRow, TaxRateSaveRequest,
 )
 from backend.project_context import get_current_project
 from backend.services import reports_service
@@ -344,14 +344,11 @@ async def get_tax_rates(
 
 @router.post("/tax_rates")
 async def save_tax_rates(
-    payload: dict,
+    payload: TaxRateSaveRequest,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Save project-level tax rates for one year (upsert 12 months)."""
     from backend.services import tax_service
-    year = payload["year"]
-    tax_regime = payload.get("tax_regime", "usn_income")
-    months = payload.get("months", [])
-    return await tax_service.save_tax_rates(db, project.id, year, tax_regime, months)
+    return await tax_service.save_tax_rates(db, project.id, payload.year, payload.tax_regime, payload.months)
 

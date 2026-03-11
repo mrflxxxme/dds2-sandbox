@@ -14,7 +14,7 @@ from backend.models import Project
 from backend.schemas import (
     OrderSchema, LeadTimeSchema, PlannedPaymentSchema,
     PlannedIncomeSchema, CustomsTopupSchema, CustomsAllocSchema,
-    WbPayoutSchema,
+    WbPayoutSchema, FactLinkCreate, CustomsDTUpdate, WbReconcileRequest,
 )
 from backend.project_context import get_current_project
 from backend.services import planning_service
@@ -290,20 +290,13 @@ async def get_fact_links(
 
 @router.post("/fact_links")
 async def create_fact_link(
-    payload: dict,
+    payload: FactLinkCreate,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Manually link a transaction to a planned payment."""
-    payment_id = payload.get("payment_id")
-    txn_id = payload.get("txn_id")
-    amount_rub = payload.get("amount_rub")
-
-    if not payment_id or not txn_id or amount_rub is None:
-        raise HTTPException(400, "payment_id, txn_id, amount_rub required")
-
     link, error = await planning_service.create_fact_link(
-        db, project.id, payment_id, txn_id, amount_rub, payload.get("note")
+        db, project.id, payload.payment_id, payload.txn_id, float(payload.amount_rub), payload.note
     )
     if error:
         raise HTTPException(404, error)
@@ -403,12 +396,12 @@ async def get_customs_dt_list(
 @router.put("/customs_dt/{dt_id}")
 async def update_customs_dt(
     dt_id: int,
-    payload: dict,
+    payload: CustomsDTUpdate,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Assign order_no to a DT declaration."""
-    result = await planning_service.update_customs_dt(db, project.id, dt_id, payload)
+    result = await planning_service.update_customs_dt(db, project.id, dt_id, payload.model_dump(exclude_unset=True))
     if not result:
         raise HTTPException(404, "Not found")
     return {"ok": True}
@@ -481,16 +474,12 @@ async def delete_wb_payout(
 @router.post("/wb_payouts/{payout_id}/reconcile")
 async def manual_reconcile_wb(
     payout_id: int,
-    payload: dict,
+    payload: WbReconcileRequest,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Manually match a WB payout with a bank transaction."""
-    txn_id = payload.get("txn_id")
-    if not txn_id:
-        raise HTTPException(400, "txn_id required")
-
-    result, error = await planning_service.manual_reconcile_wb(db, project.id, payout_id, txn_id)
+    result, error = await planning_service.manual_reconcile_wb(db, project.id, payout_id, payload.txn_id)
     if error:
         raise HTTPException(404, error)
     return {"ok": True}

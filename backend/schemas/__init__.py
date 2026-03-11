@@ -27,6 +27,7 @@ from backend.schemas.refs import (
     OverrideSchema,
     OpeningBalanceSchema,
     CategoryRefSchema,
+    CategoryRefCreate,
 )
 
 # Transactions
@@ -69,6 +70,9 @@ from backend.schemas.planning import (
     PaymentFactLinkSchema,
     CustomsDTSchema,
     WbPayoutSchema,
+    FactLinkCreate,
+    CustomsDTUpdate,
+    WbReconcileRequest,
 )
 
 # Cost
@@ -78,6 +82,8 @@ from backend.schemas.cost import (
     CostOrderItemSchema,
     CostOrderSchema,
     CostUploadResult,
+    VatRateUpdate,
+    CostOrderCreate,
 )
 
 # Integrations
@@ -102,7 +108,7 @@ __all__ = [
     "LoginRequest", "TokenResponse", "ChangePasswordRequest",
     # References
     "AccountSchema", "CounterpartyCategorySchema", "OverrideSchema",
-    "OpeningBalanceSchema", "CategoryRefSchema",
+    "OpeningBalanceSchema", "CategoryRefSchema", "CategoryRefCreate",
     # Transactions
     "TransactionSchema", "TransactionFilter", "CategoryAssignment",
     "BulkCategoryAssignment", "CategoryAssignByIds", "UnassignedGroupRow",
@@ -116,9 +122,10 @@ __all__ = [
     "PlannedIncomeSchema", "CustomsTopupSchema", "CustomsAllocSchema",
     "CashflowDailyRow", "OrderSummarySchema", "PaymentFactLinkSchema",
     "CustomsDTSchema", "WbPayoutSchema",
+    "FactLinkCreate", "CustomsDTUpdate", "WbReconcileRequest",
     # Cost
     "NomenclatureSchema", "DutyRuleSchema", "CostOrderItemSchema",
-    "CostOrderSchema", "CostUploadResult",
+    "CostOrderSchema", "CostUploadResult", "VatRateUpdate", "CostOrderCreate",
     # Integrations
     "IntegrationKeySchema", "SyncLogSchema",
     # Tax

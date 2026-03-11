@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
+from backend.schemas import DutyRuleSchema, CostOrderCreate, VatRateUpdate
 from backend.services import cost_service
 
 router = APIRouter(prefix="/cost")
@@ -73,11 +74,11 @@ async def get_duty_rules(
 
 @router.post("/duty_rules")
 async def upsert_duty_rule(
-    payload: dict,
+    payload: DutyRuleSchema,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    result, error = await cost_service.upsert_duty_rule(db, project.id, payload)
+    result, error = await cost_service.upsert_duty_rule(db, project.id, payload.model_dump(exclude_unset=True))
     if error:
         raise HTTPException(400, error)
     return {"ok": True}
@@ -109,11 +110,11 @@ async def get_cost_orders(
 
 @router.post("/orders")
 async def create_cost_order(
-    payload: dict,
+    payload: CostOrderCreate,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    result, error = await cost_service.create_cost_order(db, project.id, payload)
+    result, error = await cost_service.create_cost_order(db, project.id, payload.model_dump(exclude_unset=True))
     if error:
         raise HTTPException(400, error)
     return result
@@ -122,12 +123,12 @@ async def create_cost_order(
 @router.put("/orders/{order_no:path}")
 async def update_cost_order(
     order_no: str,
-    payload: dict,
+    payload: CostOrderCreate,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Edit an existing cost order."""
-    result, error = await cost_service.update_cost_order(db, project.id, order_no, payload)
+    result, error = await cost_service.update_cost_order(db, project.id, order_no, payload.model_dump(exclude_unset=True))
     if error:
         status = 404 if error == "Not found" else 400
         raise HTTPException(status, error)
@@ -257,15 +258,12 @@ async def get_vat_rate(
 
 @router.put("/vat_rate")
 async def set_vat_rate(
-    payload: dict,
+    payload: VatRateUpdate,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     from decimal import Decimal
-    new_rate = payload.get("vat_rate")
-    if new_rate is None:
-        raise HTTPException(400, "vat_rate is required")
-    project.vat_rate = Decimal(str(new_rate))
+    project.vat_rate = payload.vat_rate
     db.add(project)
     await db.commit()
     return {"status": "ok", "vat_rate": float(project.vat_rate)}
