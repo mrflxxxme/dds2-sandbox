@@ -274,9 +274,13 @@ async def sync_plan_payments_endpoint(
 # ─── Manual Fact Links ───────────────────────────────────────────────────────
 
 @router.get("/fact_links/{payment_id}")
-async def get_fact_links(payment_id: int, db: AsyncSession = Depends(get_db)):
+async def get_fact_links(
+    payment_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     """Get manual fact links for a planned payment."""
-    links = await planning_service.get_fact_links(db, payment_id)
+    links = await planning_service.get_fact_links(db, project.id, payment_id)
     return [
         {"id": l.id, "payment_id": l.payment_id, "txn_id": l.txn_id,
          "amount_rub": float(l.amount_rub), "note": l.note}
@@ -285,7 +289,11 @@ async def get_fact_links(payment_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/fact_links")
-async def create_fact_link(payload: dict, db: AsyncSession = Depends(get_db)):
+async def create_fact_link(
+    payload: dict,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     """Manually link a transaction to a planned payment."""
     payment_id = payload.get("payment_id")
     txn_id = payload.get("txn_id")
@@ -295,7 +303,7 @@ async def create_fact_link(payload: dict, db: AsyncSession = Depends(get_db)):
         raise HTTPException(400, "payment_id, txn_id, amount_rub required")
 
     link, error = await planning_service.create_fact_link(
-        db, payment_id, txn_id, amount_rub, payload.get("note")
+        db, project.id, payment_id, txn_id, amount_rub, payload.get("note")
     )
     if error:
         raise HTTPException(404, error)
@@ -303,8 +311,12 @@ async def create_fact_link(payload: dict, db: AsyncSession = Depends(get_db)):
 
 
 @router.delete("/fact_links/{link_id}")
-async def delete_fact_link(link_id: int, db: AsyncSession = Depends(get_db)):
-    result = await planning_service.delete_fact_link(db, link_id)
+async def delete_fact_link(
+    link_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await planning_service.delete_fact_link(db, project.id, link_id)
     if not result:
         raise HTTPException(404, "Not found")
     return {"ok": True}
@@ -336,9 +348,12 @@ async def get_candidate_transactions(
 
 
 @router.get("/accounts_list")
-async def get_accounts_list(db: AsyncSession = Depends(get_db)):
+async def get_accounts_list(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
     """Get all accounts for filtering."""
-    accs = await planning_service.get_accounts_list(db)
+    accs = await planning_service.get_accounts_list(db, project.id)
     return [
         {"id": a.id, "account": a.account, "bank": a.bank, "currency": a.currency}
         for a in accs
@@ -452,8 +467,12 @@ async def get_wb_payouts(
 
 
 @router.delete("/wb_payouts/{payout_id}")
-async def delete_wb_payout(payout_id: int, db: AsyncSession = Depends(get_db)):
-    result = await planning_service.delete_wb_payout(db, payout_id)
+async def delete_wb_payout(
+    payout_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await planning_service.delete_wb_payout(db, project.id, payout_id)
     if not result:
         raise HTTPException(404, "Not found")
     return {"ok": True}
@@ -463,6 +482,7 @@ async def delete_wb_payout(payout_id: int, db: AsyncSession = Depends(get_db)):
 async def manual_reconcile_wb(
     payout_id: int,
     payload: dict,
+    project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Manually match a WB payout with a bank transaction."""
@@ -470,7 +490,7 @@ async def manual_reconcile_wb(
     if not txn_id:
         raise HTTPException(400, "txn_id required")
 
-    result, error = await planning_service.manual_reconcile_wb(db, payout_id, txn_id)
+    result, error = await planning_service.manual_reconcile_wb(db, project.id, payout_id, txn_id)
     if error:
         raise HTTPException(404, error)
     return {"ok": True}

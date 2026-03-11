@@ -12,20 +12,35 @@ from backend.models import PlannedPayment, Transaction, PaymentFactLink
 
 # ─── Fact Links ──────────────────────────────────────────────────────────────
 
-async def get_fact_links(db: AsyncSession, payment_id: int):
+async def get_fact_links(db: AsyncSession, project_id: int, payment_id: int):
+    # Verify payment belongs to project
+    pp = await db.execute(
+        select(PlannedPayment).where(
+            PlannedPayment.id == payment_id,
+            PlannedPayment.project_id == project_id,
+        )
+    )
+    if not pp.scalar_one_or_none():
+        return []
     result = await db.execute(
         select(PaymentFactLink).where(PaymentFactLink.payment_id == payment_id)
     )
     return result.scalars().all()
 
 
-async def create_fact_link(db: AsyncSession, payment_id: int, txn_id: str,
+async def create_fact_link(db: AsyncSession, project_id: int, payment_id: int, txn_id: str,
                            amount_rub: float, note: str | None = None):
-    pp = await db.execute(select(PlannedPayment).where(PlannedPayment.id == payment_id))
+    pp = await db.execute(select(PlannedPayment).where(
+        PlannedPayment.id == payment_id,
+        PlannedPayment.project_id == project_id,
+    ))
     if not pp.scalar_one_or_none():
         return None, "Payment not found"
 
-    txn = await db.execute(select(Transaction).where(Transaction.txn_id == txn_id))
+    txn = await db.execute(select(Transaction).where(
+        Transaction.txn_id == txn_id,
+        Transaction.project_id == project_id,
+    ))
     if not txn.scalar_one_or_none():
         return None, "Transaction not found"
 
@@ -41,12 +56,21 @@ async def create_fact_link(db: AsyncSession, payment_id: int, txn_id: str,
     return link, None
 
 
-async def delete_fact_link(db: AsyncSession, link_id: int):
+async def delete_fact_link(db: AsyncSession, project_id: int, link_id: int):
     result = await db.execute(
         select(PaymentFactLink).where(PaymentFactLink.id == link_id)
     )
     link = result.scalar_one_or_none()
     if not link:
+        return None
+    # Verify ownership via payment
+    pp = await db.execute(
+        select(PlannedPayment).where(
+            PlannedPayment.id == link.payment_id,
+            PlannedPayment.project_id == project_id,
+        )
+    )
+    if not pp.scalar_one_or_none():
         return None
     payment_id = link.payment_id
     await db.delete(link)
@@ -74,9 +98,11 @@ async def get_candidate_transactions(db: AsyncSession, project_id: int,
     return result.scalars().all()
 
 
-async def get_accounts_list(db: AsyncSession):
+async def get_accounts_list(db: AsyncSession, project_id: int):
     from backend.models import Account
-    result = await db.execute(select(Account))
+    result = await db.execute(
+        select(Account).where(Account.project_id == project_id)
+    )
     return result.scalars().all()
 
 

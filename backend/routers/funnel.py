@@ -86,6 +86,7 @@ async def get_sync_status(
     last_sync = await db.execute(
         select(SyncLog).where(
             SyncLog.service == "wb_funnel",
+            SyncLog.project_id == project.id,
         ).order_by(SyncLog.id.desc()).limit(10)
     )
     logs = [

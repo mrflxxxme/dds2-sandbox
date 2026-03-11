@@ -136,8 +136,14 @@ async def trigger_wb_bdr_sync(
     project_id = project.id
 
     async def _run_sync():
-        async with AsyncSessionLocal() as bg_db:
-            await sync_wb_finance(bg_db, project_id, date_from, today)
+        try:
+            async with AsyncSessionLocal() as bg_db:
+                await sync_wb_finance(bg_db, project_id, date_from, today)
+        except Exception:
+            import logging
+            logging.getLogger("dds.reports").error(
+                "Background WB finance sync failed for project %s", project_id, exc_info=True
+            )
 
     asyncio.create_task(_run_sync())
     return {"status": "started", "message": "Sync started in background"}

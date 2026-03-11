@@ -236,7 +236,7 @@ async def upload_order_items(
         )
     except Exception as e:
         logger.error("upload_order_items exception: %s", e, exc_info=True)
-        raise HTTPException(500, f"Internal error: {e}")
+        raise HTTPException(500, "Внутренняя ошибка сервера")
 
     if error:
         logger.warning("upload_order_items error: %s", error)

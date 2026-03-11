@@ -31,7 +31,10 @@ async def upsert_account(
     """Create or update an account."""
     if payload.get("id"):
         result = await db.execute(
-            select(Account).where(Account.id == payload["id"])
+            select(Account).where(
+                Account.id == payload["id"],
+                Account.project_id == project_id,
+            )
         )
         acc = result.scalar_one_or_none()
         if acc:
@@ -49,10 +52,13 @@ async def upsert_account(
     return acc
 
 
-async def delete_account(db: AsyncSession, account_id: int) -> bool:
+async def delete_account(db: AsyncSession, project_id: int, account_id: int) -> bool:
     """Delete an account. Returns True if deleted."""
     result = await db.execute(
-        select(Account).where(Account.id == account_id)
+        select(Account).where(
+            Account.id == account_id,
+            Account.project_id == project_id,
+        )
     )
     acc = result.scalar_one_or_none()
     if not acc:
@@ -76,13 +82,14 @@ async def list_cp_categories(db: AsyncSession, project_id: int) -> list:
 
 
 async def upsert_cp_category(
-    db: AsyncSession, payload: dict
+    db: AsyncSession, project_id: int, payload: dict
 ) -> CounterpartyCategory:
     """Create or update a counterparty category."""
     if payload.get("id"):
         result = await db.execute(
             select(CounterpartyCategory).where(
-                CounterpartyCategory.id == payload["id"]
+                CounterpartyCategory.id == payload["id"],
+                CounterpartyCategory.project_id == project_id,
             )
         )
         cpc = result.scalar_one_or_none()
@@ -94,6 +101,7 @@ async def upsert_cp_category(
             await db.refresh(cpc)
             return cpc
 
+    payload["project_id"] = project_id
     cpc = CounterpartyCategory(**payload)
     db.add(cpc)
     await db.commit()
@@ -101,10 +109,13 @@ async def upsert_cp_category(
     return cpc
 
 
-async def delete_cp_category(db: AsyncSession, cpc_id: int) -> bool:
+async def delete_cp_category(db: AsyncSession, project_id: int, cpc_id: int) -> bool:
     """Delete a counterparty category. Returns True if deleted."""
     result = await db.execute(
-        select(CounterpartyCategory).where(CounterpartyCategory.id == cpc_id)
+        select(CounterpartyCategory).where(
+            CounterpartyCategory.id == cpc_id,
+            CounterpartyCategory.project_id == project_id,
+        )
     )
     cpc = result.scalar_one_or_none()
     if not cpc:
@@ -125,10 +136,13 @@ async def list_overrides(db: AsyncSession, project_id: int) -> list:
     return result.scalars().all()
 
 
-async def delete_override(db: AsyncSession, override_id: int) -> bool:
+async def delete_override(db: AsyncSession, project_id: int, override_id: int) -> bool:
     """Delete an override. Returns True if deleted."""
     result = await db.execute(
-        select(Override).where(Override.id == override_id)
+        select(Override).where(
+            Override.id == override_id,
+            Override.project_id == project_id,
+        )
     )
     ovr = result.scalar_one_or_none()
     if not ovr:
@@ -150,12 +164,15 @@ async def list_opening_balances(db: AsyncSession, project_id: int) -> list:
 
 
 async def upsert_opening_balance(
-    db: AsyncSession, payload: dict
+    db: AsyncSession, project_id: int, payload: dict
 ) -> OpeningBalance:
     """Create or update an opening balance."""
     if payload.get("id"):
         result = await db.execute(
-            select(OpeningBalance).where(OpeningBalance.id == payload["id"])
+            select(OpeningBalance).where(
+                OpeningBalance.id == payload["id"],
+                OpeningBalance.project_id == project_id,
+            )
         )
         ob = result.scalar_one_or_none()
         if ob:
@@ -166,6 +183,7 @@ async def upsert_opening_balance(
             await db.refresh(ob)
             return ob
 
+    payload["project_id"] = project_id
     ob = OpeningBalance(**payload)
     db.add(ob)
     await db.commit()

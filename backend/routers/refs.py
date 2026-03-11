@@ -14,7 +14,6 @@ from backend.schemas import (
     AccountSchema, CounterpartyCategorySchema, OpeningBalanceSchema,
 )
 from backend.project_context import get_current_project
-from backend.middleware import get_project_id
 from backend.services import refs_service
 
 router = APIRouter(prefix="/refs")
@@ -23,18 +22,29 @@ router = APIRouter(prefix="/refs")
 # ─── Accounts ─────────────────────────────────────────────────────────────────
 
 @router.get("/accounts")
-async def get_accounts(project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
-    return await refs_service.list_accounts(db, project_id)
+async def get_accounts(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await refs_service.list_accounts(db, project.id)
 
 
 @router.post("/accounts")
-async def upsert_account(payload: AccountSchema, project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
-    return await refs_service.upsert_account(db, project_id, payload.model_dump(exclude_unset=True))
+async def upsert_account(
+    payload: AccountSchema,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await refs_service.upsert_account(db, project.id, payload.model_dump(exclude_unset=True))
 
 
 @router.delete("/accounts/{account_id}")
-async def delete_account(account_id: int, project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
-    deleted = await refs_service.delete_account(db, account_id)
+async def delete_account(
+    account_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    deleted = await refs_service.delete_account(db, project.id, account_id)
     if not deleted:
         raise HTTPException(404, "Account not found")
     return {"ok": True}
@@ -43,20 +53,29 @@ async def delete_account(account_id: int, project_id: int = Depends(get_project_
 # ─── Counterparty Categories ──────────────────────────────────────────────────
 
 @router.get("/cp_categories")
-async def get_cp_categories(project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
-    return await refs_service.list_cp_categories(db, project_id)
+async def get_cp_categories(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await refs_service.list_cp_categories(db, project.id)
 
 
 @router.post("/cp_categories")
 async def upsert_cp_category(
-    payload: CounterpartyCategorySchema, db: AsyncSession = Depends(get_db)
+    payload: CounterpartyCategorySchema,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
 ):
-    return await refs_service.upsert_cp_category(db, payload.model_dump(exclude_unset=True))
+    return await refs_service.upsert_cp_category(db, project.id, payload.model_dump(exclude_unset=True))
 
 
 @router.delete("/cp_categories/{cpc_id}")
-async def delete_cp_category(cpc_id: int, db: AsyncSession = Depends(get_db)):
-    deleted = await refs_service.delete_cp_category(db, cpc_id)
+async def delete_cp_category(
+    cpc_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    deleted = await refs_service.delete_cp_category(db, project.id, cpc_id)
     if not deleted:
         raise HTTPException(404, "Category not found")
     return {"ok": True}
@@ -65,13 +84,20 @@ async def delete_cp_category(cpc_id: int, db: AsyncSession = Depends(get_db)):
 # ─── Overrides ────────────────────────────────────────────────────────────────
 
 @router.get("/overrides")
-async def get_overrides(project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
-    return await refs_service.list_overrides(db, project_id)
+async def get_overrides(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await refs_service.list_overrides(db, project.id)
 
 
 @router.delete("/overrides/{override_id}")
-async def delete_override(override_id: int, db: AsyncSession = Depends(get_db)):
-    deleted = await refs_service.delete_override(db, override_id)
+async def delete_override(
+    override_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    deleted = await refs_service.delete_override(db, project.id, override_id)
     if not deleted:
         raise HTTPException(404, "Override not found")
     return {"ok": True}
@@ -80,15 +106,20 @@ async def delete_override(override_id: int, db: AsyncSession = Depends(get_db)):
 # ─── Opening Balances ─────────────────────────────────────────────────────────
 
 @router.get("/opening_balances")
-async def get_opening_balances(project_id: int = Depends(get_project_id), db: AsyncSession = Depends(get_db)):
-    return await refs_service.list_opening_balances(db, project_id)
+async def get_opening_balances(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await refs_service.list_opening_balances(db, project.id)
 
 
 @router.post("/opening_balances")
 async def upsert_opening_balance(
-    payload: OpeningBalanceSchema, db: AsyncSession = Depends(get_db)
+    payload: OpeningBalanceSchema,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
 ):
-    return await refs_service.upsert_opening_balance(db, payload.model_dump(exclude_unset=True))
+    return await refs_service.upsert_opening_balance(db, project.id, payload.model_dump(exclude_unset=True))
 
 
 # ─── Category Reference ──────────────────────────────────────────────────────

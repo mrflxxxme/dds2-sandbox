@@ -51,8 +51,11 @@ async def get_wb_payouts(db: AsyncSession, project_id: int, status: str | None =
     return result.scalars().all()
 
 
-async def delete_wb_payout(db: AsyncSession, payout_id: int):
-    result = await db.execute(select(WbPayout).where(WbPayout.id == payout_id))
+async def delete_wb_payout(db: AsyncSession, project_id: int, payout_id: int):
+    result = await db.execute(select(WbPayout).where(
+        WbPayout.id == payout_id,
+        WbPayout.project_id == project_id,
+    ))
     obj = result.scalar_one_or_none()
     if not obj:
         return None
@@ -61,14 +64,20 @@ async def delete_wb_payout(db: AsyncSession, payout_id: int):
     return True
 
 
-async def manual_reconcile_wb(db: AsyncSession, payout_id: int, txn_id: str):
+async def manual_reconcile_wb(db: AsyncSession, project_id: int, payout_id: int, txn_id: str):
     """Manually match a WB payout with a bank transaction."""
-    result = await db.execute(select(WbPayout).where(WbPayout.id == payout_id))
+    result = await db.execute(select(WbPayout).where(
+        WbPayout.id == payout_id,
+        WbPayout.project_id == project_id,
+    ))
     payout = result.scalar_one_or_none()
     if not payout:
         return None, "Payout not found"
 
-    txn = await db.execute(select(Transaction).where(Transaction.txn_id == txn_id))
+    txn = await db.execute(select(Transaction).where(
+        Transaction.txn_id == txn_id,
+        Transaction.project_id == project_id,
+    ))
     if not txn.scalar_one_or_none():
         return None, "Transaction not found"
 
