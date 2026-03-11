@@ -11,3 +11,5 @@ uploads/
 *.sqlite3
 .ruff_cache/
 backups/
+*.pdf
+tmp_*.txt

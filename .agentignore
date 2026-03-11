@@ -1,0 +1,23 @@
+# Heavy directories
+backups/
+.git/
+pgdata/
+data/
+uploads/
+
+# Binary and large files
+*.sql.gz
+*.sql
+*.pdf
+tmp_*.txt
+
+# Python cache
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+*.egg-info/
+.ruff_cache/
+
+# System
+.DS_Store
