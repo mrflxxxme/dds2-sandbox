@@ -1473,41 +1473,50 @@ function WarehouseNeedView() {
                 </div>
             </div>
 
-            {data && data.warehouses && data.warehouses.length > 0 ? (
+            {data && data.articles && data.articles.length > 0 ? (
                 <div className="glass-card" style={{ overflowX: 'auto' }}>
                     <table className="data-table" style={{ width: '100%', fontSize: 12 }}>
                         <thead>
                             <tr>
-                                <th style={{ textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg)', zIndex: 2, minWidth: 200 }}>Склад</th>
+                                <th style={{ textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg)', zIndex: 2, minWidth: 200 }}>Артикул</th>
                                 <th style={{ textAlign: 'right', minWidth: 80 }}>Потребность</th>
-                                {(data.articles || []).map((a: any) => (
-                                    <th key={a.nm_id} style={{ textAlign: 'right', minWidth: 90, fontSize: 11, whiteSpace: 'nowrap' }}>
-                                        {a.vendor_code.length > 15 ? a.vendor_code.slice(0, 15) + '…' : a.vendor_code}
+                                {(data.warehouses || []).map((wh: any) => (
+                                    <th key={wh.name} style={{ textAlign: 'right', minWidth: 90, fontSize: 11, whiteSpace: 'nowrap' }}>
+                                        {wh.name.length > 18 ? wh.name.slice(0, 18) + '…' : wh.name}
                                     </th>
                                 ))}
                             </tr>
                         </thead>
                         <tbody>
-                            {data.warehouses.map((wh: any) => (
-                                <tr key={wh.name}>
-                                    <td style={{ fontWeight: 600, position: 'sticky', left: 0, background: 'var(--color-bg)', zIndex: 1 }}>{wh.name}</td>
-                                    <td style={{ textAlign: 'right', fontWeight: 700 }}>{formatNumber(wh.total_need)}</td>
-                                    {(data.articles || []).map((a: any) => {
-                                        const artData = wh.articles?.[a.nm_id];
-                                        const need = artData?.need || 0;
-                                        return (
-                                            <td key={a.nm_id} style={{
-                                                textAlign: 'right',
-                                                background: need > 0 ? 'rgba(255,68,68,0.1)' : undefined,
-                                                color: need > 0 ? '#ff4444' : 'var(--color-text-muted)',
-                                                fontWeight: need > 0 ? 600 : 400,
-                                            }}>
-                                                {need > 0 ? formatNumber(need) : '—'}
-                                            </td>
-                                        );
-                                    })}
-                                </tr>
-                            ))}
+                            {(data.articles || []).map((a: any) => {
+                                // Compute total need for this article across all warehouses
+                                let totalNeed = 0;
+                                (data.warehouses || []).forEach((wh: any) => {
+                                    totalNeed += wh.articles?.[a.nm_id]?.need || 0;
+                                });
+                                return (
+                                    <tr key={a.nm_id}>
+                                        <td style={{ fontWeight: 600, position: 'sticky', left: 0, background: 'var(--color-bg)', zIndex: 1 }}>
+                                            {a.vendor_code}
+                                        </td>
+                                        <td style={{ textAlign: 'right', fontWeight: 700 }}>{totalNeed > 0 ? formatNumber(totalNeed, 0) : '—'}</td>
+                                        {(data.warehouses || []).map((wh: any) => {
+                                            const artData = wh.articles?.[a.nm_id];
+                                            const need = artData?.need || 0;
+                                            return (
+                                                <td key={wh.name} style={{
+                                                    textAlign: 'right',
+                                                    background: need > 0 ? 'rgba(255,68,68,0.1)' : undefined,
+                                                    color: need > 0 ? '#ff4444' : 'var(--color-text-muted)',
+                                                    fontWeight: need > 0 ? 600 : 400,
+                                                }}>
+                                                    {need > 0 ? formatNumber(need, 0) : '—'}
+                                                </td>
+                                            );
+                                        })}
+                                    </tr>
+                                );
+                            })}
                         </tbody>
                     </table>
                 </div>
