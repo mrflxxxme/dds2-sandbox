@@ -112,7 +112,12 @@ async def get_funnel_aggregated(db: AsyncSession, pid: int, tax_rate: float,
         func.sum(WbFunnelDaily.add_to_cart).label("add_to_cart"),
         func.sum(WbFunnelDaily.orders_count).label("orders_count"),
         func.sum(WbFunnelDaily.orders_sum_rub).label("orders_sum_rub"),
-        func.avg(WbFunnelDaily.buyout_percent).label("buyout_percent"),
+        # Revenue = SUM(orders_sum_rub × buyout% / 100) per product
+        # Each product's own buyout_percent (from WB card) is applied individually
+        func.sum(
+            WbFunnelDaily.orders_sum_rub
+            * func.coalesce(WbFunnelDaily.buyout_percent, 100) / 100
+        ).label("revenue_weighted"),
         func.avg(WbFunnelDaily.cart_to_order_pct).label("cart_to_order_pct"),
         func.avg(WbFunnelDaily.add_to_cart_pct).label("add_to_cart_pct"),
         func.avg(WbFunnelDaily.avg_price).label("avg_price"),
@@ -144,12 +149,15 @@ async def get_funnel_aggregated(db: AsyncSession, pid: int, tax_rate: float,
     data = []
     for r in rows:
         orders_sum = float(r.orders_sum_rub or 0)
-        buyout = float(r.buyout_percent or 0)
+        revenue = float(r.revenue_weighted or 0)
         adv = float(r.adv_sum or 0)
         views = int(r.adv_views or 0)
         clicks = int(r.adv_clicks or 0)
         orders_count = int(r.orders_count or 0)
         cost_total = float(r.cost_total or 0)
+
+        # Weighted average buyout %
+        buyout_pct = (revenue / orders_sum * 100) if orders_sum else 0
 
         # Get finance data for this date
         fin = fin_map.get(r.date.isoformat(), {})
@@ -157,11 +165,15 @@ async def get_funnel_aggregated(db: AsyncSession, pid: int, tax_rate: float,
         commission = fin.get("commission", 0)
         storage = fin.get("storage", 0)
 
-        m = _compute_metrics(
-            orders_sum, buyout, adv, tax_rate, views, clicks,
-            orders_count, cost_total=cost_total,
-            logistics=logistics, commission=commission, storage=storage,
-        )
+        # Compute profit using pre-calculated revenue (not orders_sum × avg buyout)
+        tax = revenue * tax_rate / 100
+        profit = revenue - adv - commission - logistics - storage - cost_total - tax
+        margin = (profit / revenue * 100) if revenue else 0
+        ctr = (clicks / views * 100) if views else 0
+        cpc = (adv / clicks) if clicks else 0
+        cpm = (adv / views * 1000) if views else 0
+        cr = (orders_count / clicks * 100) if clicks else 0
+        drr = (adv / orders_sum * 100) if orders_sum else 0
 
         data.append({
             "date": r.date.isoformat(),
@@ -169,14 +181,26 @@ async def get_funnel_aggregated(db: AsyncSession, pid: int, tax_rate: float,
             "add_to_cart": int(r.add_to_cart or 0),
             "orders_count": orders_count,
             "orders_sum_rub": orders_sum,
-            "buyout_percent": round(buyout, 2),
+            "buyout_percent": round(buyout_pct, 2),
+            "revenue": round(revenue, 2),
             "adv_sum": adv,
             "adv_views": views,
             "adv_clicks": clicks,
             "avg_price": round(float(r.avg_price or 0), 2),
             "add_to_cart_pct": round(float(r.add_to_cart_pct or 0), 2),
             "cart_to_order_pct": round(float(r.cart_to_order_pct or 0), 2),
-            **m,
+            "tax": round(tax, 2),
+            "profit": round(profit, 2),
+            "margin": round(margin, 2),
+            "ctr": round(ctr, 2),
+            "cpc": round(cpc, 2),
+            "cpm": round(cpm, 2),
+            "cr": round(cr, 2),
+            "drr": round(drr, 2),
+            "logistics": round(logistics, 2),
+            "commission": round(commission, 2),
+            "storage": round(storage, 2),
+            "cost_total": round(cost_total, 2),
         })
 
     return data
