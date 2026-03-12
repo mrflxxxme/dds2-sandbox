@@ -573,6 +573,10 @@ function WbBdr() {
                         style={{ fontSize: 12, padding: '4px 10px' }}>
                         {syncing ? '⏳ Синхр...' : '🔄 Синхронизировать'}
                     </button>
+                    <button className="btn btn-secondary btn-sm" onClick={handleExcel} disabled={!articles.length}
+                        style={{ fontSize: 12, padding: '4px 10px' }}>
+                        📥 Excel
+                    </button>
                 </div>
             </div>
 
