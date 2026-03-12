@@ -751,11 +751,13 @@ function WbBdr() {
                                         <td style={{ textAlign: 'center' }}><span className={`badge-${a.abc_profit === 'A' ? 'green' : a.abc_profit === 'B' ? 'yellow' : 'red'}`}>{a.abc_profit}</span></td>
                                         <td style={{ textAlign: 'center' }}><span className={`badge-${a.abc_revenue === 'A' ? 'green' : a.abc_revenue === 'B' ? 'yellow' : 'red'}`}>{a.abc_revenue}</span></td>
                                     </tr>
-                                ))}
+                                    );
+                                })}
                             </tbody>
                         </table>
                         {articles.length === 0 && <div className="empty-state" style={{ padding: 20 }}>Нет данных за выбранный период</div>}
                     </div>
+                </div>
 
                     {/* ── Tax Summary ── */}
                     {s.tax_total > 0 && (
