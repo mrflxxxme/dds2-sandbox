@@ -15,6 +15,7 @@ from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbFunnelDaily
+from backend.models.wb_finance import WbFinanceRow
 
 logger = logging.getLogger("dds.funnel")
 
@@ -44,14 +45,34 @@ async def get_day_analysis(db: AsyncSession, pid: int, tax_rate: float,
             func.coalesce(func.sum(WbFunnelDaily.adv_sum), 0).label("adv_sum"),
             func.coalesce(func.sum(WbFunnelDaily.adv_views), 0).label("adv_views"),
             func.coalesce(func.sum(WbFunnelDaily.adv_clicks), 0).label("adv_clicks"),
+            func.coalesce(func.sum(
+                func.coalesce(WbFunnelDaily.cost_price, 0) * WbFunnelDaily.orders_count
+            ), 0).label("cost_total"),
         ).where(WbFunnelDaily.date == d)
         q = _base_filter(q)
         row = (await db.execute(q)).one()
         os_ = float(row.orders_sum)
         adv = float(row.adv_sum)
+        cost_total = float(row.cost_total)
+
+        # Get WB Finance data for this day
+        fq = select(
+            func.coalesce(func.sum(WbFinanceRow.delivery_rub), 0).label("logistics"),
+            func.coalesce(func.sum(WbFinanceRow.storage_fee), 0).label("storage"),
+            func.coalesce(func.sum(WbFinanceRow.retail_amount), 0).label("total_retail"),
+            func.coalesce(func.sum(WbFinanceRow.ppvz_for_pay), 0).label("total_ppvz"),
+        ).where(
+            WbFinanceRow.project_id == pid,
+            WbFinanceRow.rr_dt == d,
+        )
+        fin_row = (await db.execute(fq)).one()
+        logistics = abs(float(fin_row.logistics))
+        storage = abs(float(fin_row.storage))
+        commission = max(float(fin_row.total_retail) - float(fin_row.total_ppvz), 0)
+
         revenue = os_
         tax = revenue * tax_rate / 100
-        profit = revenue - adv - tax
+        profit = revenue - adv - commission - logistics - storage - cost_total - tax
         drr = (adv / os_ * 100) if os_ else 0
         views = int(row.adv_views)
         clicks = int(row.adv_clicks)
@@ -73,6 +94,10 @@ async def get_day_analysis(db: AsyncSession, pid: int, tax_rate: float,
             "tax": round(tax, 2),
             "profit": round(profit, 2),
             "margin": round((profit / revenue * 100) if revenue else 0, 2),
+            "logistics": round(logistics, 2),
+            "commission": round(commission, 2),
+            "storage": round(storage, 2),
+            "cost_total": round(cost_total, 2),
         }
 
     today_agg = await _day_agg(td)

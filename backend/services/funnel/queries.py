@@ -18,17 +18,25 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbFunnelDaily, WbCostOverride, Nomenclature
+from backend.models.wb_finance import WbFinanceRow
 
 logger = logging.getLogger("dds.funnel")
 
 
 def _compute_metrics(orders_sum: float, buyout: float, adv: float,
                      tax_rate: float, views: int, clicks: int,
-                     orders_count: int, cost_total: float = 0) -> dict:
-    """Compute derived funnel metrics from raw aggregates."""
+                     orders_count: int, cost_total: float = 0,
+                     logistics: float = 0, commission: float = 0,
+                     storage: float = 0) -> dict:
+    """Compute derived funnel metrics from raw aggregates.
+
+    Profit formula (matches BDR logic):
+        revenue  = orders_sum × buyout%
+        profit   = revenue − adv − commission − logistics − storage − cost − tax
+    """
     revenue = orders_sum * buyout / 100 if buyout else orders_sum
     tax = revenue * tax_rate / 100
-    profit = revenue - cost_total - adv - tax
+    profit = revenue - adv - commission - logistics - storage - cost_total - tax
     margin = (profit / revenue * 100) if revenue else 0
     ctr = (clicks / views * 100) if views else 0
     cpc = (adv / clicks) if clicks else 0
@@ -45,7 +53,53 @@ def _compute_metrics(orders_sum: float, buyout: float, adv: float,
         "cpm": round(cpm, 2),
         "cr": round(cr, 2),
         "drr": round(drr, 2),
+        "logistics": round(logistics, 2),
+        "commission": round(commission, 2),
+        "storage": round(storage, 2),
+        "cost_total": round(cost_total, 2),
     }
+
+
+async def _get_finance_by_date(db: AsyncSession, pid: int,
+                                date_from: Optional[str],
+                                date_to: Optional[str]) -> dict:
+    """Aggregate WB Finance data by rr_dt (date) for the given period.
+
+    Returns dict[date_iso_str] -> {logistics, commission, storage}.
+    Commission = retail_amount(sales) - ppvz_for_pay(sales)  (net of returns).
+    """
+    q = select(
+        WbFinanceRow.rr_dt,
+        func.sum(WbFinanceRow.delivery_rub).label("logistics"),
+        func.sum(WbFinanceRow.storage_fee).label("storage"),
+        # Commission = Sales net - ppvz_for_pay net
+        func.sum(WbFinanceRow.retail_amount).label("total_retail"),
+        func.sum(WbFinanceRow.ppvz_for_pay).label("total_ppvz"),
+    ).where(
+        WbFinanceRow.project_id == pid,
+        WbFinanceRow.rr_dt.is_not(None),
+    )
+    if date_from:
+        q = q.where(WbFinanceRow.rr_dt >= date.fromisoformat(date_from))
+    if date_to:
+        q = q.where(WbFinanceRow.rr_dt <= date.fromisoformat(date_to))
+    q = q.group_by(WbFinanceRow.rr_dt)
+    result = await db.execute(q)
+    rows = result.all()
+
+    fin_map: dict = {}
+    for r in rows:
+        logistics_val = abs(float(r.logistics or 0))
+        storage_val = abs(float(r.storage or 0))
+        total_retail = float(r.total_retail or 0)
+        total_ppvz = float(r.total_ppvz or 0)
+        commission_val = max(total_retail - total_ppvz, 0)
+        fin_map[r.rr_dt.isoformat()] = {
+            "logistics": logistics_val,
+            "storage": storage_val,
+            "commission": commission_val,
+        }
+    return fin_map
 
 
 async def get_funnel_aggregated(db: AsyncSession, pid: int, tax_rate: float,
@@ -65,6 +119,10 @@ async def get_funnel_aggregated(db: AsyncSession, pid: int, tax_rate: float,
         func.sum(WbFunnelDaily.adv_views).label("adv_views"),
         func.sum(WbFunnelDaily.adv_clicks).label("adv_clicks"),
         func.sum(WbFunnelDaily.adv_sum).label("adv_sum"),
+        # Cost: sum(cost_price * orders_count) per day
+        func.sum(
+            func.coalesce(WbFunnelDaily.cost_price, 0) * WbFunnelDaily.orders_count
+        ).label("cost_total"),
     ).where(WbFunnelDaily.project_id == pid)
 
     if date_from:
@@ -80,6 +138,9 @@ async def get_funnel_aggregated(db: AsyncSession, pid: int, tax_rate: float,
     result = await db.execute(q)
     rows = result.all()
 
+    # Fetch WB Finance data (logistics, commission, storage) by date
+    fin_map = await _get_finance_by_date(db, pid, date_from, date_to)
+
     data = []
     for r in rows:
         orders_sum = float(r.orders_sum_rub or 0)
@@ -88,7 +149,19 @@ async def get_funnel_aggregated(db: AsyncSession, pid: int, tax_rate: float,
         views = int(r.adv_views or 0)
         clicks = int(r.adv_clicks or 0)
         orders_count = int(r.orders_count or 0)
-        m = _compute_metrics(orders_sum, buyout, adv, tax_rate, views, clicks, orders_count)
+        cost_total = float(r.cost_total or 0)
+
+        # Get finance data for this date
+        fin = fin_map.get(r.date.isoformat(), {})
+        logistics = fin.get("logistics", 0)
+        commission = fin.get("commission", 0)
+        storage = fin.get("storage", 0)
+
+        m = _compute_metrics(
+            orders_sum, buyout, adv, tax_rate, views, clicks,
+            orders_count, cost_total=cost_total,
+            logistics=logistics, commission=commission, storage=storage,
+        )
 
         data.append({
             "date": r.date.isoformat(),
