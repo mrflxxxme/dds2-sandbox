@@ -754,6 +754,15 @@ class ApiClient {
         if (params.search) q.set('search', params.search);
         return this.request('GET', `/api/v1/funnel/trends?${q.toString()}`);
     }
+    // ─── Stock Analytics ──────────────────────────────────────────
+    async getStockAnalytics(trendDays: number = 7, subject?: string, brand?: string, article?: string): Promise<any> {
+        const q = new URLSearchParams();
+        q.set('trend_days', String(trendDays));
+        if (subject) q.set('subject', subject);
+        if (brand) q.set('brand', brand);
+        if (article) q.set('article', article);
+        return this.request('GET', `/api/v1/reports/stock_analytics?${q.toString()}`);
+    }
 }
 
 export const api = new ApiClient();

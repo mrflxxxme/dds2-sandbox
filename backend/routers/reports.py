@@ -362,3 +362,20 @@ async def save_tax_rates(
     from backend.services import tax_service
     return await tax_service.save_tax_rates(db, project.id, payload.year, payload.tax_regime, payload.months)
 
+
+@router.get("/stock_analytics")
+async def get_stock_analytics(
+    trend_days: int = Query(7, ge=1, le=90),
+    subject: Optional[str] = Query(None),
+    brand: Optional[str] = Query(None),
+    article: Optional[str] = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Stock depletion forecast based on WB funnel sales data."""
+    from backend.services import stock_analytics_service
+    return await stock_analytics_service.get_stock_analytics(
+        db, project.id, trend_days,
+        subject_filter=subject, brand_filter=brand, article_filter=article,
+    )
+
