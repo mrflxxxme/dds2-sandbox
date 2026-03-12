@@ -410,40 +410,45 @@ async def get_warehouse_need(
 ) -> dict:
     """Compute restocking need per warehouse per article.
     
-    need = avg_daily_orders * need_days - current_stock_at_warehouse
-    Returns rows grouped by warehouse with per-article needs.
+    Uses WB supplier/orders API to get per-warehouse order trends.
+    need = avg_daily_orders_at_warehouse * need_days - current_stock_at_warehouse
     """
+    from backend.services.funnel.wb_api_client import get_wb_key, fetch_supplier_orders
+    
     today = date.today()
     trend_start = today - timedelta(days=need_days)
 
-    # 1. Get avg daily orders per nm_id from WbFunnelDaily
-    latest_date_result = await db.execute(
-        select(func.max(WbFunnelDaily.date)).where(
-            WbFunnelDaily.project_id == project_id,
-        )
-    )
-    data_date = latest_date_result.scalar()
-    if not data_date:
-        return {"warehouses": [], "articles": [], "need_days": need_days}
+    # 1. Fetch per-warehouse orders from WB API
+    api_key = await get_wb_key(db, project_id, "wb")
+    wh_orders_map: dict[tuple[str, int], int] = {}  # (warehouse, nm_id) -> total_orders
+    vendor_map: dict[int, str] = {}
+    actual_days = need_days
 
-    trend_result = await db.execute(
+    if api_key:
+        orders = await fetch_supplier_orders(api_key, trend_start.isoformat())
+        for order in orders:
+            wh_name = order.get("warehouseName", "")
+            nm_id = order.get("nmId")
+            qty = order.get("quantity", 1)
+            if not wh_name or not nm_id:
+                continue
+            key = (wh_name, nm_id)
+            wh_orders_map[key] = wh_orders_map.get(key, 0) + qty
+            if nm_id not in vendor_map:
+                vendor_map[nm_id] = order.get("supplierArticle", f"#{nm_id}")
+    
+    # Also get vendor codes from WbFunnelDaily for completeness
+    funnel_result = await db.execute(
         select(
             WbFunnelDaily.nm_id,
             WbFunnelDaily.vendor_code,
-            func.sum(WbFunnelDaily.orders_count).label("total_orders"),
-            func.count(func.distinct(WbFunnelDaily.date)).label("days_count"),
         ).where(
             WbFunnelDaily.project_id == project_id,
-            WbFunnelDaily.date >= trend_start,
-            WbFunnelDaily.date <= data_date,
         ).group_by(WbFunnelDaily.nm_id, WbFunnelDaily.vendor_code)
     )
-    avg_daily_map: dict[int, float] = {}
-    vendor_map: dict[int, str] = {}
-    for r in trend_result:
-        days = max(int(r.days_count or 1), 1)
-        avg_daily_map[r.nm_id] = round(int(r.total_orders or 0) / days, 2)
-        vendor_map[r.nm_id] = r.vendor_code or f"#{r.nm_id}"
+    for r in funnel_result:
+        if r.nm_id not in vendor_map:
+            vendor_map[r.nm_id] = r.vendor_code or f"#{r.nm_id}"
 
     # 2. Get warehouse stocks
     wh_result = await db.execute(
@@ -457,7 +462,7 @@ async def get_warehouse_need(
         ).order_by(WbWarehouseStock.warehouse_name)
     )
 
-    # 3. Build warehouse → articles need map
+    # 3. Build warehouse → articles need map using per-warehouse avg daily
     wh_data: dict[str, dict] = {}
     all_nm_ids: set[int] = set()
 
@@ -465,10 +470,15 @@ async def get_warehouse_need(
         wh_name = r.warehouse_name
         nm_id = r.nm_id
         qty = int(r.quantity or 0)
-        avg_d = avg_daily_map.get(nm_id, 0)
+        
+        # Per-warehouse avg daily orders
+        total_orders_at_wh = wh_orders_map.get((wh_name, nm_id), 0)
+        avg_d = round(total_orders_at_wh / max(actual_days, 1), 2)
         need = compute_need(qty, avg_d, need_days)
 
         all_nm_ids.add(nm_id)
+        if nm_id not in vendor_map:
+            vendor_map[nm_id] = r.vendor_code or f"#{nm_id}"
 
         if wh_name not in wh_data:
             wh_data[wh_name] = {"name": wh_name, "total_need": 0, "articles": {}}
@@ -498,3 +508,4 @@ async def get_warehouse_need(
         "total_warehouses": len(warehouses),
         "total_articles": len(article_list),
     }
+

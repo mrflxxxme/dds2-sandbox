@@ -394,6 +394,51 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int],
     return result
 
 
+# ─── Supplier orders (per-warehouse) ────────────────────────────────────────
+
+async def fetch_supplier_orders(api_key: str, date_from: str) -> list[dict]:
+    """Fetch supplier orders from WB Statistics API.
+    
+    GET https://statistics-api.wildberries.ru/api/v1/supplier/orders
+    Returns orders with warehouseName, nmId, quantity, etc.
+    Data retained up to 90 days.
+    """
+    url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
+    headers = {"Authorization": api_key}
+    params = {"dateFrom": date_from}
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        for attempt in range(3):
+            try:
+                resp = await client.get(url, headers=headers, params=params)
+            except httpx.RequestError as e:
+                logger.error(f"WB supplier/orders request error: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(5)
+                    continue
+                return []
+
+            if resp.status_code == 429:
+                wait = min(int(resp.headers.get("Retry-After", "60")), 120)
+                logger.warning(f"WB supplier/orders 429, waiting {wait}s (attempt {attempt+1})")
+                await asyncio.sleep(wait)
+                continue
+
+            if resp.status_code != 200:
+                logger.error(f"WB supplier/orders API error {resp.status_code}: {resp.text[:200]}")
+                return []
+
+            data = resp.json()
+            if not isinstance(data, list):
+                logger.error(f"WB supplier/orders: unexpected response type {type(data)}")
+                return []
+
+            logger.info(f"WB supplier/orders: got {len(data)} orders from {date_from}")
+            return data
+
+    return []
+
+
 # ─── Warehouse stocks ────────────────────────────────────────────────────────
 
 async def fetch_warehouse_stocks(api_key: str) -> list[dict]:
