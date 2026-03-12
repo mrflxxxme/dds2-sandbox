@@ -413,6 +413,8 @@ function WbBdr() {
     const [syncStatus, setSyncStatus] = useState<any>(null);
     const [syncing, setSyncing] = useState(false);
     const [availableDates, setAvailableDates] = useState<string[]>([]);
+    const [sortKey, setSortKey] = useState<string>('profit');
+    const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
     // Load sync status + available dates on mount
     React.useEffect(() => {
@@ -447,61 +449,98 @@ function WbBdr() {
     }, [loadData]);
 
     const s = data?.summary;
-    const articles = data?.articles || [];
+    const rawArticles = data?.articles || [];
     const brands = data?.brands || [];
     const taxInfo = data?.tax_info || {};
+
+    // ── BDR column definitions ──
+    const bdrColumns: { key: string; label: string; color?: string; sticky?: boolean }[] = [
+        { key: 'sa_name', label: 'Артикул', sticky: true },
+        { key: 'to_pay', label: 'К оплате' },
+        { key: 'brand', label: 'Бренд' },
+        { key: 'subject', label: 'Категория' },
+        { key: 'nm_id', label: 'Арт. МП' },
+        { key: 'cost_price', label: 'Ср. С/С' },
+        { key: 'other_deduction', label: 'Проч. удерж.' },
+        { key: 'avg_retail_price', label: 'Ср. цена до скидок' },
+        { key: 'avg_sale_price', label: 'Ср. цена продажи' },
+        { key: 'realization', label: 'Реализация' },
+        { key: 'turnover_days', label: 'Оборач. (дн.)' },
+        { key: 'sales_amount', label: 'Продажи' },
+        { key: 'ppvz_for_pay', label: 'К переч.' },
+        { key: 'returns_amount', label: 'Возвраты' },
+        { key: 'cost_total', label: 'С/С продаж' },
+        { key: 'penalties', label: 'Штрафы' },
+        { key: 'orders_count', label: 'Заказы шт' },
+        { key: 'orders_sum', label: 'Заказы ₽' },
+        { key: 'commission', label: 'Комиссия' },
+        { key: 'total_wb_reward', label: 'Возн. ВБ' },
+        { key: 'compensation', label: 'Компенсация' },
+        { key: 'avg_logistics', label: 'Ср. логист.' },
+        { key: 'cap_cost', label: 'Кап. по С/С' },
+        { key: 'cap_retail', label: 'Кап. по розн.' },
+        { key: 'gmroi', label: 'GMROI' },
+        { key: 'gmroi_year', label: 'GMROI Year' },
+        { key: 'ret_qty', label: 'Откз.+возвр.' },
+        { key: 'sale_qty', label: 'Продаж шт' },
+        { key: 'buyout_pct', label: '% выкупа' },
+        { key: 'avg_profit_per_item', label: 'Ср. приб./шт' },
+        { key: 'tax_total', label: 'Налоги' },
+        { key: 'tax_base', label: 'Нал. база' },
+        { key: 'profit', label: 'Прибыль', color: '#22c55e' },
+        { key: 'roi', label: 'ROI %' },
+        { key: 'revenue_share', label: 'Доля выр. %' },
+        { key: 'margin_pct', label: 'Маржа %' },
+        { key: 'adv_sum', label: 'Реклама', color: '#f59e0b' },
+        { key: 'drr', label: 'ДРР %' },
+        { key: 'drr_orders', label: 'ДРР заказы %' },
+        { key: 'acceptance', label: 'Плат. приёмка' },
+        { key: 'logistics', label: 'Логистика' },
+        { key: 'storage', label: 'Хранение' },
+        { key: 'abc_profit', label: 'ABC приб.' },
+        { key: 'abc_revenue', label: 'ABC выр.' },
+    ];
+
+    // ── Sort logic ──
+    const toggleSort = (key: string) => {
+        if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+        else { setSortKey(key); setSortDir('desc'); }
+    };
+
+    const articles = React.useMemo(() => {
+        const arr = [...rawArticles];
+        arr.sort((a: any, b: any) => {
+            let va = a[sortKey] ?? 0, vb = b[sortKey] ?? 0;
+            if (typeof va === 'string') va = va.toLowerCase();
+            if (typeof vb === 'string') vb = vb.toLowerCase();
+            if (va < vb) return sortDir === 'asc' ? -1 : 1;
+            if (va > vb) return sortDir === 'asc' ? 1 : -1;
+            return 0;
+        });
+        return arr;
+    }, [rawArticles, sortKey, sortDir]);
+
+    // Sortable header style
+    const thStyle = (col: { key: string; color?: string; sticky?: boolean }): React.CSSProperties => ({
+        cursor: 'pointer',
+        userSelect: 'none' as const,
+        whiteSpace: 'nowrap' as const,
+        background: '#f9fafb',
+        color: col.color || '#4b5563',
+        borderBottom: '2px solid #e5e7eb',
+        ...(col.sticky ? { position: 'sticky' as const, left: 0, zIndex: 22, borderRight: '1px solid #e5e7eb' } : {}),
+    });
+    const sortIcon = (key: string) => sortKey === key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
 
     const pct = (val: number, base: number) => base ? ((val / base) * 100).toFixed(2) + '%' : '—';
 
     const handleExcel = () => {
         if (!articles.length) return;
-        const rows = articles.map((a: any, i: number) => ({
-            '№': i + 1,
-            'Артикул': a.sa_name,
-            'К оплате': a.to_pay,
-            'Бренд': a.brand,
-            'Категория': a.subject,
-            'Арт. МП': a.nm_id,
-            'Ср. С/С': a.cost_price || 0,
-            'Проч. удерж.': a.other_deduction || 0,
-            'Ср. цена до скидок': a.avg_retail_price,
-            'Ср. цена продажи': a.avg_sale_price,
-            'Реализация': a.realization,
-            'Оборач. (дн.)': a.turnover_days || 0,
-            'Продажи': a.sales_amount,
-            'К перечислению': a.ppvz_for_pay,
-            'Возвраты ₽': a.returns_amount,
-            'С/С продаж': a.cost_total || 0,
-            'Штрафы': a.penalties,
-            'Заказы шт': a.orders_count || 0,
-            'Заказы ₽': a.orders_sum || 0,
-            'Комиссия': a.commission,
-            'Возн. ВБ': a.total_wb_reward,
-            'Компенсация': a.compensation,
-            'Ср. логист.': a.avg_logistics,
-            'Кап. по С/С': a.cap_cost || 0,
-            'Кап. по розн.': a.cap_retail || 0,
-            'GMROI': a.gmroi || 0,
-            'GMROI Year': a.gmroi_year || 0,
-            'Откз.+возвр. шт': a.ret_qty,
-            'Продаж шт': a.sale_qty,
-            '% выкупа': a.buyout_pct ? +a.buyout_pct.toFixed(2) : 0,
-            'Ср. приб./шт': a.avg_profit_per_item || 0,
-            'Налоги': a.tax_total || 0,
-            'Нал. база': a.tax_base || 0,
-            'Прибыль': a.profit || 0,
-            'ROI %': a.roi || 0,
-            'Доля выр. %': a.revenue_share || 0,
-            'Маржа %': a.margin_pct || 0,
-            'Реклама': a.adv_sum || 0,
-            'ДРР %': a.drr || 0,
-            'ДРР заказы %': a.drr_orders || 0,
-            'Плат. приёмка': a.acceptance || 0,
-            'Логистика': a.logistics,
-            'Хранение': a.storage,
-            'ABC приб.': a.abc_profit || '',
-            'ABC выр.': a.abc_revenue || '',
-        }));
+        const rows = articles.map((a: any, i: number) => {
+            const row: Record<string, any> = { '№': i + 1 };
+            bdrColumns.forEach(col => { row[col.label] = a[col.key] ?? ''; });
+            return row;
+        });
         exportToExcel(rows, `BDR_${dateFrom}_${dateTo}`);
     };
 
@@ -606,51 +645,12 @@ function WbBdr() {
                             <table className="data-table" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
                                 <thead>
                                     <tr>
-                                        <th style={{ position: 'sticky', left: 0, background: '#f9fafb', zIndex: 22, borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #e5e7eb' }}>Артикул</th>
-                                        <th>К оплате</th>
-                                    <th>Бренд</th>
-                                    <th>Категория</th>
-                                    <th>Арт. МП</th>
-                                    <th>Ср. С/С</th>
-                                    <th>Проч. удерж.</th>
-                                    <th>Ср. цена до скидок</th>
-                                    <th>Ср. цена продажи</th>
-                                    <th>Реализация</th>
-                                    <th>Оборач. (дн.)</th>
-                                    <th>Продажи</th>
-                                    <th>К переч.</th>
-                                    <th>Возвраты</th>
-                                    <th>С/С продаж</th>
-                                    <th>Штрафы</th>
-                                    <th>Заказы шт</th>
-                                    <th>Заказы ₽</th>
-                                    <th>Комиссия</th>
-                                    <th>Возн. ВБ</th>
-                                    <th>Компенсация</th>
-                                    <th>Ср. логист.</th>
-                                    <th>Кап. по С/С</th>
-                                    <th>Кап. по розн.</th>
-                                    <th>GMROI</th>
-                                    <th>GMROI Year</th>
-                                    <th>Откз.+возвр.</th>
-                                    <th>Продаж шт</th>
-                                    <th>% выкупа</th>
-                                    <th>Ср. приб./шт</th>
-                                    <th>Налоги</th>
-                                    <th>Нал. база</th>
-                                    <th style={{ color: '#22c55e' }}>Прибыль</th>
-                                    <th>ROI %</th>
-                                    <th>Доля выр. %</th>
-                                    <th>Маржа %</th>
-                                    <th style={{ color: '#f59e0b' }}>Реклама</th>
-                                    <th>ДРР %</th>
-                                    <th>ДРР заказы %</th>
-                                    <th>Плат. приёмка</th>
-                                    <th>Логистика</th>
-                                    <th>Хранение</th>
-                                    <th>ABC приб.</th>
-                                    <th>ABC выр.</th>
-                                </tr>
+                                        {bdrColumns.map(col => (
+                                            <th key={col.key} style={thStyle(col)} onClick={() => toggleSort(col.key)}>
+                                                {col.label}{sortIcon(col.key)}
+                                            </th>
+                                        ))}
+                                    </tr>
                             </thead>
                             <tbody>
                                 {/* Summary row */}
