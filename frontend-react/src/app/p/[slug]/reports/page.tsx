@@ -601,12 +601,13 @@ function WbBdr() {
                     ) : null; })()}
 
                     {/* ── Articles Table ── */}
-                    <div className="glass-card" style={{ overflow: 'auto' }}>
-                        <table className="data-table" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
-                            <thead>
-                                <tr>
-                                    <th style={{ position: 'sticky', left: 0, background: 'var(--glass-bg)', zIndex: 2 }}>Артикул</th>
-                                    <th>К оплате</th>
+                    <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                        <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
+                            <table className="data-table" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                                <thead>
+                                    <tr>
+                                        <th style={{ position: 'sticky', left: 0, background: '#f9fafb', zIndex: 22, borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #e5e7eb' }}>Артикул</th>
+                                        <th>К оплате</th>
                                     <th>Бренд</th>
                                     <th>Категория</th>
                                     <th>Арт. МП</th>
@@ -654,8 +655,8 @@ function WbBdr() {
                             <tbody>
                                 {/* Summary row */}
                                 {(() => { const r = s; return (
-                                <tr style={{ fontWeight: 700, background: 'rgba(99,102,241,0.08)' }}>
-                                    <td style={{ position: 'sticky', left: 0, background: 'rgba(99,102,241,0.12)', zIndex: 1 }}>Итого:</td>
+                                <tr style={{ fontWeight: 700, background: '#eef2ff', color: '#111827' }}>
+                                    <td style={{ position: 'sticky', left: 0, background: '#e0e7ff', zIndex: 11, borderRight: '1px solid #c7d2fe' }}>Итого:</td>
                                     <td style={{ textAlign: 'right' }}>{formatNumber(r.to_pay)}</td>
                                     <td>-</td><td>-</td><td>-</td>
                                     <td style={{ textAlign: 'right' }}>—</td>
@@ -699,9 +700,13 @@ function WbBdr() {
                                 </tr>
                                 ); })()}
                                 {/* Article rows */}
-                                {articles.map((a: any, i: number) => (
-                                    <tr key={a.sa_name || i}>
-                                        <td style={{ position: 'sticky', left: 0, background: 'var(--glass-bg)', zIndex: 1, fontWeight: 500 }}>{a.sa_name || '—'}</td>
+                                {articles.map((a: any, i: number) => {
+                                    const rowBg = i % 2 === 0 ? '#ffffff' : '#f9fafb';
+                                    return (
+                                    <tr key={a.sa_name || i} style={{ background: rowBg, color: '#111827' }}>
+                                        <td style={{ position: 'sticky', left: 0, background: rowBg, zIndex: 11, fontWeight: 500, borderRight: '1px solid #e5e7eb' }}>
+                                            {a.sa_name || '—'}
+                                        </td>
                                         <td style={{ textAlign: 'right' }}>{formatNumber(a.to_pay)}</td>
                                         <td>{a.brand || '—'}</td>
                                         <td>{a.subject || '—'}</td>
