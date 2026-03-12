@@ -463,8 +463,8 @@ export default function FunnelPage() {
                             <table className="data-table" style={{ minWidth: detailed ? 1800 : 1200, borderCollapse: 'separate', borderSpacing: 0 }}>
                                 <thead>
                                     <tr ref={headerRow1Ref}>
-                                        <th rowSpan={2} style={{ position: 'sticky', left: 0, top: 0, background: '#1a1a2e', zIndex: 22, verticalAlign: 'bottom', borderBottom: '2px solid rgba(255,255,255,0.08)', minWidth: 90, borderRight: '1px solid rgba(255,255,255,0.08)' }}>ДАТА</th>
-                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', left: 90, top: 0, background: '#1a1a2e', zIndex: 22, verticalAlign: 'bottom', minWidth: 130, borderRight: '1px solid rgba(255,255,255,0.08)' }}>Артикул</th>}
+                                        <th rowSpan={2} style={{ position: 'sticky', left: 0, top: 0, background: '#1a1a2e', color: '#e4e4e7', backdropFilter: 'none', zIndex: 22, verticalAlign: 'bottom', borderBottom: '2px solid rgba(255,255,255,0.08)', minWidth: 100, borderRight: '1px solid rgba(255,255,255,0.08)', padding: '8px 12px' }}>ДАТА</th>
+                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', left: 100, top: 0, background: '#1a1a2e', color: '#e4e4e7', backdropFilter: 'none', zIndex: 22, verticalAlign: 'bottom', minWidth: 130, borderRight: '1px solid rgba(255,255,255,0.08)', padding: '8px 12px' }}>Артикул</th>}
                                         {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 20, verticalAlign: 'bottom' }}>nmId</th>}
                                         {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 20, verticalAlign: 'bottom' }}>Предмет</th>}
                                         {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 20, verticalAlign: 'bottom' }}>Бренд</th>}
@@ -505,8 +505,8 @@ export default function FunnelPage() {
                                         const rowBg = i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
                                         return (
                                             <tr key={i} style={{ background: rowBg }}>
-                                                <td style={{ position: 'sticky', left: 0, background: i % 2 === 0 ? '#1a1a2e' : '#1d1d31', zIndex: 2, whiteSpace: 'nowrap', fontSize: 12, minWidth: 90, borderRight: '1px solid rgba(255,255,255,0.06)' }}>{r.date}</td>
-                                                {detailed && <td style={{ position: 'sticky', left: 90, background: i % 2 === 0 ? '#1a1a2e' : '#1d1d31', zIndex: 2, fontSize: 12, minWidth: 130, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 160, borderRight: '1px solid rgba(255,255,255,0.06)' }}>{r.vendor_code}</td>}
+                                                <td style={{ position: 'sticky', left: 0, background: i % 2 === 0 ? '#1a1a2e' : '#1d1d31', color: '#e4e4e7', zIndex: 2, whiteSpace: 'nowrap', fontSize: 13, fontWeight: 500, minWidth: 100, padding: '8px 12px', borderRight: '1px solid rgba(255,255,255,0.06)' }}>{r.date}</td>
+                                                {detailed && <td style={{ position: 'sticky', left: 100, background: i % 2 === 0 ? '#1a1a2e' : '#1d1d31', color: '#e4e4e7', zIndex: 2, fontSize: 12, minWidth: 130, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 160, padding: '8px 12px', borderRight: '1px solid rgba(255,255,255,0.06)' }}>{r.vendor_code}</td>}
                                                 {detailed && <td style={{ fontSize: 12 }}><a href={`https://www.wildberries.ru/catalog/${r.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{r.nm_id}</a></td>}
                                                 {detailed && <td style={{ fontSize: 12 }}>{r.subject}</td>}
                                                 {detailed && <td style={{ fontSize: 12 }}>{r.brand}</td>}
