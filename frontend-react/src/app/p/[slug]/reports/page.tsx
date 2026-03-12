@@ -932,7 +932,7 @@ function TopProductsWidget({ articles }: { articles: any[] }) {
     const [mode, setMode] = useState<'profit' | 'loss'>('profit');
 
     const sorted = React.useMemo(() => {
-        const arr = articles.filter((a: any) => a.profit !== undefined && a.profit !== null);
+        const arr = articles.filter((a: any) => a.profit !== undefined && a.profit !== null && a.sa_name);
         if (mode === 'profit') {
             return [...arr].sort((a, b) => (b.profit || 0) - (a.profit || 0)).slice(0, 10);
         }
