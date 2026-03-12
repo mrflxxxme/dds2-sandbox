@@ -636,6 +636,9 @@ function WbBdr() {
                         <KpiCard label="% выкупа" value={s.buyout_pct?.toFixed(2) + '%'} sub="" />
                     </div>
 
+                    {/* ── Top 10 Products Widget ── */}
+                    <TopProductsWidget articles={rawArticles} />
+
                     {/* ── No cost warning ── */}
                     {(() => { const n = articles.filter((a: any) => !a.cost_price || a.cost_price === 0).length; return n > 0 ? (
                         <div style={{ padding: '10px 16px', marginBottom: 12, background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.4)', borderRadius: 8, color: '#f59e0b', fontSize: 13 }}>
@@ -921,6 +924,129 @@ function CostHistory() {
                     </tbody>
                 </table>
             </div>
+        </div>
+    );
+}
+
+function TopProductsWidget({ articles }: { articles: any[] }) {
+    const [mode, setMode] = useState<'profit' | 'loss'>('profit');
+
+    const sorted = React.useMemo(() => {
+        const arr = articles.filter((a: any) => a.profit !== undefined && a.profit !== null);
+        if (mode === 'profit') {
+            return [...arr].sort((a, b) => (b.profit || 0) - (a.profit || 0)).slice(0, 10);
+        }
+        return [...arr].sort((a, b) => (a.profit || 0) - (b.profit || 0)).slice(0, 10).filter(a => (a.profit || 0) < 0);
+    }, [articles, mode]);
+
+    if (!articles.length) return null;
+
+    const isProfit = mode === 'profit';
+    const accentColor = isProfit ? '#22c55e' : '#ef4444';
+    const accentBg = isProfit ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)';
+    const accentBorder = isProfit ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)';
+
+    return (
+        <div className="glass-card" style={{ marginBottom: 16, padding: 0, overflow: 'hidden' }}>
+            {/* Header with toggle */}
+            <div style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                padding: '14px 20px', borderBottom: `1px solid ${accentBorder}`,
+                background: accentBg, transition: 'all 0.3s ease',
+            }}>
+                <div style={{ fontWeight: 700, fontSize: 15, color: accentColor, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    {isProfit ? '📈' : '📉'} Топ-10 {isProfit ? 'прибыльных' : 'убыточных'} товаров
+                </div>
+                <div style={{
+                    display: 'flex', borderRadius: 8, overflow: 'hidden',
+                    border: '1px solid #e5e7eb', background: '#f3f4f6',
+                }}>
+                    <button
+                        onClick={() => setMode('profit')}
+                        style={{
+                            padding: '6px 16px', fontSize: 13, fontWeight: 600, border: 'none', cursor: 'pointer',
+                            background: isProfit ? '#22c55e' : 'transparent',
+                            color: isProfit ? '#fff' : '#6b7280',
+                            transition: 'all 0.2s ease',
+                        }}
+                    >
+                        💰 Прибыльные
+                    </button>
+                    <button
+                        onClick={() => setMode('loss')}
+                        style={{
+                            padding: '6px 16px', fontSize: 13, fontWeight: 600, border: 'none', cursor: 'pointer',
+                            background: !isProfit ? '#ef4444' : 'transparent',
+                            color: !isProfit ? '#fff' : '#6b7280',
+                            transition: 'all 0.2s ease',
+                        }}
+                    >
+                        📉 Убыточные
+                    </button>
+                </div>
+            </div>
+
+            {/* Table */}
+            {sorted.length > 0 ? (
+                <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                        <thead>
+                            <tr style={{ borderBottom: '2px solid #e5e7eb', background: '#f9fafb' }}>
+                                <th style={{ textAlign: 'left', padding: '10px 16px', color: '#6b7280', fontWeight: 600, width: 40 }}>№</th>
+                                <th style={{ textAlign: 'left', padding: '10px 12px', color: '#6b7280', fontWeight: 600 }}>Артикул</th>
+                                <th style={{ textAlign: 'left', padding: '10px 12px', color: '#6b7280', fontWeight: 600 }}>Категория</th>
+                                <th style={{ textAlign: 'right', padding: '10px 12px', color: accentColor, fontWeight: 700 }}>Прибыль ₽</th>
+                                <th style={{ textAlign: 'right', padding: '10px 12px', color: '#6b7280', fontWeight: 600 }}>Маржа %</th>
+                                <th style={{ textAlign: 'right', padding: '10px 12px', color: '#6b7280', fontWeight: 600 }}>ROI %</th>
+                                <th style={{ textAlign: 'right', padding: '10px 12px', color: '#6b7280', fontWeight: 600 }}>Продажи ₽</th>
+                                <th style={{ textAlign: 'right', padding: '10px 12px', color: '#f59e0b', fontWeight: 600 }}>Реклама ₽</th>
+                                <th style={{ textAlign: 'right', padding: '10px 16px', color: '#6b7280', fontWeight: 600 }}>ДРР %</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {sorted.map((a: any, i: number) => {
+                                const profitColor = (a.profit || 0) >= 0 ? '#22c55e' : '#ef4444';
+                                return (
+                                    <tr key={a.sa_name || i}
+                                        style={{
+                                            borderBottom: '1px solid #f3f4f6',
+                                            transition: 'background 0.15s',
+                                        }}
+                                        onMouseEnter={(e) => (e.currentTarget.style.background = '#f8fafc')}
+                                        onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                                    >
+                                        <td style={{ padding: '10px 16px', color: '#9ca3af', fontWeight: 600 }}>{i + 1}</td>
+                                        <td style={{ padding: '10px 12px', fontWeight: 600, color: '#111827' }}>{a.sa_name || '—'}</td>
+                                        <td style={{ padding: '10px 12px', color: '#6b7280', fontSize: 12 }}>{a.subject || '—'}</td>
+                                        <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: profitColor }}>
+                                            {formatNumber(a.profit || 0)}
+                                        </td>
+                                        <td style={{ padding: '10px 12px', textAlign: 'right', color: '#374151' }}>
+                                            {a.margin_pct?.toFixed(1) || '—'}%
+                                        </td>
+                                        <td style={{ padding: '10px 12px', textAlign: 'right', color: '#374151' }}>
+                                            {a.roi || '—'}%
+                                        </td>
+                                        <td style={{ padding: '10px 12px', textAlign: 'right', color: '#374151' }}>
+                                            {formatNumber(a.sales_amount || 0)}
+                                        </td>
+                                        <td style={{ padding: '10px 12px', textAlign: 'right', color: '#f59e0b', fontWeight: 500 }}>
+                                            {formatNumber(a.adv_sum || 0)}
+                                        </td>
+                                        <td style={{ padding: '10px 16px', textAlign: 'right', color: '#374151' }}>
+                                            {a.drr?.toFixed(1) || '—'}%
+                                        </td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+            ) : (
+                <div style={{ padding: '24px 20px', textAlign: 'center', color: '#9ca3af', fontSize: 14 }}>
+                    {mode === 'loss' ? 'Нет убыточных товаров 🎉' : 'Нет данных'}
+                </div>
+            )}
         </div>
     );
 }
