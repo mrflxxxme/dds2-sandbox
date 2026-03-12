@@ -234,6 +234,21 @@ async def get_stock_analytics(
             "daily_orders": daily_map.get(nm_id, []),
         })
 
+    # ── 7b. Filter out articles with no orders in last 5 days ──
+    last_5_days = sorted_dates[-5:] if len(sorted_dates) >= 5 else sorted_dates
+    filtered_articles = []
+    for a in articles:
+        recent_orders = sum(
+            d["orders"] for d in a["daily_orders"]
+            if d["date"] in last_5_days
+        )
+        if recent_orders > 0 or a["stocks_wb"] > 0:
+            # Keep if had orders recently OR still has stock
+            # But skip if zero stock AND zero recent orders
+            if recent_orders > 0:
+                filtered_articles.append(a)
+    articles = filtered_articles
+
     # Sort by days_left ascending (most critical first)
     articles.sort(key=lambda a: a["days_left"])
 
