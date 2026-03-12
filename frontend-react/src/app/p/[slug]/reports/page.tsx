@@ -1444,6 +1444,10 @@ function WarehouseNeedView() {
     const [data, setData] = useState<any>(null);
     const [loading, setLoading] = useState(false);
     const [needDays, setNeedDays] = useState(14);
+    const [brandFilter, setBrandFilter] = useState('');
+    const [subjectFilter, setSubjectFilter] = useState('');
+    const [sortCol, setSortCol] = useState<string>('total_need');
+    const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
     const load = async () => {
         setLoading(true);
@@ -1453,61 +1457,172 @@ function WarehouseNeedView() {
 
     useEffect(() => { load(); }, [needDays]);
 
+    // Compute per-article total need & per-warehouse need
+    const getArticleNeed = (a: any, whName?: string) => {
+        if (!data?.warehouses) return 0;
+        if (whName) return data.warehouses.find((w: any) => w.name === whName)?.articles?.[a.nm_id]?.need || 0;
+        let total = 0;
+        data.warehouses.forEach((wh: any) => { total += wh.articles?.[a.nm_id]?.need || 0; });
+        return total;
+    };
+
+    // Filter articles
+    const filteredArticles = (data?.articles || []).filter((a: any) => {
+        if (brandFilter && a.brand !== brandFilter) return false;
+        if (subjectFilter && a.subject !== subjectFilter) return false;
+        return true;
+    });
+
+    // Sort articles
+    const sortedArticles = [...filteredArticles].sort((a: any, b: any) => {
+        let va: any, vb: any;
+        if (sortCol === 'vendor_code') { va = a.vendor_code; vb = b.vendor_code; }
+        else if (sortCol === 'total_need') { va = getArticleNeed(a); vb = getArticleNeed(b); }
+        else { va = getArticleNeed(a, sortCol); vb = getArticleNeed(b, sortCol); }
+        if (typeof va === 'string') return sortDir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
+        return sortDir === 'asc' ? va - vb : vb - va;
+    });
+
+    // Warehouse totals (sum of need for filtered articles)
+    const getWhTotal = (whName: string) => {
+        let sum = 0;
+        filteredArticles.forEach((a: any) => { sum += getArticleNeed(a, whName); });
+        return sum;
+    };
+
+    const grandTotal = (() => {
+        let sum = 0;
+        filteredArticles.forEach((a: any) => { sum += getArticleNeed(a); });
+        return sum;
+    })();
+
+    // Sort handler
+    const handleSort = (col: string) => {
+        if (sortCol === col) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+        else { setSortCol(col); setSortDir('desc'); }
+    };
+
+    const sortIcon = (col: string) => sortCol === col ? (sortDir === 'asc' ? ' ↑' : ' ↓') : '';
+
+    // Excel export
+    const handleExport = () => {
+        if (!data) return;
+        const whs = data.warehouses || [];
+        const header = ['Артикул', 'Бренд', 'Категория', 'Потребность', ...whs.map((w: any) => w.name)];
+        const rows = sortedArticles.map((a: any) => [
+            a.vendor_code, a.brand || '', a.subject || '',
+            getArticleNeed(a),
+            ...whs.map((wh: any) => getArticleNeed(a, wh.name) || 0),
+        ]);
+        const totalRow = ['ИТОГО', '', '', grandTotal, ...whs.map((w: any) => getWhTotal(w.name))];
+        rows.push(totalRow);
+        exportToExcel([header, ...rows], `Потребность_${needDays}дн`);
+    };
+
     if (loading && !data) return <div className="glass-card" style={{ textAlign: 'center', padding: 40 }}>Расчёт потребности...</div>;
+
+    const thStyle: any = { textAlign: 'right', minWidth: 85, cursor: 'pointer', userSelect: 'none', fontSize: 11, whiteSpace: 'nowrap', padding: '10px 8px', borderBottom: '2px solid var(--color-border)' };
+    const thStickyStyle: any = { ...thStyle, textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg)', zIndex: 2, minWidth: 180 };
+    const tdStyle: any = { padding: '8px', textAlign: 'right', fontSize: 12, borderBottom: '1px solid var(--color-border)' };
+    const tdStickyStyle: any = { ...tdStyle, textAlign: 'left', fontWeight: 600, position: 'sticky', left: 0, background: 'var(--color-bg)', zIndex: 1 };
 
     return (
         <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+            {/* Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
                 <div>
                     <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>📦 Потребность по складам</h2>
                     <span style={{ fontSize: 13, opacity: 0.6 }}>
-                        {data ? `${data.total_warehouses} складов · ${data.total_articles} артикулов · на ${needDays} дней` : 'Нет данных'}
+                        {data ? `${data.total_warehouses} складов · ${filteredArticles.length} артикулов · на ${needDays} дней` : 'Нет данных'}
                     </span>
                 </div>
-                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                    <span style={{ fontSize: 13, opacity: 0.6, marginRight: 8 }}>Потребность на</span>
-                    {[7, 14, 30].map(d => (
-                        <button key={d} className={`btn btn-sm ${needDays === d ? 'btn-primary' : 'btn-secondary'}`}
-                            onClick={() => setNeedDays(d)}>{d} дн</button>
-                    ))}
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                    {/* Brand filter */}
+                    {data?.brands?.length > 0 && (
+                        <select value={brandFilter} onChange={e => setBrandFilter(e.target.value)}
+                            style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid var(--color-border)', background: 'var(--color-bg)', fontSize: 12 }}>
+                            <option value="">Все бренды</option>
+                            {data.brands.map((b: string) => <option key={b} value={b}>{b}</option>)}
+                        </select>
+                    )}
+                    {/* Subject filter */}
+                    {data?.subjects?.length > 0 && (
+                        <select value={subjectFilter} onChange={e => setSubjectFilter(e.target.value)}
+                            style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid var(--color-border)', background: 'var(--color-bg)', fontSize: 12 }}>
+                            <option value="">Все категории</option>
+                            {data.subjects.map((s: string) => <option key={s} value={s}>{s}</option>)}
+                        </select>
+                    )}
+                    {/* Days selector */}
+                    <div style={{ display: 'flex', gap: 4 }}>
+                        {[7, 14, 30].map(d => (
+                            <button key={d} className={`btn btn-sm ${needDays === d ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setNeedDays(d)}>{d} дн</button>
+                        ))}
+                    </div>
+                    {/* Excel export */}
+                    <button className="btn btn-sm btn-secondary" onClick={handleExport} title="Экспорт в Excel">📥 Excel</button>
                 </div>
             </div>
 
-            {data && data.articles && data.articles.length > 0 ? (
-                <div className="glass-card" style={{ overflowX: 'auto' }}>
-                    <table className="data-table" style={{ width: '100%', fontSize: 12 }}>
+            {/* Table */}
+            {data && sortedArticles.length > 0 ? (
+                <div className="glass-card" style={{ overflowX: 'auto', padding: 0 }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                         <thead>
-                            <tr>
-                                <th style={{ textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg)', zIndex: 2, minWidth: 200 }}>Артикул</th>
-                                <th style={{ textAlign: 'right', minWidth: 80 }}>Потребность</th>
+                            <tr style={{ background: 'var(--color-bg)' }}>
+                                <th style={thStickyStyle} onClick={() => handleSort('vendor_code')}>
+                                    Артикул{sortIcon('vendor_code')}
+                                </th>
+                                <th style={thStyle} onClick={() => handleSort('total_need')}>
+                                    Потребность{sortIcon('total_need')}
+                                </th>
                                 {(data.warehouses || []).map((wh: any) => (
-                                    <th key={wh.name} style={{ textAlign: 'right', minWidth: 90, fontSize: 11, whiteSpace: 'nowrap' }}>
-                                        {wh.name.length > 18 ? wh.name.slice(0, 18) + '…' : wh.name}
+                                    <th key={wh.name} style={thStyle} onClick={() => handleSort(wh.name)}>
+                                        {wh.name.length > 16 ? wh.name.slice(0, 16) + '…' : wh.name}
+                                        {sortIcon(wh.name)}
                                     </th>
                                 ))}
                             </tr>
+                            {/* Totals row */}
+                            <tr style={{ background: 'rgba(var(--color-primary-rgb, 59,130,246), 0.06)', fontWeight: 700 }}>
+                                <td style={{ ...tdStickyStyle, fontWeight: 700, background: 'rgba(var(--color-primary-rgb, 59,130,246), 0.06)', borderBottom: '2px solid var(--color-border)' }}>ИТОГО</td>
+                                <td style={{ ...tdStyle, fontWeight: 700, borderBottom: '2px solid var(--color-border)' }}>{grandTotal > 0 ? formatNumber(grandTotal, 0) : '—'}</td>
+                                {(data.warehouses || []).map((wh: any) => {
+                                    const t = getWhTotal(wh.name);
+                                    return (
+                                        <td key={wh.name} style={{ ...tdStyle, fontWeight: 700, borderBottom: '2px solid var(--color-border)', color: t > 0 ? '#ef4444' : 'var(--color-text-muted)' }}>
+                                            {t > 0 ? formatNumber(t, 0) : '—'}
+                                        </td>
+                                    );
+                                })}
+                            </tr>
                         </thead>
                         <tbody>
-                            {(data.articles || []).map((a: any) => {
-                                // Compute total need for this article across all warehouses
-                                let totalNeed = 0;
-                                (data.warehouses || []).forEach((wh: any) => {
-                                    totalNeed += wh.articles?.[a.nm_id]?.need || 0;
-                                });
+                            {sortedArticles.map((a: any) => {
+                                const totalNeed = getArticleNeed(a);
                                 return (
-                                    <tr key={a.nm_id}>
-                                        <td style={{ fontWeight: 600, position: 'sticky', left: 0, background: 'var(--color-bg)', zIndex: 1 }}>
-                                            {a.vendor_code}
+                                    <tr key={a.nm_id} style={{ transition: 'background 0.15s' }}
+                                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(var(--color-primary-rgb, 59,130,246), 0.03)')}
+                                        onMouseLeave={e => (e.currentTarget.style.background = '')}>
+                                        <td style={tdStickyStyle}>
+                                            <div>{a.vendor_code}</div>
+                                            {(a.brand || a.subject) && (
+                                                <div style={{ fontSize: 10, opacity: 0.5, fontWeight: 400 }}>
+                                                    {[a.brand, a.subject].filter(Boolean).join(' · ')}
+                                                </div>
+                                            )}
                                         </td>
-                                        <td style={{ textAlign: 'right', fontWeight: 700 }}>{totalNeed > 0 ? formatNumber(totalNeed, 0) : '—'}</td>
+                                        <td style={{ ...tdStyle, fontWeight: 700, color: totalNeed > 0 ? '#ef4444' : 'var(--color-text-muted)' }}>
+                                            {totalNeed > 0 ? formatNumber(totalNeed, 0) : '—'}
+                                        </td>
                                         {(data.warehouses || []).map((wh: any) => {
-                                            const artData = wh.articles?.[a.nm_id];
-                                            const need = artData?.need || 0;
+                                            const need = getArticleNeed(a, wh.name);
                                             return (
                                                 <td key={wh.name} style={{
-                                                    textAlign: 'right',
-                                                    background: need > 0 ? 'rgba(255,68,68,0.1)' : undefined,
-                                                    color: need > 0 ? '#ff4444' : 'var(--color-text-muted)',
+                                                    ...tdStyle,
+                                                    background: need > 0 ? 'rgba(239,68,68,0.08)' : undefined,
+                                                    color: need > 0 ? '#ef4444' : 'var(--color-text-muted)',
                                                     fontWeight: need > 0 ? 600 : 400,
                                                 }}>
                                                     {need > 0 ? formatNumber(need, 0) : '—'}
@@ -1523,7 +1638,7 @@ function WarehouseNeedView() {
             ) : (
                 <div className="glass-card">
                     <div className="empty-state">
-                        <div className="empty-state-text">Нет данных. Сначала синхронизируйте склады (вкладка «По складам»).</div>
+                        <div className="empty-state-text">{data ? 'Нет артикулов по выбранным фильтрам' : 'Нет данных. Сначала синхронизируйте склады (вкладка «По складам»).'}</div>
                     </div>
                 </div>
             )}

@@ -422,6 +422,8 @@ async def get_warehouse_need(
     api_key = await get_wb_key(db, project_id, "wb")
     wh_orders_map: dict[tuple[str, int], int] = {}  # (warehouse, nm_id) -> total_orders
     vendor_map: dict[int, str] = {}
+    brand_map: dict[int, str] = {}
+    subject_map: dict[int, str] = {}
     actual_days = need_days
 
     if api_key:
@@ -436,19 +438,29 @@ async def get_warehouse_need(
             wh_orders_map[key] = wh_orders_map.get(key, 0) + qty
             if nm_id not in vendor_map:
                 vendor_map[nm_id] = order.get("supplierArticle", f"#{nm_id}")
+            if nm_id not in brand_map and order.get("brand"):
+                brand_map[nm_id] = order["brand"]
+            if nm_id not in subject_map and order.get("subject"):
+                subject_map[nm_id] = order["subject"]
     
-    # Also get vendor codes from WbFunnelDaily for completeness
+    # Also get vendor codes, brand, subject from WbFunnelDaily for completeness
     funnel_result = await db.execute(
         select(
             WbFunnelDaily.nm_id,
             WbFunnelDaily.vendor_code,
+            WbFunnelDaily.brand,
+            WbFunnelDaily.subject,
         ).where(
             WbFunnelDaily.project_id == project_id,
-        ).group_by(WbFunnelDaily.nm_id, WbFunnelDaily.vendor_code)
+        ).group_by(WbFunnelDaily.nm_id, WbFunnelDaily.vendor_code, WbFunnelDaily.brand, WbFunnelDaily.subject)
     )
     for r in funnel_result:
         if r.nm_id not in vendor_map:
             vendor_map[r.nm_id] = r.vendor_code or f"#{r.nm_id}"
+        if r.nm_id not in brand_map and r.brand:
+            brand_map[r.nm_id] = r.brand
+        if r.nm_id not in subject_map and r.subject:
+            subject_map[r.nm_id] = r.subject
 
     # 2. Get warehouse stocks
     wh_result = await db.execute(
@@ -495,15 +507,26 @@ async def get_warehouse_need(
     # Sort warehouses by total need descending
     warehouses = sorted(wh_data.values(), key=lambda w: w["total_need"], reverse=True)
 
-    # Build article columns (sorted by vendor_code)
+    # Build article list with brand/subject for filtering
     article_list = sorted(
-        [{"nm_id": nm, "vendor_code": vendor_map.get(nm, f"#{nm}")} for nm in all_nm_ids],
+        [{
+            "nm_id": nm,
+            "vendor_code": vendor_map.get(nm, f"#{nm}"),
+            "brand": brand_map.get(nm, ""),
+            "subject": subject_map.get(nm, ""),
+        } for nm in all_nm_ids],
         key=lambda a: a["vendor_code"],
     )
+
+    # Collect unique brands/subjects for filters
+    brands = sorted(set(b for b in brand_map.values() if b))
+    subjects = sorted(set(s for s in subject_map.values() if s))
 
     return {
         "warehouses": warehouses,
         "articles": article_list,
+        "brands": brands,
+        "subjects": subjects,
         "need_days": need_days,
         "total_warehouses": len(warehouses),
         "total_articles": len(article_list),
