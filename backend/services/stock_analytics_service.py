@@ -419,7 +419,7 @@ async def get_warehouse_need(
         fetch_supplier_orders,
         fetch_acceptance_coefficients,
     )
-    from backend.services.warehouse_geo import find_nearest_warehouse, WAREHOUSE_COORDS
+    from backend.services.warehouse_geo import find_nearest_warehouse, WAREHOUSE_COORDS, SC_PREFIX
     
     today = date.today()
     trend_start = today - timedelta(days=need_days)
@@ -438,11 +438,12 @@ async def get_warehouse_need(
         coefficients = await fetch_acceptance_coefficients(api_key)
         if coefficients:
             # Warehouse is open if ANY entry has coefficient >= 0
+            # Exclude СЦ (sorting centers) — they redistribute, not store
             open_set: set[str] = set()
             for c in coefficients:
                 wh = c.get("warehouseName", "")
                 coeff = c.get("coefficient")
-                if wh and coeff is not None and coeff >= 0:
+                if wh and coeff is not None and coeff >= 0 and not wh.startswith(SC_PREFIX):
                     open_set.add(wh)
             if open_set:
                 open_warehouses = [w for w in open_warehouses if w in open_set]

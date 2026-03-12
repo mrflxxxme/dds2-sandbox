@@ -9,6 +9,7 @@ from backend.services.warehouse_geo import (
     find_nearest_warehouse,
     REGION_COORDS,
     WAREHOUSE_COORDS,
+    SC_PREFIX,
 )
 from backend.services.stock_analytics_service import compute_need
 
@@ -59,14 +60,14 @@ class TestFindNearestWarehouse:
         result = find_nearest_warehouse("Московская область", all_whs)
         assert result is not None
         # Should be one of the Moscow-area warehouses
-        assert any(kw in result for kw in ["Коледино", "Подольск", "Электросталь", "Тула"])
+        assert any(kw in result for kw in ["Коледино", "Электросталь", "Тула", "Домодедово-2", "Склад Истра"])
 
     def test_spb_region(self):
-        """Санкт-Петербург → should map to СПБ Шушары warehouse."""
+        """Санкт-Петербург → should map to Санкт-Петербург (Уткина Заводь)."""
         all_whs = list(WAREHOUSE_COORDS.keys())
         result = find_nearest_warehouse("Санкт-Петербург", all_whs)
         assert result is not None
-        assert "СПБ" in result
+        assert "Санкт-Петербург" in result
 
     def test_tatarstan_maps_to_kazan(self):
         """Республика Татарстан → should map to Казань."""
@@ -92,17 +93,17 @@ class TestFindNearestWarehouse:
 
     def test_limited_warehouses_filters(self):
         """Only open warehouses should be considered."""
-        limited = ["Казань", "Новосибирск"]
+        limited = ["Казань", "Юрга"]
         result = find_nearest_warehouse("Московская область", limited)
-        # Moscow is closer to Kazan than Novosibirsk
+        # Moscow is closer to Kazan than Юрга (Siberia)
         assert result == "Казань"
 
     def test_novosibirsk_region_maps_correctly(self):
-        """Новосибирская область → should map to Новосибирск warehouse."""
+        """Новосибирская область → should map to Юрга (nearest Siberian warehouse)."""
         all_whs = list(WAREHOUSE_COORDS.keys())
         result = find_nearest_warehouse("Новосибирская область", all_whs)
         assert result is not None
-        assert "Новосибирск" in result
+        assert "Юрга" in result
 
     def test_krasnodar_region(self):
         """Краснодарский край → should map to Краснодар."""
@@ -184,7 +185,7 @@ class TestHypotheticalScenario:
 
     def test_orders_remapped_to_nearest_warehouse(self):
         """Orders from different regions map to nearest open warehouse."""
-        open_whs = ["Коледино", "Казань", "Новосибирск"]
+        open_whs = ["Коледино", "Казань", "Юрга"]
 
         orders = [
             {"regionName": "Московская область", "nmId": 1001, "quantity": 2},
@@ -208,8 +209,14 @@ class TestHypotheticalScenario:
         assert wh_orders.get(("Коледино", 1001), 0) == 3
         # Tatarstan → Казань
         assert wh_orders.get(("Казань", 1001), 0) == 3
-        # Novosibirsk → Новосибирск
-        assert wh_orders.get(("Новосибирск", 1001), 0) == 1
+        # Novosibirsk → Юрга
+        assert wh_orders.get(("Юрга", 1001), 0) == 1
+
+    def test_sc_prefix_filters_sorting_centers(self):
+        """СЦ warehouses should be filtered by SC_PREFIX."""
+        wh_names = ["Коледино", "СЦ Махачкала", "СЦ Ярославль", "Казань"]
+        filtered = [w for w in wh_names if not w.startswith(SC_PREFIX)]
+        assert filtered == ["Коледино", "Казань"]
 
     def test_article_with_no_stock_at_warehouse_gets_need(self):
         """In hypothetical mode, an article not stocked at a warehouse still shows need."""
