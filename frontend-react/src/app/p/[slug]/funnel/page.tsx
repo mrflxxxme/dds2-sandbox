@@ -460,39 +460,42 @@ export default function FunnelPage() {
                     {/* Table with sticky header — both rows pinned */}
                     <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
                         {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> : (
-                            <table className="data-table" style={{ minWidth: detailed ? 1800 : 1200, borderCollapse: 'separate', borderSpacing: 0 }}>
+                            <table className="data-table" style={{ minWidth: detailed ? 1800 : 1200, borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#ffffff' }}>
                                 <thead>
                                     <tr ref={headerRow1Ref}>
-                                        <th rowSpan={2} style={{ position: 'sticky', left: 0, top: 0, background: '#1a1a2e', color: '#e4e4e7', backdropFilter: 'none', zIndex: 22, verticalAlign: 'bottom', borderBottom: '2px solid rgba(255,255,255,0.08)', minWidth: 100, borderRight: '1px solid rgba(255,255,255,0.08)', padding: '8px 12px' }}>ДАТА</th>
-                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', left: 100, top: 0, background: '#1a1a2e', color: '#e4e4e7', backdropFilter: 'none', zIndex: 22, verticalAlign: 'bottom', minWidth: 130, borderRight: '1px solid rgba(255,255,255,0.08)', padding: '8px 12px' }}>Артикул</th>}
-                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 20, verticalAlign: 'bottom' }}>nmId</th>}
-                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 20, verticalAlign: 'bottom' }}>Предмет</th>}
-                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 20, verticalAlign: 'bottom' }}>Бренд</th>}
-                                        <th colSpan={5} style={{ position: 'sticky', top: 0, background: '#2a2517', textAlign: 'center', zIndex: 20 }}>ВОРОНКА</th>
-                                        <th colSpan={7} style={{ position: 'sticky', top: 0, background: '#1f1e36', textAlign: 'center', zIndex: 20 }}>ВНУТРЕННЯЯ РЕКЛАМА</th>
-                                        <th colSpan={4} style={{ position: 'sticky', top: 0, background: '#1a2a28', textAlign: 'center', zIndex: 20 }}>ФИНАНСЫ</th>
-                                        <th colSpan={2} style={{ position: 'sticky', top: 0, background: '#2a1a28', textAlign: 'center', zIndex: 20 }}>КОНВЕРСИЯ</th>
+                                        <th rowSpan={2} style={{ position: 'sticky', left: 0, top: 0, background: '#ffffff', color: '#374151', backdropFilter: 'none', zIndex: 22, verticalAlign: 'bottom', borderBottom: '2px solid #e5e7eb', minWidth: 100, borderRight: '1px solid #e5e7eb', padding: '8px 12px', boxShadow: !detailed ? 'inset -6px 0 6px -6px rgba(0,0,0,0.08)' : 'none' }}>ДАТА</th>
+                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', left: 100, top: 0, background: '#ffffff', color: '#374151', backdropFilter: 'none', zIndex: 22, verticalAlign: 'bottom', minWidth: 130, borderRight: '1px solid #e5e7eb', padding: '8px 12px', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.08)' }}>Артикул</th>}
+                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', zIndex: 20, verticalAlign: 'bottom', borderBottom: '2px solid #e5e7eb' }}>nmId</th>}
+                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', zIndex: 20, verticalAlign: 'bottom', borderBottom: '2px solid #e5e7eb' }}>Предмет</th>}
+                                        {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', zIndex: 20, verticalAlign: 'bottom', borderBottom: '2px solid #e5e7eb' }}>Бренд</th>}
+                                        <th colSpan={5} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb' }}>ВОРОНКА</th>
+                                        <th colSpan={7} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ВНУТРЕННЯЯ РЕКЛАМА</th>
+                                        <th colSpan={4} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ФИНАНСЫ</th>
+                                        <th colSpan={2} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>КОНВЕРСИЯ</th>
                                     </tr>
                                     <tr>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Переходы</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Корзины</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Заказы</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Сумма ₽</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#231f16', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Выручка ₽</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Расходы ₽</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Просмотры</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Клики</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>CTR</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>CPC</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>CPM</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#1d1c30', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>ДРР</th>
-                                        {detailed && <th style={{ position: 'sticky', top: row1H, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Себест. ₽</th>}
-                                        <th style={{ position: 'sticky', top: row1H, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Налог ₽</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Прибыль ₽</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Маржа</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#1a2422', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>Ср. цена</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#241a24', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>В корзину</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#241a24', zIndex: 19, fontSize: 11, borderBottom: '2px solid rgba(255,255,255,0.15)', boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>В заказ</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Переходы</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Корзины</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Заказы</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Сумма ₽</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Выручка ₽</th>
+                                        
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>Расходы ₽</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Просмотры</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Клики</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>CTR</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>CPC</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>CPM</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>ДРР</th>
+                                        
+                                        {detailed && <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>Себест. ₽</th>}
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', borderLeft: !detailed ? '1px solid #e5e7eb' : 'none' }}>Налог ₽</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Прибыль ₽</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Маржа</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Ср. цена</th>
+                                        
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>В корзину</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>В заказ</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -502,37 +505,37 @@ export default function FunnelPage() {
                                         </td></tr>
                                     )}
                                     {data.map((r, i) => {
-                                        const rowBg = i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
+                                        const rowBg = i % 2 === 0 ? '#ffffff' : '#f9fafb';
                                         return (
-                                            <tr key={i} style={{ background: rowBg }}>
-                                                <td style={{ position: 'sticky', left: 0, background: i % 2 === 0 ? '#1a1a2e' : '#1d1d31', color: '#e4e4e7', zIndex: 2, whiteSpace: 'nowrap', fontSize: 13, fontWeight: 500, minWidth: 100, padding: '8px 12px', borderRight: '1px solid rgba(255,255,255,0.06)' }}>{r.date}</td>
-                                                {detailed && <td style={{ position: 'sticky', left: 100, background: i % 2 === 0 ? '#1a1a2e' : '#1d1d31', color: '#e4e4e7', zIndex: 2, fontSize: 12, minWidth: 130, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 160, padding: '8px 12px', borderRight: '1px solid rgba(255,255,255,0.06)' }}>{r.vendor_code}</td>}
-                                                {detailed && <td style={{ fontSize: 12 }}><a href={`https://www.wildberries.ru/catalog/${r.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{r.nm_id}</a></td>}
-                                                {detailed && <td style={{ fontSize: 12 }}>{r.subject}</td>}
-                                                {detailed && <td style={{ fontSize: 12 }}>{r.brand}</td>}
+                                            <tr key={i} style={{ background: rowBg, color: '#111827' }}>
+                                                <td style={{ position: 'sticky', left: 0, background: rowBg, color: '#111827', zIndex: 2, whiteSpace: 'nowrap', fontSize: 13, fontWeight: 500, minWidth: 100, padding: '8px 12px', borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #f3f4f6', boxShadow: !detailed ? 'inset -6px 0 6px -6px rgba(0,0,0,0.05)' : 'none' }}>{r.date}</td>
+                                                {detailed && <td style={{ position: 'sticky', left: 100, background: rowBg, color: '#111827', zIndex: 2, fontSize: 12, minWidth: 130, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 160, padding: '8px 12px', borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #f3f4f6', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.05)' }}>{r.vendor_code}</td>}
+                                                {detailed && <td style={{ fontSize: 12, borderBottom: '1px solid #f3f4f6' }}><a href={`https://www.wildberries.ru/catalog/${r.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{r.nm_id}</a></td>}
+                                                {detailed && <td style={{ fontSize: 12, borderBottom: '1px solid #f3f4f6' }}>{r.subject}</td>}
+                                                {detailed && <td style={{ fontSize: 12, borderBottom: '1px solid #f3f4f6' }}>{r.brand}</td>}
                                                 {/* Воронка */}
-                                                <td style={{ textAlign: 'right', background: r.open_card > 300000 ? 'rgba(245,158,11,0.08)' : undefined }}>{fmt(r.open_card)}</td>
-                                                <td style={{ textAlign: 'right', background: r.add_to_cart > 15000 ? 'rgba(59,130,246,0.08)' : undefined }}>{fmt(r.add_to_cart)}</td>
-                                                <td style={{ textAlign: 'right', fontWeight: 600, background: r.orders_count > 2500 ? 'rgba(16,185,129,0.1)' : undefined }}>{fmt(r.orders_count)}</td>
-                                                <td style={{ textAlign: 'right', background: r.orders_sum_rub > 5000000 ? 'rgba(139,92,246,0.08)' : undefined }}>{fmt(r.orders_sum_rub)}</td>
-                                                <td style={{ textAlign: 'right', fontWeight: 500, color: r.revenue > 0 ? '#d4d4d8' : '#ef4444' }}>{fmt(r.revenue)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', background: r.open_card > 300000 ? '#fffbeb' : undefined }}>{fmt(r.open_card)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', background: r.add_to_cart > 15000 ? '#eff6ff' : undefined }}>{fmt(r.add_to_cart)}</td>
+                                                <td style={{ textAlign: 'right', fontWeight: 600, borderBottom: '1px solid #f3f4f6', background: r.orders_count > 2500 ? '#f0fdf4' : undefined }}>{fmt(r.orders_count)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', background: r.orders_sum_rub > 5000000 ? '#faf5ff' : undefined }}>{fmt(r.orders_sum_rub)}</td>
+                                                <td style={{ textAlign: 'right', fontWeight: 500, borderBottom: '1px solid #f3f4f6', color: r.revenue > 0 ? '#111827' : '#ef4444' }}>{fmt(r.revenue)}</td>
                                                 {/* Реклама */}
-                                                <td style={{ textAlign: 'right', color: r.adv_sum > 400000 ? '#ef4444' : r.adv_sum > 100000 ? '#f59e0b' : r.adv_sum > 0 ? '#fb923c' : 'var(--color-text-dim)', background: r.adv_sum > 400000 ? 'rgba(239,68,68,0.06)' : undefined }}>{fmt(r.adv_sum)}</td>
-                                                <td style={{ textAlign: 'right' }}>{fmt(r.adv_views)}</td>
-                                                <td style={{ textAlign: 'right' }}>{fmt(r.adv_clicks)}</td>
-                                                <td style={{ textAlign: 'right', color: r.ctr > 5 ? '#10b981' : r.ctr > 2 ? '#d4d4d8' : '#f59e0b' }}>{fmtPct(r.ctr)}</td>
-                                                <td style={{ textAlign: 'right' }}>{fmt(r.cpc)}</td>
-                                                <td style={{ textAlign: 'right' }}>{fmt(r.cpm)}</td>
-                                                <td style={{ textAlign: 'right', color: r.drr > 30 ? '#ef4444' : r.drr > 15 ? '#f59e0b' : r.drr > 0 ? '#10b981' : 'var(--color-text-dim)', fontWeight: r.drr > 30 ? 600 : 400, background: r.drr > 30 ? 'rgba(239,68,68,0.06)' : undefined }}>{fmtPct(r.drr)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6', color: r.adv_sum > 400000 ? '#ef4444' : r.adv_sum > 100000 ? '#f59e0b' : r.adv_sum > 0 ? '#f97316' : '#9ca3af', background: r.adv_sum > 400000 ? '#fef2f2' : undefined }}>{fmt(r.adv_sum)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.adv_views)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.adv_clicks)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: r.ctr > 5 ? '#10b981' : r.ctr > 2 ? '#374151' : '#f59e0b' }}>{fmtPct(r.ctr)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.cpc)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.cpm)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: r.drr > 30 ? '#ef4444' : r.drr > 15 ? '#f59e0b' : r.drr > 0 ? '#10b981' : '#9ca3af', fontWeight: r.drr > 30 ? 600 : 400, background: r.drr > 30 ? '#fef2f2' : undefined }}>{fmtPct(r.drr)}</td>
                                                 {/* Финансы */}
-                                                {detailed && <td style={{ textAlign: 'right' }}>{r.cost_price ? fmt(r.cost_total) : <span style={{ color: '#f59e0b', fontSize: 11 }}>—</span>}</td>}
-                                                <td style={{ textAlign: 'right', color: 'var(--color-text-dim)' }}>{fmt(r.tax)}</td>
-                                                <td style={{ textAlign: 'right', fontWeight: 700, color: r.profit > 0 ? '#10b981' : '#ef4444', background: r.profit > 0 ? 'rgba(16,185,129,0.05)' : r.profit < 0 ? 'rgba(239,68,68,0.05)' : undefined }}>{fmt(r.profit)}</td>
-                                                <td style={{ textAlign: 'right', color: r.margin > 20 ? '#10b981' : r.margin > 0 ? '#a3e635' : '#ef4444', fontWeight: r.margin > 20 ? 600 : 400 }}>{fmtPct(r.margin)}</td>
-                                                <td style={{ textAlign: 'right' }}>{fmt(r.avg_price)}</td>
+                                                {detailed && <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6' }}>{r.cost_price ? fmt(r.cost_total) : <span style={{ color: '#f59e0b', fontSize: 11 }}>—</span>}</td>}
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: '#6b7280', borderLeft: !detailed ? '1px solid #f3f4f6' : 'none' }}>{fmt(r.tax)}</td>
+                                                <td style={{ textAlign: 'right', fontWeight: 700, borderBottom: '1px solid #f3f4f6', color: r.profit > 0 ? '#10b981' : '#ef4444', background: r.profit > 0 ? '#f0fdf4' : r.profit < 0 ? '#fef2f2' : undefined }}>{fmt(r.profit)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: r.margin > 20 ? '#10b981' : r.margin > 0 ? '#65a30d' : '#ef4444', fontWeight: r.margin > 20 ? 600 : 400 }}>{fmtPct(r.margin)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.avg_price)}</td>
                                                 {/* Конверсия */}
-                                                <td style={{ textAlign: 'right', color: r.add_to_cart_pct > 8 ? '#10b981' : r.add_to_cart_pct > 4 ? '#d4d4d8' : '#f59e0b' }}>{fmtPct(r.add_to_cart_pct)}</td>
-                                                <td style={{ textAlign: 'right', color: r.cart_to_order_pct > 15 ? '#10b981' : r.cart_to_order_pct > 8 ? '#d4d4d8' : '#f59e0b' }}>{fmtPct(r.cart_to_order_pct)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6', color: r.add_to_cart_pct > 8 ? '#10b981' : r.add_to_cart_pct > 4 ? '#374151' : '#f59e0b' }}>{fmtPct(r.add_to_cart_pct)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: r.cart_to_order_pct > 15 ? '#10b981' : r.cart_to_order_pct > 8 ? '#374151' : '#f59e0b' }}>{fmtPct(r.cart_to_order_pct)}</td>
                                             </tr>
                                         );
                                     })}
