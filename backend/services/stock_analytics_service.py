@@ -11,10 +11,11 @@ import logging
 from datetime import date, timedelta
 from typing import Optional
 
-from sqlalchemy import select, func, desc
+from sqlalchemy import select, func, desc, delete
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from backend.models import WbFunnelDaily
+from backend.models import WbFunnelDaily, WbWarehouseStock
 
 logger = logging.getLogger("dds.stock_analytics")
 
@@ -295,4 +296,229 @@ def _empty_result() -> dict:
         "dates": [],
         "subjects": [],
         "brands": [],
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Warehouse stocks — sync + views
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def compute_need(stock_qty: int, avg_daily: float, need_days: int) -> int:
+    """How many items need to be shipped to cover need_days of demand.
+    Negative means surplus (no need to ship).
+    """
+    needed = avg_daily * need_days
+    deficit = needed - stock_qty
+    return max(0, int(deficit + 0.5))  # round up
+
+
+async def sync_warehouse_stocks(
+    db: AsyncSession,
+    project_id: int,
+    items: list[dict],
+) -> int:
+    """Upsert warehouse stock data from WB API response.
+    items = [{warehouseName, nmId, supplierArticle, quantity, quantityFull,
+              inWayToClient, inWayFromClient, subject, brand, ...}]
+    Returns count of upserted rows.
+    """
+    if not items:
+        return 0
+
+    # Delete old data for this project first (full refresh)
+    await db.execute(
+        delete(WbWarehouseStock).where(WbWarehouseStock.project_id == project_id)
+    )
+
+    count = 0
+    batch = []
+    for item in items:
+        nm_id = item.get("nmId")
+        wh_name = item.get("warehouseName", "")
+        if not nm_id or not wh_name:
+            continue
+
+        batch.append({
+            "project_id": project_id,
+            "nm_id": nm_id,
+            "vendor_code": item.get("supplierArticle", ""),
+            "subject": item.get("subject", ""),
+            "brand": item.get("brand", ""),
+            "warehouse_name": wh_name,
+            "quantity": item.get("quantity", 0),
+            "quantity_full": item.get("quantityFull", 0),
+            "in_way_to_client": item.get("inWayToClient", 0),
+            "in_way_from_client": item.get("inWayFromClient", 0),
+        })
+
+        if len(batch) >= 500:
+            stmt = pg_insert(WbWarehouseStock).values(batch)
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_wh_stock_nm_wh",
+                set_={
+                    "vendor_code": stmt.excluded.vendor_code,
+                    "subject": stmt.excluded.subject,
+                    "brand": stmt.excluded.brand,
+                    "quantity": stmt.excluded.quantity,
+                    "quantity_full": stmt.excluded.quantity_full,
+                    "in_way_to_client": stmt.excluded.in_way_to_client,
+                    "in_way_from_client": stmt.excluded.in_way_from_client,
+                },
+            )
+            await db.execute(stmt)
+            count += len(batch)
+            batch = []
+
+    if batch:
+        stmt = pg_insert(WbWarehouseStock).values(batch)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_wh_stock_nm_wh",
+            set_={
+                "vendor_code": stmt.excluded.vendor_code,
+                "subject": stmt.excluded.subject,
+                "brand": stmt.excluded.brand,
+                "quantity": stmt.excluded.quantity,
+                "quantity_full": stmt.excluded.quantity_full,
+                "in_way_to_client": stmt.excluded.in_way_to_client,
+                "in_way_from_client": stmt.excluded.in_way_from_client,
+            },
+        )
+        await db.execute(stmt)
+        count += len(batch)
+
+    await db.commit()
+    logger.info(f"Synced {count} warehouse stock rows for project {project_id}")
+    return count
+
+
+async def get_warehouse_stocks(
+    db: AsyncSession,
+    project_id: int,
+) -> dict:
+    """Get warehouse stocks grouped by warehouse.
+    Returns {warehouses: [{name, total_qty, articles_count}], total_warehouses, total_qty}
+    """
+    result = await db.execute(
+        select(
+            WbWarehouseStock.warehouse_name,
+            func.sum(WbWarehouseStock.quantity).label("total_qty"),
+            func.count(func.distinct(WbWarehouseStock.nm_id)).label("articles_count"),
+        ).where(
+            WbWarehouseStock.project_id == project_id,
+        ).group_by(WbWarehouseStock.warehouse_name)
+        .order_by(func.sum(WbWarehouseStock.quantity).desc())
+    )
+
+    warehouses = []
+    total_qty = 0
+    for r in result:
+        qty = int(r.total_qty or 0)
+        total_qty += qty
+        warehouses.append({
+            "name": r.warehouse_name,
+            "total_qty": qty,
+            "articles_count": int(r.articles_count or 0),
+        })
+
+    return {
+        "warehouses": warehouses,
+        "total_warehouses": len(warehouses),
+        "total_qty": total_qty,
+    }
+
+
+async def get_warehouse_need(
+    db: AsyncSession,
+    project_id: int,
+    need_days: int = 14,
+) -> dict:
+    """Compute restocking need per warehouse per article.
+    
+    need = avg_daily_orders * need_days - current_stock_at_warehouse
+    Returns rows grouped by warehouse with per-article needs.
+    """
+    today = date.today()
+    trend_start = today - timedelta(days=need_days)
+
+    # 1. Get avg daily orders per nm_id from WbFunnelDaily
+    latest_date_result = await db.execute(
+        select(func.max(WbFunnelDaily.date)).where(
+            WbFunnelDaily.project_id == project_id,
+        )
+    )
+    data_date = latest_date_result.scalar()
+    if not data_date:
+        return {"warehouses": [], "articles": [], "need_days": need_days}
+
+    trend_result = await db.execute(
+        select(
+            WbFunnelDaily.nm_id,
+            WbFunnelDaily.vendor_code,
+            func.sum(WbFunnelDaily.orders_count).label("total_orders"),
+            func.count(func.distinct(WbFunnelDaily.date)).label("days_count"),
+        ).where(
+            WbFunnelDaily.project_id == project_id,
+            WbFunnelDaily.date >= trend_start,
+            WbFunnelDaily.date <= data_date,
+        ).group_by(WbFunnelDaily.nm_id, WbFunnelDaily.vendor_code)
+    )
+    avg_daily_map: dict[int, float] = {}
+    vendor_map: dict[int, str] = {}
+    for r in trend_result:
+        days = max(int(r.days_count or 1), 1)
+        avg_daily_map[r.nm_id] = round(int(r.total_orders or 0) / days, 2)
+        vendor_map[r.nm_id] = r.vendor_code or f"#{r.nm_id}"
+
+    # 2. Get warehouse stocks
+    wh_result = await db.execute(
+        select(
+            WbWarehouseStock.warehouse_name,
+            WbWarehouseStock.nm_id,
+            WbWarehouseStock.vendor_code,
+            WbWarehouseStock.quantity,
+        ).where(
+            WbWarehouseStock.project_id == project_id,
+        ).order_by(WbWarehouseStock.warehouse_name)
+    )
+
+    # 3. Build warehouse → articles need map
+    wh_data: dict[str, dict] = {}
+    all_nm_ids: set[int] = set()
+
+    for r in wh_result:
+        wh_name = r.warehouse_name
+        nm_id = r.nm_id
+        qty = int(r.quantity or 0)
+        avg_d = avg_daily_map.get(nm_id, 0)
+        need = compute_need(qty, avg_d, need_days)
+
+        all_nm_ids.add(nm_id)
+
+        if wh_name not in wh_data:
+            wh_data[wh_name] = {"name": wh_name, "total_need": 0, "articles": {}}
+
+        wh_data[wh_name]["articles"][nm_id] = {
+            "nm_id": nm_id,
+            "vendor_code": vendor_map.get(nm_id, r.vendor_code or f"#{nm_id}"),
+            "stock": qty,
+            "avg_daily": avg_d,
+            "need": need,
+        }
+        wh_data[wh_name]["total_need"] += need
+
+    # Sort warehouses by total need descending
+    warehouses = sorted(wh_data.values(), key=lambda w: w["total_need"], reverse=True)
+
+    # Build article columns (sorted by vendor_code)
+    article_list = sorted(
+        [{"nm_id": nm, "vendor_code": vendor_map.get(nm, f"#{nm}")} for nm in all_nm_ids],
+        key=lambda a: a["vendor_code"],
+    )
+
+    return {
+        "warehouses": warehouses,
+        "articles": article_list,
+        "need_days": need_days,
+        "total_warehouses": len(warehouses),
+        "total_articles": len(article_list),
     }

@@ -100,3 +100,26 @@ class WbCostOverride(Base):
     __table_args__ = (
         UniqueConstraint("project_id", "nm_id", name="uq_cost_override_nm"),
     )
+
+
+class WbWarehouseStock(Base):
+    """Per-warehouse stock levels from WB API supplier/stocks."""
+    __tablename__ = "wb_warehouse_stocks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    nm_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    vendor_code: Mapped[Optional[str]] = mapped_column(String(100))
+    subject: Mapped[Optional[str]] = mapped_column(String(200))
+    brand: Mapped[Optional[str]] = mapped_column(String(200))
+    warehouse_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, default=0)
+    quantity_full: Mapped[int] = mapped_column(Integer, default=0)
+    in_way_to_client: Mapped[int] = mapped_column(Integer, default=0)
+    in_way_from_client: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "nm_id", "warehouse_name", name="uq_wh_stock_nm_wh"),
+        Index("ix_wh_stock_project", "project_id"),
+    )

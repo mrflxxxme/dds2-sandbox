@@ -379,3 +379,44 @@ async def get_stock_analytics(
         subject_filter=subject, brand_filter=brand, article_filter=article,
     )
 
+
+@router.post("/stock_warehouses/sync")
+async def sync_warehouse_stocks(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Sync warehouse stock levels from WB API supplier/stocks."""
+    from backend.services.funnel.wb_api_client import get_wb_key, fetch_warehouse_stocks
+    from backend.services.stock_analytics_service import sync_warehouse_stocks as do_sync
+
+    api_key = await get_wb_key(db, project.id, "wb_stats")
+    if not api_key:
+        api_key = await get_wb_key(db, project.id, "wb_analytics")
+    if not api_key:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="WB Statistics API key not configured")
+
+    items = await fetch_warehouse_stocks(api_key)
+    count = await do_sync(db, project.id, items)
+    return {"synced": count}
+
+
+@router.get("/stock_warehouses")
+async def get_warehouse_stocks(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get warehouse stock levels grouped by warehouse."""
+    from backend.services.stock_analytics_service import get_warehouse_stocks as get_wh
+    return await get_wh(db, project.id)
+
+
+@router.get("/stock_need")
+async def get_stock_need(
+    need_days: int = Query(14, ge=1, le=90),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Compute restocking need per warehouse per article."""
+    from backend.services.stock_analytics_service import get_warehouse_need
+    return await get_warehouse_need(db, project.id, need_days)

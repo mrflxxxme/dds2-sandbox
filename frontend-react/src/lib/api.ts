@@ -763,6 +763,18 @@ class ApiClient {
         if (article) q.set('article', article);
         return this.request('GET', `/api/v1/reports/stock_analytics?${q.toString()}`);
     }
+
+    async syncWarehouseStocks(): Promise<{ synced: number }> {
+        return this.request('POST', '/api/v1/reports/stock_warehouses/sync');
+    }
+
+    async getWarehouseStocks(): Promise<any> {
+        return this.request('GET', '/api/v1/reports/stock_warehouses');
+    }
+
+    async getStockNeed(needDays: number = 14): Promise<any> {
+        return this.request('GET', `/api/v1/reports/stock_need?need_days=${needDays}`);
+    }
 }
 
 export const api = new ApiClient();

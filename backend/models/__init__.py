@@ -69,6 +69,7 @@ from backend.models.integrations import (
     SyncLog,
     WbFunnelDaily,
     WbCostOverride,
+    WbWarehouseStock,
 )
 
 # FX Rates
@@ -111,7 +112,7 @@ __all__ = [
     # Cost
     "Nomenclature", "DutyRule", "CostOrder", "CostOrderItem",
     # Integrations & Funnel
-    "IntegrationKey", "SyncLog", "WbFunnelDaily", "WbCostOverride",
+    "IntegrationKey", "SyncLog", "WbFunnelDaily", "WbCostOverride", "WbWarehouseStock",
     # FX Rates
     "FxRate",
     # Tax

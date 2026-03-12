@@ -1069,6 +1069,7 @@ function KpiCard({ label, value, sub, color }: { label: string; value: string; s
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function StockAnalytics() {
+    const [subView, setSubView] = useState<'articles' | 'warehouses' | 'need'>('articles');
     const [data, setData] = useState<any>(null);
     const [loading, setLoading] = useState(false);
     const [trendDays, setTrendDays] = useState(7);
@@ -1103,6 +1104,9 @@ function StockAnalytics() {
         if (searchTimeout) clearTimeout(searchTimeout);
         setSearchTimeout(setTimeout(() => load(), 500));
     };
+
+    if (subView === 'warehouses') return <WarehouseStocksView />;
+    if (subView === 'need') return <WarehouseNeedView />;
 
     if (loading && !data) return <div className="glass-card" style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-muted)' }}>Загрузка аналитики остатков...</div>;
 
@@ -1159,7 +1163,7 @@ function StockAnalytics() {
 
     return (
         <div>
-            {/* Header */}
+            {/* Header + Sub-view toggle */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                 <div>
                     <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>📦 Аналитика остатков</h2>
@@ -1172,6 +1176,19 @@ function StockAnalytics() {
                             onClick={() => setTrendDays(d)}>{d}д</button>
                     ))}
                 </div>
+            </div>
+
+            {/* Sub-view toggle */}
+            <div style={{ display: 'flex', gap: 4, marginBottom: 16 }}>
+                {[
+                    { key: 'articles' as const, label: '📋 По артикулам' },
+                    { key: 'warehouses' as const, label: '🏭 По складам' },
+                    { key: 'need' as const, label: '📦 Потребность' },
+                ].map(v => (
+                    <button key={v.key}
+                        className={`btn btn-sm ${subView === v.key ? 'btn-primary' : 'btn-secondary'}`}
+                        onClick={() => setSubView(v.key)}>{v.label}</button>
+                ))}
             </div>
 
             {/* Filters */}
@@ -1331,6 +1348,168 @@ function StockAnalytics() {
                     <button className="btn btn-sm btn-secondary" disabled={page >= totalPages - 1} onClick={() => setPage(p => p + 1)}>→</button>
                 </div>
             </div>
+        </div>
+    );
+}
+
+/* ─────────── Warehouse Stocks View ─────────── */
+function WarehouseStocksView() {
+    const [data, setData] = useState<any>(null);
+    const [loading, setLoading] = useState(false);
+    const [syncing, setSyncing] = useState(false);
+
+    const load = async () => {
+        setLoading(true);
+        try { setData(await api.getWarehouseStocks()); } catch { }
+        setLoading(false);
+    };
+
+    const sync = async () => {
+        setSyncing(true);
+        try {
+            const res = await api.syncWarehouseStocks();
+            alert(`Синхронизировано ${res.synced} записей`);
+            await load();
+        } catch (e: any) {
+            alert(e?.message || 'Ошибка синхронизации');
+        }
+        setSyncing(false);
+    };
+
+    useEffect(() => { load(); }, []);
+
+    if (loading && !data) return <div className="glass-card" style={{ textAlign: 'center', padding: 40 }}>Загрузка складов...</div>;
+
+    return (
+        <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <div>
+                    <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>🏭 Остатки по складам</h2>
+                    <span style={{ fontSize: 13, opacity: 0.6 }}>
+                        {data ? `${data.total_warehouses} складов · ${formatNumber(data.total_qty)} шт` : 'Нет данных'}
+                    </span>
+                </div>
+                <button className="btn btn-sm btn-primary" onClick={sync} disabled={syncing}>
+                    {syncing ? '⏳ Синхронизация...' : '🔄 Синхронизировать с WB'}
+                </button>
+            </div>
+
+            {data && data.warehouses && data.warehouses.length > 0 ? (
+                <div className="glass-card" style={{ overflowX: 'auto' }}>
+                    <table className="data-table" style={{ width: '100%', fontSize: 13 }}>
+                        <thead>
+                            <tr>
+                                <th style={{ textAlign: 'left' }}>Склад</th>
+                                <th style={{ textAlign: 'right' }}>Остаток (шт)</th>
+                                <th style={{ textAlign: 'right' }}>Артикулов</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr style={{ fontWeight: 700, background: 'rgba(0,0,0,0.03)' }}>
+                                <td>ИТОГО</td>
+                                <td style={{ textAlign: 'right' }}>{formatNumber(data.total_qty)}</td>
+                                <td style={{ textAlign: 'right' }}>{data.total_warehouses}</td>
+                            </tr>
+                            {data.warehouses.map((wh: any) => (
+                                <tr key={wh.name}>
+                                    <td>{wh.name}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(wh.total_qty)}</td>
+                                    <td style={{ textAlign: 'right' }}>{wh.articles_count}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            ) : (
+                <div className="glass-card">
+                    <div className="empty-state">
+                        <div className="empty-state-text">Нет данных по складам. Нажмите «Синхронизировать с WB».</div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+/* ─────────── Warehouse Need View ─────────── */
+function WarehouseNeedView() {
+    const [data, setData] = useState<any>(null);
+    const [loading, setLoading] = useState(false);
+    const [needDays, setNeedDays] = useState(14);
+
+    const load = async () => {
+        setLoading(true);
+        try { setData(await api.getStockNeed(needDays)); } catch { }
+        setLoading(false);
+    };
+
+    useEffect(() => { load(); }, [needDays]);
+
+    if (loading && !data) return <div className="glass-card" style={{ textAlign: 'center', padding: 40 }}>Расчёт потребности...</div>;
+
+    return (
+        <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <div>
+                    <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>📦 Потребность по складам</h2>
+                    <span style={{ fontSize: 13, opacity: 0.6 }}>
+                        {data ? `${data.total_warehouses} складов · ${data.total_articles} артикулов · на ${needDays} дней` : 'Нет данных'}
+                    </span>
+                </div>
+                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                    <span style={{ fontSize: 13, opacity: 0.6, marginRight: 8 }}>Потребность на</span>
+                    {[7, 14, 30].map(d => (
+                        <button key={d} className={`btn btn-sm ${needDays === d ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={() => setNeedDays(d)}>{d} дн</button>
+                    ))}
+                </div>
+            </div>
+
+            {data && data.warehouses && data.warehouses.length > 0 ? (
+                <div className="glass-card" style={{ overflowX: 'auto' }}>
+                    <table className="data-table" style={{ width: '100%', fontSize: 12 }}>
+                        <thead>
+                            <tr>
+                                <th style={{ textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg)', zIndex: 2, minWidth: 200 }}>Склад</th>
+                                <th style={{ textAlign: 'right', minWidth: 80 }}>Потребность</th>
+                                {(data.articles || []).map((a: any) => (
+                                    <th key={a.nm_id} style={{ textAlign: 'right', minWidth: 90, fontSize: 11, whiteSpace: 'nowrap' }}>
+                                        {a.vendor_code.length > 15 ? a.vendor_code.slice(0, 15) + '…' : a.vendor_code}
+                                    </th>
+                                ))}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {data.warehouses.map((wh: any) => (
+                                <tr key={wh.name}>
+                                    <td style={{ fontWeight: 600, position: 'sticky', left: 0, background: 'var(--color-bg)', zIndex: 1 }}>{wh.name}</td>
+                                    <td style={{ textAlign: 'right', fontWeight: 700 }}>{formatNumber(wh.total_need)}</td>
+                                    {(data.articles || []).map((a: any) => {
+                                        const artData = wh.articles?.[a.nm_id];
+                                        const need = artData?.need || 0;
+                                        return (
+                                            <td key={a.nm_id} style={{
+                                                textAlign: 'right',
+                                                background: need > 0 ? 'rgba(255,68,68,0.1)' : undefined,
+                                                color: need > 0 ? '#ff4444' : 'var(--color-text-muted)',
+                                                fontWeight: need > 0 ? 600 : 400,
+                                            }}>
+                                                {need > 0 ? formatNumber(need) : '—'}
+                                            </td>
+                                        );
+                                    })}
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            ) : (
+                <div className="glass-card">
+                    <div className="empty-state">
+                        <div className="empty-state-text">Нет данных. Сначала синхронизируйте склады (вкладка «По складам»).</div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
