@@ -458,9 +458,10 @@ export default function FunnelPage() {
                     )}
 
                     {/* Table with sticky header — both rows pinned */}
-                    <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
-                        {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> : (
-                            <table className="data-table" style={{ minWidth: detailed ? 1800 : 1200, borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#ffffff' }}>
+                    <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                        <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
+                            {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> : (
+                                <table className="data-table" style={{ minWidth: detailed ? 1800 : 1200, borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#ffffff' }}>
                                 <thead>
                                     <tr ref={headerRow1Ref}>
                                         <th rowSpan={2} style={{ position: 'sticky', left: 0, top: 0, background: '#ffffff', color: '#374151', backdropFilter: 'none', zIndex: 22, verticalAlign: 'bottom', borderBottom: '2px solid #e5e7eb', minWidth: 100, borderRight: '1px solid #e5e7eb', padding: '8px 12px', boxShadow: !detailed ? 'inset -6px 0 6px -6px rgba(0,0,0,0.08)' : 'none' }}>ДАТА</th>
@@ -540,11 +541,12 @@ export default function FunnelPage() {
                                         );
                                     })}
                                 </tbody>
-                            </table>
-                        )}
-                    </div>
-                    <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-dim)' }}>
-                        Всего строк: {data.length} {!detailed && '(агрегация по дням)'}
+                                </table>
+                            )}
+                        </div>
+                        <div style={{ padding: '16px 20px', borderTop: '1px solid #e5e7eb', fontSize: 12, color: 'var(--color-text-dim)', background: '#f9fafb' }}>
+                            Всего строк: {data.length} {!detailed && '(агрегация по дням)'}
+                        </div>
                     </div>
                 </>
             )
@@ -682,46 +684,50 @@ export default function FunnelPage() {
                                 )}
 
                                 {/* Top products table */}
-                                <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 380px)' }}>
-                                    <h3 style={{ margin: '12px 16px', fontSize: 14 }}>🏆 Топ товаров за {dayDate}</h3>
-                                    <table className="data-table" style={{ minWidth: 900, borderCollapse: 'separate', borderSpacing: 0 }}>
-                                        <thead>
-                                            <tr>
-                                                <th style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 10 }}>#</th>
-                                                <th style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 10 }}>Артикул</th>
-                                                <th style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 10 }}>nmId</th>
-                                                <th style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 10 }}>Категория</th>
-                                                <th style={{ position: 'sticky', top: 0, background: '#1a1a2e', zIndex: 10 }}>Бренд</th>
-                                                <th style={{ position: 'sticky', top: 0, background: '#231f16', zIndex: 10 }}>Переходы</th>
-                                                <th style={{ position: 'sticky', top: 0, background: '#231f16', zIndex: 10 }}>Корзины</th>
-                                                <th style={{ position: 'sticky', top: 0, background: '#231f16', zIndex: 10 }}>Заказы</th>
-                                                <th style={{ position: 'sticky', top: 0, background: '#231f16', zIndex: 10 }}>Выручка ₽</th>
-                                                <th style={{ position: 'sticky', top: 0, background: '#1d1c30', zIndex: 10 }}>Реклама ₽</th>
-                                                <th style={{ position: 'sticky', top: 0, background: '#1d1c30', zIndex: 10 }}>ДРР %</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {(dayReport.top_products || []).map((p: any, i: number) => (
-                                                <tr key={i} style={{ background: i % 2 ? 'rgba(255,255,255,0.02)' : 'transparent' }}>
-                                                    <td style={{ textAlign: 'center', color: '#888', fontSize: 11 }}>{i + 1}</td>
-                                                    <td style={{ fontSize: 12 }}>{p.vendor_code}</td>
-                                                    <td style={{ fontSize: 12 }}>
-                                                        <a href={`https://www.wildberries.ru/catalog/${p.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{p.nm_id}</a>
-                                                    </td>
-                                                    <td style={{ fontSize: 12 }}>{p.subject}</td>
-                                                    <td style={{ fontSize: 12 }}>{p.brand}</td>
-                                                    <td style={{ textAlign: 'right' }}>{dayFmt(p.open_card)}</td>
-                                                    <td style={{ textAlign: 'right' }}>{dayFmt(p.add_to_cart)}</td>
-                                                    <td style={{ textAlign: 'right', fontWeight: 600 }}>{dayFmt(p.orders_count)}</td>
-                                                    <td style={{ textAlign: 'right', color: '#8b5cf6', fontWeight: 600 }}>{dayFmt(p.orders_sum)}</td>
-                                                    <td style={{ textAlign: 'right', color: '#f59e0b' }}>{dayFmt(p.adv_sum)}</td>
-                                                    <td style={{ textAlign: 'right', color: p.drr > 20 ? '#ef4444' : p.drr > 10 ? '#f59e0b' : '#10b981', fontWeight: 600 }}>
-                                                        {p.drr.toFixed(1)}%
-                                                    </td>
+                                <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                                    <h3 style={{ margin: '16px 20px 12px', fontSize: 14 }}>🏆 Топ товаров за {dayDate}</h3>
+                                    <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 380px)' }}>
+                                        <table className="data-table" style={{ minWidth: 900, borderCollapse: 'separate', borderSpacing: 0 }}>
+                                            <thead>
+                                                <tr>
+                                                    <th style={{ position: 'sticky', top: 0, background: '#f9fafb', zIndex: 10, borderBottom: '1px solid #e5e7eb' }}>#</th>
+                                                    <th style={{ position: 'sticky', top: 0, background: '#f9fafb', zIndex: 10, borderBottom: '1px solid #e5e7eb' }}>Артикул</th>
+                                                    <th style={{ position: 'sticky', top: 0, background: '#f9fafb', zIndex: 10, borderBottom: '1px solid #e5e7eb' }}>nmId</th>
+                                                    <th style={{ position: 'sticky', top: 0, background: '#f9fafb', zIndex: 10, borderBottom: '1px solid #e5e7eb' }}>Категория</th>
+                                                    <th style={{ position: 'sticky', top: 0, background: '#f9fafb', zIndex: 10, borderBottom: '1px solid #e5e7eb' }}>Бренд</th>
+                                                    <th style={{ position: 'sticky', top: 0, background: '#f9fafb', zIndex: 10, borderBottom: '1px solid #e5e7eb' }}>Переходы</th>
+                                                    <th style={{ position: 'sticky', top: 0, background: '#f9fafb', zIndex: 10, borderBottom: '1px solid #e5e7eb' }}>Корзины</th>
+                                                    <th style={{ position: 'sticky', top: 0, background: '#f9fafb', zIndex: 10, borderBottom: '1px solid #e5e7eb' }}>Заказы</th>
+                                                    <th style={{ position: 'sticky', top: 0, background: '#f9fafb', zIndex: 10, borderBottom: '1px solid #e5e7eb' }}>Выручка ₽</th>
+                                                    <th style={{ position: 'sticky', top: 0, background: '#f9fafb', zIndex: 10, borderBottom: '1px solid #e5e7eb' }}>Реклама ₽</th>
+                                                    <th style={{ position: 'sticky', top: 0, background: '#f9fafb', zIndex: 10, borderBottom: '1px solid #e5e7eb' }}>ДРР %</th>
                                                 </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
+                                            </thead>
+                                            <tbody>
+                                                {(dayReport.top_products || []).map((p: any, i: number) => {
+                                                    const rowBg = i % 2 === 0 ? '#ffffff' : '#f9fafb';
+                                                    return (
+                                                    <tr key={i} style={{ background: rowBg, color: '#111827' }}>
+                                                        <td style={{ textAlign: 'center', color: '#6b7280', fontSize: 11, borderBottom: '1px solid #f3f4f6' }}>{i + 1}</td>
+                                                        <td style={{ fontSize: 12, borderBottom: '1px solid #f3f4f6' }}>{p.vendor_code}</td>
+                                                        <td style={{ fontSize: 12, borderBottom: '1px solid #f3f4f6' }}>
+                                                            <a href={`https://www.wildberries.ru/catalog/${p.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{p.nm_id}</a>
+                                                        </td>
+                                                        <td style={{ fontSize: 12, borderBottom: '1px solid #f3f4f6' }}>{p.subject}</td>
+                                                        <td style={{ fontSize: 12, borderBottom: '1px solid #f3f4f6' }}>{p.brand}</td>
+                                                        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{dayFmt(p.open_card)}</td>
+                                                        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{dayFmt(p.add_to_cart)}</td>
+                                                        <td style={{ textAlign: 'right', fontWeight: 600, borderBottom: '1px solid #f3f4f6' }}>{dayFmt(p.orders_count)}</td>
+                                                        <td style={{ textAlign: 'right', color: '#8b5cf6', fontWeight: 600, borderBottom: '1px solid #f3f4f6' }}>{dayFmt(p.orders_sum)}</td>
+                                                        <td style={{ textAlign: 'right', color: '#f59e0b', borderBottom: '1px solid #f3f4f6' }}>{dayFmt(p.adv_sum)}</td>
+                                                        <td style={{ textAlign: 'right', color: p.drr > 20 ? '#ef4444' : p.drr > 10 ? '#f59e0b' : '#10b981', fontWeight: 600, borderBottom: '1px solid #f3f4f6' }}>
+                                                            {p.drr.toFixed(1)}%
+                                                        </td>
+                                                    </tr>
+                                                )})}
+                                            </tbody>
+                                        </table>
+                                    </div>
                                 </div>
                             </>
                         );
