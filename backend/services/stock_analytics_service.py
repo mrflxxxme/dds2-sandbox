@@ -407,18 +407,24 @@ async def get_warehouse_need(
     db: AsyncSession,
     project_id: int,
     need_days: int = 14,
+    mode: str = "actual",
 ) -> dict:
     """Compute restocking need per warehouse per article.
     
-    Uses WB supplier/orders API to get per-warehouse order trends.
-    need = avg_daily_orders_at_warehouse * need_days - current_stock_at_warehouse
+    mode="actual": uses WB supplier/orders warehouseName (which warehouse shipped).
+    mode="hypothetical": maps order regionName → nearest open warehouse via geo.
     """
-    from backend.services.funnel.wb_api_client import get_wb_key, fetch_supplier_orders
+    from backend.services.funnel.wb_api_client import (
+        get_wb_key,
+        fetch_supplier_orders,
+        fetch_acceptance_coefficients,
+    )
+    from backend.services.warehouse_geo import find_nearest_warehouse, WAREHOUSE_COORDS
     
     today = date.today()
     trend_start = today - timedelta(days=need_days)
 
-    # 1. Fetch per-warehouse orders from WB API
+    # 1. Fetch orders from WB API
     api_key = await get_wb_key(db, project_id, "wb")
     wh_orders_map: dict[tuple[str, int], int] = {}  # (warehouse, nm_id) -> total_orders
     vendor_map: dict[int, str] = {}
@@ -426,14 +432,44 @@ async def get_warehouse_need(
     subject_map: dict[int, str] = {}
     actual_days = need_days
 
+    # For hypothetical mode: determine open warehouses
+    open_warehouses: list[str] = list(WAREHOUSE_COORDS.keys())
+    if api_key and mode == "hypothetical":
+        coefficients = await fetch_acceptance_coefficients(api_key)
+        if coefficients:
+            # Warehouse is open if ANY entry has coefficient >= 0
+            open_set: set[str] = set()
+            for c in coefficients:
+                wh = c.get("warehouseName", "")
+                coeff = c.get("coefficient")
+                if wh and coeff is not None and coeff >= 0:
+                    open_set.add(wh)
+            if open_set:
+                open_warehouses = [w for w in open_warehouses if w in open_set]
+                # Also include any open warehouse not in our coords
+                # (won't match in geo but stays in the list)
+
     if api_key:
         orders = await fetch_supplier_orders(api_key, trend_start.isoformat())
         for order in orders:
-            wh_name = order.get("warehouseName", "")
             nm_id = order.get("nmId")
             qty = order.get("quantity", 1)
-            if not wh_name or not nm_id:
+            if not nm_id:
                 continue
+
+            # Determine warehouse based on mode
+            if mode == "hypothetical":
+                region = order.get("regionName", "")
+                wh_name = find_nearest_warehouse(region, open_warehouses)
+                if not wh_name:
+                    # Fallback to actual warehouse
+                    wh_name = order.get("warehouseName", "")
+            else:
+                wh_name = order.get("warehouseName", "")
+
+            if not wh_name:
+                continue
+
             key = (wh_name, nm_id)
             wh_orders_map[key] = wh_orders_map.get(key, 0) + qty
             if nm_id not in vendor_map:
@@ -474,35 +510,58 @@ async def get_warehouse_need(
         ).order_by(WbWarehouseStock.warehouse_name)
     )
 
-    # 3. Build warehouse → articles need map using per-warehouse avg daily
-    wh_data: dict[str, dict] = {}
+    # Build stock lookup: (warehouse, nm_id) -> qty
+    stock_lookup: dict[tuple[str, int], int] = {}
+    stock_vendor: dict[int, str] = {}
     all_nm_ids: set[int] = set()
 
     for r in wh_result:
-        wh_name = r.warehouse_name
-        nm_id = r.nm_id
-        qty = int(r.quantity or 0)
-        
-        # Per-warehouse avg daily orders
-        total_orders_at_wh = wh_orders_map.get((wh_name, nm_id), 0)
-        avg_d = round(total_orders_at_wh / max(actual_days, 1), 2)
-        need = compute_need(qty, avg_d, need_days)
+        stock_lookup[(r.warehouse_name, r.nm_id)] = int(r.quantity or 0)
+        all_nm_ids.add(r.nm_id)
+        if r.nm_id not in vendor_map:
+            vendor_map[r.nm_id] = r.vendor_code or f"#{r.nm_id}"
 
-        all_nm_ids.add(nm_id)
-        if nm_id not in vendor_map:
-            vendor_map[nm_id] = r.vendor_code or f"#{nm_id}"
+    # In hypothetical mode, also include articles from orders that may not have stock
+    for (wh, nm) in wh_orders_map:
+        all_nm_ids.add(nm)
 
+    # 3. Determine which warehouses to show
+    if mode == "hypothetical":
+        # Show warehouses from geo mapping that have orders or stock
+        wh_names_to_show = set()
+        for (wh, _) in wh_orders_map:
+            wh_names_to_show.add(wh)
+        for (wh, _) in stock_lookup:
+            wh_names_to_show.add(wh)
+    else:
+        wh_names_to_show = set(wh for (wh, _) in stock_lookup)
+
+    # 4. Build warehouse → articles need map
+    wh_data: dict[str, dict] = {}
+
+    for wh_name in wh_names_to_show:
         if wh_name not in wh_data:
             wh_data[wh_name] = {"name": wh_name, "total_need": 0, "articles": {}}
 
-        wh_data[wh_name]["articles"][nm_id] = {
-            "nm_id": nm_id,
-            "vendor_code": vendor_map.get(nm_id, r.vendor_code or f"#{nm_id}"),
-            "stock": qty,
-            "avg_daily": avg_d,
-            "need": need,
-        }
-        wh_data[wh_name]["total_need"] += need
+        for nm_id in all_nm_ids:
+            stock = stock_lookup.get((wh_name, nm_id), 0)
+            total_orders_at_wh = wh_orders_map.get((wh_name, nm_id), 0)
+
+            # Skip if no orders and no stock at this warehouse for this article
+            if total_orders_at_wh == 0 and stock == 0:
+                continue
+
+            avg_d = round(total_orders_at_wh / max(actual_days, 1), 2)
+            need = compute_need(stock, avg_d, need_days)
+
+            wh_data[wh_name]["articles"][nm_id] = {
+                "nm_id": nm_id,
+                "vendor_code": vendor_map.get(nm_id, f"#{nm_id}"),
+                "stock": stock,
+                "avg_daily": avg_d,
+                "need": need,
+            }
+            wh_data[wh_name]["total_need"] += need
 
     # Sort warehouses by total need descending
     warehouses = sorted(wh_data.values(), key=lambda w: w["total_need"], reverse=True)
@@ -528,6 +587,7 @@ async def get_warehouse_need(
         "brands": brands,
         "subjects": subjects,
         "need_days": need_days,
+        "mode": mode,
         "total_warehouses": len(warehouses),
         "total_articles": len(article_list),
     }

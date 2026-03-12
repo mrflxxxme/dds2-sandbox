@@ -772,8 +772,8 @@ class ApiClient {
         return this.request('GET', '/api/v1/reports/stock_warehouses');
     }
 
-    async getStockNeed(needDays: number = 14): Promise<any> {
-        return this.request('GET', `/api/v1/reports/stock_need?need_days=${needDays}`);
+    async getStockNeed(needDays: number = 14, mode: string = 'actual'): Promise<any> {
+        return this.request('GET', `/api/v1/reports/stock_need?need_days=${needDays}&mode=${mode}`);
     }
 }
 

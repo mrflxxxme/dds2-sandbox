@@ -439,6 +439,55 @@ async def fetch_supplier_orders(api_key: str, date_from: str) -> list[dict]:
     return []
 
 
+# ─── Acceptance coefficients (which warehouses are open) ─────────────────────
+
+async def fetch_acceptance_coefficients(api_key: str) -> list[dict]:
+    """Fetch acceptance coefficients from WB Tariffs API.
+
+    GET https://supplies-api.wildberries.ru/api/v1/acceptance/coefficients
+    Returns list of {warehouseName, boxTypeName, coefficient, date, ...}.
+    coefficient >= 0 means warehouse is OPEN, < 0 means CLOSED.
+    """
+    url = "https://supplies-api.wildberries.ru/api/v1/acceptance/coefficients"
+    headers = {"Authorization": api_key}
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        for attempt in range(3):
+            try:
+                resp = await client.get(url, headers=headers)
+            except httpx.RequestError as e:
+                logger.error(f"WB acceptance/coefficients request error: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(5)
+                    continue
+                return []
+
+            if resp.status_code == 429:
+                wait = min(int(resp.headers.get("Retry-After", "60")), 120)
+                logger.warning(f"WB acceptance/coefficients 429, waiting {wait}s")
+                await asyncio.sleep(wait)
+                continue
+
+            if resp.status_code != 200:
+                logger.error(
+                    f"WB acceptance/coefficients error {resp.status_code}: "
+                    f"{resp.text[:200]}"
+                )
+                return []
+
+            data = resp.json()
+            if not isinstance(data, list):
+                logger.error(
+                    f"WB acceptance/coefficients: unexpected type {type(data)}"
+                )
+                return []
+
+            logger.info(f"WB acceptance/coefficients: got {len(data)} entries")
+            return data
+
+    return []
+
+
 # ─── Warehouse stocks ────────────────────────────────────────────────────────
 
 async def fetch_warehouse_stocks(api_key: str) -> list[dict]:

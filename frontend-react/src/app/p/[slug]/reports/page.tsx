@@ -1444,6 +1444,7 @@ function WarehouseNeedView() {
     const [data, setData] = useState<any>(null);
     const [loading, setLoading] = useState(false);
     const [needDays, setNeedDays] = useState(14);
+    const [mode, setMode] = useState<'actual' | 'hypothetical'>('actual');
     const [brandFilter, setBrandFilter] = useState('');
     const [subjectFilter, setSubjectFilter] = useState('');
     const [sortCol, setSortCol] = useState<string>('total_need');
@@ -1451,11 +1452,11 @@ function WarehouseNeedView() {
 
     const load = async () => {
         setLoading(true);
-        try { setData(await api.getStockNeed(needDays)); } catch { }
+        try { setData(await api.getStockNeed(needDays, mode)); } catch { }
         setLoading(false);
     };
 
-    useEffect(() => { load(); }, [needDays]);
+    useEffect(() => { load(); }, [needDays, mode]);
 
     // Compute per-article total need & per-warehouse need
     const getArticleNeed = (a: any, whName?: string) => {
@@ -1521,6 +1522,8 @@ function WarehouseNeedView() {
 
     if (loading && !data) return <div className="glass-card" style={{ textAlign: 'center', padding: 40 }}>Расчёт потребности...</div>;
 
+    const modeLabel = mode === 'actual' ? 'Фактический' : 'Гипотетический';
+
     const thStyle: any = { textAlign: 'right', minWidth: 85, cursor: 'pointer', userSelect: 'none', fontSize: 11, whiteSpace: 'nowrap', padding: '10px 8px', borderBottom: '2px solid var(--color-border)' };
     const thStickyStyle: any = { ...thStyle, textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg)', zIndex: 2, minWidth: 180 };
     const tdStyle: any = { padding: '8px', textAlign: 'right', fontSize: 12, borderBottom: '1px solid var(--color-border)' };
@@ -1533,7 +1536,7 @@ function WarehouseNeedView() {
                 <div>
                     <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>📦 Потребность по складам</h2>
                     <span style={{ fontSize: 13, opacity: 0.6 }}>
-                        {data ? `${data.total_warehouses} складов · ${filteredArticles.length} артикулов · на ${needDays} дней` : 'Нет данных'}
+                        {data ? `${data.total_warehouses} складов · ${filteredArticles.length} артикулов · на ${needDays} дней · ${modeLabel}` : 'Нет данных'}
                     </span>
                 </div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -1553,6 +1556,15 @@ function WarehouseNeedView() {
                             {data.subjects.map((s: string) => <option key={s} value={s}>{s}</option>)}
                         </select>
                     )}
+                    {/* Mode toggle */}
+                    <div style={{ display: 'flex', gap: 2, background: 'var(--color-border)', borderRadius: 8, padding: 2 }}>
+                        <button className={`btn btn-sm ${mode === 'actual' ? 'btn-primary' : 'btn-secondary'}`}
+                            style={{ borderRadius: 6, fontSize: 11 }}
+                            onClick={() => setMode('actual')}>📊 Факт</button>
+                        <button className={`btn btn-sm ${mode === 'hypothetical' ? 'btn-primary' : 'btn-secondary'}`}
+                            style={{ borderRadius: 6, fontSize: 11 }}
+                            onClick={() => setMode('hypothetical')}>🗺️ Гипотез.</button>
+                    </div>
                     {/* Days selector */}
                     <div style={{ display: 'flex', gap: 4 }}>
                         {[7, 14, 30].map(d => (
