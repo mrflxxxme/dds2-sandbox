@@ -7,7 +7,7 @@ Delegates all business logic to services/reports_service.py.
 from datetime import date
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -389,12 +389,9 @@ async def sync_warehouse_stocks(
     from backend.services.funnel.wb_api_client import get_wb_key, fetch_warehouse_stocks
     from backend.services.stock_analytics_service import sync_warehouse_stocks as do_sync
 
-    api_key = await get_wb_key(db, project.id, "wb_stats")
+    api_key = await get_wb_key(db, project.id, "wb")
     if not api_key:
-        api_key = await get_wb_key(db, project.id, "wb_analytics")
-    if not api_key:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail="WB Statistics API key not configured")
+        raise HTTPException(status_code=400, detail="WB API key not configured")
 
     items = await fetch_warehouse_stocks(api_key)
     count = await do_sync(db, project.id, items)
