@@ -13,7 +13,7 @@ import logging
 from datetime import date, timedelta
 from typing import Optional
 
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, case
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -81,7 +81,7 @@ async def _get_finance_by_date(db: AsyncSession, pid: int,
         func.sum(func.abs(WbFinanceRow.penalty)).label("penalty"),
         # Commission = retail_amount - ppvz_for_pay (Продажа + Возврат only)
         func.sum(
-            func.case(
+            case(
                 (WbFinanceRow.supplier_oper_name.in_(["Продажа", "Возврат"]),
                  WbFinanceRow.retail_amount - WbFinanceRow.ppvz_for_pay),
                 else_=0,
