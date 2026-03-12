@@ -171,30 +171,10 @@ async def get_stock_analytics(
         days = int(r.days_count or 1)
         prev_avg_map[r.nm_id] = round(int(r.total_orders or 0) / max(days, 1), 2)
 
-    # ── 6. Daily orders (last 14 days for table columns) ──
-    daily_start = data_date - timedelta(days=13)
-    daily_result = await db.execute(
-        select(
-            WbFunnelDaily.nm_id,
-            WbFunnelDaily.date,
-            WbFunnelDaily.orders_count,
-        ).where(
-            WbFunnelDaily.project_id == project_id,
-            WbFunnelDaily.date >= daily_start,
-            WbFunnelDaily.date <= data_date,
-        ).order_by(WbFunnelDaily.date)
-    )
-    daily_map: dict[int, list[dict]] = {}
-    all_dates: set[str] = set()
-    for r in daily_result:
-        nm = r.nm_id
-        d_str = str(r.date)
-        all_dates.add(d_str)
-        if nm not in daily_map:
-            daily_map[nm] = []
-        daily_map[nm].append({"date": d_str, "orders": int(r.orders_count or 0)})
-
-    sorted_dates = sorted(all_dates)
+    # ── 6. Stock forecast for 30 future days ──
+    forecast_days = 30
+    today_date = date.today()
+    sorted_dates = [str(today_date + timedelta(days=i)) for i in range(forecast_days)]
 
     # ── 7. Build articles list ──
     articles = []
@@ -220,6 +200,12 @@ async def get_stock_analytics(
         trend_pct = compute_trend_pct(avg_daily, prev_avg)
         traffic = classify_traffic_light(days_left)
 
+        # Build forecast: projected stock for each future day
+        forecast = []
+        for i in range(forecast_days):
+            projected = max(0, int(stocks - avg_daily * i + 0.5))
+            forecast.append(projected)
+
         articles.append({
             "nm_id": nm_id,
             "vendor_code": vendor_code,
@@ -232,22 +218,12 @@ async def get_stock_analytics(
             "stocks_wb": stocks,
             "days_left": days_left,
             "traffic_light": traffic,
-            "daily_orders": daily_map.get(nm_id, []),
+            "forecast": forecast,
         })
 
-    # ── 7b. Filter out articles with no orders in last 5 days ──
-    last_5_days = sorted_dates[-5:] if len(sorted_dates) >= 5 else sorted_dates
-    filtered_articles = []
-    for a in articles:
-        recent_orders = sum(
-            d["orders"] for d in a["daily_orders"]
-            if d["date"] in last_5_days
-        )
-        if recent_orders > 0 or a["stocks_wb"] > 0:
-            # Keep if had orders recently OR still has stock
-            # But skip if zero stock AND zero recent orders
-            if recent_orders > 0:
-                filtered_articles.append(a)
+    # ── 7b. Filter out articles with no recent orders ──
+    # Keep articles that had any orders in the last 30 days
+    filtered_articles = [a for a in articles if a["orders_30d"] > 0]
     articles = filtered_articles
 
     # Sort by days_left ascending (most critical first)

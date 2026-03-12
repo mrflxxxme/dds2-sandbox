@@ -1143,6 +1143,15 @@ function StockAnalytics() {
 
     const daysLeftColor = (dl: number) => dl <= 14 ? '#fff' : (dl <= 29 ? '#333' : '#fff');
 
+    // Color for forecast cell based on projected stock level
+    const forecastCellStyle = (projected: number, avgDaily: number) => {
+        if (projected <= 0) return { color: '#ff4444', background: 'rgba(255,68,68,0.12)', fontWeight: 700 };
+        const daysOfStock = avgDaily > 0 ? projected / avgDaily : 999;
+        if (daysOfStock < 7) return { color: '#ff4444', background: 'rgba(255,68,68,0.06)' };
+        if (daysOfStock < 14) return { color: '#ff9800' };
+        return {};
+    };
+
     const handleExport = () => {
         const rows = filteredArticles.map((a: any) => {
             const row: Record<string, any> = {
@@ -1155,10 +1164,12 @@ function StockAnalytics() {
                 'Остатки': a.stocks_wb,
                 'Хватит дн': a.days_left,
             };
-            (a.daily_orders || []).forEach((d: any) => { row[d.date] = d.orders; });
+            (data.dates || []).forEach((d: string, i: number) => {
+                row[d] = (a.forecast || [])[i] ?? 0;
+            });
             return row;
         });
-        exportToExcel(rows, `stock_analytics_${trendDays}d`);
+        exportToExcel(rows, `stock_forecast_${trendDays}d`);
     };
 
     return (
@@ -1265,7 +1276,7 @@ function StockAnalytics() {
                             <th style={{ textAlign: 'right', minWidth: 65 }}>ОСТАТКИ</th>
                             <th style={{ textAlign: 'center', minWidth: 75 }}>ХВАТИТ ДН</th>
                             {(data.dates || []).map((d: string) => (
-                                <th key={d} style={{ textAlign: 'right', minWidth: 55, fontSize: 10, whiteSpace: 'nowrap' }}>{shortDate(d)}</th>
+                                <th key={d} style={{ textAlign: 'right', minWidth: 60, fontSize: 10, whiteSpace: 'nowrap' }}>{shortDate(d)}</th>
                             ))}
                         </tr>
                     </thead>
@@ -1278,12 +1289,11 @@ function StockAnalytics() {
                             <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s: number, a: any) => s + a.avg_daily, 0))}</td>
                             <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s: number, a: any) => s + a.stocks_wb, 0))}</td>
                             <td></td>
-                            {(data.dates || []).map((d: string) => {
+                            {(data.dates || []).map((d: string, idx: number) => {
                                 const dayTotal = filteredArticles.reduce((s: number, a: any) => {
-                                    const dayEntry = (a.daily_orders || []).find((x: any) => x.date === d);
-                                    return s + (dayEntry ? dayEntry.orders : 0);
+                                    return s + ((a.forecast || [])[idx] ?? 0);
                                 }, 0);
-                                return <td key={d} style={{ textAlign: 'right' }}>{formatNumber(dayTotal)}</td>;
+                                return <td key={d} style={{ textAlign: 'right' }}>{formatNumber(dayTotal, 0)}</td>;
                             })}
                         </tr>
                         {pageArticles.map((a: any) => (
@@ -1306,17 +1316,15 @@ function StockAnalytics() {
                                         background: daysLeftBg(a.days_left), color: daysLeftColor(a.days_left),
                                     }}>{a.days_left}</span>
                                 </td>
-                                {(data.dates || []).map((d: string) => {
-                                    const dayEntry = (a.daily_orders || []).find((x: any) => x.date === d);
-                                    const orders = dayEntry ? dayEntry.orders : 0;
-                                    const neg = a.avg_daily > 0 && orders < a.avg_daily * 0.5;
+                                {(data.dates || []).map((d: string, idx: number) => {
+                                    const projected = (a.forecast || [])[idx] ?? 0;
+                                    const style = forecastCellStyle(projected, a.avg_daily);
                                     return (
                                         <td key={d} style={{
                                             textAlign: 'right',
-                                            color: neg ? '#ff4444' : undefined,
-                                            background: neg ? 'rgba(255,68,68,0.08)' : undefined,
+                                            ...style,
                                         }}>
-                                            {orders > 0 ? formatNumber(orders) : '—'}
+                                            {formatNumber(projected, 0)}
                                         </td>
                                     );
                                 })}
