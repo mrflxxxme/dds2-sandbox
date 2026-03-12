@@ -29,7 +29,7 @@ function TurnoverCell({ days, trendPct, stocksWb }: { days: number; trendPct: nu
     let color = '#10b981'; // 11-39 green (normal)
     let bg = 'transparent';
     if (days === 0 && stocksWb === 0) {
-        color = '#666';
+        color = '#6b7280';
     } else if (days < 10 || days === 0) {
         color = '#ef4444'; // <10 red (running out)
         bg = 'rgba(239,68,68,0.08)';
@@ -42,9 +42,9 @@ function TurnoverCell({ days, trendPct, stocksWb }: { days: number; trendPct: nu
     }
 
     return (
-        <td style={{ textAlign: 'center', background: bg }}>
+        <td style={{ textAlign: 'center', background: bg, borderBottom: '1px solid #f3f4f6' }}>
             <div style={{ fontWeight: 700, fontSize: 14, color }}>{days > 0 ? `${Math.round(days)} дн` : '—'}</div>
-            <div style={{ fontSize: 10, color: '#888' }}>{fmt(stocksWb)} шт</div>
+            <div style={{ fontSize: 10, color: '#6b7280' }}>{fmt(stocksWb)} шт</div>
             <TrendBadge value={trendPct} />
         </td>
     );
@@ -62,8 +62,8 @@ function MetricCell({ value, trend, format = 'number', color }: {
     else display = fmt(value);
 
     return (
-        <td style={{ textAlign: 'right' }}>
-            <div style={{ fontWeight: 500, color: color || 'var(--color-text)' }}>{display}</div>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>
+            <div style={{ fontWeight: 600, color: color || '#111827' }}>{display}</div>
             <TrendBadge value={trend} />
         </td>
     );
@@ -125,13 +125,14 @@ export default function TrendsPage() {
         return sortAsc ? av - bv : bv - av;
     });
 
-    const SortTh = ({ field, children, bg }: { field: string; children: React.ReactNode; bg?: string }) => (
+    const SortTh = ({ field, children, bg, style }: { field: string; children: React.ReactNode; bg?: string; style?: React.CSSProperties }) => (
         <th
             onClick={() => handleSort(field)}
             style={{
-                position: 'sticky', top: 0, background: bg || '#1a1a2e', zIndex: 10,
+                position: 'sticky', top: 0, background: bg || '#f9fafb', zIndex: 10,
                 cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap', fontSize: 11,
-                borderBottom: '2px solid rgba(255,255,255,0.15)',
+                borderBottom: '1px solid #e5e7eb', color: '#4b5563',
+                ...style,
             }}
         >
             {children} {sortField === field ? (sortAsc ? '↑' : '↓') : ''}
@@ -212,71 +213,73 @@ export default function TrendsPage() {
             </div>
 
             {/* Table */}
-            <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 260px)' }}>
+            <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                 {loading ? (
                     <div style={{ padding: 60, textAlign: 'center', color: 'var(--color-text-dim)' }}>
                         <div style={{ fontSize: 24, marginBottom: 8 }}>⏳</div>
                         Загрузка данных...
                     </div>
                 ) : (
-                    <table className="data-table" style={{ minWidth: 1400, borderCollapse: 'separate', borderSpacing: 0 }}>
-                        <thead>
-                            <tr>
-                                <SortTh field="vendor_code" bg="#1a1a2e">АРТИКУЛ</SortTh>
-                                <SortTh field="turnover_days" bg="#1e1a2a">ОБОРАЧИВ.</SortTh>
-                                {columns.map(c => (
-                                    <SortTh key={c.field} field={c.field} bg="#1a1a2e">{c.label}</SortTh>
-                                ))}
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {displayData.length === 0 && (
-                                <tr><td colSpan={20} style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-dim)' }}>
-                                    Нет данных за выбранный период
-                                </td></tr>
-                            )}
-                            {displayData.map((p, i) => {
-                                const rowBg = i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
-                                return (
-                                    <tr key={p.nm_id} style={{ background: rowBg }}>
-                                        {/* Article */}
-                                        <td style={{ position: 'sticky', left: 0, background: i % 2 === 0 ? '#1a1a2e' : '#1d1d31', zIndex: 1 }}>
-                                            <div style={{ fontWeight: 600, fontSize: 12, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                {p.vendor_code}
-                                            </div>
-                                            <div style={{ fontSize: 10, color: '#888' }}>
-                                                {p.brand} · {p.subject}
-                                            </div>
-                                        </td>
+                    <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 260px)' }}>
+                        <table className="data-table" style={{ minWidth: 1400, borderCollapse: 'separate', borderSpacing: 0 }}>
+                            <thead>
+                                <tr>
+                                    <SortTh field="vendor_code" bg="#f9fafb" style={{ left: 0, zIndex: 22, borderRight: '1px solid #e5e7eb' }}>АРТИКУЛ</SortTh>
+                                    <SortTh field="turnover_days" bg="#f9fafb">ОБОРАЧИВ.</SortTh>
+                                    {columns.map(c => (
+                                        <SortTh key={c.field} field={c.field} bg="#f9fafb">{c.label}</SortTh>
+                                    ))}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {displayData.length === 0 && (
+                                    <tr><td colSpan={20} style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-dim)' }}>
+                                        Нет данных за выбранный период
+                                    </td></tr>
+                                )}
+                                {displayData.map((p, i) => {
+                                    const rowBg = i % 2 === 0 ? '#ffffff' : '#f9fafb';
+                                    return (
+                                        <tr key={p.nm_id} style={{ background: rowBg, color: '#111827' }}>
+                                            {/* Article */}
+                                            <td style={{ position: 'sticky', left: 0, background: rowBg, zIndex: 11, borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #f3f4f6' }}>
+                                                <div style={{ fontWeight: 600, fontSize: 12, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#111827' }}>
+                                                    {p.vendor_code}
+                                                </div>
+                                                <div style={{ fontSize: 10, color: '#6b7280' }}>
+                                                    {p.brand} · {p.subject}
+                                                </div>
+                                            </td>
 
                                         {/* Turnover */}
                                         <TurnoverCell days={p.turnover_days} trendPct={p.trend_turnover} stocksWb={p.stocks_wb} />
 
-                                        {/* All metric columns */}
-                                        {columns.map(c => {
-                                            let cellColor: string | undefined;
-                                            if (c.field === 'drr') {
-                                                cellColor = p.drr > 30 ? '#ef4444' : p.drr > 15 ? '#f59e0b' : p.drr > 0 ? '#10b981' : '#666';
-                                            } else if (c.field === 'margin') {
-                                                cellColor = p.margin > 20 ? '#10b981' : p.margin > 0 ? '#a3e635' : '#ef4444';
-                                            } else if (c.field === 'profit') {
-                                                cellColor = p.profit > 0 ? '#10b981' : '#ef4444';
-                                            }
-                                            return (
-                                                <MetricCell
-                                                    key={c.field}
-                                                    value={p[c.field] ?? 0}
-                                                    trend={p[c.trend] ?? 0}
-                                                    format={c.format}
-                                                    color={cellColor}
-                                                />
-                                            );
-                                        })}
-                                    </tr>
-                                );
-                            })}
-                        </tbody>
-                    </table>
+                                            {/* All metric columns */}
+                                            {columns.map(c => {
+                                                let cellColor: string | undefined;
+                                                if (c.field === 'drr') {
+                                                    cellColor = p.drr > 30 ? '#ef4444' : p.drr > 15 ? '#f59e0b' : p.drr > 0 ? '#10b981' : '#6b7280';
+                                                } else if (c.field === 'margin') {
+                                                    cellColor = p.margin > 20 ? '#10b981' : p.margin > 0 ? '#a3e635' : '#ef4444';
+                                                } else if (c.field === 'profit') {
+                                                    cellColor = p.profit > 0 ? '#10b981' : '#ef4444';
+                                                }
+                                                return (
+                                                    <MetricCell
+                                                        key={c.field}
+                                                        value={p[c.field] ?? 0}
+                                                        trend={p[c.trend] ?? 0}
+                                                        format={c.format}
+                                                        color={cellColor}
+                                                    />
+                                                );
+                                            })}
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
                 )}
             </div>
 
