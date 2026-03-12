@@ -65,16 +65,28 @@ async def _get_finance_by_date(db: AsyncSession, pid: int,
                                 date_to: Optional[str]) -> dict:
     """Aggregate WB Finance data by rr_dt (date) for the given period.
 
-    Returns dict[date_iso_str] -> {logistics, commission, storage}.
-    Commission = retail_amount(sales) - ppvz_for_pay(sales)  (net of returns).
+    Returns dict[date_iso_str] -> {logistics, commission, storage, penalty}.
+    Commission = SUM(retail_amount - ppvz_for_pay) for Продажа/Возврат only.
+    Logistics/storage/penalty from all operations.
     """
+    # Commission: only from Продажа and Возврат operations
+    # (other operations like Возмещение издержек have retail=0, ppvz=0 but shouldn't be counted)
     q = select(
         WbFinanceRow.rr_dt,
-        func.sum(WbFinanceRow.delivery_rub).label("logistics"),
-        func.sum(WbFinanceRow.storage_fee).label("storage"),
-        # Commission = Sales net - ppvz_for_pay net
-        func.sum(WbFinanceRow.retail_amount).label("total_retail"),
-        func.sum(WbFinanceRow.ppvz_for_pay).label("total_ppvz"),
+        # Logistics (all operations, negated to get positive)
+        func.sum(func.abs(WbFinanceRow.delivery_rub)).label("logistics"),
+        # Storage (all operations)
+        func.sum(func.abs(WbFinanceRow.storage_fee)).label("storage"),
+        # Penalty (all operations)
+        func.sum(func.abs(WbFinanceRow.penalty)).label("penalty"),
+        # Commission = retail_amount - ppvz_for_pay (Продажа + Возврат only)
+        func.sum(
+            func.case(
+                (WbFinanceRow.supplier_oper_name.in_(["Продажа", "Возврат"]),
+                 WbFinanceRow.retail_amount - WbFinanceRow.ppvz_for_pay),
+                else_=0,
+            )
+        ).label("commission"),
     ).where(
         WbFinanceRow.project_id == pid,
         WbFinanceRow.rr_dt.is_not(None),
@@ -89,15 +101,15 @@ async def _get_finance_by_date(db: AsyncSession, pid: int,
 
     fin_map: dict = {}
     for r in rows:
-        logistics_val = abs(float(r.logistics or 0))
-        storage_val = abs(float(r.storage or 0))
-        total_retail = float(r.total_retail or 0)
-        total_ppvz = float(r.total_ppvz or 0)
-        commission_val = max(total_retail - total_ppvz, 0)
+        commission_val = float(r.commission or 0)
+        # Commission can be negative if ppvz > retail (SPP/promos) — use 0 if negative
+        if commission_val < 0:
+            commission_val = 0
         fin_map[r.rr_dt.isoformat()] = {
-            "logistics": logistics_val,
-            "storage": storage_val,
+            "logistics": float(r.logistics or 0),
+            "storage": float(r.storage or 0),
             "commission": commission_val,
+            "penalty": float(r.penalty or 0),
         }
     return fin_map
 
