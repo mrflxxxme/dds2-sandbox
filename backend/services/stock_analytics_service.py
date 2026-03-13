@@ -421,9 +421,11 @@ async def get_warehouse_need(
     from backend.services.funnel.wb_api_client import (
         get_wb_key,
         fetch_supplier_orders,
-        fetch_acceptance_coefficients,
+        fetch_acceptance_options,
+        fetch_wb_warehouses,
+        fetch_warehouse_stocks,
     )
-    from backend.services.warehouse_geo import find_nearest_warehouse, find_nearest_warehouse_by_city, get_country_filtered_warehouses, WAREHOUSE_COORDS, normalize_acceptance_wh_name, is_storage_warehouse
+    from backend.services.warehouse_geo import find_nearest_warehouse, find_nearest_warehouse_by_city, get_country_filtered_warehouses, WAREHOUSE_COORDS
     
     today = date.today()
     trend_start = today - timedelta(days=analysis_days)
@@ -454,23 +456,31 @@ async def get_warehouse_need(
                 okrug_map[row.srid] = row.okrug
 
     if api_key and mode == "hypothetical":
-        coefficients = await fetch_acceptance_coefficients(api_key)
-        if coefficients:
-            # Warehouse is open if ANY entry has coefficient >= 0
-            # Filter out sorting centers, SGT, food, fuel warehouses
-            # Normalize names: Acceptance API uses different names than Stocks API
-            open_set: set[str] = set()
-            for c in coefficients:
-                if not is_storage_warehouse(c):
-                    continue
-                wh = c.get("warehouseName", "")
-                coeff = c.get("coefficient")
-                if wh and coeff is not None and coeff >= 0:
-                    # Map acceptance API name → stocks API name
-                    stock_name = normalize_acceptance_wh_name(wh)
-                    open_set.add(stock_name)
-            if open_set:
-                open_warehouses = [w for w in open_warehouses if w in open_set]
+        # Use supplies API acceptance/options (per-article, matches WB supplier UI)
+        # First get barcodes from warehouse stocks API
+        stocks_raw = await fetch_warehouse_stocks(api_key)
+        barcodes = list({
+            s.get("barcode", "") for s in stocks_raw if s.get("barcode")
+        })
+        if barcodes:
+            # Get warehouse ID → name mapping
+            wh_id_to_name = await fetch_wb_warehouses(api_key)
+            # Fetch acceptance options for these barcodes
+            options = await fetch_acceptance_options(api_key, barcodes[:100])
+            if options:
+                # Build open set: warehouses where canBox=True
+                open_set: set[str] = set()
+                for opt in options:
+                    if opt.get("canBox"):
+                        wh_id = opt.get("warehouseID", 0)
+                        wh_name = wh_id_to_name.get(wh_id, "")
+                        if wh_name:
+                            open_set.add(wh_name)
+                if open_set:
+                    # Keep only warehouses from WAREHOUSE_COORDS that are open
+                    open_warehouses = [
+                        w for w in open_warehouses if w in open_set
+                    ]
 
     if api_key:
         orders = await fetch_supplier_orders(api_key, trend_start.isoformat())

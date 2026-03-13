@@ -489,6 +489,96 @@ async def fetch_acceptance_coefficients(api_key: str) -> list[dict]:
     return []
 
 
+async def fetch_wb_warehouses(api_key: str) -> dict[int, str]:
+    """Fetch WB warehouse ID → name mapping.
+
+    GET https://supplies-api.wildberries.ru/api/v1/warehouses
+    Returns dict {warehouseID: warehouseName}.
+    """
+    url = "https://supplies-api.wildberries.ru/api/v1/warehouses"
+    headers = {"Authorization": api_key}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            resp = await client.get(url, headers=headers)
+        except httpx.RequestError as e:
+            logger.error(f"WB warehouses request error: {e}")
+            return {}
+
+        if resp.status_code != 200:
+            logger.error(
+                f"WB warehouses API error {resp.status_code}: {resp.text[:200]}"
+            )
+            return {}
+
+        data = resp.json()
+        if not isinstance(data, list):
+            logger.error(f"WB warehouses: unexpected type {type(data)}")
+            return {}
+
+        result = {}
+        for w in data:
+            wid = w.get("ID", w.get("id", 0))
+            wname = w.get("name", w.get("Name", ""))
+            if wid and wname:
+                result[wid] = wname
+        logger.info(f"WB warehouses: got {len(result)} entries")
+        return result
+
+
+async def fetch_acceptance_options(
+    api_key: str, barcodes: list[str]
+) -> list[dict]:
+    """Fetch warehouse acceptance options for specific barcodes.
+
+    POST https://supplies-api.wildberries.ru/api/v1/acceptance/options
+    Body: [{quantity, barcode}, ...]
+    Returns list of {warehouseID, canBox, canMonopallet, canSupersafe, isBoxOnPallet}.
+
+    This API is article-specific and matches what WB supplier UI shows.
+    Unlike the tariffs/coefficients API, it correctly reflects per-article acceptance.
+    """
+    url = "https://supplies-api.wildberries.ru/api/v1/acceptance/options"
+    headers = {"Authorization": api_key}
+    # Build payload (max 5000 barcodes per request)
+    payload = [{"quantity": 1, "barcode": bc} for bc in barcodes[:5000]]
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            resp = await client.post(url, headers=headers, json=payload)
+        except httpx.RequestError as e:
+            logger.error(f"WB acceptance/options request error: {e}")
+            return []
+
+        if resp.status_code == 429:
+            wait = min(int(resp.headers.get("Retry-After", "60")), 120)
+            logger.warning(f"WB acceptance/options 429, waiting {wait}s")
+            await asyncio.sleep(wait)
+            try:
+                resp = await client.post(url, headers=headers, json=payload)
+            except httpx.RequestError:
+                return []
+
+        if resp.status_code != 200:
+            logger.error(
+                f"WB acceptance/options error {resp.status_code}: "
+                f"{resp.text[:200]}"
+            )
+            return []
+
+        data = resp.json()
+        if isinstance(data, dict) and "result" in data:
+            data = data["result"]
+        if not isinstance(data, list):
+            logger.error(
+                f"WB acceptance/options: unexpected type {type(data)}"
+            )
+            return []
+
+        logger.info(f"WB acceptance/options: got {len(data)} warehouses")
+        return data
+
+
 # ─── Warehouse stocks ────────────────────────────────────────────────────────
 
 async def fetch_warehouse_stocks(api_key: str) -> list[dict]:
