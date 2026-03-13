@@ -419,7 +419,7 @@ async def get_warehouse_need(
         fetch_supplier_orders,
         fetch_acceptance_coefficients,
     )
-    from backend.services.warehouse_geo import find_nearest_warehouse, find_nearest_warehouse_by_city, get_country_filtered_warehouses, WAREHOUSE_COORDS, SC_PREFIX, SKIP_SUFFIXES
+    from backend.services.warehouse_geo import find_nearest_warehouse, find_nearest_warehouse_by_city, get_country_filtered_warehouses, WAREHOUSE_COORDS, normalize_acceptance_wh_name, is_storage_warehouse
     
     today = date.today()
     trend_start = today - timedelta(days=need_days)
@@ -453,13 +453,18 @@ async def get_warehouse_need(
         coefficients = await fetch_acceptance_coefficients(api_key)
         if coefficients:
             # Warehouse is open if ANY entry has coefficient >= 0
-            # Exclude СЦ (sorting centers) — they redistribute, not store
+            # Filter out sorting centers, SGT, food, fuel warehouses
+            # Normalize names: Acceptance API uses different names than Stocks API
             open_set: set[str] = set()
             for c in coefficients:
+                if not is_storage_warehouse(c):
+                    continue
                 wh = c.get("warehouseName", "")
                 coeff = c.get("coefficient")
-                if wh and coeff is not None and coeff >= 0 and not wh.startswith(SC_PREFIX) and not any(wh.endswith(s) for s in SKIP_SUFFIXES):
-                    open_set.add(wh)
+                if wh and coeff is not None and coeff >= 0:
+                    # Map acceptance API name → stocks API name
+                    stock_name = normalize_acceptance_wh_name(wh)
+                    open_set.add(stock_name)
             if open_set:
                 open_warehouses = [w for w in open_warehouses if w in open_set]
 

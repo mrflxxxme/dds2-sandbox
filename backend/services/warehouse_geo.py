@@ -55,6 +55,47 @@ WAREHOUSE_COORDS: dict[str, tuple[float, float]] = {
     "Актобе": (50.284, 57.207),
 }
 
+# ─── Name mapping: Acceptance API → Stocks API ────────────────────────────────
+# WB uses DIFFERENT warehouse names in the Acceptance/Coefficients API
+# vs the Stocks API. We need to map from acceptance names to stock names
+# so we can correctly filter which warehouses are "open" for supply.
+ACCEPTANCE_TO_STOCK_NAME: dict[str, str] = {
+    "Санкт-Петербург (Уткина Заводь)": "Санкт-Петербург Уткина Заводь",
+    "Склад Шушары": "СПБ Шушары",
+    "Владимир Воршинское": "Владимир",
+    "Краснодар (Тихорецкая)": "Краснодар",
+    "Склад Владивосток": "Владивосток",
+    "Склад Истра": "Истра",
+    "Новосемейкино": "Самара (Новосемейкино)",
+    "Домодедово-2": "Белая дача",  # closest match
+    "Алматы Атакент": "Атакент",
+    "Астана": "Астана Карагандинское шоссе",
+    "Астана 2": "Астана Карагандинское шоссе",
+}
+
+
+def normalize_acceptance_wh_name(name: str) -> str:
+    """Convert warehouse name from Acceptance API format to Stocks API format."""
+    return ACCEPTANCE_TO_STOCK_NAME.get(name, name)
+
+
+def is_storage_warehouse(entry: dict) -> bool:
+    """Check if acceptance API entry is a proper storage warehouse (not SC/SGT/food/fuel).
+    
+    Uses isSortingCenter flag from API when available, falls back to name patterns.
+    """
+    if entry.get("isSortingCenter"):
+        return False
+    wh = entry.get("warehouseName", "")
+    if not wh:
+        return False
+    if wh.startswith(SC_PREFIX):
+        return False
+    if any(wh.endswith(s) for s in SKIP_SUFFIXES):
+        return False
+    return True
+
+
 # Prefixes/suffixes to exclude from acceptance API results
 SC_PREFIX = "СЦ "
 SKIP_SUFFIXES = ("СГТ", "Питание", "Горючее")
