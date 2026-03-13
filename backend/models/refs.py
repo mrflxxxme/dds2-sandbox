@@ -84,3 +84,17 @@ class CategoryRef(Base, SoftDeleteMixin):
     __table_args__ = (
         UniqueConstraint("project_id", "direction", "cat_lvl1", "cat_lvl2", name="uq_cat_ref"),
     )
+
+
+class ProjectSetting(Base):
+    """Key-value settings per project (JSON values)."""
+    __tablename__ = "project_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    key: Mapped[str] = mapped_column(String(100), nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "key", name="uq_project_setting"),
+    )

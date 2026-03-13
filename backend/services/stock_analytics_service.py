@@ -442,7 +442,6 @@ async def get_warehouse_need(
     actual_days = analysis_days
 
     open_warehouses: list[str] = list(WAREHOUSE_COORDS.keys())
-    article_open_wh: dict[int, list[str]] = {}  # nmId → article-specific warehouses
     city_map: dict[str, str] = {}  # srid → city
     okrug_map: dict[str, str] = {}  # srid → okrug
     if mode == "hypothetical":
@@ -458,53 +457,12 @@ async def get_warehouse_need(
             if row.okrug:
                 okrug_map[row.srid] = row.okrug
 
-    if api_key and mode == "hypothetical":
-        # Use supplies API acceptance/options for per-article warehouse filtering
-        # Each article may be accepted at different warehouses
-        stocks_raw = await fetch_warehouse_stocks(api_key)
-
-        # Build nmId → barcode mapping (take first barcode per nmId)
-        nmid_to_barcode: dict[int, str] = {}
-        for s in stocks_raw:
-            nm = s.get("nmId")
-            bc = s.get("barcode")
-            if nm and bc and nm not in nmid_to_barcode:
-                nmid_to_barcode[nm] = bc
-
-        unique_barcodes = list(set(nmid_to_barcode.values()))
-        if unique_barcodes:
-            # Call API with all barcodes — returns per-barcode warehouse lists
-            options_map = await fetch_acceptance_options(api_key, unique_barcodes)
-            if options_map:
-                # Build barcode → set[stock_warehouse_name] for canBox=True
-                barcode_to_open_wh: dict[str, set[str]] = {}
-                for bc, wh_list in options_map.items():
-                    open_names: set[str] = set()
-                    for opt in wh_list:
-                        if opt.get("canBox"):
-                            wh_id = opt.get("warehouseID", 0)
-                            stock_name = WB_API_ID_TO_STOCK_NAME.get(wh_id)
-                            if stock_name:
-                                open_names.add(stock_name)
-                    barcode_to_open_wh[bc] = open_names
-
-                # Build nmId → open warehouses (filtered by WAREHOUSE_COORDS)
-                article_open_wh: dict[int, list[str]] = {}
-                all_coords_set = set(WAREHOUSE_COORDS.keys())
-                for nm_id, bc in nmid_to_barcode.items():
-                    open_names = barcode_to_open_wh.get(bc, all_coords_set)
-                    article_open_wh[nm_id] = [
-                        w for w in all_coords_set if w in open_names
-                    ]
-
-                # Global open_warehouses = union of all per-article warehouses
-                global_open: set[str] = set()
-                for wh_list in article_open_wh.values():
-                    global_open.update(wh_list)
-                if global_open:
-                    open_warehouses = [
-                        w for w in open_warehouses if w in global_open
-                    ]
+        # Load excluded warehouses from project settings
+        from backend.services.settings_service import get_excluded_warehouses
+        excluded = await get_excluded_warehouses(db, project_id)
+        if excluded:
+            open_warehouses = [w for w in open_warehouses if w not in excluded]
+            logger.info("Excluded warehouses for project %s: %s", project_id, excluded)
 
     if api_key:
         orders = await fetch_supplier_orders(api_key, trend_start.isoformat())
@@ -519,15 +477,9 @@ async def get_warehouse_need(
                 srid = str(order.get("srid", ""))
                 wh_name = None
 
-                # Step 0: Use per-article warehouse list if available
-                if nm_id in article_open_wh:
-                    article_wh = article_open_wh[nm_id]
-                else:
-                    article_wh = open_warehouses
-
-                # Step 0b: Filter by country (RU vs KZ)
+                # Step 0: Filter by country (RU vs KZ)
                 okrug = okrug_map.get(srid)
-                country_wh = get_country_filtered_warehouses(okrug, article_wh)
+                country_wh = get_country_filtered_warehouses(okrug, open_warehouses)
 
                 # Step 1: Try city-level (from uploaded Excel, nearest by distance)
                 city = city_map.get(srid)

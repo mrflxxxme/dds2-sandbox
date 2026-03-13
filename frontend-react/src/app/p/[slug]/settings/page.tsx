@@ -7,7 +7,7 @@ import { formatDateTime, formatNumber, exportToExcel } from '@/lib/utils';
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
 
 export default function SettingsPage() {
-    const [tab, setTab] = useState<'integrations' | 'nomenclature' | 'leadtimes' | 'duties' | 'taxrates'>('integrations');
+    const [tab, setTab] = useState<'integrations' | 'nomenclature' | 'leadtimes' | 'duties' | 'taxrates' | 'warehouses'>('integrations');
 
     return (
         <div className="animate-in">
@@ -24,6 +24,7 @@ export default function SettingsPage() {
                     { key: 'leadtimes' as const, label: '⏱ Lead Times' },
                     { key: 'duties' as const, label: '⚖️ Пошлины / Утиль' },
                     { key: 'taxrates' as const, label: '📋 Налоговые ставки' },
+                    { key: 'warehouses' as const, label: '🏭 Склады' },
                 ].map(t => (
                     <button key={t.key} className={`btn ${tab === t.key ? 'btn-primary' : 'btn-secondary'} btn-sm`}
                         onClick={() => setTab(t.key)}>{t.label}</button>
@@ -34,6 +35,7 @@ export default function SettingsPage() {
             {tab === 'leadtimes' && <LeadTimes />}
             {tab === 'duties' && <DutyRules />}
             {tab === 'taxrates' && <TaxRates />}
+            {tab === 'warehouses' && <WarehouseSettings />}
         </div>
     );
 }
@@ -830,3 +832,144 @@ function TaxRates() {
         </div>
     );
 }
+
+
+// ─── Warehouse Exclusion Settings ────────────────────────────────────────────
+
+function WarehouseSettings() {
+    const { slug } = useParams();
+    const [warehouses, setWarehouses] = useState<Array<{ name: string; lat: number; lng: number }>>([]);
+    const [excluded, setExcluded] = useState<string[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
+    const [msg, setMsg] = useState('');
+    const [hasChanges, setHasChanges] = useState(false);
+
+    useEffect(() => {
+        (async () => {
+            try {
+                const a = api(slug as string);
+                const [wh, ex] = await Promise.all([
+                    a.getWarehouses(),
+                    a.getExcludedWarehouses(),
+                ]);
+                setWarehouses(wh);
+                setExcluded(ex);
+            } catch {
+                setMsg('Ошибка загрузки складов');
+            } finally {
+                setLoading(false);
+            }
+        })();
+    }, [slug]);
+
+    const toggle = (name: string) => {
+        setExcluded(prev => {
+            const next = prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name];
+            return next;
+        });
+        setHasChanges(true);
+    };
+
+    const save = async () => {
+        setSaving(true);
+        setMsg('');
+        try {
+            const a = api(slug as string);
+            await a.setExcludedWarehouses(excluded);
+            setMsg('✅ Сохранено');
+            setHasChanges(false);
+        } catch {
+            setMsg('❌ Ошибка сохранения');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    if (loading) return <div className="card" style={{ padding: 20 }}>Загрузка складов...</div>;
+
+    const active = warehouses.filter(w => !excluded.includes(w.name));
+    const excludedList = warehouses.filter(w => excluded.includes(w.name));
+
+    return (
+        <div>
+            <div className="card" style={{ padding: 20, marginBottom: 16 }}>
+                <h3 style={{ margin: '0 0 8px' }}>🏭 Исключение складов</h3>
+                <p style={{ color: 'var(--text-secondary)', margin: '0 0 16px', fontSize: 14 }}>
+                    Исключённые склады не участвуют в расчёте потребностей. Заказы из их регионов перераспределяются на ближайшие оставшиеся склады.
+                </p>
+
+                <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center' }}>
+                    <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+                        Активных: <strong>{active.length}</strong> / {warehouses.length}
+                    </span>
+                    {excluded.length > 0 && (
+                        <span style={{ fontSize: 13, color: 'var(--error)', fontWeight: 500 }}>
+                            ⛔ Исключено: {excluded.length}
+                        </span>
+                    )}
+                </div>
+
+                <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+                    gap: 8,
+                }}>
+                    {warehouses.map(w => {
+                        const isExcluded = excluded.includes(w.name);
+                        return (
+                            <label
+                                key={w.name}
+                                style={{
+                                    display: 'flex', alignItems: 'center', gap: 8,
+                                    padding: '8px 12px',
+                                    borderRadius: 8,
+                                    border: `1px solid ${isExcluded ? 'var(--error)' : 'var(--border)'}`,
+                                    background: isExcluded ? 'rgba(239,68,68,0.08)' : 'var(--surface)',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.15s',
+                                    opacity: isExcluded ? 0.7 : 1,
+                                }}
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked={!isExcluded}
+                                    onChange={() => toggle(w.name)}
+                                    style={{ accentColor: 'var(--primary)' }}
+                                />
+                                <span style={{
+                                    fontSize: 14,
+                                    textDecoration: isExcluded ? 'line-through' : 'none',
+                                    color: isExcluded ? 'var(--error)' : 'var(--text-primary)',
+                                }}>
+                                    {w.name}
+                                </span>
+                            </label>
+                        );
+                    })}
+                </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                <button
+                    className="btn btn-primary"
+                    onClick={save}
+                    disabled={saving || !hasChanges}
+                >
+                    {saving ? 'Сохранение...' : '💾 Сохранить'}
+                </button>
+                {msg && <span style={{ fontSize: 14 }}>{msg}</span>}
+            </div>
+
+            {excludedList.length > 0 && (
+                <div className="card" style={{ padding: 16, marginTop: 16 }}>
+                    <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: 0 }}>
+                        ⚠️ Исключены: <strong>{excludedList.map(w => w.name).join(', ')}</strong>.
+                        Заказы из этих регионов будут распределены на ближайшие активные склады.
+                    </p>
+                </div>
+            )}
+        </div>
+    );
+}
+

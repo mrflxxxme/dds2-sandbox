@@ -29,6 +29,7 @@ from backend.models.refs import (
     Override,
     OpeningBalance,
     CategoryRef,
+    ProjectSetting,
 )
 
 # Transactions
@@ -107,7 +108,7 @@ __all__ = [
     # Auth
     "User", "Project", "ProjectMember", "ProjectInvite",
     # References
-    "Account", "CounterpartyCategory", "Override", "OpeningBalance", "CategoryRef",
+    "Account", "CounterpartyCategory", "Override", "OpeningBalance", "CategoryRef", "ProjectSetting",
     # Transactions
     "Transaction", "CategoryChangeLog", "ImportLog",
     # Customs

@@ -158,3 +158,38 @@ async def delete_category(
     if not deleted:
         raise HTTPException(404, "Category not found")
     return {"ok": True}
+
+
+# ─── Warehouse Settings ──────────────────────────────────────────────────────
+
+@router.get("/warehouses")
+async def get_warehouses():
+    """List all available warehouses from WAREHOUSE_COORDS."""
+    from backend.services import settings_service
+    return settings_service.get_all_warehouses()
+
+
+@router.get("/excluded-warehouses")
+async def get_excluded_warehouses(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get excluded warehouse names for current project."""
+    from backend.services import settings_service
+    return await settings_service.get_excluded_warehouses(db, project.id)
+
+
+@router.put("/excluded-warehouses")
+async def set_excluded_warehouses(
+    payload: dict,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set excluded warehouses. Body: {"warehouses": ["Новосибирск", ...]}"""
+    from backend.services import settings_service
+    warehouses = payload.get("warehouses", [])
+    if not isinstance(warehouses, list):
+        raise HTTPException(400, "warehouses must be a list of strings")
+    result = await settings_service.set_excluded_warehouses(db, project.id, warehouses)
+    return {"ok": True, "excluded": result}
+

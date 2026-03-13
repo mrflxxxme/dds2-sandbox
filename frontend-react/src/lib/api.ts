@@ -496,6 +496,17 @@ class ApiClient {
         return this.request<{ status: string; vat_rate: number }>('PUT', '/api/v1/cost/vat_rate', { vat_rate: vatRate });
     }
 
+    // Warehouse Settings
+    getWarehouses() {
+        return this.request<Array<{ name: string; lat: number; lng: number }>>('GET', '/api/v1/refs/warehouses');
+    }
+    getExcludedWarehouses() {
+        return this.request<string[]>('GET', '/api/v1/refs/excluded-warehouses');
+    }
+    setExcludedWarehouses(warehouses: string[]) {
+        return this.request<{ ok: boolean; excluded: string[] }>('PUT', '/api/v1/refs/excluded-warehouses', { warehouses });
+    }
+
     // Tax Rates
     getTaxRates(year: number) {
         return this.request<any>('GET', `/api/v1/reports/tax_rates?year=${year}`);
