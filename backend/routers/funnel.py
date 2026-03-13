@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.project_context import get_current_project
 from backend.models import Project, SyncLog
-from backend.services import funnel_service
+from backend.services import funnel as funnel_service
 
 logger = logging.getLogger("dds.funnel")
 

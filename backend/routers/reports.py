@@ -18,7 +18,7 @@ from backend.schemas import (
     IncomeDailyRow, IncomeByCategoryRow, TaxRateSaveRequest,
 )
 from backend.project_context import get_current_project
-from backend.services import reports_service
+from backend.services import reports as reports_service
 
 router = APIRouter(prefix="/reports")
 

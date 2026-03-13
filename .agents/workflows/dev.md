@@ -39,6 +39,18 @@ description: Стандартный рабочий процесс при люб�
 | **Типы в `types/api.ts`** | Не inline |
 | **CSS классы из `globals.css`** | Не inline стили |
 
+
+---
+
+## ⛔ Docker — запрещённые команды
+
+> **НИКОГДА** не запускай `docker compose exec backend python3 -c "from backend..."` для ad-hoc скриптов.
+> `backend/services/__init__.py` тянет все модули → scheduler → Redis → **процесс зависает навсегда**.
+>
+> ✅ Для тестов: `docker compose exec backend pytest tests/...`
+> ✅ Для скриптов: standalone Python локально (без `import backend.*`)
+> ✅ Если нужны данные из backend модулей — скопируй данные в скрипт хардкодом
+
 ---
 
 ## Обязательные правила процесса

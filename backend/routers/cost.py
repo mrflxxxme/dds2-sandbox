@@ -12,7 +12,7 @@ from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas import DutyRuleSchema, CostOrderCreate, VatRateUpdate
-from backend.services import cost_service
+from backend.services import cost as cost_service
 
 router = APIRouter(prefix="/cost")
 

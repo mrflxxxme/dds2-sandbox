@@ -17,7 +17,7 @@ from backend.schemas import (
     WbPayoutSchema, FactLinkCreate, CustomsDTUpdate, WbReconcileRequest,
 )
 from backend.project_context import get_current_project
-from backend.services import planning_service
+from backend.services import planning as planning_service
 
 router = APIRouter(prefix="/planning")
 
