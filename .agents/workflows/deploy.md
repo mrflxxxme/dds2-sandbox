@@ -1,73 +1,77 @@
 ---
-description: Деплой на сервер — коммит, пуш, pull на сервере, пересборка
+description: Деплой на сервер — через CI/CD или make команды
 ---
 
-# Deploy to Server (130.49.150.69)
+# Deploy Workflow
 
-Workflow: локальная разработка → тест → деплой на сервер.
+## ⛔ НИКОГДА не деплоить через SSH напрямую
 
-## Предусловия
-- Локально всё работает (`docker compose ps` — все healthy)
-- Изменения протестированы на `http://localhost:3000`
+Деплой ТОЛЬКО через CI/CD pipeline или `make` команды.
 
-## Шаги
+## Стандартный деплой (staging)
 
-### 1. Коммит и пуш в GitHub
-// turbo
+// turbo-all
+
+### 1. Проверить тесты
 ```bash
-cd /Users/a1/Desktop/dds_app
-git add -A
-git status
+cd /Users/a1/Desktop/dds_app && docker compose exec backend pytest tests/ -x --tb=short
+```
+
+### 2. Commit и push в dev
+```bash
+cd /Users/a1/Desktop/dds_app && git add -A
 ```
 
 ```bash
-git commit -m "<описание изменений>"
-```
-
-// turbo
-```bash
-git push origin dev
-```
-
-### 2. Pull на сервере и пересборка
-// turbo
-```bash
-ssh root@130.49.150.69 "cd /opt/dds_app && git pull origin dev"
+cd /Users/a1/Desktop/dds_app && git commit -m "<описание изменений>"
 ```
 
 ```bash
-ssh root@130.49.150.69 "cd /opt/dds_app && docker compose up -d --build backend"
+cd /Users/a1/Desktop/dds_app && git push origin dev
 ```
 
-Если нужно пересобрать и frontend:
+> ✅ CI/CD автоматически задеплоит на staging
+
+### 3. Проверить staging
+
+Открыть staging и проверить:
+- Health check работает
+- Логин работает
+- Затронутые страницы работают корректно
+
+### 4. Деплой в production (после проверки staging)
 ```bash
-ssh root@130.49.150.69 "cd /opt/dds_app && docker compose up -d --build backend frontend-react"
+cd /Users/a1/Desktop/dds_app && git checkout main && git merge dev && git push origin main && git checkout dev
 ```
 
-### 3. Проверить что всё поднялось
-// turbo
-```bash
-ssh root@130.49.150.69 "cd /opt/dds_app && docker compose ps --format 'table {{.Name}}\t{{.Status}}'"
-```
+> ✅ CI/CD автоматически задеплоит на production
 
-// turbo
-```bash
-ssh root@130.49.150.69 "cd /opt/dds_app && docker compose logs backend --tail=10 --no-log-prefix 2>&1 | grep -v health"
-```
+### 5. Проверить production
 
-### 4. Проверить в браузере
-Открыть http://130.49.150.69 и убедиться что всё работает.
+Открыть production и убедиться что всё работает.
 
 ---
 
 ## Откат при проблемах
+
 ```bash
+# На сервере (только в экстренных случаях!):
 ssh root@130.49.150.69 "cd /opt/dds_app && git log --oneline -5"
 ssh root@130.49.150.69 "cd /opt/dds_app && git checkout <commit-hash> . && docker compose up -d --build backend"
 ```
 
+## Быстрые Makefile команды
+
+| Команда | Что делает |
+|---------|-----------|
+| `make test` | Запустить тесты |
+| `make deploy MSG="feat: ..."` | Commit + push в dev |
+| `make deploy-prod` | Merge dev → main → production |
+| `make logs` | Логи backend |
+| `make status` | Статус контейнеров |
+
 ## Сервер
 - IP: 130.49.150.69
-- Путь к проекту: /opt/dds_app
-- Ветка: dev
-- SSH: root (ключ настроен ~/.ssh/id_ed25519)
+- Путь: /opt/dds_app
+- Ветка prod: main
+- Ветка staging: dev

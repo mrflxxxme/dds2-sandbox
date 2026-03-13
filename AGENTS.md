@@ -108,6 +108,8 @@ CORS → RateLimit → RequestID → SlowQuery → ErrorHandler
 ### Git & Deploy
 - Коммиты на русском: `feat:` / `fix:` / `infra:` / `refactor:` / `test:`
 - Push в `dev` → staging → проверка → `main`
+- **НИКОГДА** не деплоить напрямую через SSH — только через CI/CD
+- `Makefile` — основные команды: `make dev`, `make test`, `make deploy`
 - Hot-reload: `.py` / `.tsx` — автоматически
 - Docker rebuild: только Dockerfile, docker-compose, package.json, requirements
 
@@ -128,6 +130,19 @@ Invalidation: импорт → `reports:*`, WB sync → opiu/wb_bdr/dashboard, �
 - Uvicorn workers: минимум **4** (Dockerfile.backend)
 - При 2 workers + тяжёлые отчёты → **worker starvation** (сервер не отвечает)
 - Deployment: после изменения кэш-формул → сбрасывать кэш **по одному ключу**, не все разом
+- SSL: `nginx/nginx-ssl.conf` — HTTPS конфиг (активировать после certbot)
+- Makefile: `make help` — список всех доступных команд
+
+## Среды
+| Среда | Ветка | URL | Описание |
+|-------|-------|-----|----------|
+| Local | `dev` | http://localhost:3000 | Локальная разработка |
+| Staging | `dev` | staging-сервер:3001 | Проверка перед prod |
+| Production | `main` | production-сервер | Реальные клиенты |
+
+- **Staging:** каждый push в `dev` → автодеплой на staging
+- **Production:** merge `dev` → `main` → автодеплой на production
+- **Правило:** всё проверить на staging ПЕРЕД merge в main
 
 ## WB API
 - Rate limits: `asyncio.Semaphore`, отдельные semaphore для Stats и Adv API
