@@ -528,27 +528,27 @@ async def fetch_wb_warehouses(api_key: str) -> dict[int, str]:
 
 async def fetch_acceptance_options(
     api_key: str, barcodes: list[str]
-) -> list[dict]:
+) -> dict[str, list[dict]]:
     """Fetch warehouse acceptance options for specific barcodes.
 
     POST https://supplies-api.wildberries.ru/api/v1/acceptance/options
     Body: [{quantity, barcode}, ...]
-    Returns list of {warehouseID, canBox, canMonopallet, canSupersafe, isBoxOnPallet}.
+    Returns dict {barcode: [{warehouseID, canBox, canMonopallet, ...}, ...]}.
 
     This API is article-specific and matches what WB supplier UI shows.
-    Unlike the tariffs/coefficients API, it correctly reflects per-article acceptance.
+    Each barcode may have a different set of available warehouses.
     """
     url = "https://supplies-api.wildberries.ru/api/v1/acceptance/options"
     headers = {"Authorization": api_key}
     # Build payload (max 5000 barcodes per request)
     payload = [{"quantity": 1, "barcode": bc} for bc in barcodes[:5000]]
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         try:
             resp = await client.post(url, headers=headers, json=payload)
         except httpx.RequestError as e:
             logger.error(f"WB acceptance/options request error: {e}")
-            return []
+            return {}
 
         if resp.status_code == 429:
             wait = min(int(resp.headers.get("Retry-After", "60")), 120)
@@ -557,40 +557,42 @@ async def fetch_acceptance_options(
             try:
                 resp = await client.post(url, headers=headers, json=payload)
             except httpx.RequestError:
-                return []
+                return {}
 
         if resp.status_code != 200:
             logger.error(
                 f"WB acceptance/options error {resp.status_code}: "
                 f"{resp.text[:200]}"
             )
-            return []
+            return {}
 
         data = resp.json()
 
         # Response structure: {"result": [{"barcode": "...", "warehouses": [...]}]}
-        # Extract warehouse list from nested structure
-        warehouses: list[dict] = []
+        # Build per-barcode mapping
+        result: dict[str, list[dict]] = {}
         if isinstance(data, dict) and "result" in data:
             result_list = data["result"]
             if isinstance(result_list, list):
                 for entry in result_list:
-                    if isinstance(entry, dict) and "warehouses" in entry:
-                        wh_list = entry["warehouses"]
-                        if isinstance(wh_list, list):
-                            warehouses.extend(wh_list)
-        elif isinstance(data, list):
-            # Fallback: flat list of warehouse dicts
-            warehouses = data
+                    if isinstance(entry, dict):
+                        bc = entry.get("barcode", "")
+                        wh_list = entry.get("warehouses", [])
+                        if bc and isinstance(wh_list, list):
+                            result[bc] = wh_list
 
-        if not warehouses:
+        if not result:
             logger.warning(
-                f"WB acceptance/options: no warehouses found in response"
+                "WB acceptance/options: no data found in response"
             )
-            return []
+            return {}
 
-        logger.info(f"WB acceptance/options: got {len(warehouses)} warehouses")
-        return warehouses
+        total_wh = sum(len(v) for v in result.values())
+        logger.info(
+            f"WB acceptance/options: {len(result)} barcodes, "
+            f"{total_wh} total warehouse entries"
+        )
+        return result
 
 
 # ─── Warehouse stocks ────────────────────────────────────────────────────────
