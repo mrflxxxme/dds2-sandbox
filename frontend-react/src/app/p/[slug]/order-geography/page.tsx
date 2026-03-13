@@ -1,27 +1,26 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { api } from '@/lib/api';
-import type { OrderGeographyResponse } from '@/types/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 
-function getDefaultDates() {
-  const now = new Date();
-  const to = now.toISOString().slice(0, 10);
-  const from = new Date(now.getTime() - 14 * 86400000).toISOString().slice(0, 10);
-  return { from, to };
+interface CityRow { city: string; region: string; okrug: string; order_count: number }
+interface DailyRow { date: string; count: number }
+interface GeoData {
+  cities: CityRow[];
+  daily: DailyRow[];
+  dates: string[];
+  totals: { total_orders: number; unique_cities: number };
+  filters: { brands: string[]; categories: string[]; articles: string[] };
 }
 
 export default function OrderGeographyPage() {
-  const [data, setData] = useState<OrderGeographyResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<GeoData | null>(null);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [mounted, setMounted] = useState(false);
 
-  const defaults = getDefaultDates();
-  const [dateFrom, setDateFrom] = useState(defaults.from);
-  const [dateTo, setDateTo] = useState(defaults.to);
-
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
   const [brand, setBrand] = useState('');
   const [category, setCategory] = useState('');
   const [article, setArticle] = useState('');
@@ -29,27 +28,36 @@ export default function OrderGeographyPage() {
   const [sortDesc, setSortDesc] = useState(true);
   const [search, setSearch] = useState('');
 
-  useEffect(() => { setMounted(true); }, []);
+  // Init dates on mount
+  useEffect(() => {
+    const now = new Date();
+    const to = now.toISOString().slice(0, 10);
+    const from = new Date(now.getTime() - 14 * 86400000).toISOString().slice(0, 10);
+    setDateFrom(from);
+    setDateTo(to);
+  }, []);
 
-  const loadData = useCallback(async () => {
-    if (!mounted) return;
-    try {
-      setLoading(true);
-      setError('');
-      const result = await api.getOrderGeography(
-        dateFrom, dateTo,
-        brand || undefined, category || undefined, article || undefined,
-      );
-      setData(result);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Ошибка загрузки';
-      setError(message);
-    } finally {
-      setLoading(false);
-    }
-  }, [mounted, dateFrom, dateTo, brand, category, article]);
-
-  useEffect(() => { loadData(); }, [loadData]);
+  // Load data when filters change
+  useEffect(() => {
+    if (!dateFrom || !dateTo) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        setLoading(true);
+        setError('');
+        const result = await api.getOrderGeography(
+          dateFrom, dateTo,
+          brand || undefined, category || undefined, article || undefined,
+        );
+        if (!cancelled) setData(result);
+      } catch (err: unknown) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Ошибка загрузки');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [dateFrom, dateTo, brand, category, article]);
 
   const cities = useMemo(() => {
     if (!data) return [];
@@ -87,38 +95,32 @@ export default function OrderGeographyPage() {
   const handleExcel = () => {
     if (!cities.length) return;
     exportToExcel(cities.map(c => ({
-      'Город': c.city,
-      'Регион': c.region,
-      'Округ': c.okrug,
-      'Заказы': c.order_count,
+      'Город': c.city, 'Регион': c.region, 'Округ': c.okrug, 'Заказы': c.order_count,
     })), 'order_geography');
   };
 
-  if (!mounted) return <div className="page-loading">Загрузка...</div>;
-  if (loading) return <div className="page-loading">Загрузка данных...</div>;
-  if (error) return <div className="error-message">{error}</div>;
-
-  const monthNames = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
-    'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
-
-  // Build calendar months
-  const calendarMonths: Array<{ key: string; year: number; month: number; daysInMonth: number; startDay: number }> = [];
-  if (data?.dates.length) {
+  // Calendar months
+  const calendarMonths = useMemo(() => {
+    if (!data?.dates.length) return [];
     const months = new Map<string, boolean>();
     data.dates.forEach(d => {
       const dt = new Date(d);
       const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
       months.set(key, true);
     });
+    const result: Array<{ key: string; year: number; month: number; daysInMonth: number; startDay: number }> = [];
     months.forEach((_, key) => {
       const [year, month] = key.split('-').map(Number);
-      const firstDay = new Date(year, month - 1, 1);
       const daysInMonth = new Date(year, month, 0).getDate();
-      let startDay = firstDay.getDay();
+      let startDay = new Date(year, month - 1, 1).getDay();
       if (startDay === 0) startDay = 7;
-      calendarMonths.push({ key, year, month, daysInMonth, startDay });
+      result.push({ key, year, month, daysInMonth, startDay });
     });
-  }
+    return result;
+  }, [data]);
+
+  const monthNames = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
+    'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 
   return (
     <div className="page-container">
@@ -127,61 +129,58 @@ export default function OrderGeographyPage() {
         .geo-header h1 { font-size: 1.5rem; font-weight: 700; margin: 0; }
         .geo-stats { display: flex; gap: 2rem; }
         .geo-stat { text-align: center; }
-        .geo-stat-value { font-size: 1.8rem; font-weight: 700; color: var(--accent); }
-        .geo-stat-label { font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
+        .geo-stat-value { font-size: 1.8rem; font-weight: 700; color: var(--accent, #6366f1); }
+        .geo-stat-label { font-size: 0.75rem; color: var(--text-secondary, #888); text-transform: uppercase; letter-spacing: 0.05em; }
         .geo-filters { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-bottom: 1.5rem; }
-        .geo-filters select, .geo-filters input { padding: 0.5rem 0.75rem; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-primary); font-size: 0.85rem; min-width: 140px; }
-        .geo-filters input[type="date"] { min-width: 130px; }
+        .geo-filters select, .geo-filters input { padding: 0.5rem 0.75rem; border-radius: 8px; border: 1px solid var(--border, #333); background: var(--bg-card, #1a1a2e); color: var(--text-primary, #fff); font-size: 0.85rem; min-width: 140px; }
         .geo-layout { display: grid; grid-template-columns: 1fr 300px; gap: 1.5rem; }
         @media (max-width: 900px) { .geo-layout { grid-template-columns: 1fr; } }
         .geo-chart { padding: 1rem; }
         .chart-bars { display: flex; align-items: flex-end; gap: 2px; height: 120px; }
-        .chart-bar { flex: 1; border-radius: 3px 3px 0 0; background: var(--accent); opacity: 0.8; transition: opacity 0.2s; min-width: 4px; cursor: pointer; position: relative; }
+        .chart-bar { flex: 1; border-radius: 3px 3px 0 0; background: var(--accent, #6366f1); opacity: 0.8; transition: opacity 0.2s; min-width: 4px; cursor: pointer; position: relative; }
         .chart-bar:hover { opacity: 1; }
-        .chart-bar:hover::after { content: attr(data-tooltip); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: var(--bg-card); color: var(--text-primary); padding: 4px 8px; border-radius: 6px; font-size: 0.7rem; white-space: nowrap; border: 1px solid var(--border); z-index: 10; }
-        .chart-label { display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-secondary); margin-top: 4px; }
+        .chart-bar:hover::after { content: attr(data-tooltip); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: var(--bg-card, #1a1a2e); color: var(--text-primary, #fff); padding: 4px 8px; border-radius: 6px; font-size: 0.7rem; white-space: nowrap; border: 1px solid var(--border, #333); z-index: 10; }
+        .chart-label { display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-secondary, #888); margin-top: 4px; }
         .cal-month { margin-bottom: 1rem; }
-        .cal-month-title { font-weight: 600; font-size: 0.85rem; margin-bottom: 0.5rem; color: var(--text-primary); }
+        .cal-month-title { font-weight: 600; font-size: 0.85rem; margin-bottom: 0.5rem; }
         .cal-header, .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
-        .cal-cell { width: 32px; height: 28px; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; border-radius: 4px; cursor: default; color: var(--text-secondary); }
-        .cal-day-name { font-weight: 600; font-size: 0.65rem; color: var(--text-secondary); }
-        .cal-has-data { background: rgba(99, 102, 241, 0.2); color: var(--text-primary); cursor: pointer; font-weight: 600; }
+        .cal-cell { width: 32px; height: 28px; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; border-radius: 4px; cursor: default; color: var(--text-secondary, #888); }
+        .cal-day-name { font-weight: 600; font-size: 0.65rem; }
+        .cal-has-data { background: rgba(99, 102, 241, 0.2); color: var(--text-primary, #fff); cursor: pointer; font-weight: 600; }
         .cal-has-data:hover { background: rgba(99, 102, 241, 0.4); }
-        .cal-in-range.cal-has-data { background: var(--accent); color: white; }
+        .cal-in-range.cal-has-data { background: var(--accent, #6366f1); color: white; }
         .geo-search { display: flex; gap: 0.75rem; margin-bottom: 1rem; align-items: center; }
-        .geo-search input { flex: 1; padding: 0.5rem 0.75rem; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-primary); font-size: 0.85rem; }
+        .geo-search input { flex: 1; padding: 0.5rem 0.75rem; border-radius: 8px; border: 1px solid var(--border, #333); background: var(--bg-card, #1a1a2e); color: var(--text-primary, #fff); font-size: 0.85rem; }
         .city-table { width: 100%; border-collapse: collapse; }
-        .city-table th { text-align: left; padding: 0.6rem 0.75rem; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); border-bottom: 1px solid var(--border); cursor: pointer; user-select: none; }
-        .city-table th:hover { color: var(--text-primary); }
-        .city-table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+        .city-table th { text-align: left; padding: 0.6rem 0.75rem; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary, #888); border-bottom: 1px solid var(--border, #333); cursor: pointer; user-select: none; }
+        .city-table th:hover { color: var(--text-primary, #fff); }
+        .city-table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border, #333); font-size: 0.85rem; }
         .city-table tr:hover td { background: rgba(99, 102, 241, 0.05); }
-        .city-count { font-weight: 600; color: var(--accent); }
-        .city-bar { height: 4px; border-radius: 2px; background: var(--accent); opacity: 0.3; margin-top: 4px; }
-        .reset-btn { padding: 0.4rem 0.75rem; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--text-secondary); font-size: 0.8rem; cursor: pointer; }
-        .reset-btn:hover { background: var(--bg-card); color: var(--text-primary); }
+        .city-count { font-weight: 600; color: var(--accent, #6366f1); }
+        .city-bar { height: 4px; border-radius: 2px; background: var(--accent, #6366f1); opacity: 0.3; margin-top: 4px; }
+        .reset-btn { padding: 0.4rem 0.75rem; border-radius: 8px; border: 1px solid var(--border, #333); background: transparent; color: var(--text-secondary, #888); font-size: 0.8rem; cursor: pointer; }
+        .reset-btn:hover { background: var(--bg-card, #1a1a2e); }
       `}</style>
 
-      {/* Header with stats */}
       <div className="geo-header">
         <h1>🗺️ Куда заказывают</h1>
         {data && (
           <div className="geo-stats">
             <div className="geo-stat">
-              <div className="geo-stat-value">{formatNumber(data.totals.total_orders)}</div>
+              <div className="geo-stat-value">{formatNumber(data.totals.total_orders, 0)}</div>
               <div className="geo-stat-label">Заказов</div>
             </div>
             <div className="geo-stat">
-              <div className="geo-stat-value">{formatNumber(data.totals.unique_cities)}</div>
+              <div className="geo-stat-value">{formatNumber(data.totals.unique_cities, 0)}</div>
               <div className="geo-stat-label">Городов</div>
             </div>
           </div>
         )}
       </div>
 
-      {/* Filters */}
       <div className="geo-filters">
         <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
-        <span style={{ color: 'var(--text-secondary)' }}>—</span>
+        <span style={{ color: 'var(--text-secondary, #888)' }}>—</span>
         <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} />
         <select value={brand} onChange={e => setBrand(e.target.value)}>
           <option value="">Все бренды</option>
@@ -202,140 +201,123 @@ export default function OrderGeographyPage() {
         )}
       </div>
 
-      <div className="geo-layout">
-        {/* Left column: Chart + Table */}
-        <div>
-          {/* Daily bar chart */}
-          {data && data.daily.length > 0 && (
-            <div className="glass-card geo-chart">
-              <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.75rem' }}>
-                Заказы по дням
-              </div>
-              <div className="chart-bars">
-                {data.daily.map(d => (
-                  <div
-                    key={d.date}
-                    className="chart-bar"
-                    style={{ height: `${Math.max((d.count / chartMax) * 100, 2)}%` }}
-                    data-tooltip={`${formatDate(d.date)}: ${formatNumber(d.count)}`}
-                    onClick={() => { setDateFrom(d.date); setDateTo(d.date); }}
-                  />
-                ))}
-              </div>
-              <div className="chart-label">
-                <span>{data.daily.length > 0 ? formatDate(data.daily[0].date) : ''}</span>
-                <span>{data.daily.length > 0 ? formatDate(data.daily[data.daily.length - 1].date) : ''}</span>
-              </div>
-            </div>
-          )}
+      {loading && <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div>}
+      {error && <div style={{ padding: 20, color: '#ef4444', textAlign: 'center' }}>{error}</div>}
 
-          {/* Search + Export */}
-          <div className="geo-search">
-            <input
-              placeholder="Поиск по городу, региону..."
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-            />
-            <button className="btn-secondary" onClick={handleExcel}>📥 Excel</button>
-          </div>
-
-          {/* Cities table */}
-          <div className="glass-card" style={{ overflow: 'auto', maxHeight: '600px' }}>
-            {cities.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-secondary)' }}>
-                Нет данных за выбранный период
+      {!loading && !error && (
+        <div className="geo-layout">
+          <div>
+            {data && data.daily.length > 0 && (
+              <div className="glass-card geo-chart">
+                <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.75rem' }}>Заказы по дням</div>
+                <div className="chart-bars">
+                  {data.daily.map(d => (
+                    <div
+                      key={d.date}
+                      className="chart-bar"
+                      style={{ height: `${Math.max((d.count / chartMax) * 100, 2)}%` }}
+                      data-tooltip={`${formatDate(d.date)}: ${formatNumber(d.count, 0)}`}
+                      onClick={() => { setDateFrom(d.date); setDateTo(d.date); }}
+                    />
+                  ))}
+                </div>
+                <div className="chart-label">
+                  <span>{data.daily.length > 0 ? formatDate(data.daily[0].date) : ''}</span>
+                  <span>{data.daily.length > 0 ? formatDate(data.daily[data.daily.length - 1].date) : ''}</span>
+                </div>
               </div>
-            ) : (
-              <table className="city-table">
-                <thead>
-                  <tr>
-                    <th style={{ width: 40 }}>#</th>
-                    <th onClick={() => handleSort('city')}>
-                      Город {sortBy === 'city' ? (sortDesc ? '↓' : '↑') : ''}
-                    </th>
-                    <th>Регион</th>
-                    <th>Округ</th>
-                    <th onClick={() => handleSort('order_count')} style={{ textAlign: 'right' }}>
-                      Заказы {sortBy === 'order_count' ? (sortDesc ? '↓' : '↑') : ''}
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {cities.slice(0, 200).map((c, i) => {
-                    const maxCount = cities[0]?.order_count || 1;
-                    return (
-                      <tr key={`${c.city}-${c.region}-${i}`}>
-                        <td style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>{i + 1}</td>
-                        <td style={{ fontWeight: 500 }}>{c.city}</td>
-                        <td style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>{c.region}</td>
-                        <td style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>{c.okrug}</td>
-                        <td style={{ textAlign: 'right' }}>
-                          <span className="city-count">{formatNumber(c.order_count)}</span>
-                          <div className="city-bar" style={{ width: `${(c.order_count / maxCount) * 100}%` }} />
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
             )}
-          </div>
-        </div>
 
-        {/* Right column: Calendar */}
-        <div>
-          <div className="glass-card" style={{ padding: '1rem' }}>
-            <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.75rem' }}>
-              📅 Календарь данных
+            <div className="geo-search">
+              <input placeholder="Поиск по городу, региону..." value={search} onChange={e => setSearch(e.target.value)} />
+              <button className="btn-secondary" onClick={handleExcel}>📥 Excel</button>
             </div>
-            {calendarMonths.map(cm => {
-              const emptyCells = [];
-              for (let i = 1; i < cm.startDay; i++) {
-                emptyCells.push(<div key={`e${i}`} className="cal-cell cal-empty" />);
-              }
-              const dayCells = [];
-              for (let d = 1; d <= cm.daysInMonth; d++) {
-                const dateStr = `${cm.year}-${String(cm.month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-                const hasData = calendarDates.has(dateStr);
-                const isInRange = dateStr >= dateFrom && dateStr <= dateTo;
-                dayCells.push(
-                  <div
-                    key={d}
-                    className={`cal-cell${hasData ? ' cal-has-data' : ''}${isInRange ? ' cal-in-range' : ''}`}
-                    onClick={() => { if (hasData) { setDateFrom(dateStr); setDateTo(dateStr); } }}
-                    title={hasData ? `${dateStr} — есть данные` : dateStr}
-                  >
-                    {d}
+
+            <div className="glass-card" style={{ overflow: 'auto', maxHeight: 600 }}>
+              {cities.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-secondary, #888)' }}>
+                  {dateFrom ? 'Нет данных за выбранный период' : 'Выберите период'}
+                </div>
+              ) : (
+                <table className="city-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: 40 }}>#</th>
+                      <th onClick={() => handleSort('city')}>Город {sortBy === 'city' ? (sortDesc ? '↓' : '↑') : ''}</th>
+                      <th>Регион</th>
+                      <th>Округ</th>
+                      <th onClick={() => handleSort('order_count')} style={{ textAlign: 'right' }}>
+                        Заказы {sortBy === 'order_count' ? (sortDesc ? '↓' : '↑') : ''}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cities.slice(0, 200).map((c, i) => {
+                      const maxCount = cities[0]?.order_count || 1;
+                      return (
+                        <tr key={`${c.city}-${c.region}-${i}`}>
+                          <td style={{ color: 'var(--text-secondary, #888)', fontSize: '0.75rem' }}>{i + 1}</td>
+                          <td style={{ fontWeight: 500 }}>{c.city}</td>
+                          <td style={{ color: 'var(--text-secondary, #888)', fontSize: '0.8rem' }}>{c.region}</td>
+                          <td style={{ color: 'var(--text-secondary, #888)', fontSize: '0.8rem' }}>{c.okrug}</td>
+                          <td style={{ textAlign: 'right' }}>
+                            <span className="city-count">{formatNumber(c.order_count, 0)}</span>
+                            <div className="city-bar" style={{ width: `${(c.order_count / maxCount) * 100}%` }} />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <div className="glass-card" style={{ padding: '1rem' }}>
+              <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.75rem' }}>📅 Календарь данных</div>
+              {calendarMonths.map(cm => {
+                const emptyCells = [];
+                for (let i = 1; i < cm.startDay; i++) {
+                  emptyCells.push(<div key={`e${i}`} className="cal-cell" />);
+                }
+                const dayCells = [];
+                for (let d = 1; d <= cm.daysInMonth; d++) {
+                  const ds = `${cm.year}-${String(cm.month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                  const has = calendarDates.has(ds);
+                  const inR = ds >= dateFrom && ds <= dateTo;
+                  dayCells.push(
+                    <div key={d}
+                      className={`cal-cell${has ? ' cal-has-data' : ''}${inR ? ' cal-in-range' : ''}`}
+                      onClick={() => { if (has) { setDateFrom(ds); setDateTo(ds); } }}
+                      title={has ? `${ds} — есть данные` : ds}
+                    >{d}</div>
+                  );
+                }
+                return (
+                  <div key={cm.key} className="cal-month">
+                    <div className="cal-month-title">{monthNames[cm.month - 1]} {cm.year}</div>
+                    <div className="cal-header">
+                      {['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map(n => (
+                        <div key={n} className="cal-cell cal-day-name">{n}</div>
+                      ))}
+                    </div>
+                    <div className="cal-grid">{emptyCells}{dayCells}</div>
                   </div>
                 );
-              }
-              return (
-                <div key={cm.key} className="cal-month">
-                  <div className="cal-month-title">{monthNames[cm.month - 1]} {cm.year}</div>
-                  <div className="cal-header">
-                    {['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map(dn => (
-                      <div key={dn} className="cal-cell cal-day-name">{dn}</div>
-                    ))}
-                  </div>
-                  <div className="cal-grid">
-                    {emptyCells}
-                    {dayCells}
-                  </div>
-                </div>
-              );
-            })}
-            {dateFrom === dateTo && (
-              <button
-                className="reset-btn"
-                style={{ width: '100%', marginTop: '0.5rem' }}
-                onClick={() => { const d = getDefaultDates(); setDateFrom(d.from); setDateTo(d.to); }}
-              >
-                Показать все 14 дней
-              </button>
-            )}
+              })}
+              {dateFrom === dateTo && dateFrom && (
+                <button className="reset-btn" style={{ width: '100%', marginTop: '0.5rem' }}
+                  onClick={() => {
+                    const now = new Date();
+                    setDateTo(now.toISOString().slice(0, 10));
+                    setDateFrom(new Date(now.getTime() - 14 * 86400000).toISOString().slice(0, 10));
+                  }}>Показать все 14 дней</button>
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
