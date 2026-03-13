@@ -567,16 +567,30 @@ async def fetch_acceptance_options(
             return []
 
         data = resp.json()
+
+        # Response structure: {"result": [{"barcode": "...", "warehouses": [...]}]}
+        # Extract warehouse list from nested structure
+        warehouses: list[dict] = []
         if isinstance(data, dict) and "result" in data:
-            data = data["result"]
-        if not isinstance(data, list):
-            logger.error(
-                f"WB acceptance/options: unexpected type {type(data)}"
+            result_list = data["result"]
+            if isinstance(result_list, list):
+                for entry in result_list:
+                    if isinstance(entry, dict) and "warehouses" in entry:
+                        wh_list = entry["warehouses"]
+                        if isinstance(wh_list, list):
+                            warehouses.extend(wh_list)
+        elif isinstance(data, list):
+            # Fallback: flat list of warehouse dicts
+            warehouses = data
+
+        if not warehouses:
+            logger.warning(
+                f"WB acceptance/options: no warehouses found in response"
             )
             return []
 
-        logger.info(f"WB acceptance/options: got {len(data)} warehouses")
-        return data
+        logger.info(f"WB acceptance/options: got {len(warehouses)} warehouses")
+        return warehouses
 
 
 # ─── Warehouse stocks ────────────────────────────────────────────────────────
