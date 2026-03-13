@@ -406,13 +406,17 @@ async def get_warehouse_stocks(
 async def get_warehouse_need(
     db: AsyncSession,
     project_id: int,
-    need_days: int = 14,
+    supply_days: int = 14,
+    analysis_days: int = 14,
     mode: str = "actual",
 ) -> dict:
     """Compute restocking need per warehouse per article.
     
-    mode="actual": uses WB supplier/orders warehouseName (which warehouse shipped).
-    mode="hypothetical": maps order regionName → nearest open warehouse via geo.
+    Args:
+        supply_days: target stock level in days (how many days of supply to maintain)
+        analysis_days: lookback period in days for calculating avg daily orders
+        mode="actual": uses WB supplier/orders warehouseName (which warehouse shipped).
+        mode="hypothetical": maps order regionName → nearest open warehouse via geo.
     """
     from backend.services.funnel.wb_api_client import (
         get_wb_key,
@@ -422,7 +426,7 @@ async def get_warehouse_need(
     from backend.services.warehouse_geo import find_nearest_warehouse, find_nearest_warehouse_by_city, get_country_filtered_warehouses, WAREHOUSE_COORDS, normalize_acceptance_wh_name, is_storage_warehouse
     
     today = date.today()
-    trend_start = today - timedelta(days=need_days)
+    trend_start = today - timedelta(days=analysis_days)
 
     # 1. Fetch orders from WB API
     api_key = await get_wb_key(db, project_id, "wb")
@@ -430,7 +434,7 @@ async def get_warehouse_need(
     vendor_map: dict[int, str] = {}
     brand_map: dict[int, str] = {}
     subject_map: dict[int, str] = {}
-    actual_days = need_days
+    actual_days = analysis_days
 
     # For hypothetical mode: load city+okrug mapping + determine open warehouses
     open_warehouses: list[str] = list(WAREHOUSE_COORDS.keys())
@@ -586,7 +590,7 @@ async def get_warehouse_need(
                 continue
 
             avg_d = round(total_orders_at_wh / max(actual_days, 1), 2)
-            need = compute_need(stock, avg_d, need_days)
+            need = compute_need(stock, avg_d, supply_days)
 
             wh_data[wh_name]["articles"][nm_id] = {
                 "nm_id": nm_id,
@@ -620,7 +624,8 @@ async def get_warehouse_need(
         "articles": article_list,
         "brands": brands,
         "subjects": subjects,
-        "need_days": need_days,
+        "supply_days": supply_days,
+        "analysis_days": analysis_days,
         "mode": mode,
         "total_warehouses": len(warehouses),
         "total_articles": len(article_list),

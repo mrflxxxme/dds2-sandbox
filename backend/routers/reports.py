@@ -410,14 +410,15 @@ async def get_warehouse_stocks(
 
 @router.get("/stock_need")
 async def get_stock_need(
-    need_days: int = Query(14, ge=1, le=90),
-    mode: str = Query("actual", regex="^(actual|hypothetical)$"),
+    supply_days: int = Query(14, ge=1, le=90, description="Target stock level in days"),
+    analysis_days: int = Query(14, ge=1, le=90, description="Lookback period for avg daily orders"),
+    mode: str = Query("actual", pattern="^(actual|hypothetical)$"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Compute restocking need per warehouse per article."""
     from backend.services.stock_analytics_service import get_warehouse_need
-    return await get_warehouse_need(db, project.id, need_days, mode)
+    return await get_warehouse_need(db, project.id, supply_days, analysis_days, mode)
 
 
 @router.post("/stock_analytics/upload_order_cities")

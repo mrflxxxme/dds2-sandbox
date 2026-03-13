@@ -1443,7 +1443,8 @@ function WarehouseStocksView() {
 function WarehouseNeedView() {
     const [data, setData] = useState<any>(null);
     const [loading, setLoading] = useState(false);
-    const [needDays, setNeedDays] = useState(14);
+    const [supplyDays, setSupplyDays] = useState(14);
+    const [analysisDays, setAnalysisDays] = useState(14);
     const [mode, setMode] = useState<'actual' | 'hypothetical'>('actual');
     const [brandFilter, setBrandFilter] = useState('');
     const [subjectFilter, setSubjectFilter] = useState('');
@@ -1452,11 +1453,11 @@ function WarehouseNeedView() {
 
     const load = async () => {
         setLoading(true);
-        try { setData(await api.getStockNeed(needDays, mode)); } catch { }
+        try { setData(await api.getStockNeed(supplyDays, analysisDays, mode)); } catch { }
         setLoading(false);
     };
 
-    useEffect(() => { load(); }, [needDays, mode]);
+    useEffect(() => { load(); }, [supplyDays, analysisDays, mode]);
 
     // Compute per-article total need & per-warehouse need
     const getArticleNeed = (a: any, whName?: string) => {
@@ -1517,7 +1518,7 @@ function WarehouseNeedView() {
         ]);
         const totalRow = ['ИТОГО', '', '', grandTotal, ...whs.map((w: any) => getWhTotal(w.name))];
         rows.push(totalRow);
-        exportToExcel([header, ...rows], `Потребность_${needDays}дн`);
+        exportToExcel([header, ...rows], `Потребность_запас${supplyDays}д_анализ${analysisDays}д`);
     };
 
     if (loading && !data) return <div className="glass-card" style={{ textAlign: 'center', padding: 40 }}>Расчёт потребности...</div>;
@@ -1536,7 +1537,7 @@ function WarehouseNeedView() {
                 <div>
                     <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>📦 Потребность по складам</h2>
                     <span style={{ fontSize: 13, opacity: 0.6 }}>
-                        {data ? `${data.total_warehouses} складов · ${filteredArticles.length} артикулов · на ${needDays} дней · ${modeLabel}` : 'Нет данных'}
+                        {data ? `${data.total_warehouses} складов · ${filteredArticles.length} артикулов · запас ${supplyDays} дн · анализ ${analysisDays} дн · ${modeLabel}` : 'Нет данных'}
                     </span>
                 </div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -1584,11 +1585,20 @@ function WarehouseNeedView() {
                             }} />
                         </label>
                     )}
-                    {/* Days selector */}
-                    <div style={{ display: 'flex', gap: 4 }}>
+                    {/* Supply days selector */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <span style={{ fontSize: 11, opacity: 0.6, whiteSpace: 'nowrap' }}>Запас:</span>
+                        {[7, 14, 30, 60].map(d => (
+                            <button key={d} className={`btn btn-sm ${supplyDays === d ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setSupplyDays(d)}>{d}д</button>
+                        ))}
+                    </div>
+                    {/* Analysis days selector */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <span style={{ fontSize: 11, opacity: 0.6, whiteSpace: 'nowrap' }}>Анализ:</span>
                         {[7, 14, 30].map(d => (
-                            <button key={d} className={`btn btn-sm ${needDays === d ? 'btn-primary' : 'btn-secondary'}`}
-                                onClick={() => setNeedDays(d)}>{d} дн</button>
+                            <button key={d} className={`btn btn-sm ${analysisDays === d ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setAnalysisDays(d)}>{d}д</button>
                         ))}
                     </div>
                     {/* Excel export */}

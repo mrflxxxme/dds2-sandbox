@@ -772,8 +772,8 @@ class ApiClient {
         return this.request('GET', '/api/v1/reports/stock_warehouses');
     }
 
-    async getStockNeed(needDays: number = 14, mode: string = 'actual'): Promise<any> {
-        return this.request('GET', `/api/v1/reports/stock_need?need_days=${needDays}&mode=${mode}`);
+    async getStockNeed(supplyDays: number = 14, analysisDays: number = 14, mode: string = 'actual'): Promise<any> {
+        return this.request('GET', `/api/v1/reports/stock_need?supply_days=${supplyDays}&analysis_days=${analysisDays}&mode=${mode}`);
     }
 
     async uploadOrderCities(file: File): Promise<{ ok: boolean; total_mappings: number; affected_rows: number }> {
