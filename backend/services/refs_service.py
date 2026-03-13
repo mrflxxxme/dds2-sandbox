@@ -205,25 +205,24 @@ async def upsert_opening_balance(
 
 
 async def list_categories(db: AsyncSession, project_id: int) -> list[dict]:
-    """List all categories for a project, structured as tree."""
+    """List all categories for a project as flat records."""
     result = await db.execute(
-        select(CategoryRef).where(CategoryRef.project_id == project_id)
-        .order_by(CategoryRef.cat_lvl1, CategoryRef.cat_lvl2)
+        select(CategoryRef).where(
+            CategoryRef.project_id == project_id,
+            CategoryRef.is_deleted == False,
+        )
+        .order_by(CategoryRef.direction, CategoryRef.cat_lvl1, CategoryRef.cat_lvl2)
     )
     rows = result.scalars().all()
 
-    # Build tree: group by cat_lvl1
-    tree: dict[str, dict] = {}
-    for r in rows:
-        if r.cat_lvl1 not in tree:
-            tree[r.cat_lvl1] = {"cat_lvl1": r.cat_lvl1, "children": [], "ids": []}
-        if r.cat_lvl2:
-            tree[r.cat_lvl1]["children"].append(r.cat_lvl2)
-        tree[r.cat_lvl1]["ids"].append(r.id)
-
     return [
-        {"cat_lvl1": k, "children": v["children"], "ids": v["ids"]}
-        for k, v in tree.items()
+        {
+            "id": r.id,
+            "direction": r.direction,
+            "cat_lvl1": r.cat_lvl1,
+            "cat_lvl2": r.cat_lvl2 or "",
+        }
+        for r in rows
     ]
 
 
