@@ -1069,7 +1069,7 @@ function KpiCard({ label, value, sub, color }: { label: string; value: string; s
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function StockAnalytics() {
-    const [subView, setSubView] = useState<'articles' | 'warehouses' | 'need'>('articles');
+    const [subView, setSubView] = useState<'articles' | 'warehouses' | 'need' | 'settings'>('articles');
     const [data, setData] = useState<any>(null);
     const [loading, setLoading] = useState(false);
     const [trendDays, setTrendDays] = useState(7);
@@ -1107,6 +1107,7 @@ function StockAnalytics() {
 
     if (subView === 'warehouses') return <WarehouseStocksView />;
     if (subView === 'need') return <WarehouseNeedView />;
+    if (subView === 'settings') return <WarehouseExclusionSettings />;
 
     if (loading && !data) return <div className="glass-card" style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-muted)' }}>Загрузка аналитики остатков...</div>;
 
@@ -1195,6 +1196,7 @@ function StockAnalytics() {
                     { key: 'articles' as const, label: '📋 По артикулам' },
                     { key: 'warehouses' as const, label: '🏭 По складам' },
                     { key: 'need' as const, label: '📦 Потребность' },
+                    { key: 'settings' as const, label: '⚙️ Настройки' },
                 ].map(v => (
                     <button key={v.key}
                         className={`btn btn-sm ${subView === v.key ? 'btn-primary' : 'btn-secondary'}`}
@@ -1681,6 +1683,142 @@ function WarehouseNeedView() {
                     <div className="empty-state">
                         <div className="empty-state-text">{data ? 'Нет артикулов по выбранным фильтрам' : 'Нет данных. Сначала синхронизируйте склады (вкладка «По складам»).'}</div>
                     </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ─── Warehouse Exclusion Settings ────────────────────────────────────────────
+
+function WarehouseExclusionSettings() {
+    const [warehouses, setWarehouses] = useState<Array<{ name: string; lat: number; lng: number }>>([]);
+    const [excluded, setExcluded] = useState<string[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
+    const [msg, setMsg] = useState('');
+    const [hasChanges, setHasChanges] = useState(false);
+
+    useEffect(() => {
+        (async () => {
+            try {
+                const [wh, ex] = await Promise.all([
+                    api.getWarehouses(),
+                    api.getExcludedWarehouses(),
+                ]);
+                setWarehouses(wh);
+                setExcluded(ex);
+            } catch {
+                setMsg('Ошибка загрузки складов');
+            } finally {
+                setLoading(false);
+            }
+        })();
+    }, []);
+
+    const toggle = (name: string) => {
+        setExcluded(prev => {
+            const next = prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name];
+            return next;
+        });
+        setHasChanges(true);
+    };
+
+    const save = async () => {
+        setSaving(true);
+        setMsg('');
+        try {
+            await api.setExcludedWarehouses(excluded);
+            setMsg('✅ Сохранено');
+            setHasChanges(false);
+        } catch {
+            setMsg('❌ Ошибка сохранения');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    if (loading) return <div className="glass-card" style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-muted)' }}>Загрузка складов...</div>;
+
+    const active = warehouses.filter(w => !excluded.includes(w.name));
+    const excludedList = warehouses.filter(w => excluded.includes(w.name));
+
+    return (
+        <div>
+            <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+                <h3 style={{ margin: '0 0 8px' }}>🏭 Исключение складов</h3>
+                <p style={{ color: 'var(--color-text-muted)', margin: '0 0 16px', fontSize: 14 }}>
+                    Исключённые склады не участвуют в расчёте потребностей. Заказы из их регионов перераспределяются на ближайшие оставшиеся склады.
+                </p>
+
+                <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center' }}>
+                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                        Активных: <strong>{active.length}</strong> / {warehouses.length}
+                    </span>
+                    {excluded.length > 0 && (
+                        <span style={{ fontSize: 13, color: 'var(--color-danger)', fontWeight: 500 }}>
+                            ⛔ Исключено: {excluded.length}
+                        </span>
+                    )}
+                </div>
+
+                <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+                    gap: 8,
+                }}>
+                    {warehouses.map(w => {
+                        const isExcluded = excluded.includes(w.name);
+                        return (
+                            <label
+                                key={w.name}
+                                style={{
+                                    display: 'flex', alignItems: 'center', gap: 8,
+                                    padding: '8px 12px',
+                                    borderRadius: 8,
+                                    border: `1px solid ${isExcluded ? 'var(--color-danger)' : 'var(--color-border)'}`,
+                                    background: isExcluded ? 'rgba(239,68,68,0.08)' : 'var(--color-bg-card)',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.15s',
+                                    opacity: isExcluded ? 0.7 : 1,
+                                }}
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked={!isExcluded}
+                                    onChange={() => toggle(w.name)}
+                                    style={{ accentColor: 'var(--color-primary)' }}
+                                />
+                                <span style={{
+                                    fontSize: 14,
+                                    textDecoration: isExcluded ? 'line-through' : 'none',
+                                    color: isExcluded ? 'var(--color-danger)' : 'var(--color-text)',
+                                }}>
+                                    {w.name}
+                                </span>
+                            </label>
+                        );
+                    })}
+                </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                <button
+                    className="btn btn-primary"
+                    onClick={save}
+                    disabled={saving || !hasChanges}
+                >
+                    {saving ? 'Сохранение...' : '💾 Сохранить'}
+                </button>
+                {msg && <span style={{ fontSize: 14 }}>{msg}</span>}
+            </div>
+
+            {excludedList.length > 0 && (
+                <div className="glass-card" style={{ padding: 16, marginTop: 16 }}>
+                    <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: 0 }}>
+                        ⚠️ Исключены: <strong>{excludedList.map(w => w.name).join(', ')}</strong>.
+                        Заказы из этих регионов будут распределены на ближайшие активные склады.
+                    </p>
                 </div>
             )}
         </div>
