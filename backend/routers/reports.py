@@ -455,7 +455,7 @@ async def upload_order_cities(
             [{"project_id": project.id, "srid": m["srid"], "city": m["city"]} for m in batch]
         )
         stmt = stmt.on_conflict_do_update(
-            constraint="uq_order_city_project_srid",
+            index_elements=["project_id", "srid"],
             set_={"city": stmt.excluded.city},
         )
         result = await db.execute(stmt)
