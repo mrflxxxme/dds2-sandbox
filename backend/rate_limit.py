@@ -16,7 +16,7 @@ logger = logging.getLogger("dds.ratelimit")
 
 # Rate limit configs: (max_requests, window_seconds)
 RATE_LIMITS = {
-    "default": (100, 60),       # 100 req/min
+    "default": (300, 60),       # 300 req/min
     "sync": (10, 60),           # 10 req/min for sync endpoints
     "import": (20, 60),         # 20 req/min for import
 }
