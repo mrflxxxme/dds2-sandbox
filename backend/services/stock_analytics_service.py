@@ -422,10 +422,13 @@ async def get_warehouse_need(
         get_wb_key,
         fetch_supplier_orders,
         fetch_acceptance_options,
-        fetch_wb_warehouses,
         fetch_warehouse_stocks,
     )
-    from backend.services.warehouse_geo import find_nearest_warehouse, find_nearest_warehouse_by_city, get_country_filtered_warehouses, WAREHOUSE_COORDS
+    from backend.services.warehouse_geo import (
+        find_nearest_warehouse, find_nearest_warehouse_by_city,
+        get_country_filtered_warehouses, WAREHOUSE_COORDS,
+        WB_API_ID_TO_STOCK_NAME,
+    )
     
     today = date.today()
     trend_start = today - timedelta(days=analysis_days)
@@ -457,27 +460,23 @@ async def get_warehouse_need(
 
     if api_key and mode == "hypothetical":
         # Use supplies API acceptance/options (per-article, matches WB supplier UI)
-        # First get barcodes from warehouse stocks API
+        # Get a representative barcode from warehouse stocks
         stocks_raw = await fetch_warehouse_stocks(api_key)
-        barcodes = list({
-            s.get("barcode", "") for s in stocks_raw if s.get("barcode")
-        })
+        barcodes = [s.get("barcode", "") for s in stocks_raw if s.get("barcode")]
         if barcodes:
-            # Get warehouse ID → name mapping
-            wh_id_to_name = await fetch_wb_warehouses(api_key)
-            # Fetch acceptance options for these barcodes
-            options = await fetch_acceptance_options(api_key, barcodes[:100])
+            # Call with ONE barcode — API returns flat warehouse list for single barcode
+            # (multi-barcode returns per-barcode entries with different structure)
+            options = await fetch_acceptance_options(api_key, [barcodes[0]])
             if options:
-                # Build open set: warehouses where canBox=True
+                # Build open set using warehouse ID → stock name mapping
                 open_set: set[str] = set()
                 for opt in options:
                     if opt.get("canBox"):
                         wh_id = opt.get("warehouseID", 0)
-                        wh_name = wh_id_to_name.get(wh_id, "")
-                        if wh_name:
-                            open_set.add(wh_name)
+                        stock_name = WB_API_ID_TO_STOCK_NAME.get(wh_id)
+                        if stock_name:
+                            open_set.add(stock_name)
                 if open_set:
-                    # Keep only warehouses from WAREHOUSE_COORDS that are open
                     open_warehouses = [
                         w for w in open_warehouses if w in open_set
                     ]
