@@ -780,13 +780,13 @@ class ApiClient {
         const formData = new FormData();
         formData.append('file', file);
 
-        const token = localStorage.getItem('access_token');
-        const projectId = localStorage.getItem('current_project_id');
+        const token = this.getToken();
+        const projectId = this.getProjectId();
         const resp = await fetch(`${API_URL}/api/v1/reports/stock_analytics/upload_order_cities`, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${token}`,
-                'X-Project-Id': projectId || '',
+                'X-Project-Id': String(projectId || ''),
             },
             body: formData,
         });
