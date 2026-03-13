@@ -23,7 +23,7 @@ frontend-react/src/
   components/    — DataTable, FormModal, PageHeader, TabLayout, Toast
   types/api.ts   — TypeScript interfaces
 
-tests/           — 16+ files, 249 tests
+tests/           — 23 files, 249 tests
 ```
 
 ## ⚠️ CRITICAL Rules

@@ -25,6 +25,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
 from backend.models.mixins import SoftDeleteMixin
+from backend.utils.time import utcnow  # ← единый datetime helper
 
 
 class Feature(Base, SoftDeleteMixin):
@@ -35,7 +36,7 @@ class Feature(Base, SoftDeleteMixin):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)   # ← Numeric, НЕ Float
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.utcnow()                      # ← НЕ datetime.now(timezone.utc)
+        DateTime, default=utcnow                                         # ← utcnow из utils/time
     )
 
     __table_args__ = (
@@ -45,7 +46,7 @@ class Feature(Base, SoftDeleteMixin):
 
 ⛔ **ЗАПРЕЩЕНО:**
 - `Column(Integer, ...)` → используй `Mapped[int] = mapped_column(Integer, ...)`
-- `datetime.now(timezone.utc)` → используй `datetime.utcnow()` (asyncpg НЕ принимает offset-aware в TIMESTAMP WITHOUT TIME ZONE)
+- `datetime.utcnow()` и `datetime.now(timezone.utc)` → используй `from backend.utils.time import utcnow` (см. skill `convention-guards`)
 - `Float` для денег → используй `Numeric(18, 2)`
 
 **Зарегистрируй** в `models/__init__.py`:
@@ -110,7 +111,7 @@ ALTER TABLE table_name ADD COLUMN new_column VARCHAR;
 
 - [ ] Модель в `models/feature.py` (НЕ в `models.py` монолите)
 - [ ] **`Mapped[]` + `mapped_column()`** — не `Column()`
-- [ ] **`datetime.utcnow()`** — НЕ `datetime.now(timezone.utc)` (asyncpg DataError!)
+- [ ] **`from backend.utils.time import utcnow`** — НЕ `datetime.utcnow()`, НЕ `datetime.now(timezone.utc)`
 - [ ] **`Numeric(18, 2)`** для денег — не `Float`
 - [ ] **`project_id`** с FK и индексом
 - [ ] **`SoftDeleteMixin`** для критичных сущностей

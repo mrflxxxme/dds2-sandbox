@@ -13,7 +13,7 @@ description: Изменение схемы БД — модель, миграци
 - Используй skill `db-migration`
 - Создай файл `backend/models/feature.py` (НЕ добавляй в монолитный models.py)
 - **`Mapped[]` + `mapped_column()`** — не `Column()`
-- **`datetime.now(timezone.utc)`** — не `datetime.utcnow`
+- **`from backend.utils.time import utcnow`** — НЕ `datetime.utcnow()`, НЕ `datetime.now(timezone.utc)`
 - **`Numeric(18,2)`** для денег — не `Float`
 - **`project_id`** с FK и индексом
 - Re-export в `models/__init__.py`
