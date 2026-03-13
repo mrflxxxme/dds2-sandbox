@@ -799,7 +799,7 @@ class ApiClient {
 
     // === Order Geography ===
     async getOrderGeography(dateFrom: string, dateTo: string, brand?: string, category?: string, article?: string): Promise<OrderGeographyResponse> {
-        let url = `/reports/order_geography?date_from=${dateFrom}&date_to=${dateTo}`;
+        let url = `/api/v1/reports/order_geography?date_from=${dateFrom}&date_to=${dateTo}`;
         if (brand) url += `&brand=${encodeURIComponent(brand)}`;
         if (category) url += `&category=${encodeURIComponent(category)}`;
         if (article) url += `&article=${encodeURIComponent(article)}`;

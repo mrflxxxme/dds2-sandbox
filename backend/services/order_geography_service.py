@@ -6,9 +6,12 @@ from datetime import date, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.cache import cached
+
 logger = logging.getLogger("dds.order_geography")
 
 
+@cached(prefix="reports:order_geography", ttl=300)
 async def get_order_geography(
     db: AsyncSession,
     project_id: int,
