@@ -419,7 +419,7 @@ async def get_warehouse_need(
         fetch_supplier_orders,
         fetch_acceptance_coefficients,
     )
-    from backend.services.warehouse_geo import find_nearest_warehouse, WAREHOUSE_COORDS, SC_PREFIX
+    from backend.services.warehouse_geo import find_nearest_warehouse, WAREHOUSE_COORDS, SC_PREFIX, SKIP_SUFFIXES
     
     today = date.today()
     trend_start = today - timedelta(days=need_days)
@@ -443,7 +443,7 @@ async def get_warehouse_need(
             for c in coefficients:
                 wh = c.get("warehouseName", "")
                 coeff = c.get("coefficient")
-                if wh and coeff is not None and coeff >= 0 and not wh.startswith(SC_PREFIX):
+                if wh and coeff is not None and coeff >= 0 and not wh.startswith(SC_PREFIX) and not any(wh.endswith(s) for s in SKIP_SUFFIXES):
                     open_set.add(wh)
             if open_set:
                 open_warehouses = [w for w in open_warehouses if w in open_set]
