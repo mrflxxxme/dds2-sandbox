@@ -11,6 +11,15 @@ export default function InboxPage() {
     const [tab, setTab] = useState<'income' | 'expense' | 'single'>('income');
     const [msg, setMsg] = useState('');
     const [expanded, setExpanded] = useState<string | null>(null);
+    // Auto-categorize state
+    const [showRules, setShowRules] = useState(false);
+    const [rules, setRules] = useState<any[]>([]);
+    const [preview, setPreview] = useState<any[] | null>(null);
+    const [autoLoading, setAutoLoading] = useState(false);
+    const [newKeyword, setNewKeyword] = useState('');
+    const [newCat1, setNewCat1] = useState('');
+    const [newCat2, setNewCat2] = useState('');
+    const [newDirection, setNewDirection] = useState('expense');
 
     useEffect(() => { loadData(); }, []);
 
@@ -28,6 +37,38 @@ export default function InboxPage() {
         } catch { }
         setLoading(false);
     };
+
+    const loadRules = async () => {
+        try { const r = await api.getAutoCategorizeRules(); setRules(r || []); } catch { }
+    };
+    const loadPreview = async () => {
+        setAutoLoading(true);
+        try { const p = await api.previewAutoCategorize(); setPreview(p || []); } catch { }
+        setAutoLoading(false);
+    };
+    const applyAutoCat = async () => {
+        setAutoLoading(true);
+        try {
+            const r = await api.applyAutoCategorize();
+            setMsg(`⚡ Авто-разнесено: ${r.updated} операций`);
+            setPreview(null);
+            loadData();
+        } catch (e: any) { setMsg(e.message); }
+        setAutoLoading(false);
+    };
+    const addRule = async () => {
+        if (!newKeyword || !newCat1) return;
+        try {
+            await api.createAutoCategorizeRule({ keyword: newKeyword, cat_lvl1: newCat1, cat_lvl2: newCat2 || undefined, direction: newDirection });
+            setNewKeyword(''); setNewCat1(''); setNewCat2('');
+            loadRules();
+            setMsg('✅ Правило добавлено');
+        } catch (e: any) { setMsg(e.message); }
+    };
+    const delRule = async (id: number) => {
+        try { await api.deleteAutoCategorizeRule(id); loadRules(); } catch { }
+    };
+    const openRulesPanel = () => { setShowRules(true); loadRules(); };
 
     const incomeCats: Record<string, string[]> = {};
     const expenseCats: Record<string, string[]> = {};
@@ -88,8 +129,130 @@ export default function InboxPage() {
                     <h1 className="page-title">🔴 INBOX — Неразнесённые</h1>
                     <p className="page-subtitle">Назначение категорий операциям</p>
                 </div>
-                <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(allTxns, 'inbox_unassigned')}>📥 Экспорт Excel</button>
+                <div style={{ display: 'flex', gap: 8 }}>
+                    <button className="btn btn-sm" style={{ background: 'linear-gradient(135deg, #f59e0b, #ef4444)', color: '#fff', fontWeight: 700 }}
+                        onClick={() => { loadPreview(); }}>⚡ Авто-разнести</button>
+                    <button className="btn btn-secondary btn-sm" onClick={openRulesPanel}>⚙️ Правила</button>
+                    <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(allTxns, 'inbox_unassigned')}>📥 Excel</button>
+                </div>
             </div>
+
+            {/* Auto-categorize preview modal */}
+            {preview !== null && (
+                <div className="glass-card" style={{ marginBottom: 16, border: '2px solid var(--color-warning)', position: 'relative' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                        <h3 style={{ margin: 0, fontSize: 16 }}>⚡ Превью авто-разнёски ({preview.length} совпадений)</h3>
+                        <button className="btn btn-secondary btn-sm" onClick={() => setPreview(null)}>✕ Закрыть</button>
+                    </div>
+                    {preview.length === 0 ? (
+                        <div style={{ textAlign: 'center', padding: 20, color: 'var(--color-text-muted)' }}>
+                            Нет совпадений. Добавьте правила через ⚙️ Правила
+                        </div>
+                    ) : (
+                        <>
+                            <div style={{ maxHeight: 400, overflowY: 'auto', marginBottom: 12 }}>
+                                <table className="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Дата</th>
+                                            <th>Контрагент</th>
+                                            <th>Сумма</th>
+                                            <th>Ключевое слово</th>
+                                            <th>→ Категория</th>
+                                            <th>Назначение</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {preview.map((p: any, i: number) => (
+                                            <tr key={i}>
+                                                <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{formatDate(p.date)}</td>
+                                                <td style={{ fontSize: 12 }}>{(p.counterparty || '—').slice(0, 30)}</td>
+                                                <td style={{ fontWeight: 600, whiteSpace: 'nowrap', color: p.expense > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
+                                                    {formatNumber(p.expense > 0 ? p.expense : p.income)}
+                                                </td>
+                                                <td><span style={{ background: 'rgba(245,158,11,0.15)', color: '#f59e0b', padding: '2px 8px', borderRadius: 4, fontSize: 12, fontWeight: 600 }}>{p.matched_keyword}</span></td>
+                                                <td style={{ fontSize: 12, fontWeight: 600 }}>{p.suggested_cat_lvl1}{p.suggested_cat_lvl2 ? ` / ${p.suggested_cat_lvl2}` : ''}</td>
+                                                <td style={{ fontSize: 11, color: 'var(--color-text-dim)', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.purpose}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <button className="btn btn-primary" style={{ width: '100%' }} disabled={autoLoading}
+                                onClick={applyAutoCat}>
+                                {autoLoading ? '⏳ Применяю...' : `✅ Применить авто-разнёску (${preview.length} операций)`}
+                            </button>
+                        </>
+                    )}
+                </div>
+            )}
+
+            {/* Rules management panel */}
+            {showRules && (
+                <div className="glass-card" style={{ marginBottom: 16 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                        <h3 style={{ margin: 0, fontSize: 16 }}>⚙️ Правила авто-категоризации</h3>
+                        <button className="btn btn-secondary btn-sm" onClick={() => setShowRules(false)}>✕</button>
+                    </div>
+                    <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+                        Если в назначении платежа найдётся ключевое слово — операция автоматически получит указанную категорию.
+                    </p>
+                    {/* Existing rules */}
+                    {rules.length > 0 && (
+                        <table className="data-table" style={{ marginBottom: 16 }}>
+                            <thead>
+                                <tr>
+                                    <th>Ключевое слово</th>
+                                    <th>Направление</th>
+                                    <th>Категория</th>
+                                    <th>Подкатегория</th>
+                                    <th style={{ width: 50 }}></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {rules.map((r: any) => (
+                                    <tr key={r.id}>
+                                        <td><strong>{r.keyword}</strong></td>
+                                        <td style={{ fontSize: 12 }}>{r.direction === 'income' ? '📥 Доход' : '📤 Расход'}</td>
+                                        <td>{r.cat_lvl1}</td>
+                                        <td>{r.cat_lvl2 || '—'}</td>
+                                        <td><button className="btn btn-sm" style={{ color: 'var(--color-danger)', background: 'none', padding: '2px 6px' }} onClick={() => delRule(r.id)}>🗑</button></td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    )}
+                    {/* Add new rule */}
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'end', flexWrap: 'wrap', borderTop: '1px solid var(--color-border)', paddingTop: 12 }}>
+                        <div className="form-group" style={{ minWidth: 150 }}>
+                            <label className="form-label">Ключевое слово</label>
+                            <input className="form-input" value={newKeyword} onChange={(e: any) => setNewKeyword(e.target.value)} placeholder="транспортн" />
+                        </div>
+                        <div className="form-group" style={{ minWidth: 100 }}>
+                            <label className="form-label">Направление</label>
+                            <select className="form-input" value={newDirection} onChange={(e: any) => setNewDirection(e.target.value)}>
+                                <option value="expense">Расход</option>
+                                <option value="income">Доход</option>
+                            </select>
+                        </div>
+                        <div className="form-group" style={{ minWidth: 150 }}>
+                            <label className="form-label">Категория</label>
+                            <select className="form-input" value={newCat1} onChange={(e: any) => { setNewCat1(e.target.value); setNewCat2((newDirection === 'income' ? incomeCats : expenseCats)[e.target.value]?.[0] || ''); }}>
+                                <option value="">—</option>
+                                {Object.keys(newDirection === 'income' ? incomeCats : expenseCats).map(k => <option key={k} value={k}>{k}</option>)}
+                            </select>
+                        </div>
+                        <div className="form-group" style={{ minWidth: 150 }}>
+                            <label className="form-label">Подкатегория</label>
+                            <select className="form-input" value={newCat2} onChange={(e: any) => setNewCat2(e.target.value)}>
+                                <option value="">—</option>
+                                {((newDirection === 'income' ? incomeCats : expenseCats)[newCat1] || []).map((s: string) => <option key={s} value={s}>{s}</option>)}
+                            </select>
+                        </div>
+                        <button className="btn btn-primary btn-sm" onClick={addRule}>➕ Добавить</button>
+                    </div>
+                </div>
+            )}
 
             {msg && (
                 <div style={{ background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)', color: 'var(--color-success)', padding: '10px 14px', borderRadius: 8, fontSize: 13, marginBottom: 16 }}>

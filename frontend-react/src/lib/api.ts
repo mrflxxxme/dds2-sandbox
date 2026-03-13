@@ -352,7 +352,22 @@ class ApiClient {
         return this.request<{ updated: number }>('POST', '/api/v1/transactions/assign_category_by_ids', data);
     }
 
-    // Reports
+    // Auto-categorize
+    getAutoCategorizeRules() {
+        return this.request<Array<{ id: number; keyword: string; direction: string; cat_lvl1: string; cat_lvl2: string | null; priority: number; is_active: boolean }>>('GET', '/api/v1/transactions/auto_categorize/rules');
+    }
+    createAutoCategorizeRule(data: { keyword: string; cat_lvl1: string; cat_lvl2?: string; direction?: string; priority?: number }) {
+        return this.request<{ id: number; keyword: string; direction: string; cat_lvl1: string; cat_lvl2: string | null }>('POST', '/api/v1/transactions/auto_categorize/rules', data);
+    }
+    deleteAutoCategorizeRule(ruleId: number) {
+        return this.request<{ ok: boolean }>('DELETE', `/api/v1/transactions/auto_categorize/rules/${ruleId}`);
+    }
+    previewAutoCategorize() {
+        return this.request<Array<{ txn_id: string; date: string; counterparty: string; purpose: string; expense: number; income: number; currency: string; matched_keyword: string; suggested_cat_lvl1: string; suggested_cat_lvl2: string | null }>>('GET', '/api/v1/transactions/auto_categorize/preview');
+    }
+    applyAutoCategorize() {
+        return this.request<{ ok: boolean; updated: number; details: Array<{ txn_id: string; cat_lvl1: string; cat_lvl2: string | null; keyword: string }> }>('POST', '/api/v1/transactions/auto_categorize/apply');
+    }
     getDDSMonth(year: number, month: number, currency = 'RUB') {
         return this.request<{ rows: Array<{ cat_lvl1: string; cat_lvl2: string; income: number; expense: number }>; totals: Record<string, number> }>('GET', `/api/v1/reports/dds_month?year=${year}&month=${month}&currency=${currency}`);
     }
