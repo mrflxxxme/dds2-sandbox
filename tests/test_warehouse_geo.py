@@ -60,8 +60,8 @@ class TestFindNearestWarehouse:
         result = find_nearest_warehouse("Московская область", all_whs)
         assert result is not None
         # Should be one of the Moscow-area warehouses (within ~50km of Moscow)
-        moscow_area = ["Коледино", "Электросталь", "Тула", "Домодедово-2", "Склад Истра",
-                        "Подольск", "Обухово", "Белые Столбы", "Чашниково", "Щербинка", "Чехов"]
+        moscow_area = ["Коледино", "Электросталь", "Тула", "Белая дача", "Истра",
+                        "Вёшки", "Обухово", "Белые Столбы", "Радумля 1", "Пушкино"]
         assert any(kw in result for kw in moscow_area)
 
     def test_spb_region(self):
@@ -95,9 +95,9 @@ class TestFindNearestWarehouse:
 
     def test_limited_warehouses_filters(self):
         """Only open warehouses should be considered."""
-        limited = ["Казань", "Юрга"]
+        limited = ["Казань", "Новосибирск"]
         result = find_nearest_warehouse("Московская область", limited)
-        # Moscow is closer to Kazan than Юрга (Siberia)
+        # Moscow is closer to Kazan than Новосибирск (Siberia)
         assert result == "Казань"
 
     def test_novosibirsk_region_maps_correctly(self):
@@ -105,7 +105,7 @@ class TestFindNearestWarehouse:
         all_whs = list(WAREHOUSE_COORDS.keys())
         result = find_nearest_warehouse("Новосибирская область", all_whs)
         assert result is not None
-        assert "Новосибирск" in result or "Юрга" in result
+        assert "Новосибирск" in result
 
     def test_krasnodar_region(self):
         """Краснодарский край → should map to Краснодар."""
@@ -187,7 +187,7 @@ class TestHypotheticalScenario:
 
     def test_orders_remapped_to_nearest_warehouse(self):
         """Orders from different regions map to nearest open warehouse."""
-        open_whs = ["Коледино", "Казань", "Юрга"]
+        open_whs = ["Коледино", "Казань", "Новосибирск"]
 
         orders = [
             {"regionName": "Московская область", "nmId": 1001, "quantity": 2},
@@ -211,8 +211,8 @@ class TestHypotheticalScenario:
         assert wh_orders.get(("Коледино", 1001), 0) == 3
         # Tatarstan → Казань
         assert wh_orders.get(("Казань", 1001), 0) == 3
-        # Novosibirsk → Юрга
-        assert wh_orders.get(("Юрга", 1001), 0) == 1
+        # Novosibirsk → Новосибирск
+        assert wh_orders.get(("Новосибирск", 1001), 0) == 1
 
     def test_sc_prefix_filters_sorting_centers(self):
         """СЦ warehouses should be filtered by SC_PREFIX."""
