@@ -1576,6 +1576,7 @@ function WarehouseNeedView() {
                                 try {
                                     const result = await api.uploadOrderCities(f);
                                     alert(`✅ Загружено ${result.total_mappings} городов`);
+                                    await load();
                                 } catch (err: any) {
                                     alert(`❌ Ошибка: ${err.message}`);
                                 }
