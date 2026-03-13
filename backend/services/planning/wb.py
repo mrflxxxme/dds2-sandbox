@@ -59,7 +59,7 @@ async def delete_wb_payout(db: AsyncSession, project_id: int, payout_id: int):
     obj = result.scalar_one_or_none()
     if not obj:
         return None
-    await db.delete(obj)
+    obj.soft_delete()
     await db.commit()
     return True
 

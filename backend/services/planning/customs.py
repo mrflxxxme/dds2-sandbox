@@ -60,7 +60,7 @@ async def delete_alloc(db: AsyncSession, project_id: int, alloc_id: int):
     obj = result.scalar_one_or_none()
     if not obj:
         return None
-    await db.delete(obj)
+    obj.soft_delete()
     await db.commit()
     return True
 
@@ -122,7 +122,7 @@ async def delete_customs_dt(db: AsyncSession, project_id: int, dt_id: int):
     dt = result.scalar_one_or_none()
     if not dt:
         return None
-    await db.delete(dt)
+    dt.soft_delete()
     await db.commit()
     return True
 

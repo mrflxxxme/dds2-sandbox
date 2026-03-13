@@ -54,6 +54,6 @@ async def delete_duty_rule(db: AsyncSession, project_id: int, rule_id: int):
     rule = result.scalar_one_or_none()
     if not rule:
         return None
-    await db.delete(rule)
+    rule.soft_delete()
     await db.commit()
     return True

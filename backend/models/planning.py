@@ -64,7 +64,7 @@ class PlannedPayment(Base, SoftDeleteMixin):
     is_paid: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
-class PlannedIncome(Base):
+class PlannedIncome(Base, SoftDeleteMixin):
     __tablename__ = "planned_incomes"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -74,7 +74,7 @@ class PlannedIncome(Base):
     source: Mapped[str] = mapped_column(String(50), default="WB")
 
 
-class WbPayout(Base):
+class WbPayout(Base, SoftDeleteMixin):
     """WB seller cabinet payout tracking."""
     __tablename__ = "wb_payouts"
 
@@ -98,7 +98,7 @@ class WbPayout(Base):
     )
 
 
-class PaymentFactLink(Base):
+class PaymentFactLink(Base, SoftDeleteMixin):
     """Manual link between PlannedPayment and Transaction for fact matching."""
     __tablename__ = "payment_fact_links"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

@@ -194,7 +194,7 @@ async def delete_cost_order(db: AsyncSession, project_id: int, order_no: str):
     order = result.scalar_one_or_none()
     if not order:
         return None
-    await db.delete(order)
+    order.soft_delete()
     await db.commit()
     await invalidate_cache("reports")
     import asyncio

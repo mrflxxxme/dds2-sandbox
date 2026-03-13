@@ -111,7 +111,7 @@ async def delete_key(db: AsyncSession, project_id: int, key_id: int) -> bool:
     key = result.scalar_one_or_none()
     if not key:
         return False
-    await db.delete(key)
+    key.soft_delete()
     await db.commit()
     return True
 

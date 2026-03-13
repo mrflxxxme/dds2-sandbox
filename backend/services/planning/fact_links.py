@@ -73,7 +73,7 @@ async def delete_fact_link(db: AsyncSession, project_id: int, link_id: int):
     if not pp.scalar_one_or_none():
         return None
     payment_id = link.payment_id
-    await db.delete(link)
+    link.soft_delete()
     await db.commit()
     await update_payment_paid_amount(payment_id, db)
     return True

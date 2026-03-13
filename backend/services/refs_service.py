@@ -68,7 +68,7 @@ async def delete_account(db: AsyncSession, project_id: int, account_id: int) -> 
     acc = result.scalar_one_or_none()
     if not acc:
         return False
-    await db.delete(acc)
+    acc.soft_delete()
     await db.commit()
     await invalidate_cache("reports")
     return True
@@ -127,7 +127,7 @@ async def delete_cp_category(db: AsyncSession, project_id: int, cpc_id: int) -> 
     cpc = result.scalar_one_or_none()
     if not cpc:
         return False
-    await db.delete(cpc)
+    cpc.soft_delete()
     await db.commit()
     await invalidate_cache("reports")
     return True
@@ -155,7 +155,7 @@ async def delete_override(db: AsyncSession, project_id: int, override_id: int) -
     ovr = result.scalar_one_or_none()
     if not ovr:
         return False
-    await db.delete(ovr)
+    ovr.soft_delete()
     await db.commit()
     await invalidate_cache("reports")
     return True
@@ -257,6 +257,6 @@ async def delete_category(
     cat = result.scalar_one_or_none()
     if not cat:
         return False
-    await db.delete(cat)
+    cat.soft_delete()
     await db.commit()
     return True

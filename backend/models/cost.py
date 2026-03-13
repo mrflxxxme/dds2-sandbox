@@ -33,7 +33,7 @@ class Nomenclature(Base):
     )
 
 
-class DutyRule(Base):
+class DutyRule(Base, SoftDeleteMixin):
     __tablename__ = "duty_rules"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))

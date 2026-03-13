@@ -55,7 +55,7 @@ async def delete_order(db: AsyncSession, project_id: int, order_id: int):
     obj = result.scalar_one_or_none()
     if not obj:
         return None
-    await db.delete(obj)
+    obj.soft_delete()
     await db.commit()
     return True
 
@@ -130,7 +130,7 @@ async def delete_payment(db: AsyncSession, project_id: int, payment_id: int):
     obj = result.scalar_one_or_none()
     if not obj:
         return None
-    await db.delete(obj)
+    obj.soft_delete()
     await db.commit()
     return True
 
@@ -192,6 +192,6 @@ async def delete_income(db: AsyncSession, project_id: int, income_id: int):
     obj = result.scalar_one_or_none()
     if not obj:
         return None
-    await db.delete(obj)
+    obj.soft_delete()
     await db.commit()
     return True

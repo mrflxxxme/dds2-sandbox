@@ -12,9 +12,10 @@ from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, Text, 
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
+from backend.models.mixins import SoftDeleteMixin
 
 
-class Account(Base):
+class Account(Base, SoftDeleteMixin):
     __tablename__ = "accounts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -30,7 +31,7 @@ class Account(Base):
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="account_ref")
 
 
-class CounterpartyCategory(Base):
+class CounterpartyCategory(Base, SoftDeleteMixin):
     __tablename__ = "counterparty_categories"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -44,7 +45,7 @@ class CounterpartyCategory(Base):
     cp_name_auto: Mapped[Optional[str]] = mapped_column(String(200))
 
 
-class Override(Base):
+class Override(Base, SoftDeleteMixin):
     __tablename__ = "overrides"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -70,7 +71,7 @@ class OpeningBalance(Base):
     __table_args__ = (UniqueConstraint("date_open", "account", "currency"),)
 
 
-class CategoryRef(Base):
+class CategoryRef(Base, SoftDeleteMixin):
     """Reference categories for income/expense."""
     __tablename__ = "category_ref"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

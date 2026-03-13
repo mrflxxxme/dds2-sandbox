@@ -15,9 +15,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
+from backend.models.mixins import SoftDeleteMixin
 
 
-class IntegrationKey(Base):
+class IntegrationKey(Base, SoftDeleteMixin):
     """Encrypted API keys for external services (WB, OZON, etc.)."""
     __tablename__ = "integration_keys"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

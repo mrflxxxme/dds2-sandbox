@@ -10,9 +10,10 @@ from sqlalchemy import String, Integer, Date, Numeric, Text, ForeignKey, Index, 
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
+from backend.models.mixins import SoftDeleteMixin
 
 
-class CustomsTopup(Base):
+class CustomsTopup(Base, SoftDeleteMixin):
     __tablename__ = "customs_topup"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -46,7 +47,7 @@ class CustomsAlloc(Base):
     topup: Mapped["CustomsTopup"] = relationship(back_populates="allocs")
 
 
-class CustomsDT(Base):
+class CustomsDT(Base, SoftDeleteMixin):
     """Parsed DT declaration from FTS report, linked to order."""
     __tablename__ = "customs_dt"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
