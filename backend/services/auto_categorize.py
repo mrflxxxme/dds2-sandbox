@@ -116,11 +116,13 @@ async def preview_auto_categorize(db: AsyncSession, project_id: int) -> list[dic
     matches = []
     for txn in txns:
         purpose_lower = (txn.purpose or "").lower()
-        if not purpose_lower:
+        cp_lower = (txn.counterparty or "").lower()
+        search_text = f"{purpose_lower} {cp_lower}"
+        if not search_text.strip():
             continue
 
         for rule in rules:
-            if rule.keyword in purpose_lower:
+            if rule.keyword in search_text:
                 # Check direction match
                 has_expense = float(txn.expense or 0) > 0
                 has_income = float(txn.income or 0) > 0
