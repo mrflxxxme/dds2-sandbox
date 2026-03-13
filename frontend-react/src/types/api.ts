@@ -324,3 +324,32 @@ export interface ImportResult {
   rows_error: number;
   errors?: string[];
 }
+
+// ─── Order Geography ─────────────────────────────────────────────────────────
+
+export interface CityOrderCount {
+  city: string;
+  region: string;
+  okrug: string;
+  order_count: number;
+}
+
+export interface DailyOrderCount {
+  date: string;
+  count: number;
+}
+
+export interface OrderGeographyResponse {
+  cities: CityOrderCount[];
+  daily: DailyOrderCount[];
+  dates: string[];
+  totals: {
+    total_orders: number;
+    unique_cities: number;
+  };
+  filters: {
+    brands: string[];
+    categories: string[];
+    articles: string[];
+  };
+}

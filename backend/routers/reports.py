@@ -467,3 +467,19 @@ async def upload_order_cities(
     return {"ok": True, "total_mappings": len(mappings), "affected_rows": inserted}
 
 
+@router.get("/order_geography")
+async def order_geography(
+    date_from: str,
+    date_to: str,
+    brand: str | None = None,
+    category: str | None = None,
+    article: str | None = None,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get order geography — cities with order counts, daily chart, filters."""
+    from backend.services.order_geography_service import get_order_geography
+    return await get_order_geography(
+        db, project.id, date_from, date_to,
+        brand=brand, category=category, article=article,
+    )

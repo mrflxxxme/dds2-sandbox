@@ -8,7 +8,7 @@ import type {
     CategoryRef, BalanceRow, DdsMonthRow, CashflowDailyRow, PlannedPayment,
     PlannedIncome, WbPayout, CostOrder, CostOrderItem, Nomenclature,
     DutyRule, IntegrationKey, SyncLog, FunnelDayRow, FunnelSummary,
-    MessageResponse, ImportResult, Order, LeadTime,
+    MessageResponse, ImportResult, Order, LeadTime, OrderGeographyResponse,
 } from '@/types/api';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
@@ -795,6 +795,15 @@ class ApiClient {
             throw new Error(err.detail || 'Upload failed');
         }
         return resp.json();
+    }
+
+    // === Order Geography ===
+    async getOrderGeography(dateFrom: string, dateTo: string, brand?: string, category?: string, article?: string): Promise<OrderGeographyResponse> {
+        let url = `/reports/order_geography?date_from=${dateFrom}&date_to=${dateTo}`;
+        if (brand) url += `&brand=${encodeURIComponent(brand)}`;
+        if (category) url += `&category=${encodeURIComponent(category)}`;
+        if (article) url += `&article=${encodeURIComponent(article)}`;
+        return this.request<OrderGeographyResponse>('GET', url);
     }
 }
 
