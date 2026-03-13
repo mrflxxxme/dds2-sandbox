@@ -848,10 +848,9 @@ function WarehouseSettings() {
     useEffect(() => {
         (async () => {
             try {
-                const a = api(slug as string);
                 const [wh, ex] = await Promise.all([
-                    a.getWarehouses(),
-                    a.getExcludedWarehouses(),
+                    api.getWarehouses(),
+                    api.getExcludedWarehouses(),
                 ]);
                 setWarehouses(wh);
                 setExcluded(ex);
@@ -875,8 +874,7 @@ function WarehouseSettings() {
         setSaving(true);
         setMsg('');
         try {
-            const a = api(slug as string);
-            await a.setExcludedWarehouses(excluded);
+            await api.setExcludedWarehouses(excluded);
             setMsg('✅ Сохранено');
             setHasChanges(false);
         } catch {
