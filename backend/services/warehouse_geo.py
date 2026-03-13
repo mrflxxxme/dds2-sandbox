@@ -404,3 +404,66 @@ def find_nearest_warehouse_by_city(
 
     return best_wh
 
+
+# ─── Federal district → preferred warehouses mapping ─────────────────────────
+# Maps okrug (from WB order feed Excel) to warehouses in/near that district.
+# Order matters: first warehouse = most central for that district.
+OKRUG_WAREHOUSES: dict[str, list[str]] = {
+    "Центральный": [
+        "Коледино", "Электросталь", "Обухово", "Подольск", "Подольск 3",
+        "Подольск 4", "Белые Столбы", "Домодедово-2", "Склад Истра",
+        "Чашниково", "Щербинка", "Чехов 1, Новоселки вл 11 стр 2",
+        "Чехов 2, Новоселки вл 11 стр 7", "Тула",
+        "Рязань (Тюшевское)", "Владимир Воршинское", "Воронеж", "Котовск",
+    ],
+    "Северо-Западный": [
+        "Санкт-Петербург (Уткина Заводь)", "Склад Шушары",
+    ],
+    "Южный": [
+        "Краснодар (Тихорецкая)", "Невинномысск", "Волгоград",
+    ],
+    "Северо-Кавказский": [
+        "Невинномысск", "Краснодар (Тихорецкая)",
+    ],
+    "Приволжский": [
+        "Казань", "Новосемейкино", "Пенза", "Сарапул",
+    ],
+    "Уральский": [
+        "Екатеринбург - Перспективная 14", "Екатеринбург - Испытателей 14г", "Сарапул",
+    ],
+    "Сибирский": [
+        "Новосибирск", "Юрга",
+    ],
+    "Дальневосточный": [
+        "Склад Владивосток",
+    ],
+}
+
+
+def find_nearest_warehouse_by_okrug(
+    okrug: str,
+    open_warehouses: list[str],
+) -> Optional[str]:
+    """Find nearest open WB warehouse for the given federal district (okrug).
+
+    Uses OKRUG_WAREHOUSES mapping for direct district → warehouse assignment.
+    Falls back to geo distance if no direct mapping exists.
+
+    Args:
+        okrug: federal district name from WB order feed Excel
+        open_warehouses: list of warehouse names that accept goods
+
+    Returns:
+        Name of the nearest open warehouse, or None if okrug unknown
+    """
+    # Direct mapping: pick first open warehouse for this okrug
+    preferred = OKRUG_WAREHOUSES.get(okrug)
+    if preferred:
+        for wh in preferred:
+            if wh in open_warehouses:
+                return wh
+
+    # Fallback: try matching okrug as region with geo
+    return find_nearest_warehouse(okrug, open_warehouses)
+
+

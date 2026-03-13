@@ -419,7 +419,7 @@ async def get_warehouse_need(
         fetch_supplier_orders,
         fetch_acceptance_coefficients,
     )
-    from backend.services.warehouse_geo import find_nearest_warehouse, find_nearest_warehouse_by_city, WAREHOUSE_COORDS, SC_PREFIX, SKIP_SUFFIXES
+    from backend.services.warehouse_geo import find_nearest_warehouse, find_nearest_warehouse_by_city, find_nearest_warehouse_by_okrug, WAREHOUSE_COORDS, SC_PREFIX, SKIP_SUFFIXES
     
     today = date.today()
     trend_start = today - timedelta(days=need_days)
@@ -432,19 +432,22 @@ async def get_warehouse_need(
     subject_map: dict[int, str] = {}
     actual_days = need_days
 
-    # For hypothetical mode: load city mapping + determine open warehouses
+    # For hypothetical mode: load city+okrug mapping + determine open warehouses
     open_warehouses: list[str] = list(WAREHOUSE_COORDS.keys())
     city_map: dict[str, str] = {}  # srid → city
+    okrug_map: dict[str, str] = {}  # srid → okrug
     if mode == "hypothetical":
-        # Load city mapping from uploaded Excel data
+        # Load city + okrug mapping from uploaded Excel data
         from backend.models.order_city import OrderCityMap
         city_rows = await db.execute(
-            select(OrderCityMap.srid, OrderCityMap.city).where(
+            select(OrderCityMap.srid, OrderCityMap.city, OrderCityMap.okrug).where(
                 OrderCityMap.project_id == project_id
             )
         )
         for row in city_rows.fetchall():
             city_map[row.srid] = row.city
+            if row.okrug:
+                okrug_map[row.srid] = row.okrug
 
     if api_key and mode == "hypothetical":
         coefficients = await fetch_acceptance_coefficients(api_key)
@@ -473,17 +476,23 @@ async def get_warehouse_need(
                 srid = str(order.get("srid", ""))
                 wh_name = None
 
-                # 1. Try city-level mapping (from uploaded Excel)
+                # 1. Try city-level mapping (from uploaded Excel, if city in CITY_COORDS)
                 city = city_map.get(srid)
                 if city:
                     wh_name = find_nearest_warehouse_by_city(city, open_warehouses)
 
-                # 2. Fallback to region-level mapping
+                # 2. Try okrug-level mapping (from uploaded Excel federal district)
+                if not wh_name:
+                    okrug = okrug_map.get(srid)
+                    if okrug:
+                        wh_name = find_nearest_warehouse_by_okrug(okrug, open_warehouses)
+
+                # 3. Fallback to region-level mapping (from API regionName)
                 if not wh_name:
                     region = order.get("regionName", "")
                     wh_name = find_nearest_warehouse(region, open_warehouses)
 
-                # 3. Final fallback to actual warehouse
+                # 4. Final fallback to actual warehouse
                 if not wh_name:
                     wh_name = order.get("warehouseName", "")
             else:

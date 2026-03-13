@@ -452,11 +452,11 @@ async def upload_order_cities(
     for i in range(0, len(mappings), batch_size):
         batch = mappings[i : i + batch_size]
         stmt = pg_insert(OrderCityMap).values(
-            [{"project_id": project.id, "srid": m["srid"], "city": m["city"]} for m in batch]
+            [{"project_id": project.id, "srid": m["srid"], "city": m["city"], "okrug": m.get("okrug")} for m in batch]
         )
         stmt = stmt.on_conflict_do_update(
             index_elements=["project_id", "srid"],
-            set_={"city": stmt.excluded.city},
+            set_={"city": stmt.excluded.city, "okrug": stmt.excluded.okrug},
         )
         result = await db.execute(stmt)
         # Count affected rows

@@ -14,6 +14,7 @@ class OrderCityMap(Base):
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     srid: Mapped[str] = mapped_column(String(100), nullable=False)
     city: Mapped[str] = mapped_column(String(200), nullable=False)
+    okrug: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.utcnow()
     )
