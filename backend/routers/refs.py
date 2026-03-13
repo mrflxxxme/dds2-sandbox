@@ -163,7 +163,9 @@ async def delete_category(
 # ─── Warehouse Settings ──────────────────────────────────────────────────────
 
 @router.get("/warehouses")
-async def get_warehouses():
+async def get_warehouses(
+    project: Project = Depends(get_current_project),
+):
     """List all available warehouses from WAREHOUSE_COORDS."""
     from backend.services import settings_service
     return settings_service.get_all_warehouses()
