@@ -405,65 +405,36 @@ def find_nearest_warehouse_by_city(
     return best_wh
 
 
-# ─── Federal district → preferred warehouses mapping ─────────────────────────
-# Maps okrug (from WB order feed Excel) to warehouses in/near that district.
-# Order matters: first warehouse = most central for that district.
-OKRUG_WAREHOUSES: dict[str, list[str]] = {
-    "Центральный": [
-        "Коледино", "Электросталь", "Обухово", "Подольск", "Подольск 3",
-        "Подольск 4", "Белые Столбы", "Домодедово-2", "Склад Истра",
-        "Чашниково", "Щербинка", "Чехов 1, Новоселки вл 11 стр 2",
-        "Чехов 2, Новоселки вл 11 стр 7", "Тула",
-        "Рязань (Тюшевское)", "Владимир Воршинское", "Воронеж", "Котовск",
-    ],
-    "Северо-Западный": [
-        "Санкт-Петербург (Уткина Заводь)", "Склад Шушары",
-    ],
-    "Южный": [
-        "Краснодар (Тихорецкая)", "Невинномысск", "Волгоград",
-    ],
-    "Северо-Кавказский": [
-        "Невинномысск", "Краснодар (Тихорецкая)",
-    ],
-    "Приволжский": [
-        "Казань", "Новосемейкино", "Пенза", "Сарапул",
-    ],
-    "Уральский": [
-        "Екатеринбург - Перспективная 14", "Екатеринбург - Испытателей 14г", "Сарапул",
-    ],
-    "Сибирский": [
-        "Новосибирск", "Юрга",
-    ],
-    "Дальневосточный": [
-        "Склад Владивосток",
-    ],
+# ─── Country separation: Kazakhstan vs Russia warehouses ─────────────────────
+# Kazakhstan warehouses should only serve Kazakhstan orders (okrug == "Казахстан").
+# Based on official WB warehouse distribution table.
+KZ_WAREHOUSES: set[str] = {
+    "Алматы Атакент",
+    "Астана",
+    "Астана 2",
 }
 
+# Okrug values from WB order feed that indicate Kazakhstan
+KZ_OKRUGS: set[str] = {"Казахстан"}
 
-def find_nearest_warehouse_by_okrug(
-    okrug: str,
+
+def get_country_filtered_warehouses(
+    okrug: str | None,
     open_warehouses: list[str],
-) -> Optional[str]:
-    """Find nearest open WB warehouse for the given federal district (okrug).
+) -> list[str]:
+    """Filter open warehouses by country based on order's okrug.
 
-    Uses OKRUG_WAREHOUSES mapping for direct district → warehouse assignment.
-    Falls back to geo distance if no direct mapping exists.
+    Kazakhstan orders → only KZ warehouses.
+    All other orders → only RU warehouses (excluding KZ).
 
     Args:
-        okrug: federal district name from WB order feed Excel
-        open_warehouses: list of warehouse names that accept goods
+        okrug: federal district from WB order feed Excel
+        open_warehouses: list of all open warehouse names
 
     Returns:
-        Name of the nearest open warehouse, or None if okrug unknown
+        Filtered list of warehouses for the correct country
     """
-    # Direct mapping: pick first open warehouse for this okrug
-    preferred = OKRUG_WAREHOUSES.get(okrug)
-    if preferred:
-        for wh in preferred:
-            if wh in open_warehouses:
-                return wh
-
-    # Fallback: try matching okrug as region with geo
-    return find_nearest_warehouse(okrug, open_warehouses)
-
-
+    if okrug and okrug in KZ_OKRUGS:
+        return [w for w in open_warehouses if w in KZ_WAREHOUSES]
+    else:
+        return [w for w in open_warehouses if w not in KZ_WAREHOUSES]

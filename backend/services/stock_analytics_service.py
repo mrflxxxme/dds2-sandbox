@@ -419,7 +419,7 @@ async def get_warehouse_need(
         fetch_supplier_orders,
         fetch_acceptance_coefficients,
     )
-    from backend.services.warehouse_geo import find_nearest_warehouse, find_nearest_warehouse_by_city, find_nearest_warehouse_by_okrug, WAREHOUSE_COORDS, SC_PREFIX, SKIP_SUFFIXES
+    from backend.services.warehouse_geo import find_nearest_warehouse, find_nearest_warehouse_by_city, get_country_filtered_warehouses, WAREHOUSE_COORDS, SC_PREFIX, SKIP_SUFFIXES
     
     today = date.today()
     trend_start = today - timedelta(days=need_days)
@@ -476,23 +476,21 @@ async def get_warehouse_need(
                 srid = str(order.get("srid", ""))
                 wh_name = None
 
-                # 1. Try city-level mapping (from uploaded Excel, if city in CITY_COORDS)
+                # Step 0: Filter warehouses by country (RU vs KZ)
+                okrug = okrug_map.get(srid)
+                country_wh = get_country_filtered_warehouses(okrug, open_warehouses)
+
+                # Step 1: Try city-level (from uploaded Excel, nearest by distance)
                 city = city_map.get(srid)
                 if city:
-                    wh_name = find_nearest_warehouse_by_city(city, open_warehouses)
+                    wh_name = find_nearest_warehouse_by_city(city, country_wh)
 
-                # 2. Try okrug-level mapping (from uploaded Excel federal district)
-                if not wh_name:
-                    okrug = okrug_map.get(srid)
-                    if okrug:
-                        wh_name = find_nearest_warehouse_by_okrug(okrug, open_warehouses)
-
-                # 3. Fallback to region-level mapping (from API regionName)
+                # Step 2: Fallback to region-level (from API regionName, nearest by distance)
                 if not wh_name:
                     region = order.get("regionName", "")
-                    wh_name = find_nearest_warehouse(region, open_warehouses)
+                    wh_name = find_nearest_warehouse(region, country_wh)
 
-                # 4. Final fallback to actual warehouse
+                # Step 3: Final fallback to actual warehouse
                 if not wh_name:
                     wh_name = order.get("warehouseName", "")
             else:
