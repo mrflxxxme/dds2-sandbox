@@ -444,11 +444,12 @@ async def fetch_supplier_orders(api_key: str, date_from: str) -> list[dict]:
 async def fetch_acceptance_coefficients(api_key: str) -> list[dict]:
     """Fetch acceptance coefficients from WB Tariffs API.
 
-    GET https://supplies-api.wildberries.ru/api/v1/acceptance/coefficients
+    GET https://common-api.wildberries.ru/api/tariffs/v1/acceptance/coefficients
     Returns list of {warehouseName, boxTypeName, coefficient, date, ...}.
     coefficient >= 0 means warehouse is OPEN, < 0 means CLOSED.
+    Note: migrated from supplies-api.wildberries.ru (disabled 2026-02-03).
     """
-    url = "https://supplies-api.wildberries.ru/api/v1/acceptance/coefficients"
+    url = "https://common-api.wildberries.ru/api/tariffs/v1/acceptance/coefficients"
     headers = {"Authorization": api_key}
 
     async with httpx.AsyncClient(timeout=60) as client:
