@@ -775,6 +775,27 @@ class ApiClient {
     async getStockNeed(needDays: number = 14, mode: string = 'actual'): Promise<any> {
         return this.request('GET', `/api/v1/reports/stock_need?need_days=${needDays}&mode=${mode}`);
     }
+
+    async uploadOrderCities(file: File): Promise<{ ok: boolean; total_mappings: number; affected_rows: number }> {
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const token = localStorage.getItem('access_token');
+        const projectId = localStorage.getItem('current_project_id');
+        const resp = await fetch(`${API_URL}/api/v1/reports/stock_analytics/upload_order_cities`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'X-Project-Id': projectId || '',
+            },
+            body: formData,
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({ detail: 'Upload failed' }));
+            throw new Error(err.detail || 'Upload failed');
+        }
+        return resp.json();
+    }
 }
 
 export const api = new ApiClient();

@@ -1565,6 +1565,24 @@ function WarehouseNeedView() {
                             style={{ borderRadius: 6, fontSize: 11 }}
                             onClick={() => setMode('hypothetical')}>🗺️ Гипотез.</button>
                     </div>
+                    {/* Upload order cities (hypothetical only) */}
+                    {mode === 'hypothetical' && (
+                        <label className="btn btn-sm btn-secondary" style={{ cursor: 'pointer', fontSize: 11 }}
+                            title="Загрузить Excel «Лента заказов» из ЛК WB для точного определения городов">
+                            📤 Загрузить ленту
+                            <input type="file" accept=".xlsx" style={{ display: 'none' }} onChange={async (e) => {
+                                const f = e.target.files?.[0];
+                                if (!f) return;
+                                try {
+                                    const result = await api.uploadOrderCities(f);
+                                    alert(`✅ Загружено ${result.total_mappings} городов`);
+                                } catch (err: any) {
+                                    alert(`❌ Ошибка: ${err.message}`);
+                                }
+                                e.target.value = '';
+                            }} />
+                        </label>
+                    )}
                     {/* Days selector */}
                     <div style={{ display: 'flex', gap: 4 }}>
                         {[7, 14, 30].map(d => (

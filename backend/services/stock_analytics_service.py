@@ -419,7 +419,7 @@ async def get_warehouse_need(
         fetch_supplier_orders,
         fetch_acceptance_coefficients,
     )
-    from backend.services.warehouse_geo import find_nearest_warehouse, WAREHOUSE_COORDS, SC_PREFIX, SKIP_SUFFIXES
+    from backend.services.warehouse_geo import find_nearest_warehouse, find_nearest_warehouse_by_city, WAREHOUSE_COORDS, SC_PREFIX, SKIP_SUFFIXES
     
     today = date.today()
     trend_start = today - timedelta(days=need_days)
@@ -432,8 +432,20 @@ async def get_warehouse_need(
     subject_map: dict[int, str] = {}
     actual_days = need_days
 
-    # For hypothetical mode: determine open warehouses
+    # For hypothetical mode: load city mapping + determine open warehouses
     open_warehouses: list[str] = list(WAREHOUSE_COORDS.keys())
+    city_map: dict[str, str] = {}  # srid → city
+    if mode == "hypothetical":
+        # Load city mapping from uploaded Excel data
+        from backend.models.order_city import OrderCityMap
+        city_rows = await db.execute(
+            select(OrderCityMap.srid, OrderCityMap.city).where(
+                OrderCityMap.project_id == project_id
+            )
+        )
+        for row in city_rows.fetchall():
+            city_map[row.srid] = row.city
+
     if api_key and mode == "hypothetical":
         coefficients = await fetch_acceptance_coefficients(api_key)
         if coefficients:
@@ -447,8 +459,6 @@ async def get_warehouse_need(
                     open_set.add(wh)
             if open_set:
                 open_warehouses = [w for w in open_warehouses if w in open_set]
-                # Also include any open warehouse not in our coords
-                # (won't match in geo but stays in the list)
 
     if api_key:
         orders = await fetch_supplier_orders(api_key, trend_start.isoformat())
@@ -460,10 +470,21 @@ async def get_warehouse_need(
 
             # Determine warehouse based on mode
             if mode == "hypothetical":
-                region = order.get("regionName", "")
-                wh_name = find_nearest_warehouse(region, open_warehouses)
+                srid = str(order.get("srid", ""))
+                wh_name = None
+
+                # 1. Try city-level mapping (from uploaded Excel)
+                city = city_map.get(srid)
+                if city:
+                    wh_name = find_nearest_warehouse_by_city(city, open_warehouses)
+
+                # 2. Fallback to region-level mapping
                 if not wh_name:
-                    # Fallback to actual warehouse
+                    region = order.get("regionName", "")
+                    wh_name = find_nearest_warehouse(region, open_warehouses)
+
+                # 3. Final fallback to actual warehouse
+                if not wh_name:
                     wh_name = order.get("warehouseName", "")
             else:
                 wh_name = order.get("warehouseName", "")

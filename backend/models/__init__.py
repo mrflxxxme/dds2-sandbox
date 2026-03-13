@@ -93,6 +93,11 @@ from backend.models.audit import (
     AuditLog,
 )
 
+# Order City (WB order feed city mapping)
+from backend.models.order_city import (
+    OrderCityMap,
+)
+
 # Alias for backward compatibility
 WbApiKey = IntegrationKey
 
@@ -123,4 +128,6 @@ __all__ = [
     "AuditLog",
     # Aliases
     "WbApiKey",
+    # Order City
+    "OrderCityMap",
 ]

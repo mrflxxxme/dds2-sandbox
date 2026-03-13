@@ -7,7 +7,7 @@ Delegates all business logic to services/reports_service.py.
 from datetime import date
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -418,4 +418,52 @@ async def get_stock_need(
     """Compute restocking need per warehouse per article."""
     from backend.services.stock_analytics_service import get_warehouse_need
     return await get_warehouse_need(db, project.id, need_days, mode)
+
+
+@router.post("/stock_analytics/upload_order_cities")
+async def upload_order_cities(
+    file: UploadFile = File(...),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload WB order feed Excel to extract city-level delivery mapping.
+
+    Parses only srid→city from the Excel. No order data duplication.
+    """
+    from backend.etl.parsers.order_city_parser import parse_order_city_excel
+    from backend.models.order_city import OrderCityMap
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    if not file.filename or not file.filename.endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Файл должен быть в формате .xlsx")
+
+    data = await file.read()
+    if len(data) > 50 * 1024 * 1024:  # 50 MB limit
+        raise HTTPException(status_code=400, detail="Файл слишком большой (макс 50 МБ)")
+
+    mappings = parse_order_city_excel(data)
+    if not mappings:
+        raise HTTPException(status_code=400, detail="Не найдены данные городов в файле")
+
+    # Upsert in batches
+    inserted = 0
+    updated = 0
+    batch_size = 500
+    for i in range(0, len(mappings), batch_size):
+        batch = mappings[i : i + batch_size]
+        stmt = pg_insert(OrderCityMap).values(
+            [{"project_id": project.id, "srid": m["srid"], "city": m["city"]} for m in batch]
+        )
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_order_city_project_srid",
+            set_={"city": stmt.excluded.city},
+        )
+        result = await db.execute(stmt)
+        # Count affected rows
+        affected = result.rowcount or 0
+        inserted += affected
+
+    await db.commit()
+    return {"ok": True, "total_mappings": len(mappings), "affected_rows": inserted}
+
 
