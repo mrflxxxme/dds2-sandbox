@@ -219,3 +219,84 @@ async def assign_category_by_ids(payload: CategoryAssignByIds, project: Project 
     return await transactions_service.assign_category_by_ids(
         db, project.id, payload.txn_ids, payload.cat_lvl1, payload.cat_lvl2,
     )
+
+
+# ─── Auto-Categorize ─────────────────────────────────────────────────────────
+
+@router.get("/transactions/auto_categorize/rules")
+async def get_auto_rules(project: Project = Depends(get_current_project), db: AsyncSession = Depends(get_db)):
+    """Get all auto-categorization rules for the project."""
+    from backend.services import auto_categorize
+    rules = await auto_categorize.get_all_rules(db, project.id)
+    return [
+        {
+            "id": r.id,
+            "keyword": r.keyword,
+            "direction": r.direction,
+            "cat_lvl1": r.cat_lvl1,
+            "cat_lvl2": r.cat_lvl2,
+            "priority": r.priority,
+            "is_active": r.is_active,
+        }
+        for r in rules
+    ]
+
+
+@router.post("/transactions/auto_categorize/rules")
+async def create_auto_rule(
+    payload: dict,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new auto-categorization rule."""
+    from backend.services import auto_categorize
+    keyword = payload.get("keyword", "").strip()
+    cat_lvl1 = payload.get("cat_lvl1", "").strip()
+    if not keyword or not cat_lvl1:
+        raise HTTPException(400, "keyword and cat_lvl1 required")
+
+    rule = await auto_categorize.create_rule(
+        db, project.id,
+        keyword=keyword,
+        cat_lvl1=cat_lvl1,
+        cat_lvl2=payload.get("cat_lvl2"),
+        direction=payload.get("direction", "expense"),
+        priority=payload.get("priority", 0),
+    )
+    return {
+        "id": rule.id,
+        "keyword": rule.keyword,
+        "direction": rule.direction,
+        "cat_lvl1": rule.cat_lvl1,
+        "cat_lvl2": rule.cat_lvl2,
+        "priority": rule.priority,
+        "is_active": rule.is_active,
+    }
+
+
+@router.delete("/transactions/auto_categorize/rules/{rule_id}")
+async def delete_auto_rule(
+    rule_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete an auto-categorization rule."""
+    from backend.services import auto_categorize
+    result = await auto_categorize.delete_rule(db, project.id, rule_id)
+    if "error" in result:
+        raise HTTPException(result.get("status", 400), result["error"])
+    return result
+
+
+@router.get("/transactions/auto_categorize/preview")
+async def preview_auto_categorize(project: Project = Depends(get_current_project), db: AsyncSession = Depends(get_db)):
+    """Preview which uncategorized transactions would be matched by keyword rules."""
+    from backend.services import auto_categorize
+    return await auto_categorize.preview_auto_categorize(db, project.id)
+
+
+@router.post("/transactions/auto_categorize/apply")
+async def apply_auto_categorize(project: Project = Depends(get_current_project), db: AsyncSession = Depends(get_db)):
+    """Apply auto-categorization: assign categories to all matching uncategorized transactions."""
+    from backend.services import auto_categorize
+    return await auto_categorize.apply_auto_categorize(db, project.id)

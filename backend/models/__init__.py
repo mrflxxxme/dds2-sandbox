@@ -32,6 +32,11 @@ from backend.models.refs import (
     ProjectSetting,
 )
 
+# Category Rules
+from backend.models.category_rules import (
+    CategoryRule,
+)
+
 # Transactions
 from backend.models.transactions import (
     Transaction,
@@ -109,6 +114,8 @@ __all__ = [
     "User", "Project", "ProjectMember", "ProjectInvite",
     # References
     "Account", "CounterpartyCategory", "Override", "OpeningBalance", "CategoryRef", "ProjectSetting",
+    # Category Rules
+    "CategoryRule",
     # Transactions
     "Transaction", "CategoryChangeLog", "ImportLog",
     # Customs
