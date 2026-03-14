@@ -1,0 +1,39 @@
+# Local development override — auto-loaded by docker compose
+# Enables hot-reload for backend and frontend via volume mounts
+#
+# docker compose up -d  ← автоматически подхватит этот файл
+#
+# НЕ коммитить изменения, специфичные для вашей машины.
+# Этот файл общий для всех разработчиков.
+
+services:
+  backend:
+    volumes:
+      - ./backend:/app/backend
+      - ./migrations:/app/migrations
+      - ./alembic.ini:/app/alembic.ini
+      - ./tests:/app/tests
+      - ./scripts:/app/scripts
+    environment:
+      DDS_ENV: development
+    ports:
+      - "8000:8000"
+
+  frontend-react:
+    volumes:
+      - ./frontend-react/src:/app/src
+      - ./frontend-react/public:/app/public
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+
+  # Expose DB for local tools (DBeaver, pgAdmin, etc.)
+  db:
+    ports:
+      - "5432:5432"
+
+  # Expose Redis for local debugging
+  redis:
+    ports:
+      - "6379:6379"

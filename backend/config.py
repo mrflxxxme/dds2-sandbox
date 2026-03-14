@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: int = 50
     ALLOWED_UPLOAD_EXTENSIONS: str = ".xlsx,.xls,.csv,.pdf"
 
+    # Feature flags (toggle per environment)
+    FEATURE_DEMO_MODE: bool = False  # Show demo banner, enable seed data
+    FEATURE_WB_SYNC: bool = True     # WB API sync enabled
+    FEATURE_EXPORT_PDF: bool = False  # PDF export (beta)
+
     @field_validator("MINIO_ACCESS_KEY", "MINIO_SECRET_KEY")
     @classmethod
     def validate_minio_credentials(cls, v: str, info) -> str:
