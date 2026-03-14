@@ -137,8 +137,8 @@ Invalidation: импорт → `reports:*`, WB sync → opiu/wb_bdr/dashboard, �
 | Среда | Ветка | URL | Описание |
 |-------|-------|-----|----------|
 | Local | `dev` | http://localhost:3000 | Локальная разработка |
-| Staging | `dev` | staging-сервер:3001 | Проверка перед prod |
-| Production | `main` | production-сервер | Реальные клиенты |
+| Staging | `dev` | http://95.163.222.70 | Проверка перед prod |
+| Production | `main` | http://130.49.150.69 | Реальные клиенты |
 
 - **Staging:** каждый push в `dev` → автодеплой на staging
 - **Production:** merge `dev` → `main` → автодеплой на production
