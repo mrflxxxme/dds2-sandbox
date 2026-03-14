@@ -1,88 +1,63 @@
+# CI/CD — Deploy to Staging on push to dev
+#
+# Requires GitHub Secrets:
+#   STAGING_HOST     — staging server IP
+#   STAGING_USER     — SSH user (e.g. root)
+#   STAGING_SSH_KEY  — private SSH key
+#   STAGING_PATH     — path to project (e.g. /opt/dds_staging)
+
 name: Deploy to Staging
 
 on:
   push:
     branches: [dev]
 
+# Only one staging deploy at a time
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Run Tests
-    runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_USER: test_dds
-          POSTGRES_PASSWORD: test_secret
-          POSTGRES_DB: test_dds_db
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
-
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 5
-
-    env:
-      DATABASE_URL: postgresql+asyncpg://test_dds:test_secret@localhost:5432/test_dds_db
-      DATABASE_URL_SYNC: postgresql://test_dds:test_secret@localhost:5432/test_dds_db
-      REDIS_URL: redis://localhost:6379/0
-      SECRET_KEY: ci-test-secret-key-minimum-32-characters-long
-      MINIO_ENDPOINT: localhost:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements-backend.txt
-          pip install pytest pytest-asyncio httpx
-
-      - name: Run tests
-        run: pytest tests/ -v --tb=short
+    uses: ./.github/workflows/test.yml
 
   deploy-staging:
     name: Deploy to Staging
-    runs-on: self-hosted
     needs: test
-    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd ${{ secrets.STAGING_PATH }}
 
-      - name: Build and deploy staging
-        run: |
-          docker compose -f docker-compose.yml \
-            -f docker-compose.staging.yml \
-            --project-name dds-staging \
-            up -d --build backend frontend-react
+            echo "📥 Pulling dev branch..."
+            git pull origin dev
 
-      - name: Run database migrations
-        run: |
-          docker compose --project-name dds-staging \
-            exec -T backend alembic upgrade head
+            echo "🔨 Building images..."
+            docker compose -f docker-compose.yml \
+              -f docker-compose.staging.yml \
+              up -d --build backend frontend-react
 
-      - name: Health check
+            echo "🗄️ Running migrations..."
+            docker compose exec -T backend alembic upgrade head
+
+            echo "🏥 Health check..."
+            sleep 10
+            curl -sf http://localhost/health || { echo "❌ Health check failed!"; exit 1; }
+
+            echo "✅ Staging deploy complete!"
+
+      - name: Notify on failure
+        if: failure()
         run: |
-          sleep 10
-          curl -f http://localhost:8001/health || exit 1
-          echo "✅ Staging is healthy"
+          echo "::error::Staging deploy failed! Check server logs."

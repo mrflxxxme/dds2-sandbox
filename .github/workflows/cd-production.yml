@@ -1,45 +1,77 @@
+# CI/CD — Deploy to Production on push to main
+#
+# Flow: dev → staging → verify → merge to main → this workflow
+#
+# Requires GitHub Secrets:
+#   DEPLOY_HOST     — production server IP
+#   DEPLOY_USER     — SSH user
+#   DEPLOY_SSH_KEY  — private SSH key
+#   DEPLOY_PATH     — path to project (e.g. /opt/dds_app)
+
 name: Deploy to Production
 
 on:
   push:
     branches: [main]
 
+# Only one production deploy at a time, never cancel in progress
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
 jobs:
+  test:
+    name: Run Tests
+    uses: ./.github/workflows/test.yml
+
   deploy-prod:
     name: Deploy to Production
-    runs-on: self-hosted
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
 
-      - name: Pre-deploy backup
-        run: |
-          echo "📦 Creating pre-deploy backup..."
-          docker compose --project-name dds-prod \
-            exec -T db pg_dump -U dds dds_db | gzip > backups/pre-deploy-$(date +%Y%m%d_%H%M%S).sql.gz
-          echo "✅ Backup created"
+            echo "📦 Pre-deploy backup..."
+            docker compose exec -T db pg_dump -U dds dds_db | gzip > backups/pre-deploy-$(date +%Y%m%d_%H%M%S).sql.gz
+            echo "✅ Backup created"
 
-      - name: Build and deploy
-        run: |
-          docker compose -f docker-compose.prod.yml \
-            --project-name dds-prod \
-            up -d --build backend frontend-react
+            echo "📥 Pulling main branch..."
+            git pull origin main
 
-      - name: Run database migrations
-        run: |
-          docker compose --project-name dds-prod \
-            exec -T backend alembic upgrade head
+            echo "🔨 Building images..."
+            docker compose build backend frontend-react
 
-      - name: Health check with rollback
+            echo "🔄 Rolling restart..."
+            docker compose up -d --remove-orphans
+
+            echo "🗄️ Running migrations..."
+            docker compose exec -T backend alembic upgrade head
+
+            echo "🏥 Health check..."
+            sleep 15
+            if ! curl -sf http://localhost/health; then
+              echo "❌ Health check failed! Rolling back..."
+              git checkout HEAD~1 -- .
+              docker compose up -d --build backend frontend-react
+              echo "🔄 Rollback complete"
+              exit 1
+            fi
+
+            echo "✅ Production deploy successful!"
+
+      - name: Notify on failure
+        if: failure()
         run: |
-          sleep 15
-          if ! curl -f http://localhost:80/health; then
-            echo "❌ Health check failed! Rolling back..."
-            git checkout HEAD~1
-            docker compose -f docker-compose.prod.yml \
-              --project-name dds-prod \
-              up -d --build backend frontend-react
-            echo "🔄 Rollback complete"
-            exit 1
-          fi
-          echo "✅ Production deploy successful"
+          echo "::error::Production deploy failed! Check server logs."
