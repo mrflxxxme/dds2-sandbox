@@ -35,7 +35,7 @@ jobs:
           host: ${{ secrets.STAGING_HOST }}
           username: ${{ secrets.STAGING_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
-          script_stop: true
+          script-stop: true
           script: |
             set -e
             cd ${{ secrets.STAGING_PATH }}
