@@ -16,8 +16,17 @@ services:
       - ./scripts:/app/scripts
     environment:
       DDS_ENV: development
+      DDS_ROLE: api
     ports:
       - "8000:8000"
+
+  worker:
+    volumes:
+      - ./backend:/app/backend
+      - ./scripts:/app/scripts
+    environment:
+      DDS_ENV: development
+      DDS_ROLE: worker
 
   frontend-react:
     volumes:
@@ -32,6 +41,11 @@ services:
   db:
     ports:
       - "5432:5432"
+
+  # Expose PgBouncer for local debugging
+  pgbouncer:
+    ports:
+      - "6432:6432"
 
   # Expose Redis for local debugging
   redis:

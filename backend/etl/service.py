@@ -100,13 +100,30 @@ def import_statement(
     log_ctx.info("etl.import.start")
 
     # Save original file to MinIO (for audit trail / re-import)
-    from backend.storage import upload_file
-    file_url = upload_file(
-        data=file_data,
-        filename=filename,
-        source_type=source_type,
-        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+    # storage.upload_file is async (miniopy-async), bridge from sync context
+    file_url = None
+    try:
+        import asyncio
+        from backend.storage import upload_file
+
+        async def _upload():
+            return await upload_file(
+                data=file_data,
+                filename=filename,
+                source_type=source_type,
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+        try:
+            loop = asyncio.get_running_loop()
+            # We're inside an async context (FastAPI) — schedule as task
+            future = asyncio.run_coroutine_threadsafe(_upload(), loop)
+            file_url = future.result(timeout=30)
+        except RuntimeError:
+            # No running loop — run directly
+            file_url = asyncio.run(_upload())
+    except Exception as e:
+        logger.warning("MinIO upload skipped: %s", e)
     log.file_url = file_url
 
     db.add(log)

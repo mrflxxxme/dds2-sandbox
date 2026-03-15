@@ -4,12 +4,12 @@ from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 from backend.config import settings
 
-# Async engine — with connection pool tuning
+# Async engine — with connection pool tuning (via PgBouncer)
 async_engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
-    pool_size=10,
-    max_overflow=20,
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
     pool_pre_ping=True,       # detect stale connections
     pool_recycle=1800,         # recycle connections every 30 min
 )

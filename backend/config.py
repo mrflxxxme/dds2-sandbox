@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     # Scheduler
     SCHEDULER_ENABLED: bool = True  # False = no background sync (for dev when server is also running)
 
+    # Container role: api = HTTP serving, worker = scheduler + background tasks
+    DDS_ROLE: str = "api"  # api | worker
+
+    # Database pool (tuned for PgBouncer)
+    DB_POOL_SIZE: int = 20       # connections per worker
+    DB_MAX_OVERFLOW: int = 40    # burst connections
+
     # Rate limiting
     LOGIN_RATE_LIMIT: int = 10  # max attempts per minute per IP
     REGISTER_ENABLED: bool = True  # disable open registration

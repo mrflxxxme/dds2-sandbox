@@ -609,8 +609,8 @@ async def prewarm_all_reports():
 def start_scheduler():
     """Start the background scheduler with cron jobs + fast backfill.
 
-    Uses a file lock to prevent duplicate schedulers when running with
-    multiple uvicorn workers (--workers 2).
+    Runs ONLY in the worker container (DDS_ROLE=worker).
+    Single instance is guaranteed by Docker (1 worker container).
     Disabled when SCHEDULER_ENABLED=false (for local dev when server is syncing).
     """
     from backend.config import settings
@@ -619,18 +619,6 @@ def start_scheduler():
         return
 
     global scheduler
-
-    # Guard: only ONE worker should run the scheduler
-    import fcntl
-    lock_file = "/tmp/.dds_scheduler.lock"
-    try:
-        _lock_fd = open(lock_file, "w")
-        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        # Keep the fd alive so the lock is held for the process lifetime
-        start_scheduler._lock_fd = _lock_fd
-    except (IOError, OSError):
-        logger.info("⏭️ Scheduler already running in another worker, skipping")
-        return
 
     scheduler = AsyncIOScheduler(timezone=MSK)
 

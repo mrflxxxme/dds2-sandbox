@@ -2,7 +2,7 @@
 
 ## Обзор
 **DDS** — система управленческого учёта (ДДС): импорт выписок, категоризация, отчёты, кэшфлоу.
-**Стек:** FastAPI + PostgreSQL + Redis + MinIO + Next.js 15
+**Стек:** FastAPI + PostgreSQL + PgBouncer + Redis + MinIO + Next.js 15
 
 ## Структура
 ```
@@ -44,7 +44,8 @@ tests/           — 23 files, 249 tests
 - `sync_log`: **ВСЕГДА** обновлять в `finally` → никогда не оставлять `RUNNING`
 - `asyncio.wait_for(timeout=600)` для всех фоновых задач
 - При старте: stale cleanup — `RUNNING` > 10 min → `STALE`
-- File lock (`/tmp/.dds_scheduler.lock`) — один scheduler на все workers
+- Scheduler runs ONLY in `worker` container (`DDS_ROLE=worker`)
+- Single instance guaranteed by Docker (1 worker replica)
 
 ## Антипаттерны
 
@@ -127,7 +128,11 @@ Invalidation: импорт → `reports:*`, WB sync → opiu/wb_bdr/dashboard, �
 - При добавлении нового типа удержаний → обновить ОБОИХ: `wb_bdr_service.py` И `opiu_service.py`
 
 ## Инфраструктура
-- Uvicorn workers: минимум **4** (Dockerfile.backend)
+- Uvicorn workers: **6** в `backend` (Dockerfile.backend), **1** в `worker`
+- PgBouncer: transaction pooling перед PostgreSQL (порт 6432)
+  - `prepared_statement_cache_size=0` **ОБЯЗАТЕЛЕН** в DATABASE_URL для asyncpg + PgBouncer
+  - `DATABASE_URL_SYNC` → напрямую к PostgreSQL (порт 5432) для Alembic/ETL
+- MinIO: `miniopy-async` (async I/O), graceful degradation при недоступности
 - При 2 workers + тяжёлые отчёты → **worker starvation** (сервер не отвечает)
 - Deployment: после изменения кэш-формул → сбрасывать кэш **по одному ключу**, не все разом
 - SSL: `nginx/nginx-ssl.conf` — HTTPS конфиг (активировать после certbot)

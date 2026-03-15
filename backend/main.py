@@ -94,20 +94,23 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as session:
         await ensure_default_admin(session)
 
-    # Start background scheduler (funnel auto-sync)
+    # Start background scheduler ONLY in worker container
     from backend.scheduler import start_scheduler, stop_scheduler
 
-    # Cleanup stale RUNNING sync_log entries (from previous crashes)
-    async with AsyncSessionLocal() as session:
-        stale = await session.execute(text(
-            "UPDATE sync_log SET status = 'STALE', error_msg = 'Process restarted while running' "
-            "WHERE status = 'RUNNING' AND started_at < NOW() - INTERVAL '10 minutes'"
-        ))
-        await session.commit()
-        if stale.rowcount:
-            logger.warning(f"Cleaned {stale.rowcount} stale RUNNING sync_log entries")
+    if settings.DDS_ROLE == "worker":
+        # Cleanup stale RUNNING sync_log entries (from previous crashes)
+        async with AsyncSessionLocal() as session:
+            stale = await session.execute(text(
+                "UPDATE sync_log SET status = 'STALE', error_msg = 'Process restarted while running' "
+                "WHERE status = 'RUNNING' AND started_at < NOW() - INTERVAL '10 minutes'"
+            ))
+            await session.commit()
+            if stale.rowcount:
+                logger.warning(f"Cleaned {stale.rowcount} stale RUNNING sync_log entries")
 
-    start_scheduler()
+        start_scheduler()
+    else:
+        logger.info("⏭️ Scheduler skipped (DDS_ROLE=%s, scheduler runs in worker container)", settings.DDS_ROLE)
 
     yield
 

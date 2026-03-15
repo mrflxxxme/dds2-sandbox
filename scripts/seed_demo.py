@@ -134,7 +134,7 @@ async def seed():
             print(f"  ✅ Demo project created (id={project_id})")
 
         # Set RLS context for this project
-        await conn.execute(text(f"SET LOCAL app.project_id = '{project_id}'"))
+        await conn.execute(text("SET LOCAL app.project_id = :pid"), {"pid": str(project_id)})
 
         # 3. Seed default categories
         from backend.seeds.default_categories import seed_default_categories

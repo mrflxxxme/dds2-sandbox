@@ -6,14 +6,43 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-dds}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dds_secret}
       POSTGRES_DB: ${POSTGRES_DB:-dds_db}
+    command: postgres -c 'config_file=/etc/postgresql/postgresql.conf'
     # ports: removed — DB only accessible within Docker network
     # - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dds} -d ${POSTGRES_DB:-dds_db}" ]
       interval: 5s
       timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - internal
+
+  pgbouncer:
+    image: bitnami/pgbouncer:latest
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGBOUNCER_DATABASE: dds_db
+      POSTGRESQL_HOST: db
+      POSTGRESQL_PORT: 5432
+      POSTGRESQL_USERNAME: ${POSTGRES_USER:-dds}
+      POSTGRESQL_PASSWORD: ${POSTGRES_PASSWORD:-dds_secret}
+      PGBOUNCER_POOL_MODE: transaction
+      PGBOUNCER_DEFAULT_POOL_SIZE: 40
+      PGBOUNCER_MIN_POOL_SIZE: 10
+      PGBOUNCER_MAX_CLIENT_CONN: 500
+      PGBOUNCER_MAX_DB_CONNECTIONS: 200
+      PGBOUNCER_SERVER_RESET_QUERY: "DISCARD ALL"
+      PGBOUNCER_QUERY_WAIT_TIMEOUT: 120
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -h localhost -p 6432 -U ${POSTGRES_USER:-dds}" ]
+      interval: 5s
+      timeout: 3s
       retries: 5
     restart: unless-stopped
     networks:
@@ -62,29 +91,58 @@ services:
     # ports: removed — backend only accessible via nginx
     # - "8000:8000"
     depends_on:
-      db:
+      pgbouncer:
         condition: service_healthy
       redis:
         condition: service_healthy
     env_file: .env
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://dds:dds_secret@db:5432/dds_db}
-      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql://dds:dds_secret@db:5432/dds_db}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@pgbouncer:6432/dds_db?prepared_statement_cache_size=0
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/dds_db
       REDIS_URL: ${REDIS_URL:-redis://:dds_redis_secret@redis:6379/0}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       MINIO_BUCKET: ${MINIO_BUCKET:-dds-files}
       MINIO_SECURE: ${MINIO_SECURE:-false}
+      DDS_ROLE: api
     # volumes: host-mount removed for production (code is COPY'd into image)
-    # For local dev, uncomment these:
-    # - ./backend:/app/backend
-    # - ./migrations:/app/migrations
-    # - ./alembic.ini:/app/alembic.ini
-    # - ./tests:/app/tests
     healthcheck:
       test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" ]
       interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - internal
+
+  worker:
+    build:
+      context: .
+      dockerfile: ./Dockerfile.backend
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@pgbouncer:6432/dds_db?prepared_statement_cache_size=0
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/dds_db
+      REDIS_URL: ${REDIS_URL:-redis://:dds_redis_secret@redis:6379/0}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-dds-files}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      DDS_ROLE: worker
+      DB_POOL_SIZE: 10
+      DB_MAX_OVERFLOW: 20
+    entrypoint: ["./entrypoint-worker.sh"]
+    command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "120"]
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" ]
+      interval: 15s
       timeout: 5s
       retries: 5
     restart: unless-stopped

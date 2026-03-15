@@ -1,6 +1,8 @@
 """
-MinIO (S3-compatible) storage client for DDS file management.
+MinIO (S3-compatible) async storage client for DDS file management.
 Stores original uploaded files for audit trail and re-import capability.
+
+Uses miniopy-async for non-blocking I/O (compatible with FastAPI async handlers).
 """
 
 import io
@@ -10,8 +12,8 @@ from datetime import datetime, timezone
 from backend.utils.time import utcnow
 from typing import Optional
 
-from minio import Minio
-from minio.error import S3Error
+from miniopy_async import Minio
+from miniopy_async.error import S3Error
 
 from backend.config import settings
 
@@ -21,8 +23,8 @@ logger = logging.getLogger(__name__)
 _minio_client: Optional[Minio] = None
 
 
-def get_minio() -> Optional[Minio]:
-    """Get or create MinIO client."""
+async def get_minio() -> Optional[Minio]:
+    """Get or create async MinIO client."""
     global _minio_client
     if _minio_client is None:
         try:
@@ -34,8 +36,8 @@ def get_minio() -> Optional[Minio]:
             )
             # Ensure bucket exists
             bucket = settings.MINIO_BUCKET
-            if not _minio_client.bucket_exists(bucket):
-                _minio_client.make_bucket(bucket)
+            if not await _minio_client.bucket_exists(bucket):
+                await _minio_client.make_bucket(bucket)
                 logger.info("Created MinIO bucket: %s", bucket)
             logger.info("MinIO connected: %s", settings.MINIO_ENDPOINT)
         except Exception as e:
@@ -44,14 +46,14 @@ def get_minio() -> Optional[Minio]:
     return _minio_client
 
 
-def upload_file(
+async def upload_file(
     data: bytes,
     filename: str,
     source_type: str = "",
     content_type: str = "application/octet-stream",
 ) -> Optional[str]:
     """
-    Upload a file to MinIO.
+    Upload a file to MinIO (async).
 
     Args:
         data: File content as bytes
@@ -63,7 +65,7 @@ def upload_file(
         Object path in MinIO (e.g. "imports/2026/02/VTB_RUB_MAIN/filename.xlsx")
         or None if MinIO is unavailable.
     """
-    client = get_minio()
+    client = await get_minio()
     if client is None:
         return None
 
@@ -75,7 +77,7 @@ def upload_file(
     object_name = f"{prefix}/{now.strftime('%d_%H%M%S')}_{filename}"
 
     try:
-        client.put_object(
+        await client.put_object(
             settings.MINIO_BUCKET,
             object_name,
             io.BytesIO(data),
@@ -89,9 +91,9 @@ def upload_file(
         return None
 
 
-def download_file(object_name: str) -> Optional[bytes]:
+async def download_file(object_name: str) -> Optional[bytes]:
     """
-    Download a file from MinIO.
+    Download a file from MinIO (async).
 
     Args:
         object_name: Object path in MinIO
@@ -99,13 +101,13 @@ def download_file(object_name: str) -> Optional[bytes]:
     Returns:
         File content as bytes, or None if not found / unavailable.
     """
-    client = get_minio()
+    client = await get_minio()
     if client is None:
         return None
 
     try:
-        response = client.get_object(settings.MINIO_BUCKET, object_name)
-        data = response.read()
+        response = await client.get_object(settings.MINIO_BUCKET, object_name)
+        data = await response.read()
         response.close()
         response.release_conn()
         return data
@@ -114,19 +116,19 @@ def download_file(object_name: str) -> Optional[bytes]:
         return None
 
 
-def list_files(prefix: str = "imports/") -> list[dict]:
+async def list_files(prefix: str = "imports/") -> list[dict]:
     """
-    List files in MinIO bucket under a prefix.
+    List files in MinIO bucket under a prefix (async).
 
     Returns:
         List of {name, size, last_modified} dicts.
     """
-    client = get_minio()
+    client = await get_minio()
     if client is None:
         return []
 
     try:
-        objects = client.list_objects(settings.MINIO_BUCKET, prefix=prefix, recursive=True)
+        objects = await client.list_objects(settings.MINIO_BUCKET, prefix=prefix, recursive=True)
         return [
             {
                 "name": obj.object_name,

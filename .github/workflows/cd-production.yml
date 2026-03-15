@@ -51,7 +51,7 @@ jobs:
             git pull origin main
 
             echo "🔨 Building images..."
-            docker compose build backend frontend-react
+            docker compose build backend worker frontend-react
 
             echo "🔄 Rolling restart..."
             docker compose up -d --remove-orphans

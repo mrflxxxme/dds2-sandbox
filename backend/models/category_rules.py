@@ -10,6 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
 from backend.models.mixins import SoftDeleteMixin
+from backend.utils.time import utcnow
 
 
 class CategoryRule(Base, SoftDeleteMixin):
@@ -24,7 +25,7 @@ class CategoryRule(Base, SoftDeleteMixin):
     cat_lvl2: Mapped[Optional[str]] = mapped_column(String(100))
     priority: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     __table_args__ = (
         UniqueConstraint("project_id", "keyword", "direction", name="uq_category_rule"),

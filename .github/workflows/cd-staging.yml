@@ -46,7 +46,7 @@ jobs:
             echo "🔨 Building images..."
             docker compose -f docker-compose.yml \
               -f docker-compose.staging.yml \
-              up -d --build backend frontend-react
+              up -d --build backend worker frontend-react
 
             echo "🗄️ Running migrations..."
             docker compose exec -T backend alembic upgrade head

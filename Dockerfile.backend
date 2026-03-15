@@ -21,12 +21,14 @@ COPY pytest.ini .
 COPY migrations/ ./migrations/
 COPY alembic.ini .
 COPY entrypoint.sh .
+COPY entrypoint-worker.sh .
 
-RUN chmod +x entrypoint.sh && chown -R app:app /app
+RUN chmod +x entrypoint.sh entrypoint-worker.sh && chown -R app:app /app
 USER app
 
 HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
 ENTRYPOINT ["./entrypoint.sh"]
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4", "--timeout-keep-alive", "120"]
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "6", "--timeout-keep-alive", "120", "--limit-max-requests", "10000"]
+

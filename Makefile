@@ -20,6 +20,9 @@ logs: ## Логи backend (follow)
 logs-all: ## Логи всех сервисов
 	docker compose logs -f --tail=30
 
+logs-worker: ## Логи worker (scheduler)
+	docker compose logs -f worker --tail=50
+
 status: ## Статус контейнеров
 	docker compose ps --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}'
 
