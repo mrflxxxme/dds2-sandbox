@@ -37,15 +37,15 @@ services:
     ports:
       - "3000:3000"
 
-  # Expose DB for local tools (DBeaver, pgAdmin, etc.)
+  # Expose DB for local tools (DBeaver, pgAdmin, etc.) — port 5433 to avoid pgbouncer conflict
   db:
     ports:
-      - "5432:5432"
+      - "5433:5432"
 
-  # Expose PgBouncer for local debugging
+  # Expose PgBouncer for local debugging (port 5432)
   pgbouncer:
     ports:
-      - "6432:6432"
+      - "5432:5432"
 
   # Expose Redis for local debugging
   redis:

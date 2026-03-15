@@ -20,24 +20,20 @@ services:
       - internal
 
   pgbouncer:
-    image: bitnami/pgbouncer:1.23.1
+    image: edoburu/pgbouncer:1.22.1
     depends_on:
       db:
         condition: service_healthy
     environment:
-      PGBOUNCER_DATABASE: dds_db
-      POSTGRESQL_HOST: db
-      POSTGRESQL_PORT: 5432
-      POSTGRESQL_USERNAME: ${POSTGRES_USER:-dds}
-      POSTGRESQL_PASSWORD: ${POSTGRES_PASSWORD:-dds_secret}
-      PGBOUNCER_POOL_MODE: transaction
-      PGBOUNCER_DEFAULT_POOL_SIZE: 40
-      PGBOUNCER_MIN_POOL_SIZE: 10
-      PGBOUNCER_MAX_CLIENT_CONN: 500
-      PGBOUNCER_MAX_DB_CONNECTIONS: 200
-      PGBOUNCER_SERVER_RESET_QUERY: "DISCARD ALL"
+      DATABASE_URL: postgres://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/dds_db
+      POOL_MODE: transaction
+      DEFAULT_POOL_SIZE: 40
+      MIN_POOL_SIZE: 10
+      MAX_CLIENT_CONN: 500
+      MAX_DB_CONNECTIONS: 200
+      SERVER_RESET_QUERY: "DISCARD ALL"
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -h localhost -p 6432 -U ${POSTGRES_USER:-dds}" ]
+      test: [ "CMD-SHELL", "pg_isready -h localhost -p 5432" ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -87,7 +83,7 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@pgbouncer:6432/dds_db?prepared_statement_cache_size=0
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@pgbouncer:5432/dds_db?prepared_statement_cache_size=0
       DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/dds_db
       REDIS_URL: ${REDIS_URL:-redis://:dds_redis_secret@redis:6379/0}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
@@ -116,7 +112,7 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@pgbouncer:6432/dds_db?prepared_statement_cache_size=0
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@pgbouncer:5432/dds_db?prepared_statement_cache_size=0
       DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/dds_db
       REDIS_URL: ${REDIS_URL:-redis://:dds_redis_secret@redis:6379/0}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
