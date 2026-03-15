@@ -22,7 +22,7 @@ services:
       - internal
 
   pgbouncer:
-    image: bitnami/pgbouncer:latest
+    image: bitnami/pgbouncer:1.23.1
     depends_on:
       db:
         condition: service_healthy
