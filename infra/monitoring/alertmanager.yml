@@ -1,0 +1,36 @@
+# Alertmanager Configuration — routes Prometheus alerts to Telegram
+#
+# Requires env vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ['alertname', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: telegram
+
+  routes:
+    # Critical alerts — send immediately
+    - match:
+        severity: critical
+      group_wait: 10s
+      repeat_interval: 1h
+      receiver: telegram
+
+receivers:
+  - name: telegram
+    telegram_configs:
+      - bot_token: '${TELEGRAM_BOT_TOKEN}'
+        chat_id: ${TELEGRAM_CHAT_ID}
+        parse_mode: HTML
+        message: |
+          {{ if eq .Status "firing" }}🔴{{ else }}🟢{{ end }} <b>{{ .Status | toUpper }}</b>
+
+          {{ range .Alerts }}
+          <b>{{ .Labels.alertname }}</b> [{{ .Labels.severity }}]
+          {{ .Annotations.summary }}
+          {{ if .Annotations.description }}{{ .Annotations.description }}{{ end }}
+          {{ end }}

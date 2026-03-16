@@ -1,0 +1,46 @@
+# Prometheus config — for MONITORING server
+# Scrapes metrics from App (10.0.0.2) and Data (10.0.0.1) via WireGuard VPN
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
+scrape_configs:
+  # ─── FastAPI Backend Metrics (App server) ─────────────────────────────────
+  - job_name: 'fastapi'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['10.0.0.2:8000']
+        labels:
+          service: 'api'
+
+  # ─── FastAPI Worker Metrics (App server) ──────────────────────────────────
+  - job_name: 'worker'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['10.0.0.2:8001']
+        labels:
+          service: 'worker'
+
+  # ─── PostgreSQL Metrics (via exporter on this server) ────────────────────
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+
+  # ─── Redis Metrics (via exporter on this server) ─────────────────────────
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+
+  # ─── Prometheus Self-Monitoring ──────────────────────────────────────────
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

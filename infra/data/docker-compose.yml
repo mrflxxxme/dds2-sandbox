@@ -1,0 +1,148 @@
+# DDS Data Server — PostgreSQL, PgBouncer, Redis, MinIO, Backup
+#
+# Runs on: dds-data (10.0.0.1 via WireGuard)
+# All services listen on 10.0.0.1 (VPN only, not public)
+
+services:
+  db:
+    image: postgres:15
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dds}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dds_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-dds_db}
+    command: postgres -c 'config_file=/etc/postgresql/postgresql.conf'
+    ports:
+      - "10.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    deploy:
+      resources:
+        limits:
+          memory: 2560M
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dds} -d ${POSTGRES_DB:-dds_db}" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - data
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/dds_db
+      POOL_MODE: transaction
+      DEFAULT_POOL_SIZE: 30
+      MIN_POOL_SIZE: 5
+      MAX_CLIENT_CONN: 200
+      MAX_DB_CONNECTIONS: 80
+      SERVER_RESET_QUERY: "DISCARD ALL"
+      QUERY_WAIT_TIMEOUT: 120
+    ports:
+      - "10.0.0.1:6432:5432"
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -h localhost -p 5432" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - data
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD:-dds_redis_secret} --maxmemory 512mb --maxmemory-policy allkeys-lru --bind 0.0.0.0
+    ports:
+      - "10.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    deploy:
+      resources:
+        limits:
+          memory: 640M
+    healthcheck:
+      test: [ "CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-dds_redis_secret}", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "10.0.0.1:9000:9000"
+      - "10.0.0.1:9001:9001"
+    volumes:
+      - miniodata:/data
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    healthcheck:
+      test: [ "CMD", "mc", "ready", "local" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - data
+
+  db-backup:
+    image: postgres:15
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      PGHOST: db
+      POSTGRES_USER: ${POSTGRES_USER:-dds}
+      POSTGRES_DB: ${POSTGRES_DB:-dds_db}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-dds_secret}
+      BACKUP_DIR: /backups
+      BACKUP_RETENTION_DAYS: "14"
+      BACKUP_INTERVAL_HOURS: "6"
+    volumes:
+      - ./backups:/backups
+      - ./scripts:/scripts
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        echo "🕐 Backup scheduler started (every $${BACKUP_INTERVAL_HOURS}h, keep $${BACKUP_RETENTION_DAYS} days)"
+        /scripts/backup.sh
+        while true; do
+          sleep $${BACKUP_INTERVAL_HOURS}h
+          /scripts/backup.sh
+        done
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    restart: unless-stopped
+    networks:
+      - data
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+
+networks:
+  data:
+    driver: bridge

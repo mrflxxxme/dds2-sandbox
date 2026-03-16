@@ -1,0 +1,105 @@
+# DDS Monitoring Server — Prometheus, Grafana, AlertManager, Exporters
+#
+# Runs on: dds-monitoring (10.0.0.3 via WireGuard)
+# Scrapes metrics from App (10.0.0.2) and Data (10.0.0.1) over VPN
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheusdata:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=30d'
+      - '--storage.tsdb.retention.size=5GB'
+    ports:
+      - "10.0.0.3:9090:9090"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    restart: unless-stopped
+    depends_on:
+      - alertmanager
+    networks:
+      - monitoring
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanagerdata:/alertmanager
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-0}
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    ports:
+      - "10.0.0.3:9093:9093"
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_SERVER_ROOT_URL=https://app.vyatkin-wb.ru/grafana/
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-DdsGrafana2026!}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "10.0.0.3:3000:3000"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    networks:
+      - monitoring
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@10.0.0.1:5432/${POSTGRES_DB:-dds_db}?sslmode=disable"
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    environment:
+      REDIS_ADDR: "redis://default:${REDIS_PASSWORD:-dds_redis_secret}@10.0.0.1:6379"
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+volumes:
+  prometheusdata:
+  grafanadata:
+  alertmanagerdata:
+
+networks:
+  monitoring:
+    driver: bridge
