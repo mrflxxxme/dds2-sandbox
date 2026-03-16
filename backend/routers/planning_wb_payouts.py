@@ -29,7 +29,7 @@ async def upload_wb_payouts(
     if not parsed:
         raise HTTPException(400, "Не удалось распознать записи в файле")
     created, updated, skipped = await planning_service.upload_wb_payouts(db, project.id, parsed)
-    await planning_service.reconcile_wb_payouts(db)
+    await planning_service.reconcile_wb_payouts(db, project.id)
     return {"ok": True, "created": created, "updated": updated, "skipped": skipped,
             "total_parsed": len(parsed)}
 

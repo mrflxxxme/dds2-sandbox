@@ -13,7 +13,7 @@ from backend.models import DutyRule
 async def get_duty_rules(db: AsyncSession, project_id: int, limit: int = 500, offset: int = 0):
     result = await db.execute(
         select(DutyRule)
-        .where(DutyRule.project_id == project_id)
+        .where(DutyRule.project_id == project_id, DutyRule.is_deleted == False)
         .order_by(DutyRule.subject)
         .limit(limit).offset(offset)
     )
@@ -25,7 +25,7 @@ async def upsert_duty_rule(db: AsyncSession, project_id: int, payload: dict):
     if not subject:
         return None, "subject required"
     result = await db.execute(
-        select(DutyRule).where(DutyRule.project_id == project_id, DutyRule.subject == subject)
+        select(DutyRule).where(DutyRule.project_id == project_id, DutyRule.is_deleted == False, DutyRule.subject == subject)
     )
     rule = result.scalar_one_or_none()
     if rule:

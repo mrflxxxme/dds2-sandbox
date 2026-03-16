@@ -62,7 +62,9 @@ async def generate_payment_plan(
     customs_rub = duty_rub + vat_rub
 
     # 4. Get lead times
-    lt_result = await db.execute(select(LeadTime))
+    lt_result = await db.execute(
+        select(LeadTime).where(LeadTime.project_id == project_id)
+    )
     lt_map = {lt.direction: lt.days for lt in lt_result.scalars().all()}
 
     transport_key = cost_order.transport_type or "AUTO"

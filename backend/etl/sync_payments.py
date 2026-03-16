@@ -59,7 +59,10 @@ def sync_plan_payments(db: Session, project_id: int):
     - ТАМОЖНЯ:  CustomsAlloc.order_no == order_no → sum(alloc_amount)
     """
     payments = db.execute(
-        select(PlannedPayment).where(PlannedPayment.project_id == project_id)
+        select(PlannedPayment).where(
+            PlannedPayment.project_id == project_id,
+            PlannedPayment.is_deleted == False,
+        )
     ).scalars().all()
     if not payments:
         return
@@ -70,7 +73,10 @@ def sync_plan_payments(db: Session, project_id: int):
 
     # Build invoice_no map: order_no_int → invoice_no (str)
     cost_orders = db.execute(
-        select(CostOrder).where(CostOrder.project_id == project_id)
+        select(CostOrder).where(
+            CostOrder.project_id == project_id,
+            CostOrder.is_deleted == False,
+        )
     ).scalars().all()
     from backend.services.cost.helpers import _order_no_to_int
     invoice_map = {}
@@ -85,6 +91,7 @@ def sync_plan_payments(db: Session, project_id: int):
     txns_order = db.execute(
         select(Transaction).where(
             Transaction.project_id == project_id,
+            Transaction.is_deleted == False,
             Transaction.purpose_tag == "Заказ",
             Transaction.expense > 0,
         )
@@ -105,6 +112,7 @@ def sync_plan_payments(db: Session, project_id: int):
     txns_delivery = db.execute(
         select(Transaction).where(
             Transaction.project_id == project_id,
+            Transaction.is_deleted == False,
             Transaction.purpose_tag == "Логистика",
             Transaction.expense > 0,
         )
@@ -153,6 +161,7 @@ def sync_plan_payments(db: Session, project_id: int):
     txns_commission = db.execute(
         select(Transaction).where(
             Transaction.project_id == project_id,
+            Transaction.is_deleted == False,
             Transaction.purpose_tag == "Комиссия",
             Transaction.expense > 0,
             Transaction.purpose.ilike("%ВТБ Шанхай%"),
@@ -193,7 +202,9 @@ def sync_plan_payments(db: Session, project_id: int):
     # ТАМОЖНЯ fact
     customs_fact = {}
     allocs = db.execute(
-        select(CustomsAlloc).where(CustomsAlloc.project_id == project_id)
+        select(CustomsAlloc).where(
+            CustomsAlloc.project_id == project_id,
+        )
     ).scalars().all()
     for a in allocs:
         if a.order_no:
@@ -202,6 +213,7 @@ def sync_plan_payments(db: Session, project_id: int):
     dts = db.execute(
         select(CustomsDT).where(
             CustomsDT.project_id == project_id,
+            CustomsDT.is_deleted == False,
             CustomsDT.order_no.isnot(None),
         )
     ).scalars().all()
@@ -212,7 +224,10 @@ def sync_plan_payments(db: Session, project_id: int):
     manual_links = db.execute(
         select(PaymentFactLink).join(
             PlannedPayment, PaymentFactLink.payment_id == PlannedPayment.id
-        ).where(PlannedPayment.project_id == project_id)
+        ).where(
+            PlannedPayment.project_id == project_id,
+            PaymentFactLink.is_deleted == False,
+        )
     ).scalars().all()
     manual_map = {}
     for ml in manual_links:

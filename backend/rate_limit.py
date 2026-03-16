@@ -53,9 +53,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return await call_next(request)
 
             key = f"rl:{bucket}:{client_ip}"
-            current = await redis.get(key)
 
-            if current and int(current) >= max_requests:
+            # Atomic: increment first, then check result
+            pipe = redis.pipeline()
+            pipe.incr(key)
+            pipe.expire(key, window)
+            results = await pipe.execute()
+            current = results[0]  # INCR returns new value
+
+            if current > max_requests:
                 logger.warning(
                     f"Rate limit exceeded: {client_ip} on {bucket} "
                     f"({current}/{max_requests})"
@@ -68,11 +74,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     },
                     headers={"Retry-After": str(window)},
                 )
-
-            pipe = redis.pipeline()
-            pipe.incr(key)
-            pipe.expire(key, window)
-            await pipe.execute()
 
         except Exception:
             pass  # Redis error — fail open, don't block requests

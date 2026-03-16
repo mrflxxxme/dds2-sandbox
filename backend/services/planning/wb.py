@@ -43,7 +43,7 @@ async def upload_wb_payouts(db: AsyncSession, project_id: int, parsed: list[dict
 
 
 async def get_wb_payouts(db: AsyncSession, project_id: int, status: str | None = None, limit: int = 500, offset: int = 0):
-    q = select(WbPayout).where(WbPayout.project_id == project_id).order_by(WbPayout.created_at.desc())
+    q = select(WbPayout).where(WbPayout.project_id == project_id, WbPayout.is_deleted == False).order_by(WbPayout.created_at.desc())
     if status:
         q = q.where(WbPayout.status == status)
     q = q.limit(limit).offset(offset)
@@ -90,20 +90,27 @@ async def manual_reconcile_wb(db: AsyncSession, project_id: int, payout_id: int,
 
 # ─── WB payout reconciliation ───────────────────────────────────────────────
 
-async def reconcile_wb_payouts(db: AsyncSession):
+async def reconcile_wb_payouts(db: AsyncSession, project_id: int):
     """
     Match WB payouts (not RECEIVED) with bank income transactions.
     Criteria: WB counterparty, amount ±1%, date within [-2, +5] days.
     """
     unmatched_result = await db.execute(
-        select(WbPayout).where(WbPayout.status.in_(["TRANSIT", "PROCESSING", "PENDING"]))
+        select(WbPayout).where(
+            WbPayout.project_id == project_id,
+            WbPayout.is_deleted == False,
+            WbPayout.status.in_(["TRANSIT", "PROCESSING", "PENDING"]),
+        )
     )
     payouts = unmatched_result.scalars().all()
     if not payouts:
         return
 
     matched_result = await db.execute(
-        select(WbPayout.matched_txn_id).where(WbPayout.matched_txn_id.isnot(None))
+        select(WbPayout.matched_txn_id).where(
+            WbPayout.project_id == project_id,
+            WbPayout.matched_txn_id.isnot(None),
+        )
     )
     already_matched = {r[0] for r in matched_result}
 
@@ -112,6 +119,8 @@ async def reconcile_wb_payouts(db: AsyncSession):
 
     candidates_result = await db.execute(
         select(Transaction).where(
+            Transaction.project_id == project_id,
+            Transaction.is_deleted == False,
             Transaction.income > 0,
             Transaction.date >= min_date,
             Transaction.date <= max_date,

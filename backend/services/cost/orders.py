@@ -22,13 +22,49 @@ async def get_cost_orders(db: AsyncSession, project_id: int, limit: int = 500, o
         .limit(limit).offset(offset)
     )
     orders = result.scalars().all()
+    if not orders:
+        return []
+
+    order_nos = [o.order_no for o in orders]
+
+    # Batch-load all items for all orders (fixes N+1)
+    all_items_result = await db.execute(
+        select(CostOrderItem).where(CostOrderItem.order_no.in_(order_nos))
+    )
+    all_items_list = all_items_result.scalars().all()
+    items_by_order: dict[str, list] = {}
+    for i in all_items_list:
+        if i.barcode and str(i.barcode).strip() not in ("0", ""):
+            items_by_order.setdefault(i.order_no, []).append(i)
+
+    # Batch-load planned payments existence (fixes N+1)
+    order_no_ints = []
+    order_no_map = {}
+    for o in orders:
+        try:
+            oint = _order_no_to_int(o.order_no)
+            order_no_ints.append(oint)
+            order_no_map[o.order_no] = oint
+        except (ValueError, TypeError):
+            pass
+
+    plans_set: set[int] = set()
+    if order_no_ints:
+        from sqlalchemy import func as sa_func
+        pp_result = await db.execute(
+            select(PlannedPayment.order_no)
+            .where(
+                PlannedPayment.order_no.in_(order_no_ints),
+                PlannedPayment.project_id == project_id,
+                PlannedPayment.is_deleted == False,
+            )
+            .group_by(PlannedPayment.order_no)
+        )
+        plans_set = {r[0] for r in pp_result}
+
     out = []
     for o in orders:
-        items_result = await db.execute(
-            select(CostOrderItem).where(CostOrderItem.order_no == o.order_no)
-        )
-        all_items = items_result.scalars().all()
-        items = [i for i in all_items if i.barcode and str(i.barcode).strip() not in ("0", "")]
+        items = items_by_order.get(o.order_no, [])
 
         total_qty = sum(i.qty for i in items)
         total = sum(safe_float(i.total_rub) * i.qty for i in items)
@@ -39,13 +75,8 @@ async def get_cost_orders(db: AsyncSession, project_id: int, limit: int = 500, o
         total_util = sum(safe_float(i.util_rub) * i.qty for i in items)
         unrecognized = sum(1 for i in items if i.unrecognized)
 
-        try:
-            pp_result = await db.execute(
-                select(PlannedPayment).where(PlannedPayment.order_no == _order_no_to_int(o.order_no))
-            )
-            has_plan = len(pp_result.scalars().all()) > 0
-        except (ValueError, TypeError):
-            has_plan = False
+        oint = order_no_map.get(o.order_no)
+        has_plan = oint in plans_set if oint is not None else False
 
         out.append({
             "id": o.id, "order_no": o.order_no, "invoice_no": o.invoice_no,

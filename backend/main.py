@@ -199,8 +199,9 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
             auth_header = request.headers.get("Authorization", "")
             if auth_header.startswith("Bearer "):
                 import jwt
+                from backend.config import settings
                 token = auth_header[7:]
-                payload = jwt.decode(token, options={"verify_signature": False})
+                payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
                 return payload.get("sub") or payload.get("user_id")
         except Exception:
             pass

@@ -98,6 +98,7 @@ async def calculate_cashflow_daily(
     inc_result = await db.execute(
         select(PlannedIncome).where(
             PlannedIncome.project_id == project_id,
+            PlannedIncome.is_deleted == False,
             PlannedIncome.date <= horizon,
         )
     )
@@ -107,7 +108,11 @@ async def calculate_cashflow_daily(
 
     # WB payouts in transit → expected income (created_at + 2 days)
     transit_result = await db.execute(
-        select(WbPayout).where(WbPayout.status.in_(["TRANSIT", "PROCESSING"]))
+        select(WbPayout).where(
+            WbPayout.project_id == project_id,
+            WbPayout.is_deleted == False,
+            WbPayout.status.in_(["TRANSIT", "PROCESSING"]),
+        )
     )
     for wp in transit_result.scalars().all():
         estimated = (
@@ -182,6 +187,7 @@ async def get_order_summary(
         select(PlannedPayment).where(
             PlannedPayment.order_no == order_no,
             PlannedPayment.project_id == project_id,
+            PlannedPayment.is_deleted == False,
         )
     )
     planned_payments = pp_result.scalars().all()
@@ -205,7 +211,10 @@ async def get_order_summary(
     txn_logistics = txn_log_result.scalars().all()
 
     alloc_result = await db.execute(
-        select(CustomsAlloc).where(CustomsAlloc.order_no == order_no)
+        select(CustomsAlloc).where(
+            CustomsAlloc.order_no == order_no,
+            CustomsAlloc.project_id == project_id,
+        )
     )
     customs_allocs = alloc_result.scalars().all()
 

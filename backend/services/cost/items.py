@@ -62,7 +62,7 @@ async def upload_order_items(db: AsyncSession, project_id: int, order_no: str,
     nom_map = {n.barcode: n for n in nom_result.scalars().all()}
 
     duty_result = await db.execute(
-        select(DutyRule).where(DutyRule.project_id == project_id)
+        select(DutyRule).where(DutyRule.project_id == project_id, DutyRule.is_deleted == False)
     )
     duty_map = {r.subject: r for r in duty_result.scalars().all()}
 
@@ -177,7 +177,7 @@ async def recalculate_order_items(db: AsyncSession, project_id: int, order_no: s
     nom_result = await db.execute(select(Nomenclature).where(Nomenclature.project_id == project_id))
     nom_map = {n.barcode: n for n in nom_result.scalars().all()}
 
-    duty_result = await db.execute(select(DutyRule).where(DutyRule.project_id == project_id))
+    duty_result = await db.execute(select(DutyRule).where(DutyRule.project_id == project_id, DutyRule.is_deleted == False))
     duty_map = {r.subject: r for r in duty_result.scalars().all()}
 
     # Calculate total volume for delivery split

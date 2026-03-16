@@ -23,7 +23,10 @@ async def get_fact_links(db: AsyncSession, project_id: int, payment_id: int):
     if not pp.scalar_one_or_none():
         return []
     result = await db.execute(
-        select(PaymentFactLink).where(PaymentFactLink.payment_id == payment_id)
+        select(PaymentFactLink).where(
+            PaymentFactLink.payment_id == payment_id,
+            PaymentFactLink.is_deleted == False,
+        )
     )
     return result.scalars().all()
 
@@ -58,7 +61,10 @@ async def create_fact_link(db: AsyncSession, project_id: int, payment_id: int, t
 
 async def delete_fact_link(db: AsyncSession, project_id: int, link_id: int):
     result = await db.execute(
-        select(PaymentFactLink).where(PaymentFactLink.id == link_id)
+        select(PaymentFactLink).where(
+            PaymentFactLink.id == link_id,
+            PaymentFactLink.is_deleted == False,
+        )
     )
     link = result.scalar_one_or_none()
     if not link:
@@ -111,7 +117,10 @@ async def get_accounts_list(db: AsyncSession, project_id: int):
 async def update_payment_paid_amount(payment_id: int, db: AsyncSession):
     """Re-calculate paid_rub for a planned payment from its fact links."""
     links_result = await db.execute(
-        select(PaymentFactLink).where(PaymentFactLink.payment_id == payment_id)
+        select(PaymentFactLink).where(
+            PaymentFactLink.payment_id == payment_id,
+            PaymentFactLink.is_deleted == False,
+        )
     )
     links = links_result.scalars().all()
     total_paid = sum(l.amount_rub or Decimal("0") for l in links)
@@ -122,6 +131,6 @@ async def update_payment_paid_amount(payment_id: int, db: AsyncSession):
     payment = pp_result.scalar_one_or_none()
     if payment:
         payment.paid_rub = total_paid
-        if total_paid >= (payment.amount_rub or Decimal("0")):
-            payment.is_paid = True
+        threshold = payment.amount_rub or Decimal("0")
+        payment.is_paid = total_paid >= threshold if threshold > 0 else False
         await db.commit()

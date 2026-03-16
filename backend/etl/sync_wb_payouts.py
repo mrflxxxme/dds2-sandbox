@@ -21,6 +21,7 @@ def sync_wb_payouts(db: Session, project_id: int):
     unmatched = db.execute(
         select(WbPayout).where(
             WbPayout.project_id == project_id,
+            WbPayout.is_deleted == False,
             WbPayout.status.in_(["TRANSIT", "PROCESSING", "PENDING"]),
         )
     ).scalars().all()
@@ -42,6 +43,7 @@ def sync_wb_payouts(db: Session, project_id: int):
     candidates = db.execute(
         select(Transaction).where(
             Transaction.project_id == project_id,
+            Transaction.is_deleted == False,
             Transaction.income > 0,
             Transaction.date >= min_date,
             Transaction.date <= max_date,
