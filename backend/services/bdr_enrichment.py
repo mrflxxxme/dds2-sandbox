@@ -60,7 +60,10 @@ def apply_tax(summary: dict, tax_info: dict, total_adv, total_cost):
     summary["tax_total"] = round(total_tax, 2)
     summary["profit"] = round(
         float(summary.get("to_pay", 0))
-        - float(total_adv)
+        # Реклама уже вычтена из to_pay через deductions_total (ad_deduction)
+        # Кредиты тоже в deductions_total, но они НЕ операционный расход
+        # Добавляем обратно loan_deduction, т.к. это финансовая операция
+        + float(summary.get("loan_deduction", 0))
         - float(total_cost)
         - total_tax,
         2,
@@ -99,10 +102,11 @@ def apply_tax_article(art: dict, tax_info: dict):
     art["tax_total"] = round(total_tax, 2)
     art["tax_base"] = round(tax_base, 2)
 
-    # Profit per article: to_pay - adv - cost - tax
+    # Profit per article: to_pay - cost - tax
+    # Реклама уже в to_pay через deductions_total, кредиты добавляем обратно
     art["profit"] = round(
         float(art.get("to_pay", 0))
-        - float(art.get("adv_sum", 0))
+        + float(art.get("loan_deduction", 0))
         - float(art.get("cost_total", 0))
         - total_tax,
         2,
