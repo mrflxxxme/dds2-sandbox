@@ -15,7 +15,12 @@
 
 ## Domain files in this directory
 - `DOMAIN_TRANSACTIONS.md` — import, ETL, categorization
-- `DOMAIN_REPORTS.md` — DDS, BDR, OPIU, dashboard
+- `DOMAIN_REPORTS.md` — DDS, BDR, OPIU, dashboard, stock/warehouse analytics
 - `DOMAIN_PLANNING.md` — orders, payments, customs
 - `DOMAIN_COST.md` — cost, nomenclature, duties
 - `DOMAIN_WB.md` — WB API, funnel, sync
+
+## Undomain files (shared/infra)
+- `services/refs_service.py` — CRUD для справочников (Account, Override, CounterpartyCategory)
+- `services/settings_service.py` — key-value настройки проекта (ProjectSetting)
+- `routers/refs.py`, `routers/auth.py`, `routers/projects.py` — базовые endpoints

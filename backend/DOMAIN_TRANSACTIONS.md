@@ -6,6 +6,7 @@
 - `etl/parsers/vtb.py` — парсер ВТБ
 - `etl/parsers/wb.py` — парсер WB
 - `etl/parsers/helpers.py` — общие утилиты парсеров
+- `etl/parsers/order_city_parser.py` — парсер городов из WB заказов
 - `etl/master_logic.py` — обогащение транзакций (категоризация, event_type, txn_id)
 - `etl/sync_payments.py` — синхронизация плановых платежей с фактом
 - `etl/sync_wb_payouts.py` — синхронизация WB-выплат

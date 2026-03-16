@@ -66,13 +66,13 @@ echo ""
 
 # Check that new Python files in backend/ are mentioned in at least one DOMAIN_*.md
 echo "-- Check 3: New backend files covered by domain docs --"
-for pyfile in backend/services/*.py backend/routers/*.py; do
+for pyfile in backend/services/*.py backend/services/**/*.py backend/routers/*.py backend/etl/*.py backend/etl/**/*.py; do
     [ -f "$pyfile" ] || continue
     basename=$(basename "$pyfile")
     [ "$basename" = "__init__.py" ] && continue
 
     FOUND=false
-    for domain in backend/DOMAIN_*.md; do
+    for domain in backend/DOMAIN_*.md backend/CLAUDE.md; do
         if grep -q "$basename" "$domain" 2>/dev/null; then
             FOUND=true
             break
@@ -80,7 +80,7 @@ for pyfile in backend/services/*.py backend/routers/*.py; do
     done
 
     if [ "$FOUND" = false ]; then
-        warn "$pyfile not mentioned in any DOMAIN_*.md"
+        warn "$pyfile not mentioned in any DOMAIN_*.md or backend/CLAUDE.md"
     fi
 done
 echo ""

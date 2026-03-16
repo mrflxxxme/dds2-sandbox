@@ -36,8 +36,8 @@
 
 ## Known Issues & Gotchas
 - **Race condition в fact_links:** commit() + update_payment_paid_amount() не атомарны
-- **is_paid не сбрасывается:** при удалении fact_link is_paid остаётся True (нет else-ветки)
-- **Soft delete fact_links:** запрос paid_amount НЕ фильтрует is_deleted — удалённые линки считаются
+- ~~**is_paid не сбрасывается:** при удалении fact_link is_paid остаётся True~~ — **ИСПРАВЛЕНО** (2026-03-16)
+- ~~**Soft delete fact_links:** запрос paid_amount НЕ фильтрует is_deleted~~ — **ИСПРАВЛЕНО** (2026-03-16)
 - **Нет валидации amount_rub:** можно передать отрицательную сумму
 
 ## Dependencies

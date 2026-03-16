@@ -12,10 +12,18 @@
 - `services/bdr_loaders.py` — загрузчики данных для БДР
 - `services/fx_service.py` — курсы валют
 - `services/tax_service.py` — налоговые ставки
+- `services/stock_forecast_service.py` — прогноз запасов
+- `services/warehouse_stock_service.py` — остатки на складах WB
+- `services/order_geography_service.py` — география заказов WB
+- `services/warehouse_geo.py` — координаты складов
+- `services/warehouse_geo_data.py` — данные координат складов
+- `services/stock_analytics_service.py` — ре-экспорт stock_forecast + warehouse
 - `routers/reports.py` — HTTP endpoints отчётов
 - `routers/reports_wb.py` — WB-специфичные отчёты
+- `routers/reports_stock.py` — складские отчёты и прогноз
 - `schemas/reports.py`
 - `tests/test_api_reports.py`, `tests/test_wb_bdr_service.py`, `tests/test_opiu_service.py`, `tests/test_fx_service.py`
+- `tests/test_stock_analytics_service.py`, `tests/test_warehouse_stocks.py`, `tests/test_warehouse_geo.py`, `tests/test_order_geography.py`
 
 ## Tables (read-only, кроме fx_rates и tax_rates)
 - `transactions` — источник данных (ЧТЕНИЕ)

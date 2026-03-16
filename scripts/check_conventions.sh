@@ -100,7 +100,27 @@ else
 fi
 echo ""
 
-# ─── 6. Missing project_id in service functions ─────────────────────
+# ─── 6. Missing is_deleted filter on SoftDelete models ───────────────
+echo "── Check 6: Queries on SoftDelete models without is_deleted filter ──"
+# Models with SoftDeleteMixin: Transaction, Account, CounterpartyCategory, Override,
+# Order, PlannedPayment, PlannedIncome, WbPayout, PaymentFactLink, CostOrder,
+# DutyRule, CustomsTopup, CustomsDT, IntegrationKey
+SOFT_MODELS="Transaction\|PlannedPayment\|PlannedIncome\|WbPayout\|PaymentFactLink\|CostOrder\|DutyRule\|CustomsTopup\|CustomsDT\|Order"
+FOUND=$(grep -rn "select($SOFT_MODELS)" backend/services/ backend/etl/ --include="*.py" \
+    | grep -v "is_deleted" \
+    | grep -v "__pycache__" \
+    | grep -v "# no-soft-delete-check" \
+    | grep -v "\.soft_delete\|\.add\|test_" \
+    2>/dev/null || true)
+if [ -n "$FOUND" ]; then
+    warn "Queries on SoftDelete models without is_deleted filter"
+    echo "$FOUND"
+else
+    ok "All SoftDelete model queries filter is_deleted"
+fi
+echo ""
+
+# ─── 7. Missing project_id in service functions ─────────────────────
 echo "── Check 6: Service functions without project_id parameter ──"
 # Check for async def functions in services that do DB queries but miss project_id
 # This is a heuristic — warns about functions that have 'db' but no 'project_id'
@@ -115,6 +135,33 @@ if [ -n "$FOUND" ]; then
     echo "$FOUND"
 else
     ok "All service DB functions include project_id"
+fi
+echo ""
+
+# ─── 8. Banned: datetime.utcnow() or datetime.now() ─────────────────
+echo "── Check 8: datetime.utcnow() / datetime.now() (use utcnow()) ──"
+FOUND=$(grep -rn "datetime\.utcnow()\|datetime\.now()" backend/ --include="*.py" \
+    | grep -v "__pycache__" \
+    | grep -v "utils/time.py" \
+    | grep -v "# allowed-datetime" \
+    2>/dev/null || true)
+if [ -n "$FOUND" ]; then
+    warn "datetime.utcnow()/now() found — use 'from backend.utils.time import utcnow'"
+    echo "$FOUND"
+else
+    ok "No banned datetime patterns"
+fi
+echo ""
+
+# ─── 9. Unbounded .all() without limit ──────────────────────────────
+echo "── Check 9: .scalars().all() without .limit() (potential OOM) ──"
+# Only check service files, not tests or routers
+FOUND=$(grep -rn "\.scalars()\.all()" backend/services/ --include="*.py" -l 2>/dev/null || true)
+if [ -n "$FOUND" ]; then
+    COUNT=$(echo "$FOUND" | wc -l)
+    warn "$COUNT service files use .scalars().all() — verify they have .limit() or bounded input"
+else
+    ok "No unbounded .all() calls"
 fi
 echo ""
 

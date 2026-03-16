@@ -32,13 +32,15 @@ bash scripts/check_conventions.sh                  # Convention checks
 
 ## Critical Rules (MUST follow)
 1. **Multi-tenancy:** EVERY query MUST filter by `project_id`
-2. **Datetime:** ONLY `from backend.utils.time import utcnow` (NEVER datetime.utcnow())
-3. **Money:** ONLY `Numeric(18, 2)` (NEVER Float)
-4. **SQL:** ONLY parameterized `:param` binding (NEVER f-strings in text())
-5. **Soft delete:** `model.soft_delete()` (NEVER db.delete())
-6. **Cache:** invalidate after mutations, key MUST include project_id
-7. **Business logic:** in services/ (NEVER in routers/)
-8. **Tests:** MUST pass before commit
+2. **Soft delete READ:** EVERY query on SoftDeleteMixin models MUST filter `is_deleted == False`
+3. **Soft delete WRITE:** `model.soft_delete()` (NEVER db.delete()) for SoftDeleteMixin models
+4. **Datetime:** ONLY `from backend.utils.time import utcnow` (NEVER datetime.utcnow())
+5. **Money:** ONLY `Numeric(18, 2)` (NEVER Float)
+6. **SQL:** ONLY parameterized `:param` binding (NEVER f-strings in text())
+7. **Cache:** invalidate after mutations, key MUST include project_id
+8. **Business logic:** in services/ (NEVER in routers/)
+9. **Tests:** MUST pass before commit
+10. **Docs:** update DOMAIN_*.md if tables/dependencies/known issues change
 
 ## Git Workflow
 - Коммиты на русском: `feat:` / `fix:` / `infra:` / `refactor:` / `test:`

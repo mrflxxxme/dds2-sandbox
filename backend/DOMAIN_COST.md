@@ -36,6 +36,7 @@
 - `cost_parsers.py` — 465 строк (ПРЕВЫШАЕТ лимит 400, нужен рефакторинг)
 - `.all()` без LIMIT в items.py — загружает всю nomenclature в память
 - Float division в funnel/sync.py для cost_price — должен быть Decimal
+- ~~N+1 запросы в get_cost_orders~~ — **ИСПРАВЛЕНО** (2026-03-16, batch-загрузка)
 
 ## Dependencies
 - `nomenclature` — используется в funnel для unit-экономики (cost_price)

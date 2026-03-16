@@ -38,7 +38,7 @@ description: Стандартный рабочий процесс при люб�
 | **`Numeric(18,2)` для денег** | Не `Float` — точные вычисления |
 | **SQL: `:param` binding** | Не f-string — безопасность |
 | **`project_id`** | Каждый запрос фильтрует по project_id |
-| **`is_deleted == False`** | Фильтр для SoftDeleteMixin моделей |
+| **`is_deleted == False`** | ОБЯЗАТЕЛЬНЫЙ фильтр в КАЖДОМ SELECT на SoftDeleteMixin моделях |
 | **Пагинация (`limit/offset`)** | Для всех list-эндпоинтов |
 | **`@cached(ttl=300)`** | Для тяжёлых GET (отчёты, агрегации) + `invalidate_cache()` при мутации |
 | **Модели в `models/domain.py`** | Не в монолитном `models.py` |
