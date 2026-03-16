@@ -221,6 +221,15 @@ app.add_middleware(AuditLogMiddleware)
 from backend.exceptions import register_exception_handlers
 register_exception_handlers(app)
 
+# ─── Prometheus Metrics ─────────────────────────────────────────────────────
+
+from prometheus_fastapi_instrumentator import Instrumentator
+Instrumentator(
+    excluded_handlers=["/health", "/metrics"],
+    inprogress_name="http_requests_in_progress",
+    inprogress_labels=True,
+).instrument(app).expose(app, include_in_schema=False)
+
 # Public routes (no auth required)
 app.include_router(auth.router, prefix="/api/v1", tags=["Auth"])
 app.include_router(
@@ -264,7 +273,43 @@ app.include_router(ws.router, prefix="/api/v1", tags=["WebSocket"])
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    """Extended health check — verify DB, Redis, MinIO connectivity."""
+    checks = {}
+
+    # DB check
+    try:
+        async with async_engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        checks["db"] = "ok"
+    except Exception as e:
+        checks["db"] = f"error: {e}"
+
+    # Redis check
+    try:
+        from backend.cache import get_redis
+        redis = await get_redis()
+        if redis:
+            await redis.ping()
+            checks["redis"] = "ok"
+        else:
+            checks["redis"] = "not configured"
+    except Exception as e:
+        checks["redis"] = f"error: {e}"
+
+    # MinIO check
+    try:
+        from backend.storage import get_minio_client
+        client = get_minio_client()
+        if client:
+            await client.list_buckets()
+            checks["minio"] = "ok"
+        else:
+            checks["minio"] = "not configured"
+    except Exception as e:
+        checks["minio"] = f"error: {e}"
+
+    all_ok = all(v == "ok" for v in checks.values() if v != "not configured")
+    return {"status": "ok" if all_ok else "degraded", "checks": checks}
 
 
 
