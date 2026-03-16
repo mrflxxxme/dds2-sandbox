@@ -325,6 +325,9 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
     Commission formula verified against TrueStats:
         commission = retail_amount_net - ppvz_for_pay_net
     where ppvz_for_pay_net includes compensation from "Добров. компенсация" rows.
+
+    IMPORTANT: logistics, penalties, deductions etc. are summed from ALL 3 buckets
+    because WB API distributes these values across sale/return/other rows.
     """
     realization = sale["retail_price_withdisc_rub"] - ret["retail_price_withdisc_rub"]
     sales_amount = sale["retail_amount"] - ret["retail_amount"]
@@ -334,32 +337,30 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
     ret_qty = int(ret["product_qty"])
     net_sale_qty = sale_qty - ret_qty
 
-    logistics = other["delivery_rub"]
-    penalties = other["penalty"]
-    storage = other["storage_fee"]
-    acceptance_val = other["acceptance"]
+    # ── Sum from ALL buckets (sale + ret + other) ──
+    # WB API distributes these values across all doc_types
+    logistics = sale["delivery_rub"] + ret["delivery_rub"] + other["delivery_rub"]
+    penalties = sale["penalty"] + ret["penalty"] + other["penalty"]
+    storage = sale["storage_fee"] + ret["storage_fee"] + other["storage_fee"]
+    acceptance_val = sale["acceptance"] + ret["acceptance"] + other["acceptance"]
+    rebill = sale["rebill_logistic_cost"] + ret["rebill_logistic_cost"] + other["rebill_logistic_cost"]
 
-    # Удержания (deduction) — полное значение из WB API
-    deductions_total = other["deduction"]
-    # Обратная логистика (rebill) — отдельная статья
-    rebill = other["rebill_logistic_cost"]
+    # Удержания (deduction) — из всех бакетов
+    deductions_total = sale["deduction"] + ret["deduction"] + other["deduction"]
     # Advertising deduction from fin report (Продвижение + Медиа)
-    ad_deduction = other["ad_deduction"]
+    ad_deduction = sale["ad_deduction"] + ret["ad_deduction"] + other["ad_deduction"]
     # Other deductions (Списание за отзыв etc.)
-    other_deduction = other["other_deduction"]
+    other_deduction = sale["other_deduction"] + ret["other_deduction"] + other["other_deduction"]
     # Loan payments (not operating expense)
-    loan_deduction = other["loan_deduction"]
+    loan_deduction = sale["loan_deduction"] + ret["loan_deduction"] + other["loan_deduction"]
 
     # Operating deductions = total - ads - loans
-    # Ads are already a separate line (from WbFunnelDaily), loans are not P&L
     operating_deductions = deductions_total - ad_deduction - loan_deduction
 
     # ── Commission ──
     # TrueStats formula: Продажи(net) - (К перечислению(net) - Компенсация)
-    # "Добровольная компенсация при возврате" has doc_type='Продажа'
-    # so its ppvz_for_pay is in sale bucket, but TrueStats excludes it
     ppvz_net = sale["ppvz_for_pay"] - ret["ppvz_for_pay"]
-    compensation = sale["compensation_ppvz"]  # ppvz from compensation rows
+    compensation = sale["compensation_ppvz"]
     commission = sales_amount - (ppvz_net - compensation)
 
     # WB total reward (for reference)
@@ -369,12 +370,8 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
     total_wb_reward = ppvz_sales_commission_net + ppvz_vw_net + ppvz_vw_nds_net
 
     # ── To Pay (итого к оплате) ──
-    # Сумма к перечислению селлеру на р/с
-    # Exclude ad_deduction (ads tracked separately) and loan_deduction (not P&L)
-    to_pay = (
-        ppvz_net
-        - logistics - penalties - storage - operating_deductions - acceptance_val
-    )
+    # Сумма ppvz_for_pay из ВСЕХ строк = реальная сумма к перечислению от WB
+    to_pay = sale["ppvz_for_pay"] + ret["ppvz_for_pay"] + other["ppvz_for_pay"]
 
     avg_sale_price = sales_amount / D(str(net_sale_qty)) if net_sale_qty > 0 else ZERO
     avg_retail_price = realization / D(str(net_sale_qty)) if net_sale_qty > 0 else ZERO
