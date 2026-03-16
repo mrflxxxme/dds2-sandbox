@@ -11,7 +11,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import select, func, case, or_, literal_column, cast, String
+from sqlalchemy import select, func, case, or_, and_, not_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.wb_finance import WbFinanceRow
@@ -43,14 +43,18 @@ async def get_opiu(
     Uses SQL aggregation — no full row loading into memory.
     """
     # ── 1. SQL aggregation per month ──
-    # month_key expression: extract year-month from rr_dt (or date_from as fallback)
     month_expr = func.to_char(
         func.coalesce(WbFinanceRow.rr_dt, WbFinanceRow.date_from),
-        literal_column("'YYYY-MM'"),
+        text("'YYYY-MM'"),
     )
 
-    is_sale = WbFinanceRow.doc_type_name == "Продажа"
-    is_return = WbFinanceRow.doc_type_name == "Возврат"
+    is_sale = (WbFinanceRow.doc_type_name == "Продажа")
+    is_return = (WbFinanceRow.doc_type_name == "Возврат")
+    is_sale_or_return = or_(is_sale, is_return)
+    is_not_sale_or_return = and_(
+        WbFinanceRow.doc_type_name != "Продажа",
+        WbFinanceRow.doc_type_name != "Возврат",
+    )
 
     # Sign: +1 for sales, -1 for returns, 0 for other
     sign = case(
@@ -64,7 +68,11 @@ async def get_opiu(
         WbFinanceRow.project_id == project_id,
         or_(
             WbFinanceRow.rr_dt.between(date_from, date_to),
-            (WbFinanceRow.rr_dt.is_(None)) & (WbFinanceRow.date_from >= date_from) & (WbFinanceRow.date_to <= date_to),
+            and_(
+                WbFinanceRow.rr_dt.is_(None),
+                WbFinanceRow.date_from >= date_from,
+                WbFinanceRow.date_to <= date_to,
+            ),
         ),
     ]
     if brand:
@@ -75,88 +83,90 @@ async def get_opiu(
     # Main aggregation query
     q = select(
         month_expr.label("month_key"),
-        # Реализация (retail_price_withdisc_rub * sign, only sales/returns)
-        func.coalesce(func.sum(
-            case((is_sale | is_return, sign * func.coalesce(WbFinanceRow.retail_price_withdisc_rub, 0)), else_=0)
-        ), 0).label("realization"),
-        # Фактические продажи (retail_amount * sign, only sales/returns)
-        func.coalesce(func.sum(
-            case((is_sale | is_return, sign * func.coalesce(WbFinanceRow.retail_amount, 0)), else_=0)
-        ), 0).label("sales_amount"),
+        # Реализация
+        func.coalesce(func.sum(case(
+            (is_sale_or_return, sign * func.coalesce(WbFinanceRow.retail_price_withdisc_rub, 0)),
+            else_=0,
+        )), 0).label("realization"),
+        # Фактические продажи
+        func.coalesce(func.sum(case(
+            (is_sale_or_return, sign * func.coalesce(WbFinanceRow.retail_amount, 0)),
+            else_=0,
+        )), 0).label("sales_amount"),
         # ppvz_for_pay for sales
-        func.coalesce(func.sum(
-            case((is_sale, func.coalesce(WbFinanceRow.ppvz_for_pay, 0)), else_=0)
-        ), 0).label("ppvz_for_pay_sale"),
+        func.coalesce(func.sum(case(
+            (is_sale, func.coalesce(WbFinanceRow.ppvz_for_pay, 0)),
+            else_=0,
+        )), 0).label("ppvz_for_pay_sale"),
         # ppvz_for_pay for returns
-        func.coalesce(func.sum(
-            case((is_return, func.coalesce(WbFinanceRow.ppvz_for_pay, 0)), else_=0)
-        ), 0).label("ppvz_for_pay_ret"),
-        # ppvz_for_pay for voluntary compensation (sale + specific oper_name)
-        func.coalesce(func.sum(
-            case(
-                (is_sale & (WbFinanceRow.supplier_oper_name == "Добровольная компенсация при возврате"),
-                 func.coalesce(WbFinanceRow.ppvz_for_pay, 0)),
-                else_=0,
-            )
-        ), 0).label("comp_ppvz"),
-        # Логистика (non sale/return only)
-        func.coalesce(func.sum(
-            case((~is_sale & ~is_return, func.coalesce(WbFinanceRow.delivery_rub, 0)), else_=0)
-        ), 0).label("logistics"),
+        func.coalesce(func.sum(case(
+            (is_return, func.coalesce(WbFinanceRow.ppvz_for_pay, 0)),
+            else_=0,
+        )), 0).label("ppvz_for_pay_ret"),
+        # ppvz_for_pay for voluntary compensation
+        func.coalesce(func.sum(case(
+            (and_(is_sale, WbFinanceRow.supplier_oper_name == "Добровольная компенсация при возврате"),
+             func.coalesce(WbFinanceRow.ppvz_for_pay, 0)),
+            else_=0,
+        )), 0).label("comp_ppvz"),
+        # Логистика
+        func.coalesce(func.sum(case(
+            (is_not_sale_or_return, func.coalesce(WbFinanceRow.delivery_rub, 0)),
+            else_=0,
+        )), 0).label("logistics"),
         # Штрафы
-        func.coalesce(func.sum(
-            case((~is_sale & ~is_return, func.coalesce(WbFinanceRow.penalty, 0)), else_=0)
-        ), 0).label("penalties"),
+        func.coalesce(func.sum(case(
+            (is_not_sale_or_return, func.coalesce(WbFinanceRow.penalty, 0)),
+            else_=0,
+        )), 0).label("penalties"),
         # Хранение
-        func.coalesce(func.sum(
-            case((~is_sale & ~is_return, func.coalesce(WbFinanceRow.storage_fee, 0)), else_=0)
-        ), 0).label("storage"),
+        func.coalesce(func.sum(case(
+            (is_not_sale_or_return, func.coalesce(WbFinanceRow.storage_fee, 0)),
+            else_=0,
+        )), 0).label("storage"),
         # Приёмка
-        func.coalesce(func.sum(
-            case((~is_sale & ~is_return, func.coalesce(WbFinanceRow.acceptance, 0)), else_=0)
-        ), 0).label("acceptance"),
+        func.coalesce(func.sum(case(
+            (is_not_sale_or_return, func.coalesce(WbFinanceRow.acceptance, 0)),
+            else_=0,
+        )), 0).label("acceptance"),
         # Удержания (all)
-        func.coalesce(func.sum(
-            case((~is_sale & ~is_return, func.coalesce(WbFinanceRow.deduction, 0)), else_=0)
-        ), 0).label("deductions"),
-        # Ad deductions (Продвижение/Медиа в bonus_type_name)
-        func.coalesce(func.sum(
-            case(
-                (~is_sale & ~is_return & (
-                    WbFinanceRow.bonus_type_name.ilike("%Продвижение%") |
-                    WbFinanceRow.bonus_type_name.ilike("%Медиа%")
-                ), func.coalesce(WbFinanceRow.deduction, 0)),
-                else_=0,
-            )
-        ), 0).label("ad_deduction"),
+        func.coalesce(func.sum(case(
+            (is_not_sale_or_return, func.coalesce(WbFinanceRow.deduction, 0)),
+            else_=0,
+        )), 0).label("deductions"),
+        # Ad deductions (Продвижение/Медиа)
+        func.coalesce(func.sum(case(
+            (and_(
+                is_not_sale_or_return,
+                or_(
+                    WbFinanceRow.bonus_type_name.ilike("%Продвижение%"),
+                    WbFinanceRow.bonus_type_name.ilike("%Медиа%"),
+                ),
+            ), func.coalesce(WbFinanceRow.deduction, 0)),
+            else_=0,
+        )), 0).label("ad_deduction"),
         # Loan deductions
-        func.coalesce(func.sum(
-            case(
-                (~is_sale & ~is_return & (
-                    WbFinanceRow.bonus_type_name.ilike("%кредит%") |
-                    WbFinanceRow.bonus_type_name.ilike("%заём%")
-                ), func.coalesce(WbFinanceRow.deduction, 0)),
-                else_=0,
-            )
-        ), 0).label("loan_deduction"),
+        func.coalesce(func.sum(case(
+            (and_(
+                is_not_sale_or_return,
+                or_(
+                    WbFinanceRow.bonus_type_name.ilike("%кредит%"),
+                    WbFinanceRow.bonus_type_name.ilike("%заём%"),
+                ),
+            ), func.coalesce(WbFinanceRow.deduction, 0)),
+            else_=0,
+        )), 0).label("loan_deduction"),
         # Additional payment (bonus points, sign-weighted)
-        func.coalesce(func.sum(
-            case((is_sale | is_return, sign * func.coalesce(WbFinanceRow.additional_payment, 0)), else_=0)
-        ), 0).label("additional_payment"),
-        # Sale quantities for cost calculation
-        func.coalesce(func.sum(
-            case(
-                (is_sale & (WbFinanceRow.supplier_oper_name.in_(["Продажа", ""])),
-                 func.coalesce(WbFinanceRow.quantity, 0)),
-                else_=0,
-            )
-        ), 0).label("sale_qty"),
+        func.coalesce(func.sum(case(
+            (is_sale_or_return, sign * func.coalesce(WbFinanceRow.additional_payment, 0)),
+            else_=0,
+        )), 0).label("additional_payment"),
     ).where(*filters).group_by(month_expr)
 
     result = await db.execute(q)
     monthly_rows = result.all()
 
-    # ── 2. Also get per-article sale quantities for cost calculation ──
+    # ── 2. Per-article sale quantities for cost calculation ──
     article_cost_q = select(
         WbFinanceRow.sa_name,
         WbFinanceRow.nm_id,
@@ -171,14 +181,18 @@ async def get_opiu(
     article_result = await db.execute(article_cost_q)
     article_rows = article_result.all()
 
-    # ── 3. Get all brands for filter dropdown ──
+    # ── 3. Brands for filter dropdown ──
     brands_q = select(func.distinct(WbFinanceRow.brand_name)).where(
         WbFinanceRow.project_id == project_id,
         WbFinanceRow.brand_name.isnot(None),
         WbFinanceRow.brand_name != "",
         or_(
             WbFinanceRow.rr_dt.between(date_from, date_to),
-            (WbFinanceRow.rr_dt.is_(None)) & (WbFinanceRow.date_from >= date_from) & (WbFinanceRow.date_to <= date_to),
+            and_(
+                WbFinanceRow.rr_dt.is_(None),
+                WbFinanceRow.date_from >= date_from,
+                WbFinanceRow.date_to <= date_to,
+            ),
         ),
     )
     brands_result = await db.execute(brands_q)
@@ -199,9 +213,20 @@ async def get_opiu(
         else:
             current = current.replace(month=current.month + 1)
 
+    _zero_month = {
+        "realization": 0.0, "sales_amount": 0.0,
+        "ppvz_for_pay_sale": 0.0, "ppvz_for_pay_ret": 0.0, "comp_ppvz": 0.0,
+        "logistics": 0.0, "penalties": 0.0, "storage": 0.0,
+        "acceptance": 0.0, "deductions": 0.0,
+        "ad_deduction": 0.0, "loan_deduction": 0.0,
+        "additional_payment": 0.0,
+    }
+
     monthly_data: dict[str, dict] = {}
     for row in monthly_rows:
         mk = row.month_key
+        if mk is None:
+            continue
         months_set.add(mk)
         monthly_data[mk] = {
             "realization": float(row.realization or 0),
@@ -222,11 +247,7 @@ async def get_opiu(
     # Fill missing months with zeros
     for mk in months_set:
         if mk not in monthly_data:
-            monthly_data[mk] = {k: 0.0 for k in [
-                "realization", "sales_amount", "ppvz_for_pay_sale", "ppvz_for_pay_ret",
-                "comp_ppvz", "logistics", "penalties", "storage", "acceptance",
-                "deductions", "ad_deduction", "loan_deduction", "additional_payment",
-            ]}
+            monthly_data[mk] = dict(_zero_month)
 
     # ── 6. Calculate costs per month from article quantities ──
     article_nm: dict[str, int] = {}
@@ -236,6 +257,8 @@ async def get_opiu(
         sa_name = row.sa_name or ""
         nm_id = row.nm_id or 0
         mk = row.month_key
+        if not mk:
+            continue
         qty = int(row.qty or 0)
         if sa_name and nm_id:
             article_nm[sa_name] = nm_id
@@ -271,10 +294,8 @@ async def get_opiu(
     def _sum_monthly(field):
         return sum(monthly_data[mk].get(field, 0) for mk in months_set)
 
-    total_data = {k: _sum_monthly(k) for k in monthly_data.get(next(iter(months_set), ""), {}).keys()} if months_set else {}
-
+    total_data = {k: _sum_monthly(k) for k in _zero_month.keys()}
     total_cost_val = sum(monthly_cost.values())
-    total_ads = sum(monthly_ads.values())
 
     # ── 9. Build P&L rows ──
     months_sorted = sorted(months_set, reverse=True)
@@ -333,8 +354,7 @@ async def get_opiu(
              for mk in months_sorted}
     ded_t = _t("deductions") - _t("ad_deduction") - _t("loan_deduction")
 
-    adv_m = _m("ad_deduction")
-    adv_t = _t("ad_deduction")
+    adv_m, adv_t = _m("ad_deduction"), _t("ad_deduction")
 
     cost_m = {mk: monthly_cost.get(mk, 0) for mk in months_sorted}
     cost_t = total_cost_val
@@ -356,11 +376,9 @@ async def get_opiu(
     margin_m = {mk: sales_m[mk] - direct_m[mk] + comp_total_m[mk] for mk in months_sorted}
     margin_t = sales_t - direct_t + comp_total_t
 
-    # Operating expenses (from DDS, not OPIU)
     ops_m = {mk: 0 for mk in months_sorted}
     ops_t = 0
 
-    # EBITDA
     ebitda_m = {mk: margin_m[mk] - ops_m[mk] for mk in months_sorted}
     ebitda_t = margin_t - ops_t
 
@@ -377,11 +395,9 @@ async def get_opiu(
     tax_m = {mk: _calc_tax(sales_m[mk]) for mk in months_sorted}
     tax_t = _calc_tax(sales_t)
 
-    # Net profit
     net_m = {mk: ebitda_m[mk] - tax_m[mk] for mk in months_sorted}
     net_t = ebitda_t - tax_t
 
-    # ── Build P&L rows array ──
     rows = [
         _build_row("realization", "Реализация", 0, True, real_m, real_t),
         _build_row("spp_discount", "Скидка за счет МП", 1, False, spp_m, spp_t, real_m, real_t),
