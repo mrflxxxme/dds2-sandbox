@@ -33,6 +33,10 @@ class Order(Base, SoftDeleteMixin):
     customs_rub: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2))
     source_file: Mapped[Optional[str]] = mapped_column(String(200))
 
+    __table_args__ = (
+        Index("ix_orders_project_id", "project_id"),
+    )
+
 
 class LeadTime(Base):
     __tablename__ = "lead_time"
@@ -63,6 +67,10 @@ class PlannedPayment(Base, SoftDeleteMixin):
     paid_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)  # fact in original currency (e.g. CNY)
     is_paid: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    __table_args__ = (
+        Index("ix_planned_payments_project_id", "project_id"),
+    )
+
 
 class PlannedIncome(Base, SoftDeleteMixin):
     __tablename__ = "planned_incomes"
@@ -72,6 +80,10 @@ class PlannedIncome(Base, SoftDeleteMixin):
     date: Mapped[date] = mapped_column(Date, nullable=False)
     amount_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
     source: Mapped[str] = mapped_column(String(50), default="WB")
+
+    __table_args__ = (
+        Index("ix_planned_incomes_project_id", "project_id"),
+    )
 
 
 class WbPayout(Base, SoftDeleteMixin):
@@ -106,3 +118,7 @@ class PaymentFactLink(Base, SoftDeleteMixin):
     txn_id: Mapped[str] = mapped_column(String(100), nullable=False)
     amount_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
     note: Mapped[Optional[str]] = mapped_column(String(200))
+
+    __table_args__ = (
+        Index("ix_payment_fact_links_payment_id", "payment_id"),
+    )

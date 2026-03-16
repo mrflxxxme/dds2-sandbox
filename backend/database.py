@@ -12,6 +12,11 @@ async_engine = create_async_engine(
     max_overflow=settings.DB_MAX_OVERFLOW,
     pool_pre_ping=True,       # detect stale connections
     pool_recycle=1800,         # recycle connections every 30 min
+    pool_timeout=10,           # wait max 10s for a connection from pool
+    connect_args={
+        "server_settings": {"statement_timeout": "30000"},  # 30s query timeout
+        "command_timeout": 30,
+    },
 )
 AsyncSessionLocal = async_sessionmaker(async_engine, expire_on_commit=False)
 
@@ -23,6 +28,7 @@ sync_engine = create_engine(
     max_overflow=10,
     pool_pre_ping=True,
     pool_recycle=1800,
+    pool_timeout=10,           # wait max 10s for a connection from pool
 )
 SyncSessionLocal = sessionmaker(sync_engine)
 

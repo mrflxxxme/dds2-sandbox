@@ -8,7 +8,7 @@ from backend.utils.time import utcnow
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, Text, ForeignKey, UniqueConstraint
+from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, Text, ForeignKey, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -30,6 +30,10 @@ class Account(Base, SoftDeleteMixin):
 
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="account_ref")
 
+    __table_args__ = (
+        Index("ix_accounts_project_id", "project_id"),
+    )
+
 
 class CounterpartyCategory(Base, SoftDeleteMixin):
     __tablename__ = "counterparty_categories"
@@ -44,6 +48,10 @@ class CounterpartyCategory(Base, SoftDeleteMixin):
     cp_key_auto: Mapped[Optional[str]] = mapped_column(String(100))
     cp_name_auto: Mapped[Optional[str]] = mapped_column(String(200))
 
+    __table_args__ = (
+        Index("ix_cp_cat_project_id", "project_id"),
+    )
+
 
 class Override(Base, SoftDeleteMixin):
     __tablename__ = "overrides"
@@ -57,6 +65,10 @@ class Override(Base, SoftDeleteMixin):
     comment: Mapped[Optional[str]] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
+    __table_args__ = (
+        Index("ix_overrides_project_id", "project_id"),
+    )
+
 
 class OpeningBalance(Base):
     __tablename__ = "opening_balances"
@@ -68,7 +80,10 @@ class OpeningBalance(Base):
     currency: Mapped[str] = mapped_column(String(10), nullable=False)
     opening_balance: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
 
-    __table_args__ = (UniqueConstraint("date_open", "account", "currency"),)
+    __table_args__ = (
+        UniqueConstraint("date_open", "account", "currency"),
+        Index("ix_opening_bal_project_id", "project_id"),
+    )
 
 
 class CategoryRef(Base, SoftDeleteMixin):

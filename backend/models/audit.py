@@ -7,7 +7,7 @@ Provides an audit trail: who did what, when, on which project.
 from datetime import datetime
 
 from sqlalchemy import (
-    Integer, String, Text, DateTime, ForeignKey,
+    Integer, String, Text, DateTime, ForeignKey, Index,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -27,3 +27,9 @@ class AuditLog(Base):
     ip: Mapped[str] = mapped_column(String(45), nullable=True)  # IPv4/IPv6
     payload_summary: Mapped[str] = mapped_column(Text, nullable=True)  # Truncated request body
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_audit_log_project_id", "project_id"),
+        Index("ix_audit_log_user_id", "user_id"),
+        Index("ix_audit_log_created_at", "created_at"),
+    )

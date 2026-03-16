@@ -46,6 +46,10 @@ class CustomsAlloc(Base):
 
     topup: Mapped["CustomsTopup"] = relationship(back_populates="allocs")
 
+    __table_args__ = (
+        Index("ix_customs_alloc_project_id", "project_id"),
+    )
+
 
 class CustomsDT(Base, SoftDeleteMixin):
     """Parsed DT declaration from FTS report, linked to order."""
@@ -57,4 +61,7 @@ class CustomsDT(Base, SoftDeleteMixin):
     amount_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
     order_no: Mapped[Optional[int]] = mapped_column(Integer)
     note: Mapped[Optional[str]] = mapped_column(Text)
-    __table_args__ = (Index("ix_customs_dt_number", "dt_number"),)
+    __table_args__ = (
+        Index("ix_customs_dt_number", "dt_number"),
+        Index("ix_customs_dt_project_id", "project_id"),
+    )

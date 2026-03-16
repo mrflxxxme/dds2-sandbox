@@ -49,6 +49,11 @@ class SyncLog(Base):
     rows_inserted: Mapped[int] = mapped_column(Integer, default=0)
     error_msg: Mapped[Optional[str]] = mapped_column(Text)
 
+    __table_args__ = (
+        Index("ix_sync_log_integration_id", "integration_id"),
+        Index("ix_sync_log_started_at", "started_at"),
+    )
+
 
 class WbFunnelDaily(Base):
     """Daily WB sales-funnel + advertising stats per nmId."""

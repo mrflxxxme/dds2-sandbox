@@ -67,6 +67,10 @@ class CostOrder(Base, SoftDeleteMixin):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     items: Mapped[list["CostOrderItem"]] = relationship(back_populates="order", cascade="all, delete-orphan")
 
+    __table_args__ = (
+        Index("ix_cost_orders_project_id", "project_id"),
+    )
+
 
 class CostOrderItem(Base):
     __tablename__ = "cost_order_items"
