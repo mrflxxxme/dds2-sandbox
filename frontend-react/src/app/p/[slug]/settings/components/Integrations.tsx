@@ -1,0 +1,94 @@
+'use client';
+import { useEffect, useState } from 'react';
+import { api } from '@/lib/api';
+import { formatDateTime } from '@/lib/utils';
+
+export function Integrations() {
+    const [keys, setKeys] = useState<any[]>([]);
+    const [syncLog, setSyncLog] = useState<any[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [showAdd, setShowAdd] = useState(false);
+    const [apiKey, setApiKey] = useState('');
+    const [label, setLabel] = useState('');
+    const [syncing, setSyncing] = useState<number | null>(null);
+    const [msg, setMsg] = useState('');
+
+    useEffect(() => { loadData(); }, []);
+    const loadData = async () => {
+        try { const [k, s] = await Promise.all([api.getIntegrationKeys(), api.getSyncLog()]); setKeys(k); setSyncLog(s); } catch { }
+        setLoading(false);
+    };
+    const addKey = async () => {
+        if (!apiKey.trim()) return;
+        try { await api.addIntegrationKey('wb', apiKey.trim(), label || undefined); setApiKey(''); setLabel(''); setShowAdd(false); setMsg(''); loadData(); } catch (e: any) { setMsg(e.message); }
+    };
+    const deleteKey = async (id: number) => { if (!confirm('Удалить ключ?')) return; await api.deleteIntegrationKey(id); loadData(); };
+    const syncWb = async (keyId: number) => {
+        setSyncing(keyId);
+        try { const d = new Date(); d.setDate(d.getDate() - 7); await api.syncFunnel(d.toISOString().slice(0, 10), new Date().toISOString().slice(0, 10)); setMsg('Синхронизация завершена'); loadData(); } catch (e: any) { setMsg(e.message); }
+        setSyncing(null);
+    };
+
+    if (loading) return <div style={{ padding: 40, color: 'var(--color-text-muted)' }}>Загрузка...</div>;
+
+    return (
+        <>
+            {msg && (<div className="auth-error" style={{ marginBottom: 16 }}>{msg}<span style={{ float: 'right', cursor: 'pointer' }} onClick={() => setMsg('')}>✕</span></div>)}
+            <div className="glass-card" style={{ marginBottom: 24 }}>
+                <div className="table-toolbar">
+                    <h3 style={{ fontSize: 16, fontWeight: 600 }}>🔌 API Интеграции</h3>
+                    <button className="btn btn-primary btn-sm" onClick={() => setShowAdd(true)}>+ Добавить ключ</button>
+                </div>
+                {showAdd && (
+                    <div style={{ background: 'var(--color-bg-input)', border: '1px solid var(--color-border)', borderRadius: 10, padding: 16, marginBottom: 16 }}>
+                        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                            <div className="form-group" style={{ flex: 1, minWidth: 200 }}><label className="form-label">API Ключ Wildberries</label><input className="form-input" placeholder="Вставьте API ключ" value={apiKey} onChange={e => setApiKey(e.target.value)} autoFocus /></div>
+                            <div className="form-group" style={{ width: 180 }}><label className="form-label">Название</label><input className="form-input" placeholder="Опционально" value={label} onChange={e => setLabel(e.target.value)} /></div>
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                            <button className="btn btn-primary btn-sm" onClick={addKey}>Добавить</button>
+                            <button className="btn btn-secondary btn-sm" onClick={() => setShowAdd(false)}>Отмена</button>
+                        </div>
+                    </div>
+                )}
+                {keys.length === 0 ? (
+                    <div className="empty-state"><div className="empty-state-icon">🔑</div><div className="empty-state-text">Нет подключенных API ключей</div></div>
+                ) : (
+                    keys.map(k => (
+                        <div key={k.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderBottom: '1px solid var(--color-border)' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                                <div style={{ width: 36, height: 36, borderRadius: 8, background: 'rgba(139, 92, 246, 0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16 }}>W</div>
+                                <div><div style={{ fontWeight: 500 }}>{k.label || 'Wildberries API'}</div><div style={{ fontSize: 12, color: 'var(--color-text-dim)', fontFamily: 'monospace' }}>{k.encrypted_key}</div></div>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span className="badge badge-success">Подключено</span>
+                                <button className="btn btn-success btn-sm" onClick={() => syncWb(k.id)} disabled={syncing === k.id}>{syncing === k.id ? '⏳' : '🔄'} Синхронизировать</button>
+                                <button className="btn btn-danger btn-sm" onClick={() => deleteKey(k.id)}>✕</button>
+                            </div>
+                        </div>
+                    ))
+                )}
+            </div>
+            <div className="glass-card">
+                <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>📋 Логи синхронизации</h3>
+                {syncLog.length === 0 ? (
+                    <div className="empty-state"><div className="empty-state-text">Синхронизаций пока не было</div></div>
+                ) : (
+                    <table className="data-table">
+                        <thead><tr><th>Сервис</th><th>Тип</th><th>Статус</th><th>Начало</th><th>Строк получено</th><th>Вставлено</th><th>Ошибка</th></tr></thead>
+                        <tbody>{syncLog.map(s => (
+                            <tr key={s.id}>
+                                <td><span className="badge badge-info">{s.service}</span></td>
+                                <td>{s.sync_type}</td>
+                                <td><span className={`badge ${s.status === 'OK' ? 'badge-success' : s.status === 'RUNNING' ? 'badge-warning' : s.status === 'ERROR' || s.status === 'TIMEOUT' ? 'badge-danger' : 'badge-secondary'}`}>{s.status}</span></td>
+                                <td style={{ fontSize: 13 }}>{formatDateTime(s.started_at)}</td>
+                                <td>{s.rows_fetched}</td><td>{s.rows_inserted}</td>
+                                <td style={{ color: 'var(--color-danger)', fontSize: 13 }}>{s.error_msg || '—'}</td>
+                            </tr>
+                        ))}</tbody>
+                    </table>
+                )}
+            </div>
+        </>
+    );
+}
