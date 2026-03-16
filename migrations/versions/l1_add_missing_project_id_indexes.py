@@ -1,12 +1,12 @@
 """add missing project_id and performance indexes
 
-Revision ID: l1_add_missing_project_id_indexes
+Revision ID: l1_missing_proj_id_idx
 Revises: k1_add_order_city_map
 Create Date: 2026-03-16 12:00:00.000000
 """
 from alembic import op
 
-revision = 'l1_add_missing_project_id_indexes'
+revision = 'l1_missing_proj_id_idx'
 down_revision = 'd03e6ced935c'
 branch_labels = None
 depends_on = None
