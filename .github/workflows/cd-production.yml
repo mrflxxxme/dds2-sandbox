@@ -1,12 +1,18 @@
-# CI/CD — Deploy to Production on push to main
+# CI/CD — Deploy to Production (3-server architecture)
+#
+# Architecture:
+#   App Server (DEPLOY_HOST)  — backend, worker, frontend, nginx
+#   Data Server (DATA_HOST)   — PostgreSQL, PgBouncer, Redis, MinIO
+#   Monitoring (MON_HOST)     — Prometheus, Grafana, AlertManager
 #
 # Flow: dev → staging → verify → merge to main → this workflow
 #
 # Requires GitHub Secrets:
-#   DEPLOY_HOST     — production server IP
-#   DEPLOY_USER     — SSH user
+#   DEPLOY_HOST     — App server IP (130.49.150.69)
+#   DEPLOY_USER     — SSH user (root)
 #   DEPLOY_SSH_KEY  — private SSH key
 #   DEPLOY_PATH     — path to project (e.g. /opt/dds_app)
+#   DATA_HOST       — Data server IP (194.67.100.57)
 
 name: Deploy to Production
 
@@ -32,7 +38,23 @@ jobs:
     environment: production
 
     steps:
-      - name: Deploy via SSH
+      # Step 1: Pre-deploy backup on Data server
+      - name: Backup database on Data server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DATA_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script-stop: true
+          script: |
+            set -e
+            cd /opt/dds_data
+            echo "📦 Pre-deploy backup..."
+            docker compose exec -T db pg_dump -U dds dds_db | gzip > backups/pre-deploy-$(date +%Y%m%d_%H%M%S).sql.gz
+            echo "✅ Backup created on Data server"
+
+      # Step 2: Deploy App server
+      - name: Deploy App server
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -43,39 +65,34 @@ jobs:
             set -e
             cd ${{ secrets.DEPLOY_PATH }}
 
-            echo "📦 Pre-deploy backup..."
-            docker compose exec -T db pg_dump -U dds dds_db | gzip > backups/pre-deploy-$(date +%Y%m%d_%H%M%S).sql.gz
-            echo "✅ Backup created"
-
             echo "📥 Pulling main branch..."
             git pull origin main
 
             echo "🔨 Building images..."
-            docker compose build backend worker frontend-react
+            docker compose -f docker-compose.app.yml build backend worker frontend-react
 
             echo "🔄 Rolling restart..."
-            docker compose up -d --remove-orphans
+            docker compose -f docker-compose.app.yml up -d --remove-orphans
 
-            echo "🗄️ Running migrations..."
-            docker compose exec -T backend alembic upgrade head
+            echo "🗄️ Running migrations on Data server..."
+            docker compose -f docker-compose.app.yml exec -T backend alembic upgrade head
 
             echo "🏥 Health check..."
             sleep 15
-            # Try HTTPS first (post-SSL), fall back to HTTP (pre-SSL)
             if curl -sf https://app.vyatkin-wb.ru/health > /dev/null 2>&1; then
               echo "✅ HTTPS health check passed"
             elif curl -sf http://localhost/health > /dev/null 2>&1; then
-              echo "✅ HTTP health check passed (SSL not yet configured)"
+              echo "✅ HTTP health check passed"
             else
               echo "❌ Health check failed! Rolling back..."
               git checkout HEAD~1 -- .
-              docker compose up -d --build backend frontend-react
+              docker compose -f docker-compose.app.yml up -d --build backend worker frontend-react
               echo "🔄 Rollback complete"
               exit 1
             fi
 
             echo "🔒 SSL certificate status:"
-            docker compose run --rm certbot certificates 2>/dev/null || echo "  (certbot not configured yet)"
+            docker compose -f docker-compose.app.yml run --rm certbot certificates 2>/dev/null || echo "  (certbot not configured yet)"
 
             echo "✅ Production deploy successful!"
 
