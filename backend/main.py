@@ -298,8 +298,8 @@ async def health():
 
     # MinIO check
     try:
-        from backend.storage import get_minio_client
-        client = get_minio_client()
+        from backend.storage import get_minio
+        client = await get_minio()
         if client:
             await client.list_buckets()
             checks["minio"] = "ok"
