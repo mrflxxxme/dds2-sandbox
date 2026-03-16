@@ -150,8 +150,11 @@ services:
     image: nginx:alpine
     ports:
       - "80:80"
+      - "443:443"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/nginx-ssl.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - certbot-webroot:/var/www/certbot:ro
     depends_on:
       - frontend-react
       - backend
@@ -194,6 +197,7 @@ volumes:
   pgdata:
   redisdata:
   miniodata:
+  certbot-webroot:
 
 
 networks:

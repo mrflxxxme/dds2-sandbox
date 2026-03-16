@@ -29,10 +29,10 @@ status: ## Статус контейнеров
 # ─── Тесты ───────────────────────────────────────────────────────────────────
 
 test: ## Запустить все тесты
-	docker compose exec backend pytest tests/ -x --tb=short
+	docker compose exec -T backend pytest tests/ -x --tb=short
 
 test-v: ## Тесты с подробным выводом
-	docker compose exec backend pytest tests/ -v --tb=long
+	docker compose exec -T backend pytest tests/ -v --tb=long
 
 lint: ## Линтер + convention checks
 	ruff check backend/ --select E,W,F --ignore E501
@@ -41,17 +41,17 @@ lint: ## Линтер + convention checks
 # ─── База данных ─────────────────────────────────────────────────────────────
 
 migrate: ## Применить миграции
-	docker compose exec backend alembic upgrade head
+	docker compose exec -T backend alembic upgrade head
 
 migrate-new: ## Создать новую миграцию (usage: make migrate-new MSG="описание")
-	docker compose exec backend alembic revision --autogenerate -m "$(MSG)"
+	docker compose exec -T backend alembic revision --autogenerate -m "$(MSG)"
 
 backup: ## Ручной бэкап БД
-	docker compose exec db-backup /scripts/backup.sh
+	docker compose exec -T db-backup /scripts/backup.sh
 	@echo "✅ Бэкап создан в ./backups/"
 
 restore: ## Восстановить БД из бэкапа (usage: make restore FILE=backup.sql.gz)
-	docker compose exec -it db-backup /scripts/restore.sh $(FILE)
+	docker compose exec -T db-backup /scripts/restore.sh $(FILE)
 
 # ─── Сборка ──────────────────────────────────────────────────────────────────
 
@@ -86,23 +86,23 @@ deploy-prod: ## Merge dev → main → production
 # ─── SSL ─────────────────────────────────────────────────────────────────────
 
 ssl-init: ## Получить SSL сертификат (первый раз)
-	docker compose exec nginx certbot certonly --webroot -w /var/www/certbot -d $(DOMAIN)
+	docker compose exec -T nginx certbot certonly --webroot -w /var/www/certbot -d $(DOMAIN)
 	@echo "✅ Сертификат получен. Раскомментируй SSL в nginx.conf"
 
 ssl-renew: ## Обновить SSL сертификат
-	docker compose exec nginx certbot renew --quiet
-	docker compose exec nginx nginx -s reload
+	docker compose exec -T nginx certbot renew --quiet
+	docker compose exec -T nginx nginx -s reload
 
 # ─── Утилиты ─────────────────────────────────────────────────────────────────
 
 seed: ## Загрузить тестовые данные на staging
-	docker compose exec backend python -m scripts.seed_demo
+	docker compose exec -T backend python -m scripts.seed_demo
 
 shell-db: ## Консоль PostgreSQL
-	docker compose exec db psql -U dds -d dds_db
+	docker compose exec -T db psql -U dds -d dds_db
 
 shell-redis: ## Консоль Redis
-	docker compose exec redis redis-cli
+	docker compose exec -T redis redis-cli
 
 clean: ## Удалить volumes (ОСТОРОЖНО!)
 	docker compose down -v
