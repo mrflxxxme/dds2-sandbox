@@ -17,7 +17,7 @@ class TaxRateMonth(BaseModel):
 
 class TaxRateSaveRequest(BaseModel):
     """Save rates for one brand for one year."""
-    brand: str
+    brand: str = ""
     year: int
     tax_regime: str = "usn_income"
     months: List[TaxRateMonth]
