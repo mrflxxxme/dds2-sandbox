@@ -76,15 +76,26 @@ async def save_tax_rates(
 
     # Insert new rows
     for m in months:
+        # Support both Pydantic objects and plain dicts
+        if isinstance(m, dict):
+            month_val = m.get("month", 1)
+            usn_val = m.get("usn_rate", 0)
+            nds_val = m.get("nds_rate", 0)
+            cost_val = m.get("cost_as_expense", False)
+        else:
+            month_val = m.month
+            usn_val = m.usn_rate
+            nds_val = m.nds_rate
+            cost_val = m.cost_as_expense
         row = TaxRate(
             project_id=project_id,
             brand=_PROJECT_BRAND,
             tax_regime=tax_regime,
             year=year,
-            month=m["month"],
-            usn_rate=m.get("usn_rate", 0),
-            nds_rate=m.get("nds_rate", 0),
-            cost_as_expense=m.get("cost_as_expense", False),
+            month=month_val,
+            usn_rate=usn_val,
+            nds_rate=nds_val,
+            cost_as_expense=cost_val,
         )
         db.add(row)
 
