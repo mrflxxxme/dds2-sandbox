@@ -80,7 +80,8 @@ async def get_sync_status(
     db: AsyncSession = Depends(get_db),
 ):
     """Get scheduler status, last sync info, and missing days count."""
-    from backend.scheduler import get_scheduler_info, _get_missing_dates
+    from backend.scheduler import get_scheduler_info
+    from backend.scheduler.helpers import get_missing_dates
     from sqlalchemy import select
 
     last_sync = await db.execute(
@@ -104,7 +105,7 @@ async def get_sync_status(
 
     # Count missing days for this project
     try:
-        missing = await _get_missing_dates(project.id)
+        missing = await get_missing_dates(project.id)
         missing_days = len(missing)
     except Exception:
         missing_days = None
@@ -125,10 +126,10 @@ async def backfill_funnel(
     Trigger full backfill: find all missing days in last 90 and sync them.
     Runs in BACKGROUND — returns immediately, sync continues async.
     """
-    from backend.scheduler import _get_missing_dates
+    from backend.scheduler.helpers import get_missing_dates
 
     pid = project.id
-    missing = await _get_missing_dates(pid)
+    missing = await get_missing_dates(pid)
 
     if not missing:
         return {"status": "ok", "message": "Нет пропущенных дней", "missing_count": 0}

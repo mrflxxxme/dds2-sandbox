@@ -296,7 +296,8 @@ async def batch_resync_ads(project_id: int) -> dict:
 
     # Pause scheduler ad jobs to avoid 429 conflicts
     try:
-        from backend.scheduler import scheduler as sched
+        from backend.scheduler import get_scheduler_instance
+        sched = get_scheduler_instance()
         if sched:
             try:
                 sched.pause_job("ad_anomaly_check")
