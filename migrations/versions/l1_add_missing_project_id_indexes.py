@@ -13,31 +13,26 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # refs models
-    op.create_index("ix_overrides_project_id", "overrides", ["project_id"])
-    op.create_index("ix_opening_bal_project_id", "opening_balances", ["project_id"])
-
-    # planning models
-    op.create_index("ix_orders_project_id", "orders", ["project_id"])
-    op.create_index("ix_planned_payments_project_id", "planned_payments", ["project_id"])
-    op.create_index("ix_planned_incomes_project_id", "planned_incomes", ["project_id"])
-    op.create_index("ix_payment_fact_links_payment_id", "payment_fact_links", ["payment_id"])
-
-    # cost models
-    op.create_index("ix_cost_orders_project_id", "cost_orders", ["project_id"])
-
-    # customs models
-    op.create_index("ix_customs_alloc_project_id", "customs_alloc", ["project_id"])
-    op.create_index("ix_customs_dt_project_id", "customs_dt", ["project_id"])
-
-    # integrations models
-    op.create_index("ix_sync_log_integration_id", "sync_log", ["integration_id"])
-    op.create_index("ix_sync_log_started_at", "sync_log", ["started_at"])
-
-    # audit log
-    op.create_index("ix_audit_log_project_id", "audit_log", ["project_id"])
-    op.create_index("ix_audit_log_user_id", "audit_log", ["user_id"])
-    op.create_index("ix_audit_log_created_at", "audit_log", ["created_at"])
+    # Use raw SQL with IF NOT EXISTS — some indexes may already exist
+    # from SQLAlchemy model definitions (Index() in models)
+    indexes = [
+        ("ix_overrides_project_id", "overrides", "project_id"),
+        ("ix_opening_bal_project_id", "opening_balances", "project_id"),
+        ("ix_orders_project_id", "orders", "project_id"),
+        ("ix_planned_payments_project_id", "planned_payments", "project_id"),
+        ("ix_planned_incomes_project_id", "planned_incomes", "project_id"),
+        ("ix_payment_fact_links_payment_id", "payment_fact_links", "payment_id"),
+        ("ix_cost_orders_project_id", "cost_orders", "project_id"),
+        ("ix_customs_alloc_project_id", "customs_alloc", "project_id"),
+        ("ix_customs_dt_project_id", "customs_dt", "project_id"),
+        ("ix_sync_log_integration_id", "sync_log", "integration_id"),
+        ("ix_sync_log_started_at", "sync_log", "started_at"),
+        ("ix_audit_log_project_id", "audit_log", "project_id"),
+        ("ix_audit_log_user_id", "audit_log", "user_id"),
+        ("ix_audit_log_created_at", "audit_log", "created_at"),
+    ]
+    for idx_name, table, column in indexes:
+        op.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table} ({column})")
 
 
 def downgrade() -> None:
