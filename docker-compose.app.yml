@@ -13,7 +13,7 @@ services:
     env_file: .env
     environment:
       # Data server via WireGuard VPN
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@10.0.0.1:6432/dds_db?prepared_statement_cache_size=0
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@10.0.0.1:5432/dds_db
       DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@10.0.0.1:5432/dds_db
       REDIS_URL: redis://:${REDIS_PASSWORD:-dds_redis_secret}@10.0.0.1:6379/0
       MINIO_ENDPOINT: 10.0.0.1:9000
@@ -43,7 +43,7 @@ services:
       dockerfile: ./Dockerfile.backend
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@10.0.0.1:6432/dds_db?prepared_statement_cache_size=0
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@10.0.0.1:5432/dds_db
       DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@10.0.0.1:5432/dds_db
       REDIS_URL: redis://:${REDIS_PASSWORD:-dds_redis_secret}@10.0.0.1:6379/0
       MINIO_ENDPOINT: 10.0.0.1:9000
