@@ -43,8 +43,8 @@ class Settings(BaseSettings):
     DDS_ROLE: str = "api"  # api | worker
 
     # Database pool (tuned for PgBouncer)
-    DB_POOL_SIZE: int = 20       # connections per worker
-    DB_MAX_OVERFLOW: int = 40    # burst connections
+    DB_POOL_SIZE: int = 5        # connections per worker (2 workers × 5 = 10 base)
+    DB_MAX_OVERFLOW: int = 10    # burst connections (2 workers × 15 = 30 max)
 
     # Rate limiting
     LOGIN_RATE_LIMIT: int = 10  # max attempts per minute per IP

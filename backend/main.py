@@ -79,16 +79,17 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create tables on startup
-    async with async_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # NOTE: Schema creation is handled by Alembic migrations (entrypoint.sh).
+    # Base.metadata.create_all was removed — it competed with Alembic for
+    # schema locks and ran redundantly on every worker process.
 
-        # Seed default categories for all existing projects (idempotent)
-        from backend.seeds.default_categories import seed_default_categories
-        project_rows = await conn.execute(text("SELECT id FROM projects"))
-        project_ids = [r[0] for r in project_rows]
-        await seed_default_categories(conn, project_ids)
-
+    # Seed default categories only in worker (avoid running in all API workers)
+    if settings.DDS_ROLE == "worker":
+        async with async_engine.begin() as conn:
+            from backend.seeds.default_categories import seed_default_categories
+            project_rows = await conn.execute(text("SELECT id FROM projects"))
+            project_ids = [r[0] for r in project_rows]
+            await seed_default_categories(conn, project_ids)
 
     # Create default admin user
     async with AsyncSessionLocal() as session:
