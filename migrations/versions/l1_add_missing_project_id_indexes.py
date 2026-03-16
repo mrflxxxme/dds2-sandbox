@@ -7,7 +7,7 @@ Create Date: 2026-03-16 12:00:00.000000
 from alembic import op
 
 revision = 'l1_add_missing_project_id_indexes'
-down_revision = 'k1_add_order_city_map'
+down_revision = 'd03e6ced935c'
 branch_labels = None
 depends_on = None
 
