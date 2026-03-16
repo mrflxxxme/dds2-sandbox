@@ -1,5 +1,5 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, event
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 from backend.config import settings
@@ -14,10 +14,17 @@ async_engine = create_async_engine(
     pool_recycle=1800,         # recycle connections every 30 min
     pool_timeout=10,           # wait max 10s for a connection from pool
     connect_args={
-        "server_settings": {"statement_timeout": "30000"},  # 30s query timeout
         "command_timeout": 30,
     },
 )
+
+# Set statement_timeout on each connection checkout (PgBouncer-compatible)
+@event.listens_for(async_engine.sync_engine, "connect")
+def set_statement_timeout(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("SET statement_timeout = '30000'")
+    cursor.close()
+
 AsyncSessionLocal = async_sessionmaker(async_engine, expire_on_commit=False)
 
 # Sync engine (for Alembic and ETL)
