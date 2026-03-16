@@ -6,6 +6,24 @@ description: Стандартный рабочий процесс при люб�
 
 # Рабочий процесс DDS
 
+## 🗺️ Шаг 0: Определи домен и прочитай контекст
+
+> **ПЕРЕД ЛЮБЫМ ИЗМЕНЕНИЕМ** определи, к какому домену относится задача, и прочитай соответствующий файл.
+
+| Если задача про... | Прочитай |
+|---------------------|----------|
+| Импорт, транзакции, категоризация | `backend/DOMAIN_TRANSACTIONS.md` |
+| Отчёты, ДДС, БДР, ОПИУ, дашборд | `backend/DOMAIN_REPORTS.md` |
+| Заказы, платежи, таможня, кэшфлоу | `backend/DOMAIN_PLANNING.md` |
+| Себестоимость, номенклатура, пошлины | `backend/DOMAIN_COST.md` |
+| WB API, воронка, синхронизация | `backend/DOMAIN_WB.md` |
+| Фронтенд страницы/компоненты | `frontend-react/DOMAIN_FRONTEND.md` |
+
+Если задача затрагивает **несколько доменов** — прочитай ВСЕ затронутые файлы.
+Обрати внимание на секции **Dependencies** и **Known Issues** — там описаны связи между доменами.
+
+---
+
 ## ⛔ Архитектурные правила (ОБЯЗАТЕЛЬНЫЕ)
 
 > **Проверяй ЭТИ правила при КАЖДОМ изменении кода. Нарушил — исправь ДО коммита.**
@@ -26,7 +44,6 @@ description: Стандартный рабочий процесс при люб�
 | **Модели в `models/domain.py`** | Не в монолитном `models.py` |
 | **Схемы в `schemas/domain.py`** | Не в монолитном `schemas.py` |
 | **Logging** | `logger = logging.getLogger("dds.module")` |
-| **Кэш инвалидация** | `invalidate_cache()` после мутации |
 
 ### Frontend
 
@@ -34,11 +51,10 @@ description: Стандартный рабочий процесс при люб�
 |---------|-----------|
 | **Loading / Error / Empty states** | Обязательны в каждом компоненте |
 | **`formatNumber()` / `formatDate()`** | Для всех чисел и дат |
-| **«📥 Excel»** | Кнопка для каждой таблицы |
+| **«Excel»** | Кнопка для каждой таблицы |
 | **`useCallback`** | Для функций загрузки данных |
 | **Типы в `types/api.ts`** | Не inline |
 | **CSS классы из `globals.css`** | Не inline стили |
-
 
 ---
 
@@ -47,91 +63,59 @@ description: Стандартный рабочий процесс при люб�
 > **НИКОГДА** не запускай `docker compose exec backend python3 -c "from backend..."` для ad-hoc скриптов.
 > `backend/services/__init__.py` тянет все модули → scheduler → Redis → **процесс зависает навсегда**.
 >
-> ✅ Для тестов: `docker compose exec backend pytest tests/...`
-> ✅ Для скриптов: standalone Python локально (без `import backend.*`)
-> ✅ Если нужны данные из backend модулей — скопируй данные в скрипт хардкодом
+> Для тестов: `docker compose exec backend pytest tests/...`
+> Для скриптов: standalone Python локально (без `import backend.*`)
 
 ---
 
 ## Обязательные правила процесса
 
 ### 1. Документация
-- **Перед началом работы** — прочитай `AGENTS.md` (особенно секции ЗАПРЕЩЕНО и ОБЯЗАТЕЛЬНО).
-- **После завершения изменений** — пройди чеклист Post-Change Review (см. секцию в AGENTS.md).
+- **Перед началом работы** — прочитай `AGENTS.md` + доменный DOMAIN_*.md файл.
+- **После завершения изменений** — обнови DOMAIN_*.md если изменились таблицы, зависимости или known issues.
 
-### 2. Git — коммит и пуш
+### 2. Тесты — запусти ПЕРЕД коммитом
+```bash
+docker compose exec backend pytest tests/ -x --tb=short
+bash scripts/check_conventions.sh
+```
+> Если тесты упали — исправь ДО коммита!
+
+### 3. Git — коммит и пуш
 - **После каждого завершённого блока работы** — сделай коммит и пуш на GitHub.
-- Используй понятные коммит-сообщения на русском или английском.
+- Коммиты на русском: `feat:` / `fix:` / `infra:` / `refactor:` / `test:`
 
 **Всегда работаем в ветке `dev`!** Ветка `main` — стабильная продакшн версия.
 
 ```bash
-# turbo
-cd /Users/a1/Desktop/dds_app && git checkout dev
+git checkout dev
+git add -A && git commit -m "feat: описание изменений"
+git push origin dev
 ```
 
+### 4. Cross-Domain Changes (изменения затрагивающие несколько доменов)
+
+Если изменение затрагивает несколько доменов:
+1. Прочитай ВСЕ затронутые DOMAIN_*.md
+2. Проверь секцию **Dependencies** — какие модули зависят от изменяемого кода
+3. Обнови кэш-инвалидацию во ВСЕХ затронутых сервисах
+4. Запусти ПОЛНЫЙ набор тестов (не только для своего модуля)
+5. Обнови DOMAIN_*.md если изменились зависимости
+
+### 5. Сборка и проверка
+**Изменения кода** (.py, .tsx) — hot-reload автоматический.
+**Изменения зависимостей** (package.json, requirements, Dockerfile) — нужна пересборка:
 ```bash
-# turbo
-cd /Users/a1/Desktop/dds_app && git add -A
+docker compose up -d --build backend      # backend changes
+docker compose up -d --build frontend-react  # frontend changes
 ```
 
-```bash
-# turbo
-cd /Users/a1/Desktop/dds_app && git commit -m "описание изменений"
-```
-
-```bash
-# turbo
-cd /Users/a1/Desktop/dds_app && git push origin dev
-```
-
-### 2b. Тесты — запусти ПЕРЕД коммитом
-```bash
-# turbo
-cd /Users/a1/Desktop/dds_app && docker compose exec backend pytest tests/ -x --tb=short
-```
-> ⛔ **Если тесты упали — исправь ДО коммита!**
-
-#### Мердж в main (только после тестирования!)
-```bash
-cd /Users/a1/Desktop/dds_app && git checkout main && git merge dev && git push origin main && git checkout dev
-```
-
-### 3. Сборка и проверка
-
-**Изменения кода** (src/, public/) — hot-reload автоматический, пересборка НЕ нужна.
-Контейнеры используют volume mount, Next.js подхватывает изменения мгновенно.
-
-**Изменения зависимостей** (package.json, Dockerfile, next.config) — нужна пересборка:
-// turbo
-```bash
-cd /Users/a1/Desktop/dds_app && docker compose up -d --build frontend-react
-```
-
-**Изменения только backend** — hot-reload через volume mount + uvicorn `--reload`, пересборка НЕ нужна.
-При изменении requirements-backend.txt:
-// turbo
-```bash
-cd /Users/a1/Desktop/dds_app && docker compose up -d --build backend
-```
-
-- После сборки проверь что страница загружается корректно.
-
-### 4. Структура проекта
-- **Frontend**: `frontend-react/` (Next.js + TypeScript)
-- **Backend**: `backend/` (FastAPI + Python)
-- **БД**: PostgreSQL (в Docker)
-- **Кэш**: Redis (в Docker)
-- **Docker**: `docker-compose.yml`
-
-### 5. Ключевые файлы
+### 6. Ключевые файлы
 | Область | Путь |
 |---------|------|
 | API клиент | `frontend-react/src/lib/api.ts` |
 | TypeScript типы | `frontend-react/src/types/api.ts` |
 | Страницы | `frontend-react/src/app/p/[slug]/<module>/page.tsx` |
-| Layout + навигация | `frontend-react/src/app/p/[slug]/layout.tsx` |
-| Стили | `frontend-react/src/app/globals.css` |
 | Backend роутеры | `backend/routers/*.py` |
 | Backend сервисы | `backend/services/*.py` |
 | Модели БД | `backend/models/*.py` |
