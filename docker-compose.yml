@@ -230,12 +230,86 @@ services:
     networks:
       - internal
 
+  # ─── Monitoring ─────────────────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheusdata:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=30d'
+      - '--storage.tsdb.retention.size=5GB'
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    restart: unless-stopped
+    networks:
+      - internal
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_SERVER_ROOT_URL=https://app.vyatkin-wb.ru/grafana/
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-DdsGrafana2026!}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    networks:
+      - internal
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/${POSTGRES_DB:-dds_db}?sslmode=disable"
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    environment:
+      REDIS_ADDR: "redis://default:${REDIS_PASSWORD:-dds_redis_secret}@redis:6379"
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - internal
+
 volumes:
   pgdata:
   redisdata:
   miniodata:
   certbot-webroot:
   certbot-certs:
+  prometheusdata:
+  grafanadata:
 
 
 networks:
