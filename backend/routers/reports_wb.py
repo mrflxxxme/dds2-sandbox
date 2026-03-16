@@ -27,19 +27,16 @@ async def get_wb_bdr(
 ):
     """WB BDR (P&L) report from locally cached finance data."""
     import asyncio
-    import logging
-    _log = logging.getLogger("dds.reports")
-    from backend.services.wb_finance_sync import ensure_initial_sync
-    try:
-        await asyncio.wait_for(ensure_initial_sync(db, project.id), timeout=30)
-    except asyncio.TimeoutError:
-        _log.warning("ensure_initial_sync timed out for project %s, continuing without sync", project.id)
-    except (ValueError, Exception) as e:
-        _log.warning("ensure_initial_sync failed for project %s: %s", project.id, e)
     from backend.services import wb_bdr_service
-    return await wb_bdr_service.get_wb_bdr(
-        db, project.id, date_from, date_to, brand=brand, article=article,
-    )
+    try:
+        return await asyncio.wait_for(
+            wb_bdr_service.get_wb_bdr(
+                db, project.id, date_from, date_to, brand=brand, article=article,
+            ),
+            timeout=60,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Отчёт ВБ БДР: таймаут (>60с). Попробуйте уменьшить период.")
 
 
 @router.get("/wb_bdr/available_weeks")
@@ -80,19 +77,16 @@ async def get_opiu(
 ):
     """ОПИУ (P&L) report — monthly breakdown with hierarchical rows."""
     import asyncio
-    import logging
-    _log = logging.getLogger("dds.reports")
-    from backend.services.wb_finance_sync import ensure_initial_sync
-    try:
-        await asyncio.wait_for(ensure_initial_sync(db, project.id), timeout=30)
-    except asyncio.TimeoutError:
-        _log.warning("ensure_initial_sync timed out for project %s, continuing without sync", project.id)
-    except (ValueError, Exception) as e:
-        _log.warning("ensure_initial_sync failed for project %s: %s", project.id, e)
     from backend.services import opiu_service
-    return await opiu_service.get_opiu(
-        db, project.id, date_from, date_to, brand=brand, article=article,
-    )
+    try:
+        return await asyncio.wait_for(
+            opiu_service.get_opiu(
+                db, project.id, date_from, date_to, brand=brand, article=article,
+            ),
+            timeout=60,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Отчёт ОПИУ: таймаут (>60с). Попробуйте уменьшить период.")
 
 
 @router.post("/wb_bdr/sync")
