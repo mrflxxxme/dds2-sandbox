@@ -370,8 +370,12 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
     total_wb_reward = ppvz_sales_commission_net + ppvz_vw_net + ppvz_vw_nds_net
 
     # ── To Pay (итого к оплате) ──
-    # Сумма ppvz_for_pay из ВСЕХ строк = реальная сумма к перечислению от WB
-    to_pay = sale["ppvz_for_pay"] + ret["ppvz_for_pay"] + other["ppvz_for_pay"]
+    # ppvz_net минус все расходы (вкл. штрафы, логистику, удержания)
+    to_pay = (
+        ppvz_net
+        - logistics - rebill - penalties - storage
+        - operating_deductions - acceptance_val
+    )
 
     avg_sale_price = sales_amount / D(str(net_sale_qty)) if net_sale_qty > 0 else ZERO
     avg_retail_price = realization / D(str(net_sale_qty)) if net_sale_qty > 0 else ZERO
