@@ -45,6 +45,7 @@ export default function OpiuPage() {
     const [brand, setBrand] = useState('');
     const [article, setArticle] = useState('');
     const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+    const [computing, setComputing] = useState(false);
 
     // Default: Jan 1 of current year → today
     useEffect(() => {
@@ -56,12 +57,21 @@ export default function OpiuPage() {
 
     const loadData = useCallback(async () => {
         if (!dateFrom || !dateTo) return;
-        setLoading(true);
+        if (!data) setLoading(true);
         setError('');
         try {
             const res = await api.getOpiu(dateFrom, dateTo, brand || undefined, article || undefined);
+            if (res.computing) {
+                // Backend is computing in background — retry in 3s
+                setComputing(true);
+                setLoading(false);
+                setTimeout(() => loadData(), 3000);
+                return;
+            }
+            setComputing(false);
             setData(res);
         } catch (e: any) {
+            setComputing(false);
             setError(e.message || 'Ошибка загрузки');
         }
         setLoading(false);
@@ -167,9 +177,18 @@ export default function OpiuPage() {
             </div>
 
             {/* Loading / Error */}
-            {loading && (
+            {loading && !computing && (
                 <div style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-dim)' }}>
                     ⏳ Загрузка ОПИУ...
+                </div>
+            )}
+            {computing && (
+                <div style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-dim)' }}>
+                    ⚙️ Отчёт рассчитывается в фоне... Обновление через несколько секунд
+                    <div style={{ marginTop: 8 }}>
+                        <div style={{ display: 'inline-block', width: 24, height: 24, border: '3px solid var(--color-border)', borderTopColor: 'var(--color-primary)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+                    </div>
+                    <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
                 </div>
             )}
             {error && (

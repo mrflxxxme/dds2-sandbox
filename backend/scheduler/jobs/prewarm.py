@@ -11,15 +11,9 @@ logger = logging.getLogger("dds.scheduler")
 
 
 async def prewarm_project(project_id: int):
-    """Pre-compute OPIU and BDR for a single project (current + previous month)."""
+    """Pre-compute OPIU and BDR for a single project (Jan 1 → today, matching frontend default)."""
     today = date.today()
-    month_start = today.replace(day=1)
-    if month_start.month == 1:
-        prev_start = month_start.replace(year=month_start.year - 1, month=12)
-    else:
-        prev_start = month_start.replace(month=month_start.month - 1)
-
-    d_from = prev_start
+    d_from = date(today.year, 1, 1)
     d_to = today
 
     try:

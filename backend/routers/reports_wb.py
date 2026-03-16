@@ -75,18 +75,48 @@ async def get_opiu(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """ОПИУ (P&L) report — monthly breakdown with hierarchical rows."""
+    """ОПИУ (P&L) report — returns cached data instantly or triggers background computation."""
     import asyncio
-    from backend.services import opiu_service
-    try:
-        return await asyncio.wait_for(
-            opiu_service.get_opiu(
-                db, project.id, date_from, date_to, brand=brand, article=article,
-            ),
-            timeout=60,
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Отчёт ОПИУ: таймаут (>60с). Попробуйте уменьшить период.")
+    import json
+    import logging
+    from backend.cache import get_redis
+
+    _log = logging.getLogger("dds.reports")
+
+    # Check cache first — instant response if available
+    r = await get_redis()
+    if r:
+        cache_key = f"reports:opiu:project_id={project.id}:date_from={date_from}:date_to={date_to}"
+        if brand:
+            cache_key += f":brand={brand}"
+        if article:
+            cache_key += f":article={article}"
+        try:
+            cached_value = await r.get(cache_key)
+            if cached_value is not None:
+                return json.loads(cached_value)
+        except Exception:
+            pass
+
+    # Cache miss — trigger background computation and return "computing"
+    project_id = project.id
+
+    async def _compute_background():
+        try:
+            from backend.database import AsyncSessionLocal
+            from backend.services import opiu_service
+            async with AsyncSessionLocal() as bg_db:
+                await opiu_service.get_opiu(
+                    bg_db, project_id, date_from, date_to,
+                    brand=brand, article=article,
+                )
+            _log.info("OPIU background compute done for project %s", project_id)
+        except Exception as e:
+            _log.error("OPIU background compute failed for project %s: %s", project_id, e)
+
+    asyncio.create_task(_compute_background())
+
+    return {"computing": True, "message": "Отчёт рассчитывается, обновите через несколько секунд"}
 
 
 @router.post("/wb_bdr/sync")
