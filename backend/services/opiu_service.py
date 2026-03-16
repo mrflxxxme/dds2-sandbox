@@ -2,7 +2,7 @@
 Service: opiu — ОПИУ (P&L) report from WB finance data.
 
 Monthly breakdown with hierarchical P&L rows.
-Optimized: SQL aggregation instead of loading all rows into memory.
+Reuses loaders from bdr_loaders.py.
 """
 
 import logging
@@ -11,7 +11,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import select, func, case, or_, and_, not_, text
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.wb_finance import WbFinanceRow
@@ -40,170 +40,26 @@ async def get_opiu(
 ) -> dict:
     """
     Build ОПИУ (P&L) from locally cached WB finance data.
-    Uses SQL aggregation — no full row loading into memory.
+    Returns monthly breakdown + total with hierarchical P&L rows.
     """
-    # ── 1. SQL aggregation per month ──
-    month_expr = func.to_char(
-        func.coalesce(WbFinanceRow.rr_dt, WbFinanceRow.date_from),
-        text("'YYYY-MM'"),
-    )
-
-    is_sale = (WbFinanceRow.doc_type_name == "Продажа")
-    is_return = (WbFinanceRow.doc_type_name == "Возврат")
-    is_sale_or_return = or_(is_sale, is_return)
-    is_not_sale_or_return = and_(
-        WbFinanceRow.doc_type_name != "Продажа",
-        WbFinanceRow.doc_type_name != "Возврат",
-    )
-
-    # Sign: +1 for sales, -1 for returns, 0 for other
-    sign = case(
-        (is_sale, 1),
-        (is_return, -1),
-        else_=0,
-    )
-
-    # Filters
-    filters = [
+    # ── 1. Load finance rows ──
+    q = select(WbFinanceRow).where(
         WbFinanceRow.project_id == project_id,
         or_(
             WbFinanceRow.rr_dt.between(date_from, date_to),
-            and_(
-                WbFinanceRow.rr_dt.is_(None),
-                WbFinanceRow.date_from >= date_from,
-                WbFinanceRow.date_to <= date_to,
-            ),
+            (WbFinanceRow.rr_dt.is_(None)) & (WbFinanceRow.date_from >= date_from) & (WbFinanceRow.date_to <= date_to),
         ),
-    ]
-    if brand:
-        filters.append(WbFinanceRow.brand_name == brand)
-    if article:
-        filters.append(WbFinanceRow.sa_name.ilike(f"%{article}%"))
-
-    # Main aggregation query
-    q = select(
-        month_expr.label("month_key"),
-        # Реализация
-        func.coalesce(func.sum(case(
-            (is_sale_or_return, sign * func.coalesce(WbFinanceRow.retail_price_withdisc_rub, 0)),
-            else_=0,
-        )), 0).label("realization"),
-        # Фактические продажи
-        func.coalesce(func.sum(case(
-            (is_sale_or_return, sign * func.coalesce(WbFinanceRow.retail_amount, 0)),
-            else_=0,
-        )), 0).label("sales_amount"),
-        # ppvz_for_pay for sales
-        func.coalesce(func.sum(case(
-            (is_sale, func.coalesce(WbFinanceRow.ppvz_for_pay, 0)),
-            else_=0,
-        )), 0).label("ppvz_for_pay_sale"),
-        # ppvz_for_pay for returns
-        func.coalesce(func.sum(case(
-            (is_return, func.coalesce(WbFinanceRow.ppvz_for_pay, 0)),
-            else_=0,
-        )), 0).label("ppvz_for_pay_ret"),
-        # ppvz_for_pay for voluntary compensation
-        func.coalesce(func.sum(case(
-            (and_(is_sale, WbFinanceRow.supplier_oper_name == "Добровольная компенсация при возврате"),
-             func.coalesce(WbFinanceRow.ppvz_for_pay, 0)),
-            else_=0,
-        )), 0).label("comp_ppvz"),
-        # Логистика
-        func.coalesce(func.sum(case(
-            (is_not_sale_or_return, func.coalesce(WbFinanceRow.delivery_rub, 0)),
-            else_=0,
-        )), 0).label("logistics"),
-        # Штрафы
-        func.coalesce(func.sum(case(
-            (is_not_sale_or_return, func.coalesce(WbFinanceRow.penalty, 0)),
-            else_=0,
-        )), 0).label("penalties"),
-        # Хранение
-        func.coalesce(func.sum(case(
-            (is_not_sale_or_return, func.coalesce(WbFinanceRow.storage_fee, 0)),
-            else_=0,
-        )), 0).label("storage"),
-        # Приёмка
-        func.coalesce(func.sum(case(
-            (is_not_sale_or_return, func.coalesce(WbFinanceRow.acceptance, 0)),
-            else_=0,
-        )), 0).label("acceptance"),
-        # Удержания (all)
-        func.coalesce(func.sum(case(
-            (is_not_sale_or_return, func.coalesce(WbFinanceRow.deduction, 0)),
-            else_=0,
-        )), 0).label("deductions"),
-        # Ad deductions (Продвижение/Медиа)
-        func.coalesce(func.sum(case(
-            (and_(
-                is_not_sale_or_return,
-                or_(
-                    WbFinanceRow.bonus_type_name.ilike("%Продвижение%"),
-                    WbFinanceRow.bonus_type_name.ilike("%Медиа%"),
-                ),
-            ), func.coalesce(WbFinanceRow.deduction, 0)),
-            else_=0,
-        )), 0).label("ad_deduction"),
-        # Loan deductions
-        func.coalesce(func.sum(case(
-            (and_(
-                is_not_sale_or_return,
-                or_(
-                    WbFinanceRow.bonus_type_name.ilike("%кредит%"),
-                    WbFinanceRow.bonus_type_name.ilike("%заём%"),
-                ),
-            ), func.coalesce(WbFinanceRow.deduction, 0)),
-            else_=0,
-        )), 0).label("loan_deduction"),
-        # Additional payment (bonus points, sign-weighted)
-        func.coalesce(func.sum(case(
-            (is_sale_or_return, sign * func.coalesce(WbFinanceRow.additional_payment, 0)),
-            else_=0,
-        )), 0).label("additional_payment"),
-    ).where(*filters).group_by(month_expr)
-
+    )
     result = await db.execute(q)
-    monthly_rows = result.all()
+    raw_rows = result.scalars().all()
 
-    # ── 2. Per-article sale quantities for cost calculation ──
-    article_cost_q = select(
-        WbFinanceRow.sa_name,
-        WbFinanceRow.nm_id,
-        month_expr.label("month_key"),
-        func.sum(func.coalesce(WbFinanceRow.quantity, 0)).label("qty"),
-    ).where(
-        *filters,
-        WbFinanceRow.doc_type_name == "Продажа",
-        WbFinanceRow.supplier_oper_name.in_(["Продажа", ""]),
-    ).group_by(WbFinanceRow.sa_name, WbFinanceRow.nm_id, month_expr)
-
-    article_result = await db.execute(article_cost_q)
-    article_rows = article_result.all()
-
-    # ── 3. Brands for filter dropdown ──
-    brands_q = select(func.distinct(WbFinanceRow.brand_name)).where(
-        WbFinanceRow.project_id == project_id,
-        WbFinanceRow.brand_name.isnot(None),
-        WbFinanceRow.brand_name != "",
-        or_(
-            WbFinanceRow.rr_dt.between(date_from, date_to),
-            and_(
-                WbFinanceRow.rr_dt.is_(None),
-                WbFinanceRow.date_from >= date_from,
-                WbFinanceRow.date_to <= date_to,
-            ),
-        ),
-    )
-    brands_result = await db.execute(brands_q)
-    all_brands = sorted([r[0] for r in brands_result if r[0]])
-
-    # ── 4. Load enrichment data ──
+    # ── 2. Load enrichment data ──
+    ads_map = await load_ads(db, project_id, date_from, date_to)
     cost_map = await load_avg_costs(db, project_id)
     cost_overrides = await load_cost_overrides(db, project_id)
     tax_info = await load_tax_settings(db, project_id, date_from, date_to)
 
-    # ── 5. Build monthly data from SQL results ──
+    # ── 3. Determine months in range ──
     months_set: set[str] = set()
     current = date_from.replace(day=1)
     while current <= date_to:
@@ -213,71 +69,67 @@ async def get_opiu(
         else:
             current = current.replace(month=current.month + 1)
 
-    _zero_month = {
-        "realization": 0.0, "sales_amount": 0.0,
-        "ppvz_for_pay_sale": 0.0, "ppvz_for_pay_ret": 0.0, "comp_ppvz": 0.0,
-        "logistics": 0.0, "penalties": 0.0, "storage": 0.0,
-        "acceptance": 0.0, "deductions": 0.0,
-        "ad_deduction": 0.0, "loan_deduction": 0.0,
-        "additional_payment": 0.0,
-    }
-
+    # ── 4. Aggregate per month ──
+    # Per-month accumulators: month_key -> totals dict
     monthly_data: dict[str, dict] = {}
-    for row in monthly_rows:
-        mk = row.month_key
-        if mk is None:
-            continue
-        months_set.add(mk)
-        monthly_data[mk] = {
-            "realization": float(row.realization or 0),
-            "sales_amount": float(row.sales_amount or 0),
-            "ppvz_for_pay_sale": float(row.ppvz_for_pay_sale or 0),
-            "ppvz_for_pay_ret": float(row.ppvz_for_pay_ret or 0),
-            "comp_ppvz": float(row.comp_ppvz or 0),
-            "logistics": float(row.logistics or 0),
-            "penalties": float(row.penalties or 0),
-            "storage": float(row.storage or 0),
-            "acceptance": float(row.acceptance or 0),
-            "deductions": float(row.deductions or 0),
-            "ad_deduction": float(row.ad_deduction or 0),
-            "loan_deduction": float(row.loan_deduction or 0),
-            "additional_payment": float(row.additional_payment or 0),
-        }
-
-    # Fill missing months with zeros
     for mk in months_set:
-        if mk not in monthly_data:
-            monthly_data[mk] = dict(_zero_month)
+        monthly_data[mk] = _empty_totals()
+    total_data = _empty_totals()
 
-    # ── 6. Calculate costs per month from article quantities ──
+    # Track per-article nm_id for cost/ads lookup
     article_nm: dict[str, int] = {}
+    # Per-month per-article qty for cost calculation
     monthly_article_qty: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    total_article_qty: dict[str, int] = defaultdict(int)
+    all_brands: set[str] = set()
 
-    for row in article_rows:
+    for row in raw_rows:
+        brand_name = row.brand_name or ""
         sa_name = row.sa_name or ""
         nm_id = row.nm_id or 0
-        mk = row.month_key
-        if not mk:
+        doc_type = row.doc_type_name or ""
+        oper_name = row.supplier_oper_name or ""
+
+        if brand_name:
+            all_brands.add(brand_name)
+
+        # Filters
+        if brand and brand_name != brand:
             continue
-        qty = int(row.qty or 0)
+        if article and article.lower() not in sa_name.lower():
+            continue
+
+        # Determine month
+        if row.rr_dt:
+            month_key = row.rr_dt.strftime("%Y-%m")
+        elif row.date_from:
+            month_key = row.date_from.strftime("%Y-%m")
+        else:
+            continue
+
+        if month_key not in monthly_data:
+            monthly_data[month_key] = _empty_totals()
+            months_set.add(month_key)
+
+        # Track nm_id for article
         if sa_name and nm_id:
             article_nm[sa_name] = nm_id
-        monthly_article_qty[mk][sa_name] += qty
 
-    monthly_cost: dict[str, float] = {}
-    for mk in months_set:
-        month_cost = 0.0
-        for sa_name, qty in monthly_article_qty.get(mk, {}).items():
-            cost_price = cost_map.get(sa_name, 0)
-            if cost_price == 0:
-                nm = article_nm.get(sa_name, 0)
-                if nm in cost_overrides:
-                    cost_price = cost_overrides[nm]
-            month_cost += cost_price * qty
-        monthly_cost[mk] = month_cost
+        # Track sale quantities for cost calculation
+        if doc_type == "Продажа" and oper_name in ("Продажа", ""):
+            qty = int(row.quantity or 0)
+            monthly_article_qty[month_key][sa_name] += qty
+            total_article_qty[sa_name] += qty
 
-    # ── 7. Calculate ads per month ──
+        # Accumulate
+        _accumulate_row(monthly_data[month_key], row, doc_type, oper_name)
+        _accumulate_row(total_data, row, doc_type, oper_name)
+
+    # ── 5. Calculate ads per month (from WbFunnelDaily, aggregated) ──
+    # ads_map is nm_id -> total_ads for the whole period
+    # We need monthly ads — load per month
     monthly_ads: dict[str, float] = {}
+    total_ads = 0.0
     for mk in months_set:
         y, m = mk.split("-")
         m_from = date(int(y), int(m), 1)
@@ -289,25 +141,37 @@ async def get_opiu(
         m_to = m_to - timedelta(days=1)
         m_ads = await load_ads(db, project_id, m_from, m_to)
         monthly_ads[mk] = sum(m_ads.values())
+    total_ads = sum(monthly_ads.values())
 
-    # ── 8. Compute totals ──
-    def _sum_monthly(field):
-        return sum(monthly_data[mk].get(field, 0) for mk in months_set)
-
-    total_data = {k: _sum_monthly(k) for k in _zero_month.keys()}
+    # ── 6. Calculate cost per month ──
+    monthly_cost: dict[str, float] = {}
+    total_cost_val = 0.0
+    for mk in months_set:
+        month_cost = 0.0
+        for sa_name, qty in monthly_article_qty.get(mk, {}).items():
+            cost_price = cost_map.get(sa_name, 0)
+            if cost_price == 0:
+                nm = article_nm.get(sa_name, 0)
+                if nm in cost_overrides:
+                    cost_price = cost_overrides[nm]
+            month_cost += cost_price * qty
+        monthly_cost[mk] = month_cost
     total_cost_val = sum(monthly_cost.values())
 
-    # ── 9. Build P&L rows ──
+    # ── 7. Build P&L rows ──
     months_sorted = sorted(months_set, reverse=True)
 
     def _pct(val, base):
+        """Calculate % of base."""
         if not base or base == 0:
             return 0
         return round(val / base * 100, 2)
 
     def _build_row(key, label, level, bold, values_monthly, values_total,
                    base_monthly=None, base_total=None, expandable=False):
+        """Build a single P&L row with monthly + total."""
         total_pct = _pct(values_total, base_total) if base_total else None
+
         monthly = {}
         monthly_pct = {}
         for mk in months_sorted:
@@ -316,73 +180,100 @@ async def get_opiu(
                 monthly_pct[mk] = _pct(values_monthly.get(mk, 0), base_monthly.get(mk, 0))
             else:
                 monthly_pct[mk] = None
+
         return {
-            "key": key, "label": label, "level": level, "bold": bold,
+            "key": key,
+            "label": label,
+            "level": level,
+            "bold": bold,
             "expandable": expandable,
-            "total": round(float(values_total), 2), "total_pct": total_pct,
-            "monthly": monthly, "monthly_pct": monthly_pct,
+            "total": round(float(values_total), 2),
+            "total_pct": total_pct,
+            "monthly": monthly,
+            "monthly_pct": monthly_pct,
         }
 
-    def _m(field):
-        return {mk: monthly_data[mk].get(field, 0) for mk in months_sorted}
+    # Extract metrics per month
+    def _metric_monthly(field):
+        return {mk: float(monthly_data[mk].get(field, 0)) for mk in months_sorted}
 
-    def _t(field):
-        return total_data.get(field, 0)
+    def _metric_total(field):
+        return float(total_data.get(field, 0))
 
-    # Metrics
-    real_m, real_t = _m("realization"), _t("realization")
-    sales_m, sales_t = _m("sales_amount"), _t("sales_amount")
-    spp_m = {mk: monthly_data[mk]["realization"] - monthly_data[mk]["sales_amount"] for mk in months_sorted}
-    spp_t = _t("realization") - _t("sales_amount")
-    log_m, log_t = _m("logistics"), _t("logistics")
+    # ── Реализация ──
+    real_m = _metric_monthly("realization")
+    real_t = _metric_total("realization")
 
-    # Commission = sales_amount - (ppvz_net - comp)
-    comm_m = {}
-    for mk in months_sorted:
-        d = monthly_data[mk]
-        ppvz_net = d["ppvz_for_pay_sale"] - d["ppvz_for_pay_ret"]
-        comp = d["comp_ppvz"]
-        comm_m[mk] = d["sales_amount"] - (ppvz_net - comp)
-    comm_t = _t("sales_amount") - (_t("ppvz_for_pay_sale") - _t("ppvz_for_pay_ret") - _t("comp_ppvz"))
-
-    pen_m, pen_t = _m("penalties"), _t("penalties")
-    stor_m, stor_t = _m("storage"), _t("storage")
-    acc_m, acc_t = _m("acceptance"), _t("acceptance")
-
-    # Deductions minus ads and loans
-    ded_m = {mk: monthly_data[mk]["deductions"] - monthly_data[mk]["ad_deduction"] - monthly_data[mk]["loan_deduction"]
+    # ── Скидка за счет МП ──
+    spp_m = {mk: float(monthly_data[mk]["realization"]) - float(monthly_data[mk]["sales_amount"])
              for mk in months_sorted}
-    ded_t = _t("deductions") - _t("ad_deduction") - _t("loan_deduction")
+    spp_t = float(total_data["realization"]) - float(total_data["sales_amount"])
 
-    adv_m, adv_t = _m("ad_deduction"), _t("ad_deduction")
+    # ── Фактические продажи ──
+    sales_m = _metric_monthly("sales_amount")
+    sales_t = _metric_total("sales_amount")
 
+    # ── Логистика ──
+    log_m = _metric_monthly("logistics")
+    log_t = _metric_total("logistics")
+
+    # ── Комиссия ──
+    comm_m = _metric_monthly("commission")
+    comm_t = _metric_total("commission")
+
+    # ── Штрафы ──
+    pen_m = _metric_monthly("penalties")
+    pen_t = _metric_total("penalties")
+
+    # ── Хранение ──
+    stor_m = _metric_monthly("storage")
+    stor_t = _metric_total("storage")
+
+    # ── Прочие удержания (without ad deductions and loan payments) ──
+    ded_m = {mk: float(monthly_data[mk]["deductions"]) - float(monthly_data[mk]["ad_deduction"]) - float(monthly_data[mk].get("loan_deduction", 0))
+             for mk in months_sorted}
+    ded_t = float(total_data["deductions"]) - float(total_data["ad_deduction"]) - float(total_data.get("loan_deduction", 0))
+
+    # ── Платная приёмка ──
+    acc_m = _metric_monthly("acceptance")
+    acc_t = _metric_total("acceptance")
+
+    # ── Себестоимость ──
     cost_m = {mk: monthly_cost.get(mk, 0) for mk in months_sorted}
     cost_t = total_cost_val
 
-    # Direct costs
+    # ── Реклама (из finance deductions: Продвижение/Медиа) ──
+    adv_m = _metric_monthly("ad_deduction")
+    adv_t = _metric_total("ad_deduction")
+
+    # ── Прямые расходы (сумма) ──
     direct_m = {mk: cost_m[mk] + log_m[mk] + comm_m[mk] + pen_m[mk] +
                     stor_m[mk] + adv_m[mk] + ded_m[mk] + acc_m[mk]
                 for mk in months_sorted}
     direct_t = cost_t + log_t + comm_t + pen_t + stor_t + adv_t + ded_t + acc_t
 
-    # Compensation
-    comp_bonus_m, comp_bonus_t = _m("additional_payment"), _t("additional_payment")
-    comp_vol_m = {mk: monthly_data[mk]["comp_ppvz"] for mk in months_sorted}
-    comp_vol_t = _t("comp_ppvz")
+    # ── Компенсация ──
+    comp_bonus_m = _metric_monthly("additional_payment")
+    comp_bonus_t = _metric_total("additional_payment")
+    comp_vol_m = _metric_monthly("compensation_ppvz")
+    comp_vol_t = _metric_total("compensation_ppvz")
+
     comp_total_m = {mk: comp_bonus_m[mk] + comp_vol_m[mk] for mk in months_sorted}
     comp_total_t = comp_bonus_t + comp_vol_t
 
-    # Gross margin
+    # ── Валовая маржа ──
     margin_m = {mk: sales_m[mk] - direct_m[mk] + comp_total_m[mk] for mk in months_sorted}
     margin_t = sales_t - direct_t + comp_total_t
 
+    # ── Операционные расходы = 0 (рассчитываются в ДДС-отчёте, не в ОПИУ) ──
     ops_m = {mk: 0 for mk in months_sorted}
     ops_t = 0
 
+    # ── EBITDA ──
     ebitda_m = {mk: margin_m[mk] - ops_m[mk] for mk in months_sorted}
     ebitda_t = margin_t - ops_t
 
-    # Taxes
+    # ── Налоги ──
     usn_rate = tax_info.get("usn_rate", 0) / 100
     nds_rate = tax_info.get("nds_rate", 0) / 100
 
@@ -395,9 +286,11 @@ async def get_opiu(
     tax_m = {mk: _calc_tax(sales_m[mk]) for mk in months_sorted}
     tax_t = _calc_tax(sales_t)
 
+    # ── Чистая прибыль ──
     net_m = {mk: ebitda_m[mk] - tax_m[mk] for mk in months_sorted}
     net_t = ebitda_t - tax_t
 
+    # ── Build P&L rows array ──
     rows = [
         _build_row("realization", "Реализация", 0, True, real_m, real_t),
         _build_row("spp_discount", "Скидка за счет МП", 1, False, spp_m, spp_t, real_m, real_t),
@@ -422,11 +315,88 @@ async def get_opiu(
         _build_row("net_profit", "Чистая прибыль", 0, True, net_m, net_t, real_m, real_t),
     ]
 
+    # Year label
+    year_label = str(date_from.year)
+
     return {
         "period": {"date_from": str(date_from), "date_to": str(date_to)},
-        "year_label": str(date_from.year),
+        "year_label": year_label,
         "months": months_sorted,
         "rows": rows,
-        "brands": all_brands,
+        "brands": sorted(all_brands),
         "tax_info": tax_info,
     }
+
+
+# ─── Aggregation helpers ────────────────────────────────────────────────────
+
+def _empty_totals() -> dict:
+    return {
+        "realization": ZERO,
+        "sales_amount": ZERO,
+        "logistics": ZERO,
+        "commission": ZERO,
+        "penalties": ZERO,
+        "storage": ZERO,
+        "acceptance": ZERO,
+        "deductions": ZERO,
+        "ad_deduction": ZERO,
+        "loan_deduction": ZERO,
+        "additional_payment": ZERO,
+        "compensation_ppvz": ZERO,
+        # Internal fields for commission calculation
+        "_ppvz_for_pay_sale": ZERO,
+        "_ppvz_for_pay_ret": ZERO,
+        "_comp_ppvz": ZERO,
+    }
+
+
+def _accumulate_row(target: dict, row: WbFinanceRow, doc_type: str, oper_name: str):
+    """Accumulate row into P&L totals."""
+    is_sale = doc_type == "Продажа"
+    is_return = doc_type == "Возврат"
+    sign = D("1") if is_sale else D("-1") if is_return else D("0")
+
+    # Реализация (retail_price_withdisc_rub)
+    if is_sale or is_return:
+        target["realization"] += sign * (row.retail_price_withdisc_rub or ZERO)
+
+    # Фактические продажи (retail_amount)
+    if is_sale or is_return:
+        target["sales_amount"] += sign * (row.retail_amount or ZERO)
+
+    # Track ppvz_for_pay for commission calculation
+    if is_sale:
+        target["_ppvz_for_pay_sale"] += row.ppvz_for_pay or ZERO
+        if oper_name == "Добровольная компенсация при возврате":
+            target["_comp_ppvz"] += row.ppvz_for_pay or ZERO
+            target["compensation_ppvz"] += row.ppvz_for_pay or ZERO
+    elif is_return:
+        target["_ppvz_for_pay_ret"] += row.ppvz_for_pay or ZERO
+
+    # Logistics, penalties, storage, acceptance, deductions — from "other" (non-sale/return)
+    if not is_sale and not is_return:
+        target["logistics"] += row.delivery_rub or ZERO
+        target["penalties"] += row.penalty or ZERO
+        target["storage"] += row.storage_fee or ZERO
+        target["acceptance"] += row.acceptance or ZERO
+        target["deductions"] += row.deduction or ZERO
+
+        # Track ad-related deductions separately (Продвижение/Медиа)
+        bonus = row.bonus_type_name or ""
+        deduction_val = row.deduction or ZERO
+        if deduction_val and bonus:
+            if "Продвижение" in bonus or "Медиа" in bonus:
+                target["ad_deduction"] += deduction_val
+            elif "кредит" in bonus.lower() or "заём" in bonus.lower():
+                target["loan_deduction"] += deduction_val
+
+    # Additional payment (bonus points)
+    if is_sale or is_return:
+        target["additional_payment"] += sign * (row.additional_payment or ZERO)
+
+    # Recompute commission: sales_amount - (ppvz_net - compensation)
+    ppvz_net = target["_ppvz_for_pay_sale"] - target["_ppvz_for_pay_ret"]
+    comp = target["_comp_ppvz"]
+    target["commission"] = target["sales_amount"] - (ppvz_net - comp)
+
