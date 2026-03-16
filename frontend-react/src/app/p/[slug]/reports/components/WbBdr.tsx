@@ -295,6 +295,7 @@ export function WbBdr() {
                         <KpiCard label="Хранение" value={formatNumber(s.storage)} sub={pct(s.storage, s.realization)} />
                         <KpiCard label="Реклама" value={formatNumber(s.adv_sum || 0)} sub={pct(s.adv_sum || 0, s.realization)} color="#f59e0b" />
                         <KpiCard label="Прочие удержания" value={formatNumber(s.other_deduction || 0)} sub={pct(s.other_deduction || 0, s.realization)} />
+                        <KpiCard label="Списание ВБ" value={formatNumber(s.wb_deductions || 0)} sub="реклама + кредит" color="#7c3aed" />
                         <KpiCard label="Себестоимость" value={formatNumber(s.cost_total || 0)} sub={pct(s.cost_total || 0, s.realization)} color="#8b5cf6" />
                         <KpiCard label="Налог" value={formatNumber(s.tax_total || 0)} sub={`НДС ${formatNumber(s.tax_nds || 0)} + УСН ${formatNumber(s.tax_usn || 0)}`} color="#ef4444" />
                         <KpiCard label="Чистая прибыль" value={formatNumber(s.profit || 0)} sub={pct(s.profit || 0, s.realization)} color={s.profit >= 0 ? '#22c55e' : '#ff6b6b'} />

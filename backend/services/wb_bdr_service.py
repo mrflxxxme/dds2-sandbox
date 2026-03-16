@@ -410,6 +410,7 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
         "ad_deduction": ad_deduction,
         "other_deduction": other_deduction,
         "loan_deduction": loan_deduction,
+        "wb_deductions": ad_deduction + loan_deduction,  # Списание ВБ (реклама + кредит)
         "rebill": rebill,
     }
 

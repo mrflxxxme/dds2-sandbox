@@ -60,10 +60,12 @@ def apply_tax(summary: dict, tax_info: dict, total_adv, total_cost):
     summary["tax_total"] = round(total_tax, 2)
     summary["profit"] = round(
         float(summary.get("to_pay", 0))
-        # Реклама уже вычтена из to_pay через deductions_total (ad_deduction)
-        # Кредиты тоже в deductions_total, но они НЕ операционный расход
-        # Добавляем обратно loan_deduction, т.к. это финансовая операция
-        + float(summary.get("loan_deduction", 0))
+        # to_pay уже содержит deductions_total (реклама+кредиты+отзывы)
+        # Добавляем обратно рекламу и кредиты — они НЕ операционные расходы
+        + float(summary.get("ad_deduction", 0))    # реклама — отдельная статья
+        + float(summary.get("loan_deduction", 0))   # кредиты — финансовая операция
+        # Вычитаем рекламу из WbFunnelDaily (наш реальный трекинг рекламы)
+        - float(total_adv)
         - float(total_cost)
         - total_tax,
         2,
@@ -102,11 +104,13 @@ def apply_tax_article(art: dict, tax_info: dict):
     art["tax_total"] = round(total_tax, 2)
     art["tax_base"] = round(tax_base, 2)
 
-    # Profit per article: to_pay - cost - tax
-    # Реклама уже в to_pay через deductions_total, кредиты добавляем обратно
+    # Profit per article: to_pay + ad/loan deductions - adv_sum - cost - tax
+    # to_pay содержит deductions_total, добавляем обратно рекламу/кредиты
     art["profit"] = round(
         float(art.get("to_pay", 0))
+        + float(art.get("ad_deduction", 0))
         + float(art.get("loan_deduction", 0))
+        - float(art.get("adv_sum", 0))
         - float(art.get("cost_total", 0))
         - total_tax,
         2,
