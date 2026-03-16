@@ -247,6 +247,27 @@ services:
         limits:
           memory: 512M
     restart: unless-stopped
+    depends_on:
+      - alertmanager
+    networks:
+      - internal
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanagerdata:/alertmanager
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-0}
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    restart: unless-stopped
     networks:
       - internal
 
@@ -310,6 +331,7 @@ volumes:
   certbot-certs:
   prometheusdata:
   grafanadata:
+  alertmanagerdata:
 
 
 networks:
