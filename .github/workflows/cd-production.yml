@@ -61,13 +61,21 @@ jobs:
 
             echo "🏥 Health check..."
             sleep 15
-            if ! curl -sf http://localhost/health; then
+            # Try HTTPS first (post-SSL), fall back to HTTP (pre-SSL)
+            if curl -sf https://app.vyatkin-wb.ru/health > /dev/null 2>&1; then
+              echo "✅ HTTPS health check passed"
+            elif curl -sf http://localhost/health > /dev/null 2>&1; then
+              echo "✅ HTTP health check passed (SSL not yet configured)"
+            else
               echo "❌ Health check failed! Rolling back..."
               git checkout HEAD~1 -- .
               docker compose up -d --build backend frontend-react
               echo "🔄 Rollback complete"
               exit 1
             fi
+
+            echo "🔒 SSL certificate status:"
+            docker compose run --rm certbot certificates 2>/dev/null || echo "  (certbot not configured yet)"
 
             echo "✅ Production deploy successful!"
 

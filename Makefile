@@ -85,13 +85,16 @@ deploy-prod: ## Merge dev → main → production
 
 # ─── SSL ─────────────────────────────────────────────────────────────────────
 
-ssl-init: ## Получить SSL сертификат (первый раз)
-	docker compose exec -T nginx certbot certonly --webroot -w /var/www/certbot -d $(DOMAIN)
-	@echo "✅ Сертификат получен. Раскомментируй SSL в nginx.conf"
+ssl-init: ## Первичная настройка SSL (запускать на сервере)
+	bash scripts/ssl-setup.sh
 
 ssl-renew: ## Обновить SSL сертификат
-	docker compose exec -T nginx certbot renew --quiet
+	docker compose run --rm certbot renew --quiet
 	docker compose exec -T nginx nginx -s reload
+	@echo "✅ Сертификат обновлён"
+
+ssl-status: ## Проверить срок действия SSL
+	docker compose run --rm certbot certificates
 
 # ─── Утилиты ─────────────────────────────────────────────────────────────────
 
