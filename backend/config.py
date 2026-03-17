@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = ""  # From @BotFather
     TELEGRAM_CHAT_ID: str = ""  # Chat/group ID for alerts
 
+    # Anthropic (Claude AI)
+    ANTHROPIC_API_KEY: str = ""  # Claude API key for AI agent
+
     # Telegram analytics bot
     TELEGRAM_BOT_TOKEN_ANALYTICS: str = ""  # @dds_analytics_bot token
     TELEGRAM_WEBHOOK_SECRET: str = ""  # X-Telegram-Bot-Api-Secret-Token

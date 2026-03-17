@@ -27,3 +27,5 @@ structlog==24.1.0
 pdfplumber==0.11.0
 prometheus-fastapi-instrumentator==7.0.0
 aiogram==3.4.1
+anthropic>=0.40.0
+matplotlib>=3.8.0

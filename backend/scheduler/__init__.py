@@ -17,6 +17,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from backend.scheduler.jobs.ai_digest import send_daily_digests
 from backend.scheduler.jobs.funnel import (
     ad_anomaly_check,
     fast_backfill_tick,
@@ -115,8 +116,20 @@ def start_scheduler():
         misfire_grace_time=600,
     )
 
+    # AI morning digest: daily at 7:00 MSK
+    _scheduler.add_job(
+        send_daily_digests,
+        trigger=CronTrigger(hour=7, minute=0, timezone=MSK),
+        id="ai_daily_digest",
+        name="AI daily digest (07:00 MSK)",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
     _scheduler.start()
-    logger.info("✅ Scheduler started — daily sync 3x/day + backfill + ad check + wb_finance Mon retry + prewarm 1h")
+    logger.info(
+        "✅ Scheduler started — daily sync 3x/day + backfill + ad check + wb_finance Mon retry + prewarm 1h + AI digest 07:00"
+    )
 
 
 def stop_scheduler():

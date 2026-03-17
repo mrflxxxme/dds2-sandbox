@@ -319,4 +319,44 @@ async def cmd_delnote(message: Message):
 
         await telegram_service.delete_brand_note(db, notes[note_num - 1].id, binding.project_id)
 
-    await message.reply(f"Заметка #{note_num} удалена.")
+    await message.reply("Заметка #" + str(note_num) + " удалена.")
+
+
+# ─── Text messages → AI agent ──────────────────────────────────────────────
+
+
+@router.message(F.text & ~F.text.startswith("/"))
+async def handle_text(message: Message):
+    """Route text messages to AI agent for bound chats."""
+    async with AsyncSessionLocal() as db:
+        binding = await telegram_service.get_chat_binding(db, message.chat.id)
+        if not binding:
+            # In private chat, also check binding
+            if message.chat.type == "private":
+                return  # Ignore text in unbound private chats
+            return  # Ignore text in unbound group chats
+
+        # Get project tax_rate
+        from backend.models.auth import Project
+
+        project = await db.get(Project, binding.project_id)
+        tax_rate = float(project.tax_rate or 6) if project else 6.0
+
+        # Send typing action
+        await message.answer_chat_action("typing")
+
+        try:
+            from backend.services.ai.agent import ask
+
+            answer = await ask(
+                db=db,
+                project_id=binding.project_id,
+                brand=binding.brand,
+                chat_id=message.chat.id,
+                question=message.text,
+                tax_rate=tax_rate,
+            )
+            await message.reply(answer)
+        except Exception:
+            logger.exception("AI agent error")
+            await message.reply("Сервис временно недоступен, попробуйте через минуту.")
