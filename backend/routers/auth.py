@@ -13,14 +13,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.auth import (
-    verify_password,
-    hash_password,
     create_access_token,
     create_refresh_token,
-    verify_refresh_token,
-    revoke_refresh_token,
     get_current_user,
+    hash_password,
+    revoke_refresh_token,
     validate_password_strength,
+    verify_password,
+    verify_refresh_token,
 )
 from backend.config import settings
 from backend.database import get_db
@@ -33,12 +33,14 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
 
 # ─── Rate Limiting ────────────────────────────────────────────────────────────
 
+
 async def check_rate_limit(request: Request, action: str = "login"):
     """Check Redis-based rate limit. Raises 429 if exceeded."""
     if os.environ.get("TESTING"):
         return  # Skip rate limiting in tests
     try:
         from backend.cache import get_redis
+
         redis = await get_redis()
         if redis is None:
             return  # Redis unavailable — skip rate limiting
@@ -65,6 +67,7 @@ async def check_rate_limit(request: Request, action: str = "login"):
 
 
 # ─── Schemas ──────────────────────────────────────────────────────────────────
+
 
 class LoginRequest(BaseModel):
     username: str
@@ -108,13 +111,21 @@ class ProfileUpdateRequest(BaseModel):
 
 # ─── Login ────────────────────────────────────────────────────────────────────
 
+
 @router.post("/login", response_model=TokenResponse)
 async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Authenticate user and return JWT token. Rate limited."""
     await check_rate_limit(request, "login")
 
+    # Allow login by username OR email
+    from sqlalchemy import or_
+
+    login_value = body.username.strip()
     result = await db.execute(
-        select(User).where(User.username == body.username, User.is_active == True)
+        select(User).where(
+            or_(User.username == login_value, User.email == login_value),
+            User.is_active == True,
+        )
     )
     user = result.scalar_one_or_none()
 
@@ -132,6 +143,7 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
 
 
 # ─── Register ─────────────────────────────────────────────────────────────────
+
 
 @router.post("/register", response_model=TokenResponse)
 async def register(body: RegisterRequest, request: Request, db: AsyncSession = Depends(get_db)):
@@ -179,6 +191,7 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
 
     # Auto-create default project
     import uuid
+
     slug = f"project-{uuid.uuid4().hex[:8]}"
     project = Project(
         name="Мой проект",
@@ -199,6 +212,7 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
 
 
 # ─── Profile ──────────────────────────────────────────────────────────────────
+
 
 @router.get("/me", response_model=ProfileResponse)
 async def get_profile(current_user: User = Depends(get_current_user)):
@@ -227,6 +241,7 @@ async def update_profile(
 
 # ─── Change Password ─────────────────────────────────────────────────────────
 
+
 @router.post("/change_password")
 async def change_password(
     body: ChangePasswordRequest,
@@ -251,6 +266,7 @@ async def change_password(
 
 
 # ─── Refresh Token ───────────────────────────────────────────────────────────
+
 
 class RefreshRequest(BaseModel):
     refresh_token: str

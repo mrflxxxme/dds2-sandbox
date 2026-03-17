@@ -42,11 +42,11 @@ export default function LoginPage() {
 
                 <form className="auth-form" onSubmit={handleSubmit}>
                     <div className="form-group">
-                        <label className="form-label">Логин</label>
+                        <label className="form-label">Логин или email</label>
                         <input
                             className="form-input"
                             type="text"
-                            placeholder="Введите логин"
+                            placeholder="Логин или email"
                             value={username}
                             onChange={e => setUsername(e.target.value)}
                             required
