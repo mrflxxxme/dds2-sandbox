@@ -311,6 +311,19 @@ export interface FunnelSummary {
   profit: number;
 }
 
+// ─── WB Tariffs ─────────────────────────────────────────────────────────────
+
+export interface WbTariff {
+  id: number;
+  subject_name: string;
+  commission_rate: number;
+}
+
+export interface WbTariffUploadResult {
+  inserted: number;
+  replaced: number;
+}
+
 // ─── Common ──────────────────────────────────────────────────────────────────
 
 export interface MessageResponse {

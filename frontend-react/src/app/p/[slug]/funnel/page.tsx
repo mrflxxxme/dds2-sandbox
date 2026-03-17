@@ -256,7 +256,7 @@ export default function FunnelPage() {
                                         {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', zIndex: 20, verticalAlign: 'bottom', borderBottom: '2px solid #e5e7eb' }}>Бренд</th>}
                                         <th colSpan={5} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb' }}>ВОРОНКА</th>
                                         <th colSpan={7} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ВНУТРЕННЯЯ РЕКЛАМА</th>
-                                        <th colSpan={4} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ФИНАНСЫ</th>
+                                        <th colSpan={detailed ? 7 : 6} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ФИНАНСЫ</th>
                                         <th colSpan={2} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>КОНВЕРСИЯ</th>
                                     </tr>
                                     <tr>
@@ -265,7 +265,7 @@ export default function FunnelPage() {
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Заказы</th>
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Сумма ₽</th>
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Выручка ₽</th>
-                                        
+
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>Расходы ₽</th>
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Просмотры</th>
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Клики</th>
@@ -273,13 +273,15 @@ export default function FunnelPage() {
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>CPC</th>
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>CPM</th>
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>ДРР</th>
-                                        
+
                                         {detailed && <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>Себест. ₽</th>}
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', borderLeft: !detailed ? '1px solid #e5e7eb' : 'none' }}>Налог ₽</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Ком. %</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Комиссия ₽</th>
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Прибыль ₽</th>
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Маржа</th>
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Ср. цена</th>
-                                        
+
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>В корзину</th>
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>В заказ</th>
                                     </tr>
@@ -316,6 +318,8 @@ export default function FunnelPage() {
                                                 {/* Финансы */}
                                                 {detailed && <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6' }}>{r.cost_price ? fmt(r.cost_total) : <span style={{ color: '#f59e0b', fontSize: 11 }}>—</span>}</td>}
                                                 <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: '#6b7280', borderLeft: !detailed ? '1px solid #f3f4f6' : 'none' }}>{fmt(r.tax)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: r.commission_rate > 0 ? '#6366f1' : '#9ca3af', fontSize: 12 }}>{r.commission_rate > 0 ? fmtPct(r.commission_rate) : '—'}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: r.commission > 0 ? '#6366f1' : '#9ca3af', fontWeight: 500 }}>{r.commission > 0 ? fmt(r.commission) : '—'}</td>
                                                 <td style={{ textAlign: 'right', fontWeight: 700, borderBottom: '1px solid #f3f4f6', color: r.profit > 0 ? '#10b981' : '#ef4444', background: r.profit > 0 ? '#f0fdf4' : r.profit < 0 ? '#fef2f2' : undefined }}>{fmt(r.profit)}</td>
                                                 <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: r.margin > 20 ? '#10b981' : r.margin > 0 ? '#65a30d' : '#ef4444', fontWeight: r.margin > 20 ? 600 : 400 }}>{fmtPct(r.margin)}</td>
                                                 <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.avg_price)}</td>

@@ -1,6 +1,6 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
-import type { FunnelDayRow, FunnelSummary, MessageResponse } from '@/types/api';
+import type { FunnelDayRow, FunnelSummary, MessageResponse, WbTariff, WbTariffUploadResult } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
@@ -59,6 +59,17 @@ export function addFunnelMethods(api: ApiClient) {
             if (params.brand) q.set('brand', params.brand);
             if (params.search) q.set('search', params.search);
             return api.request<{ products: any[]; trend_days: number; total_products: number }>('GET', `/api/v1/funnel/trends?${q.toString()}`);
+        },
+        getTariffs() {
+            return api.request<WbTariff[]>('GET', '/api/v1/funnel/tariffs');
+        },
+        uploadTariffs(file: File) {
+            const formData = new FormData();
+            formData.append('file', file);
+            return api.uploadFormData<WbTariffUploadResult>('/api/v1/funnel/tariffs/upload', formData);
+        },
+        deleteTariff(id: number) {
+            return api.request<{ status: string }>('DELETE', `/api/v1/funnel/tariffs/${id}`);
         },
     };
 }

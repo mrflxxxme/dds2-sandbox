@@ -6,16 +6,17 @@ Thin HTTP layer — all business logic is in services/funnel/ package.
 import asyncio
 import logging
 from decimal import Decimal
-from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
+from backend.models import IntegrationKey, Project, SyncLog
 from backend.project_context import get_current_project
-from backend.models import Project, SyncLog, IntegrationKey
+from backend.schemas.tariff import WbTariffSchema, WbTariffUploadResult
 from backend.services import funnel as funnel_service
+from backend.services.tariff_service import delete_tariff, list_tariffs, upload_tariffs
 
 logger = logging.getLogger("dds.funnel")
 
@@ -24,9 +25,10 @@ router = APIRouter(prefix="/funnel")
 
 # ─── Schemas ─────────────────────────────────────────────────────────────────
 
+
 class SyncRequest(BaseModel):
     date_from: str  # YYYY-MM-DD
-    date_to: str    # YYYY-MM-DD
+    date_to: str  # YYYY-MM-DD
 
 
 class CostOverrideRequest(BaseModel):
@@ -50,6 +52,7 @@ class TaxRateRequest(BaseModel):
 
 # ─── Sync endpoints ─────────────────────────────────────────────────────────
 
+
 @router.post("/sync")
 async def sync_funnel(
     body: SyncRequest,
@@ -70,7 +73,7 @@ async def resync_ads(
     """Batch re-sync ALL ad data for the project (entire date range at once).
     Runs in background — returns immediately.
     """
-    asyncio.create_task(funnel_service.batch_resync_ads(project.id))
+    asyncio.create_task(funnel_service.batch_resync_ads(project.id))  # noqa: RUF006
     return {"status": "started", "message": f"Batch ad resync started for project {project.id}"}
 
 
@@ -80,21 +83,23 @@ async def get_sync_status(
     db: AsyncSession = Depends(get_db),
 ):
     """Get scheduler status, last sync info, and missing days count."""
-    from backend.scheduler import get_scheduler_info
-    from backend.scheduler.helpers import get_missing_dates
     from sqlalchemy import select
 
-    key_ids = (
-        select(IntegrationKey.id).where(
-            IntegrationKey.project_id == project.id,
-            IntegrationKey.is_deleted == False,
-        )
+    from backend.scheduler import get_scheduler_info
+    from backend.scheduler.helpers import get_missing_dates
+
+    key_ids = select(IntegrationKey.id).where(
+        IntegrationKey.project_id == project.id,
+        IntegrationKey.is_deleted == False,  # noqa: E712
     )
     last_sync = await db.execute(
-        select(SyncLog).where(
+        select(SyncLog)
+        .where(
             SyncLog.service == "wb_funnel",
             SyncLog.integration_id.in_(key_ids),
-        ).order_by(SyncLog.id.desc()).limit(10)
+        )
+        .order_by(SyncLog.id.desc())
+        .limit(10)
     )
     logs = [
         {
@@ -141,7 +146,7 @@ async def backfill_funnel(
         return {"status": "ok", "message": "Нет пропущенных дней", "missing_count": 0}
 
     logger.info(f"Backfill: project {pid} — {len(missing)} missing days, starting background task")
-    asyncio.create_task(funnel_service.run_backfill_bg(pid, missing))
+    asyncio.create_task(funnel_service.run_backfill_bg(pid, missing))  # noqa: RUF006
 
     return {
         "status": "started",
@@ -152,13 +157,14 @@ async def backfill_funnel(
 
 # ─── Data endpoints ─────────────────────────────────────────────────────────
 
+
 @router.get("/data")
 async def get_funnel_data(
-    date_from: Optional[str] = Query(None),
-    date_to: Optional[str] = Query(None),
-    brand: Optional[str] = Query(None),
-    vendor_code: Optional[str] = Query(None),
-    subject: Optional[str] = Query(None),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    brand: str | None = Query(None),
+    vendor_code: str | None = Query(None),
+    subject: str | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -167,9 +173,7 @@ async def get_funnel_data(
     detailed = bool(vendor_code)
 
     if not detailed:
-        data = await funnel_service.get_funnel_aggregated(
-            db, project.id, tax_rate, date_from, date_to, brand, subject
-        )
+        data = await funnel_service.get_funnel_aggregated(db, project.id, tax_rate, date_from, date_to, brand, subject)
         return {"data": data, "tax_rate": tax_rate, "detailed": False}
     else:
         data = await funnel_service.get_funnel_detailed(
@@ -180,10 +184,10 @@ async def get_funnel_data(
 
 @router.get("/summary")
 async def get_funnel_summary(
-    date_from: Optional[str] = Query(None),
-    date_to: Optional[str] = Query(None),
-    brand: Optional[str] = Query(None),
-    subject: Optional[str] = Query(None),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    brand: str | None = Query(None),
+    subject: str | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -201,6 +205,7 @@ async def get_funnel_filters(
 
 
 # ─── Cost overrides ─────────────────────────────────────────────────────────
+
 
 @router.get("/costs")
 async def get_cost_overrides(
@@ -234,6 +239,7 @@ async def bulk_set_cost_overrides(
     result = await funnel_service.bulk_set_cost_overrides(db, project.id, body.items)
     # Invalidate BDR and related report caches so "без себестоимости" count updates
     from backend.cache import invalidate_project_reports
+
     await invalidate_project_reports(project.id)
     return result
 
@@ -261,32 +267,73 @@ async def set_tax_rate(
 
 # ─── Day Analysis ────────────────────────────────────────────────────────────
 
+
 @router.get("/day-analysis")
 async def get_day_analysis(
     target_date: str = Query(..., description="YYYY-MM-DD"),
-    brand: Optional[str] = Query(None),
-    subject: Optional[str] = Query(None),
+    brand: str | None = Query(None),
+    subject: str | None = Query(None),
     trend_days: int = Query(14, description="Days for trend window"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Day analysis: summary, comparison, top products, trend, anomalies."""
     tax_rate = float(project.tax_rate or 6)
-    return await funnel_service.get_day_analysis(
-        db, project.id, tax_rate, target_date, brand, subject, trend_days
-    )
+    return await funnel_service.get_day_analysis(db, project.id, tax_rate, target_date, brand, subject, trend_days)
 
 
 @router.get("/trends")
 async def get_product_trends(
     trend_days: int = Query(7, description="Trend window: 7, 14, or 30"),
-    brand: Optional[str] = Query(None),
-    search: Optional[str] = Query(None, description="Filter by vendor_code or nmId"),
+    brand: str | None = Query(None),
+    search: str | None = Query(None, description="Filter by vendor_code or nmId"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Per-product metrics with linear regression trends."""
     tax_rate = float(project.tax_rate or 6)
-    return await funnel_service.get_product_trends(
-        db, project.id, tax_rate, trend_days, brand, search
-    )
+    return await funnel_service.get_product_trends(db, project.id, tax_rate, trend_days, brand, search)
+
+
+# ─── Tariffs (WB commission rates) ──────────────────────────────────────────
+
+
+@router.get("/tariffs", response_model=list[WbTariffSchema])
+async def get_tariffs(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all WB tariffs for the project."""
+    return await list_tariffs(db, project.id)
+
+
+@router.post("/tariffs/upload", response_model=WbTariffUploadResult)
+async def upload_tariffs_xlsx(
+    file: UploadFile = File(...),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload WB tariff xlsx file. Replaces all existing tariffs."""
+    if not file.filename or not file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(400, "Ожидается файл .xlsx")
+    data = await file.read()
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(400, "Файл слишком большой (макс 10 МБ)")
+    try:
+        result = await upload_tariffs(db, project.id, data)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    return result
+
+
+@router.delete("/tariffs/{tariff_id}")
+async def remove_tariff(
+    tariff_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Soft-delete a single tariff."""
+    ok = await delete_tariff(db, project.id, tariff_id)
+    if not ok:
+        raise HTTPException(404, "Тариф не найден")
+    return {"status": "ok"}

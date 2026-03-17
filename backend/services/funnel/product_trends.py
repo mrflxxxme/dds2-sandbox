@@ -6,12 +6,12 @@ Extracted from analysis.py for maintainability.
 import logging
 from collections import defaultdict
 from datetime import date, timedelta
-from typing import Optional
 
-from sqlalchemy import select, or_
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbFunnelDaily
+from backend.services.tariff_service import get_avg_buyout_map, get_tariff_map
 
 logger = logging.getLogger("dds.funnel")
 
@@ -42,9 +42,12 @@ def _linear_regression_trend(values: list[float]) -> float:
 
 
 async def get_product_trends(
-    db: AsyncSession, pid: int, tax_rate: float,
-    trend_days: int = 7, brand: Optional[str] = None,
-    search: Optional[str] = None,
+    db: AsyncSession,
+    pid: int,
+    tax_rate: float,
+    trend_days: int = 7,
+    brand: str | None = None,
+    search: str | None = None,
 ) -> dict:
     """
     Per-product metrics with linear regression trends.
@@ -70,6 +73,10 @@ async def get_product_trends(
     q = q.order_by(WbFunnelDaily.nm_id, WbFunnelDaily.date)
     result = await db.execute(q)
     rows = result.scalars().all()
+
+    # Load maps
+    tariff_map = await get_tariff_map(db, pid)
+    buyout_map = await get_avg_buyout_map(db, pid)
 
     products: dict = defaultdict(list)
     product_meta: dict = {}
@@ -100,15 +107,18 @@ async def get_product_trends(
         stocks_wb = latest.stocks_wb or 0
         avg_price = float(latest.avg_price or 0)
         cost_price = float(latest.cost_price or 0)
+        tariff_rate = tariff_map.get(meta["subject"] or "", 0)
+        has_tariff = tariff_rate > 0
 
         avg_daily_orders = total_orders_count / n_days if n_days else 0
         turnover_days = round(stocks_wb / avg_daily_orders, 1) if avg_daily_orders > 0 else 0
 
-        buyout = float(latest.buyout_percent or 100)
-        revenue = total_orders_sum * buyout / 100 if buyout else total_orders_sum
+        buyout = buyout_map.get(nm_id, 100)
+        revenue = total_orders_sum * buyout / 100
+        commission = revenue * tariff_rate / 100
         tax = revenue * tax_rate / 100
         cost_total = cost_price * total_orders_count
-        profit = revenue - cost_total - total_adv_sum - tax
+        profit = revenue - commission - cost_total - total_adv_sum - tax
         margin = round((profit / revenue * 100), 2) if revenue else 0
         drr = round((total_adv_sum / total_orders_sum * 100), 2) if total_orders_sum else 0
         ctr = round((total_adv_clicks / total_adv_views * 100), 2) if total_adv_views else 0
@@ -121,7 +131,7 @@ async def get_product_trends(
         daily_revenue = [float(r.orders_sum_rub or 0) for r in daily_rows]
         daily_open = [r.open_card or 0 for r in daily_rows]
         daily_adv = [float(r.adv_sum or 0) for r in daily_rows]
-        daily_adv_views_arr = [r.adv_views or 0 for r in daily_rows]
+        daily_adv_views_arr = [r.adv_views or 0 for r in daily_rows]  # noqa: F841
         daily_stocks = [r.stocks_wb or 0 for r in daily_rows]
         daily_avg_price = [float(r.avg_price or 0) for r in daily_rows]
 
@@ -148,52 +158,62 @@ async def get_product_trends(
             daily_cart_to_order.append((oc / cart_c * 100) if cart_c else 0)
 
             rev = os_ * buyout / 100 if buyout else os_
+            comm = rev * tariff_rate / 100
             t = rev * tax_rate / 100
             cp = float(r.cost_price or 0) * oc
-            p = rev - cp - adv - t
+            p = rev - comm - cp - adv - t
             daily_margin.append((p / rev * 100) if rev else 0)
             daily_turnover.append(stk / oc if oc else 0)
 
-        output.append({
-            "nm_id": nm_id,
-            "vendor_code": meta["vendor_code"],
-            "subject": meta["subject"],
-            "brand": meta["brand"],
-            "n_days": n_days,
-            "turnover_days": turnover_days,
-            "stocks_wb": stocks_wb,
-            "orders_count": total_orders_count,
-            "orders_sum_rub": round(total_orders_sum, 2),
-            "revenue": round(revenue, 2),
-            "open_card": total_open_card,
-            "add_to_cart_pct": add_to_cart_pct,
-            "cart_to_order_pct": cart_to_order_pct,
-            "margin": margin,
-            "profit": round(profit, 2),
-            "avg_price": avg_price,
-            "drr": drr,
-            "adv_sum": round(total_adv_sum, 2),
-            "ctr": ctr,
-            "cost_price": cost_price,
-            "trend_turnover": _linear_regression_trend(daily_turnover),
-            "trend_orders": _linear_regression_trend(daily_orders),
-            "trend_revenue": _linear_regression_trend(daily_revenue),
-            "trend_open": _linear_regression_trend(daily_open),
-            "trend_add_to_cart_pct": _linear_regression_trend(daily_add_to_cart_pct),
-            "trend_cart_to_order": _linear_regression_trend(daily_cart_to_order),
-            "trend_margin": _linear_regression_trend(daily_margin),
-            "trend_profit": _linear_regression_trend([
-                float(r.orders_sum_rub or 0) * buyout / 100 - float(r.adv_sum or 0)
-                - float(r.orders_sum_rub or 0) * buyout / 100 * tax_rate / 100
-                - float(r.cost_price or 0) * (r.orders_count or 0)
-                for r in daily_rows
-            ]),
-            "trend_avg_price": _linear_regression_trend(daily_avg_price),
-            "trend_drr": _linear_regression_trend(daily_drr),
-            "trend_adv": _linear_regression_trend(daily_adv),
-            "trend_ctr": _linear_regression_trend(daily_ctr),
-            "trend_stocks": _linear_regression_trend(daily_stocks),
-        })
+        output.append(
+            {
+                "nm_id": nm_id,
+                "vendor_code": meta["vendor_code"],
+                "subject": meta["subject"],
+                "brand": meta["brand"],
+                "n_days": n_days,
+                "turnover_days": turnover_days,
+                "stocks_wb": stocks_wb,
+                "orders_count": total_orders_count,
+                "orders_sum_rub": round(total_orders_sum, 2),
+                "revenue": round(revenue, 2),
+                "open_card": total_open_card,
+                "add_to_cart_pct": add_to_cart_pct,
+                "cart_to_order_pct": cart_to_order_pct,
+                "margin": margin,
+                "profit": round(profit, 2),
+                "commission": round(commission, 2),
+                "commission_rate": round(tariff_rate, 2),
+                "has_tariff": has_tariff,
+                "avg_price": avg_price,
+                "drr": drr,
+                "adv_sum": round(total_adv_sum, 2),
+                "ctr": ctr,
+                "cost_price": cost_price,
+                "trend_turnover": _linear_regression_trend(daily_turnover),
+                "trend_orders": _linear_regression_trend(daily_orders),
+                "trend_revenue": _linear_regression_trend(daily_revenue),
+                "trend_open": _linear_regression_trend(daily_open),
+                "trend_add_to_cart_pct": _linear_regression_trend(daily_add_to_cart_pct),
+                "trend_cart_to_order": _linear_regression_trend(daily_cart_to_order),
+                "trend_margin": _linear_regression_trend(daily_margin),
+                "trend_profit": _linear_regression_trend(
+                    [
+                        float(r.orders_sum_rub or 0) * buyout / 100
+                        - float(r.orders_sum_rub or 0) * buyout / 100 * tariff_rate / 100
+                        - float(r.adv_sum or 0)
+                        - float(r.orders_sum_rub or 0) * buyout / 100 * tax_rate / 100
+                        - float(r.cost_price or 0) * (r.orders_count or 0)
+                        for r in daily_rows
+                    ]
+                ),
+                "trend_avg_price": _linear_regression_trend(daily_avg_price),
+                "trend_drr": _linear_regression_trend(daily_drr),
+                "trend_adv": _linear_regression_trend(daily_adv),
+                "trend_ctr": _linear_regression_trend(daily_ctr),
+                "trend_stocks": _linear_regression_trend(daily_stocks),
+            }
+        )
 
     output.sort(key=lambda x: x["orders_sum_rub"], reverse=True)
 

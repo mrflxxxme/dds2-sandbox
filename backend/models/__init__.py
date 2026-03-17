@@ -7,29 +7,17 @@ All models are re-exported here for backward compatibility:
 """
 
 # Enums
-from backend.models.enums import (
-    EventType2,
-    TransactionStatus,
-    PurposeTag,
-    DutyBasis,
+# Audit
+from backend.models.audit import (
+    AuditLog,
 )
 
 # Auth
 from backend.models.auth import (
-    User,
     Project,
-    ProjectMember,
     ProjectInvite,
-)
-
-# References
-from backend.models.refs import (
-    Account,
-    CounterpartyCategory,
-    Override,
-    OpeningBalance,
-    CategoryRef,
-    ProjectSetting,
+    ProjectMember,
+    User,
 )
 
 # Category Rules
@@ -37,45 +25,25 @@ from backend.models.category_rules import (
     CategoryRule,
 )
 
-# Transactions
-from backend.models.transactions import (
-    Transaction,
-    CategoryChangeLog,
-    ImportLog,
+# Cost
+from backend.models.cost import (
+    CostOrder,
+    CostOrderItem,
+    DutyRule,
+    Nomenclature,
 )
 
 # Customs
 from backend.models.customs import (
-    CustomsTopup,
     CustomsAlloc,
     CustomsDT,
+    CustomsTopup,
 )
-
-# Planning
-from backend.models.planning import (
-    Order,
-    LeadTime,
-    PlannedPayment,
-    PlannedIncome,
-    WbPayout,
-    PaymentFactLink,
-)
-
-# Cost
-from backend.models.cost import (
-    Nomenclature,
-    DutyRule,
-    CostOrder,
-    CostOrderItem,
-)
-
-# Integrations & Funnel
-from backend.models.integrations import (
-    IntegrationKey,
-    SyncLog,
-    WbFunnelDaily,
-    WbCostOverride,
-    WbWarehouseStock,
+from backend.models.enums import (
+    DutyBasis,
+    EventType2,
+    PurposeTag,
+    TransactionStatus,
 )
 
 # FX Rates
@@ -83,9 +51,50 @@ from backend.models.fx_rates import (
     FxRate,
 )
 
+# Integrations & Funnel
+from backend.models.integrations import (
+    IntegrationKey,
+    SyncLog,
+    WbCostOverride,
+    WbFunnelDaily,
+    WbWarehouseStock,
+)
+
+# Order City (WB order feed city mapping)
+from backend.models.order_city import (
+    OrderCityMap,
+)
+
+# Planning
+from backend.models.planning import (
+    LeadTime,
+    Order,
+    PaymentFactLink,
+    PlannedIncome,
+    PlannedPayment,
+    WbPayout,
+)
+
+# References
+from backend.models.refs import (
+    Account,
+    CategoryRef,
+    CounterpartyCategory,
+    OpeningBalance,
+    Override,
+    ProjectSetting,
+)
+
 # Tax
 from backend.models.tax import (
     TaxRate,
+)
+
+# Transactions
+from backend.models.transactions import (
+    CategoryChangeLog,
+    ImportLog,
+    Transaction,
 )
 
 # WB Finance (cached report)
@@ -94,14 +103,9 @@ from backend.models.wb_finance import (
     WbFinanceSyncLog,
 )
 
-# Audit
-from backend.models.audit import (
-    AuditLog,
-)
-
-# Order City (WB order feed city mapping)
-from backend.models.order_city import (
-    OrderCityMap,
+# WB Tariffs (commission rates by subject)
+from backend.models.wb_tariff import (
+    WbTariff,
 )
 
 # Alias for backward compatibility
@@ -109,33 +113,63 @@ WbApiKey = IntegrationKey
 
 __all__ = [
     # Enums
-    "EventType2", "TransactionStatus", "PurposeTag", "DutyBasis",
+    "EventType2",
+    "TransactionStatus",
+    "PurposeTag",
+    "DutyBasis",
     # Auth
-    "User", "Project", "ProjectMember", "ProjectInvite",
+    "User",
+    "Project",
+    "ProjectMember",
+    "ProjectInvite",
     # References
-    "Account", "CounterpartyCategory", "Override", "OpeningBalance", "CategoryRef", "ProjectSetting",
+    "Account",
+    "CounterpartyCategory",
+    "Override",
+    "OpeningBalance",
+    "CategoryRef",
+    "ProjectSetting",
     # Category Rules
     "CategoryRule",
     # Transactions
-    "Transaction", "CategoryChangeLog", "ImportLog",
+    "Transaction",
+    "CategoryChangeLog",
+    "ImportLog",
     # Customs
-    "CustomsTopup", "CustomsAlloc", "CustomsDT",
+    "CustomsTopup",
+    "CustomsAlloc",
+    "CustomsDT",
     # Planning
-    "Order", "LeadTime", "PlannedPayment", "PlannedIncome", "WbPayout", "PaymentFactLink",
+    "Order",
+    "LeadTime",
+    "PlannedPayment",
+    "PlannedIncome",
+    "WbPayout",
+    "PaymentFactLink",
     # Cost
-    "Nomenclature", "DutyRule", "CostOrder", "CostOrderItem",
+    "Nomenclature",
+    "DutyRule",
+    "CostOrder",
+    "CostOrderItem",
     # Integrations & Funnel
-    "IntegrationKey", "SyncLog", "WbFunnelDaily", "WbCostOverride", "WbWarehouseStock",
+    "IntegrationKey",
+    "SyncLog",
+    "WbFunnelDaily",
+    "WbCostOverride",
+    "WbWarehouseStock",
     # FX Rates
     "FxRate",
     # Tax
     "TaxRate",
     # WB Finance
-    "WbFinanceRow", "WbFinanceSyncLog",
+    "WbFinanceRow",
+    "WbFinanceSyncLog",
     # Audit
     "AuditLog",
     # Aliases
     "WbApiKey",
     # Order City
     "OrderCityMap",
+    # WB Tariffs
+    "WbTariff",
 ]

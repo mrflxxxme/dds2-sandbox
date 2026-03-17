@@ -7,22 +7,26 @@ Handles:
 """
 
 import logging
-from collections import defaultdict
 from datetime import date, timedelta
-from typing import Optional
 
-from sqlalchemy import select, func, or_
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbFunnelDaily
-from backend.models.wb_finance import WbFinanceRow
+from backend.services.tariff_service import get_avg_buyout_map, get_tariff_map
 
 logger = logging.getLogger("dds.funnel")
 
 
-async def get_day_analysis(db: AsyncSession, pid: int, tax_rate: float,
-                           target_date: str, brand: Optional[str],
-                           subject: Optional[str], trend_days: int = 14) -> dict:
+async def get_day_analysis(
+    db: AsyncSession,
+    pid: int,
+    tax_rate: float,
+    target_date: str,
+    brand: str | None,
+    subject: str | None,
+    trend_days: int = 14,
+) -> dict:
     """Day analysis: summary, comparison, top products, trend, anomalies."""
     td = date.fromisoformat(target_date)
     prev_d = td - timedelta(days=1)
@@ -36,68 +40,68 @@ async def get_day_analysis(db: AsyncSession, pid: int, tax_rate: float,
             q = q.where(WbFunnelDaily.subject == subject)
         return q
 
+    # Load maps once for all day aggregations
+    tariff_map = await get_tariff_map(db, pid)
+    buyout_map = await get_avg_buyout_map(db, pid)
+
     async def _day_agg(d: date) -> dict:
-        q = select(
-            func.coalesce(func.sum(WbFunnelDaily.open_card), 0).label("open_card"),
-            func.coalesce(func.sum(WbFunnelDaily.add_to_cart), 0).label("add_to_cart"),
-            func.coalesce(func.sum(WbFunnelDaily.orders_count), 0).label("orders_count"),
-            func.coalesce(func.sum(WbFunnelDaily.orders_sum_rub), 0).label("orders_sum"),
-            func.coalesce(func.sum(WbFunnelDaily.adv_sum), 0).label("adv_sum"),
-            func.coalesce(func.sum(WbFunnelDaily.adv_views), 0).label("adv_views"),
-            func.coalesce(func.sum(WbFunnelDaily.adv_clicks), 0).label("adv_clicks"),
-            func.coalesce(func.sum(
-                func.coalesce(WbFunnelDaily.cost_price, 0) * WbFunnelDaily.orders_count
-            ), 0).label("cost_total"),
-        ).where(WbFunnelDaily.date == d)
+        # Fetch raw rows to apply per-nm_id avg buyout
+        q = select(WbFunnelDaily).where(WbFunnelDaily.date == d)
         q = _base_filter(q)
-        row = (await db.execute(q)).one()
-        os_ = float(row.orders_sum)
-        adv = float(row.adv_sum)
-        cost_total = float(row.cost_total)
+        raw_rows = (await db.execute(q)).scalars().all()
 
-        # Get WB Finance data for this day
-        fq = select(
-            func.coalesce(func.sum(WbFinanceRow.delivery_rub), 0).label("logistics"),
-            func.coalesce(func.sum(WbFinanceRow.storage_fee), 0).label("storage"),
-            func.coalesce(func.sum(WbFinanceRow.retail_amount), 0).label("total_retail"),
-            func.coalesce(func.sum(WbFinanceRow.ppvz_for_pay), 0).label("total_ppvz"),
-        ).where(
-            WbFinanceRow.project_id == pid,
-            WbFinanceRow.rr_dt == d,
-        )
-        fin_row = (await db.execute(fq)).one()
-        logistics = abs(float(fin_row.logistics))
-        storage = abs(float(fin_row.storage))
-        commission = max(float(fin_row.total_retail) - float(fin_row.total_ppvz), 0)
+        total_open = 0
+        total_cart = 0
+        total_orders = 0
+        total_os = 0.0
+        total_revenue = 0.0
+        total_adv = 0.0
+        total_views = 0
+        total_clicks = 0
+        total_cost = 0.0
+        total_commission = 0.0
 
-        revenue = os_
-        tax = revenue * tax_rate / 100
-        profit = revenue - adv - commission - logistics - storage - cost_total - tax
-        drr = (adv / os_ * 100) if os_ else 0
-        views = int(row.adv_views)
-        clicks = int(row.adv_clicks)
-        ctr = (clicks / views * 100) if views else 0
-        cpc = (adv / clicks) if clicks else 0
+        for r in raw_rows:
+            total_open += int(r.open_card or 0)
+            total_cart += int(r.add_to_cart or 0)
+            total_orders += int(r.orders_count or 0)
+            orders_sum = float(r.orders_sum_rub or 0)
+            total_os += orders_sum
+            total_adv += float(r.adv_sum or 0)
+            total_views += int(r.adv_views or 0)
+            total_clicks += int(r.adv_clicks or 0)
+            total_cost += float(r.cost_price or 0) * (r.orders_count or 0)
+
+            buyout_pct = buyout_map.get(r.nm_id, 100)
+            revenue = orders_sum * buyout_pct / 100
+            total_revenue += revenue
+
+            rate = tariff_map.get(r.subject or "", 0)
+            total_commission += revenue * rate / 100
+
+        tax = total_revenue * tax_rate / 100
+        profit = total_revenue - total_adv - total_commission - total_cost - tax
+        drr = (total_adv / total_os * 100) if total_os else 0
+        ctr = (total_clicks / total_views * 100) if total_views else 0
+        cpc = (total_adv / total_clicks) if total_clicks else 0
         return {
             "date": d.isoformat(),
-            "open_card": int(row.open_card),
-            "add_to_cart": int(row.add_to_cart),
-            "orders_count": int(row.orders_count),
-            "orders_sum": round(os_, 2),
-            "revenue": round(revenue, 2),
-            "adv_sum": round(adv, 2),
-            "adv_views": views,
-            "adv_clicks": clicks,
+            "open_card": total_open,
+            "add_to_cart": total_cart,
+            "orders_count": total_orders,
+            "orders_sum": round(total_os, 2),
+            "revenue": round(total_revenue, 2),
+            "adv_sum": round(total_adv, 2),
+            "adv_views": total_views,
+            "adv_clicks": total_clicks,
             "ctr": round(ctr, 2),
             "cpc": round(cpc, 2),
             "drr": round(drr, 2),
             "tax": round(tax, 2),
             "profit": round(profit, 2),
-            "margin": round((profit / revenue * 100) if revenue else 0, 2),
-            "logistics": round(logistics, 2),
-            "commission": round(commission, 2),
-            "storage": round(storage, 2),
-            "cost_total": round(cost_total, 2),
+            "margin": round((profit / total_revenue * 100) if total_revenue else 0, 2),
+            "commission": round(total_commission, 2),
+            "cost_total": round(total_cost, 2),
         }
 
     today_agg = await _day_agg(td)
@@ -128,14 +132,20 @@ async def get_day_analysis(db: AsyncSession, pid: int, tax_rate: float,
         os_ = float(r.orders_sum_rub or 0)
         adv = float(r.adv_sum or 0)
         drr = (adv / os_ * 100) if os_ else 0
-        top_products.append({
-            "nm_id": r.nm_id, "vendor_code": r.vendor_code,
-            "brand": r.brand, "subject": r.subject,
-            "orders_count": r.orders_count or 0,
-            "orders_sum": round(os_, 2), "adv_sum": round(adv, 2),
-            "drr": round(drr, 2),
-            "open_card": r.open_card or 0, "add_to_cart": r.add_to_cart or 0,
-        })
+        top_products.append(
+            {
+                "nm_id": r.nm_id,
+                "vendor_code": r.vendor_code,
+                "brand": r.brand,
+                "subject": r.subject,
+                "orders_count": r.orders_count or 0,
+                "orders_sum": round(os_, 2),
+                "adv_sum": round(adv, 2),
+                "drr": round(drr, 2),
+                "open_card": r.open_card or 0,
+                "add_to_cart": r.add_to_cart or 0,
+            }
+        )
 
     # Trend
     q_trend = select(
@@ -153,13 +163,16 @@ async def get_day_analysis(db: AsyncSession, pid: int, tax_rate: float,
     for r in trend_rows:
         os_ = float(r.orders_sum or 0)
         adv = float(r.adv_sum or 0)
-        trend.append({
-            "date": r.date.isoformat(),
-            "orders_sum": round(os_, 2), "adv_sum": round(adv, 2),
-            "orders_count": int(r.orders_count or 0),
-            "open_card": int(r.open_card or 0),
-            "drr": round((adv / os_ * 100) if os_ else 0, 2),
-        })
+        trend.append(
+            {
+                "date": r.date.isoformat(),
+                "orders_sum": round(os_, 2),
+                "adv_sum": round(adv, 2),
+                "orders_count": int(r.orders_count or 0),
+                "open_card": int(r.open_card or 0),
+                "drr": round((adv / os_ * 100) if os_ else 0, 2),
+            }
+        )
 
     # Anomalies
     q_avg = select(
@@ -171,8 +184,7 @@ async def get_day_analysis(db: AsyncSession, pid: int, tax_rate: float,
     q_avg = q_avg.group_by(WbFunnelDaily.nm_id)
     avg_rows = (await db.execute(q_avg)).all()
     avg_map = {
-        r.nm_id: {"avg_sum": float(r.avg_orders_sum or 0), "avg_cnt": float(r.avg_orders_count or 0)}
-        for r in avg_rows
+        r.nm_id: {"avg_sum": float(r.avg_orders_sum or 0), "avg_cnt": float(r.avg_orders_count or 0)} for r in avg_rows
     }
 
     anomalies = []
@@ -207,8 +219,7 @@ async def get_day_analysis(db: AsyncSession, pid: int, tax_rate: float,
 
 # ─── Product trends (re-exported from product_trends.py) ────────────────────
 
-from backend.services.funnel.product_trends import (  # noqa: F401
-    get_product_trends,
+from backend.services.funnel.product_trends import (  # noqa: F401, E402
     _linear_regression_trend,
+    get_product_trends,
 )
-
