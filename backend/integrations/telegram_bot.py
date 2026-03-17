@@ -327,14 +327,27 @@ async def cmd_delnote(message: Message):
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
-    """Route text messages to AI agent for bound chats."""
+    """Route text messages to AI agent for bound chats.
+
+    In groups: responds only to @mentions or replies to bot messages.
+    In private chats: responds to all text (if chat is bound).
+    """
+    # In group chats: only respond to @mentions or replies to bot
+    if message.chat.type in ("group", "supergroup"):
+        is_mention = bot and f"@{(await bot.me()).username}" in (message.text or "")
+        is_reply_to_bot = (
+            message.reply_to_message
+            and message.reply_to_message.from_user
+            and bot
+            and message.reply_to_message.from_user.id == (await bot.me()).id
+        )
+        if not is_mention and not is_reply_to_bot:
+            return  # Ignore messages not directed at bot
+
     async with AsyncSessionLocal() as db:
         binding = await telegram_service.get_chat_binding(db, message.chat.id)
         if not binding:
-            # In private chat, also check binding
-            if message.chat.type == "private":
-                return  # Ignore text in unbound private chats
-            return  # Ignore text in unbound group chats
+            return  # Ignore text in unbound chats
 
         # Get project tax_rate
         from backend.models.auth import Project
@@ -343,7 +356,18 @@ async def handle_text(message: Message):
         tax_rate = float(project.tax_rate or 6) if project else 6.0
 
         # Send typing action
-        await message.answer_chat_action("typing")
+        try:
+            from aiogram.enums import ChatAction
+
+            await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
+        except Exception:
+            logger.debug("Failed to send typing action")
+
+        # Strip bot mention from question text
+        question = message.text or ""
+        if bot:
+            me = await bot.me()
+            question = question.replace(f"@{me.username}", "").strip()
 
         try:
             from backend.services.ai.agent import ask
@@ -353,10 +377,19 @@ async def handle_text(message: Message):
                 project_id=binding.project_id,
                 brand=binding.brand,
                 chat_id=message.chat.id,
-                question=message.text,
+                question=question,
                 tax_rate=tax_rate,
             )
-            await message.reply(answer)
+            try:
+                await message.reply(answer)
+            except Exception:
+                # Fallback: send without reply if original message was deleted
+                await bot.send_message(chat_id=message.chat.id, text=answer)
         except Exception:
             logger.exception("AI agent error")
-            await message.reply("Сервис временно недоступен, попробуйте через минуту.")
+            try:
+                await message.reply("Сервис временно недоступен, попробуйте через минуту.")
+            except Exception:
+                await bot.send_message(
+                    chat_id=message.chat.id, text="Сервис временно недоступен, попробуйте через минуту."
+                )

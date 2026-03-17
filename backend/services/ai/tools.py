@@ -1,8 +1,9 @@
 """
 Claude function-calling tool definitions for DDS AI agent.
 
-8 tools: funnel data, top products, cost data, DDS report, OPIU report,
-compare periods, product info, export to Excel.
+12 tools: funnel data, top products, cost data, DDS report, OPIU report,
+compare periods, product info, stock info, order geography, warehouse need,
+day analysis, warehouse stocks.
 """
 
 TOOLS = [
@@ -156,6 +157,79 @@ TOOLS = [
                     "description": "Filter by vendor code or subject (optional)",
                 },
             },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_order_geography",
+        "description": (
+            "Get order geography — where orders are being delivered. "
+            "Returns per-city/region breakdown with order counts. "
+            "Use for questions about order geography, delivery destinations, "
+            "which cities/regions buy most, regional demand."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date_from": {
+                    "type": "string",
+                    "description": "Start date in YYYY-MM-DD format",
+                },
+                "date_to": {
+                    "type": "string",
+                    "description": "End date in YYYY-MM-DD format",
+                },
+            },
+            "required": ["date_from", "date_to"],
+        },
+    },
+    {
+        "name": "get_warehouse_need",
+        "description": (
+            "Get warehouse restocking recommendations — how many units to send to each WB warehouse. "
+            "Returns per-warehouse list with articles that need restocking. "
+            "Use for questions about where to ship inventory, warehouse restocking, supply planning."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "supply_days": {
+                    "type": "integer",
+                    "description": "Days of supply to plan for (default: 14)",
+                    "default": 14,
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_day_analysis",
+        "description": (
+            "Get daily dashboard analysis with anomaly detection. "
+            "Returns today/yesterday comparison, top products, 14-day trend, anomalies. "
+            "Use for questions about today's metrics, daily KPIs, what changed today, anomalies."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "description": "Date to analyze in YYYY-MM-DD format (default: today)",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_warehouse_stocks",
+        "description": (
+            "Get current stock levels broken down by WB warehouse. "
+            "Returns per-warehouse: total quantity, number of articles. "
+            "Use for questions about stock distribution across warehouses."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
             "required": [],
         },
     },

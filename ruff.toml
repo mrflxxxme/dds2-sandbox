@@ -35,7 +35,7 @@ ignore = [
 "backend/integrations/telegram_bot.py" = ["RUF001", "RUF003"]  # Cyrillic strings in Telegram bot messages
 "backend/services/ai/**/*.py" = ["RUF001", "RUF003"]  # Cyrillic strings in AI prompts
 "backend/scheduler/jobs/ai_digest.py" = ["RUF001", "RUF003"]  # Cyrillic strings
-"backend/main.py" = ["S110", "E402"]  # try-except-pass for optional deps, late imports for conditional loading
+"backend/main.py" = ["S110", "E402", "RUF006"]  # try-except-pass, late imports, background task ref
 "backend/config.py" = ["RUF003"]  # Cyrillic chars in comments
 
 [lint.isort]

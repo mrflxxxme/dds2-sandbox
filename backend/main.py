@@ -136,12 +136,15 @@ async def lifespan(app: FastAPI):
             try:
                 from backend.integrations.telegram_bot import create_bot, set_bot_commands
 
-                create_bot()
-                from backend.integrations.telegram_bot import bot as tg_bot_ref
+                tg_bot_ref, tg_dp = create_bot()
 
                 await set_bot_commands()
                 if settings.TELEGRAM_USE_POLLING:
-                    logger.info("Telegram bot: polling mode (local dev)")
+                    import asyncio
+
+                    # Start polling in background task (non-blocking)
+                    _polling_task = asyncio.create_task(tg_dp.start_polling(tg_bot_ref))
+                    logger.info("Telegram bot: polling started (local dev)")
                 else:
                     webhook_url = "https://app.vyatkin-wb.ru/api/v1/bot/webhook"
                     await tg_bot_ref.set_webhook(
@@ -161,8 +164,10 @@ async def lifespan(app: FastAPI):
 
     # Cleanup Telegram bot
     try:
-        from backend.integrations.telegram_bot import bot as tg_bot_shutdown
+        from backend.integrations.telegram_bot import bot as tg_bot_shutdown, dp as tg_dp_shutdown
 
+        if tg_dp_shutdown and settings.TELEGRAM_USE_POLLING:
+            await tg_dp_shutdown.stop_polling()
         if tg_bot_shutdown:
             if not settings.TELEGRAM_USE_POLLING:
                 await tg_bot_shutdown.delete_webhook()

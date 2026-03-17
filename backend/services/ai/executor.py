@@ -59,6 +59,14 @@ async def execute_tool(
             return await _get_product_info(db, project_id, tax_rate, brand, tool_input)
         elif tool_name == "get_stock_info":
             return await _get_stock_info(db, project_id, brand, tool_input)
+        elif tool_name == "get_order_geography":
+            return await _get_order_geography(db, project_id, brand, tool_input)
+        elif tool_name == "get_warehouse_need":
+            return await _get_warehouse_need(db, project_id, tool_input)
+        elif tool_name == "get_day_analysis":
+            return await _get_day_analysis(db, project_id, tax_rate, brand, tool_input)
+        elif tool_name == "get_warehouse_stocks":
+            return await _get_warehouse_stocks(db, project_id, tool_input)
         else:
             return json.dumps({"error": "Unknown tool: " + tool_name})
     except Exception as e:
@@ -125,12 +133,14 @@ async def _get_top_products(db, project_id, tax_rate, brand, inp):
 async def _get_cost_data(db, project_id, inp):
     from backend.services.funnel.queries import get_cost_overrides, get_missing_costs
 
-    overrides = await get_cost_overrides(db, project_id)
+    result = await get_cost_overrides(db, project_id)
+    # get_cost_overrides returns {"overrides": [...], "missing": [...]}
+    overrides_list = result.get("overrides", []) if isinstance(result, dict) else []
     missing = await get_missing_costs(db, project_id)
     return _json(
         {
-            "cost_overrides_count": len(overrides),
-            "cost_overrides": overrides[:30],
+            "cost_overrides_count": len(overrides_list),
+            "cost_overrides": overrides_list[:30],
             "missing_costs_count": len(missing),
             "missing_costs": missing[:20],
         }
@@ -245,5 +255,103 @@ async def _get_stock_info(db, project_id, brand, inp):
             "total_articles": len(articles),
             "traffic_light_counts": traffic,
             "articles": sorted_articles[:20],
+        }
+    )
+
+
+async def _get_order_geography(db, project_id, brand, inp):
+    from backend.services.order_geography_service import get_order_geography
+
+    result = await get_order_geography(
+        db,
+        project_id,
+        date_from=inp["date_from"],
+        date_to=inp["date_to"],
+        brand=brand,
+    )
+    cities = result.get("cities", [])
+    # Top 20 cities by order count
+    top_cities = sorted(cities, key=lambda c: c.get("order_count", 0), reverse=True)[:20]
+    return _json(
+        {
+            "total_orders": result.get("total_orders", 0),
+            "unique_cities": result.get("unique_cities", 0),
+            "top_cities": top_cities,
+        }
+    )
+
+
+async def _get_warehouse_need(db, project_id, inp):
+    from backend.services.warehouse_stock_service import get_warehouse_need
+
+    result = await get_warehouse_need(
+        db,
+        project_id,
+        supply_days=inp.get("supply_days", 14),
+        analysis_days=14,
+        mode="actual",
+    )
+    warehouses = result.get("warehouses", [])
+    # Summarize: warehouse name, total need, top articles
+    summary = []
+    for wh in warehouses:
+        articles = wh.get("articles", [])
+        need_articles = [a for a in articles if a.get("need", 0) > 0]
+        if need_articles:
+            summary.append(
+                {
+                    "warehouse": wh.get("name", ""),
+                    "total_need_units": sum(a.get("need", 0) for a in need_articles),
+                    "articles_count": len(need_articles),
+                    "top_articles": sorted(need_articles, key=lambda a: a.get("need", 0), reverse=True)[:5],
+                }
+            )
+    return _json({"supply_days": inp.get("supply_days", 14), "warehouses": summary})
+
+
+async def _get_day_analysis(db, project_id, tax_rate, brand, inp):
+    from backend.services.funnel.analysis import get_day_analysis
+
+    target_date = inp.get("date")
+    if not target_date:
+        from backend.utils.time import utcnow
+
+        target_date = utcnow().strftime("%Y-%m-%d")
+
+    result = await get_day_analysis(
+        db,
+        project_id,
+        tax_rate,
+        target_date=target_date,
+        brand=brand,
+    )
+    if not result:
+        return json.dumps({"message": "No data for this date"})
+
+    # Return summary without full product list (too large)
+    return _json(
+        {
+            "date": target_date,
+            "today": result.get("today"),
+            "yesterday": result.get("yesterday"),
+            "comparison": result.get("comparison"),
+            "anomalies": result.get("anomalies", []),
+            "top_products_count": len(result.get("products", [])),
+        }
+    )
+
+
+async def _get_warehouse_stocks(db, project_id, inp):
+    from backend.services.warehouse_stock_service import get_warehouse_stocks
+
+    result = await get_warehouse_stocks(db, project_id)
+    warehouses = result.get("warehouses", [])
+    # Sort by total quantity descending
+    sorted_wh = sorted(warehouses, key=lambda w: w.get("total_qty", 0), reverse=True)
+    return _json(
+        {
+            "total_warehouses": len(sorted_wh),
+            "total_qty": sum(w.get("total_qty", 0) for w in sorted_wh),
+            "warehouses": sorted_wh[:20],
         }
     )
