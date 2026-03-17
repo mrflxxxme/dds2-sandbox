@@ -11,12 +11,10 @@ This module: scheduler lifecycle (start, stop, status, restart).
 """
 
 import logging
-from datetime import datetime, timedelta
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from backend.scheduler.jobs.funnel import (
@@ -97,16 +95,15 @@ def start_scheduler():
             misfire_grace_time=3600,
         )
 
-    # Report cache prewarm: DISABLED — causes OOM kill on worker
-    # TODO: re-enable after BDR SQL migration (reduces memory usage)
-    # _scheduler.add_job(
-    #     prewarm_all_reports,
-    #     trigger=IntervalTrigger(hours=1),
-    #     id="prewarm_reports",
-    #     name="Report cache prewarm (every 1h)",
-    #     replace_existing=True,
-    #     misfire_grace_time=300,
-    # )
+    # Report cache prewarm: every 1h (re-enabled after BDR SQL migration)
+    _scheduler.add_job(
+        prewarm_all_reports,
+        trigger=IntervalTrigger(hours=1),
+        id="prewarm_reports",
+        name="Report cache prewarm (every 1h)",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
 
     # Health monitor: every 6 hours
     _scheduler.add_job(
@@ -119,7 +116,7 @@ def start_scheduler():
     )
 
     _scheduler.start()
-    logger.info("✅ Scheduler started — daily sync 3x/day + backfill + ad check " "+ wb_finance Mon retry + prewarm 1h")
+    logger.info("✅ Scheduler started — daily sync 3x/day + backfill + ad check + wb_finance Mon retry + prewarm 1h")
 
 
 def stop_scheduler():

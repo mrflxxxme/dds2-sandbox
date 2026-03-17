@@ -11,32 +11,31 @@ Verified formulas match TrueStats.
 Architecture:
 - Loaders (DB queries) → bdr_loaders.py
 - Enrichment (tax, ABC) → bdr_enrichment.py
-- Orchestration + aggregation → this file
+- Orchestration + SQL aggregation → this file
+
+Optimized: SQL-level aggregation instead of loading all rows into Python.
 """
 
 import logging
 from datetime import date
 from decimal import Decimal
-from typing import Optional
 
-from sqlalchemy import select, or_
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models.wb_finance import WbFinanceRow
-
-from backend.services.bdr_loaders import (
-    load_ads,
-    load_orders_stocks,
-    load_avg_costs,
-    load_cost_overrides,
-    load_tax_settings,
-)
 from backend.cache import cached
 from backend.services.bdr_enrichment import (
     apply_tax,
     apply_tax_article,
-    enrich_article,
     compute_abc,
+    enrich_article,
+)
+from backend.services.bdr_loaders import (
+    load_ads,
+    load_avg_costs,
+    load_cost_overrides,
+    load_orders_stocks,
+    load_tax_settings,
 )
 
 logger = logging.getLogger("dds.wb_bdr")
@@ -45,41 +44,138 @@ D = Decimal
 ZERO = D("0")
 
 
+# ─── SQL aggregation query ────────────────────────────────────────────────────
+
+_DATE_FILTER = """(
+    (rr_dt BETWEEN :date_from AND :date_to)
+    OR (rr_dt IS NULL AND date_from >= :date_from AND date_to <= :date_to)
+  )"""
+
+_SELECT_COLS_BDR = """
+    sa_name,
+    MAX(NULLIF(nm_id, 0)) AS nm_id,
+    MAX(NULLIF(brand_name, '')) AS brand_name,
+    MAX(NULLIF(subject_name, '')) AS subject_name,
+    COUNT(*) AS row_count,
+
+    -- Realization components (sale/ret split)
+    COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub ELSE 0 END), 0) AS sale_retail,
+    COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_price_withdisc_rub ELSE 0 END), 0) AS ret_retail,
+    COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_amount ELSE 0 END), 0) AS sale_amount,
+    COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_amount ELSE 0 END), 0) AS ret_amount,
+
+    -- ppvz_for_pay (sale/ret split for commission calc)
+    COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_for_pay ELSE 0 END), 0) AS ppvz_sale,
+    COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_for_pay ELSE 0 END), 0) AS ppvz_ret,
+
+    -- Compensation (Добровольная компенсация при возврате)
+    COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа'
+        AND supplier_oper_name = 'Добровольная компенсация при возврате'
+        THEN ppvz_for_pay ELSE 0 END), 0) AS comp_ppvz,
+
+    -- WB reward components (for total_wb_reward)
+    COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_sales_commission ELSE 0 END), 0) AS ppvz_comm_sale,
+    COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_sales_commission ELSE 0 END), 0) AS ppvz_comm_ret,
+    COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_vw ELSE 0 END), 0) AS ppvz_vw_sale,
+    COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_vw ELSE 0 END), 0) AS ppvz_vw_ret,
+    COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_vw_nds ELSE 0 END), 0) AS ppvz_vw_nds_sale,
+    COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_vw_nds ELSE 0 END), 0) AS ppvz_vw_nds_ret,
+
+    -- Product quantities (only from oper_name Продажа/Возврат)
+    COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа'
+        AND supplier_oper_name IN ('Продажа', 'Возврат')
+        THEN quantity ELSE 0 END), 0) AS sale_qty,
+    COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат'
+        AND supplier_oper_name IN ('Продажа', 'Возврат')
+        THEN quantity ELSE 0 END), 0) AS ret_qty,
+
+    -- ALL buckets sums (WB distributes across doc_types)
+    COALESCE(SUM(delivery_rub), 0) AS logistics,
+    COALESCE(SUM(penalty), 0) AS penalties,
+    COALESCE(SUM(storage_fee), 0) AS storage,
+    COALESCE(SUM(acceptance), 0) AS acceptance_total,
+    COALESCE(SUM(rebill_logistic_cost), 0) AS rebill,
+    COALESCE(SUM(deduction), 0) AS deductions_total,
+
+    -- Deduction splits (from all buckets)
+    COALESCE(SUM(CASE WHEN deduction != 0
+        AND (bonus_type_name LIKE '%%Продвижение%%' OR bonus_type_name LIKE '%%Медиа%%')
+        THEN deduction ELSE 0 END), 0) AS ad_deduction,
+    COALESCE(SUM(CASE WHEN deduction != 0
+        AND bonus_type_name LIKE '%%отзыв%%'
+        THEN deduction ELSE 0 END), 0) AS other_deduction,
+    COALESCE(SUM(CASE WHEN deduction != 0
+        AND (LOWER(bonus_type_name) LIKE '%%кредит%%' OR LOWER(bonus_type_name) LIKE '%%заём%%')
+        THEN deduction ELSE 0 END), 0) AS loan_deduction
+"""
+
+
+def _build_bdr_aggregate_sql(brand: str | None, article: str | None) -> str:
+    """Build per-article SQL aggregation query with optional filters."""
+    where = f"project_id = :project_id AND {_DATE_FILTER}"
+    where += " AND LOWER(COALESCE(sa_name, '')) != 'неопознанный товар'"
+    if brand:
+        where += " AND brand_name = :brand"
+    if article:
+        where += " AND LOWER(sa_name) LIKE :article_like"
+    return f"SELECT {_SELECT_COLS_BDR} FROM wb_finance_rows" f" WHERE {where} GROUP BY sa_name ORDER BY sa_name"  # noqa: S608
+
+
+def _build_brands_sql_bdr() -> str:
+    """Get distinct brand names for filter dropdown."""
+    sql = f"SELECT DISTINCT brand_name FROM wb_finance_rows WHERE project_id = :project_id AND {_DATE_FILTER} AND brand_name IS NOT NULL AND brand_name != '' ORDER BY brand_name"  # noqa: S608
+    return sql
+
+
+def _build_total_count_sql(brand: str | None, article: str | None) -> str:
+    """Count total raw rows (for total_rows in response)."""
+    where = f"project_id = :project_id AND {_DATE_FILTER}"
+    where += " AND LOWER(COALESCE(sa_name, '')) != 'неопознанный товар'"
+    if brand:
+        where += " AND brand_name = :brand"
+    if article:
+        where += " AND LOWER(sa_name) LIKE :article_like"
+    return f"SELECT COUNT(*) AS cnt FROM wb_finance_rows WHERE {where}"  # noqa: S608
+
+
 @cached(prefix="reports:wb_bdr", ttl=3600)
 async def get_wb_bdr(
     db: AsyncSession,
     project_id: int,
     date_from: date,
     date_to: date,
-    brand: Optional[str] = None,
-    article: Optional[str] = None,
+    brand: str | None = None,
+    article: str | None = None,
 ) -> dict:
     """
     Build BDR from locally cached WB finance data.
     Enriches with ads, cost, tax.
     Returns { summary, articles, brands, period, total_rows, sync_status, tax_info }
+
+    Uses SQL-level aggregation for performance (handles 1M+ rows).
     """
     # ── 1. Get sync status ──
     from backend.services.wb_finance_sync import get_sync_status
 
     sync_status = await get_sync_status(db, project_id)
 
-    # ── 2. Load finance rows from local DB ──
-    q = select(WbFinanceRow).where(
-        WbFinanceRow.project_id == project_id,
-        or_(
-            # New rows with rr_dt — filter by actual realization date
-            WbFinanceRow.rr_dt.between(date_from, date_to),
-            # Old rows without rr_dt — fallback to week boundaries
-            (WbFinanceRow.rr_dt.is_(None)) & (WbFinanceRow.date_from >= date_from) & (WbFinanceRow.date_to <= date_to),
-        ),
-    )
-    result = await db.execute(q)
-    raw_rows = result.scalars().all()
+    # ── 2. SQL aggregation — returns ~N articles instead of 634K rows ──
+    params: dict = {
+        "project_id": project_id,
+        "date_from": date_from,
+        "date_to": date_to,
+    }
+    if brand:
+        params["brand"] = brand
+    if article:
+        params["article_like"] = f"%{article.lower()}%"
 
-    if not raw_rows:
+    result = await db.execute(text(_build_bdr_aggregate_sql(brand, article)), params)
+    agg_rows = result.mappings().all()
+
+    if not agg_rows:
         return {
-            "summary": _serialize(_compute_metrics(_empty_totals(), _empty_totals(), _empty_totals())),
+            "summary": _serialize(_empty_metrics()),
             "articles": [],
             "brands": [],
             "period": {"date_from": str(date_from), "date_to": str(date_to)},
@@ -88,143 +184,90 @@ async def get_wb_bdr(
             "tax_info": {},
         }
 
-    # ── 3. Load ads data from WbFunnelDaily ──
+    # ── 3. Total row count (for response metadata) ──
+    count_result = await db.execute(text(_build_total_count_sql(brand, article)), params)
+    total_rows = count_result.scalar() or 0
+
+    # ── 4. Load brands for filter dropdown ──
+    brands_result = await db.execute(
+        text(_build_brands_sql_bdr()),
+        {"project_id": project_id, "date_from": date_from, "date_to": date_to},
+    )
+    all_brands = sorted(r[0] for r in brands_result)
+
+    # ── 5. Load enrichment data (small queries) ──
     ads_map = await load_ads(db, project_id, date_from, date_to)
-
-    # ── 3b. Load orders & stocks from WbFunnelDaily ──
     orders_stocks_map = await load_orders_stocks(db, project_id, date_from, date_to)
-
-    # ── 4. Load cost prices from cost_order_items + manual overrides ──
     cost_map = await load_avg_costs(db, project_id)
     cost_overrides = await load_cost_overrides(db, project_id)
-
-    # ── 5. Load tax settings ──
     tax_info = await load_tax_settings(db, project_id, date_from, date_to)
 
-    # Period days (for turnover / GMROI Year)
     period_days = max((date_to - date_from).days + 1, 1)
 
-    # ── 6. Aggregate per article ──
-    articles_data: dict[str, dict] = {}
-    all_brands: set[str] = set()
-
-    for row in raw_rows:
-        brand_name = row.brand_name or ""
-        sa_name = row.sa_name or ""
-        subject = row.subject_name or ""
-        nm_id = row.nm_id or 0
-        doc_type = row.doc_type_name or ""
-        oper_name = row.supplier_oper_name or ""
-
-        if brand_name:
-            all_brands.add(brand_name)
-
-        # Apply filters
-        if brand and brand_name != brand:
-            continue
-        if article and article.lower() not in sa_name.lower():
-            continue
-
-        # Skip WB system placeholder — not a real product
-        if sa_name.lower() in ("неопознанный товар",):
-            continue
-
-        # Get or create article bucket
-        if sa_name not in articles_data:
-            articles_data[sa_name] = {
-                "sa_name": sa_name,
-                "brand": brand_name,
-                "subject": subject,
-                "nm_id": nm_id,
-                "sale": _empty_totals(),
-                "ret": _empty_totals(),
-                "other": _empty_totals(),
-            }
-
-        art = articles_data[sa_name]
-        if brand_name and not art["brand"]:
-            art["brand"] = brand_name
-        if subject and not art["subject"]:
-            art["subject"] = subject
-        if nm_id and not art["nm_id"]:
-            art["nm_id"] = nm_id
-
-        if doc_type == "Продажа":
-            target = art["sale"]
-        elif doc_type == "Возврат":
-            target = art["ret"]
-        else:
-            target = art["other"]
-
-        _accumulate_row(target, row, oper_name)
-
-    # ── 7. Build results with enrichments ──
-    total_sale = _empty_totals()
-    total_ret = _empty_totals()
-    total_other = _empty_totals()
+    # ── 6. Compute metrics per article from SQL rows ──
+    total_metrics = _empty_metrics()
     total_adv = ZERO
     total_cost = ZERO
 
     result_articles = []
-    for sa_name, art in articles_data.items():
-        for key in total_sale:
-            total_sale[key] += art["sale"].get(key, ZERO)
-            total_ret[key] += art["ret"].get(key, ZERO)
-            total_other[key] += art["other"].get(key, ZERO)
+    for row in agg_rows:
+        metrics = _compute_metrics_from_sql(row)
+        sa_name = row["sa_name"] or ""
+        nm_id = int(row["nm_id"] or 0)
 
-        row_result = _compute_metrics(art["sale"], art["ret"], art["other"])
-        row_result["sa_name"] = sa_name
-        row_result["brand"] = art["brand"]
-        row_result["subject"] = art["subject"]
-        row_result["nm_id"] = art["nm_id"]
+        metrics["sa_name"] = sa_name
+        metrics["brand"] = row["brand_name"] or ""
+        metrics["subject"] = row["subject_name"] or ""
+        metrics["nm_id"] = nm_id
 
-        # Ads: per-article always from WbFunnelDaily (finance report ads have empty sa_name)
-        nm = art["nm_id"]
-        adv_sum = float(ads_map.get(nm, 0))
-        row_result["adv_sum"] = adv_sum
+        # Accumulate totals
+        for key in total_metrics:
+            total_metrics[key] += D(str(metrics.get(key, 0)))
+
+        # Ads: per-article from WbFunnelDaily
+        adv_sum = float(ads_map.get(nm_id, 0))
+        metrics["adv_sum"] = adv_sum
         total_adv += D(str(adv_sum))
 
         # Cost from history (avg), fallback to manual override by nm_id
         cost_price = cost_map.get(sa_name, 0)
-        if cost_price == 0 and nm in cost_overrides:
-            cost_price = cost_overrides[nm]
-        sale_qty = row_result["sale_qty"]
+        if cost_price == 0 and nm_id in cost_overrides:
+            cost_price = cost_overrides[nm_id]
+        sale_qty = metrics["sale_qty"]
         cost_total = cost_price * sale_qty if sale_qty > 0 else 0
-        row_result["cost_price"] = round(cost_price, 2)
-        row_result["cost_total"] = round(cost_total, 2)
+        metrics["cost_price"] = round(cost_price, 2)
+        metrics["cost_total"] = round(cost_total, 2)
         total_cost += D(str(cost_total))
 
         # Orders & stocks from funnel
-        os_data = orders_stocks_map.get(nm, {})
-        row_result["orders_count"] = os_data.get("orders_count", 0)
-        row_result["orders_sum"] = os_data.get("orders_sum", 0)
-        row_result["stocks_wb"] = os_data.get("stocks_wb", 0)
+        os_data = orders_stocks_map.get(nm_id, {})
+        metrics["orders_count"] = os_data.get("orders_count", 0)
+        metrics["orders_sum"] = os_data.get("orders_sum", 0)
+        metrics["stocks_wb"] = os_data.get("stocks_wb", 0)
 
-        # Avg profit per item
-        # (profit computed after tax below, placeholder)
-        row_result["_period_days"] = period_days
+        metrics["_period_days"] = period_days
 
-        result_articles.append(row_result)
+        result_articles.append(metrics)
 
     # Sort by to_pay descending
     result_articles.sort(key=lambda x: x["to_pay"], reverse=True)
 
-    # ── 8. Summary ──
-    summary_result = _compute_metrics(total_sale, total_ret, total_other)
+    # ── 7. Summary ──
+    summary_result = {k: float(v) for k, v in total_metrics.items()}
 
-    # Ads: always from WbFunnelDaily (summed from per-article)
+    # Ads + cost totals
     summary_result["adv_sum"] = float(total_adv)
     summary_result["cost_total"] = float(total_cost)
 
-    # ── 9. Tax calculation ──
+    # ── 8. Tax calculation ──
     apply_tax(summary_result, tax_info, D(str(summary_result["adv_sum"])), total_cost)
     for art_row in result_articles:
         apply_tax_article(art_row, tax_info)
 
-    # ── 10. Computed enrichment fields ──
+    # ── 9. Computed enrichment fields ──
     total_real = float(summary_result.get("realization", 0)) or 1
     total_sales = float(summary_result.get("sales_amount", 0)) or 1
-    # Summary-level aggregates for orders/stocks
+
     sum_orders_count = 0
     sum_orders_sum = 0.0
     sum_stocks_wb = 0
@@ -234,149 +277,113 @@ async def get_wb_bdr(
         sum_orders_sum += art_row.get("orders_sum", 0)
         sum_stocks_wb += art_row.get("stocks_wb", 0)
 
-    # Summary enrichment
     summary_result["orders_count"] = sum_orders_count
     summary_result["orders_sum"] = round(sum_orders_sum, 2)
     summary_result["stocks_wb"] = sum_stocks_wb
     enrich_article(summary_result, total_real, total_sales, period_days)
 
-    # ── 11. ABC analysis ──
+    # ── 10. ABC analysis ──
     compute_abc(result_articles)
 
     return {
         "summary": _serialize(summary_result),
         "articles": [_serialize(a) for a in result_articles],
-        "brands": sorted(all_brands),
+        "brands": all_brands,
         "period": {"date_from": str(date_from), "date_to": str(date_to)},
-        "total_rows": len(raw_rows),
+        "total_rows": total_rows,
         "sync_status": sync_status,
         "tax_info": tax_info,
     }
 
 
-# ─── Aggregation helpers ────────────────────────────────────────────────────
+# ─── Metrics computation ──────────────────────────────────────────────────────
 
-def _empty_totals() -> dict:
+
+def _empty_metrics() -> dict:
+    """Empty metrics dict (same keys as _compute_metrics_from_sql output)."""
     return {
-        "retail_price_withdisc_rub": ZERO,
-        "retail_amount": ZERO,
+        "realization": ZERO,
+        "sales_amount": ZERO,
+        "returns_amount": ZERO,
+        "to_pay": ZERO,
         "ppvz_for_pay": ZERO,
-        "ppvz_sales_commission": ZERO,
-        "delivery_rub": ZERO,
-        "penalty": ZERO,
-        "additional_payment": ZERO,
-        "storage_fee": ZERO,
+        "compensation": ZERO,
+        "sale_qty": 0,
+        "sale_qty_gross": 0,
+        "ret_qty": 0,
+        "buyout_pct": ZERO,
+        "avg_sale_price": ZERO,
+        "avg_retail_price": ZERO,
+        "avg_logistics": ZERO,
+        "commission": ZERO,
+        "total_wb_reward": ZERO,
+        "logistics": ZERO,
+        "penalties": ZERO,
+        "storage": ZERO,
         "acceptance": ZERO,
-        "deduction": ZERO,
-        "ppvz_reward": ZERO,
-        "rebill_logistic_cost": ZERO,
-        "ppvz_vw": ZERO,
-        "ppvz_vw_nds": ZERO,
-        "quantity": ZERO,
-        "product_qty": ZERO,
-        "compensation_ppvz": ZERO,  # ppvz from Добровольная компенсация rows
-        "ad_deduction": ZERO,      # deduction from Продвижение/Медиа (fin mode ads)
-        "other_deduction": ZERO,   # deduction from Списание за отзыв etc.
-        "loan_deduction": ZERO,    # deduction from WB loan payments (not operating expense)
+        "deductions": ZERO,
+        "deductions_total": ZERO,
+        "ad_deduction": ZERO,
+        "other_deduction": ZERO,
+        "loan_deduction": ZERO,
+        "wb_deductions": ZERO,
+        "rebill": ZERO,
     }
 
 
-def _accumulate_row(target: dict, row: WbFinanceRow, oper_name: str):
-    """Accumulate ORM row values into target bucket."""
-    target["retail_price_withdisc_rub"] += row.retail_price_withdisc_rub or ZERO
-    target["retail_amount"] += row.retail_amount or ZERO
-    target["ppvz_for_pay"] += row.ppvz_for_pay or ZERO
-    target["ppvz_sales_commission"] += row.ppvz_sales_commission or ZERO
-    target["delivery_rub"] += row.delivery_rub or ZERO
-    target["penalty"] += row.penalty or ZERO
-    target["additional_payment"] += row.additional_payment or ZERO
-    target["storage_fee"] += row.storage_fee or ZERO
-    target["acceptance"] += row.acceptance or ZERO
-    target["deduction"] += row.deduction or ZERO
-    target["ppvz_reward"] += row.ppvz_reward or ZERO
-    target["rebill_logistic_cost"] += row.rebill_logistic_cost or ZERO
-    target["ppvz_vw"] += row.ppvz_vw or ZERO
-    target["ppvz_vw_nds"] += row.ppvz_vw_nds or ZERO
-    target["quantity"] += D(str(row.quantity or 0))
-
-    if oper_name in ("Продажа", "Возврат"):
-        target["product_qty"] += D(str(row.quantity or 0))
-
-    # Добровольная компенсация has doc_type='Продажа' but its ppvz_for_pay
-    # must be excluded from commission (TrueStats convention)
-    if oper_name == "Добровольная компенсация при возврате":
-        target["compensation_ppvz"] += row.ppvz_for_pay or ZERO
-
-    # Split deductions by type for financial mode
-    bonus = row.bonus_type_name or ""
-    deduction_val = row.deduction or ZERO
-    if deduction_val and bonus:
-        if "Продвижение" in bonus or "Медиа" in bonus:
-            target["ad_deduction"] += deduction_val
-        elif "отзыв" in bonus:
-            target["other_deduction"] += deduction_val
-        elif "кредит" in bonus.lower() or "заём" in bonus.lower():
-            target["loan_deduction"] += deduction_val
-
-
-def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
-    """Compute BDR metrics from sale/return/other buckets.
+def _compute_metrics_from_sql(row) -> dict:
+    """Compute BDR metrics from a SQL aggregation row.
 
     Commission formula verified against TrueStats:
-        commission = retail_amount_net - ppvz_for_pay_net
-    where ppvz_for_pay_net includes compensation from "Добров. компенсация" rows.
+        commission = sales_amount_net - (ppvz_net - compensation)
 
     IMPORTANT: logistics, penalties, deductions etc. are summed from ALL 3 buckets
     because WB API distributes these values across sale/return/other rows.
     """
-    realization = sale["retail_price_withdisc_rub"] - ret["retail_price_withdisc_rub"]
-    sales_amount = sale["retail_amount"] - ret["retail_amount"]
-    returns_amount = ret["retail_price_withdisc_rub"]
+    sale_retail = D(str(row["sale_retail"]))
+    ret_retail = D(str(row["ret_retail"]))
+    sale_amount = D(str(row["sale_amount"]))
+    ret_amount = D(str(row["ret_amount"]))
+    ppvz_sale = D(str(row["ppvz_sale"]))
+    ppvz_ret = D(str(row["ppvz_ret"]))
+    compensation = D(str(row["comp_ppvz"]))
 
-    sale_qty = int(sale["product_qty"])
-    ret_qty = int(ret["product_qty"])
+    realization = sale_retail - ret_retail
+    sales_amount = sale_amount - ret_amount
+    returns_amount = ret_retail
+
+    sale_qty = int(row["sale_qty"])
+    ret_qty = int(row["ret_qty"])
     net_sale_qty = sale_qty - ret_qty
 
-    # ── Sum from ALL buckets (sale + ret + other) ──
-    # WB API distributes these values across all doc_types
-    logistics = sale["delivery_rub"] + ret["delivery_rub"] + other["delivery_rub"]
-    penalties = sale["penalty"] + ret["penalty"] + other["penalty"]
-    storage = sale["storage_fee"] + ret["storage_fee"] + other["storage_fee"]
-    acceptance_val = sale["acceptance"] + ret["acceptance"] + other["acceptance"]
-    rebill = sale["rebill_logistic_cost"] + ret["rebill_logistic_cost"] + other["rebill_logistic_cost"]
+    # ALL buckets sums
+    logistics = D(str(row["logistics"]))
+    penalties = D(str(row["penalties"]))
+    storage = D(str(row["storage"]))
+    acceptance_val = D(str(row["acceptance_total"]))
+    rebill = D(str(row["rebill"]))
 
-    # Удержания (deduction) — из всех бакетов
-    deductions_total = sale["deduction"] + ret["deduction"] + other["deduction"]
-    # Advertising deduction from fin report (Продвижение + Медиа)
-    ad_deduction = sale["ad_deduction"] + ret["ad_deduction"] + other["ad_deduction"]
-    # Other deductions (Списание за отзыв etc.)
-    other_deduction = sale["other_deduction"] + ret["other_deduction"] + other["other_deduction"]
-    # Loan payments (not operating expense)
-    loan_deduction = sale["loan_deduction"] + ret["loan_deduction"] + other["loan_deduction"]
+    # Deductions
+    deductions_total = D(str(row["deductions_total"]))
+    ad_deduction = D(str(row["ad_deduction"]))
+    other_deduction = D(str(row["other_deduction"]))
+    loan_deduction = D(str(row["loan_deduction"]))
 
     # Operating deductions = total - ads - loans
     operating_deductions = deductions_total - ad_deduction - loan_deduction
 
-    # ── Commission ──
-    # TrueStats formula: Продажи(net) - (К перечислению(net) - Компенсация)
-    ppvz_net = sale["ppvz_for_pay"] - ret["ppvz_for_pay"]
-    compensation = sale["compensation_ppvz"]
+    # Commission: TrueStats formula
+    ppvz_net = ppvz_sale - ppvz_ret
     commission = sales_amount - (ppvz_net - compensation)
 
     # WB total reward (for reference)
-    ppvz_sales_commission_net = sale["ppvz_sales_commission"] - ret["ppvz_sales_commission"]
-    ppvz_vw_net = sale["ppvz_vw"] - ret["ppvz_vw"]
-    ppvz_vw_nds_net = sale["ppvz_vw_nds"] - ret["ppvz_vw_nds"]
-    total_wb_reward = ppvz_sales_commission_net + ppvz_vw_net + ppvz_vw_nds_net
+    ppvz_comm_net = D(str(row["ppvz_comm_sale"])) - D(str(row["ppvz_comm_ret"]))
+    ppvz_vw_net = D(str(row["ppvz_vw_sale"])) - D(str(row["ppvz_vw_ret"]))
+    ppvz_vw_nds_net = D(str(row["ppvz_vw_nds_sale"])) - D(str(row["ppvz_vw_nds_ret"]))
+    total_wb_reward = ppvz_comm_net + ppvz_vw_net + ppvz_vw_nds_net
 
-    # ── To Pay (итого к оплате) ──
-    # Реальная сумма выплаты от WB = ppvz_net минус ВСЕ удержания
-    # Включая рекламу и кредиты — WB вычитает их из перечисления
-    to_pay = (
-        ppvz_net
-        - logistics - rebill - penalties - storage
-        - deductions_total - acceptance_val
-    )
+    # To Pay
+    to_pay = ppvz_net - logistics - rebill - penalties - storage - deductions_total - acceptance_val
 
     avg_sale_price = sales_amount / D(str(net_sale_qty)) if net_sale_qty > 0 else ZERO
     avg_retail_price = realization / D(str(net_sale_qty)) if net_sale_qty > 0 else ZERO
@@ -410,7 +417,7 @@ def _compute_metrics(sale: dict, ret: dict, other: dict) -> dict:
         "ad_deduction": ad_deduction,
         "other_deduction": other_deduction,
         "loan_deduction": loan_deduction,
-        "wb_deductions": ad_deduction + loan_deduction,  # Списание ВБ (реклама + кредит)
+        "wb_deductions": ad_deduction + loan_deduction,
         "rebill": rebill,
     }
 

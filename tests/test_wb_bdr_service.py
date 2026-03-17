@@ -1,48 +1,104 @@
 """
-Tests for wb_bdr_service — pure computation functions.
-No DB required — tests _compute_metrics, _apply_tax, _enrich_article, _compute_abc.
+Tests for wb_bdr_service -- pure computation functions.
+No DB required -- tests _compute_metrics_from_sql, _apply_tax, _enrich_article, _compute_abc.
 """
-import pytest
+
 from decimal import Decimal
+
+from backend.services.bdr_enrichment import (
+    apply_tax as _apply_tax,
+    apply_tax_article as _apply_tax_article,
+    compute_abc as _compute_abc,
+    enrich_article as _enrich_article,
+)
+from backend.services.wb_bdr_service import (
+    _compute_metrics_from_sql,
+    _serialize,
+)
 
 D = Decimal
 ZERO = D("0")
 
-
-# ─── Imports ─────────────────────────────────────────────────────────────────
-
-from backend.services.wb_bdr_service import (
-    _empty_totals,
-    _compute_metrics,
-    _serialize,
-)
-from backend.services.bdr_enrichment import (
-    apply_tax as _apply_tax,
-    apply_tax_article as _apply_tax_article,
-    enrich_article as _enrich_article,
-    compute_abc as _compute_abc,
-)
-
-
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
-def _make_sale(**overrides) -> dict:
-    t = _empty_totals()
-    for k, v in overrides.items():
-        t[k] = D(str(v))
-    return t
+
+def _make_sql_row(
+    sale_retail=0,
+    ret_retail=0,
+    sale_amount=0,
+    ret_amount=0,
+    ppvz_sale=0,
+    ppvz_ret=0,
+    comp_ppvz=0,
+    ppvz_comm_sale=0,
+    ppvz_comm_ret=0,
+    ppvz_vw_sale=0,
+    ppvz_vw_ret=0,
+    ppvz_vw_nds_sale=0,
+    ppvz_vw_nds_ret=0,
+    sale_qty=0,
+    ret_qty=0,
+    logistics=0,
+    penalties=0,
+    storage=0,
+    acceptance_total=0,
+    rebill=0,
+    deductions_total=0,
+    ad_deduction=0,
+    other_deduction=0,
+    loan_deduction=0,
+    sa_name="test",
+    nm_id=1,
+    brand_name="Brand",
+    subject_name="Subject",
+    row_count=1,
+) -> dict:
+    """Build a mock SQL row dict (same keys as SQL query returns)."""
+    return {
+        "sa_name": sa_name,
+        "nm_id": nm_id,
+        "brand_name": brand_name,
+        "subject_name": subject_name,
+        "row_count": row_count,
+        "sale_retail": sale_retail,
+        "ret_retail": ret_retail,
+        "sale_amount": sale_amount,
+        "ret_amount": ret_amount,
+        "ppvz_sale": ppvz_sale,
+        "ppvz_ret": ppvz_ret,
+        "comp_ppvz": comp_ppvz,
+        "ppvz_comm_sale": ppvz_comm_sale,
+        "ppvz_comm_ret": ppvz_comm_ret,
+        "ppvz_vw_sale": ppvz_vw_sale,
+        "ppvz_vw_ret": ppvz_vw_ret,
+        "ppvz_vw_nds_sale": ppvz_vw_nds_sale,
+        "ppvz_vw_nds_ret": ppvz_vw_nds_ret,
+        "sale_qty": sale_qty,
+        "ret_qty": ret_qty,
+        "logistics": logistics,
+        "penalties": penalties,
+        "storage": storage,
+        "acceptance_total": acceptance_total,
+        "rebill": rebill,
+        "deductions_total": deductions_total,
+        "ad_deduction": ad_deduction,
+        "other_deduction": other_deduction,
+        "loan_deduction": loan_deduction,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Tests: _compute_metrics
+# Tests: _compute_metrics_from_sql
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestComputeMetrics:
     """Verify BDR metric formulas against known inputs."""
 
     def test_empty_buckets(self):
         """All-zero input → all-zero output."""
-        result = _compute_metrics(_empty_totals(), _empty_totals(), _empty_totals())
+        row = _make_sql_row()
+        result = _compute_metrics_from_sql(row)
         assert result["realization"] == ZERO
         assert result["sales_amount"] == ZERO
         assert result["to_pay"] == ZERO
@@ -51,16 +107,15 @@ class TestComputeMetrics:
 
     def test_basic_sale(self):
         """Single sale → realization, commission, to_pay."""
-        sale = _make_sale(
-            retail_price_withdisc_rub=1000,
-            retail_amount=800,
-            ppvz_for_pay=600,
-            product_qty=5,
+        row = _make_sql_row(
+            sale_retail=1000,
+            sale_amount=800,
+            ppvz_sale=600,
+            sale_qty=5,
+            logistics=100,
+            storage=50,
         )
-        ret = _empty_totals()
-        other = _make_sale(delivery_rub=100, storage_fee=50)
-
-        result = _compute_metrics(sale, ret, other)
+        result = _compute_metrics_from_sql(row)
 
         assert result["realization"] == D("1000")
         assert result["sales_amount"] == D("800")
@@ -73,21 +128,17 @@ class TestComputeMetrics:
 
     def test_sale_with_returns(self):
         """Sales + returns → net values."""
-        sale = _make_sale(
-            retail_price_withdisc_rub=1000,
-            retail_amount=800,
-            ppvz_for_pay=600,
-            product_qty=10,
+        row = _make_sql_row(
+            sale_retail=1000,
+            ret_retail=200,
+            sale_amount=800,
+            ret_amount=160,
+            ppvz_sale=600,
+            ppvz_ret=120,
+            sale_qty=10,
+            ret_qty=2,
         )
-        ret = _make_sale(
-            retail_price_withdisc_rub=200,
-            retail_amount=160,
-            ppvz_for_pay=120,
-            product_qty=2,
-        )
-        other = _empty_totals()
-
-        result = _compute_metrics(sale, ret, other)
+        result = _compute_metrics_from_sql(row)
 
         assert result["realization"] == D("800")  # 1000 - 200
         assert result["sales_amount"] == D("640")  # 800 - 160
@@ -97,28 +148,27 @@ class TestComputeMetrics:
 
     def test_buyout_pct(self):
         """Buyout % = sale_qty / (sale_qty + ret_qty) * 100."""
-        sale = _make_sale(product_qty=80)
-        ret = _make_sale(product_qty=20)
-        other = _empty_totals()
-
-        result = _compute_metrics(sale, ret, other)
+        row = _make_sql_row(sale_qty=80, ret_qty=20)
+        result = _compute_metrics_from_sql(row)
         assert result["buyout_pct"] == D("80")  # 80/(80+20)*100
 
     def test_avg_sale_price(self):
         """avg_sale_price = sales_amount / net_qty."""
-        sale = _make_sale(retail_amount=5000, product_qty=10)
-        ret = _make_sale(retail_amount=500, product_qty=2)
-        other = _empty_totals()
-
-        result = _compute_metrics(sale, ret, other)
-        net_qty = 10 - 2  # 8
-        expected_avg = D("4500") / D("8")
+        row = _make_sql_row(
+            sale_amount=5000,
+            ret_amount=500,
+            sale_qty=10,
+            ret_qty=2,
+        )
+        result = _compute_metrics_from_sql(row)
+        expected_avg = D("4500") / D("8")  # net_qty = 10 - 2 = 8
         assert result["avg_sale_price"] == expected_avg
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: _apply_tax
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestApplyTax:
     """Tax calculation on summary."""
@@ -139,7 +189,7 @@ class TestApplyTax:
         assert summary["profit"] == 29000
 
     def test_usn_income_expense_with_nds(self):
-        """USN 15% Д-Р with NDS 5%."""
+        """USN 15% income-expense with NDS 5%."""
         summary = {
             "sales_amount": 100000,
             "to_pay": 50000,
@@ -176,6 +226,7 @@ class TestApplyTax:
 # Tests: _apply_tax_article
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestApplyTaxArticle:
     """Per-article tax."""
 
@@ -202,6 +253,7 @@ class TestApplyTaxArticle:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: _enrich_article
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestEnrichArticle:
     """Computed fields: margin, ROI, DRR, turnover, GMROI, capitalization."""
@@ -307,6 +359,7 @@ class TestEnrichArticle:
 # Tests: _compute_abc
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestComputeABC:
     """ABC analysis classification."""
 
@@ -353,6 +406,7 @@ class TestComputeABC:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: _serialize
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestSerialize:
     """Decimal → float conversion."""
