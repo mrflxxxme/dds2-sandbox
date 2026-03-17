@@ -97,6 +97,10 @@ jobs:
         run: |
           docker compose exec -T backend alembic upgrade head
 
+      - name: Run convention checks
+        run: |
+          docker compose exec -T backend bash scripts/check_conventions.sh
+
       - name: Run tests
         run: |
           docker compose exec -T backend pytest tests/ -x --tb=short -q

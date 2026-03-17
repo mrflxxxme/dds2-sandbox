@@ -1,0 +1,35 @@
+# Pre-commit hooks — DDS project
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+
+repos:
+  # ─── Ruff (linter + formatter) ─────────────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.4
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        types_or: [python]
+      - id: ruff-format
+        types_or: [python]
+
+  # ─── Standard hooks ────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-merge-conflict
+
+  # ─── DDS convention checks (local) ─────────────────────────────────
+  - repo: local
+    hooks:
+      - id: dds-conventions
+        name: DDS Convention Checker
+        entry: bash scripts/check_conventions.sh
+        language: system
+        pass_filenames: false
+        types: [python]
