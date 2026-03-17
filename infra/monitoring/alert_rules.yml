@@ -90,30 +90,6 @@ groups:
           summary: "Report endpoint p95 > 5s"
           description: "{{ $labels.handler }} p95 = {{ $value | humanizeDuration }}"
 
-      # ─── Disk ──────────────────────────────────────────────────────────
-      - alert: DiskSpaceLow
-        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.15
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Disk space < 15% free"
-          description: "{{ $value | humanizePercentage }} свободно на /"
-
-      - alert: DiskSpaceCritical
-        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.05
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Disk space < 5% — CRITICAL!"
-
-      # ─── Container health ──────────────────────────────────────────────
-      - alert: ContainerRestarting
-        expr: increase(container_restart_count[1h]) > 3
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Container {{ $labels.name }} restarting frequently"
-          description: "{{ $value }} restarts in last hour"
+      # ─── Disk & Backup ────────────────────────────────────────────────
+      # Disk + backup checks done via scheduler health_monitor job
+      # (no node-exporter needed — checks os.statvfs from inside container)

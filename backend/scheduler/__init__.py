@@ -16,16 +16,17 @@ from datetime import datetime, timedelta
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from backend.scheduler.jobs.funnel import (
-    sync_all_projects_funnel,
-    fast_backfill_tick,
     ad_anomaly_check,
+    fast_backfill_tick,
+    sync_all_projects_funnel,
 )
+from backend.scheduler.jobs.health_check import health_monitor
+from backend.scheduler.jobs.prewarm import prewarm_all_reports, prewarm_project  # noqa: F401
 from backend.scheduler.jobs.wb_finance import sync_all_projects_wb_finance
-from backend.scheduler.jobs.prewarm import prewarm_project, prewarm_all_reports
 
 logger = logging.getLogger("dds.scheduler")
 
@@ -46,6 +47,7 @@ def start_scheduler():
     Single instance is guaranteed by Docker (1 worker container).
     """
     from backend.config import settings
+
     if not settings.SCHEDULER_ENABLED:
         logger.info("⏭️ Scheduler disabled (SCHEDULER_ENABLED=false)")
         return
@@ -105,6 +107,16 @@ def start_scheduler():
         misfire_grace_time=300,
     )
 
+    # Health monitor: every 6 hours
+    _scheduler.add_job(
+        health_monitor,
+        trigger=IntervalTrigger(hours=6),
+        id="health_monitor",
+        name="Health monitor (disk, backups, stuck syncs)",
+        replace_existing=True,
+        misfire_grace_time=600,
+    )
+
     # Initial prewarm: 30s after startup
     _scheduler.add_job(
         prewarm_all_reports,
@@ -115,10 +127,7 @@ def start_scheduler():
     )
 
     _scheduler.start()
-    logger.info(
-        "✅ Scheduler started — daily sync 3x/day + backfill + ad check "
-        "+ wb_finance Mon retry + prewarm 1h"
-    )
+    logger.info("✅ Scheduler started — daily sync 3x/day + backfill + ad check " "+ wb_finance Mon retry + prewarm 1h")
 
 
 def stop_scheduler():
@@ -137,11 +146,13 @@ def get_scheduler_info() -> dict:
 
     jobs = []
     for job in _scheduler.get_jobs():
-        jobs.append({
-            "id": job.id,
-            "name": job.name,
-            "next_run": job.next_run_time.isoformat() if job.next_run_time else None,
-        })
+        jobs.append(
+            {
+                "id": job.id,
+                "name": job.name,
+                "next_run": job.next_run_time.isoformat() if job.next_run_time else None,
+            }
+        )
 
     return {"running": _scheduler.running, "jobs": jobs}
 
@@ -159,7 +170,8 @@ def restart_backfill_jobs():
                 fast_backfill_tick,
                 IntervalTrigger(minutes=3),
                 id="fast_backfill",
-                max_instances=1, replace_existing=True,
+                max_instances=1,
+                replace_existing=True,
             )
             logger.info("🔄 Restarted fast_backfill job (new API key detected)")
 
@@ -168,7 +180,8 @@ def restart_backfill_jobs():
                 ad_anomaly_check,
                 IntervalTrigger(minutes=3),
                 id="ad_anomaly_check",
-                max_instances=1, replace_existing=True,
+                max_instances=1,
+                replace_existing=True,
             )
             logger.info("🔄 Restarted ad_anomaly_check job (new API key detected)")
     except Exception as e:
