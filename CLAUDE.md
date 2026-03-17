@@ -1,54 +1,112 @@
-# CLAUDE.md — DDS Project Entry Point
+# CLAUDE.md — DDS (управленческий учёт для e-commerce / Wildberries)
 
-## Quick Start
+## Стек
+FastAPI + PostgreSQL 15 + PgBouncer + Redis + MinIO + Next.js 15 (React 19)
+
+## Команды
 ```bash
-docker compose up -d                              # Start all services
-docker compose exec backend pytest tests/ -x      # Run tests
-docker compose logs backend --tail=50              # Check logs
-bash scripts/check_conventions.sh                  # Convention checks
+docker compose up -d                              # Запуск
+docker compose exec backend pytest tests/ -x      # Тесты
+docker compose logs backend --tail=50             # Логи
+bash scripts/check_conventions.sh                 # Проверка конвенций
 ```
 
-## Project Overview
-**DDS** — система управленческого учёта (ДДС) для e-commerce (Wildberries).
-Стек: FastAPI + PostgreSQL 15 + PgBouncer + Redis + MinIO + Next.js 15.
+## Железные правила (нарушение = баг)
+1. **project_id** — КАЖДЫЙ запрос к БД MUST фильтровать по `project_id`
+2. **is_deleted** — КАЖДЫЙ запрос к SoftDeleteMixin моделям MUST `.where(Model.is_deleted == False)`
+3. **soft_delete** — удаление: `model.soft_delete()` (НИКОГДА `db.delete()`)
+4. **datetime** — ТОЛЬКО `from backend.utils.time import utcnow` (НИКОГДА `datetime.utcnow()`)
+5. **деньги** — ТОЛЬКО `Numeric(18, 2)` (НИКОГДА Float)
+6. **SQL** — ТОЛЬКО параметризованный `:param` binding (НИКОГДА f-string в `text()`)
+7. **кэш** — `invalidate_cache(prefix)` после мутаций, ключ MUST содержать project_id
+8. **логика** — бизнес-логика в `services/` (НИКОГДА в `routers/`)
 
-## Architecture (read before ANY change)
-- Full guide: [AGENTS.md](AGENTS.md)
-- Business rules: [BUSINESS_RULES.md](BUSINESS_RULES.md)
-- Code conventions: [CONVENTIONS.md](CONVENTIONS.md)
-- Deploy playbook: [PLAYBOOK.md](PLAYBOOK.md)
+## Архитектура backend
+```
+routers/ (HTTP only) → services/ (логика) → models/ (ORM)
+schemas/ — Pydantic request/response
+etl/ — импорт выписок (парсеры VTB, WB)
+integrations/ — внешние API (WB)
+scheduler/jobs/ — фоновые задачи (ТОЛЬКО в worker container)
+```
 
-## Domain Context Files
-Перед работой с модулем — **ОБЯЗАТЕЛЬНО** прочитай его контекстный файл:
+### Порядок создания нового модуля
+Model → Alembic migration → Schema → Service → Router → Test
 
+### PgBouncer
+- `prepared_statement_cache_size=0` ОБЯЗАТЕЛЕН в DATABASE_URL
+- `DATABASE_URL_SYNC` → напрямую к PostgreSQL (для Alembic/ETL)
+- Statement timeout через event listener (НЕ server_settings)
+
+### Кэш (Redis)
+- `@cached(prefix="...", ttl=300)` для отчётов
+- `invalidate_cache(prefix)` сам добавляет `:*` — НЕ передавать wildcard
+- При ошибке Redis → graceful degradation (warning, не crash)
+- НИКОГДА не сбрасывать все ключи разом (worker starvation)
+
+### Crypto (API-ключи WB)
+- Шифрование: `backend/utils/crypto.py` (encrypt/decrypt)
+- Есть legacy_fallback — НЕ менять без data-migration
+
+### WB API
+- Rate limits: asyncio.Semaphore, respect Retry-After
+- Circuit Breaker: ТОЛЬКО для 500-504 (НЕ для 429)
+- Partial data: сохранять уже загруженные дни при ошибках
+- sync_log: ВСЕГДА обновлять в finally (НИКОГДА не оставлять RUNNING)
+
+### WB Finance deductions (БДР/ОПИУ)
+- `ad_deduction` — отдельная статья, НЕ включать в to_pay
+- `loan_deduction` — финансовая операция, НЕ включать в операционную прибыль
+- Только `other_deduction` → операционные расходы
+- Изменение типов удержаний → обновить ОБА: wb_bdr_service.py И opiu_service.py
+
+## Архитектура frontend
+```
+src/app/p/[slug]/ — страницы (dashboard, import, txn, inbox, reports, planning, cost, funnel, trends, refs, settings)
+src/lib/api.ts — API клиент (JWT auth + auto-refresh)
+src/lib/utils.ts — formatNumber, formatDate, exportToExcel
+src/components/ — DataTable, FormModal, PageHeader, TabLayout, Toast
+src/types/api.ts — TypeScript интерфейсы
+```
+
+### Правила frontend
+- Типы → `types/api.ts` (НИКОГДА inline / any)
+- API → методы `api.ts` (НИКОГДА прямой fetch, кроме FormData upload)
+- Числа → `formatNumber()`, даты → `formatDate()`
+- Таблицы → кнопка Excel export
+- ОБЯЗАТЕЛЬНО: loading, error, empty states
+- Новый endpoint → тип в api.ts + метод в api.ts
+
+## Домены — читай DOMAIN_*.md перед работой с модулем
 | Домен | Контекст | Ключевые файлы |
 |-------|----------|----------------|
-| Транзакции & Импорт | `backend/DOMAIN_TRANSACTIONS.md` | etl/, services/transactions_service.py, routers/import_txn.py |
-| Отчёты (ДДС, БДР, ОПИУ) | `backend/DOMAIN_REPORTS.md` | services/reports/, services/wb_bdr_service.py, services/opiu_service.py |
+| Транзакции | `backend/DOMAIN_TRANSACTIONS.md` | etl/, services/transactions_service.py |
+| Отчёты | `backend/DOMAIN_REPORTS.md` | services/reports/, opiu_service.py, wb_bdr_service.py |
 | Планирование | `backend/DOMAIN_PLANNING.md` | services/planning/, routers/planning.py |
-| Себестоимость | `backend/DOMAIN_COST.md` | services/cost/, routers/cost.py, etl/cost_parsers.py |
+| Себестоимость | `backend/DOMAIN_COST.md` | services/cost/, etl/cost_parsers.py |
 | WB Интеграция | `backend/DOMAIN_WB.md` | integrations/, services/funnel/, scheduler/jobs/ |
-| Фронтенд | `frontend-react/DOMAIN_FRONTEND.md` | src/app/, src/lib/api.ts, src/types/api.ts |
+| Фронтенд | `frontend-react/DOMAIN_FRONTEND.md` | src/app/, src/lib/api.ts |
 
-## Critical Rules (MUST follow)
-1. **Multi-tenancy:** EVERY query MUST filter by `project_id`
-2. **Soft delete READ:** EVERY query on SoftDeleteMixin models MUST filter `is_deleted == False`
-3. **Soft delete WRITE:** `model.soft_delete()` (NEVER db.delete()) for SoftDeleteMixin models
-4. **Datetime:** ONLY `from backend.utils.time import utcnow` (NEVER datetime.utcnow())
-5. **Money:** ONLY `Numeric(18, 2)` (NEVER Float)
-6. **SQL:** ONLY parameterized `:param` binding (NEVER f-strings in text())
-7. **Cache:** invalidate after mutations, key MUST include project_id
-8. **Business logic:** in services/ (NEVER in routers/)
-9. **Tests:** MUST pass before commit
-10. **Docs:** update DOMAIN_*.md if tables/dependencies/known issues change
+## Git
+- Коммиты: `feat:` / `fix:` / `infra:` / `refactor:` / `test:` (русский или англ.)
+- Ветки: `dev` → проверка → merge в `main` → production auto-deploy
+- НИКОГДА не деплоить через SSH — только CI/CD
+- Перед коммитом: тесты + check_conventions.sh
 
-## Git Workflow
-- Коммиты на русском: `feat:` / `fix:` / `infra:` / `refactor:` / `test:`
-- Push в `dev` → staging auto-deploy → verify → merge to `main` → production
-- НИКОГДА не деплоить напрямую через SSH
+## Среды
+| Среда | Ветка | URL |
+|-------|-------|-----|
+| Local | dev | http://localhost:3000 |
+| Production | main | https://app.vyatkin-wb.ru |
 
-## Before Every Commit
-```bash
-docker compose exec backend pytest tests/ -x --tb=short
-bash scripts/check_conventions.sh
-```
+## Антипаттерны (НЕ ДЕЛАТЬ)
+- Запрос без `project_id` или `is_deleted` фильтра
+- `db.delete()` вместо `soft_delete()`
+- f-string в SQL `text()`
+- Float для денег
+- `datetime.utcnow()` / `datetime.now()`
+- Бизнес-логика в роутере
+- `.scalars().all()` без `.limit()`
+- `ilike(f"%{input}%")` без экранирования `%`/`_`
+- Мутация без `invalidate_cache()`
+- Сервис > 400 строк без разбиения
