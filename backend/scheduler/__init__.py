@@ -97,15 +97,16 @@ def start_scheduler():
             misfire_grace_time=3600,
         )
 
-    # Report cache prewarm: every hour
-    _scheduler.add_job(
-        prewarm_all_reports,
-        trigger=IntervalTrigger(hours=1),
-        id="prewarm_reports",
-        name="Report cache prewarm (every 1h)",
-        replace_existing=True,
-        misfire_grace_time=300,
-    )
+    # Report cache prewarm: DISABLED — causes OOM kill on worker
+    # TODO: re-enable after BDR SQL migration (reduces memory usage)
+    # _scheduler.add_job(
+    #     prewarm_all_reports,
+    #     trigger=IntervalTrigger(hours=1),
+    #     id="prewarm_reports",
+    #     name="Report cache prewarm (every 1h)",
+    #     replace_existing=True,
+    #     misfire_grace_time=300,
+    # )
 
     # Health monitor: every 6 hours
     _scheduler.add_job(
@@ -115,15 +116,6 @@ def start_scheduler():
         name="Health monitor (disk, backups, stuck syncs)",
         replace_existing=True,
         misfire_grace_time=600,
-    )
-
-    # Initial prewarm: 5 min after startup (gives backfill time to run first)
-    _scheduler.add_job(
-        prewarm_all_reports,
-        trigger=DateTrigger(run_date=datetime.now(MSK) + timedelta(minutes=5)),
-        id="prewarm_startup",
-        name="Report cache prewarm (startup)",
-        replace_existing=True,
     )
 
     _scheduler.start()
