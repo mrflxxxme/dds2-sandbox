@@ -29,9 +29,9 @@ async def test_get_missing_dates_finds_gaps():
     mock_session.__aexit__ = AsyncMock(return_value=False)
 
     with patch("backend.scheduler.helpers.AsyncSessionLocal", return_value=mock_session), \
-         patch("backend.scheduler.helpers._get_failed_dates", return_value=set()):
-        from backend.scheduler.helpers import _get_missing_dates
-        missing = await _get_missing_dates(project_id=1, lookback_days=5)
+         patch("backend.scheduler.helpers.get_failed_dates", return_value=set()):
+        from backend.scheduler.helpers import get_missing_dates
+        missing = await get_missing_dates(project_id=1, lookback_days=5)
 
     # Should have 4 missing dates (lookback 5 days, minus yesterday which has data, minus today)
     assert len(missing) == 4
@@ -59,9 +59,9 @@ async def test_get_missing_dates_skips_poisoned():
     poisoned_date = (today - timedelta(days=2)).isoformat()
 
     with patch("backend.scheduler.helpers.AsyncSessionLocal", return_value=mock_session), \
-         patch("backend.scheduler.helpers._get_failed_dates", return_value={poisoned_date}):
-        from backend.scheduler.helpers import _get_missing_dates
-        missing = await _get_missing_dates(project_id=1, lookback_days=5)
+         patch("backend.scheduler.helpers.get_failed_dates", return_value={poisoned_date}):
+        from backend.scheduler.helpers import get_missing_dates
+        missing = await get_missing_dates(project_id=1, lookback_days=5)
 
     # Poisoned date should be excluded
     assert poisoned_date not in missing
@@ -94,8 +94,8 @@ async def test_get_sync_project_ids_with_global_key():
     mock_session.__aexit__ = AsyncMock(return_value=False)
 
     with patch("backend.scheduler.helpers.AsyncSessionLocal", return_value=mock_session):
-        from backend.scheduler.helpers import _get_sync_project_ids
-        pids = await _get_sync_project_ids()
+        from backend.scheduler.helpers import get_sync_project_ids
+        pids = await get_sync_project_ids()
 
     assert pids == [1, 2, 3]
 
@@ -123,8 +123,8 @@ async def test_get_sync_project_ids_without_global_key():
     mock_session.__aexit__ = AsyncMock(return_value=False)
 
     with patch("backend.scheduler.helpers.AsyncSessionLocal", return_value=mock_session):
-        from backend.scheduler.helpers import _get_sync_project_ids
-        pids = await _get_sync_project_ids()
+        from backend.scheduler.helpers import get_sync_project_ids
+        pids = await get_sync_project_ids()
 
     assert pids == [2]
 
