@@ -57,7 +57,7 @@ services:
     image: redis:7-alpine
     # ports: removed — Redis only accessible within Docker network
     # - "6379:6379"
-    command: redis-server --requirepass ${REDIS_PASSWORD:-dds_redis_secret} --maxmemory 256mb --maxmemory-policy allkeys-lru
+    command: redis-server --requirepass ${REDIS_PASSWORD:-dds_redis_secret} --maxmemory 256mb --maxmemory-policy volatile-lru
     volumes:
       - redisdata:/data
     deploy:
