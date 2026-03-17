@@ -1,8 +1,8 @@
 import secrets
 import warnings
 
-from pydantic_settings import BaseSettings
 from pydantic import field_validator
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     # Telegram alerts
     TELEGRAM_BOT_TOKEN: str = ""  # From @BotFather
     TELEGRAM_CHAT_ID: str = ""  # Chat/group ID for alerts
+
+    # Telegram analytics bot
+    TELEGRAM_BOT_TOKEN_ANALYTICS: str = ""  # @dds_analytics_bot token
+    TELEGRAM_WEBHOOK_SECRET: str = ""  # X-Telegram-Bot-Api-Secret-Token
+    TELEGRAM_USE_POLLING: bool = False  # True for local dev (no public URL)
 
     # CORS
     CORS_ORIGINS: str = "http://localhost:8501,http://localhost:3000"
@@ -43,8 +48,8 @@ class Settings(BaseSettings):
     DDS_ROLE: str = "api"  # api | worker
 
     # Database pool (tuned for PgBouncer)
-    DB_POOL_SIZE: int = 10       # connections per worker (2 workers × 10 = 20 base)
-    DB_MAX_OVERFLOW: int = 15    # burst connections (2 workers × 25 = 50 max)
+    DB_POOL_SIZE: int = 10  # connections per worker (2 workers × 10 = 20 base)
+    DB_MAX_OVERFLOW: int = 15  # burst connections (2 workers × 25 = 50 max)
 
     # Rate limiting
     LOGIN_RATE_LIMIT: int = 10  # max attempts per minute per IP
@@ -56,7 +61,7 @@ class Settings(BaseSettings):
 
     # Feature flags (toggle per environment)
     FEATURE_DEMO_MODE: bool = False  # Show demo banner, enable seed data
-    FEATURE_WB_SYNC: bool = True     # WB API sync enabled
+    FEATURE_WB_SYNC: bool = True  # WB API sync enabled
     FEATURE_EXPORT_PDF: bool = False  # PDF export (beta)
 
     @field_validator("MINIO_ACCESS_KEY", "MINIO_SECRET_KEY")
@@ -74,8 +79,11 @@ class Settings(BaseSettings):
     @field_validator("SECRET_KEY")
     @classmethod
     def validate_secret_key(cls, v: str) -> str:
-        if not v or v in ("", "change-me-in-production-use-a-strong-random-key",
-                          "change-me-to-a-random-64-char-string"):
+        if not v or v in (
+            "",
+            "change-me-in-production-use-a-strong-random-key",
+            "change-me-to-a-random-64-char-string",
+        ):
             generated = secrets.token_urlsafe(48)
             warnings.warn(
                 f"\n⚠️  SECRET_KEY не задан! Сгенерирован временный ключ.\n"

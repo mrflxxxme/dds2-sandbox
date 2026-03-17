@@ -90,6 +90,13 @@ from backend.models.tax import (
     TaxRate,
 )
 
+# Telegram bot
+from backend.models.telegram import (
+    BrandNote,
+    TelegramBotUser,
+    TelegramChatBinding,
+)
+
 # Transactions
 from backend.models.transactions import (
     CategoryChangeLog,
@@ -172,4 +179,8 @@ __all__ = [
     "OrderCityMap",
     # WB Tariffs
     "WbTariff",
+    # Telegram bot
+    "TelegramBotUser",
+    "TelegramChatBinding",
+    "BrandNote",
 ]

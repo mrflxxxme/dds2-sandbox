@@ -5,9 +5,10 @@ import { Nomenclature, LeadTimes } from './components/SmallSettingsTabs';
 import { DutyRules } from './components/DutyRules';
 import { TaxRates } from './components/TaxRates';
 import { WbTariffs } from './components/WbTariffs';
+import { TelegramBot } from './components/TelegramBot';
 
 export default function SettingsPage() {
-    const [tab, setTab] = useState<'integrations' | 'nomenclature' | 'leadtimes' | 'duties' | 'taxrates' | 'tariffs'>('integrations');
+    const [tab, setTab] = useState<'integrations' | 'nomenclature' | 'leadtimes' | 'duties' | 'taxrates' | 'tariffs' | 'telegram'>('integrations');
 
     return (
         <div className="animate-in">
@@ -25,6 +26,7 @@ export default function SettingsPage() {
                     { key: 'duties' as const, label: '⚖️ Пошлины / Утиль' },
                     { key: 'taxrates' as const, label: '📋 Налоговые ставки' },
                     { key: 'tariffs' as const, label: '📊 Тарифы WB' },
+                    { key: 'telegram' as const, label: '🤖 Telegram-бот' },
                 ].map(t => (
                     <button key={t.key} className={`btn ${tab === t.key ? 'btn-primary' : 'btn-secondary'} btn-sm`}
                         onClick={() => setTab(t.key)}>{t.label}</button>
@@ -36,6 +38,7 @@ export default function SettingsPage() {
             {tab === 'duties' && <DutyRules />}
             {tab === 'taxrates' && <TaxRates />}
             {tab === 'tariffs' && <WbTariffs />}
+            {tab === 'telegram' && <TelegramBot />}
         </div>
     );
 }

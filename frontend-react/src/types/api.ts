@@ -377,3 +377,19 @@ export interface OrderGeographyResponse {
     articles: string[];
   };
 }
+
+// ─── Telegram ─────────────────────────────────────────────────────────────────
+
+export interface TelegramChatBinding {
+  id: number;
+  chat_id: number;
+  project_id: number;
+  brand: string | null;
+  notify_enabled: boolean;
+  created_by_id: number;
+  created_at: string;
+}
+
+export interface TelegramLinkResponse {
+  deep_link_url: string;
+}

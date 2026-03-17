@@ -32,6 +32,9 @@ ignore = [
 "backend/alembic/**/*.py" = ["E402", "I001"]      # alembic auto-generated
 "backend/seeds/**/*.py" = ["T20", "S"]            # seed scripts can print
 "backend/routers/auth.py" = ["S110", "E712", "RUF001"]  # Redis pass-on-error, SQLAlchemy == True, Cyrillic strings
+"backend/integrations/telegram_bot.py" = ["RUF001", "RUF003"]  # Cyrillic strings in Telegram bot messages
+"backend/main.py" = ["S110", "E402"]  # try-except-pass for optional deps, late imports for conditional loading
+"backend/config.py" = ["RUF003"]  # Cyrillic chars in comments
 
 [lint.isort]
 known-first-party = ["backend"]

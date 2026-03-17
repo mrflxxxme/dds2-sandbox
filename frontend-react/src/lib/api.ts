@@ -19,6 +19,7 @@ import { addCostMethods } from './api/cost';
 import { addPlanningMethods } from './api/planning';
 import { addFunnelMethods } from './api/funnel';
 import { addImportMethods } from './api/imports';
+import { addTelegramMethods } from './api/telegram';
 
 const client = new ApiClient();
 
@@ -33,4 +34,5 @@ export const api = Object.assign(client, {
     ...addPlanningMethods(client),
     ...addFunnelMethods(client),
     ...addImportMethods(client),
+    ...addTelegramMethods(client),
 });

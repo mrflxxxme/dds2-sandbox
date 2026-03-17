@@ -5,32 +5,45 @@ Entry point: lifespan, middleware, router registration.
 See AGENTS.md for full architecture overview.
 """
 
-import logging
 import json
+import logging
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import text
+from starlette.middleware.base import BaseHTTPMiddleware
 
+from backend.auth import ensure_default_admin, get_current_user, require_admin
 from backend.config import settings
-from backend.database import async_engine, AsyncSessionLocal, Base
-from backend.auth import get_current_user, ensure_default_admin, require_admin
-from backend.routers import import_txn, refs, reports, planning, cost, auth, integrations, projects, funnel, ws
-
+from backend.database import AsyncSessionLocal, async_engine
+from backend.routers import (
+    auth,
+    cost,
+    funnel,
+    import_txn,
+    integrations,
+    planning,
+    projects,
+    refs,
+    reports,
+    telegram,
+    telegram_webhook,
+    ws,
+)
 
 # ─── Sentry Error Tracking ──────────────────────────────────────────────────
 
 if settings.SENTRY_DSN:
     import sentry_sdk
+
     sentry_sdk.init(
         dsn=settings.SENTRY_DSN,
         environment=settings.DDS_ENV,
-        traces_sample_rate=0.2,    # 20% performance traces
+        traces_sample_rate=0.2,  # 20% performance traces
         profiles_sample_rate=0.1,  # 10% profiling
-        send_default_pii=False,    # Don't send personal data
+        send_default_pii=False,  # Don't send personal data
     )
     logging.getLogger("dds").info("Sentry initialized (env=%s)", settings.DDS_ENV)
 
@@ -38,13 +51,16 @@ if settings.SENTRY_DSN:
 # ─── Telegram Alerts ────────────────────────────────────────────────────────
 
 from backend.utils.telegram import configure as configure_telegram
+
 configure_telegram(settings.TELEGRAM_BOT_TOKEN, settings.TELEGRAM_CHAT_ID)
 
 
 # ─── Structured JSON Logging ─────────────────────────────────────────────────
 
+
 class JSONFormatter(logging.Formatter):
     """JSON log formatter for structured logging."""
+
     def format(self, record):
         log_entry = {
             "timestamp": self.formatTime(record, self.datefmt),
@@ -69,6 +85,7 @@ logger = logging.getLogger("dds")
 
 class RequestIdMiddleware(BaseHTTPMiddleware):
     """Add X-Request-ID to each request for traceability."""
+
     async def dispatch(self, request: Request, call_next):
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4())[:8])
         request.state.request_id = request_id
@@ -87,6 +104,7 @@ async def lifespan(app: FastAPI):
     if settings.DDS_ROLE == "worker":
         async with async_engine.begin() as conn:
             from backend.seeds.default_categories import seed_default_categories
+
             project_rows = await conn.execute(text("SELECT id FROM projects"))
             project_ids = [r[0] for r in project_rows]
             await seed_default_categories(conn, project_ids)
@@ -101,23 +119,59 @@ async def lifespan(app: FastAPI):
     if settings.DDS_ROLE == "worker":
         # Cleanup stale RUNNING sync_log entries (from previous crashes)
         async with AsyncSessionLocal() as session:
-            stale = await session.execute(text(
-                "UPDATE sync_log SET status = 'STALE', error_msg = 'Process restarted while running' "
-                "WHERE status = 'RUNNING' AND started_at < NOW() - INTERVAL '10 minutes'"
-            ))
+            stale = await session.execute(
+                text(
+                    "UPDATE sync_log SET status = 'STALE', error_msg = 'Process restarted while running' "
+                    "WHERE status = 'RUNNING' AND started_at < NOW() - INTERVAL '10 minutes'"
+                )
+            )
             await session.commit()
             if stale.rowcount:
                 logger.warning(f"Cleaned {stale.rowcount} stale RUNNING sync_log entries")
 
         start_scheduler()
+
+        # Start Telegram analytics bot
+        if settings.TELEGRAM_BOT_TOKEN_ANALYTICS:
+            try:
+                from backend.integrations.telegram_bot import create_bot, set_bot_commands
+
+                create_bot()
+                from backend.integrations.telegram_bot import bot as tg_bot_ref
+
+                await set_bot_commands()
+                if settings.TELEGRAM_USE_POLLING:
+                    logger.info("Telegram bot: polling mode (local dev)")
+                else:
+                    webhook_url = "https://app.vyatkin-wb.ru/api/v1/bot/webhook"
+                    await tg_bot_ref.set_webhook(
+                        url=webhook_url,
+                        secret_token=settings.TELEGRAM_WEBHOOK_SECRET,
+                    )
+                    logger.info("Telegram bot webhook set: %s", webhook_url)
+            except Exception:
+                logger.exception("Failed to start Telegram analytics bot")
     else:
         logger.info("⏭️ Scheduler skipped (DDS_ROLE=%s, scheduler runs in worker container)", settings.DDS_ROLE)
 
     yield
 
-    # Shutdown: stop scheduler + close Redis
+    # Shutdown: stop scheduler + close Redis + Telegram bot
     stop_scheduler()
+
+    # Cleanup Telegram bot
+    try:
+        from backend.integrations.telegram_bot import bot as tg_bot_shutdown
+
+        if tg_bot_shutdown:
+            if not settings.TELEGRAM_USE_POLLING:
+                await tg_bot_shutdown.delete_webhook()
+            await tg_bot_shutdown.session.close()
+    except Exception:
+        pass
+
     from backend.cache import close_redis
+
     await close_redis()
 
 
@@ -138,6 +192,7 @@ app.add_middleware(
 
 # Rate limiting (Redis-based)
 from backend.rate_limit import RateLimitMiddleware
+
 app.add_middleware(RateLimitMiddleware)
 
 # Request ID for traceability
@@ -145,15 +200,23 @@ app.add_middleware(RequestIdMiddleware)
 
 # Slow request detection (>500ms)
 from backend.slow_query import SlowRequestMiddleware
+
 app.add_middleware(SlowRequestMiddleware)
 
 
 # ─── Audit Log Middleware ────────────────────────────────────────────────────
 
+
 class AuditLogMiddleware(BaseHTTPMiddleware):
     """Log all mutation requests (POST/PUT/PATCH/DELETE) to audit_log table."""
 
-    SKIP_PATHS = {"/health", "/api/v1/auth/login", "/api/v1/auth/register", "/api/v1/auth/refresh"}
+    SKIP_PATHS = {
+        "/health",
+        "/api/v1/auth/login",
+        "/api/v1/auth/register",
+        "/api/v1/auth/refresh",
+        "/api/v1/bot/webhook",
+    }
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
@@ -176,6 +239,7 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
             async with AsyncSessionLocal() as session:
                 from backend.models.audit import AuditLog
                 from backend.utils.time import utcnow
+
                 log = AuditLog(
                     user_id=user_id or 0,
                     project_id=project_id,
@@ -199,7 +263,9 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
             auth_header = request.headers.get("Authorization", "")
             if auth_header.startswith("Bearer "):
                 import jwt
+
                 from backend.config import settings
+
                 token = auth_header[7:]
                 payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
                 return payload.get("sub") or payload.get("user_id")
@@ -221,11 +287,13 @@ app.add_middleware(AuditLogMiddleware)
 
 # Register unified error handlers
 from backend.exceptions import register_exception_handlers
+
 register_exception_handlers(app)
 
 # ─── Prometheus Metrics ─────────────────────────────────────────────────────
 
 from prometheus_fastapi_instrumentator import Instrumentator
+
 Instrumentator(
     excluded_handlers=["/health", "/metrics"],
     inprogress_name="http_requests_in_progress",
@@ -235,37 +303,63 @@ Instrumentator(
 # Public routes (no auth required)
 app.include_router(auth.router, prefix="/api/v1", tags=["Auth"])
 app.include_router(
-    projects.router, prefix="/api/v1",
+    projects.router,
+    prefix="/api/v1",
     dependencies=[Depends(get_current_user)],
 )
 
 # Protected routes (auth required)
 app.include_router(
-    import_txn.router, prefix="/api/v1", tags=["Import & Transactions"],
+    import_txn.router,
+    prefix="/api/v1",
+    tags=["Import & Transactions"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
-    refs.router, prefix="/api/v1", tags=["Reference Data"],
+    refs.router,
+    prefix="/api/v1",
+    tags=["Reference Data"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
-    reports.router, prefix="/api/v1", tags=["Reports"],
+    reports.router,
+    prefix="/api/v1",
+    tags=["Reports"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
-    planning.router, prefix="/api/v1", tags=["Planning"],
+    planning.router,
+    prefix="/api/v1",
+    tags=["Planning"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
-    cost.router, prefix="/api/v1", tags=["Cost"],
+    cost.router,
+    prefix="/api/v1",
+    tags=["Cost"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
-    integrations.router, prefix="/api/v1", tags=["Integrations"],
+    integrations.router,
+    prefix="/api/v1",
+    tags=["Integrations"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
-    funnel.router, prefix="/api/v1", tags=["Funnel"],
+    funnel.router,
+    prefix="/api/v1",
+    tags=["Funnel"],
+    dependencies=[Depends(get_current_user)],
+)
+
+# Telegram webhook (NO auth — Telegram calls this directly)
+app.include_router(telegram_webhook.router, prefix="/api/v1", tags=["Telegram Webhook"])
+
+# Telegram web API (auth required — for frontend settings)
+app.include_router(
+    telegram.router,
+    prefix="/api/v1",
+    tags=["Telegram"],
     dependencies=[Depends(get_current_user)],
 )
 
@@ -289,6 +383,7 @@ async def health():
     # Redis check
     try:
         from backend.cache import get_redis
+
         redis = await get_redis()
         if redis:
             await redis.ping()
@@ -301,6 +396,7 @@ async def health():
     # MinIO check
     try:
         from backend.storage import get_minio
+
         client = await get_minio()
         if client:
             await client.list_buckets()
@@ -314,42 +410,75 @@ async def health():
     return {"status": "ok" if all_ok else "degraded", "checks": checks}
 
 
-
-
 @app.post("/api/v1/seed", dependencies=[Depends(require_admin)])
 async def seed_data():
     """Seed default accounts, lead times, etc. from the Excel files."""
+    from sqlalchemy import select
+
     from backend.database import SyncSessionLocal
     from backend.models import Account, LeadTime
-    from sqlalchemy import select
 
     with SyncSessionLocal() as db:
         # Default accounts from REF_ACCOUNTS
         default_accounts = [
-            {"account": "40702810400810052145", "bank": "VTB", "currency": "RUB",
-             "account_type": "OPER", "is_our_account": True, "account_name": "VTB RUB Основной",
-             "is_customs_payee": False},
-            {"account": "42102810316110029573", "bank": "VTB", "currency": "RUB",
-             "account_type": "TRANSIT", "is_our_account": True, "account_name": "VTB RUB Транзит",
-             "is_customs_payee": False},
-            {"account": "40702156916110000346", "bank": "VTB", "currency": "CNY",
-             "account_type": "OPER", "is_our_account": True, "account_name": "VTB CNY",
-             "is_customs_payee": False},
-            {"account": "40702810800000001893", "bank": "WB", "currency": "RUB",
-             "account_type": "OPER", "is_our_account": True, "account_name": "WB RUB Основной",
-             "is_customs_payee": False},
-            {"account": "4070281050001001752", "bank": "WB", "currency": "RUB",
-             "account_type": "TRANSIT", "is_our_account": True, "account_name": "WB RUB Транзит",
-             "is_customs_payee": False},
-            {"account": "3100643000000019502", "bank": "CUSTOMS", "currency": "RUB",
-             "account_type": "CUSTOMS_PAYEE", "is_our_account": False, "account_name": "Таможня (получатель)",
-             "is_customs_payee": True},
+            {
+                "account": "40702810400810052145",
+                "bank": "VTB",
+                "currency": "RUB",
+                "account_type": "OPER",
+                "is_our_account": True,
+                "account_name": "VTB RUB Основной",
+                "is_customs_payee": False,
+            },
+            {
+                "account": "42102810316110029573",
+                "bank": "VTB",
+                "currency": "RUB",
+                "account_type": "TRANSIT",
+                "is_our_account": True,
+                "account_name": "VTB RUB Транзит",
+                "is_customs_payee": False,
+            },
+            {
+                "account": "40702156916110000346",
+                "bank": "VTB",
+                "currency": "CNY",
+                "account_type": "OPER",
+                "is_our_account": True,
+                "account_name": "VTB CNY",
+                "is_customs_payee": False,
+            },
+            {
+                "account": "40702810800000001893",
+                "bank": "WB",
+                "currency": "RUB",
+                "account_type": "OPER",
+                "is_our_account": True,
+                "account_name": "WB RUB Основной",
+                "is_customs_payee": False,
+            },
+            {
+                "account": "4070281050001001752",
+                "bank": "WB",
+                "currency": "RUB",
+                "account_type": "TRANSIT",
+                "is_our_account": True,
+                "account_name": "WB RUB Транзит",
+                "is_customs_payee": False,
+            },
+            {
+                "account": "3100643000000019502",
+                "bank": "CUSTOMS",
+                "currency": "RUB",
+                "account_type": "CUSTOMS_PAYEE",
+                "is_our_account": False,
+                "account_name": "Таможня (получатель)",
+                "is_customs_payee": True,
+            },
         ]
 
         for acc_data in default_accounts:
-            existing = db.execute(
-                select(Account).where(Account.account == acc_data["account"])
-            ).scalar_one_or_none()
+            existing = db.execute(select(Account).where(Account.account == acc_data["account"])).scalar_one_or_none()
             if not existing:
                 db.add(Account(**acc_data))
 
