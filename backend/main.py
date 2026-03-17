@@ -138,7 +138,6 @@ async def lifespan(app: FastAPI):
 
                 tg_bot_ref, tg_dp = create_bot()
 
-                await set_bot_commands()
                 if settings.TELEGRAM_USE_POLLING:
                     import asyncio
 
@@ -152,6 +151,12 @@ async def lifespan(app: FastAPI):
                         secret_token=settings.TELEGRAM_WEBHOOK_SECRET,
                     )
                     logger.info("Telegram bot webhook set: %s", webhook_url)
+
+                # Set bot commands (non-critical, don't fail startup)
+                try:
+                    await set_bot_commands()
+                except Exception:
+                    logger.warning("Failed to set bot commands (non-critical)")
             except Exception:
                 logger.exception("Failed to start Telegram analytics bot")
     else:
