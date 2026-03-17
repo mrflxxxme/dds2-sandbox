@@ -7,7 +7,6 @@ import logging
 from datetime import timedelta
 from decimal import Decimal
 from functools import wraps
-from typing import Optional
 
 import redis.asyncio as aioredis
 
@@ -16,7 +15,7 @@ from backend.config import settings
 logger = logging.getLogger(__name__)
 
 # Lazy Redis connection
-_redis_client: Optional[aioredis.Redis] = None
+_redis_client: aioredis.Redis | None = None
 
 
 async def get_redis() -> aioredis.Redis:
@@ -39,6 +38,7 @@ async def get_redis() -> aioredis.Redis:
 
 class _DecimalEncoder(json.JSONEncoder):
     """JSON encoder that handles Decimal types."""
+
     def default(self, obj):
         if isinstance(obj, Decimal):
             return float(obj)
@@ -53,8 +53,10 @@ def cached(prefix: str, ttl: int = 300):
         prefix: Cache key prefix (e.g. "reports:balance")
         ttl: Time-to-live in seconds (default 5 min)
     """
+
     def decorator(func):
         import inspect
+
         sig = inspect.signature(func)
 
         @wraps(func)
@@ -101,6 +103,7 @@ def cached(prefix: str, ttl: int = 300):
             return result
 
         return wrapper
+
     return decorator
 
 
@@ -133,10 +136,15 @@ async def invalidate_cache(prefix: str):
 async def invalidate_project_reports(project_id: int):
     """Invalidate all cached reports for a specific project."""
     for prefix in (
-        "reports:balance", "reports:balance_daily",
-        "reports:dds_month", "reports:dashboard",
-        "reports:wb_bdr", "reports:opiu",
-        "reports:income_daily", "reports:order_geography",
+        "reports:balance",
+        "reports:balance_daily",
+        "reports:dds_month",
+        "reports:dashboard",
+        "reports:wb_bdr",
+        "reports:opiu",
+        "reports:income_daily",
+        "reports:order_geography",
+        "reports:cashflow",
     ):
         await invalidate_cache(f"{prefix}:project_id={project_id}")
 

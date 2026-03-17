@@ -99,6 +99,13 @@ src/types/api.ts — TypeScript интерфейсы
 | Local | dev | http://localhost:3000 |
 | Production | main | https://app.vyatkin-wb.ru |
 
+## При баге или новом модуле — обнови правила
+1. **Новая модель с SoftDeleteMixin** → добавь в `SOFT_MODELS` в `scripts/check_conventions.sh`
+2. **Новый отчёт с кэшем** → добавь prefix в `invalidate_project_reports()` в `backend/cache.py`
+3. **Новый домен/модуль** → создай `backend/DOMAIN_*.md`, добавь строку в таблицу доменов выше
+4. **Найден новый антипаттерн** → добавь check в `scripts/check_conventions.sh` + строку в Антипаттерны ниже
+5. **Урок из бага** → запиши в `memory/project_known_bugs.md`
+
 ## Антипаттерны (НЕ ДЕЛАТЬ)
 - Запрос без `project_id` или `is_deleted` фильтра
 - `db.delete()` вместо `soft_delete()`
