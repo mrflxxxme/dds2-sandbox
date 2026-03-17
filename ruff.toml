@@ -1,0 +1,45 @@
+# Ruff — DDS project rules
+# Docs: https://docs.astral.sh/ruff/
+
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort (import sorting)
+    "UP",     # pyupgrade (modern Python)
+    "B",      # flake8-bugbear (common bugs)
+    "S",      # flake8-bandit (security)
+    "T20",    # flake8-print (ban print())
+    "SIM",    # flake8-simplify
+    "RUF",    # ruff-specific rules
+]
+
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # function call in default arg (FastAPI Depends)
+    "S101",   # assert in tests is fine
+    "S104",   # binding to 0.0.0.0 (docker)
+    "S106",   # hardcoded password (test fixtures)
+    "RUF012", # mutable class attributes (SQLAlchemy models)
+]
+
+[lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S106", "T20"]        # assert, hardcoded pass, print OK in tests
+"backend/alembic/**/*.py" = ["E402", "I001"]      # alembic auto-generated
+"backend/seeds/**/*.py" = ["T20", "S"]            # seed scripts can print
+
+[lint.isort]
+known-first-party = ["backend"]
+force-single-line = false
+combine-as-imports = true
+
+# ─── Banned APIs ──────────────────────────────────────────────────────
+[lint.flake8-bandit]
+check-typed-exception = true
+
+[lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path"]
