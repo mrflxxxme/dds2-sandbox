@@ -237,13 +237,19 @@ async def test_wb_bdr_requires_auth(client):
 @pytest.mark.asyncio
 async def test_opiu_empty(client, auth_headers):
     """OPIU with no finance data should return valid structure."""
+    import asyncio
     headers = await _project_headers(client, auth_headers)
-    resp = await client.get(
-        "/api/v1/reports/opiu?date_from=2024-01-01&date_to=2024-03-31",
-        headers=headers,
-    )
-    assert resp.status_code == 200
-    data = resp.json()
+    # OPIU uses async computation — may return {"computing": true} on first call
+    for _ in range(5):
+        resp = await client.get(
+            "/api/v1/reports/opiu?date_from=2024-01-01&date_to=2024-03-31",
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        if "rows" in data:
+            break
+        await asyncio.sleep(1)
     assert "rows" in data
     assert "months" in data
     assert isinstance(data["rows"], list)
