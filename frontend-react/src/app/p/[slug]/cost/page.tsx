@@ -158,6 +158,15 @@ function CostHistory() {
 
 import type { MissingCostItem } from '@/types/api';
 
+interface PasteRow {
+    barcode: string;
+    cost_price: string;
+    currency: string;
+    name: string;
+}
+
+const emptyRow = (): PasteRow => ({ barcode: '', cost_price: '', currency: 'RUB', name: '' });
+
 function BulkCost() {
     const [missing, setMissing] = useState<MissingCostItem[]>([]);
     const [loading, setLoading] = useState(true);
@@ -166,6 +175,11 @@ function BulkCost() {
     const [result, setResult] = useState<{ saved: number; not_found: string[] } | null>(null);
     const [costs, setCosts] = useState<Record<number, string>>({});
     const [search, setSearch] = useState('');
+    // Paste-from-spreadsheet state
+    const [pasteRows, setPasteRows] = useState<PasteRow[]>(Array.from({ length: 5 }, emptyRow));
+    const [pasteResult, setPasteResult] = useState<{ saved: number; not_found: string[] } | null>(null);
+    const [pasteSaving, setPasteSaving] = useState(false);
+    const [nomenclature, setNomenclature] = useState<any[]>([]);
 
     const loadMissing = useCallback(async () => {
         setLoading(true);
@@ -173,12 +187,27 @@ function BulkCost() {
         try {
             const data = await api.getMissingCosts();
             setMissing(data);
-        } catch (e: any) { setError(e.message || 'Ошибка'); }  // noqa: RUF001
+        } catch (e: any) { setError(e.message || 'Ошибка'); }
         setLoading(false);
     }, []);
 
-    useEffect(() => { loadMissing(); }, [loadMissing]);
+    useEffect(() => {
+        loadMissing();
+        api.getNomenclature().then(setNomenclature).catch(() => {});
+    }, [loadMissing]);
 
+    // Nomenclature lookup for paste section
+    const barcodeMap = new Map<string, string>();
+    const nmIdMap = new Map<string, string>();
+    nomenclature.forEach((n: any) => {
+        const label = n.article_seller || n.subject || `nmId: ${n.article_wb}`;
+        if (n.barcode) barcodeMap.set(n.barcode, label);
+        if (n.article_wb) nmIdMap.set(String(n.article_wb), label);
+    });
+    const resolveName = (code: string): string => barcodeMap.get(code) || nmIdMap.get(code) || '';
+    const isKnown = (code: string): boolean => !code.trim() || barcodeMap.has(code) || nmIdMap.has(code);
+
+    // ─── Missing costs table handlers ───
     const setCost = (nmId: number, value: string) => {
         setCosts(prev => ({ ...prev, [nmId]: value }));
     };
@@ -234,12 +263,76 @@ function BulkCost() {
         exportToExcel(data, 'Товары_без_себестоимости');
     };
 
+    // ─── Paste-from-spreadsheet handlers ───
+    const updatePasteRow = (idx: number, field: keyof PasteRow, value: string) => {
+        setPasteRows(prev => {
+            const next = [...prev];
+            next[idx] = { ...next[idx], [field]: value };
+            if (field === 'barcode' && value.trim()) next[idx].name = resolveName(value.trim());
+            return next;
+        });
+        if (idx === pasteRows.length - 1) setPasteRows(prev => [...prev, emptyRow()]);
+    };
+
+    const pasteFilledRows = pasteRows.filter(r => r.barcode.trim() && r.cost_price.trim());
+    const pasteInvalidRows = pasteFilledRows.filter(r => !isKnown(r.barcode.trim()));
+    const pasteCanSave = pasteFilledRows.length > 0 && pasteInvalidRows.length === 0;
+
+    const handlePaste = (e: React.ClipboardEvent) => {
+        const text = e.clipboardData.getData('text/plain');
+        if (!text.includes('\t') && !text.includes('\n')) return;
+        e.preventDefault();
+        const lines = text.trim().split('\n').map(l => l.split('\t'));
+        const newRows: PasteRow[] = [];
+        for (const cols of lines) {
+            if (cols.length < 2) continue;
+            let barcode = '', cost = '', currency = 'RUB', name = '';
+            if (cols.length >= 4) {
+                name = cols[0].trim(); barcode = cols[1].trim();
+                cost = cols[2].trim().replace(',', '.').replace(/[^\d.]/g, '');
+                currency = cols[3].trim().toUpperCase() || 'RUB';
+            } else if (cols.length === 3) {
+                const third = cols[2].trim();
+                if (['RUB', 'CNY', 'USD', 'EUR'].includes(third.toUpperCase())) {
+                    barcode = cols[0].trim(); cost = cols[1].trim().replace(',', '.').replace(/[^\d.]/g, '');
+                    currency = third.toUpperCase();
+                } else {
+                    name = cols[0].trim(); barcode = cols[1].trim();
+                    cost = third.replace(',', '.').replace(/[^\d.]/g, '');
+                }
+            } else {
+                barcode = cols[0].trim(); cost = cols[1].trim().replace(',', '.').replace(/[^\d.]/g, '');
+            }
+            if (barcode && cost) {
+                if (!name) name = resolveName(barcode);
+                newRows.push({ barcode, cost_price: cost, currency, name });
+            }
+        }
+        if (newRows.length > 0) setPasteRows([...newRows, emptyRow(), emptyRow()]);
+    };
+
+    const handlePasteSave = async () => {
+        if (!pasteFilledRows.length) return;
+        setPasteSaving(true);
+        setPasteResult(null);
+        try {
+            const items = pasteFilledRows.map(r => ({
+                barcode: r.barcode.trim(), cost_price: parseFloat(r.cost_price), currency: r.currency || 'RUB',
+            }));
+            const res = await api.bulkSetFunnelCosts(items);
+            setPasteResult(res);
+            setPasteRows(Array.from({ length: 5 }, emptyRow));
+            await loadMissing();
+        } catch (e: any) { alert(e.message); }
+        setPasteSaving(false);
+    };
+
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
     if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--danger)' }}>{error}</div>;
 
     return (
         <div>
-            {/* Summary */}
+            {/* ─── Section 1: Missing costs table ─── */}
             {missing.length > 0 ? (
                 <div style={{
                     background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.3)',
@@ -267,7 +360,6 @@ function BulkCost() {
                 </div>
             )}
 
-            {/* Toolbar */}
             {missing.length > 0 && (
                 <>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
@@ -289,8 +381,7 @@ function BulkCost() {
                         </div>
                     </div>
 
-                    {/* Table */}
-                    <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 380px)', padding: 0 }}>
+                    <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 520px)', padding: 0 }}>
                         <table className="data-table" style={{ marginBottom: 0, fontSize: 13 }}>
                             <thead>
                                 <tr>
@@ -336,11 +427,9 @@ function BulkCost() {
                         </table>
                     </div>
 
-                    {/* Save footer */}
                     <div style={{
-                        position: 'sticky', bottom: 0, background: 'var(--color-bg)',
                         padding: '12px 0', display: 'flex', justifyContent: 'flex-end', gap: 10,
-                        borderTop: '1px solid var(--color-border)', marginTop: 8,
+                        borderBottom: '1px solid var(--color-border)', marginBottom: 24,
                     }}>
                         <button
                             className="btn btn-primary"
@@ -353,6 +442,116 @@ function BulkCost() {
                     </div>
                 </>
             )}
+
+            {/* ─── Section 2: Paste from spreadsheet ─── */}
+            <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>
+                Загрузить себестоимость вручную
+            </div>
+            <div className="glass-card" style={{ padding: 14, marginBottom: 16, fontSize: 13, lineHeight: 1.8, color: 'var(--color-text-dim)' }}>
+                Скопируйте данные из Google Sheets / Excel и вставьте в таблицу ниже (Ctrl+V / Cmd+V).
+                Форматы: <b>Баркод, Себестоимость</b> | <b>Название, Баркод, Себестоимость</b> | <b>+ Валюта</b> (4 колонки).
+            </div>
+
+            {pasteInvalidRows.length > 0 && (
+                <div style={{
+                    background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)',
+                    borderRadius: 8, padding: 12, marginBottom: 12, fontSize: 13, color: '#ef4444',
+                }}>
+                    Не найдено в базе: <b>{pasteInvalidRows.length}</b> шт.
+                </div>
+            )}
+            {pasteResult && pasteResult.saved > 0 && (
+                <div style={{
+                    background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.3)',
+                    borderRadius: 8, padding: 12, marginBottom: 12, fontSize: 13, color: 'var(--success)',
+                }}>
+                    Сохранено: <b>{pasteResult.saved}</b> шт.
+                </div>
+            )}
+
+            <div
+                className="glass-card"
+                style={{ overflow: 'auto', maxHeight: 320, padding: 0 }}
+                onPaste={handlePaste}
+            >
+                <table className="data-table" style={{ marginBottom: 0 }}>
+                    <thead>
+                        <tr>
+                            <th style={{ width: 45, textAlign: 'center' }}>#</th>
+                            <th style={{ minWidth: 200 }}>Название</th>
+                            <th style={{ minWidth: 180 }}>Баркод / nmId</th>
+                            <th style={{ width: 140 }}>Себестоимость</th>
+                            <th style={{ width: 90 }}>Валюта</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {pasteRows.map((row, i) => {
+                            const bc = row.barcode.trim();
+                            const unknown = bc && !isKnown(bc);
+                            return (
+                                <tr key={i} style={{ background: unknown ? 'rgba(239,68,68,0.06)' : undefined }}>
+                                    <td style={{ fontSize: 12, color: 'var(--color-text-dim)', textAlign: 'center' }}>{i + 1}</td>
+                                    <td>
+                                        <input value={row.name} readOnly tabIndex={-1} placeholder="—"
+                                            style={{ width: '100%', background: 'transparent', border: 'none',
+                                                color: row.name ? 'var(--color-text-dim)' : 'var(--color-text-muted)',
+                                                fontSize: 13, padding: '6px 4px', outline: 'none' }} />
+                                    </td>
+                                    <td>
+                                        <input value={row.barcode} onChange={e => updatePasteRow(i, 'barcode', e.target.value)}
+                                            placeholder="Баркод или nmId"
+                                            style={{ width: '100%', background: 'var(--color-bg)',
+                                                border: `1px solid ${unknown ? '#ef4444' : 'var(--color-border)'}`,
+                                                borderRadius: 6, padding: '6px 8px', fontSize: 13,
+                                                color: unknown ? '#ef4444' : 'var(--color-text)' }} />
+                                    </td>
+                                    <td>
+                                        <input type="number" value={row.cost_price}
+                                            onChange={e => updatePasteRow(i, 'cost_price', e.target.value)}
+                                            placeholder="0"
+                                            style={{ width: '100%', background: 'var(--color-bg)',
+                                                border: '1px solid var(--color-border)',
+                                                borderRadius: 6, padding: '6px 8px', fontSize: 13,
+                                                color: 'var(--color-text)' }} />
+                                    </td>
+                                    <td>
+                                        <select value={row.currency} onChange={e => updatePasteRow(i, 'currency', e.target.value)}
+                                            style={{ width: '100%', background: 'var(--color-bg)',
+                                                border: '1px solid var(--color-border)',
+                                                borderRadius: 6, padding: '6px 4px', fontSize: 12,
+                                                color: 'var(--color-text)' }}>
+                                            <option>RUB</option>
+                                            <option>CNY</option>
+                                            <option>USD</option>
+                                        </select>
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            </div>
+
+            <div style={{
+                position: 'sticky', bottom: 0, background: 'var(--color-bg)',
+                padding: '12px 0', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                borderTop: '1px solid var(--color-border)', marginTop: 8,
+            }}>
+                <button className="btn btn-secondary btn-sm"
+                    onClick={() => { setPasteRows(Array.from({ length: 5 }, emptyRow)); setPasteResult(null); }}>
+                    Очистить
+                </button>
+                <button
+                    className="btn btn-primary"
+                    onClick={handlePasteSave}
+                    disabled={pasteSaving || !pasteCanSave}
+                    style={{ minWidth: 160, padding: '10px 20px', fontSize: 14, opacity: pasteCanSave ? 1 : 0.5 }}
+                >
+                    {pasteSaving ? 'Сохранение...' : pasteInvalidRows.length > 0
+                        ? `Есть ошибки (${pasteInvalidRows.length})`
+                        : `Сохранить (${pasteFilledRows.length})`}
+                </button>
+            </div>
         </div>
     );
 }

@@ -17,15 +17,16 @@ logger = logging.getLogger("dds.funnel")
 async def get_missing_costs(db: AsyncSession, pid: int) -> list[dict]:
     """Return products without cost_price that participate in funnel calculations.
 
+    Excludes products that have cost from:
+    - WbCostOverride (manual overrides)
+    - Cost order history (avg cost by vendor_code)
     Includes aggregated order totals and barcode from nomenclature.
     """
-    # Products with cost override already set
-    ovr_q = select(WbCostOverride.nm_id).where(
-        WbCostOverride.project_id == pid,
-        WbCostOverride.cost_price > 0,
-    )
-    ovr_rows = (await db.execute(ovr_q)).scalars().all()
-    override_nm_ids = set(ovr_rows)
+    from backend.services.bdr_loaders import load_avg_costs, load_cost_overrides
+
+    # Load existing cost sources
+    cost_ovr = await load_cost_overrides(db, pid)
+    avg_costs = await load_avg_costs(db, pid)
 
     # Aggregate funnel data for items with no cost
     q = (
@@ -67,7 +68,11 @@ async def get_missing_costs(db: AsyncSession, pid: int) -> list[dict]:
 
     result = []
     for r in rows:
-        if r.nm_id in override_nm_ids:
+        # Skip if has manual override
+        if r.nm_id in cost_ovr and cost_ovr[r.nm_id] > 0:
+            continue
+        # Skip if has avg cost from order history
+        if r.vendor_code and r.vendor_code in avg_costs and avg_costs[r.vendor_code] > 0:
             continue
         result.append(
             {
