@@ -9,8 +9,7 @@
 name: Deploy to Staging
 
 on:
-  push:
-    branches: [dev]
+  workflow_dispatch:  # disabled auto-deploy, run manually if needed
 
 # Only one staging deploy at a time
 concurrency:

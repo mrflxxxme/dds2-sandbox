@@ -92,7 +92,7 @@ jobs:
             fi
 
             echo "🔒 SSL certificate status:"
-            docker compose -f docker-compose.app.yml run --rm certbot certificates 2>/dev/null || echo "  (certbot not configured yet)"
+            timeout 30 docker compose -f docker-compose.app.yml run --rm certbot certificates 2>/dev/null || echo "  (certbot check skipped/timed out)"
 
             echo "✅ Production deploy successful!"
 
