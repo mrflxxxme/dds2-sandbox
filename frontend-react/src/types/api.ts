@@ -324,6 +324,17 @@ export interface WbTariffUploadResult {
   replaced: number;
 }
 
+export interface MissingCostItem {
+  nm_id: number;
+  barcode: string;
+  vendor_code: string;
+  subject: string;
+  brand: string;
+  total_orders: number;
+  total_qty: number;
+  days_count: number;
+}
+
 // ─── Common ──────────────────────────────────────────────────────────────────
 
 export interface MessageResponse {

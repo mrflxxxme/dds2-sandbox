@@ -13,35 +13,35 @@ All public functions are re-exported here for backward compatibility.
 """
 
 # ─── WB API Client ──────────────────────────────────────────────────────────
-from backend.services.funnel.wb_api_client import (
-    get_wb_key,
-    fetch_funnel,
-    fetch_ad_campaigns,
-    fetch_ad_stats,
-)
-
-# ─── Sync ────────────────────────────────────────────────────────────────────
-from backend.services.funnel.sync import (
-    run_funnel_sync,
-    run_backfill_bg,
-    batch_resync_ads,
-)
-
-# ─── Queries ─────────────────────────────────────────────────────────────────
-from backend.services.funnel.queries import (
-    get_funnel_aggregated,
-    get_funnel_detailed,
-    get_summary,
-    get_filters,
-    get_cost_overrides,
-    set_cost_override,
-    bulk_set_cost_overrides,
-)
-
 # ─── Analysis ────────────────────────────────────────────────────────────────
 from backend.services.funnel.analysis import (
     get_day_analysis,
     get_product_trends,
+)
+
+# ─── Queries ─────────────────────────────────────────────────────────────────
+from backend.services.funnel.queries import (
+    bulk_set_cost_overrides,
+    get_cost_overrides,
+    get_filters,
+    get_funnel_aggregated,
+    get_funnel_detailed,
+    get_missing_costs,
+    get_summary,
+    set_cost_override,
+)
+
+# ─── Sync ────────────────────────────────────────────────────────────────────
+from backend.services.funnel.sync import (
+    batch_resync_ads,
+    run_backfill_bg,
+    run_funnel_sync,
+)
+from backend.services.funnel.wb_api_client import (
+    fetch_ad_campaigns,
+    fetch_ad_stats,
+    fetch_funnel,
+    get_wb_key,
 )
 
 __all__ = [
@@ -60,6 +60,7 @@ __all__ = [
     "get_summary",
     "get_filters",
     "get_cost_overrides",
+    "get_missing_costs",
     "set_cost_override",
     "bulk_set_cost_overrides",
     # analysis

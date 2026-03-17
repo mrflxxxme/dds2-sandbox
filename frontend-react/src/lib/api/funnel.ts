@@ -1,6 +1,6 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
-import type { FunnelDayRow, FunnelSummary, MessageResponse, WbTariff, WbTariffUploadResult } from '@/types/api';
+import type { FunnelDayRow, FunnelSummary, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
@@ -29,6 +29,9 @@ export function addFunnelMethods(api: ApiClient) {
         },
         getFunnelCosts() {
             return api.request<Array<{ nm_id: number; cost_price: number; source: string }>>('GET', '/api/v1/funnel/costs');
+        },
+        getMissingCosts() {
+            return api.request<MissingCostItem[]>('GET', '/api/v1/funnel/missing_costs');
         },
         setFunnelCost(nmId: number, costPrice: number) {
             return api.request<MessageResponse>('POST', '/api/v1/funnel/cost', { nm_id: nmId, cost_price: costPrice });

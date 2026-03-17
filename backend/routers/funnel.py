@@ -216,6 +216,15 @@ async def get_cost_overrides(
     return await funnel_service.get_cost_overrides(db, project.id)
 
 
+@router.get("/missing_costs")
+async def get_missing_costs(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Products without cost_price that participate in funnel/BDR calculations."""
+    return await funnel_service.get_missing_costs(db, project.id)
+
+
 @router.post("/cost")
 async def set_cost_override(
     body: CostOverrideRequest,
