@@ -117,10 +117,10 @@ def start_scheduler():
         misfire_grace_time=600,
     )
 
-    # Initial prewarm: 30s after startup
+    # Initial prewarm: 5 min after startup (gives backfill time to run first)
     _scheduler.add_job(
         prewarm_all_reports,
-        trigger=DateTrigger(run_date=datetime.now(MSK) + timedelta(seconds=30)),
+        trigger=DateTrigger(run_date=datetime.now(MSK) + timedelta(minutes=5)),
         id="prewarm_startup",
         name="Report cache prewarm (startup)",
         replace_existing=True,

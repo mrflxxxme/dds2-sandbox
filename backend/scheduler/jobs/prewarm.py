@@ -25,9 +25,17 @@ async def prewarm_project(project_id: int):
     try:
         async with AsyncSessionLocal() as db:
             from backend.services import opiu_service, wb_bdr_service
-            await opiu_service.get_opiu(db, project_id, d_from, d_to)
-            await wb_bdr_service.get_wb_bdr(db, project_id, d_from, d_to)
+            await asyncio.wait_for(
+                opiu_service.get_opiu(db, project_id, d_from, d_to),
+                timeout=120,
+            )
+            await asyncio.wait_for(
+                wb_bdr_service.get_wb_bdr(db, project_id, d_from, d_to),
+                timeout=120,
+            )
         logger.info(f"🔥 Prewarm: project {project_id} — OPIU + BDR cached ({d_from}→{d_to})")
+    except asyncio.TimeoutError:
+        logger.warning(f"🔥 Prewarm: project {project_id} — timeout (>120s), skipping")
     except Exception as e:
         logger.warning(f"🔥 Prewarm: project {project_id} failed: {e}")
 
