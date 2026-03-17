@@ -107,7 +107,7 @@ async def get_candidate_transactions(db: AsyncSession, project_id: int,
 async def get_accounts_list(db: AsyncSession, project_id: int):
     from backend.models import Account
     result = await db.execute(
-        select(Account).where(Account.project_id == project_id)
+        select(Account).where(Account.project_id == project_id, Account.is_deleted == False)
     )
     return result.scalars().all()
 
@@ -126,7 +126,10 @@ async def update_payment_paid_amount(payment_id: int, db: AsyncSession):
     total_paid = sum(l.amount_rub or Decimal("0") for l in links)
 
     pp_result = await db.execute(
-        select(PlannedPayment).where(PlannedPayment.id == payment_id)
+        select(PlannedPayment).where(
+            PlannedPayment.id == payment_id,
+            PlannedPayment.is_deleted == False,
+        )
     )
     payment = pp_result.scalar_one_or_none()
     if payment:

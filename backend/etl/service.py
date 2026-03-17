@@ -67,17 +67,17 @@ def _ensure_account(db: Session, account_no: str, source_type: str, project_id: 
 
 def _load_refs(db: Session, project_id: int) -> tuple:
     """Load reference data needed for master logic."""
-    accounts = db.execute(select(Account).where(Account.project_id == project_id)).scalars().all()
+    accounts = db.execute(select(Account).where(Account.project_id == project_id, Account.is_deleted == False)).scalars().all()
     our_accounts = {a.account for a in accounts if a.is_our_account}
     customs_accounts = {a.account for a in accounts if a.is_customs_payee}
 
-    cp_cats = db.execute(select(CounterpartyCategory).where(CounterpartyCategory.project_id == project_id)).scalars().all()
+    cp_cats = db.execute(select(CounterpartyCategory).where(CounterpartyCategory.project_id == project_id, CounterpartyCategory.is_deleted == False)).scalars().all()
     cp_categories = {
         c.cp_key: {"cat_lvl1": c.cat_lvl1, "cat_lvl2": c.cat_lvl2}
         for c in cp_cats
     }
 
-    overrides_db = db.execute(select(Override).where(Override.project_id == project_id)).scalars().all()
+    overrides_db = db.execute(select(Override).where(Override.project_id == project_id, Override.is_deleted == False)).scalars().all()
     overrides = {
         o.txn_id: {"cat_lvl1": o.cat_lvl1, "cat_lvl2": o.cat_lvl2}
         for o in overrides_db
@@ -261,11 +261,10 @@ def import_statement(
         # 7. Invalidate caches
         try:
             import asyncio
-            from backend.cache import invalidate_cache
+            from backend.cache import invalidate_project_reports
 
             async def _invalidate_all():
-                for prefix in ("reports", "dashboard", "funnel", "planning"):
-                    await invalidate_cache(prefix)
+                await invalidate_project_reports(project_id)
 
             try:
                 loop = asyncio.get_running_loop()

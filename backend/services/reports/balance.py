@@ -42,7 +42,7 @@ async def get_balance(
             Transaction.currency,
             func.sum(Transaction.net).label("net_sum"),
         )
-        .where(Transaction.project_id == project_id, Transaction.date <= as_of)
+        .where(Transaction.project_id == project_id, Transaction.is_deleted == False, Transaction.date <= as_of)
         .group_by(Transaction.account, Transaction.currency)
     )
     net_map: dict[tuple, Decimal] = {}
@@ -54,6 +54,7 @@ async def get_balance(
         select(Account).where(
             Account.is_our_account == True,
             Account.project_id == project_id,
+            Account.is_deleted == False,
         )
     )
     accounts = accs.scalars().all()
@@ -89,6 +90,7 @@ async def get_balance_daily(
         select(OpeningBalance).where(
             OpeningBalance.account == account,
             OpeningBalance.currency == currency,
+            OpeningBalance.project_id == project_id,
         )
     )
     ob = ob_result.scalar_one_or_none()
@@ -99,6 +101,7 @@ async def get_balance_daily(
         func.sum(Transaction.net).label("daily_net"),
     ).where(
         Transaction.project_id == project_id,
+        Transaction.is_deleted == False,
         Transaction.account == account,
         Transaction.currency == currency,
     )

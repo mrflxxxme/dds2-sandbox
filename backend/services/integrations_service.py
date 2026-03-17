@@ -26,7 +26,7 @@ async def list_keys(db: AsyncSession, project_id: int) -> list[dict]:
     """List all integration keys for a project (with masked previews)."""
     result = await db.execute(
         select(IntegrationKey)
-        .where(IntegrationKey.project_id == project_id)
+        .where(IntegrationKey.project_id == project_id, IntegrationKey.is_deleted == False)
         .order_by(IntegrationKey.created_at.desc())
     )
     keys = result.scalars().all()
@@ -126,6 +126,7 @@ async def _get_wb_key(db: AsyncSession, project_id: int) -> tuple:
             IntegrationKey.project_id == project_id,
             IntegrationKey.service == "wb",
             IntegrationKey.is_active == True,
+            IntegrationKey.is_deleted == False,
         )
     )
     key = result.scalar_one_or_none()
@@ -320,7 +321,8 @@ async def get_sync_log(
 ) -> list:
     """Get sync history for a project."""
     key_ids_q = select(IntegrationKey.id).where(
-        IntegrationKey.project_id == project_id
+        IntegrationKey.project_id == project_id,
+        IntegrationKey.is_deleted == False,
     )
     q = (
         select(SyncLog)

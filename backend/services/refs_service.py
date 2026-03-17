@@ -12,7 +12,7 @@ from backend.models import (
     Account, CounterpartyCategory, Override,
     OpeningBalance, CategoryRef,
 )
-from backend.cache import invalidate_cache
+from backend.cache import invalidate_project_reports
 
 import logging
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 async def list_accounts(db: AsyncSession, project_id: int) -> list:
     """List all accounts for a project."""
     result = await db.execute(
-        select(Account).where(Account.project_id == project_id)
+        select(Account).where(Account.project_id == project_id, Account.is_deleted == False)
     )
     return result.scalars().all()
 
@@ -53,7 +53,7 @@ async def upsert_account(
     db.add(acc)
     await db.commit()
     await db.refresh(acc)
-    await invalidate_cache("reports")
+    await invalidate_project_reports(project_id)
     return acc
 
 
@@ -70,7 +70,7 @@ async def delete_account(db: AsyncSession, project_id: int, account_id: int) -> 
         return False
     acc.soft_delete()
     await db.commit()
-    await invalidate_cache("reports")
+    await invalidate_project_reports(project_id)
     return True
 
 
@@ -81,7 +81,8 @@ async def list_cp_categories(db: AsyncSession, project_id: int) -> list:
     """List all counterparty categories for a project."""
     result = await db.execute(
         select(CounterpartyCategory).where(
-            CounterpartyCategory.project_id == project_id
+            CounterpartyCategory.project_id == project_id,
+            CounterpartyCategory.is_deleted == False,
         )
     )
     return result.scalars().all()
@@ -112,7 +113,7 @@ async def upsert_cp_category(
     db.add(cpc)
     await db.commit()
     await db.refresh(cpc)
-    await invalidate_cache("reports")
+    await invalidate_project_reports(project_id)
     return cpc
 
 
@@ -129,7 +130,7 @@ async def delete_cp_category(db: AsyncSession, project_id: int, cpc_id: int) -> 
         return False
     cpc.soft_delete()
     await db.commit()
-    await invalidate_cache("reports")
+    await invalidate_project_reports(project_id)
     return True
 
 
@@ -139,7 +140,7 @@ async def delete_cp_category(db: AsyncSession, project_id: int, cpc_id: int) -> 
 async def list_overrides(db: AsyncSession, project_id: int) -> list:
     """List all overrides for a project."""
     result = await db.execute(
-        select(Override).where(Override.project_id == project_id)
+        select(Override).where(Override.project_id == project_id, Override.is_deleted == False)
     )
     return result.scalars().all()
 
@@ -157,7 +158,7 @@ async def delete_override(db: AsyncSession, project_id: int, override_id: int) -
         return False
     ovr.soft_delete()
     await db.commit()
-    await invalidate_cache("reports")
+    await invalidate_project_reports(project_id)
     return True
 
 
@@ -197,7 +198,7 @@ async def upsert_opening_balance(
     db.add(ob)
     await db.commit()
     await db.refresh(ob)
-    await invalidate_cache("reports")
+    await invalidate_project_reports(project_id)
     return ob
 
 

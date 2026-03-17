@@ -30,6 +30,7 @@ async def get_wb_key(db: AsyncSession, project_id: int, service: str) -> Optiona
             ),
             IntegrationKey.service == service,
             IntegrationKey.is_active == True,
+            IntegrationKey.is_deleted == False,
         ).order_by(IntegrationKey.project_id.desc().nullslast()).limit(1)
     )
     key = result.scalar_one_or_none()

@@ -227,10 +227,8 @@ async def bulk_set_cost_overrides(
     """
     result = await funnel_service.bulk_set_cost_overrides(db, project.id, body.items)
     # Invalidate BDR and related report caches so "без себестоимости" count updates
-    from backend.cache import invalidate_cache
-    await invalidate_cache(f"reports:wb_bdr:project_id={project.id}")
-    await invalidate_cache(f"reports:opiu:project_id={project.id}")
-    await invalidate_cache(f"reports:dashboard:project_id={project.id}")
+    from backend.cache import invalidate_project_reports
+    await invalidate_project_reports(project.id)
     return result
 
 

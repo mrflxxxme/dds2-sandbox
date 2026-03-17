@@ -130,6 +130,17 @@ async def invalidate_cache(prefix: str):
         logger.warning("Cache invalidation error: %s", e)
 
 
+async def invalidate_project_reports(project_id: int):
+    """Invalidate all cached reports for a specific project."""
+    for prefix in (
+        "reports:balance", "reports:balance_daily",
+        "reports:dds_month", "reports:dashboard",
+        "reports:wb_bdr", "reports:opiu",
+        "reports:income_daily", "reports:order_geography",
+    ):
+        await invalidate_cache(f"{prefix}:project_id={project_id}")
+
+
 async def close_redis():
     """Close Redis connection on shutdown."""
     global _redis_client

@@ -51,14 +51,18 @@ def safe_decimal(val) -> Decimal:
         return Decimal(0)
 
 
-async def auto_link_customs_dt(order_no: str, dt_number: str, db: AsyncSession):
+async def auto_link_customs_dt(order_no: str, dt_number: str, project_id: int, db: AsyncSession):
     """Auto-link CustomsDT records matching dt_number to this order."""
     try:
         order_no_int = int(order_no)
     except (ValueError, TypeError):
         return
     result = await db.execute(
-        select(CustomsDT).where(CustomsDT.dt_number == dt_number)
+        select(CustomsDT).where(
+            CustomsDT.dt_number == dt_number,
+            CustomsDT.project_id == project_id,
+            CustomsDT.is_deleted == False,
+        )
     )
     dts = result.scalars().all()
     for d in dts:

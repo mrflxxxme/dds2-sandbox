@@ -128,9 +128,8 @@ async def sync_wb_finance(
     await db.commit()
 
     # Invalidate WB-dependent report caches
-    from backend.cache import invalidate_cache
-    for prefix in ("reports:opiu", "reports:wb_bdr", "reports:dashboard"):
-        await invalidate_cache(prefix)
+    from backend.cache import invalidate_project_reports
+    await invalidate_project_reports(project_id)
 
     # Background prewarm: re-compute reports so cache is hot
     import asyncio

@@ -103,6 +103,7 @@ async def get_opiu(
 
     # Check if a previous background task already failed (error flag in Redis)
     error_key = f"reports:opiu:error:{project_id}:{date_from}:{date_to}"
+    lock_key = f"reports:opiu:lock:{project_id}:{date_from}:{date_to}"
     prev_error = None
     if r:
         try:
@@ -110,32 +111,48 @@ async def get_opiu(
         except Exception:
             pass
 
-    async def _compute_background():
+    # Distributed lock: prevent multiple background tasks for the same report
+    already_computing = False
+    if r:
         try:
-            from backend.database import AsyncSessionLocal
-            from backend.services import opiu_service
-            async with AsyncSessionLocal() as bg_db:
-                await opiu_service.get_opiu(
-                    bg_db, project_id, date_from, date_to,
-                    brand=brand, article=article,
-                )
-            _log.info("OPIU background compute done for project %s", project_id)
-            # Clear error flag on success
-            if r:
-                try:
-                    await r.delete(error_key)
-                except Exception:
-                    pass
-        except Exception as e:
-            _log.error("OPIU background compute failed for project %s: %s", project_id, e)
-            # Set error flag so next request knows computation failed
-            if r:
-                try:
-                    await r.setex(error_key, 120, str(e))
-                except Exception:
-                    pass
+            already_computing = not await r.set(lock_key, "1", ex=120, nx=True)
+        except Exception:
+            pass
 
-    asyncio.create_task(_compute_background())
+    if not already_computing:
+        async def _compute_background():
+            try:
+                from backend.database import AsyncSessionLocal
+                from backend.services import opiu_service
+                async with AsyncSessionLocal() as bg_db:
+                    await opiu_service.get_opiu(
+                        bg_db, project_id, date_from, date_to,
+                        brand=brand, article=article,
+                    )
+                _log.info("OPIU background compute done for project %s", project_id)
+                # Clear error flag on success
+                if r:
+                    try:
+                        await r.delete(error_key)
+                    except Exception:
+                        pass
+            except Exception as e:
+                _log.error("OPIU background compute failed for project %s: %s", project_id, e)
+                # Set error flag so next request knows computation failed
+                if r:
+                    try:
+                        await r.setex(error_key, 120, str(e))
+                    except Exception:
+                        pass
+            finally:
+                # Release lock
+                if r:
+                    try:
+                        await r.delete(lock_key)
+                    except Exception:
+                        pass
+
+        asyncio.create_task(_compute_background())
 
     if prev_error:
         return {

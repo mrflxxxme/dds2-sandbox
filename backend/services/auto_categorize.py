@@ -198,9 +198,8 @@ async def apply_auto_categorize(db: AsyncSession, project_id: int) -> dict:
     await db.commit()
 
     # Invalidate caches
-    from backend.cache import invalidate_cache
-    for prefix in ("reports:balance", "reports:dashboard", "reports:dds_month"):
-        await invalidate_cache(prefix)
+    from backend.cache import invalidate_project_reports
+    await invalidate_project_reports(project_id)
 
     logger.info(f"Auto-categorized {updated_count} transactions for project {project_id}")
     return {"ok": True, "updated": updated_count, "details": details}

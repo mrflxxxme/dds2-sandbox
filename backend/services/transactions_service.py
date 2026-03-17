@@ -211,7 +211,9 @@ async def assign_category(
         # Upsert counterparty_category
         existing = await db.execute(
             select(CounterpartyCategory).where(
-                CounterpartyCategory.cp_key == txn.cp_key
+                CounterpartyCategory.cp_key == txn.cp_key,
+                CounterpartyCategory.project_id == project_id,
+                CounterpartyCategory.is_deleted == False,
             )
         )
         cpc = existing.scalar_one_or_none()
@@ -250,9 +252,8 @@ async def assign_category(
     db.add(log)
     await db.commit()
 
-    from backend.cache import invalidate_cache
-    for prefix in ("reports:balance", "reports:dashboard", "reports:dds_month"):
-        await invalidate_cache(prefix)
+    from backend.cache import invalidate_project_reports
+    await invalidate_project_reports(project_id)
 
     return {"ok": True, "txn_id": txn_id, "scope": scope}
 
@@ -268,7 +269,9 @@ async def assign_category_bulk(
     # Upsert counterparty_category
     existing = await db.execute(
         select(CounterpartyCategory).where(
-            CounterpartyCategory.cp_key == cp_key
+            CounterpartyCategory.cp_key == cp_key,
+            CounterpartyCategory.project_id == project_id,
+            CounterpartyCategory.is_deleted == False,
         )
     )
     cpc = existing.scalar_one_or_none()
@@ -300,9 +303,8 @@ async def assign_category_bulk(
     )
     await db.commit()
 
-    from backend.cache import invalidate_cache
-    for prefix in ("reports:balance", "reports:dashboard", "reports:dds_month"):
-        await invalidate_cache(prefix)
+    from backend.cache import invalidate_project_reports
+    await invalidate_project_reports(project_id)
 
     return {"ok": True, "updated": result.rowcount}
 
@@ -325,8 +327,7 @@ async def assign_category_by_ids(
     )
     await db.commit()
 
-    from backend.cache import invalidate_cache
-    for prefix in ("reports:balance", "reports:dashboard", "reports:dds_month"):
-        await invalidate_cache(prefix)
+    from backend.cache import invalidate_project_reports
+    await invalidate_project_reports(project_id)
 
     return {"ok": True, "updated": result.rowcount}
