@@ -14,6 +14,7 @@ from backend.scheduler.helpers import (
     get_sync_project_ids, get_missing_dates, get_days_with_incomplete_ads,
     split_into_windows, BACKFILL_DAYS,
 )
+from backend.utils.telegram import send_alert
 
 logger = logging.getLogger("dds.scheduler")
 
@@ -86,6 +87,17 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
         f"Scheduler: project {project_id} [{sync_type}] {d_from}→{d_to} — "
         f"{result.get('rows', 0)} rows, status: {status}"
     )
+
+    if status in ("ERROR", "TIMEOUT"):
+        errors_text = "; ".join(result.get("errors", [])[:3])
+        await send_alert(
+            f"WB Sync *{status}*\n"
+            f"Project: {project_id}\n"
+            f"Type: {sync_type}\n"
+            f"Period: {d_from} → {d_to}\n"
+            f"Error: {errors_text[:300]}",
+        )
+
     return result
 
 

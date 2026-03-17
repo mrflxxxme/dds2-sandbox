@@ -5,6 +5,7 @@ from datetime import date, timedelta
 
 from backend.database import AsyncSessionLocal
 from backend.scheduler.helpers import get_sync_project_ids
+from backend.utils.telegram import send_alert
 
 logger = logging.getLogger("dds.scheduler")
 
@@ -54,5 +55,11 @@ async def sync_all_projects_wb_finance():
 
         except Exception as e:
             logger.error(f"💰 WB Finance sync failed for project {pid}: {e}")
+            await send_alert(
+                f"WB Finance Sync *ERROR*\n"
+                f"Project: {pid}\n"
+                f"Error: {str(e)[:300]}",
+                exc=e,
+            )
 
     logger.info("💰 WB Finance sync: completed for all projects")
