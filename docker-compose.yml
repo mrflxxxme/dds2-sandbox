@@ -39,6 +39,7 @@ services:
       MAX_DB_CONNECTIONS: 50
       SERVER_RESET_QUERY: "DISCARD ALL"
       QUERY_WAIT_TIMEOUT: 120
+      AUTH_TYPE: scram-sha-256
     deploy:
       resources:
         limits:
