@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.project_context import get_current_project
-from backend.models import Project, SyncLog
+from backend.models import Project, SyncLog, IntegrationKey
 from backend.services import funnel as funnel_service
 
 logger = logging.getLogger("dds.funnel")
@@ -84,10 +84,16 @@ async def get_sync_status(
     from backend.scheduler.helpers import get_missing_dates
     from sqlalchemy import select
 
+    key_ids = (
+        select(IntegrationKey.id).where(
+            IntegrationKey.project_id == project.id,
+            IntegrationKey.is_deleted == False,
+        )
+    )
     last_sync = await db.execute(
         select(SyncLog).where(
             SyncLog.service == "wb_funnel",
-            SyncLog.project_id == project.id,
+            SyncLog.integration_id.in_(key_ids),
         ).order_by(SyncLog.id.desc()).limit(10)
     )
     logs = [
