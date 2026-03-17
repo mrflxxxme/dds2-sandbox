@@ -125,7 +125,7 @@ class TestComputeMetrics:
 
         m = _compute_metrics(
             orders_sum=100_000,
-            buyout=80,
+            revenue=80_000,
             adv=5_000,
             tax_rate=6,
             views=1000,
@@ -134,7 +134,7 @@ class TestComputeMetrics:
             cost_total=20_000,
             commission_rate_pct=15,
         )
-        # revenue = 100000 * 80 / 100 = 80000
+        # revenue = 80000 (pre-calculated: 100000 * 80%)
         assert m["revenue"] == 80_000.0
         # commission = 80000 * 15 / 100 = 12000
         assert m["commission"] == 12_000.0
@@ -149,7 +149,7 @@ class TestComputeMetrics:
 
         m = _compute_metrics(
             orders_sum=50_000,
-            buyout=100,
+            revenue=50_000,
             adv=1_000,
             tax_rate=6,
             views=100,
@@ -168,7 +168,7 @@ class TestComputeMetrics:
 
         m = _compute_metrics(
             orders_sum=0,
-            buyout=0,
+            revenue=0,
             adv=0,
             tax_rate=6,
             views=0,
@@ -186,7 +186,7 @@ class TestComputeMetrics:
 
         m = _compute_metrics(
             orders_sum=100_000,
-            buyout=100,
+            revenue=100_000,
             adv=10_000,
             tax_rate=0,
             views=0,
@@ -201,7 +201,7 @@ class TestComputeMetrics:
 
         m = _compute_metrics(
             orders_sum=100_000,
-            buyout=100,
+            revenue=100_000,
             adv=0,
             tax_rate=0,
             views=0,
