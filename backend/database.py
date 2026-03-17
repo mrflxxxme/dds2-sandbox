@@ -14,7 +14,7 @@ async_engine = create_async_engine(
     pool_recycle=1800,         # recycle connections every 30 min
     pool_timeout=10,           # wait max 10s for a connection from pool
     connect_args={
-        "command_timeout": 30,
+        "command_timeout": 60,
     },
 )
 
@@ -22,7 +22,7 @@ async_engine = create_async_engine(
 @event.listens_for(async_engine.sync_engine, "connect")
 def set_statement_timeout(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
-    cursor.execute("SET statement_timeout = '30000'")
+    cursor.execute("SET statement_timeout = '60000'")
     cursor.close()
 
 AsyncSessionLocal = async_sessionmaker(async_engine, expire_on_commit=False)

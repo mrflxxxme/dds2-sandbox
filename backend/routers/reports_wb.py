@@ -101,6 +101,15 @@ async def get_opiu(
     # Cache miss — trigger background computation and return "computing"
     project_id = project.id
 
+    # Check if a previous background task already failed (error flag in Redis)
+    error_key = f"reports:opiu:error:{project_id}:{date_from}:{date_to}"
+    prev_error = None
+    if r:
+        try:
+            prev_error = await r.get(error_key)
+        except Exception:
+            pass
+
     async def _compute_background():
         try:
             from backend.database import AsyncSessionLocal
@@ -111,10 +120,29 @@ async def get_opiu(
                     brand=brand, article=article,
                 )
             _log.info("OPIU background compute done for project %s", project_id)
+            # Clear error flag on success
+            if r:
+                try:
+                    await r.delete(error_key)
+                except Exception:
+                    pass
         except Exception as e:
             _log.error("OPIU background compute failed for project %s: %s", project_id, e)
+            # Set error flag so next request knows computation failed
+            if r:
+                try:
+                    await r.setex(error_key, 120, str(e))
+                except Exception:
+                    pass
 
     asyncio.create_task(_compute_background())
+
+    if prev_error:
+        return {
+            "computing": True,
+            "error": True,
+            "message": f"Ошибка при расчёте отчёта: {prev_error}. Повторная попытка запущена.",
+        }
 
     return {"computing": True, "message": "Отчёт рассчитывается, обновите через несколько секунд"}
 

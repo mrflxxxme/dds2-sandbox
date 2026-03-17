@@ -18,6 +18,7 @@ from backend.models.wb_finance import WbFinanceRow
 from backend.cache import cached
 from backend.services.bdr_loaders import (
     load_ads,
+    load_ads_monthly,
     load_avg_costs,
     load_cost_overrides,
     load_tax_settings,
@@ -126,21 +127,11 @@ async def get_opiu(
         _accumulate_row(total_data, row, doc_type, oper_name)
 
     # ── 5. Calculate ads per month (from WbFunnelDaily, aggregated) ──
-    # ads_map is nm_id -> total_ads for the whole period
-    # We need monthly ads — load per month
+    # Single query instead of N per-month calls
+    ads_by_month = await load_ads_monthly(db, project_id, date_from, date_to)
     monthly_ads: dict[str, float] = {}
-    total_ads = 0.0
     for mk in months_set:
-        y, m = mk.split("-")
-        m_from = date(int(y), int(m), 1)
-        if int(m) == 12:
-            m_to = date(int(y) + 1, 1, 1)
-        else:
-            m_to = date(int(y), int(m) + 1, 1)
-        from datetime import timedelta
-        m_to = m_to - timedelta(days=1)
-        m_ads = await load_ads(db, project_id, m_from, m_to)
-        monthly_ads[mk] = sum(m_ads.values())
+        monthly_ads[mk] = sum(ads_by_month.get(mk, {}).values())
     total_ads = sum(monthly_ads.values())
 
     # ── 6. Calculate cost per month ──

@@ -8,7 +8,7 @@ import logging
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import select, func, desc
+from sqlalchemy import select, func, desc, extract
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.wb_finance import WbFinanceRow
@@ -35,6 +35,32 @@ async def load_ads(db: AsyncSession, pid: int, d_from: date, d_to: date) -> dict
         ).group_by(WbFunnelDaily.nm_id)
     )
     return {r.nm_id: float(r.total_adv or 0) for r in result}
+
+
+async def load_ads_monthly(
+    db: AsyncSession, pid: int, d_from: date, d_to: date
+) -> dict[str, dict[int, float]]:
+    """Load ad spend per nm_id grouped by month (YYYY-MM).
+
+    Single query replaces N per-month calls to load_ads().
+    Returns: { "2025-01": {nm_id: total_adv, ...}, ... }
+    """
+    month_label = func.to_char(WbFunnelDaily.date, 'YYYY-MM').label("month_key")
+    result = await db.execute(
+        select(
+            month_label,
+            WbFunnelDaily.nm_id,
+            func.sum(WbFunnelDaily.adv_sum).label("total_adv"),
+        ).where(
+            WbFunnelDaily.project_id == pid,
+            WbFunnelDaily.date >= d_from,
+            WbFunnelDaily.date <= d_to,
+        ).group_by(month_label, WbFunnelDaily.nm_id)
+    )
+    monthly: dict[str, dict[int, float]] = {}
+    for r in result:
+        monthly.setdefault(r.month_key, {})[r.nm_id] = float(r.total_adv or 0)
+    return monthly
 
 
 # ─── Orders & Stocks loader ─────────────────────────────────────────────────
