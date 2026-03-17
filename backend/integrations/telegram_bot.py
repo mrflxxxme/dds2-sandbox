@@ -63,6 +63,10 @@ async def set_bot_commands():
 @router.message(CommandStart(deep_link=True))
 async def cmd_start_deeplink(message: Message):
     """Handle /start with deep link token for auth."""
+    logger.info(
+        "Deep link /start from tg_user=%s, chat=%s, text=%s", message.from_user.id, message.chat.id, message.text
+    )
+
     if message.chat.type != "private":
         await message.reply("Авторизация работает только в личных сообщениях с ботом.")
         return
@@ -72,11 +76,14 @@ async def cmd_start_deeplink(message: Message):
         await message.reply("Используйте ссылку из DDS для авторизации.")
         return
 
+    logger.info("Verifying deep link token: %s...", token[:8])
     user_id = await telegram_service.verify_deep_link_token(token)
     if not user_id:
+        logger.warning("Deep link token invalid or expired: %s...", token[:8])
         await message.reply("Ссылка истекла или недействительна. Сгенерируйте новую в DDS → Настройки → Telegram.")
         return
 
+    logger.info("Deep link verified: tg_user=%s → dds_user=%s", message.from_user.id, user_id)
     async with AsyncSessionLocal() as db:
         await telegram_service.link_telegram_user(db, message.from_user.id, user_id)
 
@@ -84,6 +91,7 @@ async def cmd_start_deeplink(message: Message):
         "Telegram привязан к вашему аккаунту DDS.\n\n"
         "Теперь добавьте бота в групповой чат и используйте /setup для привязки к проекту."
     )
+    logger.info("Deep link binding complete for tg_user=%s", message.from_user.id)
 
 
 @router.message(CommandStart())
