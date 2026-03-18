@@ -117,6 +117,7 @@ src/types/api.ts — TypeScript интерфейсы
 3. **Новый домен/модуль** → создай `backend/DOMAIN_*.md`, добавь строку в таблицу доменов выше
 4. **Найден новый антипаттерн** → добавь check в `scripts/check_conventions.sh` + строку в Антипаттерны ниже
 5. **Урок из бага** → запиши в `memory/project_known_bugs.md`
+6. **Исправлен баг из known_bugs** → обнови `memory/project_known_bugs.md` — перенеси в «Исправленные» с номером коммита
 
 ## Антипаттерны (НЕ ДЕЛАТЬ)
 - Запрос без `project_id` или `is_deleted` фильтра

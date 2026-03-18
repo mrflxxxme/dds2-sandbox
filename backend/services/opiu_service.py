@@ -10,7 +10,6 @@ Optimized: SQL-level aggregation instead of loading all rows into Python.
 import logging
 from datetime import date
 from decimal import Decimal
-from typing import Optional
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,23 +53,23 @@ _SELECT_COLS = """
 """
 
 
-def _build_aggregate_sql(brand: Optional[str], article: Optional[str]) -> str:
+def _build_aggregate_sql(brand: str | None, article: str | None) -> str:
     where = f"project_id = :project_id AND {_DATE_FILTER}"
     if brand:
         where += " AND brand_name = :brand"
     if article:
         where += " AND LOWER(sa_name) LIKE :article_like"
-    return f"SELECT {_SELECT_COLS} FROM wb_finance_rows WHERE {where} GROUP BY month_key ORDER BY month_key"
+    return f"SELECT {_SELECT_COLS} FROM wb_finance_rows WHERE {where} GROUP BY month_key ORDER BY month_key"  # noqa: S608
 
 
 def _build_brands_sql() -> str:
     return f"""SELECT DISTINCT brand_name FROM wb_finance_rows
         WHERE project_id = :project_id AND {_DATE_FILTER}
         AND brand_name IS NOT NULL AND brand_name != ''
-        ORDER BY brand_name"""
+        ORDER BY brand_name"""  # noqa: S608
 
 
-def _build_cost_qty_sql(brand: Optional[str], article: Optional[str]) -> str:
+def _build_cost_qty_sql(brand: str | None, article: str | None) -> str:
     where = f"""project_id = :project_id
         AND doc_type_name = 'Продажа'
         AND (supplier_oper_name = 'Продажа' OR supplier_oper_name = '' OR supplier_oper_name IS NULL)
@@ -92,8 +91,8 @@ async def get_opiu(
     project_id: int,
     date_from: date,
     date_to: date,
-    brand: Optional[str] = None,
-    article: Optional[str] = None,
+    brand: str | None = None,
+    article: str | None = None,
 ) -> dict:
     """
     Build ОПИУ (P&L) from locally cached WB finance data.
@@ -173,11 +172,14 @@ async def get_opiu(
             monthly_data[mk] = _empty_totals()
 
     # ── 5. Load brands ──
-    brands_result = await db.execute(text(_build_brands_sql()), {
-        "project_id": project_id,
-        "date_from": date_from,
-        "date_to": date_to,
-    })
+    brands_result = await db.execute(
+        text(_build_brands_sql()),
+        {
+            "project_id": project_id,
+            "date_from": date_from,
+            "date_to": date_to,
+        },
+    )
     all_brands = sorted(r[0] for r in brands_result)
 
     # ── 6. Ads per month (from WbFunnelDaily) ──
@@ -214,8 +216,9 @@ async def get_opiu(
             return 0
         return round(val / base * 100, 2)
 
-    def _build_row(key, label, level, bold, values_monthly, values_total,
-                   base_monthly=None, base_total=None, expandable=False):
+    def _build_row(
+        key, label, level, bold, values_monthly, values_total, base_monthly=None, base_total=None, expandable=False
+    ):
         total_pct = _pct(values_total, base_total) if base_total else None
         monthly = {}
         monthly_pct = {}
@@ -226,11 +229,15 @@ async def get_opiu(
             else:
                 monthly_pct[mk] = None
         return {
-            "key": key, "label": label, "level": level, "bold": bold,
+            "key": key,
+            "label": label,
+            "level": level,
+            "bold": bold,
             "expandable": expandable,
             "total": round(float(values_total), 2),
             "total_pct": total_pct,
-            "monthly": monthly, "monthly_pct": monthly_pct,
+            "monthly": monthly,
+            "monthly_pct": monthly_pct,
         }
 
     def _metric_monthly(field):
@@ -243,8 +250,9 @@ async def get_opiu(
     real_m = _metric_monthly("realization")
     real_t = _metric_total("realization")
 
-    spp_m = {mk: float(monthly_data[mk]["realization"]) - float(monthly_data[mk]["sales_amount"])
-             for mk in months_sorted}
+    spp_m = {
+        mk: float(monthly_data[mk]["realization"]) - float(monthly_data[mk]["sales_amount"]) for mk in months_sorted
+    }
     spp_t = float(total_data["realization"]) - float(total_data["sales_amount"])
 
     sales_m = _metric_monthly("sales_amount")
@@ -262,9 +270,15 @@ async def get_opiu(
     stor_m = _metric_monthly("storage")
     stor_t = _metric_total("storage")
 
-    ded_m = {mk: float(monthly_data[mk]["deductions"]) - float(monthly_data[mk]["ad_deduction"]) - float(monthly_data[mk].get("loan_deduction", 0))
-             for mk in months_sorted}
-    ded_t = float(total_data["deductions"]) - float(total_data["ad_deduction"]) - float(total_data.get("loan_deduction", 0))
+    ded_m = {
+        mk: float(monthly_data[mk]["deductions"])
+        - float(monthly_data[mk]["ad_deduction"])
+        - float(monthly_data[mk].get("loan_deduction", 0))
+        for mk in months_sorted
+    }
+    ded_t = (
+        float(total_data["deductions"]) - float(total_data["ad_deduction"]) - float(total_data.get("loan_deduction", 0))
+    )
 
     acc_m = _metric_monthly("acceptance")
     acc_t = _metric_total("acceptance")
@@ -275,9 +289,10 @@ async def get_opiu(
     adv_m = _metric_monthly("ad_deduction")
     adv_t = _metric_total("ad_deduction")
 
-    direct_m = {mk: cost_m[mk] + log_m[mk] + comm_m[mk] + pen_m[mk] +
-                    stor_m[mk] + adv_m[mk] + ded_m[mk] + acc_m[mk]
-                for mk in months_sorted}
+    direct_m = {
+        mk: cost_m[mk] + log_m[mk] + comm_m[mk] + pen_m[mk] + stor_m[mk] + adv_m[mk] + ded_m[mk] + acc_m[mk]
+        for mk in months_sorted
+    }
     direct_t = cost_t + log_t + comm_t + pen_t + stor_t + adv_t + ded_t + acc_t
 
     comp_bonus_m = _metric_monthly("additional_payment")
@@ -299,15 +314,32 @@ async def get_opiu(
 
     usn_rate = tax_info.get("usn_rate", 0) / 100
     nds_rate = tax_info.get("nds_rate", 0) / 100
+    regime = tax_info.get("tax_regime", "usn_income")
+    cost_as_expense = tax_info.get("cost_as_expense", False)
 
-    def _calc_tax(income):
+    def _calc_tax(income, expenses=0):
         nds = income * nds_rate / (1 + nds_rate) if nds_rate > 0 else 0
         base = income - nds
+        if regime == "usn_income_expense_vat":
+            base = base - expenses
         usn = max(base * usn_rate, 0)
         return nds + usn
 
-    tax_m = {mk: _calc_tax(sales_m[mk]) for mk in months_sorted}
-    tax_t = _calc_tax(sales_t)
+    def _tax_expenses_for(log, stor, comm, pen, ded, adv, cost_val):
+        """Tax-deductible expenses for income-expense USN regime."""
+        exp = abs(log) + abs(stor) + abs(comm) + abs(pen) + abs(ded) + abs(adv)
+        if cost_as_expense:
+            exp += abs(cost_val)
+        return exp
+
+    tax_exp_m = {
+        mk: _tax_expenses_for(log_m[mk], stor_m[mk], comm_m[mk], pen_m[mk], ded_m[mk], adv_m[mk], cost_m[mk])
+        for mk in months_sorted
+    }
+    tax_exp_t = _tax_expenses_for(log_t, stor_t, comm_t, pen_t, ded_t, adv_t, cost_t)
+
+    tax_m = {mk: _calc_tax(sales_m[mk], tax_exp_m[mk]) for mk in months_sorted}
+    tax_t = _calc_tax(sales_t, tax_exp_t)
 
     net_m = {mk: ebitda_m[mk] - tax_m[mk] for mk in months_sorted}
     net_t = ebitda_t - tax_t
@@ -326,9 +358,13 @@ async def get_opiu(
         _build_row("advertising", "Внутренняя реклама", 1, False, adv_m, adv_t, real_m, real_t),
         _build_row("deductions", "Прочие удержания", 1, False, ded_m, ded_t, real_m, real_t),
         _build_row("acceptance", "Платная приёмка", 1, False, acc_m, acc_t, real_m, real_t),
-        _build_row("compensation", "Компенсация", 0, False, comp_total_m, comp_total_t, real_m, real_t, expandable=True),
+        _build_row(
+            "compensation", "Компенсация", 0, False, comp_total_m, comp_total_t, real_m, real_t, expandable=True
+        ),
         _build_row("comp_bonus", "Баллы за скидки", 1, False, comp_bonus_m, comp_bonus_t, real_m, real_t),
-        _build_row("comp_voluntary", "Добровольная компенсация при возврате", 1, False, comp_vol_m, comp_vol_t, real_m, real_t),
+        _build_row(
+            "comp_voluntary", "Добровольная компенсация при возврате", 1, False, comp_vol_m, comp_vol_t, real_m, real_t
+        ),
         _build_row("gross_margin", "Валовая маржа", 0, True, margin_m, margin_t, real_m, real_t),
         _build_row("operating_expenses", "Операционные расходы", 0, False, ops_m, ops_t, real_m, real_t),
         _build_row("ebitda", "Операционная прибыль (EBITDA)", 0, True, ebitda_m, ebitda_t, real_m, real_t),
@@ -347,6 +383,7 @@ async def get_opiu(
 
 
 # ─── Aggregation helpers ────────────────────────────────────────────────────
+
 
 def _empty_totals() -> dict:
     return {
