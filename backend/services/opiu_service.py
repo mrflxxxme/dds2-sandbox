@@ -42,13 +42,13 @@ _SELECT_COLS = """
     COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_for_pay ELSE 0 END), 0) AS ppvz_for_pay_sale,
     COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_for_pay ELSE 0 END), 0) AS ppvz_for_pay_ret,
     COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' AND supplier_oper_name = 'Добровольная компенсация при возврате' THEN ppvz_for_pay ELSE 0 END), 0) AS comp_ppvz,
-    COALESCE(SUM(CASE WHEN doc_type_name NOT IN ('Продажа', 'Возврат') THEN delivery_rub ELSE 0 END), 0) AS logistics,
-    COALESCE(SUM(CASE WHEN doc_type_name NOT IN ('Продажа', 'Возврат') THEN penalty ELSE 0 END), 0) AS penalties,
-    COALESCE(SUM(CASE WHEN doc_type_name NOT IN ('Продажа', 'Возврат') THEN storage_fee ELSE 0 END), 0) AS storage,
-    COALESCE(SUM(CASE WHEN doc_type_name NOT IN ('Продажа', 'Возврат') THEN acceptance ELSE 0 END), 0) AS acceptance_total,
-    COALESCE(SUM(CASE WHEN doc_type_name NOT IN ('Продажа', 'Возврат') THEN deduction ELSE 0 END), 0) AS deductions,
-    COALESCE(SUM(CASE WHEN doc_type_name NOT IN ('Продажа', 'Возврат') AND deduction != 0 AND (bonus_type_name LIKE '%%Продвижение%%' OR bonus_type_name LIKE '%%Медиа%%') THEN deduction ELSE 0 END), 0) AS ad_deduction,
-    COALESCE(SUM(CASE WHEN doc_type_name NOT IN ('Продажа', 'Возврат') AND deduction != 0 AND (LOWER(bonus_type_name) LIKE '%%кредит%%' OR LOWER(bonus_type_name) LIKE '%%заём%%') THEN deduction ELSE 0 END), 0) AS loan_deduction,
+    COALESCE(SUM(delivery_rub), 0) AS logistics,
+    COALESCE(SUM(penalty), 0) AS penalties,
+    COALESCE(SUM(storage_fee), 0) AS storage,
+    COALESCE(SUM(acceptance), 0) AS acceptance_total,
+    COALESCE(SUM(deduction), 0) AS deductions,
+    COALESCE(SUM(CASE WHEN deduction != 0 AND (bonus_type_name LIKE '%%Продвижение%%' OR bonus_type_name LIKE '%%Медиа%%') THEN deduction ELSE 0 END), 0) AS ad_deduction,
+    COALESCE(SUM(CASE WHEN deduction != 0 AND (LOWER(bonus_type_name) LIKE '%%кредит%%' OR LOWER(bonus_type_name) LIKE '%%заём%%') THEN deduction ELSE 0 END), 0) AS loan_deduction,
     COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN additional_payment WHEN doc_type_name = 'Возврат' THEN -additional_payment ELSE 0 END), 0) AS additional_payment
 """
 
@@ -70,9 +70,10 @@ def _build_brands_sql() -> str:
 
 
 def _build_cost_qty_sql(brand: str | None, article: str | None) -> str:
+    """Net qty per article/month: sale_qty - ret_qty (same as BDR)."""
     where = f"""project_id = :project_id
-        AND doc_type_name = 'Продажа'
-        AND (supplier_oper_name = 'Продажа' OR supplier_oper_name = '' OR supplier_oper_name IS NULL)
+        AND doc_type_name IN ('Продажа', 'Возврат')
+        AND supplier_oper_name IN ('Продажа', 'Возврат')
         AND {_DATE_FILTER}"""
     if brand:
         where += " AND brand_name = :brand"
@@ -80,7 +81,9 @@ def _build_cost_qty_sql(brand: str | None, article: str | None) -> str:
         where += " AND LOWER(sa_name) LIKE :article_like"
     return f"""SELECT
         COALESCE(to_char(rr_dt, 'YYYY-MM'), to_char(date_from, 'YYYY-MM')) AS month_key,
-        sa_name, nm_id, SUM(quantity) AS total_qty
+        sa_name, nm_id,
+        COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN quantity ELSE 0 END), 0)
+        - COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN quantity ELSE 0 END), 0) AS total_qty
         FROM wb_finance_rows WHERE {where}
         GROUP BY month_key, sa_name, nm_id"""
 
@@ -286,8 +289,8 @@ async def get_opiu(
     cost_m = {mk: monthly_cost.get(mk, 0) for mk in months_sorted}
     cost_t = total_cost_val
 
-    adv_m = _metric_monthly("ad_deduction")
-    adv_t = _metric_total("ad_deduction")
+    adv_m = {mk: monthly_ads.get(mk, 0) for mk in months_sorted}
+    adv_t = sum(monthly_ads.values())
 
     direct_m = {
         mk: cost_m[mk] + log_m[mk] + comm_m[mk] + pen_m[mk] + stor_m[mk] + adv_m[mk] + ded_m[mk] + acc_m[mk]
