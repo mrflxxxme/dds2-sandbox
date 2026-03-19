@@ -7,6 +7,7 @@ Thin client around anthropic SDK with retry and rate limit handling.
 import logging
 
 import anthropic
+import httpx
 
 from backend.config import settings
 
@@ -20,7 +21,11 @@ def get_client() -> anthropic.AsyncAnthropic:
     """Get or create the Anthropic async client."""
     global _client
     if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        kwargs: dict = {"api_key": settings.ANTHROPIC_API_KEY}
+        if settings.TELEGRAM_PROXY:
+            kwargs["http_client"] = httpx.AsyncClient(proxy=settings.TELEGRAM_PROXY)
+            logger.info("Anthropic client using proxy")
+        _client = anthropic.AsyncAnthropic(**kwargs)
     return _client
 
 
