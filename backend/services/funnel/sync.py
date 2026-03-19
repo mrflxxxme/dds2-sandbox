@@ -7,26 +7,32 @@ Handles:
 - Batch ad data re-sync
 """
 
-import logging
 import asyncio
-import time
+import logging
 from datetime import date, timedelta
+from decimal import Decimal
 
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import WbFunnelDaily, WbCostOverride, CostOrderItem
+from backend.models import CostOrderItem, WbCostOverride, WbFunnelDaily
 from backend.services.funnel.wb_api_client import (
-    get_wb_key, fetch_funnel, fetch_funnel_history,
-    fetch_ad_campaigns, fetch_ad_stats,
+    fetch_ad_campaigns,
+    fetch_ad_stats,
+    fetch_funnel,
+    fetch_funnel_history,
+    get_wb_key,
 )
 
 logger = logging.getLogger("dds.funnel")
 
 
 async def run_funnel_sync(
-    db: AsyncSession, project_id: int, date_from: str, date_to: str,
+    db: AsyncSession,
+    project_id: int,
+    date_from: str,
+    date_to: str,
     include_completed_campaigns: bool = False,
 ) -> dict:
     """
@@ -67,25 +73,25 @@ async def run_funnel_sync(
                 CostOrderItem.article_seller,
                 CostOrderItem.total_rub,
                 CostOrderItem.qty,
-            ).where(
+            )
+            .where(
                 CostOrderItem.article_seller.isnot(None),
                 CostOrderItem.total_rub.isnot(None),
-            ).order_by(CostOrderItem.id.desc())
+            )
+            .order_by(CostOrderItem.id.desc())
         )
         for row in cost_result:
             art = row.article_seller
             if art and art not in cost_map:
                 qty = row.qty or 1
-                cost_map[art] = float(row.total_rub) / qty
+                cost_map[art] = Decimal(str(row.total_rub)) / Decimal(str(qty))
     except Exception as e:
         logger.warning(f"Cost lookup failed: {e}")
 
     # Get manual overrides
-    override_result = await db.execute(
-        select(WbCostOverride).where(WbCostOverride.project_id == pid)
-    )
+    override_result = await db.execute(select(WbCostOverride).where(WbCostOverride.project_id == pid))
     for ov in override_result.scalars():
-        cost_map[ov.nm_id] = float(ov.cost_price)
+        cost_map[ov.nm_id] = Decimal(str(ov.cost_price))
 
     # Fetch ad campaigns
     campaign_ids = await fetch_ad_campaigns(adv_key, include_completed=include_completed_campaigns)
@@ -102,7 +108,7 @@ async def run_funnel_sync(
     use_history = True
 
     for i in range(0, len(dates), HISTORY_WINDOW):
-        window = dates[i:i + HISTORY_WINDOW]
+        window = dates[i : i + HISTORY_WINDOW]
         w_from, w_to = window[0], window[-1]
 
         if use_history:
@@ -230,7 +236,6 @@ async def run_funnel_sync(
 # ─── Background tasks (re-exported from backfill.py) ────────────────────────
 
 from backend.services.funnel.backfill import (  # noqa: F401
-    run_backfill_bg,
     batch_resync_ads,
+    run_backfill_bg,
 )
-

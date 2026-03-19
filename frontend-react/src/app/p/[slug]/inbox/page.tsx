@@ -34,16 +34,16 @@ export default function InboxPage() {
             setGrouped(g || []);
             setAllTxns(txns || []);
             setCategories(cats || []);
-        } catch { }
+        } catch (e: any) { setMsg(e.message || 'Ошибка загрузки данных'); }
         setLoading(false);
     };
 
     const loadRules = async () => {
-        try { const r = await api.getAutoCategorizeRules(); setRules(r || []); } catch { }
+        try { const r = await api.getAutoCategorizeRules(); setRules(r || []); } catch (e: any) { setMsg(e.message || 'Ошибка загрузки правил'); }
     };
     const loadPreview = async () => {
         setAutoLoading(true);
-        try { const p = await api.previewAutoCategorize(); setPreview(p || []); } catch { }
+        try { const p = await api.previewAutoCategorize(); setPreview(p || []); } catch (e: any) { setMsg(e.message || 'Ошибка предпросмотра'); }
         setAutoLoading(false);
     };
     const applyAutoCat = async () => {

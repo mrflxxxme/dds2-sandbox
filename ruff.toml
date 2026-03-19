@@ -37,6 +37,8 @@ ignore = [
 "backend/scheduler/jobs/ai_digest.py" = ["RUF001", "RUF003"]  # Cyrillic strings
 "backend/main.py" = ["S110", "E402", "RUF006"]  # try-except-pass, late imports, background task ref
 "backend/config.py" = ["RUF003"]  # Cyrillic chars in comments
+"backend/services/planning/fact_links.py" = ["E712", "E741", "RUF001"]  # SQLAlchemy == False, short var, Cyrillic strings
+"backend/services/funnel/sync.py" = ["SIM105", "S110", "E402"]  # try-except-pass, late import (backfill re-export)
 
 [lint.isort]
 known-first-party = ["backend"]
