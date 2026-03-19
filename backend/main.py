@@ -52,7 +52,7 @@ if settings.SENTRY_DSN:
 
 from backend.utils.telegram import configure as configure_telegram
 
-configure_telegram(settings.TELEGRAM_BOT_TOKEN, settings.TELEGRAM_CHAT_ID)
+configure_telegram(settings.TELEGRAM_BOT_TOKEN, settings.TELEGRAM_CHAT_ID, settings.TELEGRAM_PROXY)
 
 
 # ─── Structured JSON Logging ─────────────────────────────────────────────────

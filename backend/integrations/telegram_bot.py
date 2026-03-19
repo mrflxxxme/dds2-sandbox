@@ -34,7 +34,15 @@ router = Router()
 def create_bot() -> tuple[Bot, Dispatcher]:
     """Create and configure bot + dispatcher. Called once at worker startup."""
     global bot, dp
-    bot = Bot(token=settings.TELEGRAM_BOT_TOKEN_ANALYTICS)
+
+    session = None
+    if settings.TELEGRAM_PROXY:
+        from aiogram.client.session.aiohttp import AiohttpSession
+
+        session = AiohttpSession(proxy=settings.TELEGRAM_PROXY)
+        logger.info("Telegram bot using proxy: %s", settings.TELEGRAM_PROXY.split("@")[-1])
+
+    bot = Bot(token=settings.TELEGRAM_BOT_TOKEN_ANALYTICS, session=session)
     dp = Dispatcher()
     dp.include_router(router)
     return bot, dp

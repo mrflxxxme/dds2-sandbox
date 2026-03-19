@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN_ANALYTICS: str = ""  # @dds_analytics_bot token
     TELEGRAM_WEBHOOK_SECRET: str = ""  # X-Telegram-Bot-Api-Secret-Token
     TELEGRAM_USE_POLLING: bool = False  # True for local dev (no public URL)
+    TELEGRAM_PROXY: str = ""  # HTTP proxy for Telegram API (e.g. http://user:pass@host:port)
 
     # CORS
     CORS_ORIGINS: str = "http://localhost:8501,http://localhost:3000"
