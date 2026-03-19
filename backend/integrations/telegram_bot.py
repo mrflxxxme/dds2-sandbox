@@ -397,9 +397,9 @@ async def handle_text(message: Message):
                 tax_rate=tax_rate,
             )
             try:
-                await message.reply(answer, parse_mode="MarkdownV2")
+                await message.reply(answer, parse_mode="HTML")
             except Exception:
-                # Fallback: plain text if MarkdownV2 parsing fails or message deleted
+                # Fallback: plain text if HTML parsing fails or message deleted
                 try:
                     await message.reply(answer)
                 except Exception:
