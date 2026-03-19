@@ -185,11 +185,29 @@ async def get_opiu(
     )
     all_brands = sorted(r[0] for r in brands_result)
 
-    # ── 6. Ads per month (from WbFunnelDaily) ──
+    # ── 6. Ads per month (from WbFunnelDaily, filtered by brand nm_ids) ──
     ads_by_month = await load_ads_monthly(db, project_id, date_from, date_to)
+
+    # When brand is set, only count ads for nm_ids belonging to this brand
+    brand_nm_ids: set[int] | None = None
+    if brand:
+        nm_result = await db.execute(
+            text(
+                f"SELECT DISTINCT nm_id FROM wb_finance_rows"  # noqa: S608
+                f" WHERE project_id = :project_id AND {_DATE_FILTER}"
+                f" AND brand_name = :brand AND nm_id IS NOT NULL AND nm_id != 0"
+            ),
+            params,
+        )
+        brand_nm_ids = {r[0] for r in nm_result}
+
     monthly_ads: dict[str, float] = {}
     for mk in months_set:
-        monthly_ads[mk] = sum(ads_by_month.get(mk, {}).values())
+        month_ads = ads_by_month.get(mk, {})
+        if brand_nm_ids is not None:
+            monthly_ads[mk] = sum(v for nm, v in month_ads.items() if nm in brand_nm_ids)
+        else:
+            monthly_ads[mk] = sum(month_ads.values())
 
     # ── 7. Cost per month (need per-article qty) ──
     cost_map = await load_avg_costs(db, project_id)
