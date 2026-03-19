@@ -397,10 +397,13 @@ async def handle_text(message: Message):
                 tax_rate=tax_rate,
             )
             try:
-                await message.reply(answer)
+                await message.reply(answer, parse_mode="MarkdownV2")
             except Exception:
-                # Fallback: send without reply if original message was deleted
-                await bot.send_message(chat_id=message.chat.id, text=answer)
+                # Fallback: plain text if MarkdownV2 parsing fails or message deleted
+                try:
+                    await message.reply(answer)
+                except Exception:
+                    await bot.send_message(chat_id=message.chat.id, text=answer)
         except Exception:
             logger.exception("AI agent error")
             try:
