@@ -382,8 +382,8 @@ def _compute_metrics_from_sql(row) -> dict:
     ppvz_vw_nds_net = D(str(row["ppvz_vw_nds_sale"])) - D(str(row["ppvz_vw_nds_ret"]))
     total_wb_reward = ppvz_comm_net + ppvz_vw_net + ppvz_vw_nds_net
 
-    # To Pay
-    to_pay = ppvz_net - logistics - rebill - penalties - storage - deductions_total - acceptance_val
+    # To Pay (rebill already subtracted by WB from ppvz_for_pay — do NOT subtract again)
+    to_pay = ppvz_net - logistics - penalties - storage - deductions_total - acceptance_val
 
     avg_sale_price = sales_amount / D(str(net_sale_qty)) if net_sale_qty > 0 else ZERO
     avg_retail_price = realization / D(str(net_sale_qty)) if net_sale_qty > 0 else ZERO
