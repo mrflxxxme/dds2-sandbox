@@ -166,7 +166,8 @@ async def sync_wb_finance(
 
     from backend.scheduler import prewarm_project
 
-    asyncio.create_task(prewarm_project(project_id))
+    task = asyncio.create_task(prewarm_project(project_id))
+    task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     logger.info("wb_finance_sync: done — %d rows in %d pages for project %s", total_synced, page_num, project_id)
     return {"status": "ok", "rows_synced": total_synced, "pages": page_num, "errors": []}
@@ -262,13 +263,17 @@ async def ensure_initial_sync(db: AsyncSession, project_id: int) -> dict | None:
     return await sync_wb_finance(db, project_id, date_from, today)
 
 
-def _parse_date(val) -> date:
-    """Parse date from WB API (can be string or None)."""
+def _parse_date(val) -> date | None:
+    """Parse date from WB API (can be string or None).
+
+    Returns None for missing/invalid values instead of date.today()
+    to avoid polluting max(rr_dt) queries with fake dates.
+    """
     if not val:
-        return date.today()
+        return None
     if isinstance(val, date):
         return val
     try:
         return date.fromisoformat(str(val)[:10])
     except Exception:
-        return date.today()
+        return None

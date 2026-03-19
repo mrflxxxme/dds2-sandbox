@@ -2,20 +2,20 @@
 Tests for wb_finance_sync — pure functions: _parse_date, _row_to_values.
 No DB required.
 """
-import pytest
-from datetime import date, datetime
+
+from datetime import date
 from decimal import Decimal
 
 from backend.services.wb_finance_sync import (
+    _NUMERIC_FIELDS,
     _parse_date,
     _row_to_values,
-    _NUMERIC_FIELDS,
 )
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: _parse_date
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestParseDate:
     """Parse date from WB API responses (various formats)."""
@@ -33,20 +33,17 @@ class TestParseDate:
         d = date(2024, 6, 20)
         assert _parse_date(d) is d
 
-    def test_none_returns_today(self):
-        """None → today."""
-        result = _parse_date(None)
-        assert result == date.today()
+    def test_none_returns_none(self):
+        """None → None (don't pollute max_date queries with fake dates)."""
+        assert _parse_date(None) is None
 
-    def test_empty_string_returns_today(self):
-        """Empty string → today."""
-        result = _parse_date("")
-        assert result == date.today()
+    def test_empty_string_returns_none(self):
+        """Empty string → None."""
+        assert _parse_date("") is None
 
-    def test_invalid_string_returns_today(self):
-        """Invalid format → today."""
-        result = _parse_date("not-a-date")
-        assert result == date.today()
+    def test_invalid_string_returns_none(self):
+        """Invalid format → None."""
+        assert _parse_date("not-a-date") is None
 
     def test_wb_api_format(self):
         """WB often returns dates like '2024-01-15T00:00:00Z'."""
@@ -60,6 +57,7 @@ class TestParseDate:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: _row_to_values
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestRowToValues:
     """Convert WB API row dict to DB insert values."""
