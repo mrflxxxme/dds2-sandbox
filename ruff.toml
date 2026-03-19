@@ -39,6 +39,9 @@ ignore = [
 "backend/config.py" = ["RUF003"]  # Cyrillic chars in comments
 "backend/services/planning/fact_links.py" = ["E712", "E741", "RUF001"]  # SQLAlchemy == False, short var, Cyrillic strings
 "backend/services/funnel/sync.py" = ["SIM105", "S110", "E402"]  # try-except-pass, late import (backfill re-export)
+"backend/integrations/wb_api.py" = ["RUF002", "RUF013", "SIM117"]  # Cyrillic chars, Optional style, nested with
+"backend/scheduler/jobs/wb_finance.py" = ["RUF002"]  # EN dash in docstring
+"backend/services/wb_finance_sync.py" = ["RUF006", "SIM118"]  # background task ref, dict.keys()
 
 [lint.isort]
 known-first-party = ["backend"]

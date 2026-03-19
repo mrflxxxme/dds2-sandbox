@@ -25,7 +25,10 @@ from backend.scheduler.jobs.funnel import (
 )
 from backend.scheduler.jobs.health_check import health_monitor
 from backend.scheduler.jobs.prewarm import prewarm_all_reports, prewarm_project  # noqa: F401
-from backend.scheduler.jobs.wb_finance import sync_all_projects_wb_finance
+from backend.scheduler.jobs.wb_finance import (
+    sync_all_projects_wb_finance,
+    sync_all_projects_wb_finance_daily,
+)
 
 logger = logging.getLogger("dds.scheduler")
 
@@ -85,13 +88,25 @@ def start_scheduler():
         misfire_grace_time=60,
     )
 
-    # WB finance report sync: Mon 03/06/09/10/11/12
-    for job_hour in [3, 6, 9, 10, 11, 12]:
+    # WB finance report sync — WEEKLY: Mon 03/06/09 (full week reports)
+    for job_hour in [3, 6, 9]:
         _scheduler.add_job(
             sync_all_projects_wb_finance,
             trigger=CronTrigger(day_of_week="mon", hour=job_hour, minute=0, timezone=MSK),
             id=f"wb_finance_sync_mon_{job_hour:02d}",
-            name=f"WB finance sync (MON {job_hour:02d}:00)",
+            name=f"WB finance weekly sync (MON {job_hour:02d}:00)",
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+
+    # WB finance report sync — DAILY: Tue-Sun at 08:00, 14:00 MSK
+    # Fetches daily reports (period=daily) for current incomplete week
+    for job_hour in [8, 14]:
+        _scheduler.add_job(
+            sync_all_projects_wb_finance_daily,
+            trigger=CronTrigger(day_of_week="tue-sun", hour=job_hour, minute=0, timezone=MSK),
+            id=f"wb_finance_daily_{job_hour:02d}",
+            name=f"WB finance daily sync ({job_hour:02d}:00)",
             replace_existing=True,
             misfire_grace_time=3600,
         )
@@ -128,7 +143,7 @@ def start_scheduler():
 
     _scheduler.start()
     logger.info(
-        "✅ Scheduler started — daily sync 3x/day + backfill + ad check + wb_finance Mon retry + prewarm 1h + AI digest 07:00"
+        "✅ Scheduler started — daily sync 3x/day + backfill + ad check + wb_finance weekly Mon + wb_finance daily Tue-Sun + prewarm 1h + AI digest 07:00"
     )
 
 

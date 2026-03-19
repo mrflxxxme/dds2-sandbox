@@ -8,27 +8,35 @@ Handles:
 """
 
 import logging
-from datetime import date, datetime, timedelta
-
-from backend.utils.time import utcnow
+from datetime import date, timedelta
 from decimal import Decimal
-from typing import Optional
 
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.wb_finance import WbFinanceRow, WbFinanceSyncLog
 from backend.services.integrations_service import _get_wb_key
+from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.wb_finance_sync")
 
 # Numeric fields to extract from WB API rows
 _NUMERIC_FIELDS = [
-    "retail_price_withdisc_rub", "retail_amount", "ppvz_for_pay",
-    "ppvz_sales_commission", "delivery_rub", "penalty", "additional_payment",
-    "storage_fee", "acceptance", "deduction", "ppvz_reward",
-    "rebill_logistic_cost", "ppvz_vw", "ppvz_vw_nds",
+    "retail_price_withdisc_rub",
+    "retail_amount",
+    "ppvz_for_pay",
+    "ppvz_sales_commission",
+    "delivery_rub",
+    "penalty",
+    "additional_payment",
+    "storage_fee",
+    "acceptance",
+    "deduction",
+    "ppvz_reward",
+    "rebill_logistic_cost",
+    "ppvz_vw",
+    "ppvz_vw_nds",
 ]
 
 
@@ -37,11 +45,14 @@ async def sync_wb_finance(
     project_id: int,
     date_from: date,
     date_to: date,
+    period: str | None = None,
 ) -> dict:
     """Download WB finance report and upsert into wb_finance_rows.
 
     Streams page-by-page: download → batch upsert → commit → next page.
     Data is persisted incrementally so nothing is lost on timeout.
+
+    period: "daily" for daily reports, None for weekly (default).
 
     Returns {status, rows_synced, pages, errors}.
     """
@@ -50,7 +61,7 @@ async def sync_wb_finance(
     _key, api_key = await _get_wb_key(db, project_id)
     client = WBApiClient(api_key)
 
-    logger.info("wb_finance_sync: fetching %s — %s for project %s", date_from, date_to, project_id)
+    logger.info("wb_finance_sync: fetching %s — %s (period=%s) for project %s", date_from, date_to, period, project_id)
 
     rrdid_cursor = 0
     page_limit = 100000
@@ -62,14 +73,20 @@ async def sync_wb_finance(
         while True:
             page_num += 1
             page = await client.get_finance_report(
-                date_from, date_to, limit=page_limit, rrdid=rrdid_cursor,
+                date_from,
+                date_to,
+                limit=page_limit,
+                rrdid=rrdid_cursor,
+                period=period,
             )
             if not page:
                 break
 
             logger.info(
                 "wb_finance_sync: page %d — got %d rows (cursor rrdid=%d)",
-                page_num, len(page), rrdid_cursor,
+                page_num,
+                len(page),
+                rrdid_cursor,
             )
 
             # ── Batch upsert THIS page immediately ──
@@ -95,7 +112,8 @@ async def sync_wb_finance(
             await db.commit()
             logger.info(
                 "wb_finance_sync: page %d committed (%d rows total so far)",
-                page_num, total_synced,
+                page_num,
+                total_synced,
             )
 
             # If we got less than limit, we've fetched everything
@@ -113,27 +131,41 @@ async def sync_wb_finance(
         logger.error("wb_finance_sync: API error on page %d: %s", page_num, error_msg)
         errors.append(error_msg)
         # Even on error, log what we synced so far
-        db.add(WbFinanceSyncLog(
-            project_id=project_id, date_from=date_from, date_to=date_to,
-            rows_synced=total_synced, status="ERROR", error_msg=error_msg,
-        ))
+        db.add(
+            WbFinanceSyncLog(
+                project_id=project_id,
+                date_from=date_from,
+                date_to=date_to,
+                rows_synced=total_synced,
+                status="ERROR",
+                error_msg=error_msg,
+            )
+        )
         await db.commit()
         return {"status": "error", "rows_synced": total_synced, "pages": page_num, "errors": errors}
 
     # Log sync success
-    db.add(WbFinanceSyncLog(
-        project_id=project_id, date_from=date_from, date_to=date_to,
-        rows_synced=total_synced, status="OK",
-    ))
+    db.add(
+        WbFinanceSyncLog(
+            project_id=project_id,
+            date_from=date_from,
+            date_to=date_to,
+            rows_synced=total_synced,
+            status="OK",
+        )
+    )
     await db.commit()
 
     # Invalidate WB-dependent report caches
     from backend.cache import invalidate_project_reports
+
     await invalidate_project_reports(project_id)
 
     # Background prewarm: re-compute reports so cache is hot
     import asyncio
+
     from backend.scheduler import prewarm_project
+
     asyncio.create_task(prewarm_project(project_id))
 
     logger.info("wb_finance_sync: done — %d rows in %d pages for project %s", total_synced, page_num, project_id)
@@ -173,11 +205,7 @@ def _row_to_values(row: dict, project_id: int) -> dict:
 async def _upsert_batch(db: AsyncSession, batch: list[dict]):
     """Bulk upsert a batch of rows using ON CONFLICT DO UPDATE."""
     stmt = pg_insert(WbFinanceRow).values(batch)
-    update_cols = {
-        k: stmt.excluded[k]
-        for k in batch[0].keys()
-        if k not in ("project_id", "rrd_id")
-    }
+    update_cols = {k: stmt.excluded[k] for k in batch[0].keys() if k not in ("project_id", "rrd_id")}
     stmt = stmt.on_conflict_do_update(
         constraint="uq_wb_finance_rrd",
         set_=update_cols,
@@ -222,10 +250,7 @@ async def ensure_initial_sync(db: AsyncSession, project_id: int) -> dict | None:
 
     Returns sync result or None if data already exists.
     """
-    count = await db.execute(
-        select(func.count(WbFinanceRow.id))
-        .where(WbFinanceRow.project_id == project_id)
-    )
+    count = await db.execute(select(func.count(WbFinanceRow.id)).where(WbFinanceRow.project_id == project_id))
     total = count.scalar() or 0
 
     if total > 0:

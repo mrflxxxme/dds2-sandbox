@@ -12,22 +12,18 @@ Resilience:
 - Exponential backoff: retries 429/5xx errors up to 3 times
 """
 
-import logging
-from datetime import datetime, date, timedelta, timezone
-
-from backend.utils.time import utcnow
+from datetime import date, timedelta
 from decimal import Decimal
-from typing import Optional
 
 import httpx
 import structlog
 
 from backend.integrations.resilience import (
     CircuitBreaker,
-    CircuitOpenError,
     RateLimitError,
     retry_with_backoff,
 )
+from backend.utils.time import utcnow
 
 logger = structlog.get_logger("dds.wb_api")
 
@@ -69,7 +65,7 @@ class WBApiClient:
                 if response.status_code == 429:
                     retry_after = int(response.headers.get("Retry-After", "60"))
                     raise RateLimitError(
-                        f"WB API rate limited (429)",
+                        "WB API rate limited (429)",
                         retry_after=retry_after,
                     )
                 if response.status_code >= 500:
@@ -120,10 +116,13 @@ class WBApiClient:
         date_to: date,
         limit: int = 100000,
         rrdid: int = 0,
+        period: str | None = None,
     ) -> list[dict]:
         """
         Fetch detailed finance report (payout details).
         Returns line-level data with commission, logistics, penalties, etc.
+
+        period: "daily" for daily reports, None for weekly (default).
         """
         params = {
             "dateFrom": date_from.isoformat(),
@@ -131,6 +130,8 @@ class WBApiClient:
             "limit": limit,
             "rrdid": rrdid,
         }
+        if period:
+            params["period"] = period
         return await self._get(
             WB_API_BASE,
             "/api/v5/supplier/reportDetailByPeriod",
@@ -159,24 +160,20 @@ class WBApiClient:
                 async with _wb_circuit:
                     url = f"{WB_CONTENT_API_BASE}/content/v2/get/cards/list"
                     logger.info("wb_api.request", method="POST", path="cards/list", cursor=cursor)
-                    response = await client.post(
-                        url, headers=self.headers, json=body
-                    )
+                    response = await client.post(url, headers=self.headers, json=body)
 
                     if response.status_code == 401:
                         raise ValueError("WB API: неверный API-ключ (401)")
                     if response.status_code == 429:
                         retry_after = int(response.headers.get("Retry-After", "60"))
                         raise RateLimitError(
-                            f"WB API rate limited (429)",
+                            "WB API rate limited (429)",
                             retry_after=retry_after,
                         )
                     if response.status_code >= 500:
                         raise ValueError(f"WB Content API server error: HTTP {response.status_code}")
                     if response.status_code != 200:
-                        raise ValueError(
-                            f"WB Content API error: HTTP {response.status_code} — {response.text[:200]}"
-                        )
+                        raise ValueError(f"WB Content API error: HTTP {response.status_code} — {response.text[:200]}")
 
                     data = response.json()
                     cards = data.get("cards", [])
@@ -240,20 +237,21 @@ def parse_wb_cards_to_nomenclature(cards: list[dict]) -> list[dict]:
                     continue
                 seen_barcodes.add(barcode)
 
-                nomenclature.append({
-                    "barcode": barcode,
-                    "brand": brand,
-                    "subject": subject,
-                    "article_seller": vendor_code,
-                    "article_wb": nm_id,
-                    "volume_l": round(volume_l, 4),
-                })
+                nomenclature.append(
+                    {
+                        "barcode": barcode,
+                        "brand": brand,
+                        "subject": subject,
+                        "article_seller": vendor_code,
+                        "article_wb": nm_id,
+                        "volume_l": round(volume_l, 4),
+                    }
+                )
 
     return nomenclature
 
 
 def parse_wb_sales_to_payouts(sales: list[dict]) -> list[dict]:
-
     """
     Transform WB sales API response into our wb_payouts format.
     Groups by saleID and maps fields.
@@ -270,12 +268,14 @@ def parse_wb_sales_to_payouts(sales: list[dict]) -> list[dict]:
         if total_price <= 0:
             continue
 
-        payouts.append({
-            "request_id": sale_id,
-            "amount_rub": total_price,
-            "currency": "RUB",
-            "created_at": sale.get("date", utcnow().isoformat()),
-            "wb_status_raw": sale.get("saleID", ""),
-            "status": "TRANSIT",
-        })
+        payouts.append(
+            {
+                "request_id": sale_id,
+                "amount_rub": total_price,
+                "currency": "RUB",
+                "created_at": sale.get("date", utcnow().isoformat()),
+                "wb_status_raw": sale.get("saleID", ""),
+                "status": "TRANSIT",
+            }
+        )
     return payouts

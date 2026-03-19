@@ -4,7 +4,7 @@
     {
       "name": "docker-stack",
       "runtimeExecutable": "docker",
-      "runtimeArgs": ["compose", "up", "--build"],
+      "runtimeArgs": ["compose", "up", "frontend-react"],
       "port": 3000
     }
   ]
