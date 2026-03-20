@@ -114,28 +114,28 @@ export default function PlanFactPage() {
                 </button>
             </div>
 
-            <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+            <div className="table-toolbar" style={{ marginBottom: 16 }}>
                 <button className={`btn ${tab === 'daily' ? 'btn-primary' : 'btn-secondary'} btn-sm`}
                     onClick={() => setTab('daily')}>По дням</button>
                 <button className={`btn ${tab === 'brands' ? 'btn-primary' : 'btn-secondary'} btn-sm`}
                     onClick={() => setTab('brands')}>По брендам</button>
 
-                <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
-                    {tab === 'daily' && (
-                        <select className="form-select form-select-sm" style={{ width: 180 }}
-                            value={brand} onChange={e => setBrand(e.target.value)}>
-                            {brands.map(b => <option key={b} value={b}>{b}</option>)}
-                        </select>
-                    )}
-                    <select className="form-select form-select-sm" style={{ width: 140 }}
-                        value={month} onChange={e => setMonth(Number(e.target.value))}>
-                        {MONTH_NAMES.map((name, i) => (
-                            <option key={i} value={i + 1}>{name}</option>
-                        ))}
+                <div style={{ flex: 1 }} />
+
+                {tab === 'daily' && (
+                    <select className="form-select form-select-sm" style={{ width: 180 }}
+                        value={brand} onChange={e => setBrand(e.target.value)}>
+                        {brands.map(b => <option key={b} value={b}>{b}</option>)}
                     </select>
-                    <input type="number" className="form-control form-control-sm" style={{ width: 80 }}
-                        value={year} onChange={e => setYear(Number(e.target.value))} />
-                </div>
+                )}
+                <select className="form-select form-select-sm" style={{ width: 140 }}
+                    value={month} onChange={e => setMonth(Number(e.target.value))}>
+                    {MONTH_NAMES.map((name, i) => (
+                        <option key={i} value={i + 1}>{name}</option>
+                    ))}
+                </select>
+                <input type="number" className="form-control form-control-sm" style={{ width: 80 }}
+                    value={year} onChange={e => setYear(Number(e.target.value))} />
             </div>
 
             {loading && <div className="text-center py-8 text-secondary">Загрузка...</div>}
@@ -170,8 +170,8 @@ function DailyTab({ data, pctColor, statusIcon }: {
     return (
         <>
             {chartData.length > 0 && (
-                <div className="card mb-4">
-                    <div className="card-body">
+                <div className="card" style={{ marginBottom: 20 }}>
+                    <div style={{ padding: 20 }}>
                         <ResponsiveContainer width="100%" height={300}>
                             <ComposedChart data={chartData}>
                                 <CartesianGrid strokeDasharray="3 3" />
@@ -203,27 +203,27 @@ function DailyTab({ data, pctColor, statusIcon }: {
                 </div>
             )}
 
-            <div className="table-responsive">
-                <table className="table table-sm table-bordered">
+            <div style={{ overflowX: 'auto' }}>
+                <table className="data-table">
                     <thead>
                         <tr>
                             <th>Дата</th>
-                            <th className="text-end">Факт/день</th>
-                            <th className="text-end">План/день</th>
-                            <th className="text-end">Факт накоп.</th>
-                            <th className="text-end">План накоп.</th>
-                            <th className="text-end">%</th>
+                            <th style={{ textAlign: 'right' }}>Факт/день</th>
+                            <th style={{ textAlign: 'right' }}>План/день</th>
+                            <th style={{ textAlign: 'right' }}>Факт накоп.</th>
+                            <th style={{ textAlign: 'right' }}>План накоп.</th>
+                            <th style={{ textAlign: 'right' }}>%</th>
                         </tr>
                     </thead>
                     <tbody>
                         {data.rows.map(r => (
                             <tr key={r.dt}>
                                 <td>{r.dt.slice(5).replace('-', '.')}</td>
-                                <td className="text-end">{formatNumber(r.fact_day, 0)}</td>
-                                <td className="text-end">{formatNumber(r.plan_day, 0)}</td>
-                                <td className="text-end">{formatNumber(r.fact_cumulative, 0)}</td>
-                                <td className="text-end">{formatNumber(r.plan_cumulative, 0)}</td>
-                                <td className={`text-end ${pctColor(r.pct)}`}>
+                                <td style={{ textAlign: 'right' }}>{formatNumber(r.fact_day, 0)}</td>
+                                <td style={{ textAlign: 'right' }}>{formatNumber(r.plan_day, 0)}</td>
+                                <td style={{ textAlign: 'right' }}>{formatNumber(r.fact_cumulative, 0)}</td>
+                                <td style={{ textAlign: 'right' }}>{formatNumber(r.plan_cumulative, 0)}</td>
+                                <td style={{ textAlign: 'right' }} className={pctColor(r.pct)}>
                                     {r.pct !== null ? `${r.pct}%` : '\u2014'}
                                 </td>
                             </tr>
@@ -232,19 +232,19 @@ function DailyTab({ data, pctColor, statusIcon }: {
                 </table>
             </div>
 
-            <div className="card mt-3">
-                <div className="card-body d-flex justify-content-between align-items-center">
+            <div className="card" style={{ marginTop: 16 }}>
+                <div style={{ padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16 }}>
                     <div>
                         <strong>План:</strong> {formatNumber(data.plan_adjusted, 0)}
                         {data.debt_prev > 0 && (
-                            <span className="text-warning ms-2">
+                            <span className="text-warning" style={{ marginLeft: 8 }}>
                                 (вкл. долг {formatNumber(data.debt_prev, 0)})
                             </span>
                         )}
                     </div>
                     <div>
                         <strong>Факт:</strong> {formatNumber(data.fact_mtd, 0)}
-                        <span className={`ms-2 ${pctColor(data.pct)}`}>
+                        <span className={pctColor(data.pct)} style={{ marginLeft: 8 }}>
                             {data.pct !== null ? `${data.pct}%` : ''}
                         </span>
                     </div>
@@ -271,54 +271,55 @@ function BrandsTab({ data, pctColor, statusIcon }: {
         );
     }
 
-    const totalPlan = data.reduce((s, r) => s + r.plan_adjusted, 0);
-    const totalFact = data.reduce((s, r) => s + r.fact_mtd, 0);
-    const totalForecast = data.reduce((s, r) => s + r.forecast, 0);
+    const totalPlan = data.reduce((s, r) => s + Number(r.plan_adjusted), 0);
+    const totalFact = data.reduce((s, r) => s + Number(r.fact_mtd), 0);
+    const totalForecast = data.reduce((s, r) => s + Number(r.forecast), 0);
     const totalPct = totalPlan > 0 ? totalFact / totalPlan * 100 : null;
 
     return (
         <>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 16 }}>
                 {data.map(r => (
                     <div key={r.brand} className="card">
-                        <div className="card-body">
-                            <h6 className="card-title mb-3">{r.brand}</h6>
-                            <div className="d-flex justify-content-between mb-1">
-                                <span>План</span>
+                        <div style={{ padding: 20 }}>
+                            <h6 style={{ margin: '0 0 16px', fontWeight: 600 }}>{r.brand}</h6>
+
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                                <span style={{ color: 'var(--color-text-muted)' }}>План</span>
                                 <span>{formatNumber(r.plan_month, 0)}</span>
                             </div>
                             {r.debt_prev > 0 && (
-                                <div className="d-flex justify-content-between mb-1 text-warning">
+                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }} className="text-warning">
                                     <span>Долг (перенос)</span>
                                     <span>+{formatNumber(r.debt_prev, 0)}</span>
                                 </div>
                             )}
                             {r.debt_prev > 0 && (
-                                <div className="d-flex justify-content-between mb-1 fw-bold">
+                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontWeight: 600 }}>
                                     <span>Скорр. план</span>
                                     <span>{formatNumber(r.plan_adjusted, 0)}</span>
                                 </div>
                             )}
-                            <div className="d-flex justify-content-between mb-2 fw-bold">
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12, fontWeight: 600 }}>
                                 <span>Факт</span>
                                 <span>{formatNumber(r.fact_mtd, 0)}</span>
                             </div>
 
-                            <div style={{ background: '#e5e7eb', borderRadius: 4, height: 20, overflow: 'hidden', marginBottom: 8 }}>
+                            <div style={{ background: 'var(--color-bg-hover)', borderRadius: 6, height: 24, overflow: 'hidden', marginBottom: 12 }}>
                                 <div style={{
                                     width: `${Math.min(r.pct ?? 0, 100)}%`,
                                     height: '100%',
                                     background: (r.pct ?? 0) >= 100 ? '#22c55e' : (r.pct ?? 0) >= 70 ? '#f59e0b' : '#ef4444',
-                                    borderRadius: 4,
+                                    borderRadius: 6,
                                     transition: 'width 0.3s',
                                 }} />
                             </div>
 
-                            <div className="d-flex justify-content-between">
-                                <span className={pctColor(r.pct)}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <span className={pctColor(r.pct)} style={{ fontWeight: 600 }}>
                                     {r.pct !== null ? `${r.pct}%` : '\u2014'}
                                 </span>
-                                <span>
+                                <span style={{ color: 'var(--color-text-muted)' }}>
                                     Прогноз: {formatNumber(r.forecast, 0)}
                                     {statusIcon(r.forecast, r.plan_adjusted)}
                                 </span>
@@ -328,9 +329,9 @@ function BrandsTab({ data, pctColor, statusIcon }: {
                 ))}
             </div>
 
-            <div className="card mt-4">
-                <div className="card-body d-flex justify-content-between align-items-center fw-bold">
-                    <span>Итого по кабинету</span>
+            <div className="card" style={{ marginTop: 20 }}>
+                <div style={{ padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16, fontWeight: 600 }}>
+                    <span>Итого</span>
                     <span>План: {formatNumber(totalPlan, 0)}</span>
                     <span>Факт: {formatNumber(totalFact, 0)}</span>
                     <span className={pctColor(totalPct)}>

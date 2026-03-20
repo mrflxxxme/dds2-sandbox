@@ -102,18 +102,19 @@ export function BrandPlans() {
         const rows = planBrands.map(brand => {
             const row: Record<string, unknown> = { 'Бренд': brand };
             planMonths.forEach(m => {
-                row[MONTH_NAMES[m - 1]] = getPlan(brand, m)?.plan_amount ?? 0;
+                row[MONTH_NAMES[m - 1]] = Number(getPlan(brand, m)?.plan_amount ?? 0);
             });
+            row['Итого'] = brandTotal(brand);
             return row;
         });
         exportToExcel(rows as Record<string, string | number>[], `plan_${year}`);
     };
 
     const brandTotal = (brand: string) =>
-        planMonths.reduce((s, m) => s + (getPlan(brand, m)?.plan_amount ?? 0), 0);
+        planMonths.reduce((s, m) => s + Number(getPlan(brand, m)?.plan_amount ?? 0), 0);
 
     const monthTotal = (month: number) =>
-        planBrands.reduce((s, b) => s + (getPlan(b, month)?.plan_amount ?? 0), 0);
+        planBrands.reduce((s, b) => s + Number(getPlan(b, month)?.plan_amount ?? 0), 0);
 
     const grandTotal = planBrands.reduce((s, b) => s + brandTotal(b), 0);
 
@@ -122,8 +123,8 @@ export function BrandPlans() {
 
     return (
         <div>
-            <div className="d-flex align-items-center gap-3 mb-4">
-                <h5 className="mb-0">План по брендам</h5>
+            <div className="table-toolbar" style={{ marginBottom: 16 }}>
+                <h5 style={{ margin: 0 }}>План по брендам</h5>
                 <select
                     className="form-select form-select-sm"
                     style={{ width: 100 }}
@@ -137,7 +138,8 @@ export function BrandPlans() {
                 <button className="btn btn-outline-primary btn-sm" onClick={addMonth}>
                     + Месяц
                 </button>
-                <button className="btn btn-outline-secondary btn-sm ms-auto" onClick={handleExport}>
+                <div style={{ flex: 1 }} />
+                <button className="btn btn-outline-secondary btn-sm" onClick={handleExport}>
                     Excel
                 </button>
             </div>
@@ -147,44 +149,49 @@ export function BrandPlans() {
                     Нет планов. Добавьте бренд из выпадающего списка ниже.
                 </div>
             ) : (
-                <div className="table-responsive">
-                    <table className="table table-sm table-bordered">
+                <div style={{ overflowX: 'auto' }}>
+                    <table className="data-table">
                         <thead>
                             <tr>
                                 <th>Бренд</th>
                                 {planMonths.map(m => (
-                                    <th key={m} className="text-center">{MONTH_NAMES[m - 1]}</th>
+                                    <th key={m} style={{ textAlign: 'right' }}>{MONTH_NAMES[m - 1]}</th>
                                 ))}
-                                <th className="text-end">Итого</th>
+                                <th style={{ textAlign: 'right' }}>Итого</th>
                                 <th style={{ width: 40 }}></th>
                             </tr>
                         </thead>
                         <tbody>
                             {planBrands.map(brand => (
                                 <tr key={brand}>
-                                    <td className="fw-medium">{brand}</td>
+                                    <td style={{ fontWeight: 500 }}>{brand}</td>
                                     {planMonths.map(m => {
                                         const plan = getPlan(brand, m);
                                         const key = `${brand}-${m}`;
                                         return (
-                                            <td key={m} className="text-end" style={{ minWidth: 120 }}>
+                                            <td key={m} style={{ textAlign: 'right', minWidth: 130 }}>
                                                 <input
                                                     type="number"
-                                                    className="form-control form-control-sm text-end"
+                                                    className="form-control form-control-sm"
+                                                    style={{
+                                                        textAlign: 'right',
+                                                        opacity: saving[key] ? 0.5 : 1,
+                                                        maxWidth: 130,
+                                                    }}
                                                     value={plan?.plan_amount ?? ''}
                                                     placeholder="0"
                                                     onChange={e => handleAmountChange(brand, m, e.target.value)}
-                                                    style={{ opacity: saving[key] ? 0.5 : 1 }}
                                                 />
                                             </td>
                                         );
                                     })}
-                                    <td className="text-end fw-bold">
+                                    <td style={{ textAlign: 'right', fontWeight: 600 }}>
                                         {formatNumber(brandTotal(brand), 0)}
                                     </td>
-                                    <td>
+                                    <td style={{ textAlign: 'center' }}>
                                         <button
-                                            className="btn btn-sm text-danger p-0"
+                                            className="btn btn-sm text-danger"
+                                            style={{ padding: '2px 6px', lineHeight: 1 }}
                                             title="Удалить бренд"
                                             onClick={() => deleteBrand(brand)}
                                         >
@@ -193,14 +200,14 @@ export function BrandPlans() {
                                     </td>
                                 </tr>
                             ))}
-                            <tr className="fw-bold">
+                            <tr style={{ fontWeight: 700, borderTop: '2px solid var(--color-border)' }}>
                                 <td>Итого</td>
                                 {planMonths.map(m => (
-                                    <td key={m} className="text-end">
+                                    <td key={m} style={{ textAlign: 'right' }}>
                                         {formatNumber(monthTotal(m), 0)}
                                     </td>
                                 ))}
-                                <td className="text-end">{formatNumber(grandTotal, 0)}</td>
+                                <td style={{ textAlign: 'right' }}>{formatNumber(grandTotal, 0)}</td>
                                 <td></td>
                             </tr>
                         </tbody>
@@ -208,7 +215,7 @@ export function BrandPlans() {
                 </div>
             )}
 
-            <div className="d-flex align-items-center gap-2 mt-3">
+            <div className="table-toolbar" style={{ marginTop: 16 }}>
                 <select
                     className="form-select form-select-sm"
                     style={{ width: 250 }}
