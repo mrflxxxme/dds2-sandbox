@@ -209,6 +209,50 @@ export interface LeadTime {
   days: number;
 }
 
+// ─── Brand Plans ─────────────────────────────────────────────────────────────
+
+export interface BrandPlan {
+  id?: number;
+  brand: string;
+  year: number;
+  month: number;
+  plan_amount: number;
+  created_at?: string;
+}
+
+export interface PlanFactDayRow {
+  dt: string;
+  fact_day: number;
+  plan_day: number;
+  fact_cumulative: number;
+  plan_cumulative: number;
+  pct: number | null;
+}
+
+export interface PlanFactDailyResult {
+  rows: PlanFactDayRow[];
+  forecast: number;
+  plan_month: number;
+  debt_prev: number;
+  plan_adjusted: number;
+  fact_mtd: number;
+  pct: number | null;
+  days_in_month: number;
+  current_day: number;
+}
+
+export interface PlanFactBrandRow {
+  brand: string;
+  plan_month: number;
+  debt_prev: number;
+  plan_adjusted: number;
+  fact_mtd: number;
+  pct: number | null;
+  forecast: number;
+  days_in_month: number;
+  current_day: number;
+}
+
 // ─── Cost ────────────────────────────────────────────────────────────────────
 
 export interface Nomenclature {

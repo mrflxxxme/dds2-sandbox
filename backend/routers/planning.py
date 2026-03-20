@@ -6,23 +6,25 @@ Sub-routers:
 - planning_wb_payouts.py: WB payouts upload/reconcile
 """
 
-from typing import List, Optional
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models import Project
-from backend.schemas import (
-    OrderSchema, LeadTimeSchema, PlannedPaymentSchema,
-    PlannedIncomeSchema, FactLinkCreate,
-)
 from backend.project_context import get_current_project
-from backend.services import planning as planning_service
 
 # Import sub-routers
 from backend.routers.planning_customs import router as customs_router
 from backend.routers.planning_wb_payouts import router as wb_payouts_router
+from backend.schemas import (
+    BrandPlanSchema,
+    FactLinkCreate,
+    LeadTimeSchema,
+    OrderSchema,
+    PlannedIncomeSchema,
+    PlannedPaymentSchema,
+)
+from backend.services import planning as planning_service
 
 router = APIRouter(prefix="/planning")
 
@@ -33,7 +35,8 @@ router.include_router(wb_payouts_router)
 
 # ─── Orders ──────────────────────────────────────────────────────────────────
 
-@router.get("/orders", response_model=List[OrderSchema])
+
+@router.get("/orders", response_model=list[OrderSchema])
 async def get_orders(
     limit: int = Query(500),
     offset: int = Query(0),
@@ -67,7 +70,8 @@ async def delete_order(
 
 # ─── Lead Times ───────────────────────────────────────────────────────────────
 
-@router.get("/lead_times", response_model=List[LeadTimeSchema])
+
+@router.get("/lead_times", response_model=list[LeadTimeSchema])
 async def get_lead_times(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -81,16 +85,15 @@ async def upsert_lead_time(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    return await planning_service.upsert_lead_time(
-        db, project.id, payload.direction, payload.days
-    )
+    return await planning_service.upsert_lead_time(db, project.id, payload.direction, payload.days)
 
 
 # ─── Planned Payments ─────────────────────────────────────────────────────────
 
-@router.get("/payments", response_model=List[PlannedPaymentSchema])
+
+@router.get("/payments", response_model=list[PlannedPaymentSchema])
 async def get_payments(
-    order_no: Optional[int] = Query(None),
+    order_no: int | None = Query(None),
     limit: int = Query(500),
     offset: int = Query(0),
     project: Project = Depends(get_current_project),
@@ -135,7 +138,8 @@ async def mark_paid(
 
 # ─── Planned Incomes ──────────────────────────────────────────────────────────
 
-@router.get("/incomes", response_model=List[PlannedIncomeSchema])
+
+@router.get("/incomes", response_model=list[PlannedIncomeSchema])
 async def get_incomes(
     limit: int = Query(500),
     offset: int = Query(0),
@@ -169,6 +173,7 @@ async def delete_income(
 
 # ─── Cashflow Daily ───────────────────────────────────────────────────────────
 
+
 @router.get("/cashflow_daily")
 async def get_cashflow_daily(
     days: int = Query(60),
@@ -181,13 +186,15 @@ async def get_cashflow_daily(
 
 # ─── Order Summary (plan vs fact) ─────────────────────────────────────────────
 
+
 @router.get("/orders/{order_no}/summary")
 async def order_summary(
     order_no: int,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    from backend.schemas import TransactionSchema, CustomsAllocSchema
+    from backend.schemas import CustomsAllocSchema, TransactionSchema
+
     data = await planning_service.get_order_summary(db, project.id, order_no)
     if not data:
         raise HTTPException(404, "Order not found")
@@ -203,12 +210,14 @@ async def order_summary(
 
 # ─── Manual Sync Plan Payments ───────────────────────────────────────────────
 
+
 @router.post("/sync_plan_payments")
 async def sync_plan_payments_endpoint(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     import asyncio
+
     from backend.database import SyncSessionLocal
     from backend.etl.service import _sync_plan_payments
 
@@ -226,6 +235,7 @@ async def sync_plan_payments_endpoint(
 
 # ─── Manual Fact Links ───────────────────────────────────────────────────────
 
+
 @router.get("/fact_links/{payment_id}")
 async def get_fact_links(
     payment_id: int,
@@ -234,9 +244,14 @@ async def get_fact_links(
 ):
     links = await planning_service.get_fact_links(db, project.id, payment_id)
     return [
-        {"id": l.id, "payment_id": l.payment_id, "txn_id": l.txn_id,
-         "amount_rub": float(l.amount_rub), "note": l.note}
-        for l in links
+        {
+            "id": lnk.id,
+            "payment_id": lnk.payment_id,
+            "txn_id": lnk.txn_id,
+            "amount_rub": float(lnk.amount_rub),
+            "note": lnk.note,
+        }
+        for lnk in links
     ]
 
 
@@ -296,13 +311,11 @@ async def get_accounts_list(
     db: AsyncSession = Depends(get_db),
 ):
     accs = await planning_service.get_accounts_list(db, project.id)
-    return [
-        {"id": a.id, "account": a.account, "bank": a.bank, "currency": a.currency}
-        for a in accs
-    ]
+    return [{"id": a.id, "account": a.account, "bank": a.bank, "currency": a.currency} for a in accs]
 
 
 # ─── WB Forecast ─────────────────────────────────────────────────────────────
+
 
 @router.post("/wb_forecast/refresh")
 async def refresh_wb_forecast(
@@ -311,3 +324,72 @@ async def refresh_wb_forecast(
     db: AsyncSession = Depends(get_db),
 ):
     return await planning_service.refresh_wb_forecast(db, project.id, trend_days=trend_days)
+
+
+# ─── Brand Plans ─────────────────────────────────────────────────────────────
+
+
+@router.get("/wb-brands")
+async def get_wb_brands(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await planning_service.get_wb_brands(db, project.id)
+
+
+@router.get("/brand-plans", response_model=list[BrandPlanSchema])
+async def get_brand_plans(
+    year: int = Query(...),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await planning_service.get_brand_plans(db, project.id, year)
+
+
+@router.post("/brand-plans", response_model=BrandPlanSchema)
+async def upsert_brand_plan(
+    payload: BrandPlanSchema,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await planning_service.upsert_brand_plan(
+        db,
+        project.id,
+        payload.brand,
+        payload.year,
+        payload.month,
+        payload.plan_amount,
+    )
+
+
+@router.delete("/brand-plans/{plan_id}")
+async def delete_brand_plan(
+    plan_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await planning_service.delete_brand_plan(db, project.id, plan_id)
+    if not result:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+@router.get("/plan-fact")
+async def get_plan_fact(
+    brand: str = Query(...),
+    year: int = Query(...),
+    month: int = Query(...),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await planning_service.get_plan_fact_daily(db, project.id, brand, year, month)
+
+
+@router.get("/plan-fact/brands")
+async def get_plan_fact_brands(
+    year: int = Query(...),
+    month: int = Query(...),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await planning_service.get_plan_fact_brands(db, project.id, year, month)

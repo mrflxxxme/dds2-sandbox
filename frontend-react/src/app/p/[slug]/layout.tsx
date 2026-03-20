@@ -32,6 +32,7 @@ const navGroups = [
             { href: '/trends', label: 'Метрики и тренды', icon: '📈' },
             { href: '/order-geography', label: 'Куда заказывают', icon: '🗺️' },
             { href: '/opiu', label: 'ОПИУ', icon: '📋' },
+            { href: '/plan-fact', label: 'План-Факт', icon: '🎯' },
         ],
     },
     {

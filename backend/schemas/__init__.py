@@ -44,6 +44,7 @@ from backend.schemas.integrations import (
 
 # Planning
 from backend.schemas.planning import (
+    BrandPlanSchema,
     CashflowDailyRow,
     CustomsAllocSchema,
     CustomsDTSchema,
@@ -54,6 +55,8 @@ from backend.schemas.planning import (
     OrderSchema,
     OrderSummarySchema,
     PaymentFactLinkSchema,
+    PlanFactBrandRow,
+    PlanFactDayRow,
     PlannedIncomeSchema,
     PlannedPaymentSchema,
     WbPayoutSchema,
@@ -155,6 +158,9 @@ __all__ = [
     "FactLinkCreate",
     "CustomsDTUpdate",
     "WbReconcileRequest",
+    "BrandPlanSchema",
+    "PlanFactDayRow",
+    "PlanFactBrandRow",
     # Cost
     "NomenclatureSchema",
     "DutyRuleSchema",

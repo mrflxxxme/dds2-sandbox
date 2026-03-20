@@ -3,6 +3,7 @@ import { ApiClient } from './client';
 import type {
     PlannedPayment, PlannedIncome, WbPayout, CashflowDailyRow,
     Order, LeadTime, Account, Transaction, MessageResponse,
+    BrandPlan, PlanFactDailyResult, PlanFactBrandRow,
 } from '@/types/api';
 
 export function addPlanningMethods(api: ApiClient) {
@@ -85,6 +86,30 @@ export function addPlanningMethods(api: ApiClient) {
         },
         deleteFactLink(linkId: number) {
             return api.request<MessageResponse>('DELETE', `/api/v1/planning/fact_links/${linkId}`);
+        },
+
+        // Brand Plans
+        getWbBrands() {
+            return api.request<string[]>('GET', '/api/v1/planning/wb-brands');
+        },
+        getBrandPlans(year: number) {
+            return api.request<BrandPlan[]>('GET', `/api/v1/planning/brand-plans?year=${year}`);
+        },
+        upsertBrandPlan(data: { id?: number; brand: string; year: number; month: number; plan_amount: number }) {
+            return api.request<BrandPlan>('POST', '/api/v1/planning/brand-plans', data);
+        },
+        deleteBrandPlan(id: number) {
+            return api.request<{ ok: boolean }>('DELETE', `/api/v1/planning/brand-plans/${id}`);
+        },
+        getPlanFactDaily(brand: string, year: number, month: number) {
+            return api.request<PlanFactDailyResult>(
+                'GET', `/api/v1/planning/plan-fact?brand=${encodeURIComponent(brand)}&year=${year}&month=${month}`
+            );
+        },
+        getPlanFactBrands(year: number, month: number) {
+            return api.request<PlanFactBrandRow[]>(
+                'GET', `/api/v1/planning/plan-fact/brands?year=${year}&month=${month}`
+            );
         },
     };
 }

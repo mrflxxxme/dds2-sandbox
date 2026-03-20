@@ -67,6 +67,7 @@ from backend.models.order_city import (
 
 # Planning
 from backend.models.planning import (
+    BrandPlan,
     LeadTime,
     Order,
     PaymentFactLink,
@@ -153,6 +154,7 @@ __all__ = [
     "PlannedIncome",
     "WbPayout",
     "PaymentFactLink",
+    "BrandPlan",
     # Cost
     "Nomenclature",
     "DutyRule",
