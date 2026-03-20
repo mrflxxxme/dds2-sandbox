@@ -174,6 +174,7 @@ class PlanFactBrandRow(BaseModel):
     brand: str
     plan_month: Decimal
     debt_prev: Decimal
+    surplus_prev: Decimal
     plan_adjusted: Decimal
     fact_mtd: Decimal
     pct: float | None = None

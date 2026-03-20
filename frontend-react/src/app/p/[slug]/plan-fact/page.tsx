@@ -94,6 +94,7 @@ export default function PlanFactPage() {
                 'Бренд': r.brand,
                 'План': r.plan_month,
                 'Долг': r.debt_prev,
+                'Бонус': r.surplus_prev,
                 'Скорр. план': r.plan_adjusted,
                 'Факт': r.fact_mtd,
                 '%': r.pct ?? '',
@@ -227,6 +228,11 @@ function DailyTab({ data, pctColor, statusIcon }: {
                     {data.debt_prev > 0 && (
                         <div style={{ fontSize: 12, color: 'var(--color-warning)', marginTop: 4 }}>
                             вкл. долг +{formatNumber(data.debt_prev, 0)}
+                        </div>
+                    )}
+                    {data.surplus_prev > 0 && (
+                        <div style={{ fontSize: 12, color: 'var(--color-success)', marginTop: 4 }}>
+                            вкл. бонус &minus;{formatNumber(data.surplus_prev, 0)}
                         </div>
                     )}
                 </div>
@@ -366,7 +372,13 @@ function BrandsTab({ data, pctColor, statusIcon }: {
                                 <span style={{ fontFamily: 'monospace', fontWeight: 500 }}>+{formatNumber(r.debt_prev, 0)}</span>
                             </div>
                         )}
-                        {r.debt_prev > 0 && (
+                        {r.surplus_prev > 0 && (
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 14, color: 'var(--color-success)' }}>
+                                <span>Бонус (перевып.)</span>
+                                <span style={{ fontFamily: 'monospace', fontWeight: 500 }}>&minus;{formatNumber(r.surplus_prev, 0)}</span>
+                            </div>
+                        )}
+                        {(r.debt_prev > 0 || r.surplus_prev > 0) && (
                             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 14, fontWeight: 600 }}>
                                 <span>Скорр. план</span>
                                 <span style={{ fontFamily: 'monospace' }}>{formatNumber(r.plan_adjusted, 0)}</span>

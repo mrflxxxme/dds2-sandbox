@@ -235,6 +235,7 @@ export interface PlanFactDailyResult {
   forecast: number;
   plan_month: number;
   debt_prev: number;
+  surplus_prev: number;
   plan_adjusted: number;
   fact_mtd: number;
   pct: number | null;
@@ -246,6 +247,7 @@ export interface PlanFactBrandRow {
   brand: string;
   plan_month: number;
   debt_prev: number;
+  surplus_prev: number;
   plan_adjusted: number;
   fact_mtd: number;
   pct: number | null;

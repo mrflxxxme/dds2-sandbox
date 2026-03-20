@@ -174,8 +174,9 @@ async def get_plan_fact_daily(
     prev_y, prev_m = _prev_month(year, month)
     plan_prev = await _get_plan_amount(db, project_id, brand, prev_y, prev_m)
     fact_prev = await _get_month_fact_total(db, project_id, brand, prev_y, prev_m)
-    debt_prev = max(ZERO, plan_prev - fact_prev) if plan_prev > ZERO else ZERO
-    plan_adjusted = plan_month + debt_prev
+    # Двусторонний перенос: долг (недовыполнение) или бонус (перевыполнение)
+    adjustment_prev = plan_prev - fact_prev if plan_prev > ZERO else ZERO
+    plan_adjusted = max(ZERO, plan_month + adjustment_prev)
 
     today = date.today()
     if today.year == year and today.month == month:
@@ -222,11 +223,15 @@ async def get_plan_fact_daily(
     forecast = float(fact_mtd / current_day * days_in_month) if current_day > 0 else 0
     pct_total = float(fact_mtd / plan_adjusted * 100) if plan_adjusted > 0 else None
 
+    debt_prev = max(ZERO, adjustment_prev)
+    surplus_prev = max(ZERO, -adjustment_prev)
+
     return {
         "rows": rows,
         "forecast": round(forecast, 2),
         "plan_month": float(plan_month),
         "debt_prev": float(debt_prev),
+        "surplus_prev": float(surplus_prev),
         "plan_adjusted": float(plan_adjusted),
         "fact_mtd": float(fact_mtd),
         "pct": round(pct_total, 1) if pct_total is not None else None,
@@ -268,8 +273,10 @@ async def get_plan_fact_brands(
         plan_prev = await _get_plan_amount(db, project_id, plan.brand, prev_y, prev_m)
         fact_prev = await _get_month_fact_total(db, project_id, plan.brand, prev_y, prev_m)
 
-        debt_prev = max(ZERO, plan_prev - fact_prev) if plan_prev > ZERO else ZERO
-        plan_adjusted = plan.plan_amount + debt_prev
+        adjustment_prev = plan_prev - fact_prev if plan_prev > ZERO else ZERO
+        plan_adjusted = max(ZERO, plan.plan_amount + adjustment_prev)
+        debt_prev = max(ZERO, adjustment_prev)
+        surplus_prev = max(ZERO, -adjustment_prev)
         pct = float(fact_mtd / plan_adjusted * 100) if plan_adjusted > 0 else None
         forecast = float(fact_mtd / current_day * days_in_month) if current_day > 0 else 0
 
@@ -278,6 +285,7 @@ async def get_plan_fact_brands(
                 "brand": plan.brand,
                 "plan_month": float(plan.plan_amount),
                 "debt_prev": float(debt_prev),
+                "surplus_prev": float(surplus_prev),
                 "plan_adjusted": float(plan_adjusted),
                 "fact_mtd": float(fact_mtd),
                 "pct": round(pct, 1) if pct is not None else None,
