@@ -13,10 +13,10 @@ export function addTransactionMethods(api: ApiClient) {
         getUnassignedGrouped() {
             return api.request<UnassignedGroupRow[]>('GET', '/api/v1/transactions/unassigned_grouped');
         },
-        assignCategory(data: { txn_id: string; cat_lvl1: string; cat_lvl2?: string }) {
+        assignCategory(data: { txn_id: string; cat_lvl1: string; cat_lvl2?: string; scope?: string; cp_key?: string }) {
             return api.request<MessageResponse>('POST', '/api/v1/transactions/assign_category', data);
         },
-        assignCategoryBulk(data: { cp_key: string; cat_lvl1: string; cat_lvl2?: string }) {
+        assignCategoryBulk(data: { cp_key: string; counterparty?: string; cat_lvl1: string; cat_lvl2?: string }) {
             return api.request<{ updated: number }>('POST', '/api/v1/transactions/assign_category_bulk', data);
         },
         assignCategoryByIds(data: { txn_ids: string[]; cat_lvl1: string; cat_lvl2?: string }) {

@@ -1,6 +1,6 @@
 /** Reports API methods */
 import { ApiClient } from './client';
-import type { DdsMonthRow, Transaction } from '@/types/api';
+import type { DdsMonthRow, Transaction, DDSPnLResponse, CostHistoryResponse } from '@/types/api';
 
 export function addReportMethods(api: ApiClient) {
     return {
@@ -78,7 +78,7 @@ export function addReportMethods(api: ApiClient) {
             return api.request<{ rows: Array<{ cat_lvl1: string; cat_lvl2: string; income: number; expense: number }>; totals: Record<string, number> }>('GET', `/api/v1/reports/dds_month?year=${year}&month=${month}&currency=${currency}`);
         },
         getDDSPnL(year: number) {
-            return api.request<any>('GET', `/api/v1/reports/dds_pnl?year=${year}`);
+            return api.request<DDSPnLResponse>('GET', `/api/v1/reports/dds_pnl?year=${year}`);
         },
         getOpiu(dateFrom: string, dateTo: string, brand?: string, article?: string) {
             let url = `/api/v1/reports/opiu?date_from=${dateFrom}&date_to=${dateTo}`;
@@ -106,7 +106,7 @@ export function addReportMethods(api: ApiClient) {
             if (article) params.set('article', article);
             if (brand) params.set('brand', brand);
             const qs = params.toString();
-            return api.request<any>('GET', `/api/v1/reports/cost_history${qs ? '?' + qs : ''}`);
+            return api.request<CostHistoryResponse>('GET', `/api/v1/reports/cost_history${qs ? '?' + qs : ''}`);
         },
         getBalanceDaily(account: string, currency: string, start: string, end: string) {
             return api.request<Array<{ date: string; balance: number }>>('GET', `/api/v1/reports/balance_daily?account=${encodeURIComponent(account)}&currency=${currency}&date_from=${start}&date_to=${end}`);

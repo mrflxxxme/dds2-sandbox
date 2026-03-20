@@ -1,6 +1,6 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
-import type { FunnelDayRow, FunnelSummary, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult } from '@/types/api';
+import type { FunnelDayRow, FunnelSummary, FunnelFilters, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
@@ -25,7 +25,7 @@ export function addFunnelMethods(api: ApiClient) {
             return api.request<FunnelSummary>('GET', `/api/v1/funnel/summary?${q.toString()}`);
         },
         getFunnelFilters() {
-            return api.request<{ brands: string[]; subjects: string[]; vendor_codes: string[]; min_date: string | null; max_date: string | null }>('GET', '/api/v1/funnel/filters');
+            return api.request<FunnelFilters>('GET', '/api/v1/funnel/filters');
         },
         getFunnelCosts() {
             return api.request<Array<{ nm_id: number; cost_price: number; source: string }>>('GET', '/api/v1/funnel/costs');
@@ -46,7 +46,7 @@ export function addFunnelMethods(api: ApiClient) {
             return api.request<MessageResponse>('POST', '/api/v1/funnel/tax', { tax_rate: taxRate });
         },
         getSyncStatus() {
-            return api.request<{ scheduler: Record<string, unknown>; last_syncs: Array<{ id: number; sync_type: string; status: string; rows_inserted: number; started_at: string | null; finished_at: string | null; error_msg: string | null }> }>('GET', '/api/v1/funnel/sync_status');
+            return api.request<FunnelSyncStatus>('GET', '/api/v1/funnel/sync_status');
         },
         getDayAnalysis(params: { target_date: string; brand?: string; subject?: string; trend_days?: number }) {
             const q = new URLSearchParams();

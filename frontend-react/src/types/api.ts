@@ -61,6 +61,7 @@ export interface Transaction {
   income: number;
   expense: number;
   counterparty?: string;
+  cp_key?: string;
   inn?: string;
   purpose?: string;
   cat_lvl1_2?: string;
@@ -89,8 +90,9 @@ export interface UnassignedGroupRow {
   cp_key: string;
   counterparty: string;
   count: number;
-  total_income: number;
-  total_expense: number;
+  total_income: string;
+  total_expense: string;
+  currency?: string;
 }
 
 // ─── References ──────────────────────────────────────────────────────────────
@@ -214,6 +216,8 @@ export interface Nomenclature {
   name: string;
   article_seller?: string;
   article_wb?: number;
+  barcode?: string;
+  subject?: string;
   volume_l?: number;
 }
 
@@ -286,29 +290,58 @@ export interface FunnelDayRow {
   date: string;
   nm_id?: number;
   brand_name?: string;
+  brand?: string;
   vendor_code?: string;
   subject_name?: string;
+  subject?: string;
   opens: number;
+  open_card?: number;
   add_to_cart: number;
   orders: number;
+  orders_count?: number;
   orders_sum: number;
+  orders_sum_rub?: number;
   buyout_sum: number;
+  revenue?: number;
   ad_sum?: number;
+  adv_sum?: number;
   ad_views?: number;
+  adv_views?: number;
   ad_clicks?: number;
+  adv_clicks?: number;
   cost_price?: number;
+  cost_total?: number;
   profit?: number;
+  margin?: number;
   roi?: number;
+  tax?: number;
+  commission_rate?: number;
+  commission?: number;
+  avg_price?: number;
+  ctr?: number;
+  cpc?: number;
+  cpm?: number;
+  drr?: number;
+  add_to_cart_pct?: number;
+  cart_to_order_pct?: number;
 }
 
 export interface FunnelSummary {
   opens: number;
+  open_card?: number;
   add_to_cart: number;
   orders: number;
+  orders_count?: number;
   orders_sum: number;
+  orders_sum_rub?: number;
   buyout_sum: number;
   ad_sum: number;
+  adv_sum?: number;
+  adv_views?: number;
+  adv_clicks?: number;
   profit: number;
+  drr?: number;
+  [key: string]: number | undefined;
 }
 
 // ─── WB Tariffs ─────────────────────────────────────────────────────────────
@@ -392,4 +425,224 @@ export interface TelegramChatBinding {
 
 export interface TelegramLinkResponse {
   deep_link_url: string;
+}
+
+// ─── Dashboard ──────────────────────────────────────────────────────────────
+
+export interface DailyCashflowRow {
+  date: string;
+  income: number;
+  expense: number;
+}
+
+export interface ExpenseCategoryPie {
+  name: string;
+  value: number;
+  count?: number;
+}
+
+export interface IncomeCounterparty {
+  name: string;
+  key: string;
+  total: number;
+  count: number;
+}
+
+export interface DashboardSummary {
+  balance_rub: number;
+  balance_cny: number;
+  month_income: number;
+  month_expense: number;
+  orders_count: number;
+  orders_total_cny: number;
+  debt_rub: number;
+  debt_cny: number;
+  inbox_count: number;
+  accounts_count: number;
+  daily_cashflow: DailyCashflowRow[];
+  expense_by_category: ExpenseCategoryPie[];
+  income_counterparties: IncomeCounterparty[];
+  date_from: string;
+  date_to: string;
+}
+
+export interface BalanceAccount {
+  account: string;
+  account_name: string | null;
+  currency: string;
+  balance: number;
+}
+
+export interface DashboardFunnelSummary {
+  opens: number;
+  add_to_cart: number;
+  orders: number;
+  orders_count?: number;
+  orders_sum: number;
+  orders_sum_rub?: number;
+  buyout_sum: number;
+  ad_sum: number;
+  adv_sum?: number;
+  profit: number;
+}
+
+export interface FilteredTransactionsResponse {
+  total: number;
+  items: DashboardTransaction[];
+}
+
+export interface DashboardTransaction {
+  date: string;
+  counterparty: string;
+  income: number;
+  expense: number;
+  purpose: string;
+  category: string;
+  account: string;
+}
+
+export interface CategoryCounterparty {
+  key: string;
+  name: string;
+  total: number;
+  count: number;
+}
+
+// ─── Inbox ──────────────────────────────────────────────────────────────────
+
+export interface AutoCategorizeRule {
+  id: number;
+  keyword: string;
+  direction: string;
+  cat_lvl1: string;
+  cat_lvl2: string | null;
+  priority: number;
+  is_active: boolean;
+}
+
+export interface AutoCategorizePreview {
+  txn_id: string;
+  date: string;
+  counterparty: string;
+  purpose: string;
+  expense: number;
+  income: number;
+  currency: string;
+  matched_keyword: string;
+  suggested_cat_lvl1: string;
+  suggested_cat_lvl2: string | null;
+}
+
+// ─── Cost History ───────────────────────────────────────────────────────────
+
+export interface CostHistoryArticle {
+  article_seller: string;
+  article_wb: string | null;
+  barcode: string;
+  brand: string | null;
+  subject: string;
+  avg_cost: number | null;
+  latest_cost: number | null;
+  costs: Record<string, { cost: number; qty: number }>;
+}
+
+export interface CostHistoryOrder {
+  order_no: string;
+  ship_date: string;
+}
+
+export interface CostHistoryResponse {
+  articles: CostHistoryArticle[];
+  orders: CostHistoryOrder[];
+  brands: string[];
+}
+
+// ─── Funnel Filters ─────────────────────────────────────────────────────────
+
+export interface FunnelFilters {
+  brands: string[];
+  subjects: string[];
+  vendor_codes: string[];
+  min_date: string | null;
+  max_date: string | null;
+}
+
+export interface FunnelDataResponse {
+  data: FunnelDayRow[];
+  detailed: boolean;
+  tax_rate: number;
+}
+
+export interface FunnelSyncStatus {
+  scheduler: Record<string, unknown>;
+  last_syncs: Array<{
+    id: number;
+    sync_type: string;
+    status: string;
+    rows_inserted: number;
+    started_at: string | null;
+    finished_at: string | null;
+    error_msg: string | null;
+  }>;
+  missing_days?: number;
+}
+
+// ─── DDS PnL ────────────────────────────────────────────────────────────────
+
+export interface DDSPnLMonthlyValues {
+  total?: number;
+  [monthKey: string]: number | undefined;
+}
+
+export interface DDSPnLCategory {
+  name: string;
+  type: 'income' | 'expense';
+  monthly: DDSPnLMonthlyValues;
+  counterparties?: DDSPnLCounterparty[];
+}
+
+export interface DDSPnLCounterparty {
+  name: string;
+  monthly: DDSPnLMonthlyValues;
+}
+
+export interface DDSPnLMonth {
+  key: number;
+  label: string;
+}
+
+export interface DDSPnLResponse {
+  months: DDSPnLMonth[];
+  categories: DDSPnLCategory[];
+  summary: {
+    total_income: DDSPnLMonthlyValues;
+    total_expense: DDSPnLMonthlyValues;
+    net_profit: DDSPnLMonthlyValues;
+  };
+  revenue: DDSPnLMonthlyValues;
+}
+
+// ─── Chart tooltip props ────────────────────────────────────────────────────
+
+export interface ChartTooltipPayloadItem {
+  name: string;
+  value: number;
+  color?: string;
+  fill?: string;
+}
+
+export interface ChartTooltipProps {
+  active?: boolean;
+  payload?: ChartTooltipPayloadItem[];
+  label?: string;
+}
+
+export interface PieLabelProps {
+  cx: number;
+  cy: number;
+  midAngle: number;
+  outerRadius: number;
+  name: string;
+  percent: number;
+  index: number;
 }

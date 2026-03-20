@@ -1,20 +1,24 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, ChangeEvent } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
+import type {
+    UnassignedGroupRow, Transaction, CategoryRef,
+    AutoCategorizeRule, AutoCategorizePreview,
+} from '@/types/api';
 
 export default function InboxPage() {
-    const [grouped, setGrouped] = useState<any[]>([]);
-    const [allTxns, setAllTxns] = useState<any[]>([]);
-    const [categories, setCategories] = useState<any[]>([]);
+    const [grouped, setGrouped] = useState<UnassignedGroupRow[]>([]);
+    const [allTxns, setAllTxns] = useState<Transaction[]>([]);
+    const [categories, setCategories] = useState<CategoryRef[]>([]);
     const [loading, setLoading] = useState(true);
     const [tab, setTab] = useState<'income' | 'expense' | 'single'>('income');
     const [msg, setMsg] = useState('');
     const [expanded, setExpanded] = useState<string | null>(null);
     // Auto-categorize state
     const [showRules, setShowRules] = useState(false);
-    const [rules, setRules] = useState<any[]>([]);
-    const [preview, setPreview] = useState<any[] | null>(null);
+    const [rules, setRules] = useState<AutoCategorizeRule[]>([]);
+    const [preview, setPreview] = useState<AutoCategorizePreview[] | null>(null);
     const [autoLoading, setAutoLoading] = useState(false);
     const [newKeyword, setNewKeyword] = useState('');
     const [newCat1, setNewCat1] = useState('');
@@ -34,16 +38,16 @@ export default function InboxPage() {
             setGrouped(g || []);
             setAllTxns(txns || []);
             setCategories(cats || []);
-        } catch (e: any) { setMsg(e.message || 'Ошибка загрузки данных'); }
+        } catch (e: unknown) { setMsg(e instanceof Error ? e.message : 'Ошибка загрузки данных'); }
         setLoading(false);
     };
 
     const loadRules = async () => {
-        try { const r = await api.getAutoCategorizeRules(); setRules(r || []); } catch (e: any) { setMsg(e.message || 'Ошибка загрузки правил'); }
+        try { const r = await api.getAutoCategorizeRules(); setRules(r || []); } catch (e: unknown) { setMsg(e instanceof Error ? e.message : 'Ошибка загрузки правил'); }
     };
     const loadPreview = async () => {
         setAutoLoading(true);
-        try { const p = await api.previewAutoCategorize(); setPreview(p || []); } catch (e: any) { setMsg(e.message || 'Ошибка предпросмотра'); }
+        try { const p = await api.previewAutoCategorize(); setPreview(p || []); } catch (e: unknown) { setMsg(e instanceof Error ? e.message : 'Ошибка предпросмотра'); }
         setAutoLoading(false);
     };
     const applyAutoCat = async () => {
@@ -53,7 +57,7 @@ export default function InboxPage() {
             setMsg(`⚡ Авто-разнесено: ${r.updated} операций`);
             setPreview(null);
             loadData();
-        } catch (e: any) { setMsg(e.message); }
+        } catch (e: unknown) { setMsg(e instanceof Error ? e.message : 'Ошибка'); }
         setAutoLoading(false);
     };
     const addRule = async () => {
@@ -63,7 +67,7 @@ export default function InboxPage() {
             setNewKeyword(''); setNewCat1(''); setNewCat2('');
             loadRules();
             setMsg('✅ Правило добавлено');
-        } catch (e: any) { setMsg(e.message); }
+        } catch (e: unknown) { setMsg(e instanceof Error ? e.message : 'Ошибка'); }
     };
     const delRule = async (id: number) => {
         try { await api.deleteAutoCategorizeRule(id); loadRules(); } catch { }
@@ -90,7 +94,7 @@ export default function InboxPage() {
             const result = await api.assignCategoryBulk({ cp_key: cpKey, counterparty: cpName, cat_lvl1: cat1, cat_lvl2: cat2 });
             setMsg(`✅ Обновлено ${result.updated || 0} операций → ${cat1} / ${cat2}`);
             loadData();
-        } catch (e: any) { setMsg(e.message); }
+        } catch (e: unknown) { setMsg(e instanceof Error ? e.message : 'Ошибка'); }
     };
 
     const assignByIds = async (txnIds: string[], cat1: string, cat2: string) => {
@@ -98,7 +102,7 @@ export default function InboxPage() {
             const result = await api.assignCategoryByIds({ txn_ids: txnIds, cat_lvl1: cat1, cat_lvl2: cat2 });
             setMsg(`✅ Обновлено ${result.updated || 0} из ${txnIds.length} выбранных операций → ${cat1} / ${cat2}`);
             loadData();
-        } catch (e: any) { setMsg(e.message); }
+        } catch (e: unknown) { setMsg(e instanceof Error ? e.message : 'Ошибка'); }
     };
 
     const assignSingle = async (txnId: string, cat1: string, cat2: string, scope: string, cpKey: string) => {
@@ -106,7 +110,7 @@ export default function InboxPage() {
             await api.assignCategory({ txn_id: txnId, cat_lvl1: cat1, cat_lvl2: cat2, scope, cp_key: cpKey });
             setMsg('✅ Категория назначена!');
             loadData();
-        } catch (e: any) { setMsg(e.message); }
+        } catch (e: unknown) { setMsg(e instanceof Error ? e.message : 'Ошибка'); }
     };
 
     if (loading) return <div style={{ padding: 40, color: 'var(--color-text-muted)' }}>Загрузка...</div>;
@@ -163,7 +167,7 @@ export default function InboxPage() {
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {preview.map((p: any, i: number) => (
+                                        {preview.map((p: AutoCategorizePreview, i: number) => (
                                             <tr key={i}>
                                                 <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{formatDate(p.date)}</td>
                                                 <td style={{ fontSize: 12 }}>{(p.counterparty || '—').slice(0, 30)}</td>
@@ -210,7 +214,7 @@ export default function InboxPage() {
                                 </tr>
                             </thead>
                             <tbody>
-                                {rules.map((r: any) => (
+                                {rules.map((r: AutoCategorizeRule) => (
                                     <tr key={r.id}>
                                         <td><strong>{r.keyword}</strong></td>
                                         <td style={{ fontSize: 12 }}>{r.direction === 'income' ? '📥 Доход' : '📤 Расход'}</td>
@@ -226,25 +230,25 @@ export default function InboxPage() {
                     <div style={{ display: 'flex', gap: 8, alignItems: 'end', flexWrap: 'wrap', borderTop: '1px solid var(--color-border)', paddingTop: 12 }}>
                         <div className="form-group" style={{ minWidth: 150 }}>
                             <label className="form-label">Ключевое слово</label>
-                            <input className="form-input" value={newKeyword} onChange={(e: any) => setNewKeyword(e.target.value)} placeholder="транспортн" />
+                            <input className="form-input" value={newKeyword} onChange={(e: ChangeEvent<HTMLInputElement>) => setNewKeyword(e.target.value)} placeholder="транспортн" />
                         </div>
                         <div className="form-group" style={{ minWidth: 100 }}>
                             <label className="form-label">Направление</label>
-                            <select className="form-input" value={newDirection} onChange={(e: any) => setNewDirection(e.target.value)}>
+                            <select className="form-input" value={newDirection} onChange={(e: ChangeEvent<HTMLSelectElement>) => setNewDirection(e.target.value)}>
                                 <option value="expense">Расход</option>
                                 <option value="income">Доход</option>
                             </select>
                         </div>
                         <div className="form-group" style={{ minWidth: 150 }}>
                             <label className="form-label">Категория</label>
-                            <select className="form-input" value={newCat1} onChange={(e: any) => { setNewCat1(e.target.value); setNewCat2((newDirection === 'income' ? incomeCats : expenseCats)[e.target.value]?.[0] || ''); }}>
+                            <select className="form-input" value={newCat1} onChange={(e: ChangeEvent<HTMLSelectElement>) => { setNewCat1(e.target.value); setNewCat2((newDirection === 'income' ? incomeCats : expenseCats)[e.target.value]?.[0] || ''); }}>
                                 <option value="">—</option>
                                 {Object.keys(newDirection === 'income' ? incomeCats : expenseCats).map(k => <option key={k} value={k}>{k}</option>)}
                             </select>
                         </div>
                         <div className="form-group" style={{ minWidth: 150 }}>
                             <label className="form-label">Подкатегория</label>
-                            <select className="form-input" value={newCat2} onChange={(e: any) => setNewCat2(e.target.value)}>
+                            <select className="form-input" value={newCat2} onChange={(e: ChangeEvent<HTMLSelectElement>) => setNewCat2(e.target.value)}>
                                 <option value="">—</option>
                                 {((newDirection === 'income' ? incomeCats : expenseCats)[newCat1] || []).map((s: string) => <option key={s} value={s}>{s}</option>)}
                             </select>
@@ -314,14 +318,25 @@ export default function InboxPage() {
     );
 }
 
-function CpBlock({ group, total, cats, isOpen, onToggle, allTxns, onAssign, onAssignByIds }: any) {
+interface CpBlockProps {
+    group: UnassignedGroupRow;
+    total: number;
+    cats: Record<string, string[]>;
+    isOpen: boolean;
+    onToggle: () => void;
+    allTxns: Transaction[];
+    onAssign: (cat1: string, cat2: string) => void;
+    onAssignByIds: (txnIds: string[], cat1: string, cat2: string) => void;
+}
+
+function CpBlock({ group, total, cats, isOpen, onToggle, allTxns, onAssign, onAssignByIds }: CpBlockProps) {
     const [cat1, setCat1] = useState(Object.keys(cats)[0] || '');
     const [cat2, setCat2] = useState((cats[Object.keys(cats)[0]] || [''])[0] || '');
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const catKeys = Object.keys(cats);
 
     const visibleTxns = allTxns.slice(0, 20);
-    const allChecked = visibleTxns.length > 0 && visibleTxns.every((t: any) => selectedIds.has(t.txn_id));
+    const allChecked = visibleTxns.length > 0 && visibleTxns.every((t: Transaction) => selectedIds.has(t.txn_id));
     const someChecked = selectedIds.size > 0;
 
     const toggleOne = (txnId: string) => {
@@ -336,7 +351,7 @@ function CpBlock({ group, total, cats, isOpen, onToggle, allTxns, onAssign, onAs
         if (allChecked) {
             setSelectedIds(new Set());
         } else {
-            setSelectedIds(new Set(visibleTxns.map((t: any) => t.txn_id)));
+            setSelectedIds(new Set(visibleTxns.map((t: Transaction) => t.txn_id)));
         }
     };
 
@@ -372,7 +387,7 @@ function CpBlock({ group, total, cats, isOpen, onToggle, allTxns, onAssign, onAs
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {visibleTxns.map((t: any, j: number) => (
+                                    {visibleTxns.map((t: Transaction, j: number) => (
                                         <tr key={j} style={{ background: selectedIds.has(t.txn_id) ? 'rgba(99,102,241,0.08)' : undefined }}>
                                             <td style={{ textAlign: 'center' }}>
                                                 <input type="checkbox" checked={selectedIds.has(t.txn_id)}
@@ -420,7 +435,13 @@ function CpBlock({ group, total, cats, isOpen, onToggle, allTxns, onAssign, onAs
     );
 }
 
-function SingleAssignment({ txns, cats, onAssign }: any) {
+interface SingleAssignmentProps {
+    txns: Transaction[];
+    cats: Record<string, string[]>;
+    onAssign: (txnId: string, cat1: string, cat2: string, scope: string, cpKey: string) => void;
+}
+
+function SingleAssignment({ txns, cats, onAssign }: SingleAssignmentProps) {
     const [selected, setSelected] = useState(0);
     const [cat1, setCat1] = useState(Object.keys(cats)[0] || '');
     const [cat2, setCat2] = useState((cats[Object.keys(cats)[0]] || [''])[0] || '');
@@ -435,7 +456,7 @@ function SingleAssignment({ txns, cats, onAssign }: any) {
             <div className="form-group" style={{ marginBottom: 16 }}>
                 <label className="form-label">Выберите операцию</label>
                 <select className="form-input" value={selected} onChange={e => setSelected(parseInt(e.target.value))}>
-                    {txns.slice(0, 200).map((t: any, i: number) => (
+                    {txns.slice(0, 200).map((t: Transaction, i: number) => (
                         <option key={i} value={i}>
                             {(t.date || '').slice(0, 10)} | {(t.counterparty || '—').slice(0, 40)} | {formatNumber(t.expense || t.income || 0)} {t.currency}
                         </option>

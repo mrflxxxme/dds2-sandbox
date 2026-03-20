@@ -1,8 +1,12 @@
 'use client';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState, ChangeEvent, KeyboardEvent } from 'react';
 import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
+import type {
+    CostHistoryResponse, CostHistoryArticle, CostHistoryOrder,
+    Nomenclature,
+} from '@/types/api';
 
 export default function CostPage() {
     const [tab, setTab] = useState<'history' | 'bulk'>('history');
@@ -30,7 +34,7 @@ export default function CostPage() {
 /* ─── Tab 1: История себестоимости (from Reports) ──── */
 
 function CostHistory() {
-    const [data, setData] = useState<any>(null);
+    const [data, setData] = useState<CostHistoryResponse|null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [search, setSearch] = useState('');
@@ -42,7 +46,7 @@ function CostHistory() {
         try {
             const r = await api.getCostHistory(search || undefined, brand || undefined);
             setData(r);
-        } catch (e: any) { setError(e.message || 'Ошибка'); }
+        } catch (e: unknown) { setError(e instanceof Error ? e.message : 'Ошибка'); }
         setLoading(false);
     }, [search, brand]);
 
@@ -52,20 +56,20 @@ function CostHistory() {
     if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--danger)' }}>❌ {error}</div>;
     if (!data || !data.articles?.length) return <div className="glass-card" style={{ padding: 32, textAlign: 'center', opacity: 0.6 }}>Нет данных о себестоимости</div>;
 
-    const orders: Array<{ order_no: string; ship_date: string }> = data.orders || [];
-    const articles: any[] = data.articles || [];
+    const orders: CostHistoryOrder[] = data.orders || [];
+    const articles: CostHistoryArticle[] = data.articles || [];
     const brands: string[] = data.brands || [];
 
     const handleExport = () => {
-        const rows = articles.map((a: any) => {
-            const row: Record<string, any> = {
+        const rows = articles.map((a: CostHistoryArticle) => {
+            const row: Record<string, string | number | null> = {
                 'Артикул': a.article_seller,
                 'Артикул WB': a.article_wb || '',
                 'Баркод': a.barcode,
                 'Бренд': a.brand || '',
                 'Категория': a.subject,
             };
-            orders.forEach((o: any) => {
+            orders.forEach((o: CostHistoryOrder) => {
                 const c = a.costs?.[o.order_no];
                 row[`Заказ ${o.order_no}`] = c ? c.cost : '';
                 row[`Кол-во ${o.order_no}`] = c ? c.qty : '';
@@ -89,11 +93,11 @@ function CostHistory() {
                 <input
                     type="text" placeholder="🔍 Поиск по артикулу / WB артикулу"
                     value={search}
-                    onChange={(e: any) => setSearch(e.target.value)}
-                    onKeyDown={(e: any) => e.key === 'Enter' && load()}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSearch(e.target.value)}
+                    onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => e.key === 'Enter' && load()}
                     style={{ ...selectStyle, width: 280 }}
                 />
-                <select value={brand} onChange={(e: any) => setBrand(e.target.value)} style={selectStyle}>
+                <select value={brand} onChange={(e: ChangeEvent<HTMLSelectElement>) => setBrand(e.target.value)} style={selectStyle}>
                     <option value="">Все бренды</option>
                     {brands.map((b: string) => <option key={b} value={b}>{b}</option>)}
                 </select>
@@ -112,7 +116,7 @@ function CostHistory() {
                             <th style={{ minWidth: 100 }}>Категория</th>
                             <th style={{ textAlign: 'right', fontWeight: 700, color: 'var(--primary)' }}>Средняя ₽</th>
                             <th style={{ textAlign: 'right', fontWeight: 700, color: 'var(--success)' }}>Последняя ₽</th>
-                            {orders.map((o: any) => (
+                            {orders.map((o: CostHistoryOrder) => (
                                 <th key={o.order_no} style={{ textAlign: 'right', minWidth: 100 }}>
                                     <div>{o.order_no}</div>
                                     <div style={{ fontSize: 10, opacity: 0.5 }}>{o.ship_date ? formatDate(o.ship_date) : ''}</div>
@@ -121,7 +125,7 @@ function CostHistory() {
                         </tr>
                     </thead>
                     <tbody>
-                        {articles.map((a: any, i: number) => {
+                        {articles.map((a: CostHistoryArticle, i: number) => {
                             return (
                                 <tr key={i}>
                                     <td style={{ position: 'sticky', left: 0, background: 'var(--bg-primary)', zIndex: 1, fontWeight: 600 }}>{a.article_seller}</td>
@@ -130,7 +134,7 @@ function CostHistory() {
                                     <td style={{ opacity: 0.7 }}>{a.subject || '—'}</td>
                                     <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--primary)' }}>{a.avg_cost ? formatNumber(a.avg_cost) : '—'}</td>
                                     <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--success)' }}>{a.latest_cost ? formatNumber(a.latest_cost) : '—'}</td>
-                                    {orders.map((o: any, j: number) => {
+                                    {orders.map((o: CostHistoryOrder, j: number) => {
                                         const c = a.costs?.[o.order_no];
                                         if (!c) return <td key={j} style={{ textAlign: 'right', opacity: 0.2 }}>—</td>;
                                         const prev = j < orders.length - 1 ? (a.costs?.[orders[j + 1]?.order_no]?.cost || 0) : 0;
@@ -179,7 +183,7 @@ function BulkCost() {
     const [pasteRows, setPasteRows] = useState<PasteRow[]>(Array.from({ length: 5 }, emptyRow));
     const [pasteResult, setPasteResult] = useState<{ saved: number; not_found: string[] } | null>(null);
     const [pasteSaving, setPasteSaving] = useState(false);
-    const [nomenclature, setNomenclature] = useState<any[]>([]);
+    const [nomenclature, setNomenclature] = useState<Nomenclature[]>([]);
 
     const loadMissing = useCallback(async () => {
         setLoading(true);
@@ -187,7 +191,7 @@ function BulkCost() {
         try {
             const data = await api.getMissingCosts();
             setMissing(data);
-        } catch (e: any) { setError(e.message || 'Ошибка'); }
+        } catch (e: unknown) { setError(e instanceof Error ? e.message : 'Ошибка'); }
         setLoading(false);
     }, []);
 
@@ -199,7 +203,7 @@ function BulkCost() {
     // Nomenclature lookup for paste section
     const barcodeMap = new Map<string, string>();
     const nmIdMap = new Map<string, string>();
-    nomenclature.forEach((n: any) => {
+    nomenclature.forEach((n: Nomenclature) => {
         const label = n.article_seller || n.subject || `nmId: ${n.article_wb}`;
         if (n.barcode) barcodeMap.set(n.barcode, label);
         if (n.article_wb) nmIdMap.set(String(n.article_wb), label);
@@ -230,7 +234,7 @@ function BulkCost() {
             setResult(res);
             setCosts({});
             await loadMissing();
-        } catch (e: any) { alert(e.message); }
+        } catch (e: unknown) { alert(e instanceof Error ? e.message : 'Ошибка'); }
         setSaving(false);
     };
 
@@ -323,7 +327,7 @@ function BulkCost() {
             setPasteResult(res);
             setPasteRows(Array.from({ length: 5 }, emptyRow));
             await loadMissing();
-        } catch (e: any) { alert(e.message); }
+        } catch (e: unknown) { alert(e instanceof Error ? e.message : 'Ошибка'); }
         setPasteSaving(false);
     };
 

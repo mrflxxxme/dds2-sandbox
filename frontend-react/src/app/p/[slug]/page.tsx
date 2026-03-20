@@ -2,6 +2,12 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
+import type {
+    DashboardSummary, BalanceAccount, DashboardFunnelSummary,
+    DailyCashflowRow, ExpenseCategoryPie, IncomeCounterparty,
+    DashboardTransaction, CategoryCounterparty,
+    ChartTooltipProps, ChartTooltipPayloadItem, PieLabelProps,
+} from '@/types/api';
 import {
     XAxis, YAxis, CartesianGrid, Tooltip, Legend,
     ResponsiveContainer, PieChart, Pie, Cell,
@@ -32,14 +38,14 @@ function fmtK(v: number) { if(Math.abs(v)>=1e6) return (v/1e6).toFixed(1)+'М'; 
 function shortDay(iso: string) { return new Date(iso+'T00:00:00').toLocaleDateString('ru-RU',{day:'numeric',month:'short'}); }
 function truncate(s: string, n: number) { return s.length>n ? s.slice(0,n)+'…' : s; }
 
-function ChartTooltip({active,payload,label}:any) {
+function ChartTooltip({active,payload,label}:ChartTooltipProps) {
     if(!active||!payload?.length) return null;
     return (<div style={{background:'rgba(15,17,26,0.95)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,padding:'10px 14px',fontSize:13}}>
         <div style={{color:'#94a3b8',marginBottom:4}}>{label}</div>
-        {payload.map((p:any,i:number)=>(<div key={i} style={{color:p.color||p.fill,fontWeight:600}}>{p.name}: {formatNumber(p.value)}</div>))}
+        {payload.map((p:ChartTooltipPayloadItem,i:number)=>(<div key={i} style={{color:p.color||p.fill,fontWeight:600}}>{p.name}: {formatNumber(p.value)}</div>))}
     </div>);
 }
-function renderPieLabel({cx,cy,midAngle,outerRadius,name,percent,index}:any) {
+function renderPieLabel({cx,cy,midAngle,outerRadius,name,percent,index}:PieLabelProps) {
     const R=Math.PI/180,r=outerRadius+20,x=cx+r*Math.cos(-midAngle*R),y=cy+r*Math.sin(-midAngle*R);
     if(percent<0.03) return null;
     return <text x={x} y={y} fill={PIE_COLORS[index%PIE_COLORS.length]} textAnchor={x>cx?'start':'end'} dominantBaseline="central" fontSize={11} fontWeight={600}>{truncate(name,12)} {(percent*100).toFixed(0)}%</text>;
@@ -54,7 +60,7 @@ function KpiCard({icon,label,value,sub,color,borderColor}:{icon:string;label:str
 
 /* ─── Inline transaction mini-table ────────────────────────────── */
 function InlineTxnRows({txnList,txnTotal,txnFlow,onFlowChange,filterLoading,colSpan}:{
-    txnList:any[];txnTotal:number;txnFlow:string;onFlowChange:(f:'all'|'income'|'expense')=>void;filterLoading:boolean;colSpan:number;
+    txnList:DashboardTransaction[];txnTotal:number;txnFlow:string;onFlowChange:(f:'all'|'income'|'expense')=>void;filterLoading:boolean;colSpan:number;
 }) {
     return (
         <tr><td colSpan={colSpan} style={{padding:0,background:'rgba(255,255,255,0.02)'}}>
@@ -81,7 +87,7 @@ function InlineTxnRows({txnList,txnTotal,txnFlow,onFlowChange,filterLoading,colS
                             <th style={{padding:'4px 8px',textAlign:'right',fontWeight:500}}>Расход</th>
                             <th style={{padding:'4px 8px',textAlign:'left',fontWeight:500}}>Назначение</th>
                         </tr></thead>
-                        <tbody>{txnList.map((t:any,i:number)=>(
+                        <tbody>{txnList.map((t:DashboardTransaction,i:number)=>(
                             <tr key={i} style={{borderTop:'1px solid rgba(255,255,255,0.04)',fontSize:12}}>
                                 <td style={{padding:'5px 8px',whiteSpace:'nowrap',color:'#94a3b8'}}>{formatDate(t.date)}</td>
                                 <td style={{padding:'5px 8px',maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{t.counterparty||'—'}</td>
@@ -100,9 +106,9 @@ function InlineTxnRows({txnList,txnTotal,txnFlow,onFlowChange,filterLoading,colS
 
 /* ═══════════════════════════════════════════════════════════════ */
 export default function DashboardPage() {
-    const [data,setData]=useState<any>(null);
-    const [balance,setBalance]=useState<any[]>([]);
-    const [funnel,setFunnel]=useState<any>(null);
+    const [data,setData]=useState<DashboardSummary|null>(null);
+    const [balance,setBalance]=useState<BalanceAccount[]>([]);
+    const [funnel,setFunnel]=useState<DashboardFunnelSummary|null>(null);
     const [loading,setLoading]=useState(true);
     const [error,setError]=useState('');
     const [period,setPeriod]=useState<PeriodKey>('month');
@@ -110,22 +116,22 @@ export default function DashboardPage() {
     const [customTo,setCustomTo]=useState('');
 
     /* ─── Filter state ────────────────────────────────────────── */
-    const [selectedCp,setSelectedCp]=useState<any>(null);
+    const [selectedCp,setSelectedCp]=useState<IncomeCounterparty|null>(null);
     const [selectedExpCat,setSelectedExpCat]=useState<string|null>(null);
-    const [filteredDaily,setFilteredDaily]=useState<any[]|null>(null);
+    const [filteredDaily,setFilteredDaily]=useState<DailyCashflowRow[]|null>(null);
     const [filterLoading,setFilterLoading]=useState(false);
 
     // Income cp → transactions
-    const [cpTxnList,setCpTxnList]=useState<any[]>([]);
+    const [cpTxnList,setCpTxnList]=useState<DashboardTransaction[]>([]);
     const [cpTxnTotal,setCpTxnTotal]=useState(0);
     const [cpTxnFlow,setCpTxnFlow]=useState<'all'|'income'|'expense'>('all');
 
     // Expense category → counterparties (level 1)
-    const [catCps,setCatCps]=useState<any[]>([]);
+    const [catCps,setCatCps]=useState<CategoryCounterparty[]>([]);
     const [catCpsLoading,setCatCpsLoading]=useState(false);
     // Expense category → selected counterparty → transactions (level 2)
-    const [selectedCatCp,setSelectedCatCp]=useState<any>(null);
-    const [catCpTxnList,setCatCpTxnList]=useState<any[]>([]);
+    const [selectedCatCp,setSelectedCatCp]=useState<CategoryCounterparty|null>(null);
+    const [catCpTxnList,setCatCpTxnList]=useState<DashboardTransaction[]>([]);
     const [catCpTxnTotal,setCatCpTxnTotal]=useState(0);
     const [catCpTxnFlow,setCatCpTxnFlow]=useState<'all'|'income'|'expense'>('all');
     const [catCpTxnLoading,setCatCpTxnLoading]=useState(false);
@@ -139,7 +145,7 @@ export default function DashboardPage() {
                 api.getDashboardSummary(from,to),api.getBalance(),api.getFunnelSummary(from,to).catch(()=>null),
             ]);
             setData(summary);setBalance(bal);setFunnel(fun);resetFilters();
-        } catch(e:any){setError(e.message||'Ошибка загрузки');} finally{setLoading(false);}
+        } catch(e:unknown){setError(e instanceof Error ? e.message : 'Ошибка загрузки');} finally{setLoading(false);}
     },[period,customFrom,customTo]);
     useEffect(()=>{loadData();},[loadData]);
 
@@ -151,7 +157,7 @@ export default function DashboardPage() {
     },[]);
 
     /* ─── Income CP click → chart + transactions ──────────────── */
-    const handleCpClick=useCallback(async(cp:any)=>{
+    const handleCpClick=useCallback(async(cp:IncomeCounterparty)=>{
         if(selectedCp?.name===cp.name){resetFilters();return;}
         setSelectedCp(cp);setSelectedExpCat(null);setCatCps([]);setSelectedCatCp(null);setCpTxnFlow('all');
         setFilterLoading(true);
@@ -193,7 +199,7 @@ export default function DashboardPage() {
     },[selectedExpCat,period,customFrom,customTo,resetFilters]);
 
     /* ─── Expense category → CP click → transactions (level 2) ── */
-    const handleCatCpClick=useCallback(async(cp:any)=>{
+    const handleCatCpClick=useCallback(async(cp:CategoryCounterparty)=>{
         if(selectedCatCp?.key===cp.key){setSelectedCatCp(null);setCatCpTxnList([]);return;}
         setSelectedCatCp(cp);setCatCpTxnFlow('all');setCatCpTxnLoading(true);
         try {
@@ -223,10 +229,10 @@ export default function DashboardPage() {
         {key:'90d',label:'90д'},{key:'all',label:'Всё'},
     ];
     const incomeCounterparties=data?.income_counterparties||[];
-    const expensePie:any[]=data?.expense_by_category||[];
+    const expensePie:ExpenseCategoryPie[]=data?.expense_by_category||[];
     const dailyChart=useMemo(()=>{
         const raw=filteredDaily||data?.daily_cashflow||[];
-        return raw.map((d:any)=>({...d,label:shortDay(d.date)}));
+        return raw.map((d:DailyCashflowRow)=>({...d,label:shortDay(d.date)}));
     },[data,filteredDaily]);
     const hasFilter=selectedCp||selectedExpCat;
     const filterLabel=selectedCp?truncate(selectedCp.name,20):selectedExpCat?truncate(selectedExpCat,20):'';
@@ -304,13 +310,13 @@ export default function DashboardPage() {
                         <ResponsiveContainer width="100%" height={320}>
                             <PieChart><Pie data={expensePie} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={50} outerRadius={90} paddingAngle={2}
                                 label={renderPieLabel} labelLine={{stroke:'#475569',strokeWidth:1}}
-                                onClick={(entry:any)=>handleExpCatClick(entry.name)} style={{cursor:'pointer'}}>
-                                {expensePie.map((_:any,i:number)=>(<Cell key={i} fill={PIE_COLORS[i%PIE_COLORS.length]}
+                                onClick={(entry:ExpenseCategoryPie)=>handleExpCatClick(entry.name)} style={{cursor:'pointer'}}>
+                                {expensePie.map((_:ExpenseCategoryPie,i:number)=>(<Cell key={i} fill={PIE_COLORS[i%PIE_COLORS.length]}
                                     opacity={!selectedExpCat||selectedExpCat===expensePie[i]?.name?1:0.3}
                                     stroke={selectedExpCat===expensePie[i]?.name?'#fff':'none'}
                                     strokeWidth={selectedExpCat===expensePie[i]?.name?2:0}/>))}
                             </Pie>
-                            <Tooltip formatter={(v:number)=>formatNumber(v)+' ₽'} contentStyle={{background:'rgba(15,17,26,0.95)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,color:'#e2e8f0'}}/>
+                            <Tooltip formatter={(v:string|number)=>formatNumber(Number(v))+' ₽'} contentStyle={{background:'rgba(15,17,26,0.95)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,color:'#e2e8f0'}}/>
                             </PieChart>
                         </ResponsiveContainer>
                     </div>
@@ -327,7 +333,7 @@ export default function DashboardPage() {
                     <table className="data-table"><thead><tr>
                         <th>Контрагент</th><th style={{textAlign:'right'}}>Сумма</th><th style={{textAlign:'right'}}>Операций</th><th style={{textAlign:'right'}}>% от общего</th>
                     </tr></thead><tbody>
-                        {incomeCounterparties.map((c:any,i:number)=>{
+                        {incomeCounterparties.map((c:IncomeCounterparty,i:number)=>{
                             const pct=data.month_income>0?(c.total/data.month_income*100):0;
                             const isSelected=selectedCp?.name===c.name;
                             return (<React.Fragment key={i}>
@@ -356,7 +362,7 @@ export default function DashboardPage() {
                     <table className="data-table"><thead><tr>
                         <th>Категория</th><th style={{textAlign:'right'}}>Сумма</th><th style={{textAlign:'right'}}>Операций</th><th style={{textAlign:'right'}}>% от расходов</th>
                     </tr></thead><tbody>
-                        {expensePie.map((c:any,i:number)=>{
+                        {expensePie.map((c:ExpenseCategoryPie,i:number)=>{
                             const pct=data.month_expense>0?(c.value/data.month_expense*100):0;
                             const isSelected=selectedExpCat===c.name;
                             return (<React.Fragment key={i}>
@@ -383,7 +389,7 @@ export default function DashboardPage() {
                                                     <th style={{padding:'6px 8px',textAlign:'right',fontWeight:500}}>Кол-во</th>
                                                 </tr></thead>
                                                 <tbody>
-                                                    {catCps.map((cp:any,j:number)=>{
+                                                    {catCps.map((cp:CategoryCounterparty,j:number)=>{
                                                         const isCpSel=selectedCatCp?.key===cp.key;
                                                         return (<React.Fragment key={j}>
                                                             <tr onClick={e=>{e.stopPropagation();handleCatCpClick(cp);}}

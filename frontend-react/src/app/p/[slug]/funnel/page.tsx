@@ -4,6 +4,7 @@ import { api } from '@/lib/api';
 import { MultiLineChart } from './components/MultiLineChart';
 import { DayAnalysisTab } from './components/DayAnalysisTab';
 import { StockAnalytics } from './components/StockAnalytics';
+import type { FunnelDayRow, FunnelSummary, FunnelFilters } from '@/types/api';
 
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
 const fmtPct = (n: number) => (n || 0).toFixed(2) + '%';
@@ -12,10 +13,10 @@ const fmtPct = (n: number) => (n || 0).toFixed(2) + '%';
 
 export default function FunnelPage() {
     const [tab, setTab] = useState<'funnel' | 'day-analysis' | 'stock'>('funnel');
-    const [data, setData] = useState<any[]>([]);
+    const [data, setData] = useState<FunnelDayRow[]>([]);
     const [detailed, setDetailed] = useState(false);
-    const [summary, setSummary] = useState<any>(null);
-    const [filters, setFilters] = useState<any>({ brands: [], subjects: [] });
+    const [summary, setSummary] = useState<FunnelSummary|null>(null);
+    const [filters, setFilters] = useState<FunnelFilters>({ brands: [], subjects: [], vendor_codes: [], min_date: null, max_date: null });
     const [loading, setLoading] = useState(false);
     const headerRow1Ref = useRef<HTMLTableRowElement>(null);
     const [row1H, setRow1H] = useState(32);
@@ -71,7 +72,7 @@ export default function FunnelPage() {
             setSummary(sum);
             setTaxRate(tax.tax_rate || 6);
             return res.data || [];
-        } catch (e: any) {
+        } catch (e: unknown) {
             console.error(e);
             return [];
         } finally {
@@ -112,11 +113,18 @@ export default function FunnelPage() {
         try {
             await api.setFunnelTax(taxRate);
             loadData();
-        } catch (e: any) { alert(e.message); }
+        } catch (e: unknown) { alert(e instanceof Error ? e.message : 'Ошибка'); }
     };
 
     // Summary card definitions
-    const summaryCards = [
+    interface SummaryCard {
+        label: string;
+        field: string;
+        color: string;
+        suffix?: string;
+    }
+
+    const summaryCards: SummaryCard[] = [
         { label: 'Переходы', field: 'open_card', color: '#f59e0b' },
         { label: 'Корзины', field: 'add_to_cart', color: '#3b82f6' },
         { label: 'Заказы', field: 'orders_count', color: '#10b981' },
@@ -176,7 +184,7 @@ export default function FunnelPage() {
                     {/* Summary header — clickable cards to switch chart */}
                     {summary && (
                         <div style={{ display: 'grid', gridTemplateColumns: `repeat(${summaryCards.length}, 1fr)`, gap: 6, marginBottom: 12 }}>
-                            {summaryCards.map((s: any) => {
+                            {summaryCards.map((s: SummaryCard) => {
                                 const isActive = chartFields.some(c => c.field === s.field);
                                 const toggleChart = () => {
                                     setChartFields(prev => {

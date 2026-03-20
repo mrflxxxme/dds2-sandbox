@@ -2,11 +2,15 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, exportToExcel } from '@/lib/utils';
+import type {
+    DDSPnLResponse, DDSPnLCategory, DDSPnLCounterparty,
+    DDSPnLMonth, DDSPnLMonthlyValues,
+} from '@/types/api';
 
 export function DDSPnL() {
     const now = new Date();
     const [year, setYear] = useState(now.getFullYear());
-    const [data, setData] = useState<any>(null);
+    const [data, setData] = useState<DDSPnLResponse|null>(null);
     const [loading, setLoading] = useState(false);
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -34,13 +38,13 @@ export function DDSPnL() {
     if (loading) return <div className="glass-card" style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-muted)' }}>Загрузка отчёта...</div>;
     if (!data) return <div className="glass-card"><div className="empty-state"><div className="empty-state-text">Нажмите год для загрузки</div></div></div>;
 
-    const months: Array<{ key: number; label: string }> = data.months || [];
-    const cats: any[] = data.categories || [];
-    const summary = data.summary || {};
-    const revenue = data.revenue || {};
+    const months: DDSPnLMonth[] = data.months || [];
+    const cats: DDSPnLCategory[] = data.categories || [];
+    const summary = data.summary || { total_income: {}, total_expense: {}, net_profit: {} };
+    const revenue: DDSPnLMonthlyValues = data.revenue || {};
 
     // Flatten for Excel export
-    const exportRows: any[] = [];
+    const exportRows: Record<string, string | number>[] = [];
     exportRows.push({ Статья: 'Доходы итого', [`${year}`]: summary.total_income?.total || 0, ...Object.fromEntries(months.map(m => [m.label, summary.total_income?.[String(m.key)] || 0])) });
     cats.filter(c => c.type === 'income').forEach(c => {
         exportRows.push({ Статья: `  ${c.name}`, [`${year}`]: c.monthly?.total || 0, ...Object.fromEntries(months.map(m => [m.label, c.monthly?.[String(m.key)] || 0])) });
@@ -48,7 +52,7 @@ export function DDSPnL() {
     exportRows.push({ Статья: 'Расходы итого', [`${year}`]: summary.total_expense?.total || 0, ...Object.fromEntries(months.map(m => [m.label, summary.total_expense?.[String(m.key)] || 0])) });
     cats.filter(c => c.type === 'expense').forEach(c => {
         exportRows.push({ Статья: `  ${c.name}`, [`${year}`]: c.monthly?.total || 0, ...Object.fromEntries(months.map(m => [m.label, c.monthly?.[String(m.key)] || 0])) });
-        (c.counterparties || []).forEach((cp: any) => {
+        (c.counterparties || []).forEach((cp: DDSPnLCounterparty) => {
             exportRows.push({ Статья: `    ${cp.name}`, [`${year}`]: cp.monthly?.total || 0, ...Object.fromEntries(months.map(m => [m.label, cp.monthly?.[String(m.key)] || 0])) });
         });
     });
@@ -128,7 +132,7 @@ export function DDSPnL() {
 
                         {expenseCats.map(cat => {
                             const isOpen = expanded.has(cat.name);
-                            const cps: any[] = cat.counterparties || [];
+                            const cps: DDSPnLCounterparty[] = cat.counterparties || [];
                             return (
                                 <React.Fragment key={cat.name}>
                                     <tr style={{ cursor: cps.length > 0 ? 'pointer' : 'default', borderBottom: '1px solid var(--color-border-light, rgba(0,0,0,0.05))' }} onClick={() => cps.length > 0 && toggle(cat.name)}>
