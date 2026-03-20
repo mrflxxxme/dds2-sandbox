@@ -53,7 +53,31 @@ jobs:
             docker compose exec -T db pg_dump -U dds dds_db | gzip > backups/pre-deploy-$(date +%Y%m%d_%H%M%S).sql.gz
             echo "✅ Backup created on Data server"
 
-      # Step 2: Deploy App server
+      # Step 2: Verify backup before deploying
+      - name: Verify backup size
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DATA_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script-stop: true
+          script: |
+            set -e
+            cd /opt/dds_data
+            LATEST_BACKUP=$(ls -t backups/pre-deploy-*.sql.gz 2>/dev/null | head -1)
+            if [ -z "$LATEST_BACKUP" ]; then
+              echo "❌ No pre-deploy backup found!"
+              exit 1
+            fi
+            BACKUP_SIZE=$(stat -c%s "$LATEST_BACKUP" 2>/dev/null || stat -f%z "$LATEST_BACKUP")
+            echo "📦 Backup: $LATEST_BACKUP ($BACKUP_SIZE bytes)"
+            if [ "$BACKUP_SIZE" -lt 10240 ]; then
+              echo "❌ Backup too small ($BACKUP_SIZE bytes < 10KB), aborting deploy"
+              exit 1
+            fi
+            echo "✅ Backup verified ($BACKUP_SIZE bytes)"
+
+      # Step 3: Deploy App server
       - name: Deploy App server
         uses: appleboy/ssh-action@v1
         with:
@@ -95,6 +119,32 @@ jobs:
             timeout 30 docker compose -f docker-compose.app.yml run --rm certbot certificates 2>/dev/null || echo "  (certbot check skipped/timed out)"
 
             echo "✅ Production deploy successful!"
+
+      # Step 4: Verify database is accessible after deploy
+      - name: Verify DB after deploy
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DATA_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script-stop: true
+          script: |
+            set -e
+            cd /opt/dds_data
+            echo "🏥 Post-deploy DB health check..."
+            if docker compose exec -T db psql -U dds dds_db -c 'SELECT 1' > /dev/null 2>&1; then
+              echo "✅ PostgreSQL is responding"
+            else
+              echo "❌ PostgreSQL is NOT responding after deploy!"
+              exit 1
+            fi
+
+            # Verify PgBouncer connectivity
+            if docker compose exec -T pgbouncer psql -U dds -p 6432 dds_db -c 'SELECT 1' > /dev/null 2>&1; then
+              echo "✅ PgBouncer is responding"
+            else
+              echo "⚠️ PgBouncer is not responding (DB direct access works)"
+            fi
 
       - name: Notify on failure
         if: failure()

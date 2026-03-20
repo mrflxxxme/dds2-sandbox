@@ -17,6 +17,9 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./wal_archive:/var/lib/postgresql/wal_archive
+    oom_score_adj: -1000
+    stop_grace_period: 60s
     deploy:
       resources:
         limits:
@@ -65,7 +68,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: redis-server --requirepass ${REDIS_PASSWORD:-dds_redis_secret} --maxmemory 512mb --maxmemory-policy allkeys-lru --bind 0.0.0.0
+    command: redis-server --requirepass ${REDIS_PASSWORD:-dds_redis_secret} --maxmemory 256mb --maxmemory-policy allkeys-lru --bind 0.0.0.0
     ports:
       - "6379:6379"
     volumes:
@@ -73,7 +76,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 640M
+          memory: 384M
     healthcheck:
       test: [ "CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-dds_redis_secret}", "ping" ]
       interval: 5s
@@ -121,6 +124,8 @@ services:
       BACKUP_DIR: /backups
       BACKUP_RETENTION_DAYS: "14"
       BACKUP_INTERVAL_HOURS: "6"
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALERT_CHAT_ID: ${TELEGRAM_ALERT_CHAT_ID:-}
     volumes:
       - ./backups:/backups
       - ./scripts:/scripts

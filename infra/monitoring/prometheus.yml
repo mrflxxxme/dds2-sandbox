@@ -40,6 +40,31 @@ scrape_configs:
     static_configs:
       - targets: ['redis-exporter:9121']
 
+  # ─── Node Exporter (host metrics: CPU, memory, disk) ────────────────────
+  - job_name: 'node-app'
+    static_configs:
+      - targets: ['10.0.0.2:9100']
+        labels:
+          server: 'app'
+
+  - job_name: 'node-data'
+    static_configs:
+      - targets: ['10.0.0.1:9100']
+        labels:
+          server: 'data'
+
+  - job_name: 'node-monitoring'
+    static_configs:
+      - targets: ['localhost:9100']
+        labels:
+          server: 'monitoring'
+
+  # ─── Pushgateway (for backup age metric) ───────────────────────────────
+  - job_name: 'pushgateway'
+    honor_labels: true
+    static_configs:
+      - targets: ['pushgateway:9091']
+
   # ─── Prometheus Self-Monitoring ──────────────────────────────────────────
   - job_name: 'prometheus'
     static_configs:

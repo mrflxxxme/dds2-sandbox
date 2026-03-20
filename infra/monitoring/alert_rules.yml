@@ -90,6 +90,44 @@ groups:
           summary: "Report endpoint p95 > 5s"
           description: "{{ $labels.handler }} p95 = {{ $value | humanizeDuration }}"
 
-      # ─── Disk & Backup ────────────────────────────────────────────────
-      # Disk + backup checks done via scheduler health_monitor job
-      # (no node-exporter needed — checks os.statvfs from inside container)
+      # ─── Host Memory (node_exporter) ─────────────────────────────────
+      - alert: HostMemoryWarning
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory usage > 80% on {{ $labels.instance }}"
+          description: "{{ $value | humanizePercentage }} памяти занято"
+
+      - alert: HostMemoryCritical
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.9
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Memory usage > 90% on {{ $labels.instance }}"
+          description: "{{ $value | humanizePercentage }} памяти занято — возможен OOM"
+
+      # ─── Host Disk (node_exporter) ──────────────────────────────────
+      - alert: HostDiskCritical
+        expr: (1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"})) > 0.85
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk usage > 85% on {{ $labels.instance }}:{{ $labels.mountpoint }}"
+          description: "{{ $value | humanizePercentage }} диска занято"
+
+      # ─── Backup Age ─────────────────────────────────────────────────
+      # Requires a custom metric pushed by backup cron job:
+      #   dds_backup_last_success_timestamp (unix epoch of last successful backup)
+      # Example push: echo "dds_backup_last_success_timestamp $(date +%s)" | curl --data-binary @- http://pushgateway:9091/metrics/job/backup
+      - alert: BackupTooOld
+        expr: (time() - dds_backup_last_success_timestamp) > 28800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Last backup is older than 8 hours"
+          description: "Бэкап не обновлялся {{ $value | humanizeDuration }}. Расписание — каждые 6ч."
