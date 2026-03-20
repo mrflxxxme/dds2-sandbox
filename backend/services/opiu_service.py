@@ -4,6 +4,10 @@ Service: opiu — ОПИУ (P&L) report from WB finance data.
 Monthly breakdown with hierarchical P&L rows.
 Reuses loaders from bdr_loaders.py.
 
+Architecture:
+- SQL queries & row builders → opiu_helpers.py
+- Orchestration → this file
+
 Optimized: SQL-level aggregation instead of loading all rows into Python.
 """
 
@@ -21,71 +25,25 @@ from backend.services.bdr_loaders import (
     load_cost_overrides,
     load_tax_settings,
 )
+from backend.services.opiu_helpers import (
+    build_aggregate_sql,
+    build_brand_nm_ids_sql,
+    build_brands_sql,
+    build_cost_qty_sql,
+    build_row,
+    empty_totals,
+)
 
 logger = logging.getLogger("dds.opiu")
 
 D = Decimal
 ZERO = D("0")
 
-
-# ─── SQL aggregation query ────────────────────────────────────────────────────
-
-_DATE_FILTER = """(
-    (rr_dt BETWEEN :date_from AND :date_to)
-    OR (rr_dt IS NULL AND date_from >= :date_from AND date_to <= :date_to)
-  )"""
-
-_SELECT_COLS = """
-    COALESCE(to_char(rr_dt, 'YYYY-MM'), to_char(date_from, 'YYYY-MM')) AS month_key,
-    COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub WHEN doc_type_name = 'Возврат' THEN -retail_price_withdisc_rub ELSE 0 END), 0) AS realization,
-    COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_amount WHEN doc_type_name = 'Возврат' THEN -retail_amount ELSE 0 END), 0) AS sales_amount,
-    COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_for_pay ELSE 0 END), 0) AS ppvz_for_pay_sale,
-    COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_for_pay ELSE 0 END), 0) AS ppvz_for_pay_ret,
-    COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' AND supplier_oper_name = 'Добровольная компенсация при возврате' THEN ppvz_for_pay ELSE 0 END), 0) AS comp_ppvz,
-    COALESCE(SUM(delivery_rub), 0) AS logistics,
-    COALESCE(SUM(penalty), 0) AS penalties,
-    COALESCE(SUM(storage_fee), 0) AS storage,
-    COALESCE(SUM(acceptance), 0) AS acceptance_total,
-    COALESCE(SUM(deduction), 0) AS deductions,
-    COALESCE(SUM(CASE WHEN deduction != 0 AND (bonus_type_name LIKE '%%Продвижение%%' OR bonus_type_name LIKE '%%Медиа%%') THEN deduction ELSE 0 END), 0) AS ad_deduction,
-    COALESCE(SUM(CASE WHEN deduction != 0 AND (LOWER(bonus_type_name) LIKE '%%кредит%%' OR LOWER(bonus_type_name) LIKE '%%заём%%') THEN deduction ELSE 0 END), 0) AS loan_deduction,
-    COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN additional_payment WHEN doc_type_name = 'Возврат' THEN -additional_payment ELSE 0 END), 0) AS additional_payment
-"""
-
-
-def _build_aggregate_sql(brand: str | None, article: str | None) -> str:
-    where = f"project_id = :project_id AND {_DATE_FILTER}"
-    if brand:
-        where += " AND brand_name = :brand"
-    if article:
-        where += " AND LOWER(sa_name) LIKE :article_like"
-    return f"SELECT {_SELECT_COLS} FROM wb_finance_rows WHERE {where} GROUP BY month_key ORDER BY month_key"  # noqa: S608
-
-
-def _build_brands_sql() -> str:
-    return f"""SELECT DISTINCT brand_name FROM wb_finance_rows
-        WHERE project_id = :project_id AND {_DATE_FILTER}
-        AND brand_name IS NOT NULL AND brand_name != ''
-        ORDER BY brand_name"""  # noqa: S608
-
-
-def _build_cost_qty_sql(brand: str | None, article: str | None) -> str:
-    """Net qty per article/month: sale_qty - ret_qty (same as BDR)."""
-    where = f"""project_id = :project_id
-        AND doc_type_name IN ('Продажа', 'Возврат')
-        AND supplier_oper_name IN ('Продажа', 'Возврат')
-        AND {_DATE_FILTER}"""
-    if brand:
-        where += " AND brand_name = :brand"
-    if article:
-        where += " AND LOWER(sa_name) LIKE :article_like"
-    return f"""SELECT
-        COALESCE(to_char(rr_dt, 'YYYY-MM'), to_char(date_from, 'YYYY-MM')) AS month_key,
-        sa_name, nm_id,
-        COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN quantity ELSE 0 END), 0)
-        - COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN quantity ELSE 0 END), 0) AS total_qty
-        FROM wb_finance_rows WHERE {where}
-        GROUP BY month_key, sa_name, nm_id"""
+# Keep old private names as aliases for backwards compatibility
+_build_aggregate_sql = build_aggregate_sql
+_build_brands_sql = build_brands_sql
+_build_cost_qty_sql = build_cost_qty_sql
+_empty_totals = empty_totals
 
 
 @cached(prefix="reports:opiu", ttl=3600)
@@ -113,7 +71,7 @@ async def get_opiu(
         params["article_like"] = f"%{article.lower()}%"
 
     # ── 1. SQL aggregation — returns ~3 rows instead of 634K ──
-    result = await db.execute(text(_build_aggregate_sql(brand, article)), params)
+    result = await db.execute(text(build_aggregate_sql(brand, article)), params)
     agg_rows = result.mappings().all()
 
     # ── 2. Load enrichment data (small queries) ──
@@ -131,7 +89,7 @@ async def get_opiu(
 
     # ── 4. Parse aggregated results into monthly_data ──
     monthly_data: dict[str, dict] = {}
-    total_data = _empty_totals()
+    total_data = empty_totals()
 
     for row in agg_rows:
         mk = row["month_key"]
@@ -139,7 +97,7 @@ async def get_opiu(
             continue
         months_set.add(mk)
 
-        d = _empty_totals()
+        d = empty_totals()
         d["realization"] = D(str(row["realization"]))
         d["sales_amount"] = D(str(row["sales_amount"]))
         d["logistics"] = D(str(row["logistics"]))
@@ -172,11 +130,11 @@ async def get_opiu(
     # Fill missing months
     for mk in months_set:
         if mk not in monthly_data:
-            monthly_data[mk] = _empty_totals()
+            monthly_data[mk] = empty_totals()
 
     # ── 5. Load brands ──
     brands_result = await db.execute(
-        text(_build_brands_sql()),
+        text(build_brands_sql()),
         {
             "project_id": project_id,
             "date_from": date_from,
@@ -191,14 +149,7 @@ async def get_opiu(
     # When brand is set, only count ads for nm_ids belonging to this brand
     brand_nm_ids: set[int] | None = None
     if brand:
-        nm_result = await db.execute(
-            text(
-                f"SELECT DISTINCT nm_id FROM wb_finance_rows"  # noqa: S608
-                f" WHERE project_id = :project_id AND {_DATE_FILTER}"
-                f" AND brand_name = :brand AND nm_id IS NOT NULL AND nm_id != 0"
-            ),
-            params,
-        )
+        nm_result = await db.execute(text(build_brand_nm_ids_sql()), params)
         brand_nm_ids = {r[0] for r in nm_result}
 
     monthly_ads: dict[str, float] = {}
@@ -213,7 +164,7 @@ async def get_opiu(
     cost_map = await load_avg_costs(db, project_id)
     cost_overrides = await load_cost_overrides(db, project_id)
 
-    cost_result = await db.execute(text(_build_cost_qty_sql(brand, article)), params)
+    cost_result = await db.execute(text(build_cost_qty_sql(brand, article)), params)
     monthly_cost: dict[str, float] = {mk: 0.0 for mk in months_set}
     for row in cost_result:
         mk = row.month_key
@@ -232,34 +183,33 @@ async def get_opiu(
     # ── 8. Build P&L rows ──
     months_sorted = sorted(months_set, reverse=True)
 
-    def _pct(val, base):
-        if not base or base == 0:
-            return 0
-        return round(val / base * 100, 2)
+    return _build_pnl_result(
+        monthly_data,
+        total_data,
+        months_sorted,
+        all_brands,
+        tax_info,
+        monthly_ads,
+        monthly_cost,
+        total_cost_val,
+        date_from,
+        date_to,
+    )
 
-    def _build_row(
-        key, label, level, bold, values_monthly, values_total, base_monthly=None, base_total=None, expandable=False
-    ):
-        total_pct = _pct(values_total, base_total) if base_total else None
-        monthly = {}
-        monthly_pct = {}
-        for mk in months_sorted:
-            monthly[mk] = round(float(values_monthly.get(mk, 0)), 2)
-            if base_monthly and mk in base_monthly:
-                monthly_pct[mk] = _pct(values_monthly.get(mk, 0), base_monthly.get(mk, 0))
-            else:
-                monthly_pct[mk] = None
-        return {
-            "key": key,
-            "label": label,
-            "level": level,
-            "bold": bold,
-            "expandable": expandable,
-            "total": round(float(values_total), 2),
-            "total_pct": total_pct,
-            "monthly": monthly,
-            "monthly_pct": monthly_pct,
-        }
+
+def _build_pnl_result(
+    monthly_data,
+    total_data,
+    months_sorted,
+    all_brands,
+    tax_info,
+    monthly_ads,
+    monthly_cost,
+    total_cost_val,
+    date_from,
+    date_to,
+):
+    """Build the final P&L rows and return the result dict."""
 
     def _metric_monthly(field):
         return {mk: float(monthly_data[mk].get(field, 0)) for mk in months_sorted}
@@ -347,7 +297,6 @@ async def get_opiu(
         return nds + usn
 
     def _tax_expenses_for(log, stor, comm, pen, ded, adv, cost_val):
-        """Tax-deductible expenses for income-expense USN regime."""
         exp = abs(log) + abs(stor) + abs(comm) + abs(pen) + abs(ded) + abs(adv)
         if cost_as_expense:
             exp += abs(cost_val)
@@ -365,32 +314,40 @@ async def get_opiu(
     net_m = {mk: ebitda_m[mk] - tax_m[mk] for mk in months_sorted}
     net_t = ebitda_t - tax_t
 
+    def _r(key, label, level, bold, vm, vt, bm=None, bt=None, expandable=False):
+        return build_row(key, label, level, bold, vm, vt, months_sorted, bm, bt, expandable)
+
     rows = [
-        _build_row("realization", "Реализация", 0, True, real_m, real_t),
-        _build_row("spp_discount", "Скидка за счет МП", 1, False, spp_m, spp_t, real_m, real_t),
-        _build_row("sales_amount", "Фактические продажи", 0, True, sales_m, sales_t, real_m, real_t),
-        _build_row("direct_costs", "Прямые расходы", 0, True, direct_m, direct_t, real_m, real_t, expandable=True),
-        _build_row("cost_of_sales", "Себестоимость продаж", 1, False, cost_m, cost_t, real_m, real_t, expandable=True),
-        _build_row("cost_price", "Себестоимость", 2, False, cost_m, cost_t, real_m, real_t),
-        _build_row("logistics", "Логистика", 1, False, log_m, log_t, real_m, real_t),
-        _build_row("commission", "Комиссия", 1, False, comm_m, comm_t, real_m, real_t),
-        _build_row("penalties", "Штрафы", 1, False, pen_m, pen_t, real_m, real_t),
-        _build_row("storage", "Хранение", 1, False, stor_m, stor_t, real_m, real_t),
-        _build_row("advertising", "Внутренняя реклама", 1, False, adv_m, adv_t, real_m, real_t),
-        _build_row("deductions", "Прочие удержания", 1, False, ded_m, ded_t, real_m, real_t),
-        _build_row("acceptance", "Платная приёмка", 1, False, acc_m, acc_t, real_m, real_t),
-        _build_row(
-            "compensation", "Компенсация", 0, False, comp_total_m, comp_total_t, real_m, real_t, expandable=True
+        _r("realization", "Реализация", 0, True, real_m, real_t),
+        _r("spp_discount", "Скидка за счет МП", 1, False, spp_m, spp_t, real_m, real_t),
+        _r("sales_amount", "Фактические продажи", 0, True, sales_m, sales_t, real_m, real_t),
+        _r("direct_costs", "Прямые расходы", 0, True, direct_m, direct_t, real_m, real_t, expandable=True),
+        _r("cost_of_sales", "Себестоимость продаж", 1, False, cost_m, cost_t, real_m, real_t, expandable=True),
+        _r("cost_price", "Себестоимость", 2, False, cost_m, cost_t, real_m, real_t),
+        _r("logistics", "Логистика", 1, False, log_m, log_t, real_m, real_t),
+        _r("commission", "Комиссия", 1, False, comm_m, comm_t, real_m, real_t),
+        _r("penalties", "Штрафы", 1, False, pen_m, pen_t, real_m, real_t),
+        _r("storage", "Хранение", 1, False, stor_m, stor_t, real_m, real_t),
+        _r("advertising", "Внутренняя реклама", 1, False, adv_m, adv_t, real_m, real_t),
+        _r("deductions", "Прочие удержания", 1, False, ded_m, ded_t, real_m, real_t),
+        _r("acceptance", "Платная приёмка", 1, False, acc_m, acc_t, real_m, real_t),
+        _r("compensation", "Компенсация", 0, False, comp_total_m, comp_total_t, real_m, real_t, expandable=True),
+        _r("comp_bonus", "Баллы за скидки", 1, False, comp_bonus_m, comp_bonus_t, real_m, real_t),
+        _r(
+            "comp_voluntary",
+            "Добровольная компенсация при возврате",
+            1,
+            False,
+            comp_vol_m,
+            comp_vol_t,
+            real_m,
+            real_t,
         ),
-        _build_row("comp_bonus", "Баллы за скидки", 1, False, comp_bonus_m, comp_bonus_t, real_m, real_t),
-        _build_row(
-            "comp_voluntary", "Добровольная компенсация при возврате", 1, False, comp_vol_m, comp_vol_t, real_m, real_t
-        ),
-        _build_row("gross_margin", "Валовая маржа", 0, True, margin_m, margin_t, real_m, real_t),
-        _build_row("operating_expenses", "Операционные расходы", 0, False, ops_m, ops_t, real_m, real_t),
-        _build_row("ebitda", "Операционная прибыль (EBITDA)", 0, True, ebitda_m, ebitda_t, real_m, real_t),
-        _build_row("taxes", "Налоги (кроме зарплатных)", 0, True, tax_m, tax_t, real_m, real_t, expandable=True),
-        _build_row("net_profit", "Чистая прибыль", 0, True, net_m, net_t, real_m, real_t),
+        _r("gross_margin", "Валовая маржа", 0, True, margin_m, margin_t, real_m, real_t),
+        _r("operating_expenses", "Операционные расходы", 0, False, ops_m, ops_t, real_m, real_t),
+        _r("ebitda", "Операционная прибыль (EBITDA)", 0, True, ebitda_m, ebitda_t, real_m, real_t),
+        _r("taxes", "Налоги (кроме зарплатных)", 0, True, tax_m, tax_t, real_m, real_t, expandable=True),
+        _r("net_profit", "Чистая прибыль", 0, True, net_m, net_t, real_m, real_t),
     ]
 
     return {
@@ -400,27 +357,4 @@ async def get_opiu(
         "rows": rows,
         "brands": all_brands,
         "tax_info": tax_info,
-    }
-
-
-# ─── Aggregation helpers ────────────────────────────────────────────────────
-
-
-def _empty_totals() -> dict:
-    return {
-        "realization": ZERO,
-        "sales_amount": ZERO,
-        "logistics": ZERO,
-        "commission": ZERO,
-        "penalties": ZERO,
-        "storage": ZERO,
-        "acceptance": ZERO,
-        "deductions": ZERO,
-        "ad_deduction": ZERO,
-        "loan_deduction": ZERO,
-        "additional_payment": ZERO,
-        "compensation_ppvz": ZERO,
-        "_ppvz_for_pay_sale": ZERO,
-        "_ppvz_for_pay_ret": ZERO,
-        "_comp_ppvz": ZERO,
     }
