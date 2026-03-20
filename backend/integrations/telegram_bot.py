@@ -8,6 +8,7 @@ Bot lifecycle:
 """
 
 import logging
+import re
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
@@ -338,6 +339,76 @@ async def cmd_delnote(message: Message):
     await message.reply("Заметка #" + str(note_num) + " удалена.")
 
 
+# ─── HTML send helper ─────────────────────────────────────────────────────
+
+
+def _strip_html(text: str) -> str:
+    """Remove HTML tags for plain-text fallback."""
+    return re.sub(r"<[^>]+>", "", text)
+
+
+def _fix_html(text: str) -> str:
+    """Fix common HTML issues that cause Telegram parse errors.
+
+    - Escape stray < and & that are not part of valid tags/entities
+    - Close unclosed tags
+    """
+    # Escape & that are not HTML entities (e.g. &amp; &lt; etc.)
+    text = re.sub(r"&(?!amp;|lt;|gt;|quot;|#\d+;)", "&amp;", text)
+
+    # Allowed Telegram HTML tags
+    allowed = {"b", "i", "u", "s", "a", "code", "pre", "blockquote", "tg-spoiler", "tg-emoji"}
+
+    # Escape < that are not part of known tags
+    def _escape_lt(m):
+        tag_content = m.group(1)
+        # Check if it's a valid opening/closing tag
+        tag_match = re.match(r"/?\s*(\w[\w-]*)", tag_content)
+        if tag_match and tag_match.group(1).lower() in allowed:
+            return m.group(0)  # Keep valid tag
+        return "&lt;" + tag_content + "&gt;"
+
+    text = re.sub(r"<([^>]*)>", _escape_lt, text)
+
+    return text
+
+
+async def _send_html(message: Message, text: str):
+    """Send message as HTML; on parse error strip tags and retry as plain text."""
+    # Split long messages (Telegram limit 4096 chars)
+    fixed = _fix_html(text)
+    chunks = _split_message(fixed, 4096)
+    for chunk in chunks:
+        try:
+            await message.reply(chunk, parse_mode="HTML")
+        except Exception as e:
+            logger.warning("HTML parse failed (%s), stripping tags", e)
+            plain = _strip_html(chunk)
+            try:
+                await message.reply(plain)
+            except Exception:
+                if bot:
+                    await bot.send_message(chat_id=message.chat.id, text=plain)
+
+
+def _split_message(text: str, limit: int = 4096) -> list[str]:
+    """Split text into chunks respecting line boundaries."""
+    if len(text) <= limit:
+        return [text]
+    chunks = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+        # Find last newline before limit
+        split_at = text.rfind("\n", 0, limit)
+        if split_at <= 0:
+            split_at = limit
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip("\n")
+    return chunks
+
+
 # ─── Text messages → AI agent ──────────────────────────────────────────────
 
 
@@ -428,14 +499,7 @@ async def handle_text(message: Message):
                 tax_rate=tax_rate,
             )
             logger.info("AI answer ready: chat=%s len=%d", message.chat.id, len(answer))
-            try:
-                await message.reply(answer, parse_mode="HTML")
-            except Exception:
-                # Fallback: plain text if HTML parsing fails or message deleted
-                try:
-                    await message.reply(answer)
-                except Exception:
-                    await bot.send_message(chat_id=message.chat.id, text=answer)
+            await _send_html(message, answer)
         except Exception as exc:
             logger.exception("AI agent error: %s", exc)
             from backend.utils.telegram import send_alert
