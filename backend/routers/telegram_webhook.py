@@ -66,6 +66,11 @@ async def telegram_webhook(request: Request):
 async def _process_update(tg_bot, tg_dp, update: Update):
     """Process Telegram update in background."""
     try:
+        logger.info("Processing update id=%s", update.update_id)
         await tg_dp.feed_update(tg_bot, update)
-    except Exception:
-        logger.exception("Error processing Telegram update")
+        logger.info("Update id=%s processed OK", update.update_id)
+    except Exception as exc:
+        logger.exception("Error processing Telegram update: %s", exc)
+        from backend.utils.telegram import send_alert
+
+        await send_alert(f"🤖 Webhook error: {type(exc).__name__}: {exc}")

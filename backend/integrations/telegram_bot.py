@@ -388,6 +388,13 @@ async def handle_text(message: Message):
         try:
             from backend.services.ai.agent import ask
 
+            logger.info(
+                "AI ask: chat=%s project=%s brand=%s q=%s",
+                message.chat.id,
+                binding.project_id,
+                binding.brand,
+                question[:80],
+            )
             answer = await ask(
                 db=db,
                 project_id=binding.project_id,
@@ -396,6 +403,7 @@ async def handle_text(message: Message):
                 question=question,
                 tax_rate=tax_rate,
             )
+            logger.info("AI answer ready: chat=%s len=%d", message.chat.id, len(answer))
             try:
                 await message.reply(answer, parse_mode="HTML")
             except Exception:
@@ -404,8 +412,11 @@ async def handle_text(message: Message):
                     await message.reply(answer)
                 except Exception:
                     await bot.send_message(chat_id=message.chat.id, text=answer)
-        except Exception:
-            logger.exception("AI agent error")
+        except Exception as exc:
+            logger.exception("AI agent error: %s", exc)
+            from backend.utils.telegram import send_alert
+
+            await send_alert(f"🤖 Bot AI error: {type(exc).__name__}: {exc}")
             try:
                 await message.reply("Сервис временно недоступен, попробуйте через минуту.")
             except Exception:
