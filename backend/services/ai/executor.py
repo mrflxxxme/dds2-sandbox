@@ -67,6 +67,8 @@ async def execute_tool(
             return await _get_day_analysis(db, project_id, tax_rate, brand, tool_input)
         elif tool_name == "get_warehouse_stocks":
             return await _get_warehouse_stocks(db, project_id, tool_input)
+        elif tool_name == "get_bdr_data":
+            return await _get_bdr_data(db, project_id, brand, tool_input)
         else:
             return json.dumps({"error": "Unknown tool: " + tool_name})
     except Exception as e:
@@ -353,5 +355,73 @@ async def _get_warehouse_stocks(db, project_id, inp):
             "total_warehouses": len(sorted_wh),
             "total_qty": sum(w.get("total_qty", 0) for w in sorted_wh),
             "warehouses": sorted_wh[:20],
+        }
+    )
+
+
+async def _get_bdr_data(db, project_id, brand, inp):
+    from backend.services.wb_bdr_service import get_wb_bdr
+
+    date_from = date.fromisoformat(inp["date_from"])
+    date_to = date.fromisoformat(inp["date_to"])
+    article_filter = inp.get("article")
+
+    result = await get_wb_bdr(
+        db,
+        project_id=project_id,
+        date_from=date_from,
+        date_to=date_to,
+        brand=brand,
+        article=article_filter,
+    )
+    if not result:
+        return json.dumps({"message": "No BDR data for this period"})
+
+    summary = result.get("summary", {})
+    articles = result.get("articles", [])
+
+    # Top 15 by realization
+    top_articles = sorted(articles, key=lambda a: float(a.get("realization", 0)), reverse=True)[:15]
+    # Simplify article data for LLM
+    simplified = []
+    for a in top_articles:
+        simplified.append(
+            {
+                "article": a.get("sa_name", ""),
+                "brand": a.get("brand", ""),
+                "realization": a.get("realization", 0),
+                "commission": a.get("commission", 0),
+                "logistics": a.get("logistics", 0),
+                "storage": a.get("storage", 0),
+                "penalties": a.get("penalties", 0),
+                "adv_sum": a.get("adv_sum", 0),
+                "cost_total": a.get("cost_total", 0),
+                "to_pay": a.get("to_pay", 0),
+                "net_profit": a.get("net_profit", 0),
+                "margin_pct": a.get("margin_pct", 0),
+                "sale_qty": a.get("sale_qty", 0),
+                "ret_qty": a.get("ret_qty", 0),
+                "buyout_pct": a.get("buyout_pct", 0),
+            }
+        )
+
+    return _json(
+        {
+            "period": result.get("period"),
+            "summary": {
+                "realization": summary.get("realization", 0),
+                "commission": summary.get("commission", 0),
+                "logistics": summary.get("logistics", 0),
+                "storage": summary.get("storage", 0),
+                "penalties": summary.get("penalties", 0),
+                "adv_sum": summary.get("adv_sum", 0),
+                "cost_total": summary.get("cost_total", 0),
+                "to_pay": summary.get("to_pay", 0),
+                "net_profit": summary.get("net_profit", 0),
+                "margin_pct": summary.get("margin_pct", 0),
+                "tax_sum": summary.get("tax_sum", 0),
+            },
+            "total_articles": len(articles),
+            "top_articles": simplified,
         }
     )
