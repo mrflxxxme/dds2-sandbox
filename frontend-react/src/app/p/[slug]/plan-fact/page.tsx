@@ -9,17 +9,25 @@ import {
     ResponsiveContainer, Cell,
 } from 'recharts';
 
-const MONTH_NAMES = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
-    'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
-const MONTH_SHORT = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
 
 export default function PlanFactPage() {
     const [tab, setTab] = useState<'daily' | 'brands'>('daily');
-    const [year, setYear] = useState(new Date().getFullYear());
-    const [month, setMonth] = useState(new Date().getMonth() + 1);
-    const [yearTo, setYearTo] = useState(new Date().getFullYear());
-    const [monthTo, setMonthTo] = useState(new Date().getMonth() + 1);
+    const [dateFrom, setDateFrom] = useState(() => {
+        const d = new Date();
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
+    });
+    const [dateTo, setDateTo] = useState(() => {
+        const d = new Date();
+        const dim = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(dim).padStart(2, '0')}`;
+    });
     const [brand, setBrand] = useState('');
+
+    // Derive year/month from dates for API
+    const year = parseInt(dateFrom.slice(0, 4));
+    const month = parseInt(dateFrom.slice(5, 7));
+    const yearTo = parseInt(dateTo.slice(0, 4));
+    const monthTo = parseInt(dateTo.slice(5, 7));
     const [brands, setBrands] = useState<string[]>([]);
 
     const [dailyData, setDailyData] = useState<PlanFactDailyResult | null>(null);
@@ -128,107 +136,48 @@ export default function PlanFactPage() {
 
             {/* Filters */}
             <div className="glass-card" style={{ marginBottom: 20, padding: 16 }}>
-                <div style={{ display: 'flex', gap: 12, alignItems: 'end', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <input type="date" className="form-input"
+                        value={dateFrom}
+                        max={dateTo}
+                        onChange={e => setDateFrom(e.target.value)} />
+                    <span style={{ color: 'var(--color-text-muted)', fontSize: 18 }}>&mdash;</span>
+                    <input type="date" className="form-input"
+                        value={dateTo}
+                        min={dateFrom}
+                        onChange={e => setDateTo(e.target.value)} />
                     {tab === 'daily' && (
-                        <div className="form-group">
-                            <label className="form-label">Бренд</label>
-                            <select className="form-input" style={{ minWidth: 180 }}
-                                value={brand} onChange={e => setBrand(e.target.value)}>
-                                {brands.map(b => <option key={b} value={b}>{b}</option>)}
-                            </select>
-                        </div>
+                        <select className="form-input" style={{ minWidth: 180 }}
+                            value={brand} onChange={e => setBrand(e.target.value)}>
+                            {brands.map(b => <option key={b} value={b}>{b}</option>)}
+                        </select>
                     )}
-                    <div className="form-group">
-                        <label className="form-label">Быстрый выбор</label>
-                        <div style={{ display: 'flex', gap: 4 }}>
-                            {(() => {
-                                const now = new Date();
-                                const curM = now.getMonth() + 1;
-                                const curY = now.getFullYear();
-                                const prevDate = new Date(curY, curM - 2, 1);
-                                const prevM = prevDate.getMonth() + 1;
-                                const prevY = prevDate.getFullYear();
-                                const isSingle = month === monthTo && year === yearTo;
-                                const isCurrentMonth = isSingle && month === curM && year === curY;
-                                const isPrevMonth = isSingle && month === prevM && year === prevY;
-                                const isQuarter = (() => {
-                                    const q = Math.floor((curM - 1) / 3);
-                                    const qStart = q * 3 + 1;
-                                    return month === qStart && monthTo === curM && year === curY && yearTo === curY;
-                                })();
-                                return (
-                                    <>
-                                        <button
-                                            className={`btn ${isCurrentMonth ? 'btn-primary' : 'btn-secondary'} btn-sm`}
-                                            onClick={() => { setMonth(curM); setMonthTo(curM); setYear(curY); setYearTo(curY); }}
-                                        >Тек. месяц</button>
-                                        <button
-                                            className={`btn ${isPrevMonth ? 'btn-primary' : 'btn-secondary'} btn-sm`}
-                                            onClick={() => { setMonth(prevM); setMonthTo(prevM); setYear(prevY); setYearTo(prevY); }}
-                                        >Пред.</button>
-                                        <button
-                                            className={`btn ${isQuarter ? 'btn-primary' : 'btn-secondary'} btn-sm`}
-                                            onClick={() => {
-                                                const q = Math.floor((curM - 1) / 3);
-                                                const qStart = q * 3 + 1;
-                                                setMonth(qStart); setMonthTo(curM); setYear(curY); setYearTo(curY);
-                                            }}
-                                        >Квартал</button>
-                                    </>
-                                );
-                            })()}
-                        </div>
-                    </div>
-                    <div className="form-group">
-                        <label className="form-label">С</label>
-                        <div style={{ display: 'flex', gap: 4 }}>
-                            <select className="form-input" style={{ minWidth: 110 }}
-                                value={month} onChange={e => {
-                                    const m = Number(e.target.value);
-                                    setMonth(m);
-                                    if (year > yearTo || (year === yearTo && m > monthTo)) {
-                                        setMonthTo(m); setYearTo(year);
-                                    }
-                                }}>
-                                {MONTH_SHORT.map((name, i) => (
-                                    <option key={i} value={i + 1}>{name}</option>
-                                ))}
-                            </select>
-                            <input type="number" className="form-input" style={{ width: 80 }}
-                                value={year} onChange={e => {
-                                    const y = Number(e.target.value);
-                                    setYear(y);
-                                    if (y > yearTo || (y === yearTo && month > monthTo)) {
-                                        setYearTo(y); setMonthTo(month);
-                                    }
-                                }} />
-                        </div>
-                    </div>
-                    <div className="form-group">
-                        <label className="form-label">По</label>
-                        <div style={{ display: 'flex', gap: 4 }}>
-                            <select className="form-input" style={{ minWidth: 110 }}
-                                value={monthTo} onChange={e => {
-                                    const m = Number(e.target.value);
-                                    setMonthTo(m);
-                                    if (yearTo < year || (yearTo === year && m < month)) {
-                                        setMonth(m); setYear(yearTo);
-                                    }
-                                }}>
-                                {MONTH_SHORT.map((name, i) => (
-                                    <option key={i} value={i + 1}>{name}</option>
-                                ))}
-                            </select>
-                            <input type="number" className="form-input" style={{ width: 80 }}
-                                value={yearTo} onChange={e => {
-                                    const y = Number(e.target.value);
-                                    setYearTo(y);
-                                    if (y < year || (y === year && monthTo < month)) {
-                                        setYear(y); setMonth(monthTo);
-                                    }
-                                }} />
-                        </div>
-                    </div>
+                    {(() => {
+                        const now = new Date();
+                        const curY = now.getFullYear();
+                        const curM = now.getMonth();
+                        const curDim = new Date(curY, curM + 1, 0).getDate();
+                        const curFrom = `${curY}-${String(curM + 1).padStart(2, '0')}-01`;
+                        const curTo = `${curY}-${String(curM + 1).padStart(2, '0')}-${String(curDim).padStart(2, '0')}`;
+                        const prevD = new Date(curY, curM - 1, 1);
+                        const prevY = prevD.getFullYear();
+                        const prevM = prevD.getMonth();
+                        const prevDim = new Date(prevY, prevM + 1, 0).getDate();
+                        const prevFrom = `${prevY}-${String(prevM + 1).padStart(2, '0')}-01`;
+                        const prevTo = `${prevY}-${String(prevM + 1).padStart(2, '0')}-${String(prevDim).padStart(2, '0')}`;
+                        return (
+                            <div style={{ display: 'flex', gap: 4 }}>
+                                <button
+                                    className={`btn ${dateFrom === curFrom && dateTo === curTo ? 'btn-primary' : 'btn-secondary'} btn-sm`}
+                                    onClick={() => { setDateFrom(curFrom); setDateTo(curTo); }}
+                                >Тек. месяц</button>
+                                <button
+                                    className={`btn ${dateFrom === prevFrom && dateTo === prevTo ? 'btn-primary' : 'btn-secondary'} btn-sm`}
+                                    onClick={() => { setDateFrom(prevFrom); setDateTo(prevTo); }}
+                                >Пред.</button>
+                            </div>
+                        );
+                    })()}
                 </div>
             </div>
 
