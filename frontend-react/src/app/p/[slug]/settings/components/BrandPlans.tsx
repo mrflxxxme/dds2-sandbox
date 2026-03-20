@@ -118,16 +118,29 @@ export function BrandPlans() {
 
     const grandTotal = planBrands.reduce((s, b) => s + brandTotal(b), 0);
 
-    if (loading && plans.length === 0) return <div className="text-center py-8 text-secondary">Загрузка...</div>;
-    if (error) return <div className="text-center py-8 text-danger">{error}</div>;
+    if (loading && plans.length === 0) {
+        return (
+            <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                Загрузка...
+            </div>
+        );
+    }
+    if (error) {
+        return (
+            <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-danger)' }}>
+                {error}
+            </div>
+        );
+    }
 
     return (
         <div>
-            <div className="table-toolbar" style={{ marginBottom: 16 }}>
-                <h5 style={{ margin: 0 }}>План по брендам</h5>
+            {/* Toolbar */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
+                <h5 style={{ margin: 0, fontWeight: 600 }}>План по брендам</h5>
                 <select
-                    className="form-select form-select-sm"
-                    style={{ width: 100 }}
+                    className="form-input"
+                    style={{ width: 100, padding: '8px 12px' }}
                     value={year}
                     onChange={e => setYear(Number(e.target.value))}
                 >
@@ -135,90 +148,113 @@ export function BrandPlans() {
                         <option key={y} value={y}>{y}</option>
                     ))}
                 </select>
-                <button className="btn btn-outline-primary btn-sm" onClick={addMonth}>
+                <button className="btn btn-secondary btn-sm" onClick={addMonth}>
                     + Месяц
                 </button>
                 <div style={{ flex: 1 }} />
-                <button className="btn btn-outline-secondary btn-sm" onClick={handleExport}>
-                    Excel
+                <button className="btn btn-secondary btn-sm" onClick={handleExport}>
+                    📥 Excel
                 </button>
             </div>
 
             {planBrands.length === 0 ? (
-                <div className="text-center py-8 text-secondary">
-                    Нет планов. Добавьте бренд из выпадающего списка ниже.
+                <div className="glass-card">
+                    <div className="empty-state">
+                        <div className="empty-state-icon">📊</div>
+                        <div className="empty-state-text">Нет планов</div>
+                        <p style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
+                            Добавьте бренд из выпадающего списка ниже
+                        </p>
+                    </div>
                 </div>
             ) : (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead>
-                            <tr>
-                                <th>Бренд</th>
-                                {planMonths.map(m => (
-                                    <th key={m} style={{ textAlign: 'right' }}>{MONTH_NAMES[m - 1]}</th>
-                                ))}
-                                <th style={{ textAlign: 'right' }}>Итого</th>
-                                <th style={{ width: 40 }}></th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {planBrands.map(brand => (
-                                <tr key={brand}>
-                                    <td style={{ fontWeight: 500 }}>{brand}</td>
-                                    {planMonths.map(m => {
-                                        const plan = getPlan(brand, m);
-                                        const key = `${brand}-${m}`;
-                                        return (
-                                            <td key={m} style={{ textAlign: 'right', minWidth: 130 }}>
-                                                <input
-                                                    type="number"
-                                                    className="form-control form-control-sm"
-                                                    style={{
-                                                        textAlign: 'right',
-                                                        opacity: saving[key] ? 0.5 : 1,
-                                                        maxWidth: 130,
-                                                    }}
-                                                    value={plan?.plan_amount ?? ''}
-                                                    placeholder="0"
-                                                    onChange={e => handleAmountChange(brand, m, e.target.value)}
-                                                />
-                                            </td>
-                                        );
-                                    })}
-                                    <td style={{ textAlign: 'right', fontWeight: 600 }}>
-                                        {formatNumber(brandTotal(brand), 0)}
-                                    </td>
-                                    <td style={{ textAlign: 'center' }}>
-                                        <button
-                                            className="btn btn-sm text-danger"
-                                            style={{ padding: '2px 6px', lineHeight: 1 }}
-                                            title="Удалить бренд"
-                                            onClick={() => deleteBrand(brand)}
-                                        >
-                                            &times;
-                                        </button>
-                                    </td>
+                <div className="glass-card">
+                    <div style={{ overflowX: 'auto' }}>
+                        <table className="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Бренд</th>
+                                    {planMonths.map(m => (
+                                        <th key={m} style={{ textAlign: 'right' }}>{MONTH_NAMES[m - 1]}</th>
+                                    ))}
+                                    <th style={{ textAlign: 'right' }}>Итого</th>
+                                    <th style={{ width: 44 }}></th>
                                 </tr>
-                            ))}
-                            <tr style={{ fontWeight: 700, borderTop: '2px solid var(--color-border)' }}>
-                                <td>Итого</td>
-                                {planMonths.map(m => (
-                                    <td key={m} style={{ textAlign: 'right' }}>
-                                        {formatNumber(monthTotal(m), 0)}
-                                    </td>
+                            </thead>
+                            <tbody>
+                                {planBrands.map(brand => (
+                                    <tr key={brand}>
+                                        <td style={{ fontWeight: 500 }}>{brand}</td>
+                                        {planMonths.map(m => {
+                                            const plan = getPlan(brand, m);
+                                            const key = `${brand}-${m}`;
+                                            return (
+                                                <td key={m} style={{ textAlign: 'right', minWidth: 130 }}>
+                                                    <input
+                                                        type="number"
+                                                        className="form-input"
+                                                        style={{
+                                                            textAlign: 'right',
+                                                            padding: '6px 10px',
+                                                            fontSize: 14,
+                                                            maxWidth: 130,
+                                                            opacity: saving[key] ? 0.5 : 1,
+                                                            fontFamily: 'monospace',
+                                                        }}
+                                                        value={plan?.plan_amount ?? ''}
+                                                        placeholder="0"
+                                                        onChange={e => handleAmountChange(brand, m, e.target.value)}
+                                                    />
+                                                </td>
+                                            );
+                                        })}
+                                        <td style={{ textAlign: 'right', fontWeight: 600, fontFamily: 'monospace' }}>
+                                            {formatNumber(brandTotal(brand), 0)}
+                                        </td>
+                                        <td style={{ textAlign: 'center' }}>
+                                            <button
+                                                style={{
+                                                    background: 'none',
+                                                    border: 'none',
+                                                    color: 'var(--color-danger)',
+                                                    cursor: 'pointer',
+                                                    fontSize: 18,
+                                                    lineHeight: 1,
+                                                    padding: '4px 8px',
+                                                    borderRadius: 6,
+                                                }}
+                                                title="Удалить бренд"
+                                                onClick={() => deleteBrand(brand)}
+                                            >
+                                                &times;
+                                            </button>
+                                        </td>
+                                    </tr>
                                 ))}
-                                <td style={{ textAlign: 'right' }}>{formatNumber(grandTotal, 0)}</td>
-                                <td></td>
-                            </tr>
-                        </tbody>
-                    </table>
+                                {/* Totals row */}
+                                <tr>
+                                    <td style={{ fontWeight: 700 }}>Итого</td>
+                                    {planMonths.map(m => (
+                                        <td key={m} style={{ textAlign: 'right', fontWeight: 700, fontFamily: 'monospace' }}>
+                                            {formatNumber(monthTotal(m), 0)}
+                                        </td>
+                                    ))}
+                                    <td style={{ textAlign: 'right', fontWeight: 700, fontFamily: 'monospace' }}>
+                                        {formatNumber(grandTotal, 0)}
+                                    </td>
+                                    <td></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             )}
 
-            <div className="table-toolbar" style={{ marginTop: 16 }}>
+            {/* Add brand */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 16 }}>
                 <select
-                    className="form-select form-select-sm"
-                    style={{ width: 250 }}
+                    className="form-input"
+                    style={{ width: 250, padding: '8px 12px' }}
                     value={newBrand}
                     onChange={e => setNewBrand(e.target.value)}
                 >
