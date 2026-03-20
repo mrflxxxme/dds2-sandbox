@@ -11,11 +11,14 @@ import {
 
 const MONTH_NAMES = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
     'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+const MONTH_SHORT = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
 
 export default function PlanFactPage() {
     const [tab, setTab] = useState<'daily' | 'brands'>('daily');
     const [year, setYear] = useState(new Date().getFullYear());
     const [month, setMonth] = useState(new Date().getMonth() + 1);
+    const [yearTo, setYearTo] = useState(new Date().getFullYear());
+    const [monthTo, setMonthTo] = useState(new Date().getMonth() + 1);
     const [brand, setBrand] = useState('');
     const [brands, setBrands] = useState<string[]>([]);
 
@@ -39,25 +42,25 @@ export default function PlanFactPage() {
         setLoading(true);
         setError('');
         try {
-            setDailyData(await api.getPlanFactDaily(brand, year, month));
+            setDailyData(await api.getPlanFactDaily(brand, year, month, yearTo, monthTo));
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Error');
         } finally {
             setLoading(false);
         }
-    }, [brand, year, month]);
+    }, [brand, year, month, yearTo, monthTo]);
 
     const loadBrandData = useCallback(async () => {
         setLoading(true);
         setError('');
         try {
-            setBrandData(await api.getPlanFactBrands(year, month));
+            setBrandData(await api.getPlanFactBrands(year, month, yearTo, monthTo));
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Error');
         } finally {
             setLoading(false);
         }
-    }, [year, month]);
+    }, [year, month, yearTo, monthTo]);
 
     useEffect(() => {
         if (tab === 'daily') loadDailyData();
@@ -136,7 +139,7 @@ export default function PlanFactPage() {
                         </div>
                     )}
                     <div className="form-group">
-                        <label className="form-label">Период</label>
+                        <label className="form-label">Быстрый выбор</label>
                         <div style={{ display: 'flex', gap: 4 }}>
                             {(() => {
                                 const now = new Date();
@@ -145,36 +148,86 @@ export default function PlanFactPage() {
                                 const prevDate = new Date(curY, curM - 2, 1);
                                 const prevM = prevDate.getMonth() + 1;
                                 const prevY = prevDate.getFullYear();
-                                const isCurrentMonth = month === curM && year === curY;
-                                const isPrevMonth = month === prevM && year === prevY;
+                                const isSingle = month === monthTo && year === yearTo;
+                                const isCurrentMonth = isSingle && month === curM && year === curY;
+                                const isPrevMonth = isSingle && month === prevM && year === prevY;
+                                const isQuarter = (() => {
+                                    const q = Math.floor((curM - 1) / 3);
+                                    const qStart = q * 3 + 1;
+                                    return month === qStart && monthTo === curM && year === curY && yearTo === curY;
+                                })();
                                 return (
                                     <>
                                         <button
                                             className={`btn ${isCurrentMonth ? 'btn-primary' : 'btn-secondary'} btn-sm`}
-                                            onClick={() => { setMonth(curM); setYear(curY); }}
+                                            onClick={() => { setMonth(curM); setMonthTo(curM); setYear(curY); setYearTo(curY); }}
                                         >Тек. месяц</button>
                                         <button
                                             className={`btn ${isPrevMonth ? 'btn-primary' : 'btn-secondary'} btn-sm`}
-                                            onClick={() => { setMonth(prevM); setYear(prevY); }}
+                                            onClick={() => { setMonth(prevM); setMonthTo(prevM); setYear(prevY); setYearTo(prevY); }}
                                         >Пред.</button>
+                                        <button
+                                            className={`btn ${isQuarter ? 'btn-primary' : 'btn-secondary'} btn-sm`}
+                                            onClick={() => {
+                                                const q = Math.floor((curM - 1) / 3);
+                                                const qStart = q * 3 + 1;
+                                                setMonth(qStart); setMonthTo(curM); setYear(curY); setYearTo(curY);
+                                            }}
+                                        >Квартал</button>
                                     </>
                                 );
                             })()}
                         </div>
                     </div>
                     <div className="form-group">
-                        <label className="form-label">Месяц</label>
-                        <select className="form-input" style={{ minWidth: 140 }}
-                            value={month} onChange={e => setMonth(Number(e.target.value))}>
-                            {MONTH_NAMES.map((name, i) => (
-                                <option key={i} value={i + 1}>{name}</option>
-                            ))}
-                        </select>
+                        <label className="form-label">С</label>
+                        <div style={{ display: 'flex', gap: 4 }}>
+                            <select className="form-input" style={{ minWidth: 110 }}
+                                value={month} onChange={e => {
+                                    const m = Number(e.target.value);
+                                    setMonth(m);
+                                    if (year > yearTo || (year === yearTo && m > monthTo)) {
+                                        setMonthTo(m); setYearTo(year);
+                                    }
+                                }}>
+                                {MONTH_SHORT.map((name, i) => (
+                                    <option key={i} value={i + 1}>{name}</option>
+                                ))}
+                            </select>
+                            <input type="number" className="form-input" style={{ width: 80 }}
+                                value={year} onChange={e => {
+                                    const y = Number(e.target.value);
+                                    setYear(y);
+                                    if (y > yearTo || (y === yearTo && month > monthTo)) {
+                                        setYearTo(y); setMonthTo(month);
+                                    }
+                                }} />
+                        </div>
                     </div>
                     <div className="form-group">
-                        <label className="form-label">Год</label>
-                        <input type="number" className="form-input" style={{ width: 90 }}
-                            value={year} onChange={e => setYear(Number(e.target.value))} />
+                        <label className="form-label">По</label>
+                        <div style={{ display: 'flex', gap: 4 }}>
+                            <select className="form-input" style={{ minWidth: 110 }}
+                                value={monthTo} onChange={e => {
+                                    const m = Number(e.target.value);
+                                    setMonthTo(m);
+                                    if (yearTo < year || (yearTo === year && m < month)) {
+                                        setMonth(m); setYear(yearTo);
+                                    }
+                                }}>
+                                {MONTH_SHORT.map((name, i) => (
+                                    <option key={i} value={i + 1}>{name}</option>
+                                ))}
+                            </select>
+                            <input type="number" className="form-input" style={{ width: 80 }}
+                                value={yearTo} onChange={e => {
+                                    const y = Number(e.target.value);
+                                    setYearTo(y);
+                                    if (y < year || (y === year && monthTo < month)) {
+                                        setYear(y); setMonth(monthTo);
+                                    }
+                                }} />
+                        </div>
                     </div>
                 </div>
             </div>
@@ -307,16 +360,16 @@ function DailyTab({ data, pctColor, statusIcon }: {
                                         {r.dt.slice(5).replace('-', '.')}
                                     </td>
                                     <td style={{ textAlign: 'right', fontFamily: 'monospace', fontWeight: 600 }}>
-                                        {r.is_future ? '\u2014' : formatNumber(r.fact_day, 0)}
+                                        {r.is_future ? '\u2014' : (r.fact_day ? formatNumber(r.fact_day, 0) : '\u2014')}
                                     </td>
                                     <td style={{ textAlign: 'right', fontFamily: 'monospace', fontWeight: 500, color: 'var(--color-text-muted)' }}>
-                                        {formatNumber(r.plan_day, 0)}
+                                        {r.plan_day ? formatNumber(r.plan_day, 0) : '\u2014'}
                                     </td>
                                     <td style={{ textAlign: 'right', fontFamily: 'monospace', fontWeight: 600 }}>
-                                        {formatNumber(r.fact_cumulative, 0)}
+                                        {r.fact_cumulative ? formatNumber(r.fact_cumulative, 0) : '\u2014'}
                                     </td>
                                     <td style={{ textAlign: 'right', fontFamily: 'monospace', fontWeight: 500, color: 'var(--color-text-muted)' }}>
-                                        {formatNumber(r.plan_cumulative, 0)}
+                                        {r.plan_cumulative ? formatNumber(r.plan_cumulative, 0) : '\u2014'}
                                     </td>
                                     <td style={{ textAlign: 'right', fontWeight: 600, color: pctColor(r.pct) }}>
                                         {r.pct !== null ? `${r.pct}%` : '\u2014'}

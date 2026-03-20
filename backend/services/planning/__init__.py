@@ -10,7 +10,9 @@ from backend.services.planning.brand_plan import (
     delete_brand_plan,
     get_brand_plans,
     get_plan_fact_brands,
+    get_plan_fact_brands_range,
     get_plan_fact_daily,
+    get_plan_fact_daily_range,
     get_wb_brands,
     upsert_brand_plan,
 )
@@ -107,5 +109,7 @@ __all__ = [
     "delete_brand_plan",
     "get_wb_brands",
     "get_plan_fact_daily",
+    "get_plan_fact_daily_range",
     "get_plan_fact_brands",
+    "get_plan_fact_brands_range",
 ]

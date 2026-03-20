@@ -296,3 +296,197 @@ async def get_plan_fact_brands(
         )
 
     return rows
+
+
+def _iter_months(year_from: int, month_from: int, year_to: int, month_to: int):
+    """Yield (year, month) pairs from start to end inclusive."""
+    y, m = year_from, month_from
+    while (y, m) <= (year_to, month_to):
+        yield y, m
+        if m == 12:
+            y, m = y + 1, 1
+        else:
+            m += 1
+
+
+@cached(prefix="reports:plan_fact", ttl=300)
+async def get_plan_fact_daily_range(
+    db: AsyncSession,
+    project_id: int,
+    brand: str,
+    year_from: int,
+    month_from: int,
+    year_to: int,
+    month_to: int,
+) -> dict:
+    """Plan-fact daily view across a range of months."""
+    today = date.today()
+    months_list = list(_iter_months(year_from, month_from, year_to, month_to))
+
+    # Gather full date range
+    first_start = date(year_from, month_from, 1)
+    last_dim = calendar.monthrange(year_to, month_to)[1]
+    last_end = date(year_to, month_to, last_dim)
+    total_days = (last_end - first_start).days + 1
+
+    daily_fact = await _get_fact_daily(db, project_id, brand, first_start, last_end)
+
+    # Sum plan across all months + debt from month before first
+    plan_total = ZERO
+    for y, m in months_list:
+        plan_total += await _get_plan_amount(db, project_id, brand, y, m)
+
+    prev_y, prev_m = _prev_month(year_from, month_from)
+    plan_prev = await _get_plan_amount(db, project_id, brand, prev_y, prev_m)
+    fact_prev = await _get_month_fact_total(db, project_id, brand, prev_y, prev_m)
+    adjustment_prev = plan_prev - fact_prev if plan_prev > ZERO else ZERO
+    plan_adjusted = max(ZERO, plan_total + adjustment_prev)
+
+    # Current day within the range
+    if today >= last_end:
+        current_day = total_days
+    elif today < first_start:
+        current_day = 0
+    else:
+        current_day = (today - first_start).days + 1
+
+    rows = []
+    fact_cumulative = ZERO
+    day_idx = 0
+    for y, m in months_list:
+        dim = calendar.monthrange(y, m)[1]
+        for d in range(1, dim + 1):
+            day_idx += 1
+            dt = date(y, m, d)
+            is_future = dt > today
+
+            fact_day = daily_fact.get(dt, ZERO) if not is_future else ZERO
+            if not is_future:
+                fact_cumulative += fact_day
+
+            remaining = total_days - day_idx
+            if not is_future:
+                plan_day = (plan_adjusted - fact_cumulative) / remaining if remaining > 0 else ZERO
+            else:
+                future_remaining = total_days - current_day
+                plan_day = (plan_adjusted - fact_cumulative) / future_remaining if future_remaining > 0 else ZERO
+
+            plan_cumulative = plan_adjusted * day_idx / total_days
+            pct = float(fact_cumulative / plan_cumulative * 100) if plan_cumulative > 0 else None
+
+            rows.append(
+                {
+                    "dt": dt.isoformat(),
+                    "fact_day": float(fact_day),
+                    "plan_day": float(max(ZERO, plan_day)),
+                    "fact_cumulative": float(fact_cumulative),
+                    "plan_cumulative": float(plan_cumulative),
+                    "pct": round(pct, 1) if pct is not None else None,
+                    "is_future": is_future,
+                }
+            )
+
+    fact_mtd = fact_cumulative
+    forecast = float(fact_mtd / current_day * total_days) if current_day > 0 else 0
+    pct_total = float(fact_mtd / plan_adjusted * 100) if plan_adjusted > 0 else None
+
+    debt_prev = max(ZERO, adjustment_prev)
+    surplus_prev = max(ZERO, -adjustment_prev)
+
+    return {
+        "rows": rows,
+        "forecast": round(forecast, 2),
+        "plan_month": float(plan_total),
+        "debt_prev": float(debt_prev),
+        "surplus_prev": float(surplus_prev),
+        "plan_adjusted": float(plan_adjusted),
+        "fact_mtd": float(fact_mtd),
+        "pct": round(pct_total, 1) if pct_total is not None else None,
+        "days_in_month": total_days,
+        "current_day": current_day,
+    }
+
+
+@cached(prefix="reports:plan_fact", ttl=300)
+async def get_plan_fact_brands_range(
+    db: AsyncSession,
+    project_id: int,
+    year_from: int,
+    month_from: int,
+    year_to: int,
+    month_to: int,
+) -> list[dict]:
+    """Plan-fact brands summary across a range of months."""
+    months_list = list(_iter_months(year_from, month_from, year_to, month_to))
+    today = date.today()
+
+    # Collect all brands that have plans in any month of the range
+    brand_plans: dict[str, Decimal] = {}
+    for y, m in months_list:
+        result = await db.execute(
+            select(BrandPlan)
+            .where(
+                BrandPlan.project_id == project_id,
+                BrandPlan.year == y,
+                BrandPlan.month == m,
+            )
+            .limit(100)
+        )
+        for plan in result.scalars().all():
+            brand_plans[plan.brand] = brand_plans.get(plan.brand, ZERO) + plan.plan_amount
+
+    if not brand_plans:
+        return []
+
+    first_start = date(year_from, month_from, 1)
+    last_dim = calendar.monthrange(year_to, month_to)[1]
+    last_end = date(year_to, month_to, last_dim)
+    total_days = (last_end - first_start).days + 1
+
+    if today >= last_end:
+        current_day = total_days
+    elif today < first_start:
+        current_day = 0
+    else:
+        current_day = (today - first_start).days + 1
+
+    prev_y, prev_m = _prev_month(year_from, month_from)
+
+    rows = []
+    for brand_name in sorted(brand_plans):
+        plan_total = brand_plans[brand_name]
+
+        # Fact across full range
+        daily = await _get_fact_daily(db, project_id, brand_name, first_start, last_end)
+        fact_mtd = sum(
+            (v for dt, v in daily.items() if dt <= today),
+            ZERO,
+        )
+
+        # Debt/surplus from month before the range
+        plan_prev = await _get_plan_amount(db, project_id, brand_name, prev_y, prev_m)
+        fact_prev = await _get_month_fact_total(db, project_id, brand_name, prev_y, prev_m)
+        adjustment_prev = plan_prev - fact_prev if plan_prev > ZERO else ZERO
+        plan_adjusted = max(ZERO, plan_total + adjustment_prev)
+        debt_prev = max(ZERO, adjustment_prev)
+        surplus_prev = max(ZERO, -adjustment_prev)
+
+        pct = float(fact_mtd / plan_adjusted * 100) if plan_adjusted > 0 else None
+        forecast = float(fact_mtd / current_day * total_days) if current_day > 0 else 0
+
+        rows.append(
+            {
+                "brand": brand_name,
+                "plan_month": float(plan_total),
+                "debt_prev": float(debt_prev),
+                "surplus_prev": float(surplus_prev),
+                "plan_adjusted": float(plan_adjusted),
+                "fact_mtd": float(fact_mtd),
+                "pct": round(pct, 1) if pct is not None else None,
+                "forecast": round(forecast, 2),
+                "days_in_month": total_days,
+                "current_day": current_day,
+            }
+        )
+
+    return rows

@@ -101,15 +101,19 @@ export function addPlanningMethods(api: ApiClient) {
         deleteBrandPlan(id: number) {
             return api.request<{ ok: boolean }>('DELETE', `/api/v1/planning/brand-plans/${id}`);
         },
-        getPlanFactDaily(brand: string, year: number, month: number) {
-            return api.request<PlanFactDailyResult>(
-                'GET', `/api/v1/planning/plan-fact?brand=${encodeURIComponent(brand)}&year=${year}&month=${month}`
-            );
+        getPlanFactDaily(brand: string, year: number, month: number, yearTo?: number, monthTo?: number) {
+            let url = `/api/v1/planning/plan-fact?brand=${encodeURIComponent(brand)}&year=${year}&month=${month}`;
+            if (yearTo && monthTo && (yearTo !== year || monthTo !== month)) {
+                url += `&year_to=${yearTo}&month_to=${monthTo}`;
+            }
+            return api.request<PlanFactDailyResult>('GET', url);
         },
-        getPlanFactBrands(year: number, month: number) {
-            return api.request<PlanFactBrandRow[]>(
-                'GET', `/api/v1/planning/plan-fact/brands?year=${year}&month=${month}`
-            );
+        getPlanFactBrands(year: number, month: number, yearTo?: number, monthTo?: number) {
+            let url = `/api/v1/planning/plan-fact/brands?year=${year}&month=${month}`;
+            if (yearTo && monthTo && (yearTo !== year || monthTo !== month)) {
+                url += `&year_to=${yearTo}&month_to=${monthTo}`;
+            }
+            return api.request<PlanFactBrandRow[]>('GET', url);
         },
     };
 }

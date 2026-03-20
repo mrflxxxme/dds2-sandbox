@@ -379,17 +379,44 @@ async def get_plan_fact(
     brand: str = Query(...),
     year: int = Query(...),
     month: int = Query(...),
+    year_to: int | None = Query(None),
+    month_to: int | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    return await planning_service.get_plan_fact_daily(db, project.id, brand, year, month)
+    yt = year_to or year
+    mt = month_to or month
+    if (yt, mt) == (year, month):
+        return await planning_service.get_plan_fact_daily(db, project.id, brand, year, month)
+    return await planning_service.get_plan_fact_daily_range(
+        db,
+        project.id,
+        brand,
+        year,
+        month,
+        yt,
+        mt,
+    )
 
 
 @router.get("/plan-fact/brands")
 async def get_plan_fact_brands(
     year: int = Query(...),
     month: int = Query(...),
+    year_to: int | None = Query(None),
+    month_to: int | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    return await planning_service.get_plan_fact_brands(db, project.id, year, month)
+    yt = year_to or year
+    mt = month_to or month
+    if (yt, mt) == (year, month):
+        return await planning_service.get_plan_fact_brands(db, project.id, year, month)
+    return await planning_service.get_plan_fact_brands_range(
+        db,
+        project.id,
+        year,
+        month,
+        yt,
+        mt,
+    )
