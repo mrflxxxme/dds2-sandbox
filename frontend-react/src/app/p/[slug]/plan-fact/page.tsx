@@ -135,6 +135,33 @@ export default function PlanFactPage() {
                         </div>
                     )}
                     <div className="form-group">
+                        <label className="form-label">Период</label>
+                        <div style={{ display: 'flex', gap: 4 }}>
+                            {(() => {
+                                const now = new Date();
+                                const curM = now.getMonth() + 1;
+                                const curY = now.getFullYear();
+                                const prevDate = new Date(curY, curM - 2, 1);
+                                const prevM = prevDate.getMonth() + 1;
+                                const prevY = prevDate.getFullYear();
+                                const isCurrentMonth = month === curM && year === curY;
+                                const isPrevMonth = month === prevM && year === prevY;
+                                return (
+                                    <>
+                                        <button
+                                            className={`btn ${isCurrentMonth ? 'btn-primary' : 'btn-secondary'} btn-sm`}
+                                            onClick={() => { setMonth(curM); setYear(curY); }}
+                                        >Тек. месяц</button>
+                                        <button
+                                            className={`btn ${isPrevMonth ? 'btn-primary' : 'btn-secondary'} btn-sm`}
+                                            onClick={() => { setMonth(prevM); setYear(prevY); }}
+                                        >Пред.</button>
+                                    </>
+                                );
+                            })()}
+                        </div>
+                    </div>
+                    <div className="form-group">
                         <label className="form-label">Месяц</label>
                         <select className="form-input" style={{ minWidth: 140 }}
                             value={month} onChange={e => setMonth(Number(e.target.value))}>
