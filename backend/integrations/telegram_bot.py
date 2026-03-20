@@ -348,14 +348,33 @@ async def handle_text(message: Message):
     In groups: responds only to @mentions or replies to bot messages.
     In private chats: responds to all text (if chat is bound).
     """
+    logger.info("handle_text: chat=%s type=%s text=%s", message.chat.id, message.chat.type, (message.text or "")[:80])
+
     # In group chats: only respond to @mentions or replies to bot
     if message.chat.type in ("group", "supergroup"):
-        is_mention = bot and f"@{(await bot.me()).username}" in (message.text or "")
+        bot_username = None
+        bot_id = None
+        if bot:
+            try:
+                me = await bot.me()
+                bot_username = me.username
+                bot_id = me.id
+            except Exception:
+                logger.warning("Failed to get bot.me()")
+
+        is_mention = bot_username and f"@{bot_username}" in (message.text or "")
         is_reply_to_bot = (
             message.reply_to_message
             and message.reply_to_message.from_user
-            and bot
-            and message.reply_to_message.from_user.id == (await bot.me()).id
+            and bot_id
+            and message.reply_to_message.from_user.id == bot_id
+        )
+        logger.info(
+            "handle_text: bot=%s bot_username=%s is_mention=%s is_reply=%s",
+            bot is not None,
+            bot_username,
+            is_mention,
+            is_reply_to_bot,
         )
         if not is_mention and not is_reply_to_bot:
             return  # Ignore messages not directed at bot
@@ -363,6 +382,7 @@ async def handle_text(message: Message):
     async with AsyncSessionLocal() as db:
         binding = await telegram_service.get_chat_binding(db, message.chat.id)
         if not binding:
+            logger.info("handle_text: no binding for chat=%s", message.chat.id)
             return  # Ignore text in unbound chats
 
         # Get project tax_rate
@@ -375,15 +395,19 @@ async def handle_text(message: Message):
         try:
             from aiogram.enums import ChatAction
 
-            await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
+            if bot:
+                await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
         except Exception:
             logger.debug("Failed to send typing action")
 
         # Strip bot mention from question text
         question = message.text or ""
         if bot:
-            me = await bot.me()
-            question = question.replace(f"@{me.username}", "").strip()
+            try:
+                me = await bot.me()
+                question = question.replace(f"@{me.username}", "").strip()
+            except Exception:
+                logger.debug("Failed to strip bot mention")
 
         try:
             from backend.services.ai.agent import ask
