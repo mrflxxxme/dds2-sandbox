@@ -4,16 +4,19 @@ Planning — Cashflow daily calculation and Order summary.
 
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Optional
 
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import (
-    PlannedPayment, PlannedIncome, WbPayout, Order,
-    Transaction, CustomsAlloc,
-)
 from backend.cache import cached
+from backend.models import (
+    CustomsAlloc,
+    Order,
+    PlannedIncome,
+    PlannedPayment,
+    Transaction,
+    WbPayout,
+)
 
 
 @cached(prefix="reports:cashflow", ttl=300)
@@ -34,7 +37,8 @@ async def calculate_cashflow_daily(
 
     # Auto-calculate starting balance from account balances if not provided
     if starting_balance == 0.0:
-        from backend.models import Account, OpeningBalance
+        from backend.models import OpeningBalance
+
         # Sum opening balances for RUB accounts
         ob_result = await db.execute(
             select(OpeningBalance).where(
@@ -42,9 +46,7 @@ async def calculate_cashflow_daily(
                 OpeningBalance.currency == "RUB",
             )
         )
-        total_ob = sum(
-            ob.opening_balance for ob in ob_result.scalars().all()
-        )
+        total_ob = sum(ob.opening_balance for ob in ob_result.scalars().all())
         # Sum net from all RUB transactions up to today
         net_result = await db.execute(
             select(func.coalesce(func.sum(Transaction.net), 0)).where(
@@ -83,7 +85,7 @@ async def calculate_cashflow_daily(
             avg_rate_result = await db.execute(
                 select(func.avg(PlannedPayment.fx_rate)).where(
                     PlannedPayment.project_id == project_id,
-                    PlannedPayment.currency.ilike(f"%{ccy}%"),
+                    PlannedPayment.currency == ccy,
                     PlannedPayment.fx_rate.isnot(None),
                     PlannedPayment.fx_rate > 0,
                 )
@@ -144,9 +146,7 @@ async def calculate_cashflow_daily(
         elif amt == 0 and p.amount:
             amt = p.amount
         effective_date = p.pay_date if (p.pay_date and p.pay_date >= today) else today
-        expense_map[effective_date] = (
-            expense_map.get(effective_date, Decimal("0")) + Decimal(str(amt))
-        )
+        expense_map[effective_date] = expense_map.get(effective_date, Decimal("0")) + Decimal(str(amt))
 
     # Build daily series
     running = Decimal(str(starting_balance))
@@ -157,28 +157,29 @@ async def calculate_cashflow_daily(
         exp = expense_map.get(d, Decimal("0"))
         net = inc - exp
         running += net
-        rows.append({
-            "date": str(d),
-            "planned_income": float(inc),
-            "planned_expense": float(exp),
-            "net": float(net),
-            "deficit_running": float(running),
-        })
+        rows.append(
+            {
+                "date": str(d),
+                "planned_income": float(inc),
+                "planned_expense": float(exp),
+                "net": float(net),
+                "deficit_running": float(running),
+            }
+        )
 
     return rows
 
 
 # ─── Order summary ──────────────────────────────────────────────────────────
 
+
 async def get_order_summary(
     db: AsyncSession,
     project_id: int,
     order_no: int,
-) -> Optional[dict]:
+) -> dict | None:
     """Return plan vs fact for a specific order."""
-    result = await db.execute(
-        select(Order).where(Order.order_no == order_no, Order.project_id == project_id)
-    )
+    result = await db.execute(select(Order).where(Order.order_no == order_no, Order.project_id == project_id))
     order = result.scalar_one_or_none()
     if not order:
         return None

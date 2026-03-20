@@ -6,14 +6,15 @@ Extracted from routers/import_txn.py to enable reuse and testing.
 
 import logging
 from datetime import date
-from decimal import Decimal
-from typing import Optional
 
-from sqlalchemy import select, func, and_, or_, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import (
-    Transaction, Override, CounterpartyCategory, CategoryChangeLog,
+    CategoryChangeLog,
+    CounterpartyCategory,
+    Override,
+    Transaction,
 )
 
 logger = logging.getLogger("dds.transactions")
@@ -27,15 +28,15 @@ def _escape_like(s: str) -> str:
 async def search_transactions(
     db: AsyncSession,
     project_id: int,
-    date_from: Optional[date] = None,
-    date_to: Optional[date] = None,
-    account: Optional[str] = None,
-    currency: Optional[str] = None,
-    category: Optional[str] = None,
-    search: Optional[str] = None,
-    event_type: Optional[str] = None,
-    status: Optional[str] = None,
-    is_cashflow2: Optional[int] = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    account: str | None = None,
+    currency: str | None = None,
+    category: str | None = None,
+    search: str | None = None,
+    event_type: str | None = None,
+    status: str | None = None,
+    is_cashflow2: int | None = None,
     limit: int = 500,
     offset: int = 0,
 ) -> list:
@@ -102,13 +103,73 @@ async def get_unassigned(
     return result.scalars().all()
 
 
+async def get_unassigned_with_fx(
+    db: AsyncSession,
+    project_id: int,
+    limit: int = 200,
+) -> list[dict]:
+    """Get uncategorized transactions with FX conversion (CNY→RUB).
+
+    Returns dicts with income/expense converted to RUB,
+    plus original amounts and fx_rate for non-RUB currencies.
+    """
+    from datetime import date as date_cls
+
+    from backend.services import fx_service
+
+    txns = await get_unassigned(db, project_id, limit)
+
+    # Load FX rates for conversion
+    rates_map = await fx_service.get_rates_map(db, project_id, date_cls(2020, 1, 1), date_cls.today())
+    fallback_rate = await fx_service.get_rate_for_date(db, project_id, date_cls.today()) if not rates_map else None
+
+    items = []
+    for t in txns:
+        inc = float(t.income or 0)
+        exp = float(t.expense or 0)
+        currency = t.currency or "RUB"
+        rate = None
+        if currency == "CNY":
+            day_date = t.date.date() if hasattr(t.date, "date") else t.date
+            rate = fx_service.find_rate_for_date(rates_map, day_date) or fallback_rate or 1.0
+            inc_rub = inc * rate
+            exp_rub = exp * rate
+        else:
+            inc_rub = inc
+            exp_rub = exp
+
+        items.append(
+            {
+                "id": t.id,
+                "txn_id": t.txn_id,
+                "date": t.date.isoformat() if t.date else None,
+                "counterparty": t.counterparty,
+                "cp_key": t.cp_key,
+                "income": inc_rub,
+                "expense": exp_rub,
+                "income_original": inc if currency != "RUB" else None,
+                "expense_original": exp if currency != "RUB" else None,
+                "currency": currency,
+                "fx_rate": rate,
+                "purpose": t.purpose,
+                "cat_lvl1_2": t.cat_lvl1_2,
+                "cat_lvl2_2": t.cat_lvl2_2,
+                "account": t.account,
+                "event_type2": t.event_type2,
+                "is_cashflow2": t.is_cashflow2,
+            }
+        )
+    return items
+
+
 async def get_unassigned_grouped(
     db: AsyncSession,
     project_id: int,
 ) -> list[dict]:
     """Group uncategorized transactions by counterparty, converting CNY→RUB."""
-    from backend.services import fx_service
     from datetime import date as date_cls
+
+    from backend.services import fx_service
 
     # Load FX rates
     rates_map = await fx_service.get_rates_map(db, project_id, date_cls(2020, 1, 1), date_cls.today())
@@ -170,9 +231,9 @@ async def assign_category(
     project_id: int,
     txn_id: str,
     cat_lvl1: str,
-    cat_lvl2: Optional[str],
+    cat_lvl2: str | None,
     scope: str = "txn",
-    user_id: Optional[int] = None,
+    user_id: int | None = None,
 ) -> dict:
     """
     Assign category to a transaction.
@@ -253,6 +314,7 @@ async def assign_category(
     await db.commit()
 
     from backend.cache import invalidate_project_reports
+
     await invalidate_project_reports(project_id)
 
     return {"ok": True, "txn_id": txn_id, "scope": scope}
@@ -263,7 +325,7 @@ async def assign_category_bulk(
     project_id: int,
     cp_key: str,
     cat_lvl1: str,
-    cat_lvl2: Optional[str] = None,
+    cat_lvl2: str | None = None,
 ) -> dict:
     """Assign category to all uncategorized transactions with given cp_key."""
     # Upsert counterparty_category
@@ -304,6 +366,7 @@ async def assign_category_bulk(
     await db.commit()
 
     from backend.cache import invalidate_project_reports
+
     await invalidate_project_reports(project_id)
 
     return {"ok": True, "updated": result.rowcount}
@@ -314,7 +377,7 @@ async def assign_category_by_ids(
     project_id: int,
     txn_ids: list[str],
     cat_lvl1: str,
-    cat_lvl2: Optional[str] = None,
+    cat_lvl2: str | None = None,
 ) -> dict:
     """Assign category to specific transactions by txn_id list."""
     result = await db.execute(
@@ -328,6 +391,7 @@ async def assign_category_by_ids(
     await db.commit()
 
     from backend.cache import invalidate_project_reports
+
     await invalidate_project_reports(project_id)
 
     return {"ok": True, "updated": result.rowcount}
