@@ -227,6 +227,7 @@ export interface PlanFactDayRow {
   fact_cumulative: number;
   plan_cumulative: number;
   pct: number | null;
+  is_future?: boolean;
 }
 
 export interface PlanFactDailyResult {

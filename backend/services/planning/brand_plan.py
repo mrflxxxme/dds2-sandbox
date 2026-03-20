@@ -189,13 +189,19 @@ async def get_plan_fact_daily(
     fact_cumulative = ZERO
     for day_num in range(1, days_in_month + 1):
         dt = date(year, month, day_num)
-        if dt > today:
-            break
-        fact_day = daily_fact.get(dt, ZERO)
-        fact_cumulative += fact_day
+        is_future = dt > today
+
+        fact_day = daily_fact.get(dt, ZERO) if not is_future else ZERO
+        if not is_future:
+            fact_cumulative += fact_day
 
         remaining = days_in_month - day_num
-        plan_day = (plan_adjusted - fact_cumulative) / remaining if remaining > 0 else ZERO
+        if not is_future:
+            plan_day = (plan_adjusted - fact_cumulative) / remaining if remaining > 0 else ZERO
+        else:
+            # Для будущих дней: равномерно распределяем остаток
+            future_remaining = days_in_month - current_day
+            plan_day = (plan_adjusted - fact_cumulative) / future_remaining if future_remaining > 0 else ZERO
 
         plan_cumulative = plan_adjusted * day_num / days_in_month
         pct = float(fact_cumulative / plan_cumulative * 100) if plan_cumulative > 0 else None
@@ -208,6 +214,7 @@ async def get_plan_fact_daily(
                 "fact_cumulative": float(fact_cumulative),
                 "plan_cumulative": float(plan_cumulative),
                 "pct": round(pct, 1) if pct is not None else None,
+                "is_future": is_future,
             }
         )
 

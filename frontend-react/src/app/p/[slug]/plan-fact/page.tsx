@@ -236,7 +236,7 @@ function DailyTab({ data, pctColor, statusIcon }: {
                                 {chartData.map((entry, i) => (
                                     <Cell
                                         key={i}
-                                        fill={entry.fact_day >= entry.plan_day ? 'var(--color-success)' : 'var(--color-danger)'}
+                                        fill={entry.is_future ? 'transparent' : entry.fact_day >= entry.plan_day ? 'var(--color-success)' : 'var(--color-danger)'}
                                     />
                                 ))}
                             </Bar>
@@ -269,12 +269,12 @@ function DailyTab({ data, pctColor, statusIcon }: {
                         </thead>
                         <tbody>
                             {data.rows.map(r => (
-                                <tr key={r.dt}>
+                                <tr key={r.dt} style={r.is_future ? { opacity: 0.45 } : undefined}>
                                     <td style={{ fontSize: 13, whiteSpace: 'nowrap' }}>
                                         {r.dt.slice(5).replace('-', '.')}
                                     </td>
                                     <td style={{ textAlign: 'right', fontFamily: 'monospace', fontWeight: 600 }}>
-                                        {formatNumber(r.fact_day, 0)}
+                                        {r.is_future ? '\u2014' : formatNumber(r.fact_day, 0)}
                                     </td>
                                     <td style={{ textAlign: 'right', fontFamily: 'monospace', fontWeight: 500, color: 'var(--color-text-muted)' }}>
                                         {formatNumber(r.plan_day, 0)}
