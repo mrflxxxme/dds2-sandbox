@@ -797,8 +797,11 @@ export interface StockSummaryRow {
   barcode: string;
   warehouses: Record<number, number>;
   in_transit: Record<number, number>;
+  reserved: Record<number, number>;
   total: number;
   total_in_transit: number;
+  total_reserved: number;
+  total_available: number;
 }
 
 export interface StockAdjustment {
