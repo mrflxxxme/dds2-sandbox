@@ -22,6 +22,8 @@ const navGroups = [
         title: 'Склад',
         items: [
             { href: '/warehouse', label: 'Склады', icon: '🏢' },
+            { href: '/warehouse/assembly', label: 'Заявки на сборку', icon: '📋' },
+            { href: '/warehouse/logistics', label: 'Лист логиста', icon: '🚛' },
             { href: '/warehouse/stock', label: 'Сводные остатки', icon: '📦' },
             { href: '/warehouse/fbo-supplies', label: 'Поставки FBO', icon: '📮' },
         ],

@@ -105,8 +105,8 @@ echo "── Check 6: Queries on SoftDelete models without is_deleted filter ─
 # Models with SoftDeleteMixin: Transaction, Account, CounterpartyCategory, Override,
 # Order, PlannedPayment, PlannedIncome, WbPayout, PaymentFactLink, CostOrder,
 # DutyRule, CustomsTopup, CustomsDT, IntegrationKey, Warehouse, InboundReceipt,
-# OutboundShipment, StockTransfer
-SOFT_MODELS="Transaction\|Account\|CounterpartyCategory\|Override\|IntegrationKey\|PlannedPayment\|PlannedIncome\|WbPayout\|PaymentFactLink\|CostOrder\|DutyRule\|CustomsTopup\|CustomsDT\|Order\|CategoryRef\|CategoryRule\|WbTariff\|Warehouse\|InboundReceipt\|OutboundShipment\|StockTransfer"
+# OutboundShipment, StockTransfer, AssemblyRequest
+SOFT_MODELS="Transaction\|Account\|CounterpartyCategory\|Override\|IntegrationKey\|PlannedPayment\|PlannedIncome\|WbPayout\|PaymentFactLink\|CostOrder\|DutyRule\|CustomsTopup\|CustomsDT\|Order\|CategoryRef\|CategoryRule\|WbTariff\|Warehouse\|InboundReceipt\|OutboundShipment\|StockTransfer\|AssemblyRequest"
 FOUND=$(grep -rn "select($SOFT_MODELS)" backend/services/ backend/etl/ --include="*.py" \
     | grep -v "is_deleted" \
     | grep -v "__pycache__" \

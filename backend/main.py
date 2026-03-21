@@ -19,6 +19,7 @@ from backend.auth import ensure_default_admin, get_current_user, require_admin
 from backend.config import settings
 from backend.database import AsyncSessionLocal, async_engine
 from backend.routers import (
+    assembly,
     auth,
     cost,
     fbo_supplies,
@@ -367,6 +368,12 @@ app.include_router(
     fbo_supplies.router,
     prefix="/api/v1",
     tags=["FBO Supplies"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    assembly.router,
+    prefix="/api/v1",
+    tags=["Assembly"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

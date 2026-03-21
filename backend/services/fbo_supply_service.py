@@ -1,16 +1,24 @@
 """
-FBO Supply Service — sync WB Marketplace supplies, list, link to outbound shipments.
+FBO Supply Service — sync WB FBW supplies, list, link to outbound shipments.
+
+Uses Supplies API (supplies-api.wildberries.ru) for FBW supplies:
+- POST /api/v1/supplies — list supplies
+- GET /api/v1/supplies/{id} — supply detail (warehouse, quantities)
+- GET /api/v1/supplies/{id}/goods — supply items
+
+Rate limit: 6 req/min for Suppliers API — must throttle detail/goods calls.
 
 Responsibilities:
-- Sync supplies from WB API (full + status-only)
+- Sync supplies from WB FBW API (full + status-only)
 - List supplies with search/filter/sort/pagination
 - Get supply items
-- Link/unlink supply ↔ OutboundShipment
+- Link/unlink supply <-> OutboundShipment
 - Auto-deliver shipment when supply is ACCEPTED
 """
 
+import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +29,40 @@ from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem, WbSupplyStatus
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
+
+# FBW API rate limit: 6 req/min = 1 req per 10 seconds
+FBW_RATE_LIMIT_DELAY = 11  # seconds between detail/goods API calls
+
+# ─── FBW status/boxType mappings ─────────────────────────────────────────────
+
+FBW_STATUS_MAP: dict[int, str] = {
+    1: WbSupplyStatus.ACTIVE,  # Запланирована
+    2: WbSupplyStatus.ON_DELIVERY,  # В пути  # noqa: RUF003
+    3: WbSupplyStatus.IN_PROGRESS,  # Разгрузка
+    4: WbSupplyStatus.ACCEPTED,  # Принята
+    5: WbSupplyStatus.CANCELLED,  # Отменена
+    6: WbSupplyStatus.ACCEPTED,  # Частично принята -> ACCEPTED
+}
+
+FBW_BOX_TYPE_MAP: dict[int, str] = {
+    0: None,  # virtual (no physical box)
+    1: "Короб",  # noqa: RUF001
+    2: "Короб",  # noqa: RUF001
+    5: "Монопаллет",
+    6: "Суперсейф",
+}
+
+
+def _map_fbw_status(status_id: int) -> str:
+    """Map FBW statusID to WbSupplyStatus enum value."""
+    return FBW_STATUS_MAP.get(status_id, WbSupplyStatus.ACTIVE)
+
+
+def _map_fbw_box_type(box_type_id: int | None) -> str | None:
+    """Map FBW boxTypeID to human-readable cargo type."""
+    if box_type_id is None:
+        return None
+    return FBW_BOX_TYPE_MAP.get(box_type_id, f"Тип {box_type_id}")
 
 
 # ─── Sync: full ─────────────────────────────────────────────────────────────
@@ -33,9 +75,8 @@ async def sync_fbo_supplies(
     integration_id: int,
 ) -> dict:
     """
-    Full sync: fetch all supplies from WB API (last 60 days),
-    upsert into wb_fbo_supplies + wb_fbo_supply_items.
-    Updates SyncLog.
+    Fast sync: fetch all FBW supplies list (1 API call), upsert into DB, return immediately.
+    Detail enrichment (warehouse, qty) runs in background via enrich_fbo_supplies().
 
     Returns: {synced, created, updated, errors, message}
     """
@@ -54,71 +95,71 @@ async def sync_fbo_supplies(
     errors = 0
 
     try:
-        # 1. Fetch all supplies from WB API (paginated)
-        all_supplies = []
-        next_cursor = 0
-        while True:
-            response = await api_client.get_fbo_supplies(next=next_cursor, limit=1000)
-            supplies_batch = response.get("supplies", [])
-            if not supplies_batch:
-                break
-            all_supplies.extend(supplies_batch)
-            next_cursor = response.get("next", 0)
-            if next_cursor == 0:
-                break
+        # 1. Fetch all supplies from FBW API (1 call, up to 1000 items per page)
+        now = utcnow()
+        date_from = (now - timedelta(days=365)).strftime("%Y-%m-%d")
+        date_to = (now + timedelta(days=1)).strftime("%Y-%m-%d")
 
-        # 2. Process all supplies (no date cutoff — WB API handles pagination)
+        all_supplies: list[dict] = []
+        offset = 0
+        while True:
+            batch = await api_client.get_fbw_supplies(
+                date_from=date_from,
+                date_to=date_to,
+                status_ids=[1, 2, 3, 4, 5, 6],
+                limit=1000,
+                offset=offset,
+            )
+            if not batch:
+                break
+            all_supplies.extend(batch)
+            if len(batch) < 1000:
+                break
+            offset += len(batch)
+
+        logger.info(
+            "fbo_sync.fbw_list_fetched",
+            extra={"project_id": project_id, "total": len(all_supplies)},
+        )
+
+        # 2. Load existing supplies for this project (for upsert logic)
+        result = await db.execute(select(WbFboSupply).where(WbFboSupply.project_id == project_id))
+        existing_map: dict[str, WbFboSupply] = {s.wb_supply_id: s for s in result.scalars().all()}
+
+        # 3. Upsert all supplies from list data (no detail call needed)
         for wb_supply in all_supplies:
             try:
-                wb_supply_id = str(wb_supply.get("id", ""))
-                if not wb_supply_id:
+                supply_id_raw = wb_supply.get("supplyID")
+                if not supply_id_raw:
                     continue
+                wb_supply_id = str(supply_id_raw)
 
-                # WB API v3 /supplies list doesn't return "status" field,
-                # only "done" (bool) and "closedAt". Map to our status enum.
-                if "status" not in wb_supply:
-                    wb_supply["status"] = _map_wb_done_to_status(wb_supply)
-
-                # 3. Upsert supply
-                result = await db.execute(
-                    select(WbFboSupply).where(
-                        WbFboSupply.project_id == project_id,
-                        WbFboSupply.wb_supply_id == wb_supply_id,
-                    )
-                )
-                existing = result.scalar_one_or_none()
+                existing = existing_map.get(wb_supply_id)
 
                 if existing:
-                    _update_supply_from_wb(existing, wb_supply)
+                    _update_supply_from_fbw_list(existing, wb_supply)
                     updated += 1
-                    supply = existing
                 else:
-                    supply = _create_supply_from_wb(project_id, wb_supply)
+                    supply = _create_supply_from_fbw_list(project_id, wb_supply)
                     db.add(supply)
                     await db.flush()
                     created += 1
-
-                # 4. Fetch and upsert items for this supply
-                wb_orders = await api_client.get_fbo_supply_orders(wb_supply_id)
-                await _upsert_supply_items(db, supply.id, wb_orders)
-
-                # 5. Update qty totals
-                supply.total_qty = sum(o.get("quantity", 1) for o in wb_orders) if wb_orders else 0
-                supply.synced_at = utcnow()
-
-                # 6. Auto-deliver linked shipment if supply ACCEPTED
-                if supply.wb_status == WbSupplyStatus.ACCEPTED and supply.outbound_shipment_id:
-                    await _auto_deliver_shipment(db, project_id, supply.outbound_shipment_id)
+                    existing_map[wb_supply_id] = supply
 
             except Exception as e:
                 logger.warning(
                     "fbo_sync.supply_error",
                     extra={
-                        "wb_supply_id": wb_supply.get("id"),
+                        "wb_supply_id": wb_supply.get("supplyID"),
                         "error": str(e),
                     },
                 )
                 errors += 1
+
+        # 4. Auto-deliver linked shipments for ACCEPTED supplies
+        for _wb_supply_id, supply in existing_map.items():
+            if supply.wb_status == WbSupplyStatus.ACCEPTED and supply.outbound_shipment_id:
+                await _auto_deliver_shipment(db, project_id, supply.outbound_shipment_id)
 
         await db.commit()
 
@@ -133,7 +174,11 @@ async def sync_fbo_supplies(
             "created": created,
             "updated": updated,
             "errors": errors,
-            "message": f"Synced {created + updated} supplies ({created} new, {updated} updated)",
+            "message": (
+                f"Загружено {created + updated} поставок "
+                f"({created} новых, {updated} обновлено). "
+                f"Детали загружаются в фоне."
+            ),
         }
 
     except Exception as e:
@@ -142,6 +187,76 @@ async def sync_fbo_supplies(
         sync_log.finished_at = utcnow()
         await db.commit()
         raise
+
+
+async def enrich_fbo_supplies(
+    db: AsyncSession,
+    project_id: int,
+    api_client,
+    max_calls: int = 30,
+) -> dict:
+    """
+    Background enrichment: fetch detail (warehouse, qty) for supplies missing it.
+    Called after sync or on-demand. Rate-limited to max_calls per run.
+
+    Returns: {enriched, errors}
+    """
+    # Find supplies needing detail (no warehouse_name, not completed)
+    result = await db.execute(
+        select(WbFboSupply).where(
+            WbFboSupply.project_id == project_id,
+            WbFboSupply.warehouse_name.is_(None),
+            WbFboSupply.wb_status.notin_(
+                [
+                    WbSupplyStatus.ACCEPTED,
+                    WbSupplyStatus.CANCELLED,
+                ]
+            ),
+        )
+    )
+    supplies_needing_detail = result.scalars().all()
+
+    if not supplies_needing_detail:
+        return {"enriched": 0, "errors": 0}
+
+    logger.info(
+        "fbo_enrich.start",
+        extra={
+            "project_id": project_id,
+            "need": len(supplies_needing_detail),
+            "max": max_calls,
+        },
+    )
+
+    enriched = 0
+    errors = 0
+
+    for supply in supplies_needing_detail[:max_calls]:
+        try:
+            if enriched > 0:
+                await asyncio.sleep(FBW_RATE_LIMIT_DELAY)
+
+            detail = await api_client.get_fbw_supply_detail(int(supply.wb_supply_id))
+            if detail:
+                _update_supply_from_fbw_detail(supply, detail)
+            supply.synced_at = utcnow()
+            enriched += 1
+
+        except Exception as e:
+            logger.warning(
+                "fbo_enrich.error",
+                extra={"wb_supply_id": supply.wb_supply_id, "error": str(e)},
+            )
+            errors += 1
+
+    await db.commit()
+
+    logger.info(
+        "fbo_enrich.done",
+        extra={"enriched": enriched, "errors": errors},
+    )
+
+    return {"enriched": enriched, "errors": errors}
 
 
 # ─── Sync: statuses only ───────────────────────────────────────────────────
@@ -154,12 +269,15 @@ async def sync_fbo_statuses(
     integration_id: int,
 ) -> dict:
     """
-    Status-only sync: for supplies with status not in (ACCEPTED, CANCELLED),
-    re-fetch from WB API and update status + dates.
+    Status-only sync: fetch active FBW supplies from Suppliers API
+    and update statuses + dates.
+
+    Uses single POST /api/v1/supplies call with statusIDs=[1,2,3]
+    to get all non-final supplies. No per-supply detail calls needed.
 
     Returns: {synced, updated, errors, message}
     """
-    # Get supplies that may have changed status
+    # Get our active supplies from DB
     result = await db.execute(
         select(WbFboSupply).where(
             WbFboSupply.project_id == project_id,
@@ -173,38 +291,75 @@ async def sync_fbo_statuses(
     )
     active_supplies = result.scalars().all()
 
+    if not active_supplies:
+        return {
+            "synced": 0,
+            "updated": 0,
+            "errors": 0,
+            "message": "No active supplies to update",
+        }
+
+    # Build lookup by wb_supply_id
+    supply_map: dict[str, WbFboSupply] = {s.wb_supply_id: s for s in active_supplies}
+
     updated = 0
     errors = 0
 
-    for supply in active_supplies:
-        try:
-            # Fetch fresh data from WB
-            wb_data = await api_client.get_fbo_supply(supply.wb_supply_id)
-            if not wb_data:
+    try:
+        # Fetch active supplies from FBW API (statuses 1-3 = non-final)
+        now = utcnow()
+        date_from = (now - timedelta(days=365)).strftime("%Y-%m-%d")
+        date_to = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        wb_supplies = await api_client.get_fbw_supplies(
+            date_from=date_from,
+            date_to=date_to,
+            status_ids=[1, 2, 3, 4, 5, 6],  # all statuses to catch transitions
+            limit=1000,
+            offset=0,
+        )
+
+        # Match and update our active supplies
+        for wb_data in wb_supplies:
+            supply_id_raw = wb_data.get("supplyID")
+            if not supply_id_raw:
+                continue
+            wb_supply_id = str(supply_id_raw)
+
+            supply = supply_map.get(wb_supply_id)
+            if not supply:
                 continue
 
-            old_status = supply.wb_status
-            _update_supply_from_wb(supply, wb_data)
-            supply.synced_at = utcnow()
-            updated += 1
+            try:
+                old_status = supply.wb_status
+                _update_supply_from_fbw_list(supply, wb_data)
+                supply.synced_at = utcnow()
+                updated += 1
 
-            # Auto-deliver linked shipment if status changed to ACCEPTED
-            if (
-                old_status != WbSupplyStatus.ACCEPTED
-                and supply.wb_status == WbSupplyStatus.ACCEPTED
-                and supply.outbound_shipment_id
-            ):
-                await _auto_deliver_shipment(db, project_id, supply.outbound_shipment_id)
+                # Auto-deliver linked shipment if status changed to ACCEPTED
+                if (
+                    old_status != WbSupplyStatus.ACCEPTED
+                    and supply.wb_status == WbSupplyStatus.ACCEPTED
+                    and supply.outbound_shipment_id
+                ):
+                    await _auto_deliver_shipment(db, project_id, supply.outbound_shipment_id)
 
-        except Exception as e:
-            logger.warning(
-                "fbo_sync.status_error",
-                extra={
-                    "supply_id": supply.id,
-                    "error": str(e),
-                },
-            )
-            errors += 1
+            except Exception as e:
+                logger.warning(
+                    "fbo_sync.status_error",
+                    extra={
+                        "supply_id": supply.id,
+                        "error": str(e),
+                    },
+                )
+                errors += 1
+
+    except Exception as e:
+        logger.warning(
+            "fbo_sync.status_list_error",
+            extra={"project_id": project_id, "error": str(e)},
+        )
+        errors += 1
 
     await db.commit()
 
@@ -219,12 +374,30 @@ async def sync_fbo_statuses(
 # ─── List supplies (with search/filter/sort/pagination) ────────────────────
 
 
+async def list_warehouses(
+    db: AsyncSession,
+    project_id: int,
+) -> list[str]:
+    """Get unique warehouse names for filter dropdown."""
+    result = await db.execute(
+        select(WbFboSupply.warehouse_name)
+        .where(
+            WbFboSupply.project_id == project_id,
+            WbFboSupply.warehouse_name.is_not(None),
+        )
+        .distinct()
+        .order_by(WbFboSupply.warehouse_name)
+    )
+    return [row[0] for row in result.fetchall()]
+
+
 async def list_fbo_supplies(
     db: AsyncSession,
     project_id: int,
     *,
     search: str | None = None,
     status: str | None = None,
+    warehouse: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     sort_by: str = "created_at_wb",
@@ -254,6 +427,10 @@ async def list_fbo_supplies(
     # Filter by status
     if status:
         base_query = base_query.where(WbFboSupply.wb_status == status)
+
+    # Filter by warehouse
+    if warehouse:
+        base_query = base_query.where(WbFboSupply.warehouse_name == warehouse)
 
     # Filter by date range
     if date_from:
@@ -292,8 +469,12 @@ async def get_fbo_supply_items(
     db: AsyncSession,
     project_id: int,
     supply_id: int,
+    api_client=None,
 ) -> list[WbFboSupplyItem]:
-    """Get items for a specific FBO supply. Validates project_id ownership."""
+    """
+    Get items for a specific FBO supply. Validates project_id ownership.
+    Lazy-load: if no items in DB and api_client provided, fetch from WB API.
+    """
     # Verify supply belongs to project
     result = await db.execute(
         select(WbFboSupply).where(
@@ -312,10 +493,34 @@ async def get_fbo_supply_items(
         )
         .order_by(WbFboSupplyItem.id)
     )
-    return result.scalars().all()
+    items = result.scalars().all()
+
+    # Lazy-load from WB API if no items cached
+    if not items and api_client and supply.wb_supply_id.isdigit():
+        try:
+            goods = await api_client.get_fbw_supply_goods(
+                int(supply.wb_supply_id),
+                limit=100,
+                offset=0,
+            )
+            if goods:
+                await _upsert_supply_items_fbw(db, supply.id, int(supply.wb_supply_id), goods)
+                await db.commit()
+                # Re-fetch from DB
+                result = await db.execute(
+                    select(WbFboSupplyItem).where(WbFboSupplyItem.supply_id == supply_id).order_by(WbFboSupplyItem.id)
+                )
+                items = result.scalars().all()
+        except Exception as e:
+            logger.warning(
+                "fbo_items.lazy_load_error",
+                extra={"supply_id": supply_id, "error": str(e)},
+            )
+
+    return items
 
 
-# ─── Link / Unlink supply ↔ OutboundShipment ───────────────────────────────
+# ─── Link / Unlink supply <-> OutboundShipment ───────────────────────────────
 
 
 async def link_supply_to_shipment(
@@ -398,21 +603,7 @@ async def unlink_supply_from_shipment(
     return supply
 
 
-# ─── Private helpers ────────────────────────────────────────────────────────
-
-
-def _map_wb_done_to_status(wb_supply: dict) -> str:
-    """
-    Map WB API v3 supply fields to status enum.
-    WB list endpoint returns {done: bool, closedAt: str|null} instead of status.
-    """
-    done = wb_supply.get("done", False)
-    closed_at = wb_supply.get("closedAt")
-    if done and closed_at:
-        return WbSupplyStatus.ACCEPTED
-    if done and not closed_at:
-        return WbSupplyStatus.CANCELLED
-    return WbSupplyStatus.ACTIVE
+# ─── Private helpers: FBW field mapping ────────────────────────────────────
 
 
 def _parse_wb_datetime(value: str) -> datetime | None:
@@ -420,7 +611,6 @@ def _parse_wb_datetime(value: str) -> datetime | None:
     if not value:
         return None
     try:
-        # WB returns ISO 8601: 2026-03-20T16:20:00Z or 2026-03-20T16:20:00+03:00
         value = value.replace("Z", "+00:00")
         return datetime.fromisoformat(value).replace(tzinfo=None)
     except (ValueError, TypeError):
@@ -428,7 +618,7 @@ def _parse_wb_datetime(value: str) -> datetime | None:
 
 
 def _parse_wb_date(value: str) -> date | None:
-    """Parse WB API date string."""
+    """Parse WB API date string (take first 10 chars as YYYY-MM-DD)."""
     if not value:
         return None
     try:
@@ -437,36 +627,79 @@ def _parse_wb_date(value: str) -> date | None:
         return None
 
 
-def _create_supply_from_wb(project_id: int, wb_data: dict) -> WbFboSupply:
-    """Create new WbFboSupply from WB API data."""
+def _create_supply_from_fbw_list(project_id: int, wb_data: dict) -> WbFboSupply:
+    """
+    Create new WbFboSupply from FBW list endpoint data.
+
+    FBW list fields: supplyID, preorderID, createDate, supplyDate,
+    factDate, updatedDate, statusID, boxTypeID, phone
+    """
+    status_id = wb_data.get("statusID", 1)
     return WbFboSupply(
         project_id=project_id,
-        wb_supply_id=str(wb_data.get("id", "")),
-        wb_status=wb_data.get("status", WbSupplyStatus.ACTIVE),
-        name=wb_data.get("name"),
-        created_at_wb=_parse_wb_datetime(wb_data.get("createdAt", "")) or utcnow(),
-        planned_date=_parse_wb_date(wb_data.get("plannedDate")),
-        actual_date=_parse_wb_date(wb_data.get("closedAt")),
-        warehouse_name=wb_data.get("warehouseName"),
+        wb_supply_id=str(wb_data.get("supplyID", "")),
+        wb_status=_map_fbw_status(status_id),
+        name=f"FBW-{wb_data.get('supplyID', '')}",
+        created_at_wb=_parse_wb_datetime(wb_data.get("createDate", "")) or utcnow(),
+        planned_date=_parse_wb_date(wb_data.get("supplyDate")),
+        actual_date=_parse_wb_date(wb_data.get("factDate")),
+        cargo_type=_map_fbw_box_type(wb_data.get("boxTypeID")),
         synced_at=utcnow(),
     )
 
 
-def _update_supply_from_wb(supply: WbFboSupply, wb_data: dict) -> None:
-    """Update existing WbFboSupply from WB API data."""
-    supply.wb_status = wb_data.get("status", supply.wb_status)
-    supply.name = wb_data.get("name", supply.name)
-    supply.planned_date = _parse_wb_date(wb_data.get("plannedDate")) or supply.planned_date
-    supply.actual_date = _parse_wb_date(wb_data.get("closedAt")) or supply.actual_date
-    supply.warehouse_name = wb_data.get("warehouseName", supply.warehouse_name)
+def _update_supply_from_fbw_list(supply: WbFboSupply, wb_data: dict) -> None:
+    """
+    Update existing WbFboSupply from FBW list endpoint data.
+    Only updates fields available in the list response.
+    """
+    status_id = wb_data.get("statusID")
+    if status_id is not None:
+        supply.wb_status = _map_fbw_status(status_id)
+
+    planned = _parse_wb_date(wb_data.get("supplyDate"))
+    if planned:
+        supply.planned_date = planned
+
+    actual = _parse_wb_date(wb_data.get("factDate"))
+    if actual:
+        supply.actual_date = actual
+
+    box_type = _map_fbw_box_type(wb_data.get("boxTypeID"))
+    if box_type:
+        supply.cargo_type = box_type
 
 
-async def _upsert_supply_items(
+def _update_supply_from_fbw_detail(supply: WbFboSupply, detail: dict) -> None:
+    """
+    Update WbFboSupply with data from FBW detail endpoint.
+    Detail adds: warehouseName, quantity, acceptedQuantity, acceptanceCost.
+    """
+    wh_name = detail.get("warehouseName")
+    if wh_name:
+        supply.warehouse_name = wh_name
+
+    qty = detail.get("quantity")
+    if qty is not None:
+        supply.total_qty = qty
+
+    accepted = detail.get("acceptedQuantity")
+    if accepted is not None:
+        supply.accepted_qty = accepted
+
+
+async def _upsert_supply_items_fbw(
     db: AsyncSession,
     supply_id: int,
-    wb_orders: list[dict],
+    wb_supply_id_int: int,
+    goods: list[dict],
 ) -> None:
-    """Replace supply items with fresh data from WB API."""
+    """
+    Replace supply items with fresh data from FBW goods endpoint.
+
+    FBW goods fields: barcode, vendorCode, nmID, quantity,
+    readyForSaleQuantity, acceptedQuantity, techSize, color
+    """
     # Delete old items
     result = await db.execute(select(WbFboSupplyItem).where(WbFboSupplyItem.supply_id == supply_id))
     old_items = result.scalars().all()
@@ -474,17 +707,22 @@ async def _upsert_supply_items(
         await db.delete(item)
     await db.flush()
 
-    # Insert new items
-    for order in wb_orders:
+    # Insert new items from FBW goods
+    for good in goods:
+        barcode = str(good.get("barcode", ""))
+        vendor_code = good.get("vendorCode", "")
+
         item = WbFboSupplyItem(
             supply_id=supply_id,
-            wb_order_id=str(order.get("orderId", order.get("id", ""))),
-            nm_id=order.get("nmId"),
-            barcode=str(order.get("barcode", order.get("skus", [""])[0] if order.get("skus") else "")),
-            article_seller=order.get("articleSeller", order.get("vendorCode")),
-            product_name=order.get("productName", order.get("name")),
-            quantity=order.get("quantity", 1),
-            accepted_qty=order.get("acceptedQty", 0),
+            # FBW has no order IDs — use composite key
+            wb_order_id=f"{wb_supply_id_int}_{barcode}",
+            nm_id=good.get("nmID"),
+            barcode=barcode,
+            article_seller=vendor_code,
+            # FBW goods API has no product_name — use vendorCode as fallback
+            product_name=vendor_code or None,
+            quantity=good.get("quantity", 0),
+            accepted_qty=good.get("acceptedQuantity") or 0,
         )
         db.add(item)
 

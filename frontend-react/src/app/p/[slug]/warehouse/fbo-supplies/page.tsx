@@ -1,6 +1,7 @@
 'use client';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
+import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime } from '@/lib/utils';
 import type { WbFboSupply, WbFboSupplyItem, OutboundShipment } from '@/types/api';
@@ -9,8 +10,8 @@ import type { WbFboSupply, WbFboSupplyItem, OutboundShipment } from '@/types/api
 
 const STATUS_MAP: Record<string, { label: string; className: string }> = {
     ACTIVE:       { label: 'Запланирована',       className: 'badge-warning' },
-    ON_DELIVERY:  { label: 'В пути',              className: 'badge-info' },
-    IN_PROGRESS:  { label: 'Разгрузка разрешена', className: 'badge-warning' },
+    ON_DELIVERY:  { label: 'Запланирована',       className: 'badge-warning' },
+    IN_PROGRESS:  { label: 'Разгрузка разрешена', className: 'badge-info' },
     ACCEPTED:     { label: 'Принята',             className: 'badge-success' },
     CANCELLED:    { label: 'Отменена',            className: 'badge-secondary' },
 };
@@ -18,7 +19,7 @@ const STATUS_MAP: Record<string, { label: string; className: string }> = {
 const STATUS_OPTIONS = [
     { value: '', label: 'Все статусы' },
     { value: 'ACTIVE', label: 'Запланирована' },
-    { value: 'ON_DELIVERY', label: 'В пути' },
+    { value: 'ON_DELIVERY', label: 'Запланирована (в пути)' },
     { value: 'IN_PROGRESS', label: 'Разгрузка разрешена' },
     { value: 'ACCEPTED', label: 'Принята' },
     { value: 'CANCELLED', label: 'Отменена' },
@@ -39,6 +40,8 @@ export default function FboSuppliesPage() {
     // Filters
     const [search, setSearch] = useState('');
     const [statusFilter, setStatusFilter] = useState('');
+    const [warehouseFilter, setWarehouseFilter] = useState('');
+    const [warehouseOptions, setWarehouseOptions] = useState<string[]>([]);
     const [sortBy, setSortBy] = useState('created_at_wb');
     const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
     const [page, setPage] = useState(0);
@@ -63,6 +66,11 @@ export default function FboSuppliesPage() {
 
     // ─── Load supplies ───────────────────────────────────────────────────
 
+    // Load warehouse options once
+    useEffect(() => {
+        api.getFboWarehouses().then(setWarehouseOptions).catch(() => {});
+    }, []);
+
     const load = useCallback(async () => {
         setLoading(true);
         setError('');
@@ -70,6 +78,7 @@ export default function FboSuppliesPage() {
             const resp = await api.getFboSupplies({
                 search: search || undefined,
                 status: statusFilter || undefined,
+                warehouse: warehouseFilter || undefined,
                 sort_by: sortBy,
                 sort_order: sortOrder,
                 limit: PAGE_SIZE,
@@ -81,7 +90,7 @@ export default function FboSuppliesPage() {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         }
         setLoading(false);
-    }, [search, statusFilter, sortBy, sortOrder, page]);
+    }, [search, statusFilter, warehouseFilter, sortBy, sortOrder, page]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -109,6 +118,16 @@ export default function FboSuppliesPage() {
         try {
             const items = await api.getFboSupplyItems(supplyId);
             setExpandedItems(items);
+            // Update total_qty in the supply row from loaded items
+            if (items.length > 0) {
+                const totalQty = items.reduce((s, i) => s + i.quantity, 0);
+                const acceptedQty = items.reduce((s, i) => s + i.accepted_qty, 0);
+                setSupplies(prev => prev.map(s =>
+                    s.id === supplyId
+                        ? { ...s, total_qty: totalQty, accepted_qty: acceptedQty }
+                        : s
+                ));
+            }
         } catch {
             setExpandedItems([]);
         }
@@ -269,6 +288,18 @@ export default function FboSuppliesPage() {
                             ))}
                         </select>
                     </div>
+                    <div className="form-group">
+                        <select
+                            className="form-input"
+                            value={warehouseFilter}
+                            onChange={e => { setWarehouseFilter(e.target.value); setPage(0); }}
+                        >
+                            <option value="">Все склады</option>
+                            {warehouseOptions.map(wh => (
+                                <option key={wh} value={wh}>{wh}</option>
+                            ))}
+                        </select>
+                    </div>
                 </div>
             </div>
 
@@ -299,8 +330,10 @@ export default function FboSuppliesPage() {
                         <thead>
                             <tr>
                                 <th style={{ width: 40 }}></th>
-                                <th>ID</th>
+                                <th>Поставка</th>
                                 <th>Статус</th>
+                                <th>Склад</th>
+                                <th style={{ textAlign: 'right' }}>Кол-во</th>
                                 <th>Отгрузка</th>
                                 <th
                                     style={{ cursor: 'pointer' }}
@@ -336,11 +369,29 @@ export default function FboSuppliesPage() {
                                             <td style={{ textAlign: 'center', fontSize: 12, color: 'var(--color-text-muted)' }}>
                                                 {isExpanded ? '\u25BC' : '\u25B6'}
                                             </td>
-                                            <td style={{ fontWeight: 500 }}>{supply.wb_supply_id}</td>
+                                            <td>
+                                                <div style={{ fontWeight: 500 }}>
+                                                    {supply.wb_supply_id}
+                                                </div>
+                                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                                    {supply.cargo_type || ''}{supply.cargo_type && supply.name ? ' · ' : ''}{supply.name || ''}
+                                                </div>
+                                            </td>
                                             <td>
                                                 <span className={`badge ${status.className}`}>
                                                     {status.label}
                                                 </span>
+                                            </td>
+                                            <td style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                                {supply.warehouse_name || '\u2014'}
+                                            </td>
+                                            <td style={{ textAlign: 'right', fontWeight: 500 }}>
+                                                {supply.total_qty || 0}
+                                                {supply.accepted_qty > 0 && supply.accepted_qty !== supply.total_qty && (
+                                                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)', fontWeight: 400 }}>
+                                                        {' '}/ {supply.accepted_qty}
+                                                    </span>
+                                                )}
                                             </td>
                                             <td onClick={e => e.stopPropagation()}>
                                                 {supply.outbound_shipment_id ? (
@@ -352,12 +403,11 @@ export default function FboSuppliesPage() {
                                                         Связана #{supply.outbound_shipment_id}
                                                     </button>
                                                 ) : (
-                                                    <button
-                                                        className="btn btn-secondary btn-sm"
-                                                        onClick={() => openLinkModal(supply.id)}
-                                                    >
-                                                        Связать
-                                                    </button>
+                                                    <Link href={`/p/${slug}/warehouse/assembly/new?fbo_supply_id=${supply.id}`}>
+                                                        <button className="btn btn-primary btn-sm">
+                                                            Создать заявку
+                                                        </button>
+                                                    </Link>
                                                 )}
                                             </td>
                                             <td>{formatDateTime(supply.created_at_wb)}</td>
@@ -368,7 +418,7 @@ export default function FboSuppliesPage() {
                                         {/* Expanded items row */}
                                         {isExpanded && (
                                             <tr>
-                                                <td colSpan={7} style={{ padding: 0, background: 'var(--color-bg-secondary)' }}>
+                                                <td colSpan={9} style={{ padding: 0, background: 'var(--color-bg-secondary)' }}>
                                                     <SupplyItemsPanel
                                                         supply={supply}
                                                         items={expandedItems}

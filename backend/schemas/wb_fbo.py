@@ -36,6 +36,7 @@ class WbFboSupplySchema(BaseModel):
     planned_date: date | None = None
     actual_date: date | None = None
     warehouse_name: str | None = None
+    cargo_type: str | None = None
     total_qty: int = 0
     accepted_qty: int = 0
     outbound_shipment_id: int | None = None

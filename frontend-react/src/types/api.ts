@@ -840,6 +840,7 @@ export interface WbFboSupply {
   planned_date?: string;
   actual_date?: string;
   warehouse_name?: string;
+  cargo_type?: string;
   total_qty: number;
   accepted_qty: number;
   outbound_shipment_id?: number;
@@ -871,4 +872,69 @@ export interface FboSyncResult {
   updated: number;
   errors: number;
   message: string;
+}
+
+// ─── Assembly Requests ────────────────────────────────────────────────────
+
+export type AssemblyStatus = 'PENDING' | 'IN_PROGRESS' | 'READY' | 'VEHICLE_ASSIGNED' | 'SHIPPED' | 'CANCELLED';
+
+export interface AssemblyRequestItem {
+  id: number;
+  nomenclature_id: number;
+  barcode: string;
+  quantity: number;
+}
+
+export interface AssemblyRequest {
+  id: number;
+  warehouse_id: number;
+  warehouse_name?: string;
+  number: string;
+  status: AssemblyStatus;
+  wb_fbo_supply_id: number;
+  wb_supply_name?: string;
+  wb_warehouse_name?: string;
+  outbound_shipment_id?: number;
+  estimated_ready_date?: string;
+  actual_ready_date?: string;
+  pallets_count: number;
+  pallet_weight_kg: number;
+  total_weight_kg?: number;
+  vehicle_info?: string;
+  vehicle_assigned_at?: string;
+  shipped_at?: string;
+  comment?: string;
+  items: AssemblyRequestItem[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AssemblyListResponse {
+  items: AssemblyRequest[];
+  total: number;
+}
+
+export interface AssemblyRequestCreate {
+  warehouse_id: number;
+  wb_fbo_supply_id: number;
+  estimated_ready_date?: string;
+  pallets_count: number;
+  pallet_weight_kg: number;
+  comment?: string;
+  items: { barcode: string; quantity: number }[];
+}
+
+export interface AssemblyRequestUpdate {
+  estimated_ready_date?: string;
+  pallets_count?: number;
+  pallet_weight_kg?: number;
+  comment?: string;
+  items?: { barcode: string; quantity: number }[];
+}
+
+export interface RefreshFromFboResponse {
+  added: number;
+  removed: number;
+  changed: number;
+  items: AssemblyRequestItem[];
 }

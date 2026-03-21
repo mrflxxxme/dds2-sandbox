@@ -1,0 +1,239 @@
+"""
+Router: /warehouse/assembly — Assembly request CRUD + workflow transitions.
+"""
+
+from datetime import date
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.database import get_db
+from backend.models import Project
+from backend.project_context import get_current_project
+from backend.schemas.assembly import (
+    AssemblyListResponse,
+    AssemblyRequestCreate,
+    AssemblyRequestResponse,
+    AssemblyRequestUpdate,
+    AssignVehicle,
+    AssignVehicleBulk,
+    RefreshFromFboResponse,
+    ShipBulk,
+)
+from backend.services import assembly_service
+
+router = APIRouter(prefix="/warehouse/assembly", tags=["Assembly"])
+
+
+# --- List -------------------------------------------------------------------
+
+
+@router.get("", response_model=AssemblyListResponse)
+async def list_assembly_requests(
+    warehouse_id: int | None = Query(None),
+    status: str | None = Query(None),
+    search: str | None = Query(None),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    limit: int = Query(50, le=500),
+    offset: int = Query(0, ge=0),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """List assembly requests with filters and pagination."""
+    items, total = await assembly_service.list_assembly_requests(
+        db,
+        project.id,
+        warehouse_id=warehouse_id,
+        status=status,
+        search=search,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+        offset=offset,
+    )
+    response_items = []
+    for req in items:
+        resp = await assembly_service._build_response(db, req)
+        response_items.append(AssemblyRequestResponse.model_validate(resp))
+    return AssemblyListResponse(items=response_items, total=total)
+
+
+# --- Create -----------------------------------------------------------------
+
+
+@router.post("", response_model=AssemblyRequestResponse)
+async def create_assembly_request(
+    payload: AssemblyRequestCreate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new assembly request."""
+    try:
+        req = await assembly_service.create_assembly_request(db, project.id, payload)
+        return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+# --- Get by ID --------------------------------------------------------------
+
+
+@router.get("/{request_id}", response_model=AssemblyRequestResponse)
+async def get_assembly_request(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get a single assembly request by ID."""
+    req = await assembly_service.get_assembly_request(db, project.id, request_id)
+    if not req:
+        raise HTTPException(404, "Assembly request not found")
+    return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+
+
+# --- Update -----------------------------------------------------------------
+
+
+@router.put("/{request_id}", response_model=AssemblyRequestResponse)
+async def update_assembly_request(
+    request_id: int,
+    payload: AssemblyRequestUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update an assembly request."""
+    try:
+        req = await assembly_service.update_assembly_request(db, project.id, request_id, payload)
+        return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+# --- Status transitions -----------------------------------------------------
+
+
+@router.post("/{request_id}/start", response_model=AssemblyRequestResponse)
+async def start_assembly(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """PENDING -> IN_PROGRESS."""
+    try:
+        req = await assembly_service.start_assembly(db, project.id, request_id)
+        return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post("/{request_id}/ready", response_model=AssemblyRequestResponse)
+async def mark_ready(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """IN_PROGRESS -> READY."""
+    try:
+        req = await assembly_service.mark_ready(db, project.id, request_id)
+        return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post("/{request_id}/assign-vehicle", response_model=AssemblyRequestResponse)
+async def assign_vehicle(
+    request_id: int,
+    payload: AssignVehicle,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """READY -> VEHICLE_ASSIGNED."""
+    try:
+        req = await assembly_service.assign_vehicle(db, project.id, request_id, payload)
+        return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post("/{request_id}/ship", response_model=AssemblyRequestResponse)
+async def ship_request(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """VEHICLE_ASSIGNED -> SHIPPED."""
+    try:
+        req = await assembly_service.ship_request(db, project.id, request_id)
+        return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post("/{request_id}/cancel", response_model=AssemblyRequestResponse)
+async def cancel_request(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Any status -> CANCELLED."""
+    try:
+        req = await assembly_service.cancel_request(db, project.id, request_id)
+        return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+# --- Bulk operations --------------------------------------------------------
+
+
+@router.post("/assign-vehicle-bulk", response_model=list[AssemblyRequestResponse])
+async def assign_vehicle_bulk(
+    payload: AssignVehicleBulk,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk assign vehicle to multiple requests."""
+    try:
+        results = await assembly_service.assign_vehicle_bulk(db, project.id, payload.ids, payload.vehicle_info)
+        response = []
+        for req in results:
+            resp = await assembly_service._build_response(db, req)
+            response.append(AssemblyRequestResponse.model_validate(resp))
+        return response
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post("/ship-bulk", response_model=list[AssemblyRequestResponse])
+async def ship_bulk(
+    payload: ShipBulk,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk ship multiple requests."""
+    try:
+        results = await assembly_service.ship_bulk(db, project.id, payload.ids)
+        response = []
+        for req in results:
+            resp = await assembly_service._build_response(db, req)
+            response.append(AssemblyRequestResponse.model_validate(resp))
+        return response
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+# --- FBO sync ---------------------------------------------------------------
+
+
+@router.post("/{request_id}/refresh-from-fbo", response_model=RefreshFromFboResponse)
+async def refresh_from_fbo(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-sync items from linked WbFboSupply."""
+    try:
+        return await assembly_service.refresh_from_fbo(db, project.id, request_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None

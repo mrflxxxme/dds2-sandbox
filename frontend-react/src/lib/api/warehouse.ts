@@ -1,9 +1,14 @@
 /** Warehouse API methods */
 import { ApiClient } from './client';
 import type {
+    AssemblyListResponse,
+    AssemblyRequest,
+    AssemblyRequestCreate,
+    AssemblyRequestUpdate,
     FboSyncResult,
     InboundReceipt,
     OutboundShipment,
+    RefreshFromFboResponse,
     StockAdjustment,
     StockMovement,
     StockSummaryRow,
@@ -67,8 +72,11 @@ export function addWarehouseMethods(api: ApiClient) {
         },
 
         // ─── FBO Supplies ──────────────────────────────────────────────
+        getFboWarehouses() {
+            return api.request<string[]>('GET', '/api/v1/warehouse/fbo-supplies/warehouses');
+        },
         getFboSupplies(params?: {
-            search?: string; status?: string; date_from?: string; date_to?: string;
+            search?: string; status?: string; warehouse?: string; date_from?: string; date_to?: string;
             sort_by?: string; sort_order?: string; limit?: number; offset?: number;
         }) {
             const query = new URLSearchParams();
@@ -94,6 +102,54 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         unlinkFboSupply(supplyId: number) {
             return api.request<WbFboSupply>('DELETE', `/api/v1/warehouse/fbo-supplies/${supplyId}/link`);
+        },
+
+        // ─── Assembly Requests ──────────────────────────────────────────
+        getAssemblyRequests(params?: {
+            warehouse_id?: number; status?: string; search?: string;
+            date_from?: string; date_to?: string; limit?: number; offset?: number;
+        }) {
+            const query = new URLSearchParams();
+            if (params) {
+                Object.entries(params).forEach(([k, v]) => {
+                    if (v !== undefined && v !== null && v !== '') query.set(k, String(v));
+                });
+            }
+            const qs = query.toString();
+            return api.request<AssemblyListResponse>('GET', `/api/v1/warehouse/assembly${qs ? `?${qs}` : ''}`);
+        },
+        createAssemblyRequest(data: AssemblyRequestCreate) {
+            return api.request<AssemblyRequest>('POST', '/api/v1/warehouse/assembly', data);
+        },
+        getAssemblyRequest(id: number) {
+            return api.request<AssemblyRequest>('GET', `/api/v1/warehouse/assembly/${id}`);
+        },
+        updateAssemblyRequest(id: number, data: AssemblyRequestUpdate) {
+            return api.request<AssemblyRequest>('PUT', `/api/v1/warehouse/assembly/${id}`, data);
+        },
+        startAssembly(id: number) {
+            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/start`);
+        },
+        markAssemblyReady(id: number) {
+            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/ready`);
+        },
+        assignVehicle(id: number, vehicleInfo: string) {
+            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/assign-vehicle`, { vehicle_info: vehicleInfo });
+        },
+        shipAssembly(id: number) {
+            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/ship`);
+        },
+        cancelAssembly(id: number) {
+            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/cancel`);
+        },
+        assignVehicleBulk(ids: number[], vehicleInfo: string) {
+            return api.request<AssemblyRequest[]>('POST', '/api/v1/warehouse/assembly/assign-vehicle-bulk', { ids, vehicle_info: vehicleInfo });
+        },
+        shipBulk(ids: number[]) {
+            return api.request<AssemblyRequest[]>('POST', '/api/v1/warehouse/assembly/ship-bulk', { ids });
+        },
+        refreshFromFbo(id: number) {
+            return api.request<RefreshFromFboResponse>('POST', `/api/v1/warehouse/assembly/${id}/refresh-from-fbo`);
         },
     };
 }

@@ -55,6 +55,7 @@ class WbFboSupply(Base, TimestampMixin):
     planned_date: Mapped[date | None] = mapped_column(Date)
     actual_date: Mapped[date | None] = mapped_column(Date)
     warehouse_name: Mapped[str | None] = mapped_column(String(200))
+    cargo_type: Mapped[str | None] = mapped_column(String(50))
     total_qty: Mapped[int] = mapped_column(Integer, default=0)
     accepted_qty: Mapped[int] = mapped_column(Integer, default=0)
     outbound_shipment_id: Mapped[int | None] = mapped_column(

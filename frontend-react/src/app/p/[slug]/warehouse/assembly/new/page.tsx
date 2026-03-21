@@ -1,0 +1,364 @@
+'use client';
+import { useCallback, useEffect, useState } from 'react';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
+import Link from 'next/link';
+import { api } from '@/lib/api';
+import { formatNumber } from '@/lib/utils';
+import type { Warehouse, WbFboSupply, WbFboSupplyItem } from '@/types/api';
+
+interface FormItem {
+    barcode: string;
+    quantity: number;
+    product_name?: string;
+}
+
+export default function AssemblyNewPage() {
+    const params = useParams();
+    const router = useRouter();
+    const searchParams = useSearchParams();
+    const slug = params.slug as string;
+
+    const preselectedFboId = searchParams.get('fbo_supply_id');
+
+    // Form state
+    const [warehouseId, setWarehouseId] = useState<number | ''>('');
+    const [fboSupplyId, setFboSupplyId] = useState<number | ''>('');
+    const [estimatedReadyDate, setEstimatedReadyDate] = useState('');
+    const [palletsCount, setPalletsCount] = useState<number>(1);
+    const [palletWeightKg, setPalletWeightKg] = useState<number>(0);
+    const [comment, setComment] = useState('');
+    const [formItems, setFormItems] = useState<FormItem[]>([]);
+
+    // Reference data
+    const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+    const [fboSupplies, setFboSupplies] = useState<WbFboSupply[]>([]);
+    const [fboSearchInput, setFboSearchInput] = useState('');
+
+    // State
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
+    const [submitting, setSubmitting] = useState(false);
+    const [loadingFboItems, setLoadingFboItems] = useState(false);
+
+    // ─── Load reference data ──────────────────────────────────────────────
+
+    useEffect(() => {
+        api.getWarehouses()
+            .then(whs => setWarehouses(whs.filter(w => w.warehouse_type === 'FULFILLMENT')))
+            .catch(() => {});
+    }, []);
+
+    const loadFboSupplies = useCallback(async () => {
+        setLoading(true);
+        try {
+            const resp = await api.getFboSupplies({
+                status: 'ACTIVE',
+                search: fboSearchInput || undefined,
+                limit: 100,
+            });
+            setFboSupplies(resp.items);
+        } catch {
+            setFboSupplies([]);
+        }
+        setLoading(false);
+    }, [fboSearchInput]);
+
+    useEffect(() => { loadFboSupplies(); }, [loadFboSupplies]);
+
+    // ─── Pre-select FBO supply from URL ───────────────────────────────────
+
+    useEffect(() => {
+        if (preselectedFboId && fboSupplies.length > 0) {
+            const id = Number(preselectedFboId);
+            const found = fboSupplies.find(s => s.id === id);
+            if (found) {
+                setFboSupplyId(id);
+            } else {
+                // Supply might not be in ACTIVE list, try loading it anyway
+                setFboSupplyId(id);
+            }
+        }
+    }, [preselectedFboId, fboSupplies]);
+
+    // ─── Load items when FBO supply changes ──────────────────────────────
+
+    useEffect(() => {
+        if (!fboSupplyId) {
+            setFormItems([]);
+            return;
+        }
+        const loadItems = async () => {
+            setLoadingFboItems(true);
+            try {
+                const items: WbFboSupplyItem[] = await api.getFboSupplyItems(Number(fboSupplyId));
+                // Group by barcode and sum quantities
+                const grouped = new Map<string, FormItem>();
+                for (const item of items) {
+                    const existing = grouped.get(item.barcode);
+                    if (existing) {
+                        existing.quantity += item.quantity;
+                    } else {
+                        grouped.set(item.barcode, {
+                            barcode: item.barcode,
+                            quantity: item.quantity,
+                            product_name: item.product_name || item.article_seller || undefined,
+                        });
+                    }
+                }
+                setFormItems(Array.from(grouped.values()));
+            } catch {
+                setFormItems([]);
+            }
+            setLoadingFboItems(false);
+        };
+        loadItems();
+    }, [fboSupplyId]);
+
+    // ─── Computed ─────────────────────────────────────────────────────────
+
+    const totalWeight = palletsCount * palletWeightKg;
+
+    // ─── Item management ──────────────────────────────────────────────────
+
+    const addItem = () => {
+        setFormItems(prev => [...prev, { barcode: '', quantity: 1 }]);
+    };
+
+    const updateItem = (index: number, field: keyof FormItem, value: string | number) => {
+        setFormItems(prev => prev.map((item, i) =>
+            i === index ? { ...item, [field]: value } : item
+        ));
+    };
+
+    const removeItem = (index: number) => {
+        setFormItems(prev => prev.filter((_, i) => i !== index));
+    };
+
+    // ─── Submit ───────────────────────────────────────────────────────────
+
+    const handleSubmit = async () => {
+        if (!warehouseId || !fboSupplyId || formItems.length === 0) return;
+
+        setSubmitting(true);
+        setError('');
+        try {
+            const result = await api.createAssemblyRequest({
+                warehouse_id: Number(warehouseId),
+                wb_fbo_supply_id: Number(fboSupplyId),
+                estimated_ready_date: estimatedReadyDate || undefined,
+                pallets_count: palletsCount,
+                pallet_weight_kg: palletWeightKg,
+                comment: comment || undefined,
+                items: formItems.map(i => ({ barcode: i.barcode, quantity: i.quantity })),
+            });
+            router.push(`/p/${slug}/warehouse/assembly/${result.id}`);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка создания заявки');
+        }
+        setSubmitting(false);
+    };
+
+    // ─── Render ───────────────────────────────────────────────────────────
+
+    return (
+        <div className="animate-in">
+            {/* Header */}
+            <div className="page-header">
+                <div>
+                    <Link href={`/p/${slug}/warehouse/assembly`} style={{ color: 'var(--color-text-muted)', textDecoration: 'none', fontSize: 14 }}>
+                        &larr; Заявки на сборку
+                    </Link>
+                    <h1 className="page-title">Новая заявка на сборку</h1>
+                </div>
+            </div>
+
+            {/* Error */}
+            {error && (
+                <div className="glass-card" style={{ padding: 16, marginBottom: 16, color: 'var(--color-danger)' }}>
+                    {error}
+                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={() => setError('')}>
+                        Закрыть
+                    </button>
+                </div>
+            )}
+
+            {/* Form */}
+            <div className="glass-card" style={{ padding: 24, marginBottom: 16 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                    {/* Warehouse */}
+                    <div className="form-group">
+                        <label className="form-label">Склад</label>
+                        <select
+                            className="form-input"
+                            value={warehouseId}
+                            onChange={e => setWarehouseId(e.target.value ? Number(e.target.value) : '')}
+                        >
+                            <option value="">Выберите склад...</option>
+                            {warehouses.map(w => (
+                                <option key={w.id} value={w.id}>{w.name}</option>
+                            ))}
+                        </select>
+                    </div>
+
+                    {/* FBO Supply */}
+                    <div className="form-group">
+                        <label className="form-label">Поставка FBO</label>
+                        <select
+                            className="form-input"
+                            value={fboSupplyId}
+                            onChange={e => setFboSupplyId(e.target.value ? Number(e.target.value) : '')}
+                        >
+                            <option value="">Выберите поставку...</option>
+                            {fboSupplies.map(s => (
+                                <option key={s.id} value={s.id}>
+                                    {s.wb_supply_id} &mdash; {s.warehouse_name || 'Без склада'} ({s.total_qty} шт.)
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+
+                    {/* Ready date */}
+                    <div className="form-group">
+                        <label className="form-label">Дата готовности (план)</label>
+                        <input
+                            className="form-input"
+                            type="date"
+                            value={estimatedReadyDate}
+                            onChange={e => setEstimatedReadyDate(e.target.value)}
+                        />
+                    </div>
+
+                    {/* Pallets */}
+                    <div style={{ display: 'flex', gap: 12 }}>
+                        <div className="form-group" style={{ flex: 1 }}>
+                            <label className="form-label">Палеты</label>
+                            <input
+                                className="form-input"
+                                type="number"
+                                min={0}
+                                value={palletsCount}
+                                onChange={e => setPalletsCount(Number(e.target.value) || 0)}
+                            />
+                        </div>
+                        <div className="form-group" style={{ flex: 1 }}>
+                            <label className="form-label">Вес 1 палеты (кг)</label>
+                            <input
+                                className="form-input"
+                                type="number"
+                                min={0}
+                                step={0.1}
+                                value={palletWeightKg}
+                                onChange={e => setPalletWeightKg(Number(e.target.value) || 0)}
+                            />
+                        </div>
+                        <div className="form-group" style={{ flex: 1 }}>
+                            <label className="form-label">Общий вес</label>
+                            <div style={{ padding: '8px 12px', background: 'var(--color-bg-secondary)', borderRadius: 8, fontWeight: 500 }}>
+                                {totalWeight > 0 ? formatNumber(totalWeight, 1) + ' кг' : '\u2014'}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Comment */}
+                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                        <label className="form-label">Комментарий</label>
+                        <textarea
+                            className="form-input"
+                            rows={2}
+                            value={comment}
+                            onChange={e => setComment(e.target.value)}
+                            placeholder="Примечания к заявке..."
+                        />
+                    </div>
+                </div>
+            </div>
+
+            {/* Items */}
+            <div className="glass-card" style={{ padding: 24 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>
+                        Позиции ({formItems.length})
+                    </h2>
+                    <button className="btn btn-secondary btn-sm" onClick={addItem}>
+                        + Добавить позицию
+                    </button>
+                </div>
+
+                {loadingFboItems ? (
+                    <div style={{ textAlign: 'center', padding: 24 }}>Загрузка позиций из FBO...</div>
+                ) : formItems.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: 32, color: 'var(--color-text-muted)' }}>
+                        {fboSupplyId
+                            ? 'Нет позиций в выбранной поставке'
+                            : 'Выберите поставку FBO для автозаполнения или добавьте позиции вручную'}
+                    </div>
+                ) : (
+                    <table className="data-table" style={{ fontSize: 13 }}>
+                        <thead>
+                            <tr>
+                                <th style={{ width: 40 }}>#</th>
+                                <th>Товар</th>
+                                <th style={{ width: 200 }}>ШК</th>
+                                <th style={{ width: 120, textAlign: 'right' }}>Количество</th>
+                                <th style={{ width: 40 }}></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {formItems.map((item, idx) => (
+                                <tr key={idx}>
+                                    <td style={{ color: 'var(--color-text-muted)' }}>{idx + 1}</td>
+                                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                        {item.product_name || '\u2014'}
+                                    </td>
+                                    <td>
+                                        <input
+                                            className="form-input"
+                                            value={item.barcode}
+                                            onChange={e => updateItem(idx, 'barcode', e.target.value)}
+                                            placeholder="Штрихкод"
+                                            style={{ fontSize: 13, fontFamily: 'monospace' }}
+                                        />
+                                    </td>
+                                    <td>
+                                        <input
+                                            className="form-input"
+                                            type="number"
+                                            min={1}
+                                            value={item.quantity}
+                                            onChange={e => updateItem(idx, 'quantity', Number(e.target.value) || 0)}
+                                            style={{ fontSize: 13, textAlign: 'right' }}
+                                        />
+                                    </td>
+                                    <td>
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            onClick={() => removeItem(idx)}
+                                            title="Удалить"
+                                            style={{ padding: '4px 8px' }}
+                                        >
+                                            &times;
+                                        </button>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                )}
+
+                {/* Submit */}
+                <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end', marginTop: 24 }}>
+                    <Link href={`/p/${slug}/warehouse/assembly`}>
+                        <button className="btn btn-secondary">Отмена</button>
+                    </Link>
+                    <button
+                        className="btn btn-primary"
+                        onClick={handleSubmit}
+                        disabled={submitting || !warehouseId || !fboSupplyId || formItems.length === 0}
+                    >
+                        {submitting ? 'Создание...' : 'Создать заявку'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
