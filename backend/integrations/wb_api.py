@@ -153,9 +153,7 @@ class WBApiClient:
         """
         async with _wb_circuit:
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-                params = {"limit": limit}
-                if next:
-                    params["next"] = next
+                params = {"limit": limit, "next": next}
                 url = f"{WB_MARKETPLACE_API_BASE}/api/v3/supplies"
                 logger.info("wb_api.request", method="GET", path="/api/v3/supplies", params=params)
                 response = await client.get(url, headers=self.headers, params=params)

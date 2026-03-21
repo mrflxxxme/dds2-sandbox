@@ -10,7 +10,7 @@ Responsibilities:
 """
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -67,18 +67,17 @@ async def sync_fbo_supplies(
             if next_cursor == 0:
                 break
 
-        # 2. Filter last 60 days
-        cutoff = utcnow() - timedelta(days=60)
-
+        # 2. Process all supplies (no date cutoff — WB API handles pagination)
         for wb_supply in all_supplies:
             try:
                 wb_supply_id = str(wb_supply.get("id", ""))
                 if not wb_supply_id:
                     continue
 
-                created_at_wb = _parse_wb_datetime(wb_supply.get("createdAt", ""))
-                if created_at_wb and created_at_wb < cutoff:
-                    continue
+                # WB API v3 /supplies list doesn't return "status" field,
+                # only "done" (bool) and "closedAt". Map to our status enum.
+                if "status" not in wb_supply:
+                    wb_supply["status"] = _map_wb_done_to_status(wb_supply)
 
                 # 3. Upsert supply
                 result = await db.execute(
@@ -400,6 +399,20 @@ async def unlink_supply_from_shipment(
 
 
 # ─── Private helpers ────────────────────────────────────────────────────────
+
+
+def _map_wb_done_to_status(wb_supply: dict) -> str:
+    """
+    Map WB API v3 supply fields to status enum.
+    WB list endpoint returns {done: bool, closedAt: str|null} instead of status.
+    """
+    done = wb_supply.get("done", False)
+    closed_at = wb_supply.get("closedAt")
+    if done and closed_at:
+        return WbSupplyStatus.ACCEPTED
+    if done and not closed_at:
+        return WbSupplyStatus.CANCELLED
+    return WbSupplyStatus.ACTIVE
 
 
 def _parse_wb_datetime(value: str) -> datetime | None:
