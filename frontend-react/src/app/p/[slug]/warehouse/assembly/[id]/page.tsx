@@ -34,6 +34,12 @@ export default function AssemblyDetailPage() {
     // Modals
     const [showVehicleModal, setShowVehicleModal] = useState(false);
     const [vehicleInfo, setVehicleInfo] = useState('');
+    const [vehicleBrand, setVehicleBrand] = useState('');
+    const [driverPhone, setDriverPhone] = useState('');
+    const [pickupDate, setPickupDate] = useState('');
+    const [pickupTimeSlot, setPickupTimeSlot] = useState('');
+    const [pickupCost, setPickupCost] = useState<number | ''>('');
+    const [deliveryDate, setDeliveryDate] = useState('');
     const [showShipModal, setShowShipModal] = useState(false);
     const [showCancelModal, setShowCancelModal] = useState(false);
 
@@ -77,12 +83,23 @@ export default function AssemblyDetailPage() {
     const handleStart = () => doAction(() => api.startAssembly(id));
     const handleReady = () => doAction(() => api.markAssemblyReady(id));
 
+    const vehicleFormValid = vehicleInfo.trim() && vehicleBrand.trim() && driverPhone.trim()
+        && pickupDate && pickupTimeSlot && pickupCost !== '' && deliveryDate;
+
     const handleAssignVehicle = async () => {
-        if (!vehicleInfo.trim()) return;
+        if (!vehicleFormValid) return;
         setActionLoading(true);
         setError('');
         try {
-            const updated = await api.assignVehicle(id, vehicleInfo.trim());
+            const updated = await api.assignVehicle(id, {
+                vehicle_info: vehicleInfo.trim(),
+                vehicle_brand: vehicleBrand.trim(),
+                driver_phone: driverPhone.trim(),
+                pickup_date: pickupDate,
+                pickup_time_slot: pickupTimeSlot,
+                pickup_cost: Number(pickupCost),
+                delivery_date: deliveryDate,
+            });
             setAssembly(updated);
             setShowVehicleModal(false);
             setVehicleInfo('');
@@ -298,6 +315,21 @@ export default function AssemblyDetailPage() {
                     {assembly.vehicle_info && (
                         <InfoField label="Машина" value={assembly.vehicle_info} />
                     )}
+                    {assembly.vehicle_brand && (
+                        <InfoField label="Марка" value={assembly.vehicle_brand} />
+                    )}
+                    {assembly.driver_phone && (
+                        <InfoField label="Телефон" value={assembly.driver_phone} />
+                    )}
+                    {assembly.pickup_date && (
+                        <InfoField label="Забор" value={`${formatDate(assembly.pickup_date)}${assembly.pickup_time_slot ? ', ' + assembly.pickup_time_slot : ''}`} />
+                    )}
+                    {assembly.pickup_cost != null && (
+                        <InfoField label="Стоимость" value={formatNumber(assembly.pickup_cost) + ' \u20BD'} />
+                    )}
+                    {assembly.delivery_date && (
+                        <InfoField label="Сдача на WB" value={formatDate(assembly.delivery_date)} />
+                    )}
                     {assembly.vehicle_assigned_at && (
                         <InfoField label="Машина назначена" value={formatDateTime(assembly.vehicle_assigned_at)} />
                     )}
@@ -411,27 +443,47 @@ export default function AssemblyDetailPage() {
             {/* Vehicle modal */}
             {showVehicleModal && (
                 <div className="modal-overlay" onClick={() => setShowVehicleModal(false)}>
-                    <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 440 }}>
+                    <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
                         <h2 className="modal-title">Назначить машину</h2>
-                        <div className="form-group" style={{ marginBottom: 16 }}>
-                            <label className="form-label">Информация о машине</label>
-                            <input
-                                className="form-input"
-                                value={vehicleInfo}
-                                onChange={e => setVehicleInfo(e.target.value)}
-                                placeholder="Номер, водитель, ТК..."
-                                autoFocus
-                            />
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                            <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                <label className="form-label">Описание машины *</label>
+                                <input className="form-input" value={vehicleInfo} onChange={e => setVehicleInfo(e.target.value)} placeholder="Номер, водитель, ТК..." autoFocus />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Марка машины *</label>
+                                <input className="form-input" value={vehicleBrand} onChange={e => setVehicleBrand(e.target.value)} placeholder="ГАЗ-330, КАМАЗ..." />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Телефон водителя *</label>
+                                <input className="form-input" value={driverPhone} onChange={e => setDriverPhone(e.target.value)} placeholder="+7 999 123-45-67" />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Дата забора *</label>
+                                <input className="form-input" type="date" value={pickupDate} onChange={e => setPickupDate(e.target.value)} />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Интервал *</label>
+                                <select className="form-input" value={pickupTimeSlot} onChange={e => setPickupTimeSlot(e.target.value)}>
+                                    <option value="">Выберите...</option>
+                                    <option value="08:00-12:00">08:00 — 12:00</option>
+                                    <option value="12:00-16:00">12:00 — 16:00</option>
+                                    <option value="16:00-20:00">16:00 — 20:00</option>
+                                    <option value="20:00-00:00">20:00 — 00:00</option>
+                                </select>
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Стоимость забора, \u20BD *</label>
+                                <input className="form-input" type="number" min={0} value={pickupCost} onChange={e => setPickupCost(e.target.value ? Number(e.target.value) : '')} placeholder="15000" />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Дата сдачи на WB *</label>
+                                <input className="form-input" type="date" value={deliveryDate} onChange={e => setDeliveryDate(e.target.value)} />
+                            </div>
                         </div>
-                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                            <button className="btn btn-secondary" onClick={() => setShowVehicleModal(false)}>
-                                Отмена
-                            </button>
-                            <button
-                                className="btn btn-primary"
-                                onClick={handleAssignVehicle}
-                                disabled={actionLoading || !vehicleInfo.trim()}
-                            >
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+                            <button className="btn btn-secondary" onClick={() => setShowVehicleModal(false)}>Отмена</button>
+                            <button className="btn btn-primary" onClick={handleAssignVehicle} disabled={actionLoading || !vehicleFormValid}>
                                 {actionLoading ? 'Назначение...' : 'Назначить'}
                             </button>
                         </div>

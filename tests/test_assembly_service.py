@@ -380,7 +380,15 @@ class TestLifecycle:
         assert req.status == AssemblyStatus.READY
         assert req.actual_ready_date == date.today()
 
-        payload = AssignVehicle(vehicle_info="Truck ABC-123")
+        payload = AssignVehicle(
+            vehicle_info="Truck ABC-123",
+            vehicle_brand="GAZ-330",
+            driver_phone="+79991234567",
+            pickup_date="2026-03-22",
+            pickup_time_slot="08:00-12:00",
+            pickup_cost=15000,
+            delivery_date="2026-03-23",
+        )
         req = await assign_vehicle(db_session, PROJECT_ID, req.id, payload)
         assert req.status == AssemblyStatus.VEHICLE_ASSIGNED
         assert req.vehicle_info == "Truck ABC-123"
@@ -425,7 +433,20 @@ class TestShipAndCancel:
         # Move through lifecycle
         await start_assembly(db_session, PROJECT_ID, req.id)
         await mark_ready(db_session, PROJECT_ID, req.id)
-        await assign_vehicle(db_session, PROJECT_ID, req.id, AssignVehicle(vehicle_info="Truck X"))
+        await assign_vehicle(
+            db_session,
+            PROJECT_ID,
+            req.id,
+            AssignVehicle(
+                vehicle_info="Truck X",
+                vehicle_brand="KAMAZ",
+                driver_phone="+79990000000",
+                pickup_date="2026-03-22",
+                pickup_time_slot="12:00-16:00",
+                pickup_cost=20000,
+                delivery_date="2026-03-24",
+            ),
+        )
         req = await ship_request(db_session, PROJECT_ID, req.id)
 
         # Check stock decreased
@@ -478,7 +499,20 @@ class TestShipAndCancel:
         # Ship it
         await start_assembly(db_session, PROJECT_ID, req.id)
         await mark_ready(db_session, PROJECT_ID, req.id)
-        await assign_vehicle(db_session, PROJECT_ID, req.id, AssignVehicle(vehicle_info="Truck Y"))
+        await assign_vehicle(
+            db_session,
+            PROJECT_ID,
+            req.id,
+            AssignVehicle(
+                vehicle_info="Truck Y",
+                vehicle_brand="GAZ",
+                driver_phone="+79991111111",
+                pickup_date="2026-03-22",
+                pickup_time_slot="08:00-12:00",
+                pickup_cost=10000,
+                delivery_date="2026-03-23",
+            ),
+        )
         req = await ship_request(db_session, PROJECT_ID, req.id)
         shipment_id = req.outbound_shipment_id
 
@@ -542,7 +576,16 @@ class TestBulkOperations:
         await mark_ready(db_session, PROJECT_ID, req2.id)
 
         # Bulk assign
-        results = await assign_vehicle_bulk(db_session, PROJECT_ID, [req1.id, req2.id], "Truck BULK-1")
+        bulk_payload = AssignVehicle(
+            vehicle_info="Truck BULK-1",
+            vehicle_brand="MAN",
+            driver_phone="+79993333333",
+            pickup_date="2026-03-22",
+            pickup_time_slot="08:00-12:00",
+            pickup_cost=30000,
+            delivery_date="2026-03-24",
+        )
+        results = await assign_vehicle_bulk(db_session, PROJECT_ID, [req1.id, req2.id], bulk_payload)
         assert len(results) == 2
         for r in results:
             assert r.status == AssemblyStatus.VEHICLE_ASSIGNED
@@ -569,7 +612,20 @@ class TestInsufficientStock:
         req = await create_assembly_request(db_session, PROJECT_ID, payload)
         await start_assembly(db_session, PROJECT_ID, req.id)
         await mark_ready(db_session, PROJECT_ID, req.id)
-        await assign_vehicle(db_session, PROJECT_ID, req.id, AssignVehicle(vehicle_info="Truck Z"))
+        await assign_vehicle(
+            db_session,
+            PROJECT_ID,
+            req.id,
+            AssignVehicle(
+                vehicle_info="Truck Z",
+                vehicle_brand="MAN",
+                driver_phone="+79992222222",
+                pickup_date="2026-03-22",
+                pickup_time_slot="16:00-20:00",
+                pickup_cost=25000,
+                delivery_date="2026-03-25",
+            ),
+        )
 
         # Now reduce stock to 0 so ship fails
         from sqlalchemy import update

@@ -896,6 +896,10 @@ export interface AssemblyRequest {
   wb_fbo_supply_id: number;
   wb_supply_name?: string;
   wb_warehouse_name?: string;
+  wb_supply_id_wb?: string;
+  wb_fbo_status?: string;
+  wb_fbo_planned_date?: string;
+  wb_fbo_actual_date?: string;
   outbound_shipment_id?: number;
   estimated_ready_date?: string;
   actual_ready_date?: string;
@@ -903,6 +907,12 @@ export interface AssemblyRequest {
   pallet_weight_kg: number;
   total_weight_kg?: number;
   vehicle_info?: string;
+  vehicle_brand?: string;
+  driver_phone?: string;
+  pickup_date?: string;
+  pickup_time_slot?: string;
+  pickup_cost?: number;
+  delivery_date?: string;
   vehicle_assigned_at?: string;
   shipped_at?: string;
   comment?: string;

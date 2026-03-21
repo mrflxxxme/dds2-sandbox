@@ -18,6 +18,14 @@ const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> =
     CANCELLED:        { label: 'Отменена',           className: 'badge-secondary' },
 };
 
+const WB_STATUS_MAP: Record<string, { label: string; className: string }> = {
+    ACTIVE:       { label: 'Запланирована',  className: 'badge-warning' },
+    ON_DELIVERY:  { label: 'В пути',         className: 'badge-info' },
+    IN_PROGRESS:  { label: 'Разгрузка',      className: 'badge-info' },
+    ACCEPTED:     { label: 'Принята',         className: 'badge-success' },
+    CANCELLED:    { label: 'Отменена',        className: 'badge-secondary' },
+};
+
 type GroupBy = 'wb_warehouse' | 'warehouse';
 
 // ─── Component ──────────────────────────────────────────────────────────────
@@ -44,6 +52,12 @@ export default function LogisticsPage() {
     // Vehicle modal
     const [showVehicleModal, setShowVehicleModal] = useState(false);
     const [vehicleInfo, setVehicleInfo] = useState('');
+    const [vehicleBrand, setVehicleBrand] = useState('');
+    const [driverPhone, setDriverPhone] = useState('');
+    const [pickupDate, setPickupDate] = useState('');
+    const [pickupTimeSlot, setPickupTimeSlot] = useState('');
+    const [pickupCost, setPickupCost] = useState<number | ''>('');
+    const [deliveryDate, setDeliveryDate] = useState('');
     const [selectedIds, setSelectedIds] = useState<number[]>([]);
     const [actionLoading, setActionLoading] = useState(false);
 
@@ -123,15 +137,27 @@ export default function LogisticsPage() {
         setShowVehicleModal(true);
     };
 
+    const vehicleFormValid = vehicleInfo.trim() && vehicleBrand.trim() && driverPhone.trim()
+        && pickupDate && pickupTimeSlot && pickupCost !== '' && deliveryDate;
+
     const handleAssignVehicle = async () => {
-        if (!vehicleInfo.trim() || selectedIds.length === 0) return;
+        if (!vehicleFormValid || selectedIds.length === 0) return;
         setActionLoading(true);
         setError('');
+        const data = {
+            vehicle_info: vehicleInfo.trim(),
+            vehicle_brand: vehicleBrand.trim(),
+            driver_phone: driverPhone.trim(),
+            pickup_date: pickupDate,
+            pickup_time_slot: pickupTimeSlot,
+            pickup_cost: Number(pickupCost),
+            delivery_date: deliveryDate,
+        };
         try {
             if (selectedIds.length === 1) {
-                await api.assignVehicle(selectedIds[0], vehicleInfo.trim());
+                await api.assignVehicle(selectedIds[0], data);
             } else {
-                await api.assignVehicleBulk(selectedIds, vehicleInfo.trim());
+                await api.assignVehicleBulk(selectedIds, data);
             }
             setShowVehicleModal(false);
             await load();
@@ -394,14 +420,18 @@ export default function LogisticsPage() {
                         <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--color-border)', fontSize: 13, color: 'var(--color-text-muted)' }}>
                             Всего: {historyTotal}
                         </div>
-                        <table className="data-table">
+                        <table className="data-table" style={{ fontSize: 13 }}>
                             <thead>
                                 <tr>
                                     <th>Статус</th>
                                     <th>№</th>
+                                    <th>Поставка WB</th>
+                                    <th>Статус WB</th>
                                     <th>Склад забора</th>
                                     <th>Склад сдачи</th>
                                     <th>Дата отгрузки</th>
+                                    <th>Дата сдачи</th>
+                                    <th>План сдачи</th>
                                     <th style={{ textAlign: 'right' }}>Палеты</th>
                                     <th style={{ textAlign: 'right' }}>Вес</th>
                                 </tr>
@@ -409,26 +439,36 @@ export default function LogisticsPage() {
                             <tbody>
                                 {historyItems.map(item => {
                                     const statusCfg = STATUS_MAP[item.status] || { label: item.status, className: '' };
+                                    const wbStatusCfg = item.wb_fbo_status ? WB_STATUS_MAP[item.wb_fbo_status] : null;
                                     return (
-                                        <tr key={item.id}>
+                                        <tr
+                                            key={item.id}
+                                            style={{ cursor: 'pointer' }}
+                                            onClick={() => window.location.href = `/p/${slug}/warehouse/assembly/${item.id}`}
+                                        >
                                             <td>
                                                 <span className={`badge ${statusCfg.className}`}>{statusCfg.label}</span>
                                             </td>
-                                            <td>
-                                                <Link
-                                                    href={`/p/${slug}/warehouse/assembly/${item.id}`}
-                                                    style={{ fontWeight: 500, textDecoration: 'none', color: 'var(--color-text)' }}
-                                                >
-                                                    {item.number}
-                                                </Link>
+                                            <td style={{ fontWeight: 500 }}>
+                                                {item.number}
                                             </td>
-                                            <td style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+                                            <td style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                                                {item.wb_supply_id_wb || '\u2014'}
+                                            </td>
+                                            <td>
+                                                {wbStatusCfg ? (
+                                                    <span className={`badge ${wbStatusCfg.className}`}>{wbStatusCfg.label}</span>
+                                                ) : '\u2014'}
+                                            </td>
+                                            <td style={{ color: 'var(--color-text-muted)' }}>
                                                 {item.warehouse_name || '\u2014'}
                                             </td>
-                                            <td style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+                                            <td style={{ color: 'var(--color-text-muted)' }}>
                                                 {item.wb_warehouse_name || '\u2014'}
                                             </td>
                                             <td>{formatDate(item.shipped_at)}</td>
+                                            <td>{item.wb_fbo_actual_date ? formatDate(item.wb_fbo_actual_date) : '\u2014'}</td>
+                                            <td>{item.wb_fbo_planned_date ? formatDate(item.wb_fbo_planned_date) : '\u2014'}</td>
                                             <td style={{ textAlign: 'right' }}>{item.pallets_count}</td>
                                             <td style={{ textAlign: 'right' }}>
                                                 {item.total_weight_kg ? formatNumber(item.total_weight_kg, 1) + ' кг' : '\u2014'}
@@ -445,30 +485,50 @@ export default function LogisticsPage() {
             {/* Vehicle modal */}
             {showVehicleModal && (
                 <div className="modal-overlay" onClick={() => setShowVehicleModal(false)}>
-                    <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 440 }}>
+                    <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
                         <h2 className="modal-title">Назначить машину</h2>
                         <div style={{ marginBottom: 12, fontSize: 14, color: 'var(--color-text-muted)' }}>
                             Заявок: {selectedIds.length}
                         </div>
-                        <div className="form-group" style={{ marginBottom: 16 }}>
-                            <label className="form-label">Информация о машине</label>
-                            <input
-                                className="form-input"
-                                value={vehicleInfo}
-                                onChange={e => setVehicleInfo(e.target.value)}
-                                placeholder="Номер, водитель, ТК..."
-                                autoFocus
-                            />
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                            <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                <label className="form-label">Описание машины *</label>
+                                <input className="form-input" value={vehicleInfo} onChange={e => setVehicleInfo(e.target.value)} placeholder="Номер, водитель, ТК..." autoFocus />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Марка машины *</label>
+                                <input className="form-input" value={vehicleBrand} onChange={e => setVehicleBrand(e.target.value)} placeholder="ГАЗ-330, КАМАЗ..." />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Телефон водителя *</label>
+                                <input className="form-input" value={driverPhone} onChange={e => setDriverPhone(e.target.value)} placeholder="+7 999 123-45-67" />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Дата забора *</label>
+                                <input className="form-input" type="date" value={pickupDate} onChange={e => setPickupDate(e.target.value)} />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Интервал *</label>
+                                <select className="form-input" value={pickupTimeSlot} onChange={e => setPickupTimeSlot(e.target.value)}>
+                                    <option value="">Выберите...</option>
+                                    <option value="08:00-12:00">08:00 — 12:00</option>
+                                    <option value="12:00-16:00">12:00 — 16:00</option>
+                                    <option value="16:00-20:00">16:00 — 20:00</option>
+                                    <option value="20:00-00:00">20:00 — 00:00</option>
+                                </select>
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Стоимость забора, \u20BD *</label>
+                                <input className="form-input" type="number" min={0} value={pickupCost} onChange={e => setPickupCost(e.target.value ? Number(e.target.value) : '')} placeholder="15000" />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Дата сдачи на WB *</label>
+                                <input className="form-input" type="date" value={deliveryDate} onChange={e => setDeliveryDate(e.target.value)} />
+                            </div>
                         </div>
-                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                            <button className="btn btn-secondary" onClick={() => setShowVehicleModal(false)}>
-                                Отмена
-                            </button>
-                            <button
-                                className="btn btn-primary"
-                                onClick={handleAssignVehicle}
-                                disabled={actionLoading || !vehicleInfo.trim()}
-                            >
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+                            <button className="btn btn-secondary" onClick={() => setShowVehicleModal(false)}>Отмена</button>
+                            <button className="btn btn-primary" onClick={handleAssignVehicle} disabled={actionLoading || !vehicleFormValid}>
                                 {actionLoading ? 'Назначение...' : `Назначить (${selectedIds.length})`}
                             </button>
                         </div>

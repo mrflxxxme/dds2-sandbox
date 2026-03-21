@@ -187,6 +187,10 @@ async def _build_response(
         "wb_fbo_supply_id": request.wb_fbo_supply_id,
         "wb_supply_name": request.wb_fbo_supply.name if request.wb_fbo_supply else None,
         "wb_warehouse_name": request.wb_fbo_supply.warehouse_name if request.wb_fbo_supply else None,
+        "wb_supply_id_wb": request.wb_fbo_supply.wb_supply_id if request.wb_fbo_supply else None,
+        "wb_fbo_status": request.wb_fbo_supply.wb_status if request.wb_fbo_supply else None,
+        "wb_fbo_planned_date": request.wb_fbo_supply.planned_date if request.wb_fbo_supply else None,
+        "wb_fbo_actual_date": request.wb_fbo_supply.actual_date if request.wb_fbo_supply else None,
         "outbound_shipment_id": request.outbound_shipment_id,
         "estimated_ready_date": request.estimated_ready_date,
         "actual_ready_date": request.actual_ready_date,
@@ -194,6 +198,12 @@ async def _build_response(
         "pallet_weight_kg": request.pallet_weight_kg,
         "total_weight_kg": total_weight,
         "vehicle_info": request.vehicle_info,
+        "vehicle_brand": request.vehicle_brand,
+        "driver_phone": request.driver_phone,
+        "pickup_date": request.pickup_date,
+        "pickup_time_slot": request.pickup_time_slot,
+        "pickup_cost": request.pickup_cost,
+        "delivery_date": request.delivery_date,
         "vehicle_assigned_at": request.vehicle_assigned_at,
         "shipped_at": request.shipped_at,
         "comment": request.comment,
@@ -462,6 +472,12 @@ async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, pay
     old = req.status
     req.status = AssemblyStatus.VEHICLE_ASSIGNED
     req.vehicle_info = payload.vehicle_info
+    req.vehicle_brand = payload.vehicle_brand
+    req.driver_phone = payload.driver_phone
+    req.pickup_date = payload.pickup_date
+    req.pickup_time_slot = payload.pickup_time_slot
+    req.pickup_cost = payload.pickup_cost
+    req.delivery_date = payload.delivery_date
     req.vehicle_assigned_at = utcnow()
     await _log_status_change(db, req.id, old, AssemblyStatus.VEHICLE_ASSIGNED, comment=payload.vehicle_info)
     await db.commit()
@@ -623,14 +639,13 @@ async def assign_vehicle_bulk(
     db: AsyncSession,
     project_id: int,
     ids: list[int],
-    vehicle_info: str,
+    payload: AssignVehicle,
 ) -> list[AssemblyRequest]:
     """
     Bulk assign vehicle to multiple requests.
     """
     results = []
     for req_id in ids:
-        payload = AssignVehicle(vehicle_info=vehicle_info)
         req = await assign_vehicle(db, project_id, req_id, payload)
         results.append(req)
     return results

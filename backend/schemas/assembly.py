@@ -36,11 +36,23 @@ class AssemblyRequestUpdate(BaseModel):
 
 class AssignVehicle(BaseModel):
     vehicle_info: str
+    vehicle_brand: str
+    driver_phone: str
+    pickup_date: date
+    pickup_time_slot: str
+    pickup_cost: Decimal
+    delivery_date: date
 
 
 class AssignVehicleBulk(BaseModel):
     ids: list[int]
     vehicle_info: str
+    vehicle_brand: str
+    driver_phone: str
+    pickup_date: date
+    pickup_time_slot: str
+    pickup_cost: Decimal
+    delivery_date: date
 
 
 class ShipBulk(BaseModel):
@@ -72,6 +84,10 @@ class AssemblyRequestResponse(BaseModel):
     wb_fbo_supply_id: int
     wb_supply_name: str | None = None  # wb_fbo_supplies.name
     wb_warehouse_name: str | None = None  # wb_fbo_supplies.warehouse_name (WB destination)
+    wb_supply_id_wb: str | None = None  # wb_fbo_supplies.wb_supply_id (WB-I-xxxx)
+    wb_fbo_status: str | None = None  # wb_fbo_supplies.wb_status (ACTIVE/ON_DELIVERY/...)
+    wb_fbo_planned_date: date | None = None  # wb_fbo_supplies.planned_date
+    wb_fbo_actual_date: date | None = None  # wb_fbo_supplies.actual_date
     outbound_shipment_id: int | None = None
     estimated_ready_date: date | None = None
     actual_ready_date: date | None = None
@@ -79,6 +95,12 @@ class AssemblyRequestResponse(BaseModel):
     pallet_weight_kg: Decimal
     total_weight_kg: Decimal | None = None  # computed: pallets x weight
     vehicle_info: str | None = None
+    vehicle_brand: str | None = None
+    driver_phone: str | None = None
+    pickup_date: date | None = None
+    pickup_time_slot: str | None = None
+    pickup_cost: Decimal | None = None
+    delivery_date: date | None = None
     vehicle_assigned_at: datetime | None = None
     shipped_at: datetime | None = None
     comment: str | None = None

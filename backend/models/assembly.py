@@ -90,6 +90,12 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
 
     # Vehicle & shipping
     vehicle_info: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    vehicle_brand: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    driver_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    pickup_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    pickup_time_slot: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    pickup_cost: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    delivery_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     vehicle_assigned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     shipped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

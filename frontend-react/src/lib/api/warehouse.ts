@@ -134,8 +134,16 @@ export function addWarehouseMethods(api: ApiClient) {
         markAssemblyReady(id: number) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/ready`);
         },
-        assignVehicle(id: number, vehicleInfo: string) {
-            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/assign-vehicle`, { vehicle_info: vehicleInfo });
+        assignVehicle(id: number, data: {
+            vehicle_info: string;
+            vehicle_brand: string;
+            driver_phone: string;
+            pickup_date: string;
+            pickup_time_slot: string;
+            pickup_cost: number;
+            delivery_date: string;
+        }) {
+            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/assign-vehicle`, data);
         },
         shipAssembly(id: number) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/ship`);
@@ -143,8 +151,16 @@ export function addWarehouseMethods(api: ApiClient) {
         cancelAssembly(id: number) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/cancel`);
         },
-        assignVehicleBulk(ids: number[], vehicleInfo: string) {
-            return api.request<AssemblyRequest[]>('POST', '/api/v1/warehouse/assembly/assign-vehicle-bulk', { ids, vehicle_info: vehicleInfo });
+        assignVehicleBulk(ids: number[], data: {
+            vehicle_info: string;
+            vehicle_brand: string;
+            driver_phone: string;
+            pickup_date: string;
+            pickup_time_slot: string;
+            pickup_cost: number;
+            delivery_date: string;
+        }) {
+            return api.request<AssemblyRequest[]>('POST', '/api/v1/warehouse/assembly/assign-vehicle-bulk', { ids, ...data });
         },
         shipBulk(ids: number[]) {
             return api.request<AssemblyRequest[]>('POST', '/api/v1/warehouse/assembly/ship-bulk', { ids });
