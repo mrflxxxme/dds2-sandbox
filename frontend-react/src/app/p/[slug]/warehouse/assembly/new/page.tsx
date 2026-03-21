@@ -136,6 +136,7 @@ export default function AssemblyNewPage() {
 
     // ─── Computed ─────────────────────────────────────────────────────────
 
+    const selectedWarehouse = warehouses.find(w => w.id === warehouseId) || null;
     const totalWeight = palletsCount * palletWeightKg;
 
     // ─── Item management ──────────────────────────────────────────────────
@@ -240,12 +241,29 @@ export default function AssemblyNewPage() {
                     {/* Ready date */}
                     <div className="form-group">
                         <label className="form-label">Дата готовности (план)</label>
-                        <input
-                            className="form-input"
-                            type="date"
-                            value={estimatedReadyDate}
-                            onChange={e => setEstimatedReadyDate(e.target.value)}
-                        />
+                        <div style={{ display: 'flex', gap: 8 }}>
+                            <input
+                                className="form-input"
+                                type="date"
+                                value={estimatedReadyDate}
+                                onChange={e => setEstimatedReadyDate(e.target.value)}
+                                style={{ flex: 1 }}
+                            />
+                            {selectedWarehouse?.assembly_days != null && selectedWarehouse.assembly_days > 0 && (
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary btn-sm"
+                                    style={{ whiteSpace: 'nowrap' }}
+                                    onClick={() => {
+                                        const d = new Date();
+                                        d.setDate(d.getDate() + selectedWarehouse.assembly_days!);
+                                        setEstimatedReadyDate(d.toISOString().slice(0, 10));
+                                    }}
+                                >
+                                    +{selectedWarehouse.assembly_days} дн.
+                                </button>
+                            )}
+                        </div>
                     </div>
 
                     {/* Pallets */}
