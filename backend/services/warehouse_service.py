@@ -271,7 +271,7 @@ async def create_receipt(db: AsyncSession, project_id: int, warehouse_id: int, p
         project_id=project_id,
         warehouse_id=warehouse_id,
         number=number,
-        status=InboundStatus.DRAFT,
+        status=InboundStatus.EXPECTED,
         planned_date=payload.get("planned_date"),
         comment=payload.get("comment"),
         tags=payload.get("tags"),

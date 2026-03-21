@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
-import type { Nomenclature } from '@/types/api';
+import type { Nomenclature, Warehouse } from '@/types/api';
 
 /* ─── Nomenclature lookup helper ──────────────────────────────────────────── */
 
@@ -15,7 +15,7 @@ function useNomLookup(nomenclature: Nomenclature[]) {
         });
         const resolve = (barcode: string): Nomenclature | undefined => byBarcode.get(barcode);
         const label = (n: Nomenclature): string => n.article_seller || n.subject || n.name || `nmId: ${n.article_wb}`;
-        return { resolve, label, byBarcode };
+        return { resolve, label };
     }, [nomenclature]);
 }
 
@@ -23,27 +23,26 @@ function useNomLookup(nomenclature: Nomenclature[]) {
 
 interface ItemRow {
     barcode: string;
-    expected_qty: string;
-    actual_qty: string;
+    quantity: string;
 }
 
-const emptyItemRow = (): ItemRow => ({ barcode: '', expected_qty: '', actual_qty: '' });
+const emptyItemRow = (): ItemRow => ({ barcode: '', quantity: '' });
 
 /* ─── Page ────────────────────────────────────────────────────────────────── */
 
-export default function NewReceiptPage() {
+export default function NewTransferPage() {
     const params = useParams();
     const router = useRouter();
     const slug = params.slug as string;
-    const warehouseId = Number(params.id);
+    const fromWarehouseId = Number(params.id);
 
+    const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
     const [nomenclature, setNomenclature] = useState<Nomenclature[]>([]);
-    const [warehouseName, setWarehouseName] = useState('');
+    const [fromName, setFromName] = useState('');
     const [loading, setLoading] = useState(true);
 
-    const [formDate, setFormDate] = useState('');
+    const [toWarehouseId, setToWarehouseId] = useState<number | ''>('');
     const [formComment, setFormComment] = useState('');
-    const [mode, setMode] = useState<'form' | 'table'>('form');
     const [rows, setRows] = useState<ItemRow[]>(() => Array.from({ length: 8 }, emptyItemRow));
     const [search, setSearch] = useState('');
     const [saving, setSaving] = useState(false);
@@ -58,12 +57,13 @@ export default function NewReceiptPage() {
                 api.getWarehouses(),
                 api.getNomenclature(),
             ]);
-            const wh = whs.find(w => w.id === warehouseId);
-            setWarehouseName(wh?.name || `Склад #${warehouseId}`);
+            setWarehouses(whs);
+            const wh = whs.find(w => w.id === fromWarehouseId);
+            setFromName(wh?.name || `Склад #${fromWarehouseId}`);
             setNomenclature(nomData);
         } catch { /* ignore */ }
         setLoading(false);
-    }, [warehouseId]);
+    }, [fromWarehouseId]);
 
     useEffect(() => { loadData(); }, [loadData]);
 
@@ -93,9 +93,8 @@ export default function NewReceiptPage() {
         for (const cols of lines) {
             if (cols.length < 2) continue;
             const barcode = cols[0].trim();
-            const expected = cols[1].trim().replace(',', '.').replace(/[^\d]/g, '');
-            const actual = cols.length >= 3 ? cols[2].trim().replace(',', '.').replace(/[^\d]/g, '') : expected;
-            if (barcode && expected) newRows.push({ barcode, expected_qty: expected, actual_qty: actual });
+            const qty = cols[1].trim().replace(',', '.').replace(/[^\d]/g, '');
+            if (barcode && qty) newRows.push({ barcode, quantity: qty });
         }
         if (newRows.length > 0) setRows([...newRows, emptyItemRow(), emptyItemRow()]);
     };
@@ -108,19 +107,20 @@ export default function NewReceiptPage() {
         if (firstEmpty >= 0) {
             setRows(prev => {
                 const next = [...prev];
-                next[firstEmpty] = { barcode: n.barcode!, expected_qty: '', actual_qty: '' };
+                next[firstEmpty] = { barcode: n.barcode!, quantity: '' };
                 return next;
             });
         } else {
-            setRows(prev => [...prev, { barcode: n.barcode!, expected_qty: '', actual_qty: '' }]);
+            setRows(prev => [...prev, { barcode: n.barcode!, quantity: '' }]);
         }
         setSearch('');
     };
 
     /* ─── Computed ────────────────────────────────────────────────────────── */
 
-    const filledRows = rows.filter(r => r.barcode.trim() && r.expected_qty.trim());
-    const totalQty = filledRows.reduce((s, r) => s + (parseInt(r.expected_qty) || 0), 0);
+    const filledRows = rows.filter(r => r.barcode.trim() && r.quantity.trim());
+    const totalQty = filledRows.reduce((s, r) => s + (parseInt(r.quantity) || 0), 0);
+    const otherWarehouses = warehouses.filter(w => w.id !== fromWarehouseId && w.is_active);
 
     const filteredNom = search.trim()
         ? nomenclature.filter(n => {
@@ -135,28 +135,29 @@ export default function NewReceiptPage() {
     /* ─── Submit ──────────────────────────────────────────────────────────── */
 
     const handleCreate = async () => {
+        if (!toWarehouseId) { setError('Выберите склад назначения'); return; }
         if (filledRows.length === 0) { setError('Добавьте хотя бы одну позицию'); return; }
         setSaving(true);
         setError('');
         try {
             const items = filledRows.map(r => ({
                 barcode: r.barcode.trim(),
-                expected_qty: parseInt(r.expected_qty) || 0,
-                actual_qty: parseInt(r.actual_qty) || 0,
+                quantity: parseInt(r.quantity) || 0,
             }));
-            const result = await api.createReceipt(warehouseId, {
-                planned_date: formDate || undefined,
+            await api.createTransfer({
+                from_warehouse_id: fromWarehouseId,
+                to_warehouse_id: Number(toWarehouseId),
                 comment: formComment.trim() || undefined,
                 items,
             });
-            router.push(`/p/${slug}/warehouse/${warehouseId}/receipt/${result.id}`);
+            router.push(`/p/${slug}/warehouse/${fromWarehouseId}`);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
         }
         setSaving(false);
     };
 
-    const goBack = () => router.push(`/p/${slug}/warehouse/${warehouseId}`);
+    const goBack = () => router.push(`/p/${slug}/warehouse/${fromWarehouseId}`);
 
     /* ─── Render ──────────────────────────────────────────────────────────── */
 
@@ -174,8 +175,8 @@ export default function NewReceiptPage() {
                         title="Назад"
                     >&larr;</button>
                     <div>
-                        <h1 className="page-title">Новая приёмка</h1>
-                        <p className="page-subtitle">{warehouseName}</p>
+                        <h1 className="page-title">Новое перемещение</h1>
+                        <p className="page-subtitle">Со склада: {fromName}</p>
                     </div>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
@@ -183,9 +184,9 @@ export default function NewReceiptPage() {
                     <button
                         className="btn btn-primary"
                         onClick={handleCreate}
-                        disabled={saving || filledRows.length === 0}
+                        disabled={saving || filledRows.length === 0 || !toWarehouseId}
                     >
-                        {saving ? 'Сохранение...' : 'Создать приёмку'}
+                        {saving ? 'Сохранение...' : 'Создать перемещение'}
                     </button>
                 </div>
             </div>
@@ -201,41 +202,34 @@ export default function NewReceiptPage() {
 
             {/* Parameters */}
             <div className="glass-card" style={{ padding: 20, marginBottom: 20 }}>
-                <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Параметры приёмки</div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Параметры перемещения</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
                     <div className="form-group" style={{ margin: 0 }}>
-                        <label className="form-label">Плановая дата поступления</label>
-                        <input className="form-input" type="date" value={formDate} onChange={e => setFormDate(e.target.value)} />
+                        <label className="form-label">Откуда</label>
+                        <input className="form-input" value={fromName} disabled style={{ background: 'var(--color-hover)' }} />
+                    </div>
+                    <div className="form-group" style={{ margin: 0 }}>
+                        <label className="form-label">Куда *</label>
+                        <select
+                            className="form-input"
+                            value={toWarehouseId}
+                            onChange={e => setToWarehouseId(e.target.value ? Number(e.target.value) : '')}
+                        >
+                            <option value="">Выберите склад...</option>
+                            {otherWarehouses.map(w => (
+                                <option key={w.id} value={w.id}>{w.name}</option>
+                            ))}
+                        </select>
                     </div>
                     <div className="form-group" style={{ margin: 0 }}>
                         <label className="form-label">Комментарий</label>
-                        <input className="form-input" value={formComment} onChange={e => setFormComment(e.target.value)} placeholder="Примечание к приёмке..." />
+                        <input className="form-input" value={formComment} onChange={e => setFormComment(e.target.value)} placeholder="Примечание..." />
                     </div>
                 </div>
             </div>
 
-            {/* Toolbar: mode toggle + search + counter */}
+            {/* Toolbar: search + counter */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
-                <div style={{ display: 'flex', border: '1px solid var(--color-border)', borderRadius: 8, overflow: 'hidden' }}>
-                    <button
-                        onClick={() => setMode('form')}
-                        style={{
-                            padding: '6px 14px', fontSize: 13, border: 'none', cursor: 'pointer',
-                            background: mode === 'form' ? 'var(--color-primary)' : 'var(--color-bg)',
-                            color: mode === 'form' ? '#fff' : 'var(--color-text)',
-                        }}
-                    >Форма</button>
-                    <button
-                        onClick={() => setMode('table')}
-                        style={{
-                            padding: '6px 14px', fontSize: 13, border: 'none', cursor: 'pointer',
-                            borderLeft: '1px solid var(--color-border)',
-                            background: mode === 'table' ? 'var(--color-primary)' : 'var(--color-bg)',
-                            color: mode === 'table' ? '#fff' : 'var(--color-text)',
-                        }}
-                    >Таблица</button>
-                </div>
-
                 <div style={{ flex: 1, position: 'relative', minWidth: 200 }}>
                     <input
                         className="form-input"
@@ -285,10 +279,9 @@ export default function NewReceiptPage() {
                     <thead>
                         <tr>
                             <th style={{ width: 40, textAlign: 'center' }}>#</th>
-                            {mode === 'form' && <th style={{ minWidth: 220 }}>ТОВАР</th>}
+                            <th style={{ minWidth: 220 }}>ТОВАР</th>
                             <th style={{ minWidth: 160 }}>ШК (БАРКОД)</th>
                             <th style={{ width: 120, textAlign: 'right' }}>КОЛИЧЕСТВО</th>
-                            {mode === 'table' && <th style={{ width: 120, textAlign: 'right' }}>ФАКТ</th>}
                             <th style={{ width: 50 }}></th>
                         </tr>
                     </thead>
@@ -301,11 +294,9 @@ export default function NewReceiptPage() {
                                     <td style={{ textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 12 }}>
                                         {row.barcode.trim() ? i + 1 : ''}
                                     </td>
-                                    {mode === 'form' && (
-                                        <td style={{ fontSize: 13, color: n ? 'var(--color-text)' : unknown ? '#ef4444' : 'var(--color-text-muted)' }}>
-                                            {n ? nom.label(n) : (unknown ? '(не найден)' : '—')}
-                                        </td>
-                                    )}
+                                    <td style={{ fontSize: 13, color: n ? 'var(--color-text)' : unknown ? '#ef4444' : 'var(--color-text-muted)' }}>
+                                        {n ? nom.label(n) : (unknown ? '(не найден)' : '\u2014')}
+                                    </td>
                                     <td>
                                         <input
                                             value={row.barcode}
@@ -322,8 +313,8 @@ export default function NewReceiptPage() {
                                     <td>
                                         <input
                                             type="number"
-                                            value={row.expected_qty}
-                                            onChange={e => updateRow(i, 'expected_qty', e.target.value)}
+                                            value={row.quantity}
+                                            onChange={e => updateRow(i, 'quantity', e.target.value)}
                                             placeholder="0"
                                             style={{
                                                 width: '100%', background: 'transparent',
@@ -333,22 +324,6 @@ export default function NewReceiptPage() {
                                             }}
                                         />
                                     </td>
-                                    {mode === 'table' && (
-                                        <td>
-                                            <input
-                                                type="number"
-                                                value={row.actual_qty}
-                                                onChange={e => updateRow(i, 'actual_qty', e.target.value)}
-                                                placeholder="0"
-                                                style={{
-                                                    width: '100%', background: 'transparent',
-                                                    border: 'none', padding: '8px 4px', fontSize: 13,
-                                                    textAlign: 'right', color: 'var(--color-text)',
-                                                    outline: 'none',
-                                                }}
-                                            />
-                                        </td>
-                                    )}
                                     <td>
                                         {row.barcode.trim() && (
                                             <button
@@ -358,7 +333,7 @@ export default function NewReceiptPage() {
                                                     color: 'var(--color-text-muted)', fontSize: 16, padding: '4px 6px',
                                                 }}
                                                 title="Удалить строку"
-                                            >×</button>
+                                            >{'\u00D7'}</button>
                                         )}
                                     </td>
                                 </tr>
@@ -369,7 +344,7 @@ export default function NewReceiptPage() {
             </div>
 
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 8 }}>
-                Вставьте данные из Excel/Google Sheets (Ctrl+V): Баркод &#x21B9; Кол-во или Баркод &#x21B9; Ожид. &#x21B9; Факт
+                Вставьте данные из Excel/Google Sheets (Ctrl+V): Баркод &#x21B9; Кол-во
             </div>
 
             {/* Bottom action bar */}
@@ -378,9 +353,9 @@ export default function NewReceiptPage() {
                 <button
                     className="btn btn-primary"
                     onClick={handleCreate}
-                    disabled={saving || filledRows.length === 0}
+                    disabled={saving || filledRows.length === 0 || !toWarehouseId}
                 >
-                    {saving ? 'Сохранение...' : `Создать приёмку (${filledRows.length} поз.)`}
+                    {saving ? 'Сохранение...' : `Создать перемещение (${filledRows.length} поз.)`}
                 </button>
             </div>
         </div>

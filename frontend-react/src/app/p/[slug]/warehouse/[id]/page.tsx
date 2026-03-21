@@ -71,11 +71,9 @@ export default function WarehouseDetailPage() {
                     <button className="btn btn-primary" onClick={() => router.push(`/p/${slug}/warehouse/${warehouseId}/receipt/new`)}>
                         + Приёмка
                     </button>
-                    {isFulfillment && (
-                        <button className="btn btn-secondary" onClick={() => router.push(`/p/${slug}/warehouse/${warehouseId}/shipment/new`)}>
-                            + Отгрузка
-                        </button>
-                    )}
+                    <button className="btn btn-secondary" onClick={() => router.push(`/p/${slug}/warehouse/${warehouseId}/transfer/new`)}>
+                        + Перемещение
+                    </button>
                 </div>
             </div>
 
