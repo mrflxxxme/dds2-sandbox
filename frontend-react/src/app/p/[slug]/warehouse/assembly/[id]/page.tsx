@@ -4,7 +4,7 @@ import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
-import type { AssemblyRequest, AssemblyStatus, RefreshFromFboResponse } from '@/types/api';
+import type { AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, RefreshFromFboResponse } from '@/types/api';
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -14,6 +14,7 @@ const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> =
     READY:            { label: 'Готово',             className: 'badge-success' },
     VEHICLE_ASSIGNED: { label: 'Машина назначена',   className: 'badge-info' },
     SHIPPED:          { label: 'Отгружена',          className: 'badge-success' },
+    DELIVERED:        { label: 'Принята WB',         className: 'badge-success' },
     CANCELLED:        { label: 'Отменена',           className: 'badge-secondary' },
 };
 
@@ -39,6 +40,9 @@ export default function AssemblyDetailPage() {
     // Refresh from FBO result
     const [refreshResult, setRefreshResult] = useState<RefreshFromFboResponse | null>(null);
 
+    // History
+    const [history, setHistory] = useState<AssemblyHistoryEntry[]>([]);
+
     // ─── Load ─────────────────────────────────────────────────────────────
 
     const load = useCallback(async () => {
@@ -47,6 +51,7 @@ export default function AssemblyDetailPage() {
         try {
             const data = await api.getAssemblyRequest(id);
             setAssembly(data);
+            api.getAssemblyHistory(id).then(setHistory).catch(() => {});
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         }
@@ -224,6 +229,8 @@ export default function AssemblyDetailPage() {
             case 'SHIPPED':
                 // No primary actions for shipped
                 break;
+            case 'DELIVERED':
+                break;
             case 'CANCELLED':
                 break;
         }
@@ -321,25 +328,83 @@ export default function AssemblyDetailPage() {
                             <tr>
                                 <th>ШК</th>
                                 <th>Товар</th>
-                                <th style={{ textAlign: 'right' }}>Кол-во</th>
+                                <th style={{ textAlign: 'right' }}>В поставке</th>
+                                <th style={{ textAlign: 'right' }}>На складе</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {assembly.items.map(item => (
-                                <tr key={item.id}>
-                                    <td>
-                                        <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{item.barcode}</span>
-                                    </td>
-                                    <td style={{ color: 'var(--color-text-muted)' }}>
-                                        ID: {item.nomenclature_id}
-                                    </td>
-                                    <td style={{ textAlign: 'right', fontWeight: 500 }}>{item.quantity}</td>
-                                </tr>
-                            ))}
+                            {assembly.items.map(item => {
+                                const deficit = item.stock_quantity < item.quantity;
+                                return (
+                                    <tr key={item.id}>
+                                        <td>
+                                            <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{item.barcode}</span>
+                                        </td>
+                                        <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            {item.product_name || '\u2014'}
+                                        </td>
+                                        <td style={{ textAlign: 'right', fontWeight: 500 }}>{item.quantity}</td>
+                                        <td style={{ textAlign: 'right', fontWeight: 500, color: deficit ? 'var(--color-danger)' : 'var(--color-success)' }}>
+                                            {item.stock_quantity}
+                                        </td>
+                                    </tr>
+                                );
+                            })}
                         </tbody>
                     </table>
                 )}
             </div>
+
+            {/* History timeline */}
+            {history.length > 0 && (
+                <div className="glass-card" style={{ padding: 24, marginTop: 16 }}>
+                    <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>
+                        История
+                    </h2>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+                        {history.map((entry, idx) => {
+                            const statusInfo = STATUS_MAP[entry.new_status as AssemblyStatus] || { label: entry.new_status, className: '' };
+                            const isLast = idx === history.length - 1;
+                            return (
+                                <div key={entry.id} style={{ display: 'flex', gap: 12, position: 'relative' }}>
+                                    {/* Timeline line */}
+                                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 20 }}>
+                                        <div style={{
+                                            width: 10, height: 10, borderRadius: '50%',
+                                            background: isLast ? 'var(--color-primary)' : 'var(--color-border)',
+                                            flexShrink: 0, marginTop: 6,
+                                        }} />
+                                        {!isLast && (
+                                            <div style={{ width: 2, flex: 1, background: 'var(--color-border)' }} />
+                                        )}
+                                    </div>
+                                    {/* Content */}
+                                    <div style={{ paddingBottom: isLast ? 0 : 16, flex: 1 }}>
+                                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                            <span className={`badge ${statusInfo.className}`} style={{ fontSize: 11 }}>
+                                                {statusInfo.label}
+                                            </span>
+                                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                                {formatDateTime(entry.changed_at)}
+                                            </span>
+                                            {entry.changed_by && (
+                                                <span style={{ fontSize: 11, color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
+                                                    ({entry.changed_by})
+                                                </span>
+                                            )}
+                                        </div>
+                                        {entry.comment && (
+                                            <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                                                {entry.comment}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
 
             {/* ─── Modals ──────────────────────────────────────────────────── */}
 

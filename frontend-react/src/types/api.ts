@@ -876,13 +876,15 @@ export interface FboSyncResult {
 
 // ─── Assembly Requests ────────────────────────────────────────────────────
 
-export type AssemblyStatus = 'PENDING' | 'IN_PROGRESS' | 'READY' | 'VEHICLE_ASSIGNED' | 'SHIPPED' | 'CANCELLED';
+export type AssemblyStatus = 'PENDING' | 'IN_PROGRESS' | 'READY' | 'VEHICLE_ASSIGNED' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED';
 
 export interface AssemblyRequestItem {
   id: number;
   nomenclature_id: number;
   barcode: string;
   quantity: number;
+  product_name?: string;
+  stock_quantity: number;
 }
 
 export interface AssemblyRequest {
@@ -912,6 +914,15 @@ export interface AssemblyRequest {
 export interface AssemblyListResponse {
   items: AssemblyRequest[];
   total: number;
+}
+
+export interface AssemblyHistoryEntry {
+    id: number;
+    old_status: string | null;
+    new_status: string;
+    changed_at: string;
+    changed_by: string | null;
+    comment: string | null;
 }
 
 export interface AssemblyRequestCreate {

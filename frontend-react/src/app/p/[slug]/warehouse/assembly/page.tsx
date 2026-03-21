@@ -14,6 +14,7 @@ const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> =
     READY:            { label: 'Готово',             className: 'badge-success' },
     VEHICLE_ASSIGNED: { label: 'Машина назначена',   className: 'badge-info' },
     SHIPPED:          { label: 'Отгружена',          className: 'badge-success' },
+    DELIVERED:        { label: 'Принята WB',         className: 'badge-success' },
     CANCELLED:        { label: 'Отменена',           className: 'badge-secondary' },
 };
 
@@ -24,6 +25,7 @@ const STATUS_OPTIONS: { value: string; label: string }[] = [
     { value: 'READY', label: 'Готово' },
     { value: 'VEHICLE_ASSIGNED', label: 'Машина назначена' },
     { value: 'SHIPPED', label: 'Отгружена' },
+    { value: 'DELIVERED', label: 'Принята WB' },
     { value: 'CANCELLED', label: 'Отменена' },
 ];
 

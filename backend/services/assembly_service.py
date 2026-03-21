@@ -30,7 +30,9 @@ from backend.models.assembly import (
     AssemblyRequest,
     AssemblyRequestItem,
     AssemblyStatus,
+    AssemblyStatusHistory,
 )
+from backend.models.cost import Nomenclature
 from backend.models.warehouse import (
     MovementType,
     OutboundShipment,
@@ -64,6 +66,26 @@ def _check_transition(current: AssemblyStatus, target: AssemblyStatus) -> None:
         raise ValueError(f"Cannot transition from {current} to {target}. Allowed: {allowed or 'none'}")
 
 
+async def _log_status_change(
+    db: AsyncSession,
+    request_id: int,
+    old_status: str | None,
+    new_status: str,
+    changed_by: str = "user",
+    comment: str | None = None,
+) -> None:
+    """Record a status transition in assembly_status_history."""
+    history = AssemblyStatusHistory(
+        assembly_request_id=request_id,
+        old_status=old_status,
+        new_status=new_status,
+        changed_at=utcnow(),
+        changed_by=changed_by,
+        comment=comment,
+    )
+    db.add(history)
+
+
 async def _validate_stock_for_ship(
     db: AsyncSession,
     project_id: int,
@@ -72,7 +94,7 @@ async def _validate_stock_for_ship(
 ) -> list[dict]:
     """
     Check stock availability for all items before shipping.
-    Returns list of deficits: [{"barcode": ..., "need": ..., "have": ...}]
+    Returns list of deficits with product names for readable error messages.
     Empty list = OK to ship.
     """
     deficits: list[dict] = []
@@ -87,14 +109,58 @@ async def _validate_stock_for_ship(
         stock = result.scalar_one_or_none()
         have = stock.quantity if stock else 0
         if have < item.quantity:
+            # Get product name from nomenclature
+            nom_result = await db.execute(
+                select(Nomenclature).where(
+                    Nomenclature.id == item.nomenclature_id,
+                )
+            )
+            nom = nom_result.scalar_one_or_none()
+            name = (nom.subject or nom.article_seller or item.barcode) if nom else item.barcode
             deficits.append(
                 {
+                    "name": name,
                     "barcode": item.barcode,
                     "need": item.quantity,
                     "have": have,
                 }
             )
     return deficits
+
+
+async def _build_items_with_stock(
+    db: AsyncSession,
+    request: AssemblyRequest,
+) -> list[dict]:
+    """Build items list with product_name and stock_quantity."""
+    items_out: list[dict] = []
+    for item in request.items:
+        # Get nomenclature name
+        nom_result = await db.execute(select(Nomenclature).where(Nomenclature.id == item.nomenclature_id))
+        nom = nom_result.scalar_one_or_none()
+        product_name = (nom.subject or nom.article_seller or item.barcode) if nom else item.barcode
+
+        # Get stock quantity
+        stock_result = await db.execute(
+            select(WarehouseStock.quantity).where(
+                WarehouseStock.project_id == request.project_id,
+                WarehouseStock.warehouse_id == request.warehouse_id,
+                WarehouseStock.nomenclature_id == item.nomenclature_id,
+            )
+        )
+        stock_qty = stock_result.scalar_one_or_none() or 0
+
+        items_out.append(
+            {
+                "id": item.id,
+                "nomenclature_id": item.nomenclature_id,
+                "barcode": item.barcode,
+                "quantity": item.quantity,
+                "product_name": product_name,
+                "stock_quantity": stock_qty,
+            }
+        )
+    return items_out
 
 
 async def _build_response(
@@ -131,15 +197,7 @@ async def _build_response(
         "vehicle_assigned_at": request.vehicle_assigned_at,
         "shipped_at": request.shipped_at,
         "comment": request.comment,
-        "items": [
-            {
-                "id": item.id,
-                "nomenclature_id": item.nomenclature_id,
-                "barcode": item.barcode,
-                "quantity": item.quantity,
-            }
-            for item in request.items
-        ],
+        "items": await _build_items_with_stock(db, request),
         "created_at": request.created_at,
         "updated_at": request.updated_at,
     }
@@ -171,7 +229,11 @@ async def list_assembly_requests(
     if warehouse_id is not None:
         base = base.where(AssemblyRequest.warehouse_id == warehouse_id)
     if status is not None:
-        base = base.where(AssemblyRequest.status == status)
+        statuses = [s.strip() for s in status.split(",")]
+        if len(statuses) == 1:
+            base = base.where(AssemblyRequest.status == statuses[0])
+        else:
+            base = base.where(AssemblyRequest.status.in_(statuses))
     if date_from is not None:
         base = base.where(AssemblyRequest.created_at >= date_from)
     if date_to is not None:
@@ -246,8 +308,8 @@ async def create_assembly_request(
     fbo_supply = fbo_result.scalar_one_or_none()
     if not fbo_supply:
         raise ValueError("FBO supply not found")
-    if fbo_supply.wb_status != "ACTIVE":
-        raise ValueError("FBO supply must be ACTIVE")
+    if fbo_supply.wb_status not in ("ACTIVE", "ON_DELIVERY"):
+        raise ValueError("FBO supply must be ACTIVE or ON_DELIVERY")
 
     # Check no active assembly request for this FBO supply
     existing_result = await db.execute(
@@ -282,6 +344,7 @@ async def create_assembly_request(
     await db.flush()
 
     # 5. Resolve barcodes and create items
+    resolved_items: list[AssemblyRequestItem] = []
     for item_data in payload.items:
         nom = await _resolve_barcode(db, project_id, item_data.barcode)
         item = AssemblyRequestItem(
@@ -291,6 +354,16 @@ async def create_assembly_request(
             quantity=item_data.quantity,
         )
         db.add(item)
+        resolved_items.append(item)
+
+    # 6. Validate stock availability
+    await db.flush()
+    deficits = await _validate_stock_for_ship(db, project_id, payload.warehouse_id, resolved_items)
+    if deficits:
+        lines = [f"  {d['name']} (ШК {d['barcode']}): нужно {d['need']}, на складе {d['have']}" for d in deficits]
+        raise ValueError(f"Недостаточно остатков на складе ({len(deficits)} поз.):\n" + "\n".join(lines))
+
+    await _log_status_change(db, assembly_req.id, None, AssemblyStatus.PENDING, changed_by="user")
 
     await db.commit()
     await db.refresh(assembly_req)
@@ -310,7 +383,7 @@ async def update_assembly_request(
     if not req:
         raise ValueError("Assembly request not found")
 
-    if req.status in (AssemblyStatus.SHIPPED, AssemblyStatus.CANCELLED):
+    if req.status in (AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED, AssemblyStatus.CANCELLED):
         raise ValueError(f"Cannot edit in status {req.status}")
 
     # Update scalar fields (allowed until SHIPPED)
@@ -355,7 +428,9 @@ async def start_assembly(db: AsyncSession, project_id: int, request_id: int) -> 
         raise ValueError("Assembly request not found")
 
     _check_transition(AssemblyStatus(req.status), AssemblyStatus.IN_PROGRESS)
+    old = req.status
     req.status = AssemblyStatus.IN_PROGRESS
+    await _log_status_change(db, req.id, old, AssemblyStatus.IN_PROGRESS)
     await db.commit()
     await db.refresh(req)
     return req
@@ -368,8 +443,10 @@ async def mark_ready(db: AsyncSession, project_id: int, request_id: int) -> Asse
         raise ValueError("Assembly request not found")
 
     _check_transition(AssemblyStatus(req.status), AssemblyStatus.READY)
+    old = req.status
     req.status = AssemblyStatus.READY
     req.actual_ready_date = date.today()
+    await _log_status_change(db, req.id, old, AssemblyStatus.READY)
     await db.commit()
     await db.refresh(req)
     return req
@@ -382,9 +459,11 @@ async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, pay
         raise ValueError("Assembly request not found")
 
     _check_transition(AssemblyStatus(req.status), AssemblyStatus.VEHICLE_ASSIGNED)
+    old = req.status
     req.status = AssemblyStatus.VEHICLE_ASSIGNED
     req.vehicle_info = payload.vehicle_info
     req.vehicle_assigned_at = utcnow()
+    await _log_status_change(db, req.id, old, AssemblyStatus.VEHICLE_ASSIGNED, comment=payload.vehicle_info)
     await db.commit()
     await db.refresh(req)
     return req
@@ -403,8 +482,8 @@ async def ship_request(db: AsyncSession, project_id: int, request_id: int) -> As
     # 1. Validate stock
     deficits = await _validate_stock_for_ship(db, project_id, req.warehouse_id, req.items)
     if deficits:
-        details = "; ".join(f"{d['barcode']}: need {d['need']}, have {d['have']}" for d in deficits)
-        raise ValueError(f"Insufficient stock: {details}")
+        lines = [f"  {d['name']} (ШК {d['barcode']}): нужно {d['need']}, на складе {d['have']}" for d in deficits]
+        raise ValueError(f"Недостаточно остатков на складе ({len(deficits)} поз.):\n" + "\n".join(lines))
 
     # 2. Deduct stock
     for item in req.items:
@@ -458,9 +537,11 @@ async def ship_request(db: AsyncSession, project_id: int, request_id: int) -> As
         fbo_supply.outbound_shipment_id = shipment.id
 
     # 7. Update assembly request
+    old = req.status
     req.outbound_shipment_id = shipment.id
     req.shipped_at = utcnow()
     req.status = AssemblyStatus.SHIPPED
+    await _log_status_change(db, req.id, old, AssemblyStatus.SHIPPED)
 
     await db.commit()
     await db.refresh(req)
@@ -526,6 +607,7 @@ async def cancel_request(db: AsyncSession, project_id: int, request_id: int) -> 
         req.shipped_at = None
 
     req.status = AssemblyStatus.CANCELLED
+    await _log_status_change(db, req.id, current, AssemblyStatus.CANCELLED)
     await db.commit()
     await db.refresh(req)
 
@@ -569,6 +651,49 @@ async def ship_bulk(
     return results
 
 
+# --- Deliver ----------------------------------------------------------------
+
+
+async def deliver_request(
+    db: AsyncSession,
+    project_id: int,
+    request_id: int,
+    changed_by: str = "user",
+    comment: str | None = None,
+) -> AssemblyRequest:
+    """SHIPPED -> DELIVERED."""
+    req = await get_assembly_request(db, project_id, request_id)
+    if not req:
+        raise ValueError("Assembly request not found")
+    _check_transition(AssemblyStatus(req.status), AssemblyStatus.DELIVERED)
+    old = req.status
+    req.status = AssemblyStatus.DELIVERED
+    await _log_status_change(db, req.id, old, AssemblyStatus.DELIVERED, changed_by=changed_by, comment=comment)
+    await db.commit()
+    await db.refresh(req)
+    return req
+
+
+# --- History ----------------------------------------------------------------
+
+
+async def get_assembly_history(
+    db: AsyncSession,
+    project_id: int,
+    request_id: int,
+) -> list[AssemblyStatusHistory]:
+    """Get status change history for an assembly request."""
+    req = await get_assembly_request(db, project_id, request_id)
+    if not req:
+        raise ValueError("Assembly request not found")
+    result = await db.execute(
+        select(AssemblyStatusHistory)
+        .where(AssemblyStatusHistory.assembly_request_id == request_id)
+        .order_by(AssemblyStatusHistory.changed_at.asc())
+    )
+    return result.scalars().all()
+
+
 # --- FBO sync ---------------------------------------------------------------
 
 
@@ -585,7 +710,7 @@ async def refresh_from_fbo(
     if not req:
         raise ValueError("Assembly request not found")
 
-    if req.status in (AssemblyStatus.SHIPPED, AssemblyStatus.CANCELLED):
+    if req.status in (AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED, AssemblyStatus.CANCELLED):
         raise ValueError(f"Cannot refresh in status {req.status}")
 
     # Load FBO supply items

@@ -18,8 +18,7 @@ const STATUS_MAP: Record<string, { label: string; className: string }> = {
 
 const STATUS_OPTIONS = [
     { value: '', label: 'Все статусы' },
-    { value: 'ACTIVE', label: 'Запланирована' },
-    { value: 'ON_DELIVERY', label: 'Запланирована (в пути)' },
+    { value: 'ACTIVE,ON_DELIVERY', label: 'Запланирована' },
     { value: 'IN_PROGRESS', label: 'Разгрузка разрешена' },
     { value: 'ACCEPTED', label: 'Принята' },
     { value: 'CANCELLED', label: 'Отменена' },

@@ -23,6 +23,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
 from backend.models.mixins import SoftDeleteMixin, TimestampMixin
+from backend.utils.time import utcnow
 
 # ─── Enums ──────────────────────────────────────────────────────────────────
 
@@ -35,6 +36,7 @@ class AssemblyStatus(enum.StrEnum):
     READY = "READY"
     VEHICLE_ASSIGNED = "VEHICLE_ASSIGNED"
     SHIPPED = "SHIPPED"
+    DELIVERED = "DELIVERED"  # WB accepted the supply (auto from FBO sync)
     CANCELLED = "CANCELLED"
 
 
@@ -44,7 +46,8 @@ ASSEMBLY_TRANSITIONS: dict[AssemblyStatus, set[AssemblyStatus]] = {
     AssemblyStatus.IN_PROGRESS: {AssemblyStatus.READY, AssemblyStatus.CANCELLED},
     AssemblyStatus.READY: {AssemblyStatus.VEHICLE_ASSIGNED, AssemblyStatus.CANCELLED},
     AssemblyStatus.VEHICLE_ASSIGNED: {AssemblyStatus.SHIPPED, AssemblyStatus.CANCELLED},
-    AssemblyStatus.SHIPPED: {AssemblyStatus.READY, AssemblyStatus.CANCELLED},  # rollback
+    AssemblyStatus.SHIPPED: {AssemblyStatus.DELIVERED, AssemblyStatus.READY, AssemblyStatus.CANCELLED},
+    AssemblyStatus.DELIVERED: set(),  # final status
     AssemblyStatus.CANCELLED: set(),
 }
 
@@ -140,3 +143,24 @@ class AssemblyRequestItem(Base):
     assembly_request: Mapped["AssemblyRequest"] = relationship(back_populates="items")
 
     __table_args__ = (Index("ix_assembly_request_items_request_id", "assembly_request_id"),)
+
+
+# ─── Assembly Status History ─────────────────────────────────────────────────
+
+
+class AssemblyStatusHistory(Base):
+    """Audit log for assembly request status changes."""
+
+    __tablename__ = "assembly_status_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    assembly_request_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("assembly_requests.id", ondelete="CASCADE"), nullable=False
+    )
+    old_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    new_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    changed_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (Index("ix_assembly_status_history_request_id", "assembly_request_id"),)

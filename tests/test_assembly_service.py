@@ -558,18 +558,30 @@ class TestInsufficientStock:
         wh_id = await _get_fulfillment_wh_id(db_session)
         fbo_id = await _get_fbo_supply_id(db_session)
 
-        # Create request with quantity > available stock (100)
+        # Create with valid quantity (stock=100 is enough)
         payload = AssemblyRequestCreate(
             warehouse_id=wh_id,
             wb_fbo_supply_id=fbo_id,
             pallets_count=1,
             pallet_weight_kg=Decimal("100.00"),
-            items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=999)],
+            items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=50)],
         )
         req = await create_assembly_request(db_session, PROJECT_ID, payload)
         await start_assembly(db_session, PROJECT_ID, req.id)
         await mark_ready(db_session, PROJECT_ID, req.id)
         await assign_vehicle(db_session, PROJECT_ID, req.id, AssignVehicle(vehicle_info="Truck Z"))
 
-        with pytest.raises(ValueError, match="Insufficient stock"):
+        # Now reduce stock to 0 so ship fails
+        from sqlalchemy import update
+
+        from backend.models.warehouse import WarehouseStock
+
+        await db_session.execute(
+            update(WarehouseStock)
+            .where(WarehouseStock.project_id == PROJECT_ID, WarehouseStock.warehouse_id == wh_id)
+            .values(quantity=0)
+        )
+        await db_session.flush()
+
+        with pytest.raises(ValueError, match="Недостаточно остатков"):
             await ship_request(db_session, PROJECT_ID, req.id)

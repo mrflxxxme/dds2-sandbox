@@ -11,6 +11,7 @@ from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.assembly import (
+    AssemblyHistoryResponse,
     AssemblyListResponse,
     AssemblyRequestCreate,
     AssemblyRequestResponse,
@@ -219,6 +220,23 @@ async def ship_bulk(
             resp = await assembly_service._build_response(db, req)
             response.append(AssemblyRequestResponse.model_validate(resp))
         return response
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+# --- History ----------------------------------------------------------------
+
+
+@router.get("/{request_id}/history", response_model=list[AssemblyHistoryResponse])
+async def get_assembly_history(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get status change history for an assembly request."""
+    try:
+        history = await assembly_service.get_assembly_history(db, project.id, request_id)
+        return [AssemblyHistoryResponse.model_validate(h) for h in history]
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
 

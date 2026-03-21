@@ -57,6 +57,8 @@ class AssemblyItemResponse(BaseModel):
     nomenclature_id: int
     barcode: str
     quantity: int
+    product_name: str | None = None
+    stock_quantity: int = 0
 
 
 class AssemblyRequestResponse(BaseModel):
@@ -95,6 +97,17 @@ class RefreshFromFboResponse(BaseModel):
     removed: int
     changed: int
     items: list[AssemblyItemResponse]
+
+
+class AssemblyHistoryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    old_status: str | None
+    new_status: str
+    changed_at: datetime
+    changed_by: str | None
+    comment: str | None
 
 
 class StockDeficit(BaseModel):

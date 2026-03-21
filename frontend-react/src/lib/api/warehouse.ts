@@ -1,6 +1,7 @@
 /** Warehouse API methods */
 import { ApiClient } from './client';
 import type {
+    AssemblyHistoryEntry,
     AssemblyListResponse,
     AssemblyRequest,
     AssemblyRequestCreate,
@@ -150,6 +151,9 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         refreshFromFbo(id: number) {
             return api.request<RefreshFromFboResponse>('POST', `/api/v1/warehouse/assembly/${id}/refresh-from-fbo`);
+        },
+        getAssemblyHistory(id: number) {
+            return api.request<AssemblyHistoryEntry[]>('GET', `/api/v1/warehouse/assembly/${id}/history`);
         },
     };
 }

@@ -14,6 +14,7 @@ const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> =
     READY:            { label: 'Готово',             className: 'badge-success' },
     VEHICLE_ASSIGNED: { label: 'Машина назначена',   className: 'badge-info' },
     SHIPPED:          { label: 'Отгружена',          className: 'badge-success' },
+    DELIVERED:        { label: 'Принята WB',         className: 'badge-success' },
     CANCELLED:        { label: 'Отменена',           className: 'badge-secondary' },
 };
 
@@ -28,6 +29,13 @@ export default function LogisticsPage() {
     const [items, setItems] = useState<AssemblyRequest[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+
+    // Tab
+    const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
+    // History tab
+    const [historyItems, setHistoryItems] = useState<AssemblyRequest[]>([]);
+    const [historyTotal, setHistoryTotal] = useState(0);
+    const [historyLoading, setHistoryLoading] = useState(false);
 
     // Filters
     const [groupBy, setGroupBy] = useState<GroupBy>('wb_warehouse');
@@ -78,6 +86,24 @@ export default function LogisticsPage() {
     }, [showSoonReady]);
 
     useEffect(() => { load(); }, [load]);
+
+    // ─── Load history ───────────────────────────────────────────────────────
+
+    const loadHistory = useCallback(async () => {
+        setHistoryLoading(true);
+        try {
+            const resp = await api.getAssemblyRequests({
+                status: 'SHIPPED,DELIVERED',
+                limit: 50,
+                offset: 0,
+            });
+            setHistoryItems(resp.items);
+            setHistoryTotal(resp.total);
+        } catch { /* ignore */ }
+        setHistoryLoading(false);
+    }, []);
+
+    useEffect(() => { if (activeTab === 'history') loadHistory(); }, [activeTab, loadHistory]);
 
     // ─── Grouping ─────────────────────────────────────────────────────────
 
@@ -161,49 +187,27 @@ export default function LogisticsPage() {
                 </button>
             </div>
 
-            {/* Filters */}
-            <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
-                <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <div className="form-group" style={{ margin: 0 }}>
-                        <select
-                            className="form-input"
-                            value={groupBy}
-                            onChange={e => setGroupBy(e.target.value as GroupBy)}
-                        >
-                            <option value="wb_warehouse">По складу сдачи WB</option>
-                            <option value="warehouse">По складу забора</option>
-                        </select>
-                    </div>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 14 }}>
-                        <input
-                            type="checkbox"
-                            checked={showSoonReady}
-                            onChange={e => setShowSoonReady(e.target.checked)}
-                        />
-                        Показывать скоро готовые
-                    </label>
-                </div>
-            </div>
-
-            {/* Summary */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
-                <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                    <div style={{ fontSize: 24, fontWeight: 600 }}>{totalRequests}</div>
-                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Заявок</div>
-                </div>
-                <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                    <div style={{ fontSize: 24, fontWeight: 600 }}>{totalPallets}</div>
-                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Палет</div>
-                </div>
-                <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                    <div style={{ fontSize: 24, fontWeight: 600 }}>{totalWeight > 0 ? formatNumber(totalWeight, 0) : '0'}</div>
-                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Общий вес (кг)</div>
-                </div>
+            {/* Tab switcher */}
+            <div style={{ display: 'flex', gap: 0, marginBottom: 16 }}>
+                <button
+                    className={`btn ${activeTab === 'active' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setActiveTab('active')}
+                    style={{ borderRadius: '8px 0 0 8px' }}
+                >
+                    Активные
+                </button>
+                <button
+                    className={`btn ${activeTab === 'history' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setActiveTab('history')}
+                    style={{ borderRadius: '0 8px 8px 0' }}
+                >
+                    История отправок
+                </button>
             </div>
 
             {/* Error */}
             {error && (
-                <div className="glass-card" style={{ padding: 16, marginBottom: 16, color: 'var(--color-danger)' }}>
+                <div className="glass-card" style={{ padding: 16, marginBottom: 16, color: 'var(--color-danger)', whiteSpace: 'pre-line' }}>
                     {error}
                     <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={() => setError('')}>
                         Закрыть
@@ -211,125 +215,231 @@ export default function LogisticsPage() {
                 </div>
             )}
 
-            {/* Content */}
-            {loading ? (
-                <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>
-            ) : items.length === 0 ? (
-                <div className="glass-card" style={{ padding: 64, textAlign: 'center' }}>
-                    <div style={{ fontSize: 48, marginBottom: 16 }}>🚛</div>
-                    <div style={{ fontSize: 16, fontWeight: 500, marginBottom: 8 }}>Нет заявок для логистики</div>
-                    <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
-                        Здесь появятся заявки в статусе &laquo;Готово&raquo; и &laquo;Машина назначена&raquo;
+            {activeTab === 'active' ? (
+                <>
+                    {/* Filters */}
+                    <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
+                        <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+                            <div className="form-group" style={{ margin: 0 }}>
+                                <select
+                                    className="form-input"
+                                    value={groupBy}
+                                    onChange={e => setGroupBy(e.target.value as GroupBy)}
+                                >
+                                    <option value="wb_warehouse">По складу сдачи WB</option>
+                                    <option value="warehouse">По складу забора</option>
+                                </select>
+                            </div>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 14 }}>
+                                <input
+                                    type="checkbox"
+                                    checked={showSoonReady}
+                                    onChange={e => setShowSoonReady(e.target.checked)}
+                                />
+                                Показывать скоро готовые
+                            </label>
+                        </div>
                     </div>
-                </div>
-            ) : (
-                <div>
-                    {grouped.map(group => (
-                        <div key={group.key} style={{ marginBottom: 24 }}>
-                            <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12, padding: '0 4px' }}>
-                                {group.label || 'Без склада'}
-                                <span style={{ fontWeight: 400, color: 'var(--color-text-muted)', marginLeft: 8, fontSize: 14 }}>
-                                    ({group.items.length} заявок, {group.items.reduce((s, i) => s + i.pallets_count, 0)} палет)
-                                </span>
-                            </h2>
 
-                            {group.subGroups.map(sub => (
-                                <div key={sub.key} style={{ marginBottom: 16 }}>
-                                    <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 8, padding: '0 4px', color: 'var(--color-text-muted)' }}>
-                                        {sub.label || 'Без склада'}
-                                    </div>
+                    {/* Summary */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
+                        <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                            <div style={{ fontSize: 24, fontWeight: 600 }}>{totalRequests}</div>
+                            <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Заявок</div>
+                        </div>
+                        <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                            <div style={{ fontSize: 24, fontWeight: 600 }}>{totalPallets}</div>
+                            <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Палет</div>
+                        </div>
+                        <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                            <div style={{ fontSize: 24, fontWeight: 600 }}>{totalWeight > 0 ? formatNumber(totalWeight, 0) : '0'}</div>
+                            <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Общий вес (кг)</div>
+                        </div>
+                    </div>
 
-                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
-                                        {sub.items.map(item => {
-                                            const soon = isSoonReady(item);
-                                            const statusCfg = STATUS_MAP[item.status] || { label: item.status, className: '' };
+                    {/* Content */}
+                    {loading ? (
+                        <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>
+                    ) : items.length === 0 ? (
+                        <div className="glass-card" style={{ padding: 64, textAlign: 'center' }}>
+                            <div style={{ fontSize: 48, marginBottom: 16 }}>🚛</div>
+                            <div style={{ fontSize: 16, fontWeight: 500, marginBottom: 8 }}>Нет заявок для логистики</div>
+                            <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
+                                Здесь появятся заявки в статусе &laquo;Готово&raquo; и &laquo;Машина назначена&raquo;
+                            </div>
+                        </div>
+                    ) : (
+                        <div>
+                            {grouped.map(group => (
+                                <div key={group.key} style={{ marginBottom: 24 }}>
+                                    <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12, padding: '0 4px' }}>
+                                        {group.label || 'Без склада'}
+                                        <span style={{ fontWeight: 400, color: 'var(--color-text-muted)', marginLeft: 8, fontSize: 14 }}>
+                                            ({group.items.length} заявок, {group.items.reduce((s, i) => s + i.pallets_count, 0)} палет)
+                                        </span>
+                                    </h2>
 
-                                            return (
-                                                <div
-                                                    key={item.id}
-                                                    className="glass-card"
-                                                    style={{
-                                                        padding: 16,
-                                                        opacity: soon ? 0.5 : 1,
-                                                    }}
-                                                >
-                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                                                        <Link
-                                                            href={`/p/${slug}/warehouse/assembly/${item.id}`}
-                                                            style={{ fontWeight: 600, textDecoration: 'none', color: 'var(--color-text)' }}
+                                    {group.subGroups.map(sub => (
+                                        <div key={sub.key} style={{ marginBottom: 16 }}>
+                                            <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 8, padding: '0 4px', color: 'var(--color-text-muted)' }}>
+                                                {sub.label || 'Без склада'}
+                                            </div>
+
+                                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
+                                                {sub.items.map(item => {
+                                                    const soon = isSoonReady(item);
+                                                    const statusCfg = STATUS_MAP[item.status] || { label: item.status, className: '' };
+
+                                                    return (
+                                                        <div
+                                                            key={item.id}
+                                                            className="glass-card"
+                                                            style={{
+                                                                padding: 16,
+                                                                opacity: soon ? 0.5 : 1,
+                                                            }}
                                                         >
-                                                            {item.number}
-                                                        </Link>
-                                                        <span className={`badge ${statusCfg.className}`}>
-                                                            {soon && item.estimated_ready_date
-                                                                ? formatDate(item.estimated_ready_date)
-                                                                : statusCfg.label}
-                                                        </span>
-                                                    </div>
-
-                                                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
-                                                        <div>Палет: {item.pallets_count} &middot; Вес: {item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014'}</div>
-                                                        <div>Позиций: {item.items?.length || 0}</div>
-                                                        {item.wb_warehouse_name && (
-                                                            <div>WB: {item.wb_warehouse_name}</div>
-                                                        )}
-                                                    </div>
-
-                                                    {!soon && (
-                                                        <div style={{ display: 'flex', gap: 8 }}>
-                                                            {item.status === 'READY' && (
-                                                                <button
-                                                                    className="btn btn-primary btn-sm"
-                                                                    onClick={() => openVehicleModal([item.id])}
-                                                                    disabled={actionLoading}
+                                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                                                                <Link
+                                                                    href={`/p/${slug}/warehouse/assembly/${item.id}`}
+                                                                    style={{ fontWeight: 600, textDecoration: 'none', color: 'var(--color-text)' }}
                                                                 >
-                                                                    Назначить машину
-                                                                </button>
-                                                            )}
-                                                            {item.status === 'VEHICLE_ASSIGNED' && (
-                                                                <>
-                                                                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', flex: 1 }}>
-                                                                        {item.vehicle_info}
-                                                                    </div>
-                                                                    <button
-                                                                        className="btn btn-primary btn-sm"
-                                                                        onClick={() => handleShip(item.id)}
-                                                                        disabled={actionLoading}
-                                                                    >
-                                                                        Отгрузить
-                                                                    </button>
-                                                                </>
+                                                                    {item.number}
+                                                                </Link>
+                                                                <span className={`badge ${statusCfg.className}`}>
+                                                                    {soon && item.estimated_ready_date
+                                                                        ? formatDate(item.estimated_ready_date)
+                                                                        : statusCfg.label}
+                                                                </span>
+                                                            </div>
+
+                                                            <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                                                                <div>Палет: {item.pallets_count} &middot; Вес: {item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014'}</div>
+                                                                <div>Позиций: {item.items?.length || 0}</div>
+                                                                {item.wb_warehouse_name && (
+                                                                    <div>WB: {item.wb_warehouse_name}</div>
+                                                                )}
+                                                            </div>
+
+                                                            {!soon && (
+                                                                <div style={{ display: 'flex', gap: 8 }}>
+                                                                    {item.status === 'READY' && (
+                                                                        <button
+                                                                            className="btn btn-primary btn-sm"
+                                                                            onClick={() => openVehicleModal([item.id])}
+                                                                            disabled={actionLoading}
+                                                                        >
+                                                                            Назначить машину
+                                                                        </button>
+                                                                    )}
+                                                                    {item.status === 'VEHICLE_ASSIGNED' && (
+                                                                        <>
+                                                                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', flex: 1 }}>
+                                                                                {item.vehicle_info}
+                                                                            </div>
+                                                                            <button
+                                                                                className="btn btn-primary btn-sm"
+                                                                                onClick={() => handleShip(item.id)}
+                                                                                disabled={actionLoading}
+                                                                            >
+                                                                                Отгрузить
+                                                                            </button>
+                                                                        </>
+                                                                    )}
+                                                                </div>
                                                             )}
                                                         </div>
-                                                    )}
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
+                                                    );
+                                                })}
+                                            </div>
 
-                                    {/* Bulk assign for READY items in this sub-group */}
-                                    {(() => {
-                                        const readyIds = sub.items.filter(i => i.status === 'READY').map(i => i.id);
-                                        if (readyIds.length > 1) {
-                                            return (
-                                                <div style={{ marginTop: 8, padding: '0 4px' }}>
-                                                    <button
-                                                        className="btn btn-secondary btn-sm"
-                                                        onClick={() => openVehicleModal(readyIds)}
-                                                        disabled={actionLoading}
-                                                    >
-                                                        Назначить машину для всех ({readyIds.length})
-                                                    </button>
-                                                </div>
-                                            );
-                                        }
-                                        return null;
-                                    })()}
+                                            {/* Bulk assign for READY items in this sub-group */}
+                                            {(() => {
+                                                const readyIds = sub.items.filter(i => i.status === 'READY').map(i => i.id);
+                                                if (readyIds.length > 1) {
+                                                    return (
+                                                        <div style={{ marginTop: 8, padding: '0 4px' }}>
+                                                            <button
+                                                                className="btn btn-secondary btn-sm"
+                                                                onClick={() => openVehicleModal(readyIds)}
+                                                                disabled={actionLoading}
+                                                            >
+                                                                Назначить машину для всех ({readyIds.length})
+                                                            </button>
+                                                        </div>
+                                                    );
+                                                }
+                                                return null;
+                                            })()}
+                                        </div>
+                                    ))}
                                 </div>
                             ))}
                         </div>
-                    ))}
-                </div>
+                    )}
+                </>
+            ) : (
+                /* History tab */
+                historyLoading ? (
+                    <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>
+                ) : historyItems.length === 0 ? (
+                    <div className="glass-card" style={{ padding: 64, textAlign: 'center' }}>
+                        <div style={{ fontSize: 16, fontWeight: 500, marginBottom: 8 }}>Нет отправок</div>
+                        <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
+                            Здесь появятся отгруженные и принятые WB заявки
+                        </div>
+                    </div>
+                ) : (
+                    <div className="glass-card" style={{ overflow: 'auto' }}>
+                        <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--color-border)', fontSize: 13, color: 'var(--color-text-muted)' }}>
+                            Всего: {historyTotal}
+                        </div>
+                        <table className="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Статус</th>
+                                    <th>№</th>
+                                    <th>Склад забора</th>
+                                    <th>Склад сдачи</th>
+                                    <th>Дата отгрузки</th>
+                                    <th style={{ textAlign: 'right' }}>Палеты</th>
+                                    <th style={{ textAlign: 'right' }}>Вес</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {historyItems.map(item => {
+                                    const statusCfg = STATUS_MAP[item.status] || { label: item.status, className: '' };
+                                    return (
+                                        <tr key={item.id}>
+                                            <td>
+                                                <span className={`badge ${statusCfg.className}`}>{statusCfg.label}</span>
+                                            </td>
+                                            <td>
+                                                <Link
+                                                    href={`/p/${slug}/warehouse/assembly/${item.id}`}
+                                                    style={{ fontWeight: 500, textDecoration: 'none', color: 'var(--color-text)' }}
+                                                >
+                                                    {item.number}
+                                                </Link>
+                                            </td>
+                                            <td style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+                                                {item.warehouse_name || '\u2014'}
+                                            </td>
+                                            <td style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+                                                {item.wb_warehouse_name || '\u2014'}
+                                            </td>
+                                            <td>{formatDate(item.shipped_at)}</td>
+                                            <td style={{ textAlign: 'right' }}>{item.pallets_count}</td>
+                                            <td style={{ textAlign: 'right' }}>
+                                                {item.total_weight_kg ? formatNumber(item.total_weight_kg, 1) + ' кг' : '\u2014'}
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                )
             )}
 
             {/* Vehicle modal */}

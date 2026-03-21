@@ -4,7 +4,7 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
-import type { Warehouse, WbFboSupply, WbFboSupplyItem } from '@/types/api';
+import type { Warehouse, WarehouseStockRow, WbFboSupply, WbFboSupplyItem } from '@/types/api';
 
 interface FormItem {
     barcode: string;
@@ -40,6 +40,9 @@ export default function AssemblyNewPage() {
     const [submitting, setSubmitting] = useState(false);
     const [loadingFboItems, setLoadingFboItems] = useState(false);
 
+    // Stock data by barcode
+    const [stockMap, setStockMap] = useState<Map<string, number>>(new Map());
+
     // ─── Load reference data ──────────────────────────────────────────────
 
     useEffect(() => {
@@ -52,7 +55,7 @@ export default function AssemblyNewPage() {
         setLoading(true);
         try {
             const resp = await api.getFboSupplies({
-                status: 'ACTIVE',
+                status: 'ACTIVE,ON_DELIVERY',
                 search: fboSearchInput || undefined,
                 limit: 100,
             });
@@ -64,6 +67,23 @@ export default function AssemblyNewPage() {
     }, [fboSearchInput]);
 
     useEffect(() => { loadFboSupplies(); }, [loadFboSupplies]);
+
+    // Load stock when warehouse changes
+    useEffect(() => {
+        if (!warehouseId) {
+            setStockMap(new Map());
+            return;
+        }
+        api.getWarehouseStock(Number(warehouseId))
+            .then((rows: WarehouseStockRow[]) => {
+                const map = new Map<string, number>();
+                for (const row of rows) {
+                    map.set(row.barcode, (map.get(row.barcode) || 0) + row.quantity);
+                }
+                setStockMap(map);
+            })
+            .catch(() => setStockMap(new Map()));
+    }, [warehouseId]);
 
     // ─── Pre-select FBO supply from URL ───────────────────────────────────
 
@@ -174,7 +194,7 @@ export default function AssemblyNewPage() {
 
             {/* Error */}
             {error && (
-                <div className="glass-card" style={{ padding: 16, marginBottom: 16, color: 'var(--color-danger)' }}>
+                <div className="glass-card" style={{ padding: 16, marginBottom: 16, color: 'var(--color-danger)', whiteSpace: 'pre-line' }}>
                     {error}
                     <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={() => setError('')}>
                         Закрыть
@@ -299,48 +319,56 @@ export default function AssemblyNewPage() {
                                 <th style={{ width: 40 }}>#</th>
                                 <th>Товар</th>
                                 <th style={{ width: 200 }}>ШК</th>
-                                <th style={{ width: 120, textAlign: 'right' }}>Количество</th>
+                                <th style={{ width: 100, textAlign: 'right' }}>В поставке</th>
+                                <th style={{ width: 100, textAlign: 'right' }}>На складе</th>
                                 <th style={{ width: 40 }}></th>
                             </tr>
                         </thead>
                         <tbody>
-                            {formItems.map((item, idx) => (
-                                <tr key={idx}>
-                                    <td style={{ color: 'var(--color-text-muted)' }}>{idx + 1}</td>
-                                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                                        {item.product_name || '\u2014'}
-                                    </td>
-                                    <td>
-                                        <input
-                                            className="form-input"
-                                            value={item.barcode}
-                                            onChange={e => updateItem(idx, 'barcode', e.target.value)}
-                                            placeholder="Штрихкод"
-                                            style={{ fontSize: 13, fontFamily: 'monospace' }}
-                                        />
-                                    </td>
-                                    <td>
-                                        <input
-                                            className="form-input"
-                                            type="number"
-                                            min={1}
-                                            value={item.quantity}
-                                            onChange={e => updateItem(idx, 'quantity', Number(e.target.value) || 0)}
-                                            style={{ fontSize: 13, textAlign: 'right' }}
-                                        />
-                                    </td>
-                                    <td>
-                                        <button
-                                            className="btn btn-secondary btn-sm"
-                                            onClick={() => removeItem(idx)}
-                                            title="Удалить"
-                                            style={{ padding: '4px 8px' }}
-                                        >
-                                            &times;
-                                        </button>
-                                    </td>
-                                </tr>
-                            ))}
+                            {formItems.map((item, idx) => {
+                                const stockQty = stockMap.get(item.barcode) || 0;
+                                const deficit = item.barcode && stockQty < item.quantity;
+                                return (
+                                    <tr key={idx}>
+                                        <td style={{ color: 'var(--color-text-muted)' }}>{idx + 1}</td>
+                                        <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                            {item.product_name || '\u2014'}
+                                        </td>
+                                        <td>
+                                            <input
+                                                className="form-input"
+                                                value={item.barcode}
+                                                onChange={e => updateItem(idx, 'barcode', e.target.value)}
+                                                placeholder="Штрихкод"
+                                                style={{ fontSize: 13, fontFamily: 'monospace' }}
+                                            />
+                                        </td>
+                                        <td>
+                                            <input
+                                                className="form-input"
+                                                type="number"
+                                                min={1}
+                                                value={item.quantity}
+                                                onChange={e => updateItem(idx, 'quantity', Number(e.target.value) || 0)}
+                                                style={{ fontSize: 13, textAlign: 'right' }}
+                                            />
+                                        </td>
+                                        <td style={{ textAlign: 'right', fontWeight: 500, color: deficit ? 'var(--color-danger)' : warehouseId ? 'var(--color-success)' : 'var(--color-text-muted)' }}>
+                                            {warehouseId ? stockQty : '\u2014'}
+                                        </td>
+                                        <td>
+                                            <button
+                                                className="btn btn-secondary btn-sm"
+                                                onClick={() => removeItem(idx)}
+                                                title="Удалить"
+                                                style={{ padding: '4px 8px' }}
+                                            >
+                                                &times;
+                                            </button>
+                                        </td>
+                                    </tr>
+                                );
+                            })}
                         </tbody>
                     </table>
                 )}

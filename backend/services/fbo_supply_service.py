@@ -160,6 +160,7 @@ async def sync_fbo_supplies(
         for _wb_supply_id, supply in existing_map.items():
             if supply.wb_status == WbSupplyStatus.ACCEPTED and supply.outbound_shipment_id:
                 await _auto_deliver_shipment(db, project_id, supply.outbound_shipment_id)
+                await _auto_deliver_assembly(db, project_id, supply.id)
 
         await db.commit()
 
@@ -343,6 +344,7 @@ async def sync_fbo_statuses(
                     and supply.outbound_shipment_id
                 ):
                     await _auto_deliver_shipment(db, project_id, supply.outbound_shipment_id)
+                    await _auto_deliver_assembly(db, project_id, supply.id)
 
             except Exception as e:
                 logger.warning(
@@ -424,9 +426,13 @@ async def list_fbo_supplies(
             )
         )
 
-    # Filter by status
+    # Filter by status (comma-separated for multi-status filter)
     if status:
-        base_query = base_query.where(WbFboSupply.wb_status == status)
+        statuses = [s.strip() for s in status.split(",")]
+        if len(statuses) == 1:
+            base_query = base_query.where(WbFboSupply.wb_status == statuses[0])
+        else:
+            base_query = base_query.where(WbFboSupply.wb_status.in_(statuses))
 
     # Filter by warehouse
     if warehouse:
@@ -749,4 +755,39 @@ async def _auto_deliver_shipment(
                 "shipment_id": shipment_id,
                 "project_id": project_id,
             },
+        )
+
+
+async def _auto_deliver_assembly(
+    db: AsyncSession,
+    project_id: int,
+    fbo_supply_id: int,
+) -> None:
+    """Auto-deliver AssemblyRequest when linked FBO supply is ACCEPTED."""
+    from backend.models.assembly import AssemblyRequest, AssemblyStatus, AssemblyStatusHistory
+    from backend.utils.time import utcnow as _utcnow
+
+    result = await db.execute(
+        select(AssemblyRequest).where(
+            AssemblyRequest.wb_fbo_supply_id == fbo_supply_id,
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted == False,  # noqa: E712
+            AssemblyRequest.status == AssemblyStatus.SHIPPED,
+        )
+    )
+    assembly_req = result.scalar_one_or_none()
+    if assembly_req:
+        assembly_req.status = AssemblyStatus.DELIVERED
+        history = AssemblyStatusHistory(
+            assembly_request_id=assembly_req.id,
+            old_status=AssemblyStatus.SHIPPED,
+            new_status=AssemblyStatus.DELIVERED,
+            changed_at=_utcnow(),
+            changed_by="system",
+            comment="WB FBO ACCEPTED",
+        )
+        db.add(history)
+        logger.info(
+            "fbo_sync.auto_deliver_assembly",
+            extra={"assembly_id": assembly_req.id, "project_id": project_id},
         )
