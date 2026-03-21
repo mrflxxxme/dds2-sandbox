@@ -109,6 +109,42 @@ from backend.schemas.transactions import (
     UnassignedGroupRow,
 )
 
+# Warehouse
+from backend.schemas.warehouse import (
+    CostPriceUpdate,
+    InboundReceiptCreate,
+    InboundReceiptItemCreate,
+    InboundReceiptItemSchema,
+    InboundReceiptSchema,
+    InboundReceiptUpdate,
+    OutboundShipmentCreate,
+    OutboundShipmentItemCreate,
+    OutboundShipmentItemSchema,
+    OutboundShipmentSchema,
+    StockAdjustmentCreate,
+    StockAdjustmentSchema,
+    StockMovementSchema,
+    StockTransferCreate,
+    StockTransferItemCreate,
+    StockTransferItemSchema,
+    StockTransferSchema,
+    WarehouseCreate,
+    WarehouseReorder,
+    WarehouseSchema,
+    WarehouseStockSchema,
+    WarehouseUpdate,
+)
+
+# WB FBO Supplies
+from backend.schemas.wb_fbo import (
+    FboSupplyLinkRequest,
+    FboSyncResultSchema,
+    WbFboSupplyItemSchema,
+    WbFboSupplyListResponse,
+    WbFboSupplySchema,
+    WbFboSupplyWithItemsSchema,
+)
+
 __all__ = [
     # Common
     "MessageResponse",
@@ -181,4 +217,34 @@ __all__ = [
     # WB Tariffs
     "WbTariffSchema",
     "WbTariffUploadResult",
+    # Warehouse
+    "WarehouseCreate",
+    "WarehouseUpdate",
+    "WarehouseSchema",
+    "WarehouseReorder",
+    "InboundReceiptCreate",
+    "InboundReceiptUpdate",
+    "InboundReceiptSchema",
+    "InboundReceiptItemCreate",
+    "InboundReceiptItemSchema",
+    "OutboundShipmentCreate",
+    "OutboundShipmentSchema",
+    "OutboundShipmentItemCreate",
+    "OutboundShipmentItemSchema",
+    "StockTransferCreate",
+    "StockTransferSchema",
+    "StockTransferItemCreate",
+    "StockTransferItemSchema",
+    "StockMovementSchema",
+    "WarehouseStockSchema",
+    "CostPriceUpdate",
+    "StockAdjustmentCreate",
+    "StockAdjustmentSchema",
+    # WB FBO Supplies
+    "WbFboSupplySchema",
+    "WbFboSupplyWithItemsSchema",
+    "WbFboSupplyItemSchema",
+    "WbFboSupplyListResponse",
+    "FboSupplyLinkRequest",
+    "FboSyncResultSchema",
 ]

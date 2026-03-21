@@ -1,11 +1,13 @@
 """
-Wildberries Statistics API client.
+Wildberries API client.
 Docs: https://openapi.wildberries.ru/
 
 Supported endpoints:
 - /api/v1/supplier/sales — продажи
 - /api/v1/supplier/orders — заказы FBS
 - /api/v5/supplier/reportDetailByPeriod — финансовый отчёт (детализация выплат)
+- /api/v3/supplies — FBO поставки (Marketplace API)
+- /api/v3/supplies/{id}/orders — позиции FBO поставки
 
 Resilience:
 - Circuit breaker: stops calling WB API after 5 consecutive failures (60s cooldown)
@@ -31,6 +33,7 @@ logger = structlog.get_logger("dds.wb_api")
 WB_API_BASE = "https://statistics-api.wildberries.ru"
 WB_API_BASE_V2 = "https://common-api.wildberries.ru"
 WB_CONTENT_API_BASE = "https://content-api.wildberries.ru"
+WB_MARKETPLACE_API_BASE = "https://marketplace-api.wildberries.ru"
 
 # Request timeout in seconds
 TIMEOUT = 30
@@ -137,6 +140,96 @@ class WBApiClient:
             "/api/v5/supplier/reportDetailByPeriod",
             params,
         )
+
+    # ─── FBO Supplies (Marketplace API) ─────────────────────────────────────
+
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def get_fbo_supplies(self, next: int = 0, limit: int = 1000) -> dict:
+        """
+        Fetch FBO supplies list.
+        WB Marketplace API: GET /api/v3/supplies
+
+        Returns: {next: int, supplies: [dict]}
+        """
+        async with _wb_circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                params = {"limit": limit}
+                if next:
+                    params["next"] = next
+                url = f"{WB_MARKETPLACE_API_BASE}/api/v3/supplies"
+                logger.info("wb_api.request", method="GET", path="/api/v3/supplies", params=params)
+                response = await client.get(url, headers=self.headers, params=params)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401)")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Marketplace API server error: HTTP {response.status_code}")
+                if response.status_code != 200:
+                    raise ValueError(f"WB Marketplace API error: HTTP {response.status_code} — {response.text[:200]}")
+
+                data = response.json()
+                return {
+                    "next": data.get("next", 0),
+                    "supplies": data.get("supplies", []),
+                }
+
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def get_fbo_supply_orders(self, supply_id: str) -> list[dict]:
+        """
+        Fetch orders (items) for a specific FBO supply.
+        WB Marketplace API: GET /api/v3/supplies/{supplyId}/orders
+        """
+        async with _wb_circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                url = f"{WB_MARKETPLACE_API_BASE}/api/v3/supplies/{supply_id}/orders"
+                logger.info("wb_api.request", method="GET", path=f"/api/v3/supplies/{supply_id}/orders")
+                response = await client.get(url, headers=self.headers)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401)")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Marketplace API server error: HTTP {response.status_code}")
+                if response.status_code == 404:
+                    return []
+                if response.status_code != 200:
+                    raise ValueError(f"WB Marketplace API error: HTTP {response.status_code} — {response.text[:200]}")
+
+                data = response.json()
+                if isinstance(data, list):
+                    return data
+                return data.get("orders", [])
+
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def get_fbo_supply(self, supply_id: str) -> dict | None:
+        """
+        Fetch single FBO supply details.
+        WB Marketplace API: GET /api/v3/supplies/{supplyId}
+        """
+        async with _wb_circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                url = f"{WB_MARKETPLACE_API_BASE}/api/v3/supplies/{supply_id}"
+                logger.info("wb_api.request", method="GET", path=f"/api/v3/supplies/{supply_id}")
+                response = await client.get(url, headers=self.headers)
+
+                if response.status_code == 404:
+                    return None
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401)")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Marketplace API server error: HTTP {response.status_code}")
+                if response.status_code != 200:
+                    raise ValueError(f"WB Marketplace API error: HTTP {response.status_code} — {response.text[:200]}")
+
+                return response.json()
 
     @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
     async def get_cards_list(self, limit: int = 100) -> list[dict]:

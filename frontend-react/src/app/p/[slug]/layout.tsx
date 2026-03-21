@@ -19,6 +19,14 @@ const navGroups = [
         ],
     },
     {
+        title: 'Склад',
+        items: [
+            { href: '/warehouse', label: 'Склады', icon: '🏢' },
+            { href: '/warehouse/stock', label: 'Сводные остатки', icon: '📦' },
+            { href: '/warehouse/fbo-supplies', label: 'Поставки FBO', icon: '📮' },
+        ],
+    },
+    {
         title: 'Заказы',
         items: [
             { href: '/planning', label: 'Планирование', icon: '📦' },

@@ -21,6 +21,7 @@ from backend.database import AsyncSessionLocal, async_engine
 from backend.routers import (
     auth,
     cost,
+    fbo_supplies,
     funnel,
     import_txn,
     integrations,
@@ -30,6 +31,7 @@ from backend.routers import (
     reports,
     telegram,
     telegram_webhook,
+    warehouse,
     ws,
 )
 
@@ -359,6 +361,18 @@ app.include_router(
     funnel.router,
     prefix="/api/v1",
     tags=["Funnel"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    fbo_supplies.router,
+    prefix="/api/v1",
+    tags=["FBO Supplies"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    warehouse.router,
+    prefix="/api/v1",
+    tags=["Warehouse"],
     dependencies=[Depends(get_current_user)],
 )
 

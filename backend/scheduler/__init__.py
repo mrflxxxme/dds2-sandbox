@@ -18,6 +18,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from backend.scheduler.jobs.ai_digest import send_daily_digests
+from backend.scheduler.jobs.fbo_supplies import sync_all_projects_fbo_supplies
 from backend.scheduler.jobs.funnel import (
     ad_anomaly_check,
     fast_backfill_tick,
@@ -127,6 +128,16 @@ def start_scheduler():
         trigger=IntervalTrigger(hours=6),
         id="health_monitor",
         name="Health monitor (disk, backups, stuck syncs)",
+        replace_existing=True,
+        misfire_grace_time=600,
+    )
+
+    # FBO supplies sync: every 1 hour
+    _scheduler.add_job(
+        sync_all_projects_fbo_supplies,
+        trigger=IntervalTrigger(hours=1),
+        id="fbo_supplies_sync",
+        name="FBO supplies sync (every 1h)",
         replace_existing=True,
         misfire_grace_time=600,
     )

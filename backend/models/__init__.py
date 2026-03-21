@@ -105,6 +105,32 @@ from backend.models.transactions import (
     Transaction,
 )
 
+# Warehouse
+from backend.models.warehouse import (
+    InboundReceipt,
+    InboundReceiptItem,
+    InboundStatus,
+    MovementType,
+    OutboundShipment,
+    OutboundShipmentItem,
+    OutboundStatus,
+    StockAdjustment,
+    StockMovement,
+    StockTransfer,
+    StockTransferItem,
+    TransferStatus,
+    Warehouse,
+    WarehouseStock,
+    WarehouseType,
+)
+
+# WB FBO Supplies
+from backend.models.wb_fbo import (
+    WbFboSupply,
+    WbFboSupplyItem,
+    WbSupplyStatus,
+)
+
 # WB Finance (cached report)
 from backend.models.wb_finance import (
     WbFinanceRow,
@@ -185,4 +211,24 @@ __all__ = [
     "TelegramBotUser",
     "TelegramChatBinding",
     "BrandNote",
+    # Warehouse
+    "Warehouse",
+    "WarehouseType",
+    "InboundReceipt",
+    "InboundReceiptItem",
+    "InboundStatus",
+    "OutboundShipment",
+    "OutboundShipmentItem",
+    "OutboundStatus",
+    "StockTransfer",
+    "StockTransferItem",
+    "TransferStatus",
+    "StockMovement",
+    "MovementType",
+    "WarehouseStock",
+    "StockAdjustment",
+    # WB FBO Supplies
+    "WbFboSupply",
+    "WbFboSupplyItem",
+    "WbSupplyStatus",
 ]

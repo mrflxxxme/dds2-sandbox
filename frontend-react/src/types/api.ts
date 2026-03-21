@@ -678,6 +678,138 @@ export interface ChartTooltipPayloadItem {
   fill?: string;
 }
 
+// ─── Warehouse ─────────────────────────────────────────────────────────────
+
+export interface Warehouse {
+  id: number;
+  project_id: number;
+  name: string;
+  warehouse_type: 'EXTERNAL' | 'FULFILLMENT';
+  country?: string;
+  address?: string;
+  assembly_days?: number;
+  external_id?: string;
+  sort_order: number;
+  is_active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface InboundReceiptItem {
+  id: number;
+  receipt_id: number;
+  nomenclature_id: number;
+  barcode: string;
+  expected_qty: number;
+  actual_qty: number;
+}
+
+export interface InboundReceipt {
+  id: number;
+  project_id: number;
+  warehouse_id: number;
+  number: string;
+  status: 'DRAFT' | 'EXPECTED' | 'ACCEPTED' | 'CANCELLED';
+  planned_date?: string;
+  actual_date?: string;
+  comment?: string;
+  tags?: string;
+  cost_order_id?: number;
+  created_at?: string;
+  updated_at?: string;
+  items: InboundReceiptItem[];
+}
+
+export interface OutboundShipmentItem {
+  id: number;
+  shipment_id: number;
+  nomenclature_id: number;
+  barcode: string;
+  quantity: number;
+}
+
+export interface OutboundShipment {
+  id: number;
+  project_id: number;
+  warehouse_id: number;
+  number: string;
+  status: 'DRAFT' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED';
+  destination?: string;
+  wb_supply_id?: string;
+  shipped_date?: string;
+  comment?: string;
+  created_at?: string;
+  updated_at?: string;
+  items: OutboundShipmentItem[];
+}
+
+export interface StockTransferItem {
+  id: number;
+  transfer_id: number;
+  nomenclature_id: number;
+  barcode: string;
+  quantity: number;
+}
+
+export interface StockTransfer {
+  id: number;
+  project_id: number;
+  from_warehouse_id: number;
+  to_warehouse_id: number;
+  number: string;
+  status: 'DRAFT' | 'IN_TRANSIT' | 'COMPLETED';
+  comment?: string;
+  created_at?: string;
+  updated_at?: string;
+  items: StockTransferItem[];
+}
+
+export interface StockMovement {
+  id: number;
+  project_id: number;
+  warehouse_id: number;
+  nomenclature_id: number;
+  barcode: string;
+  movement_type: string;
+  quantity: number;
+  reference_type: string;
+  reference_id?: number;
+  comment?: string;
+  created_at?: string;
+}
+
+export interface WarehouseStockRow {
+  id: number;
+  project_id: number;
+  warehouse_id: number;
+  nomenclature_id: number;
+  barcode: string;
+  quantity: number;
+  in_transit: number;
+  cost_price?: number;
+  updated_at?: string;
+}
+
+export interface StockSummaryRow {
+  nomenclature_id: number;
+  barcode: string;
+  warehouses: Record<number, number>;
+  in_transit: Record<number, number>;
+  total: number;
+  total_in_transit: number;
+}
+
+export interface StockAdjustment {
+  id: number;
+  project_id: number;
+  warehouse_id: number;
+  nomenclature_id: number;
+  barcode: string;
+  delta: number;
+  reason: string;
+  created_at?: string;
+}
+
 export interface ChartTooltipProps {
   active?: boolean;
   payload?: ChartTooltipPayloadItem[];
@@ -692,4 +824,51 @@ export interface PieLabelProps {
   name: string;
   percent: number;
   index: number;
+}
+
+// ─── WB FBO Supplies ──────────────────────────────────────────────────────
+
+export type WbSupplyStatus = 'ACTIVE' | 'ON_DELIVERY' | 'IN_PROGRESS' | 'ACCEPTED' | 'CANCELLED';
+
+export interface WbFboSupply {
+  id: number;
+  project_id: number;
+  wb_supply_id: string;
+  wb_status: WbSupplyStatus;
+  name?: string;
+  created_at_wb: string;
+  planned_date?: string;
+  actual_date?: string;
+  warehouse_name?: string;
+  total_qty: number;
+  accepted_qty: number;
+  outbound_shipment_id?: number;
+  synced_at?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface WbFboSupplyItem {
+  id: number;
+  supply_id: number;
+  wb_order_id: string;
+  nm_id?: number;
+  barcode: string;
+  article_seller?: string;
+  product_name?: string;
+  quantity: number;
+  accepted_qty: number;
+}
+
+export interface WbFboSupplyListResponse {
+  items: WbFboSupply[];
+  total: number;
+}
+
+export interface FboSyncResult {
+  synced: number;
+  created: number;
+  updated: number;
+  errors: number;
+  message: string;
 }
