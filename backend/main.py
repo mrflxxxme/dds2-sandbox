@@ -246,6 +246,9 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         # Fire-and-forget audit write
         try:
             user_id = self._extract_user_id(request)
+            if user_id is None:
+                return response  # Skip audit for unauthenticated requests
+
             project_id = self._extract_project_id(request)
             ip = request.headers.get("X-Real-IP", request.client.host if request.client else None)
 
@@ -254,7 +257,7 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
                 from backend.utils.time import utcnow
 
                 log = AuditLog(
-                    user_id=user_id or 0,
+                    user_id=user_id,
                     project_id=project_id,
                     method=request.method,
                     endpoint=path,

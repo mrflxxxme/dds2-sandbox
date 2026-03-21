@@ -17,7 +17,7 @@ import type {
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
 export class ApiClient {
-    private _isRefreshing = false;
+    private _refreshPromise: Promise<'ok' | 'invalid' | 'unavailable'> | null = null;
 
     getToken(): string | null {
         if (typeof window === 'undefined') return null;
@@ -59,14 +59,26 @@ export class ApiClient {
 
     /**
      * Try to refresh the access token.
+     * All concurrent callers share the same refresh promise to avoid race conditions.
      * Returns: 'ok' if refreshed, 'invalid' if token is rejected (must logout),
      *          'unavailable' if backend is unreachable (keep tokens, retry later).
      */
     private async tryRefresh(): Promise<'ok' | 'invalid' | 'unavailable'> {
         const refreshToken = this.getRefreshToken();
-        if (!refreshToken || this._isRefreshing) return 'invalid';
+        if (!refreshToken) return 'invalid';
 
-        this._isRefreshing = true;
+        // If a refresh is already in progress, wait for the same result
+        if (this._refreshPromise) return this._refreshPromise;
+
+        this._refreshPromise = this._doRefresh(refreshToken);
+        try {
+            return await this._refreshPromise;
+        } finally {
+            this._refreshPromise = null;
+        }
+    }
+
+    private async _doRefresh(refreshToken: string): Promise<'ok' | 'invalid' | 'unavailable'> {
         try {
             const res = await fetch(`${API_URL}/api/v1/auth/refresh`, {
                 method: 'POST',
@@ -85,7 +97,6 @@ export class ApiClient {
             // Network error (backend down during deploy) — don't invalidate tokens
             return 'unavailable';
         }
-        finally { this._isRefreshing = false; }
     }
 
     async request<T>(
