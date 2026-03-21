@@ -210,6 +210,8 @@ class WarehouseStockSchema(BaseModel):
     in_transit: int = 0
     cost_price: Decimal | None = None
     updated_at: datetime | None = None
+    reserved: int = 0
+    available: int = 0
 
 
 class CostPriceUpdate(BaseModel):

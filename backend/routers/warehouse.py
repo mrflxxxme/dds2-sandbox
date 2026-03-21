@@ -113,7 +113,7 @@ async def get_warehouse_stock(
 ):
     """Get current stock for a warehouse."""
     rows = await warehouse_service.get_warehouse_stock(db, project.id, warehouse_id)
-    return [WarehouseStockSchema.model_validate(r) for r in rows]
+    return [WarehouseStockSchema(**r) for r in rows]
 
 
 @router.get("/{warehouse_id}/movements")

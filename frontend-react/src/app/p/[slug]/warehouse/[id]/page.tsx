@@ -370,10 +370,14 @@ function StockTab({ warehouseId }: { warehouseId: number }) {
 
     const totalQty = stock.reduce((s, r) => s + r.quantity, 0);
     const totalCost = stock.reduce((s, r) => s + (r.cost_price || 0) * r.quantity, 0);
+    const totalReserved = stock.reduce((s, r) => s + (r.reserved || 0), 0);
+    const totalAvailable = stock.reduce((s, r) => s + (r.available || 0), 0);
 
     const cols: Column[] = [
         { key: 'barcode', label: 'ШК' },
         { key: 'quantity', label: 'Кол-во', align: 'right', format: 'number' },
+        { key: 'reserved', label: 'Зарезерв.', align: 'right', format: 'number' },
+        { key: 'available', label: 'Доступно', align: 'right', format: 'number' },
         { key: 'in_transit', label: 'В пути', align: 'right', format: 'number' },
         { key: 'cost_price', label: 'Себестоимость', align: 'right', render: (v: number | null) => v ? formatNumber(v) + ' \u20BD' : '—' },
         { key: 'updated_at', label: 'Обновлено', format: 'date' },
@@ -383,7 +387,7 @@ function StockTab({ warehouseId }: { warehouseId: number }) {
         <>
             {error && <div style={{ color: 'var(--color-danger)', marginBottom: 12 }}>{error}</div>}
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 20 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 20 }}>
                 <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
                     <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Позиций</div>
                     <div style={{ fontSize: 24, fontWeight: 700 }}>{stock.length}</div>
@@ -391,6 +395,14 @@ function StockTab({ warehouseId }: { warehouseId: number }) {
                 <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
                     <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Всего штук</div>
                     <div style={{ fontSize: 24, fontWeight: 700 }}>{formatNumber(totalQty)}</div>
+                </div>
+                <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Зарезервировано</div>
+                    <div style={{ fontSize: 24, fontWeight: 700, color: totalReserved > 0 ? 'var(--color-warning)' : undefined }}>{formatNumber(totalReserved)}</div>
+                </div>
+                <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Доступно</div>
+                    <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-success)' }}>{formatNumber(totalAvailable)}</div>
                 </div>
                 <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
                     <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Себестоимость</div>

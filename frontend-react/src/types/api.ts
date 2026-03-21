@@ -788,6 +788,8 @@ export interface WarehouseStockRow {
   in_transit: number;
   cost_price?: number;
   updated_at?: string;
+  reserved: number;
+  available: number;
 }
 
 export interface StockSummaryRow {

@@ -456,8 +456,36 @@ async def cancel_receipt(db: AsyncSession, project_id: int, receipt_id: int) -> 
 # ─── Warehouse Stock queries ──────────────────────────────────────────────
 
 
-async def get_warehouse_stock(db: AsyncSession, project_id: int, warehouse_id: int) -> list:
-    """Get current stock for a warehouse."""
+async def _get_reserved_map(db: AsyncSession, project_id: int, warehouse_id: int) -> dict[int, int]:
+    """Get reserved qty per nomenclature_id from active assembly requests."""
+    from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
+
+    result = await db.execute(
+        select(
+            AssemblyRequestItem.nomenclature_id,
+            func.sum(AssemblyRequestItem.quantity).label("reserved"),
+        )
+        .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.warehouse_id == warehouse_id,
+            AssemblyRequest.is_deleted.is_(False),
+            AssemblyRequest.status.in_(
+                [
+                    AssemblyStatus.PENDING,
+                    AssemblyStatus.IN_PROGRESS,
+                    AssemblyStatus.READY,
+                    AssemblyStatus.VEHICLE_ASSIGNED,
+                ]
+            ),
+        )
+        .group_by(AssemblyRequestItem.nomenclature_id)
+    )
+    return {row.nomenclature_id: row.reserved for row in result.all()}
+
+
+async def get_warehouse_stock(db: AsyncSession, project_id: int, warehouse_id: int) -> list[dict]:
+    """Get current stock for a warehouse, enriched with reserved/available."""
     result = await db.execute(
         select(WarehouseStock)
         .where(
@@ -467,7 +495,30 @@ async def get_warehouse_stock(db: AsyncSession, project_id: int, warehouse_id: i
         )
         .order_by(WarehouseStock.barcode)
     )
-    return result.scalars().all()
+    rows = result.scalars().all()
+
+    reserved_map = await _get_reserved_map(db, project_id, warehouse_id)
+
+    enriched = []
+    for row in rows:
+        reserved = reserved_map.get(row.nomenclature_id, 0)
+        available = max(0, row.quantity - reserved)
+        enriched.append(
+            {
+                "id": row.id,
+                "project_id": row.project_id,
+                "warehouse_id": row.warehouse_id,
+                "nomenclature_id": row.nomenclature_id,
+                "barcode": row.barcode,
+                "quantity": row.quantity,
+                "in_transit": row.in_transit,
+                "cost_price": row.cost_price,
+                "updated_at": row.updated_at,
+                "reserved": reserved,
+                "available": available,
+            }
+        )
+    return enriched
 
 
 async def get_stock_movements(db: AsyncSession, project_id: int, warehouse_id: int, limit: int = 200) -> list:
@@ -866,7 +917,8 @@ async def create_adjustment(db: AsyncSession, project_id: int, warehouse_id: int
 async def get_stock_summary(db: AsyncSession, project_id: int) -> list[dict]:
     """
     Summary stock across all warehouses.
-    Returns: [{barcode, nomenclature_id, warehouses: {wh_id: qty}, in_transit: {wh_id: qty}, total}]
+    Returns: [{barcode, nomenclature_id, warehouses: {wh_id: qty}, in_transit: {wh_id: qty},
+               reserved: {wh_id: qty}, total, total_in_transit, total_reserved, total_available}]
     """
     result = await db.execute(
         select(WarehouseStock)
@@ -876,6 +928,12 @@ async def get_stock_summary(db: AsyncSession, project_id: int) -> list[dict]:
         .order_by(WarehouseStock.barcode)
     )
     rows = result.scalars().all()
+
+    # Collect unique warehouse_ids to get reserved maps
+    wh_ids = {row.warehouse_id for row in rows}
+    all_reserved: dict[int, dict[int, int]] = {}
+    for wh_id in wh_ids:
+        all_reserved[wh_id] = await _get_reserved_map(db, project_id, wh_id)
 
     # Group by nomenclature_id
     summary: dict[int, dict] = {}
@@ -887,8 +945,11 @@ async def get_stock_summary(db: AsyncSession, project_id: int) -> list[dict]:
                 "barcode": row.barcode,
                 "warehouses": {},
                 "in_transit": {},
+                "reserved": {},
                 "total": 0,
                 "total_in_transit": 0,
+                "total_reserved": 0,
+                "total_available": 0,
             }
         entry = summary[key]
         if row.quantity > 0:
@@ -897,6 +958,15 @@ async def get_stock_summary(db: AsyncSession, project_id: int) -> list[dict]:
         if row.in_transit > 0:
             entry["in_transit"][row.warehouse_id] = row.in_transit
             entry["total_in_transit"] += row.in_transit
+        # Reserved from assembly requests
+        res = all_reserved.get(row.warehouse_id, {}).get(row.nomenclature_id, 0)
+        if res > 0:
+            entry["reserved"][row.warehouse_id] = res
+            entry["total_reserved"] += res
+
+    # Compute available
+    for entry in summary.values():
+        entry["total_available"] = max(0, entry["total"] - entry["total_reserved"])
 
     return [v for v in summary.values() if v["total"] > 0 or v["total_in_transit"] > 0]
 
