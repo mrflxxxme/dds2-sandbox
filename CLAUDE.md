@@ -106,6 +106,7 @@ src/types/api.ts — TypeScript интерфейсы
 | Отчёты | `backend/DOMAIN_REPORTS.md` | services/reports/, opiu_service.py, wb_bdr_service.py |
 | Планирование | `backend/DOMAIN_PLANNING.md` | services/planning/, routers/planning.py |
 | Себестоимость | `backend/DOMAIN_COST.md` | services/cost/, etl/cost_parsers.py |
+| Склад | `backend/DOMAIN_WAREHOUSE.md` | services/warehouse_service.py, services/fbo_supply_service.py |
 | WB Интеграция | `backend/DOMAIN_WB.md` | integrations/, services/funnel/, scheduler/jobs/ |
 | Сборка/Логистика | `backend/DOMAIN_ASSEMBLY.md` | services/assembly_service.py, routers/assembly.py |
 | Фронтенд | `frontend-react/DOMAIN_FRONTEND.md` | src/app/, src/lib/api.ts |
