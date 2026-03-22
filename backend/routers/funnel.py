@@ -408,6 +408,7 @@ async def get_capital_report(
     parent_filter: str | None = Query(None),
     include_rf_stocks: bool = Query(False),
     elasticity: float = Query(1.8),
+    illiquid_threshold: int = Query(60),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -424,6 +425,7 @@ async def get_capital_report(
         parent_filter=parent_filter,
         include_rf_stocks=include_rf_stocks,
         elasticity=elasticity,
+        illiquid_threshold=illiquid_threshold,
         bdr_rates_map=bdr_rates_map,
     )
 

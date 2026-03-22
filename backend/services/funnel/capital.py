@@ -22,11 +22,22 @@ logger = logging.getLogger("dds.funnel.capital")
 _MIN_ORDERS = 5
 
 
-def _classify_turnover(turnover_days: float) -> str:
-    """Returns 'liquid', 'transition', or 'illiquid'."""
+def _classify_turnover(
+    turnover_days: float,
+    stocks: int = 0,
+    illiquid_threshold: int = 60,
+) -> str:
+    """Returns 'liquid', 'transition', or 'illiquid'.
+
+    turnover_days == 0 with stock means no sales → illiquid.
+    turnover_days == 0 with no stock means nothing to classify → liquid.
+    illiquid_threshold is configurable (default 60 days).
+    """
+    if turnover_days <= 0:
+        return "illiquid" if stocks > 0 else "liquid"
     if turnover_days < 30:
         return "liquid"
-    if turnover_days <= 60:
+    if turnover_days <= illiquid_threshold:
         return "transition"
     return "illiquid"
 
@@ -79,6 +90,7 @@ def _enrich_products(
     bdr_rates_map: BdrRatesLookup | None,
     period_days: int,
     elasticity: float,
+    illiquid_threshold: int = 60,
 ) -> list[dict]:
     """Enrich product dicts with capital metrics."""
     enriched: list[dict] = []
@@ -102,7 +114,7 @@ def _enrich_products(
         capital = total_stock * cost
 
         turnover = p["turnover_days"]
-        category = _classify_turnover(turnover)
+        category = _classify_turnover(turnover, total_stock, illiquid_threshold)
         margin = p["margin"]
         drr = p["drr"]
 
@@ -133,11 +145,13 @@ def _group_products(
     parent_filter: str | None,
 ) -> list[dict]:
     """Group products and aggregate metrics by capital weight."""
-    # Apply parent filter
+    # Apply parent filter for drill-down
     if parent_filter:
-        if group_by == "brand":
+        if group_by == "category":
+            # Drill from brand → categories within that brand
             products = [p for p in products if p.get("brand") == parent_filter]
-        elif group_by == "category":
+        elif group_by == "article":
+            # Drill from category → articles within that category
             products = [p for p in products if p.get("subject") == parent_filter]
 
     if group_by == "article":
@@ -163,7 +177,7 @@ def _article_rows(products: list[dict]) -> list[dict]:
         cap = p["capital"]
         liquid = cap if p["category"] == "liquid" else 0.0
         illiquid = cap if p["category"] == "illiquid" else 0.0
-        frozen = cap if p["category"] != "liquid" else 0.0
+        frozen = cap if p["category"] == "illiquid" else 0.0
 
         rows.append(
             {
@@ -193,7 +207,7 @@ def _aggregate_group(key: str, group_type: str, items: list[dict]) -> dict:
     total_cap = sum(i["capital"] for i in items)
     liquid_cap = sum(i["capital"] for i in items if i["category"] == "liquid")
     illiquid_cap = sum(i["capital"] for i in items if i["category"] == "illiquid")
-    frozen = total_cap - liquid_cap
+    frozen = illiquid_cap  # only illiquid is truly frozen
 
     w_margin = _wavg(items, "margin", "capital")
     w_drr = _wavg(items, "drr", "capital")
@@ -346,6 +360,7 @@ async def get_capital_analysis(
     parent_filter: str | None = None,
     include_rf_stocks: bool = False,
     elasticity: float = 1.8,
+    illiquid_threshold: int = 60,
     bdr_rates_map: BdrRatesLookup | None = None,
 ) -> dict:
     """Run capital analysis and return structured report."""
@@ -366,7 +381,8 @@ async def get_capital_analysis(
         try:
             rf_stocks_map = await load_rf_stocks(db, project_id)
         except Exception:
-            logger.warning("Failed to load RF stocks, continuing without", exc_info=True)
+            logger.warning("Failed to load RF stocks, continuing without")
+            await db.rollback()
 
     # 3. Enrich products
     enriched = _enrich_products(
@@ -376,13 +392,19 @@ async def get_capital_analysis(
         bdr_rates_map,
         period_days,
         elasticity,
+        illiquid_threshold,
     )
 
     # 4. Group
     groups = _group_products(enriched, group_by, parent_filter)
 
-    # 5. Build trend
-    trend = await _build_capital_trend(db, project_id, period_days, enriched)
+    # 5. Build trend (graceful degradation if snapshots unavailable)
+    trend: list[dict] = []
+    try:
+        trend = await _build_capital_trend(db, project_id, period_days, enriched)
+    except Exception:
+        logger.warning("Failed to build capital trend, returning empty")
+        await db.rollback()
 
     # 6. Summary
     summary = _build_summary(enriched, trend)

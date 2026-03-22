@@ -82,7 +82,7 @@ export function addFunnelMethods(api: ApiClient) {
             if (params?.min_orders) q.set('min_orders', String(params.min_orders));
             return api.request<AnomaliesResponse>('GET', `/api/v1/funnel/anomalies?${q.toString()}`);
         },
-        getCapital(params?: { period_days?: number; brand?: string; group_by?: string; parent_filter?: string; include_rf_stocks?: boolean; elasticity?: number }) {
+        getCapital(params?: { period_days?: number; brand?: string; group_by?: string; parent_filter?: string; include_rf_stocks?: boolean; elasticity?: number; illiquid_threshold?: number }) {
             const q = new URLSearchParams();
             if (params?.period_days) q.set('period_days', String(params.period_days));
             if (params?.brand) q.set('brand', params.brand);
@@ -90,6 +90,7 @@ export function addFunnelMethods(api: ApiClient) {
             if (params?.parent_filter) q.set('parent_filter', params.parent_filter);
             if (params?.include_rf_stocks != null) q.set('include_rf_stocks', String(params.include_rf_stocks));
             if (params?.elasticity != null) q.set('elasticity', String(params.elasticity));
+            if (params?.illiquid_threshold != null) q.set('illiquid_threshold', String(params.illiquid_threshold));
             return api.request<CapitalResponse>('GET', `/api/v1/funnel/capital?${q.toString()}`);
         },
     };

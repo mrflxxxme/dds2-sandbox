@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
 import {
     AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
+    PieChart, Pie, Cell,
 } from 'recharts';
 import type {
     CapitalResponse, CapitalGroupRow, CapitalTrendDay,
@@ -222,6 +223,7 @@ export default function CapitalTab({ trendDays, brand, onTrendDaysChange, onBran
     const [groupBy, setGroupBy] = useState<string>('brand');
     const [includeRfStocks, setIncludeRfStocks] = useState(false);
     const [elasticity, setElasticity] = useState(1.8);
+    const [illiquidThreshold, setIlliquidThreshold] = useState(60);
     const [expandedRows, setExpandedRows] = useState<Record<string, CapitalGroupRow[]>>({});
     const [loadingRows, setLoadingRows] = useState<Set<string>>(new Set());
 
@@ -236,6 +238,7 @@ export default function CapitalTab({ trendDays, brand, onTrendDaysChange, onBran
                 group_by: groupBy,
                 include_rf_stocks: includeRfStocks,
                 elasticity,
+                illiquid_threshold: illiquidThreshold,
             });
             setData(res);
         } catch (err: unknown) {
@@ -245,7 +248,7 @@ export default function CapitalTab({ trendDays, brand, onTrendDaysChange, onBran
         } finally {
             setLoading(false);
         }
-    }, [trendDays, brand, groupBy, includeRfStocks, elasticity]);
+    }, [trendDays, brand, groupBy, includeRfStocks, elasticity, illiquidThreshold]);
 
     useEffect(() => { loadData(); }, [loadData]);
 
@@ -327,14 +330,14 @@ export default function CapitalTab({ trendDays, brand, onTrendDaysChange, onBran
                         bgColor="rgba(16, 185, 129, 0.06)"
                     />
                     <SummaryCard
-                        label="Переходный (30-60 дн)"
+                        label={`Переходный (30-${illiquidThreshold} дн)`}
                         value={fmtMoney(summary.transition_capital)}
                         badge={fmtPct(summary.transition_pct)}
                         accentColor="#D97706"
                         bgColor="rgba(217, 119, 6, 0.06)"
                     />
                     <SummaryCard
-                        label="Неликвидный (>60 дн)"
+                        label={`Неликвидный (>${illiquidThreshold} дн)`}
                         value={fmtMoney(summary.illiquid_capital)}
                         badge={fmtPct(summary.illiquid_pct)}
                         accentColor="#E02424"
@@ -347,6 +350,80 @@ export default function CapitalTab({ trendDays, brand, onTrendDaysChange, onBran
                         accentColor="#7C3AED"
                         bgColor="rgba(124, 58, 237, 0.06)"
                     />
+                </div>
+            )}
+
+            {/* Pie chart — capital distribution */}
+            {!loading && !error && data && data.summary.total_capital > 0 && (
+                <div className="glass-card" style={{ padding: '16px 20px', marginBottom: 20 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)', marginBottom: 12 }}>
+                        Распределение капитала
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 40 }}>
+                        <ResponsiveContainer width={220} height={220}>
+                            <PieChart>
+                                <Pie
+                                    data={[
+                                        { name: 'Ликвидный', value: data.summary.liquid_capital, pct: data.summary.liquid_pct },
+                                        { name: 'Переходный', value: data.summary.transition_capital, pct: data.summary.transition_pct },
+                                        { name: 'Неликвидный', value: data.summary.illiquid_capital, pct: data.summary.illiquid_pct },
+                                    ]}
+                                    cx="50%"
+                                    cy="50%"
+                                    innerRadius={55}
+                                    outerRadius={90}
+                                    dataKey="value"
+                                    stroke="none"
+                                >
+                                    <Cell fill="#10B981" />
+                                    <Cell fill="#D97706" />
+                                    <Cell fill="#E02424" />
+                                </Pie>
+                                <Tooltip
+                                    formatter={(value: number) => fmtMoney(value)}
+                                    contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                                />
+                            </PieChart>
+                        </ResponsiveContainer>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                            {[
+                                { label: 'Ликвидный (<30 дн)', value: data.summary.liquid_capital, pct: data.summary.liquid_pct, color: '#10B981' },
+                                { label: `Переходный (30-${illiquidThreshold} дн)`, value: data.summary.transition_capital, pct: data.summary.transition_pct, color: '#D97706' },
+                                { label: `Неликвидный (>${illiquidThreshold} дн)`, value: data.summary.illiquid_capital, pct: data.summary.illiquid_pct, color: '#E02424' },
+                            ].map(item => (
+                                <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                    <div style={{ width: 12, height: 12, borderRadius: 3, backgroundColor: item.color, flexShrink: 0 }} />
+                                    <div>
+                                        <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>{item.label}</div>
+                                        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--color-text)' }}>
+                                            {fmtMoney(item.value)} <span style={{ fontSize: 12, color: item.color, fontWeight: 500 }}>{fmtPct(item.pct)}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                        {/* Brand bars — like mockup */}
+                        {data.groups.length > 0 && groupBy === 'brand' && (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 200 }}>
+                                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-dim)', marginBottom: 4 }}>По брендам</div>
+                                {data.groups.slice(0, 5).map(g => {
+                                    const liq = g.liquid_pct;
+                                    const trans = 100 - g.liquid_pct - g.illiquid_pct;
+                                    const illiq = g.illiquid_pct;
+                                    return (
+                                        <div key={g.group_key}>
+                                            <div style={{ fontSize: 11, color: 'var(--color-text)', marginBottom: 2 }}>{g.group_key}</div>
+                                            <div style={{ display: 'flex', height: 14, borderRadius: 4, overflow: 'hidden', background: '#f3f4f6' }}>
+                                                {liq > 0 && <div style={{ width: `${liq}%`, background: '#10B981' }} />}
+                                                {trans > 0 && <div style={{ width: `${trans}%`, background: '#D97706' }} />}
+                                                {illiq > 0 && <div style={{ width: `${illiq}%`, background: '#E02424' }} />}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
                 </div>
             )}
 
@@ -469,6 +546,27 @@ export default function CapitalTab({ trendDays, brand, onTrendDaysChange, onBran
                             color: 'var(--color-text)',
                         }}
                     />
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--color-text-dim)' }}>
+                    Порог неликвида:
+                    <input
+                        type="number"
+                        value={illiquidThreshold}
+                        onChange={e => {
+                            const v = parseInt(e.target.value);
+                            if (!isNaN(v) && v >= 30 && v <= 120) setIlliquidThreshold(v);
+                        }}
+                        min={30}
+                        max={120}
+                        step={5}
+                        style={{
+                            width: 55, padding: '4px 8px', fontSize: 13, borderRadius: 6,
+                            border: '1px solid var(--color-border)',
+                            background: 'var(--color-bg-card)',
+                            color: 'var(--color-text)',
+                        }}
+                    />
+                    дн
                 </label>
             </div>
 

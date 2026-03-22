@@ -250,24 +250,27 @@ class TestGroupProducts:
         assert len(groups) == 2
         assert all(g["children_count"] == 0 for g in groups)
 
-    def test_parent_filter_brand(self):
-        """parent_filter filters to specific brand."""
-        p1 = self._make_enriched(nm_id=1, brand="BrandA")
-        p2 = self._make_enriched(nm_id=2, brand="BrandB")
+    def test_parent_filter_brand_to_category(self):
+        """Drill-down: brand -> categories within that brand."""
+        p1 = self._make_enriched(nm_id=1, brand="BrandA", subject="Shoes")
+        p2 = self._make_enriched(nm_id=2, brand="BrandA", subject="Bags")
+        p3 = self._make_enriched(nm_id=3, brand="BrandB", subject="Shoes")
 
-        # group_by=category with brand filter
-        groups = _group_products([p1, p2], "brand", parent_filter="BrandA")
-        assert len(groups) == 1
-        assert groups[0]["group_key"] == "BrandA"
+        groups = _group_products([p1, p2, p3], "category", parent_filter="BrandA")
+        assert len(groups) == 2
+        keys = {g["group_key"] for g in groups}
+        assert keys == {"Shoes", "Bags"}
 
-    def test_parent_filter_category(self):
-        """parent_filter filters to specific category (subject)."""
-        p1 = self._make_enriched(nm_id=1, subject="Shoes")
-        p2 = self._make_enriched(nm_id=2, subject="Bags")
+    def test_parent_filter_category_to_article(self):
+        """Drill-down: category -> articles within that category."""
+        p1 = self._make_enriched(nm_id=1, subject="Shoes", vendor_code="shoe_1")
+        p2 = self._make_enriched(nm_id=2, subject="Shoes", vendor_code="shoe_2")
+        p3 = self._make_enriched(nm_id=3, subject="Bags", vendor_code="bag_1")
 
-        groups = _group_products([p1, p2], "category", parent_filter="Shoes")
-        assert len(groups) == 1
-        assert groups[0]["group_key"] == "Shoes"
+        groups = _group_products([p1, p2, p3], "article", parent_filter="Shoes")
+        assert len(groups) == 2
+        keys = {g["group_key"] for g in groups}
+        assert keys == {"shoe_1", "shoe_2"}
 
 
 # ─── _build_summary ─────────────────────────────────────────────────────────
