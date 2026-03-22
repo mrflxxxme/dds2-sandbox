@@ -2,9 +2,10 @@
 Router: /warehouse/fbo-supplies — FBO supply sync, list, items, link/unlink.
 """
 
+import logging
 from datetime import date
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import AsyncSessionLocal, get_db
@@ -21,7 +22,11 @@ from backend.schemas.wb_fbo import (
 from backend.services import fbo_supply_service
 from backend.services.integrations_service import _get_wb_key
 
+logger = logging.getLogger("dds.routers.fbo_supplies")
 router = APIRouter(prefix="/warehouse/fbo-supplies", tags=["FBO Supplies"])
+
+# Store background task references to prevent GC
+_background_tasks: set = set()
 
 
 # ─── List supplies ──────────────────────────────────────────────────────────
@@ -109,7 +114,6 @@ async def get_fbo_supply_items(
 
 @router.post("/sync", response_model=FboSyncResultSchema)
 async def sync_fbo_supplies(
-    background_tasks: BackgroundTasks,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -127,8 +131,12 @@ async def sync_fbo_supplies(
         )
 
         # Background: enrich with warehouse/qty details (rate-limited)
-        project_id = project.id
-        background_tasks.add_task(_enrich_in_background, project_id, api_key)
+        # Use asyncio.create_task to avoid cancellation when HTTP connection closes
+        import asyncio
+
+        task = asyncio.create_task(_enrich_in_background(project.id, api_key))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
 
         return FboSyncResultSchema(**result)
     except ValueError as e:
@@ -138,15 +146,24 @@ async def sync_fbo_supplies(
 
 
 async def _enrich_in_background(project_id: int, api_key: str):
-    """Run enrichment in a separate DB session (background task)."""
-    api_client = WBApiClient(api_key)
-    async with AsyncSessionLocal() as db:
-        await fbo_supply_service.enrich_fbo_supplies(
-            db,
-            project_id,
-            api_client,
-            max_calls=300,
-        )
+    """Run enrichment in a separate DB session (detached from HTTP request)."""
+    try:
+        api_client = WBApiClient(api_key)
+        async with AsyncSessionLocal() as db:
+            result = await fbo_supply_service.enrich_fbo_supplies(
+                db,
+                project_id,
+                api_client,
+                max_calls=300,
+            )
+            logger.info(
+                "FBO enrich background: project %d — %d enriched, %d errors",
+                project_id,
+                result["enriched"],
+                result["errors"],
+            )
+    except Exception as e:
+        logger.error("FBO enrich background failed: project %d — %s", project_id, e)
 
 
 # ─── Sync: statuses only ──────────────────────────────────────────────────
