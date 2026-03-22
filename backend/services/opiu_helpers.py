@@ -78,6 +78,14 @@ def build_brand_nm_ids_sql() -> str:
     )
 
 
+def build_article_nm_ids_sql() -> str:
+    return (
+        f"SELECT DISTINCT nm_id FROM wb_finance_rows"  # noqa: S608
+        f" WHERE project_id = :project_id AND {_DATE_FILTER}"
+        f" AND LOWER(sa_name) LIKE :article_like AND nm_id IS NOT NULL AND nm_id != 0"
+    )
+
+
 # ─── Aggregation helpers ────────────────────────────────────────────────────
 
 

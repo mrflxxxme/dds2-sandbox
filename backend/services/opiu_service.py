@@ -27,6 +27,7 @@ from backend.services.bdr_loaders import (
 )
 from backend.services.opiu_helpers import (
     build_aggregate_sql,
+    build_article_nm_ids_sql,
     build_brand_nm_ids_sql,
     build_brands_sql,
     build_cost_qty_sql,
@@ -146,17 +147,20 @@ async def get_opiu(
     # ── 6. Ads per month (from WbFunnelDaily, filtered by brand nm_ids) ──
     ads_by_month = await load_ads_monthly(db, project_id, date_from, date_to)
 
-    # When brand is set, only count ads for nm_ids belonging to this brand
-    brand_nm_ids: set[int] | None = None
-    if brand:
+    # When brand or article is set, only count ads for matching nm_ids
+    filter_nm_ids: set[int] | None = None
+    if article:
+        nm_result = await db.execute(text(build_article_nm_ids_sql()), params)
+        filter_nm_ids = {r[0] for r in nm_result}
+    elif brand:
         nm_result = await db.execute(text(build_brand_nm_ids_sql()), params)
-        brand_nm_ids = {r[0] for r in nm_result}
+        filter_nm_ids = {r[0] for r in nm_result}
 
     monthly_ads: dict[str, float] = {}
     for mk in months_set:
         month_ads = ads_by_month.get(mk, {})
-        if brand_nm_ids is not None:
-            monthly_ads[mk] = sum(v for nm, v in month_ads.items() if nm in brand_nm_ids)
+        if filter_nm_ids is not None:
+            monthly_ads[mk] = sum(v for nm, v in month_ads.items() if nm in filter_nm_ids)
         else:
             monthly_ads[mk] = sum(month_ads.values())
 
