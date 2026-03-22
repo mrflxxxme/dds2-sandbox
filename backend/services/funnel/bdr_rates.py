@@ -251,11 +251,12 @@ def compute_profit_bdr(
     to_pay_est = est_real * bdr.to_pay_rate
     cost_total = cost_price * orders_count * buyout
 
-    # WB expenses for tax deduction (USN D-R)
-    wb_expenses = est_real - to_pay_est  # commission + logistics + penalties + storage
+    # WB commission for tax deduction (without SPP discount)
+    # SPP already deducted from income (price_after_spp), so expenses = only commission
+    wb_commission = price_after_spp - to_pay_est
 
     # Tax calculation using same logic as bdr_enrichment.apply_tax
-    tax = _compute_tax(price_after_spp, tax_info, wb_expenses, adv_sum, cost_total)
+    tax = _compute_tax(price_after_spp, tax_info, wb_commission, adv_sum, cost_total)
 
     profit = to_pay_est - cost_total - adv_sum - tax
     margin = (profit / est_real * 100) if est_real > 0 else 0
@@ -278,25 +279,26 @@ def compute_profit_bdr(
 def _compute_tax(
     income: float,
     tax_info: dict,
-    wb_expenses: float,
+    wb_commission: float,
     adv_sum: float,
     cost_total: float,
 ) -> float:
     """Compute tax from income (price_after_spp).
 
     Same formula as bdr_enrichment.apply_tax but returns just the number.
+    income = price_after_spp (already without SPP)
+    wb_commission = price_after_spp - to_pay_est (only WB commission, no SPP)
     """
     usn_rate = tax_info.get("usn_rate", 0) / 100
     nds_rate = tax_info.get("nds_rate", 0) / 100
     regime = tax_info.get("tax_regime", "usn_income")
     cost_as_expense = tax_info.get("cost_as_expense", False)
 
-    # НДС
     nds_sum = income * nds_rate / (1 + nds_rate) if nds_rate > 0 else 0
     tax_base = income - nds_sum
 
     if regime == "usn_income_expense_vat":
-        expenses = abs(wb_expenses) + adv_sum
+        expenses = abs(wb_commission) + adv_sum
         if cost_as_expense:
             expenses += cost_total
         tax_base = income - nds_sum - expenses
