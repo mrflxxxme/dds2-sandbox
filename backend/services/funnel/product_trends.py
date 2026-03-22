@@ -111,7 +111,10 @@ async def get_product_trends(
         latest = daily_rows[-1]
         stocks_wb = latest.stocks_wb or 0
         avg_price = float(latest.avg_price or 0)
-        cost_price = float(latest.cost_price or 0)
+        # Weighted average cost_price across all days (weighted by orders_count)
+        _cost_num = sum(float(r.cost_price or 0) * (r.orders_count or 0) for r in daily_rows)
+        _cost_den = sum(r.orders_count or 0 for r in daily_rows)
+        cost_price = round(_cost_num / _cost_den, 2) if _cost_den > 0 else float(latest.cost_price or 0)
         tariff_rate = tariff_map.get(meta["subject"] or "", 0)
 
         avg_daily_orders = total_orders_count / n_days if n_days else 0
@@ -137,7 +140,7 @@ async def get_product_trends(
             revenue = total_orders_sum * buyout / 100
             commission = revenue * tariff_rate / 100
             tax = revenue * tax_rate / 100
-            cost_total = cost_price * total_orders_count
+            cost_total = cost_price * total_orders_count * buyout / 100
             profit = revenue - commission - cost_total - total_adv_sum - tax
             margin = round((profit / revenue * 100), 2) if revenue else 0
             commission_rate = tariff_rate
@@ -193,7 +196,7 @@ async def get_product_trends(
                 rev = os_ * buyout / 100 if buyout else os_
                 comm = rev * tariff_rate / 100
                 t = rev * tax_rate / 100
-                cp = float(r.cost_price or 0) * oc
+                cp = float(r.cost_price or 0) * oc * buyout / 100
                 p = rev - comm - cp - adv - t
                 daily_margin.append((p / rev * 100) if rev else 0)
                 daily_profit.append(p)

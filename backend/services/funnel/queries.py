@@ -208,7 +208,7 @@ async def get_funnel_aggregated(
                 agg["has_tariff_gaps"] = True
             agg["leg_revenue"] += revenue
             agg["leg_commission"] += revenue * rate / 100
-            agg["cost_total"] += cost_per_unit * orders_count
+            agg["cost_total"] += cost_per_unit * orders_count * buyout_pct / 100
 
     data = []
     for d_key in sorted(day_agg.keys(), reverse=True):
@@ -343,7 +343,7 @@ async def get_funnel_detailed(
         else:
             buyout_pct = buyout_map.get(nm_id, 100)
             revenue = orders_sum * buyout_pct / 100
-            cost_total = cost_per_unit * orders_count
+            cost_total = cost_per_unit * orders_count * buyout_pct / 100
             rate = tariff_map.get(r.subject or "", 0)
             m = _compute_metrics_legacy(
                 orders_sum, revenue, adv, tax_rate, views, clicks, orders_count, cost_total, commission_rate_pct=rate

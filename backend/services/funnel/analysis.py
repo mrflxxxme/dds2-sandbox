@@ -93,7 +93,7 @@ async def get_day_analysis(
                 total_revenue += revenue
                 rate = tariff_map.get(r.subject or "", 0)
                 total_commission += revenue * rate / 100
-                total_cost += cost_per_unit * orders_count
+                total_cost += cost_per_unit * orders_count * buyout_pct / 100
                 total_tax += revenue * tax_rate / 100
 
         profit = total_revenue - total_adv - total_commission - total_cost - total_tax
