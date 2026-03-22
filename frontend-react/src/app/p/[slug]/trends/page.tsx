@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '@/lib/api';
+import AnomaliesTab from './components/AnomaliesTab';
 
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
 const fmtK = (n: number) => {
@@ -81,6 +82,8 @@ export default function TrendsPage() {
     const [sortField, setSortField] = useState('orders_sum_rub');
     const [sortAsc, setSortAsc] = useState(false);
     const [totalProducts, setTotalProducts] = useState(0);
+    const [activeTab, setActiveTab] = useState<'table' | 'anomalies'>('table');
+    const [anomalyCount, setAnomalyCount] = useState(0);
 
     const loadFilters = useCallback(async () => {
         try {
@@ -106,8 +109,20 @@ export default function TrendsPage() {
         }
     }, [trendDays, brand, search]);
 
+    // Load anomaly count for badge
+    const loadAnomalyCount = useCallback(async () => {
+        try {
+            const res = await api.getAnomalies({
+                period_days: trendDays,
+                brand: brand || undefined,
+            });
+            setAnomalyCount(res.anomalies.filter(a => a.severity === 'critical').length);
+        } catch { }
+    }, [trendDays, brand]);
+
     useEffect(() => { loadFilters(); }, [loadFilters]);
     useEffect(() => { loadData(); }, [loadData]);
+    useEffect(() => { loadAnomalyCount(); }, [loadAnomalyCount]);
 
     // Sorting
     const handleSort = (field: string) => {
@@ -164,128 +179,181 @@ export default function TrendsPage() {
         <div>
             <h1 style={{ fontSize: 22, fontWeight: 600, marginBottom: 16 }}>📈 Метрики и тренды</h1>
 
-            {/* Controls */}
-            <div className="glass-card" style={{ display: 'flex', gap: 12, alignItems: 'center', padding: '10px 16px', marginBottom: 16, flexWrap: 'wrap' }}>
-                {/* Trend period buttons */}
-                <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>Тренд:</span>
-                {[7, 14, 30].map(d => (
-                    <button key={d}
-                        onClick={() => setTrendDays(d)}
-                        style={{
-                            padding: '5px 14px', fontSize: 13, borderRadius: 6, cursor: 'pointer',
-                            border: trendDays === d ? '1px solid var(--color-accent)' : '1px solid var(--color-border)',
-                            background: trendDays === d ? 'rgba(139,92,246,0.15)' : 'var(--color-bg-card)',
-                            color: trendDays === d ? 'var(--color-accent)' : 'var(--color-text)',
-                            fontWeight: trendDays === d ? 600 : 400,
-                            transition: 'all 0.15s',
-                        }}
-                    >
-                        {d} дней
-                    </button>
-                ))}
-
-                <span style={{ width: 1, height: 24, background: 'var(--color-border)', margin: '0 4px' }} />
-
-                {/* Brand filter */}
-                <select value={brand} onChange={e => setBrand(e.target.value)}
-                    style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '5px 8px', color: 'var(--color-text)', fontSize: 13 }}>
-                    <option value="">Все бренды</option>
-                    {filters.brands.map(b => <option key={b} value={b}>{b}</option>)}
-                </select>
-
-                {/* Search */}
-                <input placeholder="🔍 Поиск по артикулу..." value={search} onChange={e => setSearch(e.target.value)}
-                    style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '5px 8px', color: 'var(--color-text)', fontSize: 13, width: 180 }} />
-
-                <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-text-dim)' }}>
-                    Показано: {displayData.length} из {totalProducts} товаров
-                </span>
+            {/* Tab switcher */}
+            <div style={{ display: 'flex', gap: 4, marginBottom: 20 }}>
+                <button
+                    className={`btn btn-sm ${activeTab === 'table' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setActiveTab('table')}
+                >
+                    Таблица трендов
+                </button>
+                <button
+                    className={`btn btn-sm ${activeTab === 'anomalies' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setActiveTab('anomalies')}
+                    style={{ position: 'relative' }}
+                >
+                    Аномалии
+                    {anomalyCount > 0 && (
+                        <span style={{
+                            position: 'absolute',
+                            top: -6,
+                            right: -6,
+                            background: '#E02424',
+                            color: '#fff',
+                            fontSize: 10,
+                            fontWeight: 700,
+                            minWidth: 18,
+                            height: 18,
+                            borderRadius: 9,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            padding: '0 5px',
+                        }}>
+                            {anomalyCount}
+                        </span>
+                    )}
+                </button>
             </div>
 
-            {/* Info bar */}
-            <div style={{ marginBottom: 12, fontSize: 11, color: '#888', display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
-                <span>📊 Считается по линейной регрессии за {trendDays} дней</span>
-                <span style={{ display: 'flex', gap: 8 }}>
-                    <span>Порог: <span style={{ color: '#10b981' }}>&gt;+5%</span> — растёт,</span>
-                    <span><span style={{ color: '#ef4444' }}>&lt;-5%</span> — падает,</span>
-                    <span>иначе стабильно</span>
-                </span>
-            </div>
+            {/* Anomalies tab */}
+            {activeTab === 'anomalies' && (
+                <AnomaliesTab
+                    trendDays={trendDays}
+                    brand={brand}
+                    onTrendDaysChange={setTrendDays}
+                    onBrandChange={setBrand}
+                    brands={filters.brands}
+                />
+            )}
 
-            {/* Table */}
-            <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-                {loading ? (
-                    <div style={{ padding: 60, textAlign: 'center', color: 'var(--color-text-dim)' }}>
-                        <div style={{ fontSize: 24, marginBottom: 8 }}>⏳</div>
-                        Загрузка данных...
+            {/* Table tab — existing content */}
+            {activeTab === 'table' && (
+                <>
+                    {/* Controls */}
+                    <div className="glass-card" style={{ display: 'flex', gap: 12, alignItems: 'center', padding: '10px 16px', marginBottom: 16, flexWrap: 'wrap' }}>
+                        {/* Trend period buttons */}
+                        <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>Тренд:</span>
+                        {[7, 14, 30].map(d => (
+                            <button key={d}
+                                onClick={() => setTrendDays(d)}
+                                style={{
+                                    padding: '5px 14px', fontSize: 13, borderRadius: 6, cursor: 'pointer',
+                                    border: trendDays === d ? '1px solid var(--color-accent)' : '1px solid var(--color-border)',
+                                    background: trendDays === d ? 'rgba(139,92,246,0.15)' : 'var(--color-bg-card)',
+                                    color: trendDays === d ? 'var(--color-accent)' : 'var(--color-text)',
+                                    fontWeight: trendDays === d ? 600 : 400,
+                                    transition: 'all 0.15s',
+                                }}
+                            >
+                                {d} дней
+                            </button>
+                        ))}
+
+                        <span style={{ width: 1, height: 24, background: 'var(--color-border)', margin: '0 4px' }} />
+
+                        {/* Brand filter */}
+                        <select value={brand} onChange={e => setBrand(e.target.value)}
+                            style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '5px 8px', color: 'var(--color-text)', fontSize: 13 }}>
+                            <option value="">Все бренды</option>
+                            {filters.brands.map(b => <option key={b} value={b}>{b}</option>)}
+                        </select>
+
+                        {/* Search */}
+                        <input placeholder="🔍 Поиск по артикулу..." value={search} onChange={e => setSearch(e.target.value)}
+                            style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '5px 8px', color: 'var(--color-text)', fontSize: 13, width: 180 }} />
+
+                        <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-text-dim)' }}>
+                            Показано: {displayData.length} из {totalProducts} товаров
+                        </span>
                     </div>
-                ) : (
-                    <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 260px)' }}>
-                        <table className="data-table" style={{ minWidth: 1400, borderCollapse: 'separate', borderSpacing: 0 }}>
-                            <thead>
-                                <tr>
-                                    <SortTh field="vendor_code" bg="#f9fafb" style={{ left: 0, zIndex: 22, borderRight: '1px solid #e5e7eb' }}>АРТИКУЛ</SortTh>
-                                    <SortTh field="turnover_days" bg="#f9fafb">ОБОРАЧИВ.</SortTh>
-                                    {columns.map(c => (
-                                        <SortTh key={c.field} field={c.field} bg="#f9fafb">{c.label}</SortTh>
-                                    ))}
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {displayData.length === 0 && (
-                                    <tr><td colSpan={20} style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-dim)' }}>
-                                        Нет данных за выбранный период
-                                    </td></tr>
-                                )}
-                                {displayData.map((p, i) => {
-                                    const rowBg = i % 2 === 0 ? '#ffffff' : '#f9fafb';
-                                    return (
-                                        <tr key={p.nm_id} style={{ background: rowBg, color: '#111827' }}>
-                                            {/* Article */}
-                                            <td style={{ position: 'sticky', left: 0, background: rowBg, zIndex: 11, borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #f3f4f6' }}>
-                                                <div style={{ fontWeight: 600, fontSize: 12, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#111827' }}>
-                                                    {p.vendor_code}
-                                                </div>
-                                                <div style={{ fontSize: 10, color: '#6b7280' }}>
-                                                    {p.brand} · {p.subject}
-                                                </div>
-                                            </td>
 
-                                        {/* Turnover */}
-                                        <TurnoverCell days={p.turnover_days} trendPct={p.trend_turnover} stocksWb={p.stocks_wb} />
+                    {/* Info bar */}
+                    <div style={{ marginBottom: 12, fontSize: 11, color: '#888', display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <span>📊 Считается по линейной регрессии за {trendDays} дней</span>
+                        <span style={{ display: 'flex', gap: 8 }}>
+                            <span>Порог: <span style={{ color: '#10b981' }}>&gt;+5%</span> — растёт,</span>
+                            <span><span style={{ color: '#ef4444' }}>&lt;-5%</span> — падает,</span>
+                            <span>иначе стабильно</span>
+                        </span>
+                    </div>
 
-                                            {/* All metric columns */}
-                                            {columns.map(c => {
-                                                let cellColor: string | undefined;
-                                                if (c.field === 'drr') {
-                                                    cellColor = p.drr > 30 ? '#ef4444' : p.drr > 15 ? '#f59e0b' : p.drr > 0 ? '#10b981' : '#6b7280';
-                                                } else if (c.field === 'margin') {
-                                                    cellColor = p.margin > 20 ? '#10b981' : p.margin > 0 ? '#a3e635' : '#ef4444';
-                                                } else if (c.field === 'profit') {
-                                                    cellColor = p.profit > 0 ? '#10b981' : '#ef4444';
-                                                }
-                                                return (
-                                                    <MetricCell
-                                                        key={c.field}
-                                                        value={p[c.field] ?? 0}
-                                                        trend={p[c.trend] ?? 0}
-                                                        format={c.format}
-                                                        color={cellColor}
-                                                    />
-                                                );
-                                            })}
+                    {/* Table */}
+                    <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                        {loading ? (
+                            <div style={{ padding: 60, textAlign: 'center', color: 'var(--color-text-dim)' }}>
+                                <div style={{ fontSize: 24, marginBottom: 8 }}>⏳</div>
+                                Загрузка данных...
+                            </div>
+                        ) : (
+                            <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 260px)' }}>
+                                <table className="data-table" style={{ minWidth: 1400, borderCollapse: 'separate', borderSpacing: 0 }}>
+                                    <thead>
+                                        <tr>
+                                            <SortTh field="vendor_code" bg="#f9fafb" style={{ left: 0, zIndex: 22, borderRight: '1px solid #e5e7eb' }}>АРТИКУЛ</SortTh>
+                                            <SortTh field="turnover_days" bg="#f9fafb">ОБОРАЧИВ.</SortTh>
+                                            {columns.map(c => (
+                                                <SortTh key={c.field} field={c.field} bg="#f9fafb">{c.label}</SortTh>
+                                            ))}
                                         </tr>
-                                    );
-                                })}
-                            </tbody>
-                        </table>
-                    </div>
-                )}
-            </div>
+                                    </thead>
+                                    <tbody>
+                                        {displayData.length === 0 && (
+                                            <tr><td colSpan={20} style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-dim)' }}>
+                                                Нет данных за выбранный период
+                                            </td></tr>
+                                        )}
+                                        {displayData.map((p, i) => {
+                                            const rowBg = i % 2 === 0 ? '#ffffff' : '#f9fafb';
+                                            return (
+                                                <tr key={p.nm_id} style={{ background: rowBg, color: '#111827' }}>
+                                                    {/* Article */}
+                                                    <td style={{ position: 'sticky', left: 0, background: rowBg, zIndex: 11, borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #f3f4f6' }}>
+                                                        <div style={{ fontWeight: 600, fontSize: 12, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#111827' }}>
+                                                            {p.vendor_code}
+                                                        </div>
+                                                        <div style={{ fontSize: 10, color: '#6b7280' }}>
+                                                            {p.brand} · {p.subject}
+                                                        </div>
+                                                    </td>
 
-            <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-dim)' }}>
-                Всего товаров: {totalProducts} · Период: {trendDays} дней · Сортировка: {sortField} {sortAsc ? '↑' : '↓'}
-            </div>
+                                                {/* Turnover */}
+                                                <TurnoverCell days={p.turnover_days} trendPct={p.trend_turnover} stocksWb={p.stocks_wb} />
+
+                                                    {/* All metric columns */}
+                                                    {columns.map(c => {
+                                                        let cellColor: string | undefined;
+                                                        if (c.field === 'drr') {
+                                                            cellColor = p.drr > 30 ? '#ef4444' : p.drr > 15 ? '#f59e0b' : p.drr > 0 ? '#10b981' : '#6b7280';
+                                                        } else if (c.field === 'margin') {
+                                                            cellColor = p.margin > 20 ? '#10b981' : p.margin > 0 ? '#a3e635' : '#ef4444';
+                                                        } else if (c.field === 'profit') {
+                                                            cellColor = p.profit > 0 ? '#10b981' : '#ef4444';
+                                                        }
+                                                        return (
+                                                            <MetricCell
+                                                                key={c.field}
+                                                                value={p[c.field] ?? 0}
+                                                                trend={p[c.trend] ?? 0}
+                                                                format={c.format}
+                                                                color={cellColor}
+                                                            />
+                                                        );
+                                                    })}
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </div>
+
+                    <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-dim)' }}>
+                        Всего товаров: {totalProducts} · Период: {trendDays} дней · Сортировка: {sortField} {sortAsc ? '↑' : '↓'}
+                    </div>
+                </>
+            )}
         </div>
     );
 }

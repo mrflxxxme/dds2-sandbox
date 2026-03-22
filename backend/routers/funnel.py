@@ -374,6 +374,30 @@ async def get_product_trends(
     )
 
 
+@router.get("/anomalies")
+async def get_anomalies_report(
+    period_days: int = Query(7),
+    brand: str | None = Query(None),
+    include_rf_stocks: bool = Query(False),
+    min_orders: int = Query(5),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Anomalies report — detect problematic products across 5 patterns."""
+    tax_info = await _load_tax_info(db, project)
+    bdr_rates_map = await _load_bdr_rates(db, project.id)
+    return await funnel_service.get_anomalies(
+        db,
+        project.id,
+        tax_info,
+        period_days=period_days,
+        brand=brand,
+        include_rf_stocks=include_rf_stocks,
+        min_orders=min_orders,
+        bdr_rates_map=bdr_rates_map,
+    )
+
+
 # ─── Tariffs (WB commission rates) ──────────────────────────────────────────
 
 

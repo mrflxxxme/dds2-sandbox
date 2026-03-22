@@ -19,6 +19,11 @@ from backend.services.funnel.analysis import (
     get_product_trends,
 )
 
+# ─── Anomalies ────────────────────────────────────────────────────────────────
+from backend.services.funnel.anomalies import (
+    get_anomalies,
+)
+
 # ─── Queries ─────────────────────────────────────────────────────────────────
 from backend.services.funnel.queries import (
     bulk_set_cost_overrides,
@@ -66,4 +71,6 @@ __all__ = [
     # analysis
     "get_day_analysis",
     "get_product_trends",
+    # anomalies
+    "get_anomalies",
 ]

@@ -1056,3 +1056,49 @@ export interface RefreshFromFboResponse {
   changed: number;
   items: AssemblyRequestItem[];
 }
+
+// ─── Anomalies ──────────────────────────────────────────────────────────────
+
+export interface AnomalyMetrics {
+  margin?: number;
+  was_margin?: number;
+  drr?: number;
+  adv_sum?: number;
+  turnover_days?: number;
+  stocks_wb?: number;
+  days_left?: number;
+  restock_qty?: number;
+  frozen_value?: number;
+  buyout_pct?: number;
+  avg_price?: number;
+  orders_sum?: number;
+  appetite_weekly?: number;
+}
+
+export interface AnomalyItem {
+  nm_id: number;
+  vendor_code: string;
+  brand: string;
+  subject: string;
+  severity: 'critical' | 'warning';
+  anomaly_type: string;
+  title: string;
+  description: string;
+  loss_amount: number | null;
+  metrics: AnomalyMetrics;
+  action: string;
+}
+
+export interface AnomalySummary {
+  total_loss: number;
+  oos_risk_count: number;
+  frozen_capital: number;
+  healthy_count: number;
+}
+
+export interface AnomaliesResponse {
+  summary: AnomalySummary;
+  anomalies: AnomalyItem[];
+  total_products: number;
+  period_days: number;
+}

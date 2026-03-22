@@ -1,6 +1,6 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
-import type { FunnelDayRow, FunnelSummary, FunnelFilters, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult } from '@/types/api';
+import type { FunnelDayRow, FunnelSummary, FunnelFilters, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
@@ -73,6 +73,14 @@ export function addFunnelMethods(api: ApiClient) {
         },
         deleteTariff(id: number) {
             return api.request<{ status: string }>('DELETE', `/api/v1/funnel/tariffs/${id}`);
+        },
+        getAnomalies(params?: { period_days?: number; brand?: string; include_rf_stocks?: boolean; min_orders?: number }) {
+            const q = new URLSearchParams();
+            if (params?.period_days) q.set('period_days', String(params.period_days));
+            if (params?.brand) q.set('brand', params.brand);
+            if (params?.include_rf_stocks != null) q.set('include_rf_stocks', String(params.include_rf_stocks));
+            if (params?.min_orders) q.set('min_orders', String(params.min_orders));
+            return api.request<AnomaliesResponse>('GET', `/api/v1/funnel/anomalies?${q.toString()}`);
         },
     };
 }
