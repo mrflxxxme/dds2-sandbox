@@ -16,37 +16,41 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Use IF NOT EXISTS for idempotency (columns may already exist on production)
+    conn = op.get_bind()
+
     # 1. order_city_map: add okrug + order_date
-    op.add_column(
-        "order_city_map",
-        sa.Column("okrug", sa.String(length=100), nullable=True),
-    )
-    op.add_column(
-        "order_city_map",
-        sa.Column("order_date", sa.Date(), nullable=True),
-    )
+    conn.execute(sa.text("ALTER TABLE order_city_map ADD COLUMN IF NOT EXISTS okrug VARCHAR(100)"))
+    conn.execute(sa.text("ALTER TABLE order_city_map ADD COLUMN IF NOT EXISTS order_date DATE"))
 
     # 2. warehouses: add wb_acceptance_days
-    op.add_column(
-        "warehouses",
-        sa.Column("wb_acceptance_days", sa.Integer(), server_default="2", nullable=True),
-    )
+    conn.execute(sa.text("ALTER TABLE warehouses ADD COLUMN IF NOT EXISTS wb_acceptance_days INTEGER DEFAULT 2"))
 
     # 3. warehouse_delivery_times table
-    op.create_table(
-        "warehouse_delivery_times",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("project_id", sa.Integer(), sa.ForeignKey("projects.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("warehouse_id", sa.Integer(), sa.ForeignKey("warehouses.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("wb_warehouse_name", sa.String(length=255), nullable=False),
-        sa.Column("delivery_days", sa.Integer(), server_default="3", nullable=False),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=True),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=True),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("project_id", "warehouse_id", "wb_warehouse_name", name="uq_wh_delivery_time"),
+    conn.execute(
+        sa.text("""
+        CREATE TABLE IF NOT EXISTS warehouse_delivery_times (
+            id SERIAL PRIMARY KEY,
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
+            wb_warehouse_name VARCHAR(255) NOT NULL,
+            delivery_days INTEGER NOT NULL DEFAULT 3,
+            created_at TIMESTAMP DEFAULT now(),
+            updated_at TIMESTAMP DEFAULT now(),
+            CONSTRAINT uq_wh_delivery_time UNIQUE (project_id, warehouse_id, wb_warehouse_name)
+        )
+    """)
     )
-    op.create_index("ix_warehouse_delivery_times_project_id", "warehouse_delivery_times", ["project_id"])
-    op.create_index("ix_warehouse_delivery_times_warehouse_id", "warehouse_delivery_times", ["warehouse_id"])
+    conn.execute(
+        sa.text(
+            "CREATE INDEX IF NOT EXISTS ix_warehouse_delivery_times_project_id ON warehouse_delivery_times (project_id)"
+        )
+    )
+    conn.execute(
+        sa.text(
+            "CREATE INDEX IF NOT EXISTS ix_warehouse_delivery_times_warehouse_id ON warehouse_delivery_times (warehouse_id)"
+        )
+    )
 
 
 def downgrade() -> None:
