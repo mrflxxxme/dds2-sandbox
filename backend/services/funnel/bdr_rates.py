@@ -1,16 +1,19 @@
 # ruff: noqa: RUF001
 """
-BDR rates — per-article coefficients from wb_finance_rows for funnel profit calculation.
+BDR rates — per-article DAILY coefficients from wb_finance_rows for funnel profit.
 
-Provides 3 coefficients per nm_id (averaged over lookback period):
+Provides 3 coefficients per (nm_id, date):
 - to_pay_rate: what % of realization WB actually pays out
 - spp_rate: SPP discount % (1 - sales_amount / realization)
 - buyout_pct: % of orders that are actually bought (not returned)
 
-These replace the flat tariff-based commission and fix profit overstatement.
+Daily rates are used to match funnel data precisely:
+- Funnel day 18.03 → BDR rates from rr_dt = 18.03
+- If no data for that day → fallback to article-level average
 """
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -19,8 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger("dds.funnel.bdr_rates")
 
-# Simple in-memory cache (project_id -> (timestamp, rates_map))
-_cache: dict[int, tuple[float, dict]] = {}
+# In-memory cache: project_id -> (monotonic_ts, daily_map, avg_map)
+_cache: dict[int, tuple[float, dict, dict]] = {}
 _CACHE_TTL = 3600  # 1 hour
 
 
@@ -33,16 +36,48 @@ class BdrRates:
     buyout_pct: float  # sale_qty / (sale_qty + ret_qty) (e.g. 0.976 = 97.6%)
 
 
-_BDR_RATES_SQL = text("""
+class BdrRatesLookup:
+    """Wrapper for daily + avg BDR rates with automatic fallback.
+
+    Usage:
+        lookup = BdrRatesLookup(daily_map, avg_map)
+        bdr = lookup.get(nm_id, row_date)  # daily if exists, else avg
+        bdr = lookup.get(nm_id)            # avg only
+    """
+
+    def __init__(
+        self,
+        daily_map: dict[tuple[int, date], BdrRates],
+        avg_map: dict[int, BdrRates],
+    ):
+        self.daily = daily_map
+        self.avg = avg_map
+
+    def get(self, nm_id: int, d: date | None = None) -> BdrRates | None:
+        """Look up rates: daily first (if date provided), then avg fallback."""
+        if d is not None:
+            daily = self.daily.get((nm_id, d))
+            if daily:
+                return daily
+        return self.avg.get(nm_id)
+
+    def __bool__(self) -> bool:
+        return bool(self.daily) or bool(self.avg)
+
+
+# ── Daily rates SQL (GROUP BY nm_id, rr_dt) ─────────────────────────────────
+
+_BDR_RATES_DAILY_SQL = text("""
 SELECT
   nm_id,
+  rr_dt,
 
   -- Realization (net: sales - returns, до СПП)
   COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub ELSE 0 END), 0) -
   COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_price_withdisc_rub ELSE 0 END), 0)
     AS realization,
 
-  -- Sales amount (net: sales - returns, после СПП)
+  -- Sales amount (net, после СПП)
   COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_amount ELSE 0 END), 0) -
   COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_amount ELSE 0 END), 0)
     AS sales_amount,
@@ -57,7 +92,7 @@ SELECT
   - COALESCE(SUM(acceptance), 0)
     AS to_pay,
 
-  -- Quantities (only from oper_name Продажа/Возврат)
+  -- Quantities
   COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа'
       AND supplier_oper_name IN ('Продажа', 'Возврат')
       THEN quantity ELSE 0 END), 0) AS sale_qty,
@@ -68,94 +103,128 @@ SELECT
 FROM wb_finance_rows
 WHERE project_id = :project_id
   AND rr_dt >= :date_from
-GROUP BY nm_id
+GROUP BY nm_id, rr_dt
 HAVING
-  -- Only articles with meaningful realization
   (COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub ELSE 0 END), 0) -
    COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_price_withdisc_rub ELSE 0 END), 0)) > 0
 """)
 
 
-async def _query_bdr_rates(db: AsyncSession, project_id: int, date_from: date) -> dict[int, BdrRates]:
-    """Execute BDR rates query and build rates map."""
+def _build_rates(
+    realization: float, sales_amount: float, to_pay: float, sale_qty: int, ret_qty: int
+) -> BdrRates | None:
+    """Build BdrRates from raw aggregates, with sanity clamping."""
+    if realization <= 0:
+        return None
+
+    to_pay_rate = max(to_pay / realization, 0)
+    if to_pay_rate > 1:
+        to_pay_rate = 1.0
+
+    spp_rate = max(1 - (sales_amount / realization), 0)
+    if spp_rate > 0.95:
+        spp_rate = 0.95
+
+    total_qty = sale_qty + ret_qty
+    buyout_pct = sale_qty / total_qty if total_qty > 0 else 1.0
+
+    return BdrRates(
+        to_pay_rate=round(to_pay_rate, 4),
+        spp_rate=round(spp_rate, 4),
+        buyout_pct=round(buyout_pct, 4),
+    )
+
+
+async def _query_bdr_rates_daily(
+    db: AsyncSession,
+    project_id: int,
+    date_from: date,
+) -> tuple[dict[tuple[int, date], BdrRates], dict[int, BdrRates]]:
+    """Query daily BDR rates. Returns (daily_map, avg_map).
+
+    daily_map: {(nm_id, rr_dt): BdrRates} — exact rates per day
+    avg_map:   {nm_id: BdrRates}           — weighted avg as fallback
+    """
     result = await db.execute(
-        _BDR_RATES_SQL,
+        _BDR_RATES_DAILY_SQL,
         {"project_id": project_id, "date_from": date_from},
     )
     rows = result.fetchall()
 
-    rates_map: dict[int, BdrRates] = {}
+    daily_map: dict[tuple[int, date], BdrRates] = {}
+
+    # Accumulators for weighted average per nm_id
+    acc: dict[int, dict] = {}  # nm_id -> {realization, sales_amount, to_pay, sale_qty, ret_qty}
+
     for row in rows:
         realization = float(row.realization)
         sales_amount = float(row.sales_amount)
         to_pay = float(row.to_pay)
         sale_qty = int(row.sale_qty)
         ret_qty = int(row.ret_qty)
+        nm_id = row.nm_id
+        rr_dt = row.rr_dt
 
-        if realization <= 0:
-            continue
+        rates = _build_rates(realization, sales_amount, to_pay, sale_qty, ret_qty)
+        if rates:
+            daily_map[(nm_id, rr_dt)] = rates
 
-        to_pay_rate = to_pay / realization
-        spp_rate = 1 - (sales_amount / realization) if realization > 0 else 0
-        total_qty = sale_qty + ret_qty
-        buyout_pct = sale_qty / total_qty if total_qty > 0 else 1.0
+        # Accumulate for avg
+        if nm_id not in acc:
+            acc[nm_id] = {"realization": 0, "sales_amount": 0, "to_pay": 0, "sale_qty": 0, "ret_qty": 0}
+        a = acc[nm_id]
+        a["realization"] += realization
+        a["sales_amount"] += sales_amount
+        a["to_pay"] += to_pay
+        a["sale_qty"] += sale_qty
+        a["ret_qty"] += ret_qty
 
-        # Clamp to valid range instead of skipping
-        to_pay_rate = max(to_pay_rate, 0)
-        if to_pay_rate > 1:
-            to_pay_rate = 1.0
-        spp_rate = max(spp_rate, 0)
-        if spp_rate > 0.95:
-            spp_rate = 0.95
+    # Build avg map
+    avg_map: dict[int, BdrRates] = {}
+    for nm_id, a in acc.items():
+        rates = _build_rates(a["realization"], a["sales_amount"], a["to_pay"], a["sale_qty"], a["ret_qty"])
+        if rates:
+            avg_map[nm_id] = rates
 
-        rates_map[row.nm_id] = BdrRates(
-            to_pay_rate=round(to_pay_rate, 4),
-            spp_rate=round(spp_rate, 4),
-            buyout_pct=round(buyout_pct, 4),
-        )
-
-    return rates_map
+    return daily_map, avg_map
 
 
-async def get_bdr_rates(db: AsyncSession, project_id: int, lookback_days: int = 7) -> dict[int, BdrRates]:
-    """Get BDR coefficients per nm_id from wb_finance_rows.
+async def get_bdr_rates(
+    db: AsyncSession,
+    project_id: int,
+    lookback_days: int = 30,
+) -> BdrRatesLookup:
+    """Get daily BDR coefficients per (nm_id, date) from wb_finance_rows.
 
-    Tries lookback_days first, then expands progressively: 14, 30, 90 days.
-    Also tries shorter periods (3, 1 day) for fresh data.
+    Returns BdrRatesLookup with .get(nm_id, date) method:
+    - Tries daily rate for exact (nm_id, date) first
+    - Falls back to period-average for nm_id
 
-    Uses in-memory TTL cache (1h). Empty results are NOT cached.
-
-    Returns: {nm_id: BdrRates}
+    Uses in-memory TTL cache (1h).
     """
-    import time
-
     now = time.monotonic()
     cached = _cache.get(project_id)
-    if cached and (now - cached[0]) < _CACHE_TTL and cached[1]:
-        return cached[1]
+    if cached and (now - cached[0]) < _CACHE_TTL and (cached[1] or cached[2]):
+        return BdrRatesLookup(cached[1], cached[2])
 
     today = date.today()
+    date_from = today - timedelta(days=lookback_days)
 
-    # Try preferred lookback first, then expand progressively
-    tried = set()
-    for days in [lookback_days, 3, 1, 14, 30, 90]:
-        if days in tried:
-            continue
-        tried.add(days)
-        date_from = today - timedelta(days=days)
-        rates_map = await _query_bdr_rates(db, project_id, date_from)
-        if rates_map:
-            logger.info(
-                "BDR rates loaded: project=%d, lookback=%d days, articles=%d",
-                project_id,
-                days,
-                len(rates_map),
-            )
-            _cache[project_id] = (now, rates_map)
-            return rates_map
+    daily_map, avg_map = await _query_bdr_rates_daily(db, project_id, date_from)
 
-    logger.info("BDR rates: no data for project=%d", project_id)
-    return {}
+    if daily_map or avg_map:
+        logger.info(
+            "BDR rates loaded: project=%d, lookback=%d days, daily_entries=%d, articles=%d",
+            project_id,
+            lookback_days,
+            len(daily_map),
+            len(avg_map),
+        )
+        _cache[project_id] = (now, daily_map, avg_map)
+    else:
+        logger.info("BDR rates: no data for project=%d", project_id)
+
+    return BdrRatesLookup(daily_map, avg_map)
 
 
 def compute_profit_bdr(

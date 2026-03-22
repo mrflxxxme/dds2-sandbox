@@ -20,7 +20,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbFunnelDaily
-from backend.services.funnel.bdr_rates import BdrRates, compute_profit_bdr
+from backend.services.funnel.bdr_rates import BdrRatesLookup, compute_profit_bdr
 from backend.services.tariff_service import get_avg_buyout_map, get_tariff_map
 
 logger = logging.getLogger("dds.funnel")
@@ -94,7 +94,7 @@ async def get_funnel_aggregated(
     date_to: str | None,
     brand: str | None,
     subject: str | None,
-    bdr_rates_map: dict[int, BdrRates] | None = None,
+    bdr_rates_map: BdrRatesLookup | None = None,
 ) -> list[dict]:
     """Get funnel data aggregated by day.
 
@@ -187,7 +187,7 @@ async def get_funnel_aggregated(
         if r.avg_price:
             agg["avg_prices"].append(float(r.avg_price))
 
-        bdr = bdr_rates_map.get(nm_id) if bdr_rates_map else None
+        bdr = bdr_rates_map.get(nm_id, r.date) if bdr_rates_map else None
         if bdr:
             m = compute_profit_bdr(orders_sum, orders_count, adv, cost_per_unit, bdr, tax_info)
             agg["bdr_revenue"] += m["revenue"]
@@ -294,7 +294,7 @@ async def get_funnel_detailed(
     brand: str | None,
     vendor_code: str | None,
     subject: str | None,
-    bdr_rates_map: dict[int, BdrRates] | None = None,
+    bdr_rates_map: BdrRatesLookup | None = None,
 ) -> list[dict]:
     """Get detailed funnel data per product.
 
@@ -336,7 +336,7 @@ async def get_funnel_detailed(
         clicks = r.adv_clicks or 0
         nm_id = r.nm_id
 
-        bdr = bdr_rates_map.get(nm_id) if bdr_rates_map else None
+        bdr = bdr_rates_map.get(nm_id, r.date) if bdr_rates_map else None
         if bdr:
             m = compute_profit_bdr(orders_sum, orders_count, adv, cost_per_unit, bdr, tax_info)
             m.update(_traffic_metrics(orders_sum, adv, views, clicks, orders_count))

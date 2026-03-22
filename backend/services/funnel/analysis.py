@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbFunnelDaily
-from backend.services.funnel.bdr_rates import BdrRates, compute_profit_bdr
+from backend.services.funnel.bdr_rates import BdrRatesLookup, compute_profit_bdr
 from backend.services.tariff_service import get_avg_buyout_map, get_tariff_map
 
 logger = logging.getLogger("dds.funnel")
@@ -28,7 +28,7 @@ async def get_day_analysis(
     brand: str | None,
     subject: str | None,
     trend_days: int = 14,
-    bdr_rates_map: dict[int, BdrRates] | None = None,
+    bdr_rates_map: BdrRatesLookup | None = None,
 ) -> dict:
     """Day analysis: summary, comparison, top products, trend, anomalies."""
     td = date.fromisoformat(target_date)
@@ -80,7 +80,7 @@ async def get_day_analysis(
             cost_per_unit = float(r.cost_price or 0)
             orders_count = int(r.orders_count or 0)
 
-            bdr = bdr_rates_map.get(r.nm_id) if bdr_rates_map else None
+            bdr = bdr_rates_map.get(r.nm_id, r.date) if bdr_rates_map else None
             if bdr:
                 m = compute_profit_bdr(orders_sum, orders_count, adv, cost_per_unit, bdr, tax_info)
                 total_revenue += m["revenue"]

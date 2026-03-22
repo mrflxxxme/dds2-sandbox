@@ -12,7 +12,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbFunnelDaily
-from backend.services.funnel.bdr_rates import BdrRates, compute_profit_bdr
+from backend.services.funnel.bdr_rates import BdrRatesLookup, compute_profit_bdr
 from backend.services.tariff_service import get_avg_buyout_map, get_tariff_map
 
 logger = logging.getLogger("dds.funnel")
@@ -50,7 +50,7 @@ async def get_product_trends(
     trend_days: int = 7,
     brand: str | None = None,
     search: str | None = None,
-    bdr_rates_map: dict[int, BdrRates] | None = None,
+    bdr_rates_map: BdrRatesLookup | None = None,
 ) -> dict:
     """
     Per-product metrics with linear regression trends.
@@ -118,7 +118,7 @@ async def get_product_trends(
         turnover_days = round(stocks_wb / avg_daily_orders, 1) if avg_daily_orders > 0 else 0
 
         # Profit calculation: BDR or legacy
-        bdr = bdr_rates_map.get(nm_id) if bdr_rates_map else None
+        bdr = bdr_rates_map.get(nm_id) if bdr_rates_map else None  # avg for totals
         if bdr:
             m = compute_profit_bdr(total_orders_sum, total_orders_count, total_adv_sum, cost_price, bdr, tax_info)
             revenue = m["revenue"]
@@ -184,9 +184,9 @@ async def get_product_trends(
             daily_cart_to_order.append((oc / cart_c * 100) if cart_c else 0)
             daily_turnover.append(stk / oc if oc else 0)
 
-            # Daily profit & margin using same method as totals
-            if bdr:
-                dm = compute_profit_bdr(os_, oc, adv, float(r.cost_price or 0), bdr, tax_info)
+            day_bdr = bdr_rates_map.get(nm_id, r.date) if bdr_rates_map else None
+            if day_bdr:
+                dm = compute_profit_bdr(os_, oc, adv, float(r.cost_price or 0), day_bdr, tax_info)
                 daily_margin.append(dm["margin"])
                 daily_profit.append(dm["profit"])
             else:

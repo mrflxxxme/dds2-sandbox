@@ -77,7 +77,7 @@ async def _load_tax_info(db: AsyncSession, project: Project) -> dict:
 
 
 async def _load_bdr_rates(db: AsyncSession, project_id: int):
-    """Load BDR rates for profit calculation."""
+    """Load BDR rates (daily + avg fallback) for profit calculation."""
     from backend.services.funnel.bdr_rates import get_bdr_rates
 
     return await get_bdr_rates(db, project_id)
