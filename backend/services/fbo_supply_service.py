@@ -553,19 +553,33 @@ async def get_fbo_supply_items(
     # Lazy-load from WB API if no items cached
     if not items and api_client and supply.wb_supply_id.isdigit():
         try:
+            wb_id_int = int(supply.wb_supply_id)
             goods = await api_client.get_fbw_supply_goods(
-                int(supply.wb_supply_id),
+                wb_id_int,
                 limit=100,
                 offset=0,
             )
             if goods:
-                await _upsert_supply_items_fbw(db, supply.id, int(supply.wb_supply_id), goods)
-                await db.commit()
-                # Re-fetch from DB
-                result = await db.execute(
-                    select(WbFboSupplyItem).where(WbFboSupplyItem.supply_id == supply_id).order_by(WbFboSupplyItem.id)
-                )
-                items = result.scalars().all()
+                await _upsert_supply_items_fbw(db, supply.id, wb_id_int, goods)
+
+            # Also fetch detail (warehouse_name, qty) if missing
+            if not supply.warehouse_name:
+                try:
+                    detail = await api_client.get_fbw_supply_detail(wb_id_int)
+                    if detail:
+                        _update_supply_from_fbw_detail(supply, detail)
+                except Exception as e:
+                    logger.warning(
+                        "fbo_items.detail_fetch_error",
+                        extra={"supply_id": supply_id, "error": str(e)},
+                    )
+
+            await db.commit()
+            # Re-fetch from DB
+            result = await db.execute(
+                select(WbFboSupplyItem).where(WbFboSupplyItem.supply_id == supply_id).order_by(WbFboSupplyItem.id)
+            )
+            items = result.scalars().all()
         except Exception as e:
             logger.warning(
                 "fbo_items.lazy_load_error",
