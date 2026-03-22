@@ -52,12 +52,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Add swap space (prevent OOM exit code 137)
+      - name: Free disk space and add swap (prevent OOM exit code 137)
         continue-on-error: true
         run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc 2>/dev/null || true
+          docker system prune -af 2>/dev/null || true
           sudo swapoff -a 2>/dev/null || true
           sudo rm -f /swapfile
-          sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
+          sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
