@@ -151,6 +151,10 @@ async def get_funnel_aggregated(
             "bdr_tax": 0.0,
             "bdr_commission": 0.0,
             "bdr_cost_total": 0.0,
+            # Weighted SPP/to_pay accumulators (weight = orders_sum)
+            "w_spp_sum": 0.0,
+            "w_topay_sum": 0.0,
+            "w_total": 0.0,
             # Legacy aggregate fields
             "leg_revenue": 0.0,
             "leg_commission": 0.0,
@@ -191,6 +195,10 @@ async def get_funnel_aggregated(
             agg["bdr_tax"] += m["tax"]
             agg["bdr_commission"] += m["commission"]
             agg["bdr_cost_total"] += m["cost_total"]
+            # Weighted average for SPP and to_pay_rate
+            agg["w_spp_sum"] += bdr.spp_rate * orders_sum
+            agg["w_topay_sum"] += bdr.to_pay_rate * orders_sum
+            agg["w_total"] += orders_sum
         else:
             buyout_pct = buyout_map.get(nm_id, 100)
             revenue = orders_sum * buyout_pct / 100
@@ -268,6 +276,8 @@ async def get_funnel_aggregated(
                 "commission": round(commission, 2),
                 "commission_rate": round((commission / revenue * 100) if revenue else 0, 2),
                 "cost_total": round(cost_total, 2),
+                "spp_rate": round(agg["w_spp_sum"] / agg["w_total"] * 100, 2) if agg["w_total"] > 0 else 0,
+                "to_pay_rate": round(agg["w_topay_sum"] / agg["w_total"] * 100, 2) if agg["w_total"] > 0 else 0,
                 "has_tariff_gaps": agg["has_tariff_gaps"],
                 "has_bdr": agg["has_bdr"],
                 **traffic,
