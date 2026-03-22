@@ -2,7 +2,7 @@
 """add okrug, order_date, updated_at to order_city_map
 
 Revision ID: m7_order_city_map_add_columns
-Revises: m6_assembly_vehicle_fields
+Revises: 4b113f1a37a6
 Create Date: 2026-03-22 10:00:00.000000
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "m7_order_city_map_add_columns"
-down_revision = "m6_assembly_vehicle_fields"
+down_revision = "4b113f1a37a6"
 branch_labels = None
 depends_on = None
 
