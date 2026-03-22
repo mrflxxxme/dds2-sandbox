@@ -1,0 +1,43 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "input=$(cat); cmd=$(echo \"$input\" | grep -o '\"command\":\"[^\"]*\"' | head -1 | sed 's/\"command\":\"//;s/\"$//'); if echo \"$cmd\" | grep -qE '(--no-verify|--no-gpg-sign)'; then echo 'BLOCKED: --no-verify и --no-gpg-sign запрещены. Используй хуки как положено.' >&2; exit 2; fi; exit 0"
+          }
+        ],
+        "description": "Блокировать git commit --no-verify и --no-gpg-sign"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "input=$(cat); file=$(echo \"$input\" | grep -o '\"file_path\":\"[^\"]*\"' | head -1 | sed 's/\"file_path\":\"//;s/\"$//'); if [ -z \"$file\" ]; then exit 0; fi; case \"$file\" in *.py) if grep -qn 'datetime.utcnow\\|datetime.now()' \"$file\" 2>/dev/null; then echo '[DDS2 WARN] Найден datetime.utcnow() или datetime.now() — используй from backend.utils.time import utcnow' >&2; fi; if grep -qn 'text(f\"\\|text(f'\\''' \"$file\" 2>/dev/null; then echo '[DDS2 WARN] Найден f-string в text() — SQL injection риск! Используй параметризованные запросы' >&2; fi; if grep -qn 'db\\.delete\\|session\\.delete' \"$file\" 2>/dev/null; then echo '[DDS2 WARN] Найден db.delete() — используй soft_delete()' >&2; fi ;; esac; exit 0",
+            "timeout": 5
+          }
+        ],
+        "description": "Проверка iron rules DDS2 после редактирования Python файлов"
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "changed=$(git diff --name-only 2>/dev/null); if [ -z \"$changed\" ]; then exit 0; fi; issues=0; for f in $changed; do case \"$f\" in *.py) if [ -f \"$f\" ]; then if grep -qn 'Float' \"$f\" 2>/dev/null && echo \"$f\" | grep -q 'models/'; then echo \"[DDS2] Float в модели $f — используй Numeric(18,2)\" >&2; issues=$((issues+1)); fi; fi ;; esac; done; if [ $issues -gt 0 ]; then echo \"[DDS2] $issues проблем найдено в изменённых файлах\" >&2; fi; exit 0",
+            "timeout": 10,
+            "async": true
+          }
+        ],
+        "description": "Проверка Float в моделях после каждого ответа"
+      }
+    ]
+  }
+}
