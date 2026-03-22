@@ -27,7 +27,7 @@ async def _auto_sync_wb_stocks_if_stale(project_id: int, db: AsyncSession) -> bo
     """Check if WB stocks are stale (>1h) and trigger background sync. Returns True if sync started."""
     from sqlalchemy import func as sqlfunc
 
-    from backend.models.wb_stocks import WbWarehouseStock
+    from backend.models.integrations import WbWarehouseStock
 
     result = await db.execute(
         select(sqlfunc.max(WbWarehouseStock.updated_at)).where(
