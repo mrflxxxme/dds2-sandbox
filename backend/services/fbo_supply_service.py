@@ -203,17 +203,11 @@ async def enrich_fbo_supplies(
 
     Returns: {enriched, errors}
     """
-    # Find supplies needing detail (no warehouse_name, not completed)
+    # Find supplies needing detail (no warehouse_name)
     result = await db.execute(
         select(WbFboSupply).where(
             WbFboSupply.project_id == project_id,
             WbFboSupply.warehouse_name.is_(None),
-            WbFboSupply.wb_status.notin_(
-                [
-                    WbSupplyStatus.ACCEPTED,
-                    WbSupplyStatus.CANCELLED,
-                ]
-            ),
         )
     )
     supplies_needing_detail = result.scalars().all()

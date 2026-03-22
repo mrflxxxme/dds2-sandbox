@@ -145,7 +145,7 @@ async def _enrich_in_background(project_id: int, api_key: str):
             db,
             project_id,
             api_client,
-            max_calls=30,
+            max_calls=300,
         )
 
 
