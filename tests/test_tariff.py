@@ -121,7 +121,7 @@ class TestTariffParser:
 
 class TestComputeMetrics:
     def test_basic_profit(self):
-        from backend.services.funnel.queries import _compute_metrics
+        from backend.services.funnel.queries import _compute_metrics_legacy as _compute_metrics
 
         m = _compute_metrics(
             orders_sum=100_000,
@@ -145,7 +145,7 @@ class TestComputeMetrics:
         assert m["commission_rate"] == 15.0
 
     def test_zero_tariff(self):
-        from backend.services.funnel.queries import _compute_metrics
+        from backend.services.funnel.queries import _compute_metrics_legacy as _compute_metrics
 
         m = _compute_metrics(
             orders_sum=50_000,
@@ -164,7 +164,7 @@ class TestComputeMetrics:
         assert m["profit"] == 36_000.0
 
     def test_no_revenue(self):
-        from backend.services.funnel.queries import _compute_metrics
+        from backend.services.funnel.queries import _compute_metrics_legacy as _compute_metrics
 
         m = _compute_metrics(
             orders_sum=0,
@@ -182,7 +182,7 @@ class TestComputeMetrics:
         assert m["margin"] == 0.0
 
     def test_drr_calculation(self):
-        from backend.services.funnel.queries import _compute_metrics
+        from backend.services.funnel.queries import _compute_metrics_legacy as _compute_metrics
 
         m = _compute_metrics(
             orders_sum=100_000,
@@ -197,7 +197,7 @@ class TestComputeMetrics:
         assert m["drr"] == 10.0  # 10000/100000 * 100
 
     def test_margin_calculation(self):
-        from backend.services.funnel.queries import _compute_metrics
+        from backend.services.funnel.queries import _compute_metrics_legacy as _compute_metrics
 
         m = _compute_metrics(
             orders_sum=100_000,
