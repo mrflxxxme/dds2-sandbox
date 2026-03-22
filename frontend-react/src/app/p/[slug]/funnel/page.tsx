@@ -19,7 +19,6 @@ export default function FunnelPage() {
     const [loading, setLoading] = useState(false);
     const headerRow1Ref = useRef<HTMLTableRowElement>(null);
     const [row1H, setRow1H] = useState(32);
-    const [taxRate, setTaxRate] = useState(6);
     const [initDone, setInitDone] = useState(false);
     const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
     const [missingDays, setMissingDays] = useState<number | null>(null);
@@ -62,15 +61,13 @@ export default function FunnelPage() {
         if (!from || !to) return [];
         setLoading(true);
         try {
-            const [res, sum, tax] = await Promise.all([
+            const [res, sum] = await Promise.all([
                 api.getFunnelData({ date_from: from, date_to: to, brand, vendor_code: search, subject }),
                 api.getFunnelSummary(from, to, brand, subject),
-                api.getFunnelTax(),
             ]);
             setData(res.data || []);
             setDetailed(res.detailed || false);
             setSummary(sum);
-            setTaxRate(tax.tax_rate || 6);
             setHasBdr(res.has_bdr || false);
             return res.data || [];
         } catch (e: unknown) {
@@ -110,12 +107,6 @@ export default function FunnelPage() {
 
     useEffect(() => { if (initDone && dateFrom && dateTo) loadData(); }, [dateFrom, dateTo, brand, subject, search]);
 
-    const handleSaveTax = async () => {
-        try {
-            await api.setFunnelTax(taxRate);
-            loadData();
-        } catch (e: unknown) { alert(e instanceof Error ? e.message : 'Ошибка'); }
-    };
 
     // Summary card definitions
     interface SummaryCard {
@@ -183,13 +174,6 @@ export default function FunnelPage() {
                                     ⚠️ Нет данных БДР — прибыль по тарифам
                                 </span>
                             )}
-                            <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
-                                <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>Налог %:</span>
-                                <input type="number" value={taxRate} step="0.1"
-                                    onChange={e => setTaxRate(parseFloat(e.target.value) || 0)}
-                                    style={{ width: 60, background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', textAlign: 'center' }} />
-                                <button className="btn-secondary" onClick={handleSaveTax} style={{ padding: '4px 10px', fontSize: 12 }}>Сохранить</button>
-                            </div>
                         </div>
                     </div>
 
