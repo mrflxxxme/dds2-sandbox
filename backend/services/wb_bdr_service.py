@@ -141,9 +141,11 @@ async def get_wb_bdr(
         metrics["subject"] = row["subject_name"] or ""
         metrics["nm_id"] = nm_id
 
-        # Accumulate totals
+        # Accumulate totals (skip percentages/averages — they are recalculated)
+        _skip_sum = {"buyout_pct", "avg_sale_price", "avg_retail_price", "avg_logistics"}
         for key in total_metrics:
-            total_metrics[key] += D(str(metrics.get(key, 0)))
+            if key not in _skip_sum:
+                total_metrics[key] += D(str(metrics.get(key, 0)))
 
         # Ads: per-article from WbFunnelDaily
         adv_sum = float(ads_map.get(nm_id, 0))
@@ -175,6 +177,22 @@ async def get_wb_bdr(
 
     # ── 7. Summary ──
     summary_result = {k: float(v) for k, v in total_metrics.items()}
+
+    # Recalculate averages/percentages from totals (cannot sum them across articles)
+    total_sale_qty = summary_result.get("sale_qty_gross", 0) or summary_result.get("sale_qty", 0)
+    total_ret_qty = summary_result.get("ret_qty", 0)
+    net_sale_qty = summary_result.get("sale_qty", 0)
+    total_qty = total_sale_qty + total_ret_qty
+    summary_result["buyout_pct"] = round(total_sale_qty / total_qty * 100, 2) if total_qty > 0 else 0
+    summary_result["avg_sale_price"] = (
+        round(summary_result.get("sales_amount", 0) / net_sale_qty, 2) if net_sale_qty > 0 else 0
+    )
+    summary_result["avg_retail_price"] = (
+        round(summary_result.get("realization", 0) / net_sale_qty, 2) if net_sale_qty > 0 else 0
+    )
+    summary_result["avg_logistics"] = (
+        round(summary_result.get("logistics", 0) / net_sale_qty, 2) if net_sale_qty > 0 else 0
+    )
 
     # Ads + cost totals
     summary_result["adv_sum"] = float(total_adv)
