@@ -12,6 +12,7 @@ on:
     paths:
       - 'backend/**'
       - 'tests/**'
+      - 'migrations/**'
       - 'requirements-backend.txt'
       - 'docker-compose.yml'
       - 'Dockerfile.backend'
@@ -20,6 +21,7 @@ on:
     paths:
       - 'backend/**'
       - 'tests/**'
+      - 'migrations/**'
       - 'requirements-backend.txt'
 
 env:
