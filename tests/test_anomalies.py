@@ -413,7 +413,7 @@ class TestGetAnomalies:
                 return_value=mock_trends,
             ),
             patch(
-                "backend.services.funnel.anomalies._load_rf_stocks",
+                "backend.services.funnel.anomalies.load_rf_stocks",
                 new_callable=AsyncMock,
                 return_value={42: 100},
             ) as mock_rf,

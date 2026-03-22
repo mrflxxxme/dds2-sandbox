@@ -1,4 +1,3 @@
-# ruff: noqa: RUF001
 """
 Router: /funnel — WB Sales funnel analytics (воронка продаж).
 Thin HTTP layer — all business logic is in services/funnel/ package.
@@ -394,6 +393,37 @@ async def get_anomalies_report(
         brand=brand,
         include_rf_stocks=include_rf_stocks,
         min_orders=min_orders,
+        bdr_rates_map=bdr_rates_map,
+    )
+
+
+# ─── Capital analysis ──────────────────────────────────────────────────────
+
+
+@router.get("/capital")
+async def get_capital_report(
+    period_days: int = Query(7),
+    brand: str | None = Query(None),
+    group_by: str = Query("brand"),
+    parent_filter: str | None = Query(None),
+    include_rf_stocks: bool = Query(False),
+    elasticity: float = Query(1.8),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Capital analysis — liquidity classification, ROI, recommendations."""
+    tax_info = await _load_tax_info(db, project)
+    bdr_rates_map = await _load_bdr_rates(db, project.id)
+    return await funnel_service.get_capital_analysis(
+        db,
+        project.id,
+        tax_info,
+        period_days=period_days,
+        brand=brand,
+        group_by=group_by,
+        parent_filter=parent_filter,
+        include_rf_stocks=include_rf_stocks,
+        elasticity=elasticity,
         bdr_rates_map=bdr_rates_map,
     )
 

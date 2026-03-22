@@ -11,13 +11,11 @@ Detectors:
 
 import logging
 
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import Warehouse, WarehouseStock
-from backend.models.cost import Nomenclature
 from backend.services.funnel.bdr_rates import BdrRatesLookup
 from backend.services.funnel.product_trends import get_product_trends
+from backend.services.funnel.stock_helpers import load_rf_stocks
 
 logger = logging.getLogger("dds.funnel.anomalies")
 
@@ -29,34 +27,6 @@ _PRIORITY = {
     "dead_stock": 20,
     "low_buyout": 10,
 }
-
-
-# ─── RF stocks loader ────────────────────────────────────────────────────────
-
-
-async def _load_rf_stocks(db: AsyncSession, project_id: int) -> dict[int, int]:
-    """Load non-WB warehouse stocks grouped by nm_id (article_wb).
-
-    Returns {nm_id: total_quantity} for all RF/external warehouses.
-    """
-    q = (
-        select(
-            Nomenclature.article_wb,
-            func.sum(WarehouseStock.quantity).label("qty"),
-        )
-        .join(Nomenclature, Nomenclature.id == WarehouseStock.nomenclature_id)
-        .join(Warehouse, Warehouse.id == WarehouseStock.warehouse_id)
-        .where(
-            Warehouse.project_id == project_id,
-            Warehouse.is_deleted == False,  # noqa: E712
-            Warehouse.warehouse_type != "wb",
-            WarehouseStock.project_id == project_id,
-            Nomenclature.article_wb.isnot(None),
-        )
-        .group_by(Nomenclature.article_wb)
-    )
-    result = await db.execute(q)
-    return {row.article_wb: int(row.qty or 0) for row in result}
 
 
 # ─── Detectors ────────────────────────────────────────────────────────────────
@@ -343,7 +313,7 @@ async def get_anomalies(
     rf_stocks_map: dict[int, int] = {}
     if include_rf_stocks:
         try:
-            rf_stocks_map = await _load_rf_stocks(db, project_id)
+            rf_stocks_map = await load_rf_stocks(db, project_id)
         except Exception:
             logger.warning("Failed to load RF stocks, continuing without", exc_info=True)
 

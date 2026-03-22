@@ -1,6 +1,6 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
-import type { FunnelDayRow, FunnelSummary, FunnelFilters, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse } from '@/types/api';
+import type { FunnelDayRow, FunnelSummary, FunnelFilters, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
@@ -81,6 +81,16 @@ export function addFunnelMethods(api: ApiClient) {
             if (params?.include_rf_stocks != null) q.set('include_rf_stocks', String(params.include_rf_stocks));
             if (params?.min_orders) q.set('min_orders', String(params.min_orders));
             return api.request<AnomaliesResponse>('GET', `/api/v1/funnel/anomalies?${q.toString()}`);
+        },
+        getCapital(params?: { period_days?: number; brand?: string; group_by?: string; parent_filter?: string; include_rf_stocks?: boolean; elasticity?: number }) {
+            const q = new URLSearchParams();
+            if (params?.period_days) q.set('period_days', String(params.period_days));
+            if (params?.brand) q.set('brand', params.brand);
+            if (params?.group_by) q.set('group_by', params.group_by);
+            if (params?.parent_filter) q.set('parent_filter', params.parent_filter);
+            if (params?.include_rf_stocks != null) q.set('include_rf_stocks', String(params.include_rf_stocks));
+            if (params?.elasticity != null) q.set('elasticity', String(params.elasticity));
+            return api.request<CapitalResponse>('GET', `/api/v1/funnel/capital?${q.toString()}`);
         },
     };
 }

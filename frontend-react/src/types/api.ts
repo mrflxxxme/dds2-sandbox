@@ -1102,3 +1102,61 @@ export interface AnomaliesResponse {
   total_products: number;
   period_days: number;
 }
+
+// ─── Capital ──────────────────────────────────────────────────────────────────
+
+export interface PriceRecommendation {
+  type: string;
+  label: string;
+  current_roi: number;
+  roi_at_minus_10: number | null;
+  roi_at_minus_20: number | null;
+}
+
+export interface CapitalSummary {
+  total_capital: number;
+  liquid_capital: number;
+  liquid_pct: number;
+  transition_capital: number;
+  transition_pct: number;
+  illiquid_capital: number;
+  illiquid_pct: number;
+  roi_monthly: number;
+  roi_trend: number;
+}
+
+export interface CapitalTrendDay {
+  date: string;
+  liquid: number;
+  transition: number;
+  illiquid: number;
+  total: number;
+  roi_monthly: number;
+}
+
+export interface CapitalGroupRow {
+  group_key: string;
+  group_type: string;
+  nm_id: number | null;
+  vendor_code: string | null;
+  capital: number;
+  liquid_pct: number;
+  illiquid_pct: number;
+  frozen_amount: number;
+  roi_monthly: number;
+  turnover_days: number;
+  sales_per_day: number;
+  margin: number;
+  drr: number;
+  recommendation: PriceRecommendation;
+  children_count: number;
+}
+
+export interface CapitalResponse {
+  summary: CapitalSummary;
+  trend: CapitalTrendDay[];
+  groups: CapitalGroupRow[];
+  total_products: number;
+  period_days: number;
+  elasticity: number;
+}

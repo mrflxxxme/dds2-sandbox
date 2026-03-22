@@ -2,6 +2,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '@/lib/api';
 import AnomaliesTab from './components/AnomaliesTab';
+import CapitalTab from './components/CapitalTab';
 
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
 const fmtK = (n: number) => {
@@ -82,7 +83,7 @@ export default function TrendsPage() {
     const [sortField, setSortField] = useState('orders_sum_rub');
     const [sortAsc, setSortAsc] = useState(false);
     const [totalProducts, setTotalProducts] = useState(0);
-    const [activeTab, setActiveTab] = useState<'table' | 'anomalies'>('table');
+    const [activeTab, setActiveTab] = useState<'table' | 'anomalies' | 'capital'>('table');
     const [anomalyCount, setAnomalyCount] = useState(0);
 
     const loadFilters = useCallback(async () => {
@@ -214,11 +215,28 @@ export default function TrendsPage() {
                         </span>
                     )}
                 </button>
+                <button
+                    className={`btn btn-sm ${activeTab === 'capital' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setActiveTab('capital')}
+                >
+                    {'\u20bd'} Капитал
+                </button>
             </div>
 
             {/* Anomalies tab */}
             {activeTab === 'anomalies' && (
                 <AnomaliesTab
+                    trendDays={trendDays}
+                    brand={brand}
+                    onTrendDaysChange={setTrendDays}
+                    onBrandChange={setBrand}
+                    brands={filters.brands}
+                />
+            )}
+
+            {/* Capital tab */}
+            {activeTab === 'capital' && (
+                <CapitalTab
                     trendDays={trendDays}
                     brand={brand}
                     onTrendDaysChange={setTrendDays}
