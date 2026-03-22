@@ -33,7 +33,7 @@ class BdrRates:
 
     to_pay_rate: float  # to_pay / realization (e.g. 0.598 = 59.8%)
     spp_rate: float  # 1 - sales_amount / realization (e.g. 0.331 = 33.1%)
-    buyout_pct: float  # sale_qty / (sale_qty + ret_qty) (e.g. 0.976 = 97.6%)
+    buyout_pct: float  # sale_qty / (sale_qty + ret_qty + cancel_qty) (e.g. 0.882 = 88.2%)
 
 
 class BdrRatesLookup:
@@ -111,7 +111,12 @@ HAVING
 
 
 def _build_rates(
-    realization: float, sales_amount: float, to_pay: float, sale_qty: int, ret_qty: int
+    realization: float,
+    sales_amount: float,
+    to_pay: float,
+    sale_qty: int,
+    ret_qty: int,
+    cancel_qty: int = 0,
 ) -> BdrRates | None:
     """Build BdrRates from raw aggregates, with sanity clamping."""
     if realization <= 0:
@@ -125,7 +130,7 @@ def _build_rates(
     if spp_rate > 0.95:
         spp_rate = 0.95
 
-    total_qty = sale_qty + ret_qty
+    total_qty = sale_qty + ret_qty + cancel_qty
     buyout_pct = sale_qty / total_qty if total_qty > 0 else 1.0
 
     return BdrRates(
@@ -133,6 +138,23 @@ def _build_rates(
         spp_rate=round(spp_rate, 4),
         buyout_pct=round(buyout_pct, 4),
     )
+
+
+async def _load_cancel_map(
+    db: AsyncSession,
+    project_id: int,
+    date_from: date,
+) -> dict[tuple[int, date], int]:
+    """Load cancelled order counts per (nm_id, dt) from wb_order_cancel_daily."""
+    result = await db.execute(
+        text("""
+            SELECT nm_id, dt, cancelled_orders
+            FROM wb_order_cancel_daily
+            WHERE project_id = :project_id AND dt >= :date_from
+        """),
+        {"project_id": project_id, "date_from": date_from},
+    )
+    return {(row.nm_id, row.dt): row.cancelled_orders for row in result.fetchall()}
 
 
 async def _query_bdr_rates_daily(
@@ -151,10 +173,13 @@ async def _query_bdr_rates_daily(
     )
     rows = result.fetchall()
 
+    # Load cancel stats for buyout adjustment
+    cancel_map = await _load_cancel_map(db, project_id, date_from)
+
     daily_map: dict[tuple[int, date], BdrRates] = {}
 
     # Accumulators for weighted average per nm_id
-    acc: dict[int, dict] = {}  # nm_id -> {realization, sales_amount, to_pay, sale_qty, ret_qty}
+    acc: dict[int, dict] = {}  # nm_id -> {realization, sales_amount, to_pay, sale_qty, ret_qty, cancel_qty}
 
     for row in rows:
         realization = float(row.realization)
@@ -164,25 +189,41 @@ async def _query_bdr_rates_daily(
         ret_qty = int(row.ret_qty)
         nm_id = row.nm_id
         rr_dt = row.rr_dt
+        cancel_qty = cancel_map.get((nm_id, rr_dt), 0)
 
-        rates = _build_rates(realization, sales_amount, to_pay, sale_qty, ret_qty)
+        rates = _build_rates(realization, sales_amount, to_pay, sale_qty, ret_qty, cancel_qty)
         if rates:
             daily_map[(nm_id, rr_dt)] = rates
 
         # Accumulate for avg
         if nm_id not in acc:
-            acc[nm_id] = {"realization": 0, "sales_amount": 0, "to_pay": 0, "sale_qty": 0, "ret_qty": 0}
+            acc[nm_id] = {
+                "realization": 0,
+                "sales_amount": 0,
+                "to_pay": 0,
+                "sale_qty": 0,
+                "ret_qty": 0,
+                "cancel_qty": 0,
+            }
         a = acc[nm_id]
         a["realization"] += realization
         a["sales_amount"] += sales_amount
         a["to_pay"] += to_pay
         a["sale_qty"] += sale_qty
         a["ret_qty"] += ret_qty
+        a["cancel_qty"] += cancel_qty
 
     # Build avg map
     avg_map: dict[int, BdrRates] = {}
     for nm_id, a in acc.items():
-        rates = _build_rates(a["realization"], a["sales_amount"], a["to_pay"], a["sale_qty"], a["ret_qty"])
+        rates = _build_rates(
+            a["realization"],
+            a["sales_amount"],
+            a["to_pay"],
+            a["sale_qty"],
+            a["ret_qty"],
+            a["cancel_qty"],
+        )
         if rates:
             avg_map[nm_id] = rates
 

@@ -47,6 +47,7 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
     from sqlalchemy import and_, delete, func as sa_func, select
 
     from backend.models.wb_finance import WbFinanceRow
+    from backend.services.wb_cancel_sync import sync_cancel_stats
     from backend.services.wb_finance_sync import sync_wb_finance
 
     today = date.today()
@@ -182,6 +183,25 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                     pid,
                     status,
                     rows,
+                )
+
+            # Sync order cancel stats (for accurate buyout_pct)
+            try:
+                async with AsyncSessionLocal() as db2:
+                    cancel_from = today - timedelta(days=30)
+                    cancel_result = await sync_cancel_stats(db2, pid, cancel_from)
+                    logger.info(
+                        "💰 WB Cancel sync: project %s — %s, %d orders, %d cancelled",
+                        pid,
+                        cancel_result.get("status", "?"),
+                        cancel_result.get("total_orders", 0),
+                        cancel_result.get("total_cancelled", 0),
+                    )
+            except Exception as cancel_err:
+                logger.error(
+                    "💰 WB Cancel sync failed for project %s: %s",
+                    pid,
+                    cancel_err,
                 )
 
         except Exception as e:

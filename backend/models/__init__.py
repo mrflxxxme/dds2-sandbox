@@ -139,6 +139,11 @@ from backend.models.wb_finance import (
     WbFinanceSyncLog,
 )
 
+# WB Order Cancel Stats
+from backend.models.wb_order_cancel import (
+    WbOrderCancelDaily,
+)
+
 # WB Tariffs (commission rates by subject)
 from backend.models.wb_tariff import (
     WbTariff,
@@ -231,6 +236,8 @@ __all__ = [
     "WarehouseStock",
     "StockAdjustment",
     "WarehouseDeliveryTime",
+    # WB Order Cancel Stats
+    "WbOrderCancelDaily",
     # WB FBO Supplies
     "WbFboSupply",
     "WbFboSupplyItem",
