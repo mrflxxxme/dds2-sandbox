@@ -241,8 +241,6 @@ async def get_funnel_aggregated(
             else 0
         )
 
-        # Simplified: use combined totals for profit
-        profit = revenue - commission - cost_total - adv - tax
         margin = (profit / revenue * 100) if revenue else 0
 
         buyout_pct = (revenue / orders_sum * 100) if orders_sum else 0

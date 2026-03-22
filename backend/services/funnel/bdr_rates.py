@@ -100,11 +100,13 @@ async def _query_bdr_rates(db: AsyncSession, project_id: int, date_from: date) -
         total_qty = sale_qty + ret_qty
         buyout_pct = sale_qty / total_qty if total_qty > 0 else 1.0
 
-        # Sanity checks — skip obviously broken data
-        if to_pay_rate < 0 or to_pay_rate > 1:
-            continue
-        if spp_rate < 0 or spp_rate > 0.95:
-            continue
+        # Clamp to valid range instead of skipping
+        to_pay_rate = max(to_pay_rate, 0)
+        if to_pay_rate > 1:
+            to_pay_rate = 1.0
+        spp_rate = max(spp_rate, 0)
+        if spp_rate > 0.95:
+            spp_rate = 0.95
 
         rates_map[row.nm_id] = BdrRates(
             to_pay_rate=round(to_pay_rate, 4),
