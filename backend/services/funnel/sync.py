@@ -12,11 +12,10 @@ import logging
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import CostOrderItem, WbCostOverride, WbFunnelDaily
+from backend.models import WbFunnelDaily
 from backend.services.funnel.wb_api_client import (
     fetch_ad_campaigns,
     fetch_ad_stats,
@@ -65,33 +64,19 @@ async def run_funnel_sync(
     if not dates:
         return {"status": "error", "rows": 0, "days": 0, "errors": ["Пустой диапазон дат"]}
 
-    # Get cost prices from orders
+    # Use same cost sources as BDR (weighted average + overrides)
+    from backend.services.bdr_loaders import load_avg_costs, load_cost_overrides
+
     cost_map: dict = {}
     try:
-        cost_result = await db.execute(
-            select(
-                CostOrderItem.article_seller,
-                CostOrderItem.total_rub,
-                CostOrderItem.qty,
-            )
-            .where(
-                CostOrderItem.article_seller.isnot(None),
-                CostOrderItem.total_rub.isnot(None),
-            )
-            .order_by(CostOrderItem.id.desc())
-        )
-        for row in cost_result:
-            art = row.article_seller
-            if art and art not in cost_map:
-                qty = row.qty or 1
-                cost_map[art] = Decimal(str(row.total_rub)) / Decimal(str(qty))
+        cost_by_article = await load_avg_costs(db, pid)
+        for art, cost in cost_by_article.items():
+            cost_map[art] = Decimal(str(cost))
+        cost_overrides = await load_cost_overrides(db, pid)
+        for nm_id, cost in cost_overrides.items():
+            cost_map[nm_id] = Decimal(str(cost))
     except Exception as e:
         logger.warning(f"Cost lookup failed: {e}")
-
-    # Get manual overrides
-    override_result = await db.execute(select(WbCostOverride).where(WbCostOverride.project_id == pid))
-    for ov in override_result.scalars():
-        cost_map[ov.nm_id] = Decimal(str(ov.cost_price))
 
     # Fetch ad campaigns
     campaign_ids = await fetch_ad_campaigns(adv_key, include_completed=include_completed_campaigns)
