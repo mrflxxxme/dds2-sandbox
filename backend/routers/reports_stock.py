@@ -6,21 +6,73 @@ Sub-router extracted from reports.py for maintainability.
 
 import logging
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.database import get_db
+from backend.database import AsyncSessionLocal, get_db
 from backend.models import Project
 from backend.project_context import get_current_project
+from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.routers.reports_stock")
 
 router = APIRouter()
 
+# Auto-sync threshold: 1 hour
+_AUTO_SYNC_STALE_SECONDS = 3600
+
+
+async def _auto_sync_wb_stocks_if_stale(project_id: int, db: AsyncSession) -> bool:
+    """Check if WB stocks are stale (>1h) and trigger background sync. Returns True if sync started."""
+    from sqlalchemy import func as sqlfunc
+
+    from backend.models.wb_stocks import WbWarehouseStock
+
+    result = await db.execute(
+        select(sqlfunc.max(WbWarehouseStock.updated_at)).where(
+            WbWarehouseStock.project_id == project_id,
+        )
+    )
+    last_sync = result.scalar()
+
+    if last_sync and (utcnow() - last_sync).total_seconds() < _AUTO_SYNC_STALE_SECONDS:
+        return False
+
+    return True
+
+
+async def _bg_sync_wb_stocks(project_id: int):
+    """Background task: sync WB stocks for a project."""
+    try:
+        async with AsyncSessionLocal() as db:
+            from backend.services.funnel.wb_api_client import fetch_warehouse_stocks, get_wb_key
+            from backend.services.stock_analytics_service import sync_warehouse_stocks as do_sync
+            from backend.services.warehouse_stock_service import (
+                get_warehouse_stocks as _get_wh,
+                get_warehouse_stocks_by_article as _get_art,
+            )
+
+            api_key = await get_wb_key(db, project_id, "wb")
+            if not api_key:
+                return
+
+            items = await fetch_warehouse_stocks(api_key)
+            await do_sync(db, project_id, items)
+
+            # Prewarm caches
+            async with AsyncSessionLocal() as prewarm_db:
+                await _get_wh(prewarm_db, project_id)
+                await _get_art(prewarm_db, project_id)
+
+            logger.info("Auto-sync WB stocks: project %d done", project_id)
+    except Exception as e:
+        logger.warning("Auto-sync WB stocks: project %d failed — %s", project_id, e)
+
 
 @router.get("/stock_analytics")
 async def get_stock_analytics(
+    background_tasks: BackgroundTasks,
     trend_days: int = Query(7, ge=1, le=90),
     subject: str | None = Query(None),
     brand: str | None = Query(None),
@@ -30,6 +82,9 @@ async def get_stock_analytics(
     db: AsyncSession = Depends(get_db),
 ):
     """Stock depletion forecast based on WB funnel sales data."""
+    if await _auto_sync_wb_stocks_if_stale(project.id, db):
+        background_tasks.add_task(_bg_sync_wb_stocks, project.id)
+
     from backend.services import stock_analytics_service
 
     return await stock_analytics_service.get_stock_analytics(
@@ -76,11 +131,15 @@ async def sync_warehouse_stocks(
 
 @router.get("/stock_warehouses")
 async def get_warehouse_stocks(
+    background_tasks: BackgroundTasks,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Get warehouse stock levels grouped by warehouse with yesterday comparison."""
     from backend.services.warehouse_stock_service import get_warehouse_stocks as get_wh
+
+    if await _auto_sync_wb_stocks_if_stale(project.id, db):
+        background_tasks.add_task(_bg_sync_wb_stocks, project.id)
 
     return await get_wh(db, project.id)
 
@@ -113,6 +172,7 @@ async def get_stock_history(
 
 @router.get("/stock_need")
 async def get_stock_need(
+    background_tasks: BackgroundTasks,
     supply_days: int = Query(14, ge=1, le=90, description="Target stock level in days"),
     analysis_days: int = Query(14, ge=1, le=90, description="Lookback period for avg daily orders"),
     mode: str = Query("actual", pattern="^(actual|hypothetical)$"),
@@ -120,6 +180,9 @@ async def get_stock_need(
     db: AsyncSession = Depends(get_db),
 ):
     """Compute restocking need per warehouse per article."""
+    if await _auto_sync_wb_stocks_if_stale(project.id, db):
+        background_tasks.add_task(_bg_sync_wb_stocks, project.id)
+
     from backend.services.stock_analytics_service import get_warehouse_need
 
     return await get_warehouse_need(db, project.id, supply_days, analysis_days, mode)

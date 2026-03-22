@@ -66,3 +66,47 @@ async def sync_all_projects_fbo_supplies():
                 logger.warning("FBO supplies sync: failed to send alert for project %d", project_id)
 
     logger.info("FBO supplies sync: done — %d ok, %d errors", ok, errors)
+
+
+async def enrich_all_projects_fbo_supplies():
+    """
+    Enrich FBO supplies with warehouse_name via detail API for all projects.
+    Called by APScheduler every 3 hours. Rate-limited: 6 req/min per project.
+    """
+    logger.info("FBO enrich: starting for all projects")
+    project_ids = await get_sync_project_ids()
+
+    if not project_ids:
+        logger.info("FBO enrich: no projects with WB keys, skipping")
+        return
+
+    from backend.integrations.wb_api import WBApiClient
+    from backend.services.fbo_supply_service import enrich_fbo_supplies
+    from backend.services.integrations_service import _get_wb_key
+
+    for project_id in project_ids:
+        try:
+            async with AsyncSessionLocal() as db:
+                try:
+                    _key, api_key = await _get_wb_key(db, project_id)
+                except ValueError:
+                    logger.debug("FBO enrich: project %d has no WB key, skipping", project_id)
+                    continue
+
+                api_client = WBApiClient(api_key)
+                result = await enrich_fbo_supplies(db, project_id, api_client, max_calls=300)
+
+                logger.info(
+                    "FBO enrich: project %d — %d enriched, %d errors",
+                    project_id,
+                    result["enriched"],
+                    result["errors"],
+                )
+
+        except Exception as e:
+            logger.error(
+                "FBO enrich: project %d failed — %s",
+                project_id,
+                str(e),
+                exc_info=True,
+            )

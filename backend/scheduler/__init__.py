@@ -18,7 +18,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from backend.scheduler.jobs.ai_digest import send_daily_digests
-from backend.scheduler.jobs.fbo_supplies import sync_all_projects_fbo_supplies
+from backend.scheduler.jobs.fbo_supplies import enrich_all_projects_fbo_supplies, sync_all_projects_fbo_supplies
 from backend.scheduler.jobs.funnel import (
     ad_anomaly_check,
     fast_backfill_tick,
@@ -143,12 +143,22 @@ def start_scheduler():
         misfire_grace_time=600,
     )
 
-    # WB warehouse stocks sync: every 1 hour
+    # FBO supplies enrich: every 3 hours (warehouse_name via detail API)
+    _scheduler.add_job(
+        enrich_all_projects_fbo_supplies,
+        trigger=IntervalTrigger(hours=3),
+        id="fbo_supplies_enrich",
+        name="FBO supplies enrich (every 3h)",
+        replace_existing=True,
+        misfire_grace_time=600,
+    )
+
+    # WB warehouse stocks snapshot: daily at 00:00 MSK
     _scheduler.add_job(
         sync_all_projects_wb_stocks,
-        trigger=IntervalTrigger(hours=1),
+        trigger=CronTrigger(hour=0, minute=0, timezone=MSK),
         id="wb_stocks_sync",
-        name="WB warehouse stocks sync (every 1h)",
+        name="WB warehouse stocks snapshot (daily 00:00 MSK)",
         replace_existing=True,
         misfire_grace_time=600,
     )
