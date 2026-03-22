@@ -2,15 +2,14 @@
 Tests for warehouse stock analytics — compute_need helper,
 and response structure validation for get_warehouse_stocks / get_warehouse_need.
 """
-import pytest
 
 from backend.services.stock_analytics_service import compute_need
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: compute_need(stock_qty, avg_daily, need_days)
 # Formula: max(0, round(avg_daily * need_days - stock_qty))
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestComputeNeed:
     """Verify restocking need calculation: avg_daily * need_days - stock_qty."""
@@ -64,6 +63,7 @@ class TestComputeNeed:
 # Tests: Warehouse stocks response structure
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestWarehouseResponseStructure:
     """Validate expected response shapes without DB."""
 
@@ -73,21 +73,68 @@ class TestWarehouseResponseStructure:
             "warehouses": [],
             "total_warehouses": 0,
             "total_qty": 0,
+            "total_in_way_to_client": 0,
+            "total_in_way_from_client": 0,
+            "yesterday_total_qty": 0,
+            "change_total": 0,
+            "last_synced_at": None,
         }
         assert response["total_warehouses"] == 0
         assert response["total_qty"] == 0
         assert response["warehouses"] == []
+        assert response["yesterday_total_qty"] == 0
+        assert response["change_total"] == 0
 
     def test_warehouse_stocks_shape(self):
-        """Expected shape of a single warehouse entry."""
+        """Expected shape of a single warehouse entry with extended fields."""
         wh = {
             "name": "Казань",
             "total_qty": 500,
+            "in_way_to_client": 50,
+            "in_way_from_client": 10,
             "articles_count": 10,
+            "yesterday_qty": 480,
+            "change": 20,
         }
         assert wh["name"] == "Казань"
         assert isinstance(wh["total_qty"], int)
         assert isinstance(wh["articles_count"], int)
+        assert wh["in_way_to_client"] == 50
+        assert wh["in_way_from_client"] == 10
+        assert wh["change"] == 20
+
+    def test_articles_response_shape(self):
+        """Expected shape of stock by article response."""
+        article = {
+            "nm_id": 12345,
+            "vendor_code": "ART-001",
+            "subject": "Ковры",
+            "brand": "TestBrand",
+            "total_qty": 100,
+            "in_way_to_client": 15,
+            "in_way_from_client": 5,
+            "warehouses": [
+                {"name": "Казань", "quantity": 60, "in_way_to_client": 10, "in_way_from_client": 3},
+                {"name": "Тула", "quantity": 40, "in_way_to_client": 5, "in_way_from_client": 2},
+            ],
+        }
+        assert article["total_qty"] == 100
+        assert len(article["warehouses"]) == 2
+        assert article["warehouses"][0]["name"] == "Казань"
+        assert sum(w["quantity"] for w in article["warehouses"]) == 100
+
+    def test_history_response_shape(self):
+        """Expected shape of stock history response."""
+        day = {
+            "date": "2026-03-21",
+            "total_qty": 5000,
+            "in_way_to_client": 300,
+            "in_way_from_client": 50,
+            "total": 5350,
+            "articles_count": 100,
+        }
+        assert day["total"] == day["total_qty"] + day["in_way_to_client"] + day["in_way_from_client"]
+        assert day["articles_count"] == 100
 
     def test_need_response_structure(self):
         """Expected shape of stock need response."""
@@ -130,8 +177,8 @@ class TestWarehouseResponseStructure:
             total_need += n
             results.append({"nm_id": a["nm_id"], "need": n})
 
-        assert results[0]["need"] == 40   # 5*14 - 30 = 40
-        assert results[1]["need"] == 0    # 3*14 - 100 = -58 → 0
+        assert results[0]["need"] == 40  # 5*14 - 30 = 40
+        assert results[1]["need"] == 0  # 3*14 - 100 = -58 → 0
         assert results[2]["need"] == 120  # 10*14 - 20 = 120
         assert total_need == 160
 

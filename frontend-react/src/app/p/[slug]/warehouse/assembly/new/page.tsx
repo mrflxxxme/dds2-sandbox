@@ -58,6 +58,7 @@ export default function AssemblyNewPage() {
                 status: 'ACTIVE,ON_DELIVERY',
                 search: fboSearchInput || undefined,
                 limit: 100,
+                exclude_with_assembly: true,
             });
             setFboSupplies(resp.items);
         } catch {

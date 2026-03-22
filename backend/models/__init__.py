@@ -57,6 +57,7 @@ from backend.models.integrations import (
     SyncLog,
     WbCostOverride,
     WbFunnelDaily,
+    WbStockSnapshot,
     WbWarehouseStock,
 )
 
@@ -120,6 +121,7 @@ from backend.models.warehouse import (
     StockTransferItem,
     TransferStatus,
     Warehouse,
+    WarehouseDeliveryTime,
     WarehouseStock,
     WarehouseType,
 )
@@ -191,6 +193,7 @@ __all__ = [
     "SyncLog",
     "WbFunnelDaily",
     "WbCostOverride",
+    "WbStockSnapshot",
     "WbWarehouseStock",
     # FX Rates
     "FxRate",
@@ -227,6 +230,7 @@ __all__ = [
     "MovementType",
     "WarehouseStock",
     "StockAdjustment",
+    "WarehouseDeliveryTime",
     # WB FBO Supplies
     "WbFboSupply",
     "WbFboSupplyItem",

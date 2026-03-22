@@ -26,6 +26,8 @@ const navGroups = [
             { href: '/warehouse/logistics', label: 'Лист логиста', icon: '🚛' },
             { href: '/warehouse/stock', label: 'Сводные остатки', icon: '📦' },
             { href: '/warehouse/fbo-supplies', label: 'Поставки FBO', icon: '📮' },
+            { href: '/warehouse/wb-stocks', label: 'Остатки WB', icon: '🏭' },
+            { href: '/warehouse/analytics', label: 'Аналитика остатков', icon: '📊' },
         ],
     },
     {

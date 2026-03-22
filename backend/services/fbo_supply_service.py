@@ -23,6 +23,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.models.assembly import AssemblyRequest, AssemblyStatus
 from backend.models.integrations import SyncLog
 from backend.models.warehouse import OutboundShipment, OutboundStatus
 from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem, WbSupplyStatus
@@ -241,16 +242,16 @@ async def enrich_fbo_supplies(
             if detail:
                 _update_supply_from_fbw_detail(supply, detail)
             supply.synced_at = utcnow()
+            await db.commit()
             enriched += 1
 
         except Exception as e:
+            await db.rollback()
             logger.warning(
                 "fbo_enrich.error",
                 extra={"wb_supply_id": supply.wb_supply_id, "error": str(e)},
             )
             errors += 1
-
-    await db.commit()
 
     logger.info(
         "fbo_enrich.done",
@@ -406,6 +407,7 @@ async def list_fbo_supplies(
     sort_order: str = "desc",
     limit: int = 50,
     offset: int = 0,
+    exclude_with_assembly: bool = False,
 ) -> tuple[list[WbFboSupply], int]:
     """
     List FBO supplies with filtering, search, sorting, and pagination.
@@ -448,6 +450,22 @@ async def list_fbo_supplies(
             func.date(WbFboSupply.created_at_wb) <= date_to,
         )
 
+    # Exclude supplies that already have an active assembly request
+    if exclude_with_assembly:
+        active_statuses = [
+            AssemblyStatus.PENDING,
+            AssemblyStatus.IN_PROGRESS,
+            AssemblyStatus.READY,
+            AssemblyStatus.VEHICLE_ASSIGNED,
+            AssemblyStatus.SHIPPED,
+        ]
+        active_assembly_ids = select(AssemblyRequest.wb_fbo_supply_id).where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted.is_(False),
+            AssemblyRequest.status.in_(active_statuses),
+        )
+        base_query = base_query.where(WbFboSupply.id.not_in(active_assembly_ids))
+
     # Count total
     count_query = select(func.count()).select_from(base_query.subquery())
     total = (await db.execute(count_query)).scalar() or 0
@@ -465,7 +483,44 @@ async def list_fbo_supplies(
     result = await db.execute(base_query)
     supplies = result.scalars().all()
 
-    return supplies, total
+    # Enrich with assembly request info (single query for the page)
+    supply_ids = [s.id for s in supplies]
+    assembly_map: dict[int, tuple[int, str, str]] = {}
+    if supply_ids:
+        active_statuses = [
+            AssemblyStatus.PENDING,
+            AssemblyStatus.IN_PROGRESS,
+            AssemblyStatus.READY,
+            AssemblyStatus.VEHICLE_ASSIGNED,
+            AssemblyStatus.SHIPPED,
+        ]
+        asm_result = await db.execute(
+            select(
+                AssemblyRequest.wb_fbo_supply_id,
+                AssemblyRequest.id,
+                AssemblyRequest.number,
+                AssemblyRequest.status,
+            ).where(
+                AssemblyRequest.project_id == project_id,
+                AssemblyRequest.is_deleted.is_(False),
+                AssemblyRequest.status.in_(active_statuses),
+                AssemblyRequest.wb_fbo_supply_id.in_(supply_ids),
+            )
+        )
+        for row in asm_result.all():
+            assembly_map[row.wb_fbo_supply_id] = (row.id, row.number, row.status)
+
+    # Build enriched dicts
+    enriched = []
+    for s in supplies:
+        d = {c.key: getattr(s, c.key) for c in WbFboSupply.__table__.columns}
+        asm = assembly_map.get(s.id)
+        d["assembly_request_id"] = asm[0] if asm else None
+        d["assembly_request_number"] = asm[1] if asm else None
+        d["assembly_request_status"] = asm[2] if asm else None
+        enriched.append(d)
+
+    return enriched, total
 
 
 # ─── Get supply items ───────────────────────────────────────────────────────

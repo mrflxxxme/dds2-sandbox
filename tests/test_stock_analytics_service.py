@@ -3,19 +3,20 @@ Tests for stock_analytics_service — pure computation helpers.
 No DB required — tests compute_days_left, compute_trend_pct,
 classify_traffic_light, build_traffic_light_counts.
 """
+
 import pytest
 
 from backend.services.stock_analytics_service import (
+    build_traffic_light_counts,
+    classify_traffic_light,
     compute_days_left,
     compute_trend_pct,
-    classify_traffic_light,
-    build_traffic_light_counts,
 )
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: compute_days_left
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestComputeDaysLeft:
     """Verify days left calculation."""
@@ -28,13 +29,17 @@ class TestComputeDaysLeft:
         """150 stocks / 7 avg daily = 21 days (int division)."""
         assert compute_days_left(150, 7) == 21
 
-    def test_zero_avg_daily(self):
-        """Zero sales → 0 days (not infinite)."""
-        assert compute_days_left(100, 0) == 0
+    def test_zero_avg_daily_with_stock(self):
+        """Zero sales but stock exists → 999 days (infinite, green)."""
+        assert compute_days_left(100, 0) == 999
+
+    def test_zero_avg_daily_no_stock(self):
+        """Zero sales and zero stock → 0 days."""
+        assert compute_days_left(0, 0) == 0
 
     def test_negative_avg_daily(self):
-        """Negative avg → 0 days."""
-        assert compute_days_left(100, -5) == 0
+        """Negative avg with stock → 999 days."""
+        assert compute_days_left(100, -5) == 999
 
     def test_zero_stocks(self):
         """Zero stock → 0 days."""
@@ -60,6 +65,7 @@ class TestComputeDaysLeft:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: compute_trend_pct
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestComputeTrendPct:
     """Verify trend percentage calculation."""
@@ -91,7 +97,7 @@ class TestComputeTrendPct:
     def test_rounding(self):
         """Result should be rounded to 1 decimal."""
         # 7/3 ≈ 2.333, prev=3 → ((2.333 - 3) / 3) * 100 = -22.2%
-        result = compute_trend_pct(7/3, 3)
+        result = compute_trend_pct(7 / 3, 3)
         assert result == pytest.approx(-22.2, abs=0.1)
 
     def test_double_growth(self):
@@ -102,6 +108,7 @@ class TestComputeTrendPct:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: classify_traffic_light
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestClassifyTrafficLight:
     """Verify traffic light classification boundaries."""
@@ -139,6 +146,7 @@ class TestClassifyTrafficLight:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: build_traffic_light_counts
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestBuildTrafficLightCounts:
     """Verify traffic light counting."""
@@ -181,6 +189,7 @@ class TestBuildTrafficLightCounts:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Integration-style: verify full pipeline with mock data
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestStockAnalyticsPipeline:
     """End-to-end pipeline test using pure functions only (no DB)."""
@@ -232,11 +241,11 @@ class TestStockAnalyticsPipeline:
     def test_traffic_light_counts_pipeline(self):
         """Build multiple articles and count traffic light."""
         articles = [
-            self._build_article(1, "A1", 3, 1.0, 1.0),     # 3 days → red
-            self._build_article(2, "A2", 10, 1.0, 1.0),    # 10 days → orange
-            self._build_article(3, "A3", 20, 1.0, 1.0),    # 20 days → yellow
-            self._build_article(4, "A4", 50, 1.0, 1.0),    # 50 days → green
-            self._build_article(5, "A5", 100, 1.0, 1.0),   # 100 days → green
+            self._build_article(1, "A1", 3, 1.0, 1.0),  # 3 days → red
+            self._build_article(2, "A2", 10, 1.0, 1.0),  # 10 days → orange
+            self._build_article(3, "A3", 20, 1.0, 1.0),  # 20 days → yellow
+            self._build_article(4, "A4", 50, 1.0, 1.0),  # 50 days → green
+            self._build_article(5, "A5", 100, 1.0, 1.0),  # 100 days → green
         ]
         counts = build_traffic_light_counts(articles)
         assert counts == {"red": 1, "orange": 1, "yellow": 1, "green": 2}
@@ -244,9 +253,9 @@ class TestStockAnalyticsPipeline:
     def test_sort_by_days_left(self):
         """Articles should be sortable by days_left ascending."""
         articles = [
-            self._build_article(1, "A1", 100, 1.0, 1.0),   # 100 days
-            self._build_article(2, "A2", 3, 1.0, 1.0),     # 3 days
-            self._build_article(3, "A3", 20, 1.0, 1.0),    # 20 days
+            self._build_article(1, "A1", 100, 1.0, 1.0),  # 100 days
+            self._build_article(2, "A2", 3, 1.0, 1.0),  # 3 days
+            self._build_article(3, "A3", 20, 1.0, 1.0),  # 20 days
         ]
         articles.sort(key=lambda a: a["days_left"])
         assert [a["nm_id"] for a in articles] == [2, 3, 1]

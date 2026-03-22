@@ -10,6 +10,7 @@ from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.warehouse import (
     CostPriceUpdate,
+    DeliveryTimesUpdate,
     InboundReceiptCreate,
     InboundReceiptSchema,
     InboundReceiptUpdate,
@@ -100,6 +101,43 @@ async def delete_warehouse(
     if not deleted:
         raise HTTPException(404, "Warehouse not found")
     return {"ok": True}
+
+
+# ─── Delivery Times (Время доставки до WB) ────────────────────────────────
+
+
+@router.get("/{warehouse_id}/delivery-times")
+async def get_delivery_times(
+    warehouse_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get delivery time settings for a warehouse to WB warehouses."""
+    result = await warehouse_service.get_delivery_times(db, project.id, warehouse_id)
+    if result is None:
+        raise HTTPException(404, "Warehouse not found")
+    return result
+
+
+@router.put("/{warehouse_id}/delivery-times")
+async def update_delivery_times(
+    warehouse_id: int,
+    body: DeliveryTimesUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update delivery time settings for a warehouse."""
+    result = await warehouse_service.update_delivery_times(
+        db,
+        project.id,
+        warehouse_id,
+        assembly_days=body.assembly_days,
+        wb_acceptance_days=body.wb_acceptance_days,
+        items=[item.model_dump() for item in body.items],
+    )
+    if result is None:
+        raise HTTPException(404, "Warehouse not found")
+    return result
 
 
 # ─── Warehouse Stock ──────────────────────────────────────────────────────

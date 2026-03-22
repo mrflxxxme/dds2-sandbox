@@ -2,52 +2,58 @@
 Integration models: IntegrationKey, SyncLog, WbFunnelDaily, WbCostOverride.
 """
 
-from datetime import datetime, date, timezone
-
-from backend.utils.time import utcnow
+from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional
 
 from sqlalchemy import (
-    String, Integer, Boolean, DateTime, Date, Numeric, Text,
-    ForeignKey, UniqueConstraint, Index,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
 from backend.models.mixins import SoftDeleteMixin
+from backend.utils.time import utcnow
 
 
 class IntegrationKey(Base, SoftDeleteMixin):
     """Encrypted API keys for external services (WB, OZON, etc.)."""
+
     __tablename__ = "integration_keys"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
+    project_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("projects.id"))
     service: Mapped[str] = mapped_column(String(50), nullable=False)  # "wb", "ozon"
-    label: Mapped[Optional[str]] = mapped_column(String(200))  # user-friendly name
+    label: Mapped[str | None] = mapped_column(String(200))  # user-friendly name
     encrypted_key: Mapped[str] = mapped_column(Text, nullable=False)  # Fernet-encrypted
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
-    last_sync_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime)
 
-    __table_args__ = (
-        UniqueConstraint("project_id", "service", "label", name="uq_integration_project_service_label"),
-    )
+    __table_args__ = (UniqueConstraint("project_id", "service", "label", name="uq_integration_project_service_label"),)
 
 
 class SyncLog(Base):
     """Log of integration sync operations."""
+
     __tablename__ = "sync_log"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     integration_id: Mapped[int] = mapped_column(Integer, ForeignKey("integration_keys.id"))
     service: Mapped[str] = mapped_column(String(50), nullable=False)
     sync_type: Mapped[str] = mapped_column(String(50), nullable=False)  # "sales", "payouts", "orders"
     started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
-    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     status: Mapped[str] = mapped_column(String(20), default="RUNNING")  # RUNNING, OK, ERROR
     rows_fetched: Mapped[int] = mapped_column(Integer, default=0)
     rows_inserted: Mapped[int] = mapped_column(Integer, default=0)
-    error_msg: Mapped[Optional[str]] = mapped_column(Text)
+    error_msg: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (
         Index("ix_sync_log_integration_id", "integration_id"),
@@ -57,25 +63,26 @@ class SyncLog(Base):
 
 class WbFunnelDaily(Base):
     """Daily WB sales-funnel + advertising stats per nmId."""
+
     __tablename__ = "wb_funnel_daily"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
+    project_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("projects.id"))
     date: Mapped[date] = mapped_column(Date, nullable=False)
     nm_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    vendor_code: Mapped[Optional[str]] = mapped_column(String(100))
-    subject: Mapped[Optional[str]] = mapped_column(String(200))
-    brand: Mapped[Optional[str]] = mapped_column(String(200))
+    vendor_code: Mapped[str | None] = mapped_column(String(100))
+    subject: Mapped[str | None] = mapped_column(String(200))
+    brand: Mapped[str | None] = mapped_column(String(200))
 
     # Funnel
     open_card: Mapped[int] = mapped_column(Integer, default=0)
     add_to_cart: Mapped[int] = mapped_column(Integer, default=0)
     orders_count: Mapped[int] = mapped_column(Integer, default=0)
     orders_sum_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
-    buyout_percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2))
-    cart_to_order_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2))
-    add_to_cart_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2))
-    avg_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2))
+    buyout_percent: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    cart_to_order_pct: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    add_to_cart_pct: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    avg_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     stocks_wb: Mapped[int] = mapped_column(Integer, default=0)
     stocks_mp: Mapped[int] = mapped_column(Integer, default=0)
 
@@ -85,7 +92,7 @@ class WbFunnelDaily(Base):
     adv_sum: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
 
     # Cost price (filled from last order or override)
-    cost_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2))
+    cost_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
 
     __table_args__ = (
         UniqueConstraint("project_id", "date", "nm_id", name="uq_funnel_daily"),
@@ -95,29 +102,29 @@ class WbFunnelDaily(Base):
 
 class WbCostOverride(Base):
     """Manual cost price per nmId (used if no order data available)."""
+
     __tablename__ = "wb_cost_override"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"))
+    project_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("projects.id"))
     nm_id: Mapped[int] = mapped_column(Integer, nullable=False)
     cost_price: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
-    __table_args__ = (
-        UniqueConstraint("project_id", "nm_id", name="uq_cost_override_nm"),
-    )
+    __table_args__ = (UniqueConstraint("project_id", "nm_id", name="uq_cost_override_nm"),)
 
 
 class WbWarehouseStock(Base):
     """Per-warehouse stock levels from WB API supplier/stocks."""
+
     __tablename__ = "wb_warehouse_stocks"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     nm_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    vendor_code: Mapped[Optional[str]] = mapped_column(String(100))
-    subject: Mapped[Optional[str]] = mapped_column(String(200))
-    brand: Mapped[Optional[str]] = mapped_column(String(200))
+    vendor_code: Mapped[str | None] = mapped_column(String(100))
+    subject: Mapped[str | None] = mapped_column(String(200))
+    brand: Mapped[str | None] = mapped_column(String(200))
     warehouse_name: Mapped[str] = mapped_column(String(200), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, default=0)
     quantity_full: Mapped[int] = mapped_column(Integer, default=0)
@@ -128,4 +135,26 @@ class WbWarehouseStock(Base):
     __table_args__ = (
         UniqueConstraint("project_id", "nm_id", "warehouse_name", name="uq_wh_stock_nm_wh"),
         Index("ix_wh_stock_project", "project_id"),
+    )
+
+
+class WbStockSnapshot(Base):
+    """Historical snapshot of warehouse stock at sync time."""
+
+    __tablename__ = "wb_stock_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    warehouse_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    nm_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    vendor_code: Mapped[str | None] = mapped_column(String(100))
+    barcode: Mapped[str | None] = mapped_column(String(100))
+    quantity: Mapped[int] = mapped_column(Integer, default=0)
+    in_way_to_client: Mapped[int] = mapped_column(Integer, default=0)
+    in_way_from_client: Mapped[int] = mapped_column(Integer, default=0)
+
+    __table_args__ = (
+        Index("ix_wb_stock_snap_project_date", "project_id", "synced_at"),
+        Index("ix_wb_stock_snap_nm", "project_id", "nm_id", "synced_at"),
     )

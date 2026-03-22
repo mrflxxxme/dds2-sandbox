@@ -6,6 +6,8 @@ import type {
     AssemblyRequest,
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
+    DeliveryTimesResponse,
+    DeliveryTimesUpdate,
     FboSyncResult,
     InboundReceipt,
     OutboundShipment,
@@ -72,6 +74,14 @@ export function addWarehouseMethods(api: ApiClient) {
             return api.request<StockAdjustment>('POST', `/api/v1/warehouse/${warehouseId}/adjustment`, data);
         },
 
+        // ─── Delivery Times ──────────────────────────────────────────
+        getDeliveryTimes(warehouseId: number) {
+            return api.request<DeliveryTimesResponse>('GET', `/api/v1/warehouse/${warehouseId}/delivery-times`);
+        },
+        updateDeliveryTimes(warehouseId: number, data: DeliveryTimesUpdate) {
+            return api.request<DeliveryTimesResponse>('PUT', `/api/v1/warehouse/${warehouseId}/delivery-times`, data);
+        },
+
         // ─── FBO Supplies ──────────────────────────────────────────────
         getFboWarehouses() {
             return api.request<string[]>('GET', '/api/v1/warehouse/fbo-supplies/warehouses');
@@ -79,6 +89,7 @@ export function addWarehouseMethods(api: ApiClient) {
         getFboSupplies(params?: {
             search?: string; status?: string; warehouse?: string; date_from?: string; date_to?: string;
             sort_by?: string; sort_order?: string; limit?: number; offset?: number;
+            exclude_with_assembly?: boolean;
         }) {
             const query = new URLSearchParams();
             if (params) {
@@ -151,16 +162,19 @@ export function addWarehouseMethods(api: ApiClient) {
         cancelAssembly(id: number) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/cancel`);
         },
-        assignVehicleBulk(ids: number[], data: {
+        assignVehicleBulk(data: {
             vehicle_info: string;
             vehicle_brand: string;
             driver_phone: string;
-            pickup_date: string;
-            pickup_time_slot: string;
-            pickup_cost: number;
-            delivery_date: string;
+            items: Array<{
+                request_id: number;
+                pickup_date: string;
+                pickup_time_slot: string;
+                pickup_cost: number;
+                delivery_date: string;
+            }>;
         }) {
-            return api.request<AssemblyRequest[]>('POST', '/api/v1/warehouse/assembly/assign-vehicle-bulk', { ids, ...data });
+            return api.request<AssemblyRequest[]>('POST', '/api/v1/warehouse/assembly/assign-vehicle-bulk', data);
         },
         shipBulk(ids: number[]) {
             return api.request<AssemblyRequest[]>('POST', '/api/v1/warehouse/assembly/ship-bulk', { ids });

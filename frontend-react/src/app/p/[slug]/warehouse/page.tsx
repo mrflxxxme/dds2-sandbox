@@ -2,7 +2,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
-import { formatDate } from '@/lib/utils';
+import { formatDate, formatNumber } from '@/lib/utils';
 import { DataTable } from '@/components';
 import type { Warehouse, StockTransfer } from '@/types/api';
 import type { Column } from '@/components/DataTable';
@@ -92,6 +92,10 @@ export default function WarehousePage() {
         },
         { key: 'country', label: 'Страна' },
         { key: 'assembly_days', label: 'Дни сборки', align: 'right' as const },
+        {
+            key: 'total_stock', label: 'Остатки', align: 'right' as const,
+            render: (v: number) => v ? formatNumber(v, 0) : '—',
+        },
         {
             key: 'is_active', label: 'Статус',
             render: (v: boolean) => v ? 'Активен' : 'Архив',

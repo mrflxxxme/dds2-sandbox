@@ -16,6 +16,7 @@ class WarehouseCreate(BaseModel):
     country: str | None = None
     address: str | None = None
     assembly_days: int | None = None
+    wb_acceptance_days: int = 2
     sort_order: int = 0
 
 
@@ -25,6 +26,7 @@ class WarehouseUpdate(BaseModel):
     country: str | None = None
     address: str | None = None
     assembly_days: int | None = None
+    wb_acceptance_days: int | None = None
     sort_order: int | None = None
     is_active: bool | None = None
 
@@ -38,9 +40,11 @@ class WarehouseSchema(BaseModel):
     country: str | None = None
     address: str | None = None
     assembly_days: int | None = None
+    wb_acceptance_days: int = 2
     external_id: str | None = None
     sort_order: int = 0
     is_active: bool = True
+    total_stock: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -237,3 +241,31 @@ class StockAdjustmentSchema(BaseModel):
     delta: int
     reason: str
     created_at: datetime | None = None
+
+
+# ─── Delivery Times (Время доставки до WB) ──────────────────────────────
+
+
+class DeliveryTimeItem(BaseModel):
+    wb_warehouse_name: str
+    delivery_days: int = 3
+
+
+class DeliveryTimesUpdate(BaseModel):
+    wb_acceptance_days: int | None = None
+    assembly_days: int | None = None
+    items: list[DeliveryTimeItem] = []
+
+
+class DeliveryTimeRow(BaseModel):
+    wb_warehouse_name: str
+    delivery_days: int
+    total_days: int  # assembly_days + delivery_days + wb_acceptance_days
+
+
+class DeliveryTimesResponse(BaseModel):
+    warehouse_id: int
+    warehouse_name: str
+    assembly_days: int
+    wb_acceptance_days: int
+    wb_warehouses: list[DeliveryTimeRow]

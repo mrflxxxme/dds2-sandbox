@@ -38,6 +38,7 @@ async def list_fbo_supplies(
     sort_order: str = Query("desc", description="Sort order: asc/desc"),
     limit: int = Query(50, le=500),
     offset: int = Query(0, ge=0),
+    exclude_with_assembly: bool = Query(False, description="Exclude supplies with active assembly requests"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -54,9 +55,10 @@ async def list_fbo_supplies(
         sort_order=sort_order,
         limit=limit,
         offset=offset,
+        exclude_with_assembly=exclude_with_assembly,
     )
     return WbFboSupplyListResponse(
-        items=[WbFboSupplySchema.model_validate(s) for s in supplies],
+        items=[WbFboSupplySchema(**s) for s in supplies],
         total=total,
     )
 

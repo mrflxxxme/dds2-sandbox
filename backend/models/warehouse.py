@@ -77,6 +77,7 @@ class Warehouse(Base, TimestampMixin, SoftDeleteMixin):
     country: Mapped[str | None] = mapped_column(String(100))
     address: Mapped[str | None] = mapped_column(String(500))
     assembly_days: Mapped[int | None] = mapped_column(Integer)
+    wb_acceptance_days: Mapped[int] = mapped_column(Integer, default=2)
     external_id: Mapped[str | None] = mapped_column(String(100))
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -285,3 +286,22 @@ class StockAdjustment(Base, TimestampMixin):
     reason: Mapped[str] = mapped_column(Text, nullable=False)
 
     __table_args__ = (Index("ix_stock_adjustments_project_id", "project_id"),)
+
+
+# ─── Warehouse Delivery Times (Время доставки до WB) ─────────────────────
+
+
+class WarehouseDeliveryTime(Base, TimestampMixin):
+    __tablename__ = "warehouse_delivery_times"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    warehouse_id: Mapped[int] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=False)
+    wb_warehouse_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    delivery_days: Mapped[int] = mapped_column(Integer, default=3)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "warehouse_id", "wb_warehouse_name", name="uq_wh_delivery_time"),
+        Index("ix_warehouse_delivery_times_project_id", "project_id"),
+        Index("ix_warehouse_delivery_times_warehouse_id", "warehouse_id"),
+    )

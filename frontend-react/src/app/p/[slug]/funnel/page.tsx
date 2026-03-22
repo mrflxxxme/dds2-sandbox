@@ -3,7 +3,6 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
 import { MultiLineChart } from './components/MultiLineChart';
 import { DayAnalysisTab } from './components/DayAnalysisTab';
-import { StockAnalytics } from './components/StockAnalytics';
 import type { FunnelDayRow, FunnelSummary, FunnelFilters } from '@/types/api';
 
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
@@ -12,7 +11,7 @@ const fmtPct = (n: number) => (n || 0).toFixed(2) + '%';
 /* ─── Main page ──────────────────────────────────────────────── */
 
 export default function FunnelPage() {
-    const [tab, setTab] = useState<'funnel' | 'day-analysis' | 'stock'>('funnel');
+    const [tab, setTab] = useState<'funnel' | 'day-analysis'>('funnel');
     const [data, setData] = useState<FunnelDayRow[]>([]);
     const [detailed, setDetailed] = useState(false);
     const [summary, setSummary] = useState<FunnelSummary|null>(null);
@@ -151,7 +150,6 @@ export default function FunnelPage() {
             <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
                 <button className={`tab-btn ${tab === 'funnel' ? 'active' : ''}`} onClick={() => setTab('funnel')}>Воронка</button>
                 <button className={`tab-btn ${tab === 'day-analysis' ? 'active' : ''}`} onClick={() => setTab('day-analysis')}>🔍 Анализ дня</button>
-                <button className={`tab-btn ${tab === 'stock' ? 'active' : ''}`} onClick={() => setTab('stock')}>📦 Остатки</button>
             </div>
 
             {tab === 'funnel' && (
@@ -354,7 +352,6 @@ export default function FunnelPage() {
                 <DayAnalysisTab brand={brand} subject={subject} filters={filters} />
             )}
 
-            {tab === 'stock' && <StockAnalytics />}
         </div >
     );
 }

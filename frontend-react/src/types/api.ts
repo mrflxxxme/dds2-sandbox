@@ -688,11 +688,33 @@ export interface Warehouse {
   country?: string;
   address?: string;
   assembly_days?: number;
+  wb_acceptance_days?: number;
   external_id?: string;
   sort_order: number;
   is_active: boolean;
+  total_stock: number;
   created_at?: string;
   updated_at?: string;
+}
+
+export interface DeliveryTimeRow {
+  wb_warehouse_name: string;
+  delivery_days: number;
+  total_days: number;
+}
+
+export interface DeliveryTimesResponse {
+  warehouse_id: number;
+  warehouse_name: string;
+  assembly_days: number;
+  wb_acceptance_days: number;
+  wb_warehouses: DeliveryTimeRow[];
+}
+
+export interface DeliveryTimesUpdate {
+  assembly_days?: number;
+  wb_acceptance_days?: number;
+  items: { wb_warehouse_name: string; delivery_days: number }[];
 }
 
 export interface InboundReceiptItem {
@@ -815,6 +837,66 @@ export interface StockAdjustment {
   created_at?: string;
 }
 
+// ─── WB Stock (warehouse stock snapshots) ─────────────────────────────────
+
+export interface WbWarehouseRow {
+  name: string;
+  total_qty: number;
+  in_way_to_client: number;
+  in_way_from_client: number;
+  articles_count: number;
+  yesterday_qty: number;
+  change: number;
+}
+
+export interface WbStocksResponse {
+  warehouses: WbWarehouseRow[];
+  total_warehouses: number;
+  total_qty: number;
+  total_in_way_to_client: number;
+  total_in_way_from_client: number;
+  yesterday_total_qty: number;
+  change_total: number;
+  last_synced_at: string | null;
+}
+
+export interface WbArticleWarehouse {
+  name: string;
+  quantity: number;
+  in_way_to_client: number;
+  in_way_from_client: number;
+}
+
+export interface WbArticleRow {
+  nm_id: number;
+  vendor_code: string;
+  subject: string;
+  brand: string;
+  total_qty: number;
+  in_way_to_client: number;
+  in_way_from_client: number;
+  warehouses: WbArticleWarehouse[];
+}
+
+export interface WbStocksArticlesResponse {
+  articles: WbArticleRow[];
+  total_articles: number;
+}
+
+export interface WbStockHistoryDay {
+  date: string;
+  total_qty: number;
+  in_way_to_client: number;
+  in_way_from_client: number;
+  total: number;
+  articles_count: number;
+}
+
+export interface WbStockHistoryResponse {
+  days: WbStockHistoryDay[];
+  warehouses: string[];
+}
+
 export interface ChartTooltipProps {
   active?: boolean;
   payload?: ChartTooltipPayloadItem[];
@@ -849,6 +931,9 @@ export interface WbFboSupply {
   total_qty: number;
   accepted_qty: number;
   outbound_shipment_id?: number;
+  assembly_request_id?: number;
+  assembly_request_number?: string;
+  assembly_request_status?: string;
   synced_at?: string;
   created_at?: string;
   updated_at?: string;

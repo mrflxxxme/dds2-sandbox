@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001
 """
 Tests for order geography — parser + service logic.
 
@@ -5,22 +6,24 @@ Tests:
   1. order_city_parser — Excel parsing (srid → city + okrug)
   2. order_geography_service — aggregation logic (mocked WB API + DB)
 """
-import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
-from collections import Counter
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: order_city_parser
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestOrderCityParser:
     """Verify Excel parsing of WB order feed."""
 
     def _make_xlsx(self, rows: list[list], sheet_name: str = "Заказы") -> bytes:
         """Create a minimal xlsx in memory with given rows."""
-        import openpyxl
         from io import BytesIO
+
+        import openpyxl
 
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -45,8 +48,8 @@ class TestOrderCityParser:
         result = parse_order_city_excel(data)
 
         assert len(result) == 2
-        assert result[0] == {"srid": "srid-001", "city": "Москва", "okrug": "ЦФО"}
-        assert result[1] == {"srid": "srid-002", "city": "Новосибирск", "okrug": "СФО"}
+        assert result[0] == {"srid": "srid-001", "city": "Москва", "okrug": "ЦФО", "order_date": None}
+        assert result[1] == {"srid": "srid-002", "city": "Новосибирск", "okrug": "СФО", "order_date": None}
 
     def test_missing_city_skipped(self):
         """Rows without city are skipped."""
@@ -129,15 +132,17 @@ class TestOrderCityParser:
 # Tests: order_geography_service — pure aggregation logic
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestOrderGeographyAggregation:
     """Test the aggregation logic without DB or WB API.
-    
+
     We test the data processing code by directly calling the function
     with mocked dependencies.
     """
 
-    def _make_order(self, date: str, brand: str, subject: str, article: str,
-                    region: str, srid: str, is_cancel: bool = False):
+    def _make_order(
+        self, date: str, brand: str, subject: str, article: str, region: str, srid: str, is_cancel: bool = False
+    ):
         """Build a WB order dict matching API format."""
         return {
             "date": f"{date}T10:00:00",
@@ -170,13 +175,12 @@ class TestOrderGeographyAggregation:
         mock_result.fetchall.return_value = city_map_rows
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with patch("backend.services.funnel.wb_api_client.get_wb_key", return_value="test-key"), \
-             patch("backend.services.funnel.wb_api_client.fetch_supplier_orders", return_value=orders), \
-             patch("backend.cache.get_redis", return_value=None):  # skip cache
-
-            result = await get_order_geography.__wrapped__(
-                mock_db, 1, "2026-03-01", "2026-03-05"
-            )
+        with (
+            patch("backend.services.funnel.wb_api_client.get_wb_key", return_value="test-key"),
+            patch("backend.services.funnel.wb_api_client.fetch_supplier_orders", return_value=orders),
+            patch("backend.cache.get_redis", return_value=None),
+        ):  # skip cache
+            result = await get_order_geography.__wrapped__(mock_db, 1, "2026-03-01", "2026-03-05")
 
         assert result["totals"]["total_orders"] == 3
         assert result["totals"]["unique_cities"] == 2
@@ -200,13 +204,12 @@ class TestOrderGeographyAggregation:
         mock_result.fetchall.return_value = []
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with patch("backend.services.funnel.wb_api_client.get_wb_key", return_value="k"), \
-             patch("backend.services.funnel.wb_api_client.fetch_supplier_orders", return_value=orders), \
-             patch("backend.cache.get_redis", return_value=None):
-
-            result = await get_order_geography.__wrapped__(
-                mock_db, 1, "2026-03-01", "2026-03-05"
-            )
+        with (
+            patch("backend.services.funnel.wb_api_client.get_wb_key", return_value="k"),
+            patch("backend.services.funnel.wb_api_client.fetch_supplier_orders", return_value=orders),
+            patch("backend.cache.get_redis", return_value=None),
+        ):
+            result = await get_order_geography.__wrapped__(mock_db, 1, "2026-03-01", "2026-03-05")
 
         assert result["totals"]["total_orders"] == 1
 
@@ -225,13 +228,12 @@ class TestOrderGeographyAggregation:
         mock_result.fetchall.return_value = []
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with patch("backend.services.funnel.wb_api_client.get_wb_key", return_value="k"), \
-             patch("backend.services.funnel.wb_api_client.fetch_supplier_orders", return_value=orders), \
-             patch("backend.cache.get_redis", return_value=None):
-
-            result = await get_order_geography.__wrapped__(
-                mock_db, 1, "2026-03-01", "2026-03-05"
-            )
+        with (
+            patch("backend.services.funnel.wb_api_client.get_wb_key", return_value="k"),
+            patch("backend.services.funnel.wb_api_client.fetch_supplier_orders", return_value=orders),
+            patch("backend.cache.get_redis", return_value=None),
+        ):
+            result = await get_order_geography.__wrapped__(mock_db, 1, "2026-03-01", "2026-03-05")
 
         assert result["totals"]["total_orders"] == 1
 
@@ -250,13 +252,12 @@ class TestOrderGeographyAggregation:
         mock_result.fetchall.return_value = []
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with patch("backend.services.funnel.wb_api_client.get_wb_key", return_value="k"), \
-             patch("backend.services.funnel.wb_api_client.fetch_supplier_orders", return_value=orders), \
-             patch("backend.cache.get_redis", return_value=None):
-
-            result = await get_order_geography.__wrapped__(
-                mock_db, 1, "2026-03-01", "2026-03-05", brand="BrandA"
-            )
+        with (
+            patch("backend.services.funnel.wb_api_client.get_wb_key", return_value="k"),
+            patch("backend.services.funnel.wb_api_client.fetch_supplier_orders", return_value=orders),
+            patch("backend.cache.get_redis", return_value=None),
+        ):
+            result = await get_order_geography.__wrapped__(mock_db, 1, "2026-03-01", "2026-03-05", brand="BrandA")
 
         assert result["totals"]["total_orders"] == 1
 
@@ -270,9 +271,10 @@ class TestOrderGeographyAggregation:
         mock_result.fetchall.return_value = []
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with patch("backend.services.funnel.wb_api_client.get_wb_key", return_value=None), \
-             patch("backend.cache.get_redis", return_value=None):
-
+        with (
+            patch("backend.services.funnel.wb_api_client.get_wb_key", return_value=None),
+            patch("backend.cache.get_redis", return_value=None),
+        ):
             result = await get_order_geography.__wrapped__(mock_db, 1, "2026-03-01", "2026-03-05")
 
         assert result["totals"]["total_orders"] == 0
@@ -292,13 +294,12 @@ class TestOrderGeographyAggregation:
         mock_result.fetchall.return_value = []  # no city map
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with patch("backend.services.funnel.wb_api_client.get_wb_key", return_value="k"), \
-             patch("backend.services.funnel.wb_api_client.fetch_supplier_orders", return_value=orders), \
-             patch("backend.cache.get_redis", return_value=None):
-
-            result = await get_order_geography.__wrapped__(
-                mock_db, 1, "2026-03-01", "2026-03-05"
-            )
+        with (
+            patch("backend.services.funnel.wb_api_client.get_wb_key", return_value="k"),
+            patch("backend.services.funnel.wb_api_client.fetch_supplier_orders", return_value=orders),
+            patch("backend.cache.get_redis", return_value=None),
+        ):
+            result = await get_order_geography.__wrapped__(mock_db, 1, "2026-03-01", "2026-03-05")
 
         assert result["cities"][0]["city"] == "Московская область"
 
@@ -317,13 +318,12 @@ class TestOrderGeographyAggregation:
         mock_result.fetchall.return_value = []
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with patch("backend.services.funnel.wb_api_client.get_wb_key", return_value="k"), \
-             patch("backend.services.funnel.wb_api_client.fetch_supplier_orders", return_value=orders), \
-             patch("backend.cache.get_redis", return_value=None):
-
-            result = await get_order_geography.__wrapped__(
-                mock_db, 1, "2026-03-01", "2026-03-05"
-            )
+        with (
+            patch("backend.services.funnel.wb_api_client.get_wb_key", return_value="k"),
+            patch("backend.services.funnel.wb_api_client.fetch_supplier_orders", return_value=orders),
+            patch("backend.cache.get_redis", return_value=None),
+        ):
+            result = await get_order_geography.__wrapped__(mock_db, 1, "2026-03-01", "2026-03-05")
 
         assert "BrandA" in result["filters"]["brands"]
         assert "BrandB" in result["filters"]["brands"]
@@ -346,13 +346,12 @@ class TestOrderGeographyAggregation:
         mock_result.fetchall.return_value = []
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with patch("backend.services.funnel.wb_api_client.get_wb_key", return_value="k"), \
-             patch("backend.services.funnel.wb_api_client.fetch_supplier_orders", return_value=orders), \
-             patch("backend.cache.get_redis", return_value=None):
-
-            result = await get_order_geography.__wrapped__(
-                mock_db, 1, "2026-03-01", "2026-03-05"
-            )
+        with (
+            patch("backend.services.funnel.wb_api_client.get_wb_key", return_value="k"),
+            patch("backend.services.funnel.wb_api_client.fetch_supplier_orders", return_value=orders),
+            patch("backend.cache.get_redis", return_value=None),
+        ):
+            result = await get_order_geography.__wrapped__(mock_db, 1, "2026-03-01", "2026-03-05")
 
         dates = [d["date"] for d in result["daily"]]
         assert dates == sorted(dates)
@@ -362,11 +361,13 @@ class TestOrderGeographyAggregation:
 # Tests: _empty_response helper
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestEmptyResponse:
     """Verify empty response structure."""
 
     def test_structure(self):
         from backend.services.order_geography_service import _empty_response
+
         result = _empty_response()
 
         assert result["cities"] == []

@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "docker-stack",
-      "runtimeExecutable": "docker",
-      "runtimeArgs": ["compose", "up", "frontend-react"],
+      "runtimeExecutable": "echo",
+      "runtimeArgs": ["server already running"],
       "port": 3000,
       "autoPort": false
     }

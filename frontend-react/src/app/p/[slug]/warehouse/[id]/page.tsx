@@ -6,7 +6,7 @@ import { formatNumber, formatDate } from '@/lib/utils';
 import { DataTable } from '@/components';
 import type {
     Warehouse, InboundReceipt, OutboundShipment,
-    WarehouseStockRow, StockMovement,
+    WarehouseStockRow, StockMovement, DeliveryTimesResponse,
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 
@@ -17,7 +17,7 @@ export default function WarehouseDetailPage() {
     const router = useRouter();
     const slug = params.slug as string;
     const warehouseId = Number(params.id);
-    const [tab, setTab] = useState<'all' | 'receipts' | 'shipments' | 'stock'>('all');
+    const [tab, setTab] = useState<'all' | 'receipts' | 'shipments' | 'stock' | 'delivery'>('all');
     const [warehouse, setWarehouse] = useState<Warehouse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -54,6 +54,7 @@ export default function WarehouseDetailPage() {
         { key: 'receipts' as const, label: 'Приёмки', count: receiptCount },
         ...(isFulfillment ? [{ key: 'shipments' as const, label: 'Отгрузки', count: shipmentCount }] : []),
         { key: 'stock' as const, label: 'Остатки и статистика' },
+        { key: 'delivery' as const, label: 'Время доставки' },
     ];
 
     return (
@@ -127,6 +128,7 @@ export default function WarehouseDetailPage() {
                 />
             )}
             {tab === 'stock' && <StockTab warehouseId={warehouseId} />}
+            {tab === 'delivery' && <DeliveryTab warehouseId={warehouseId} />}
         </div>
     );
 }
@@ -440,5 +442,213 @@ function StockTab({ warehouseId }: { warehouseId: number }) {
                 </div>
             )}
         </>
+    );
+}
+
+/* ─── Tab: Время доставки ──────────────────────────────────────────────── */
+
+function DeliveryTab({ warehouseId }: { warehouseId: number }) {
+    const [data, setData] = useState<DeliveryTimesResponse | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState('');
+    const [success, setSuccess] = useState('');
+
+    // Editable state
+    const [assemblyDays, setAssemblyDays] = useState(0);
+    const [wbAcceptanceDays, setWbAcceptanceDays] = useState(2);
+    const [deliveryMap, setDeliveryMap] = useState<Record<string, number>>({});
+
+    // Inline editing for assembly_days / wb_acceptance_days
+    const [editingAssembly, setEditingAssembly] = useState(false);
+    const [editingAcceptance, setEditingAcceptance] = useState(false);
+
+    const load = useCallback(async () => {
+        setLoading(true);
+        setError('');
+        try {
+            const r = await api.getDeliveryTimes(warehouseId);
+            setData(r);
+            setAssemblyDays(r.assembly_days);
+            setWbAcceptanceDays(r.wb_acceptance_days);
+            const map: Record<string, number> = {};
+            r.wb_warehouses.forEach(w => { map[w.wb_warehouse_name] = w.delivery_days; });
+            setDeliveryMap(map);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setLoading(false);
+    }, [warehouseId]);
+
+    useEffect(() => { load(); }, [load]);
+
+    const handleSave = async () => {
+        setSaving(true);
+        setError('');
+        setSuccess('');
+        try {
+            const items = Object.entries(deliveryMap).map(([name, days]) => ({
+                wb_warehouse_name: name,
+                delivery_days: days,
+            }));
+            const r = await api.updateDeliveryTimes(warehouseId, {
+                assembly_days: assemblyDays,
+                wb_acceptance_days: wbAcceptanceDays,
+                items,
+            });
+            setData(r);
+            setSuccess('Сохранено');
+            setTimeout(() => setSuccess(''), 3000);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setSaving(false);
+    };
+
+    if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
+
+    if (!data || data.wb_warehouses.length === 0) {
+        return (
+            <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>
+                <div style={{ fontSize: 40, marginBottom: 12 }}>📦</div>
+                <div style={{ fontSize: 15, color: 'var(--color-text-muted)' }}>
+                    Сначала синхронизируйте остатки WB, чтобы увидеть список складов
+                </div>
+            </div>
+        );
+    }
+
+    const totalDays = (wbName: string) => assemblyDays + (deliveryMap[wbName] ?? 3) + wbAcceptanceDays;
+
+    return (
+        <div className="glass-card" style={{ padding: 24 }}>
+            <p style={{ fontSize: 14, color: 'var(--color-text-muted)', marginBottom: 20 }}>
+                Укажите сколько дней занимает доставка с этого склада до каждого склада WB
+                (без учёта сборки)
+            </p>
+
+            {error && <div style={{ color: 'var(--color-danger)', marginBottom: 12 }}>{error}</div>}
+            {success && <div style={{ color: 'var(--color-success)', marginBottom: 12 }}>{success}</div>}
+
+            {/* Editable cards */}
+            <div style={{ display: 'flex', gap: 12, marginBottom: 24 }}>
+                <div
+                    style={{
+                        padding: '10px 16px',
+                        border: '1px solid var(--color-border)',
+                        borderRadius: 10,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        cursor: 'pointer',
+                    }}
+                    onClick={() => setEditingAssembly(true)}
+                >
+                    <span style={{ fontSize: 14 }}>Время сборки:</span>
+                    {editingAssembly ? (
+                        <input
+                            type="number"
+                            min={0}
+                            value={assemblyDays}
+                            onChange={e => setAssemblyDays(Math.max(0, parseInt(e.target.value) || 0))}
+                            onBlur={() => setEditingAssembly(false)}
+                            onKeyDown={e => e.key === 'Enter' && setEditingAssembly(false)}
+                            autoFocus
+                            style={{ width: 50, padding: '2px 6px', fontSize: 14, border: '1px solid var(--color-primary)', borderRadius: 6, textAlign: 'center' }}
+                        />
+                    ) : (
+                        <span style={{ fontWeight: 600 }}>{assemblyDays} дн.</span>
+                    )}
+                    {!editingAssembly && <span style={{ fontSize: 14, opacity: 0.5 }}>✏️</span>}
+                </div>
+
+                <div
+                    style={{
+                        padding: '10px 16px',
+                        border: '1px solid var(--color-border)',
+                        borderRadius: 10,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        cursor: 'pointer',
+                    }}
+                    onClick={() => setEditingAcceptance(true)}
+                >
+                    <span style={{ fontSize: 14 }}>Приёмка WB:</span>
+                    {editingAcceptance ? (
+                        <input
+                            type="number"
+                            min={0}
+                            value={wbAcceptanceDays}
+                            onChange={e => setWbAcceptanceDays(Math.max(0, parseInt(e.target.value) || 0))}
+                            onBlur={() => setEditingAcceptance(false)}
+                            onKeyDown={e => e.key === 'Enter' && setEditingAcceptance(false)}
+                            autoFocus
+                            style={{ width: 50, padding: '2px 6px', fontSize: 14, border: '1px solid var(--color-primary)', borderRadius: 6, textAlign: 'center' }}
+                        />
+                    ) : (
+                        <span style={{ fontWeight: 600 }}>{wbAcceptanceDays} дн.</span>
+                    )}
+                    {!editingAcceptance && <span style={{ fontSize: 14, opacity: 0.5 }}>✏️</span>}
+                </div>
+            </div>
+
+            {/* Table */}
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
+                <thead>
+                    <tr style={{ borderBottom: '2px solid var(--color-border)' }}>
+                        <th style={{ textAlign: 'left', padding: '8px 12px', fontWeight: 600, textTransform: 'uppercase', fontSize: 11, color: 'var(--color-text-muted)', letterSpacing: '0.5px' }}>Склад WB</th>
+                        <th style={{ textAlign: 'center', padding: '8px 12px', fontWeight: 600, textTransform: 'uppercase', fontSize: 11, color: 'var(--color-text-muted)', letterSpacing: '0.5px' }}>Дней доставки</th>
+                        <th style={{ textAlign: 'center', padding: '8px 12px', fontWeight: 600, textTransform: 'uppercase', fontSize: 11, color: 'var(--color-text-muted)', letterSpacing: '0.5px' }}>Итого до WB</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {data.wb_warehouses.map((wh, idx) => {
+                        const days = deliveryMap[wh.wb_warehouse_name] ?? 3;
+                        const total = totalDays(wh.wb_warehouse_name);
+                        const isFirst = idx === 0;
+                        return (
+                            <tr key={wh.wb_warehouse_name} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                <td style={{ padding: '10px 12px' }}>{wh.wb_warehouse_name}</td>
+                                <td style={{ padding: '10px 12px', textAlign: 'center' }}>
+                                    <input
+                                        type="number"
+                                        min={0}
+                                        value={days}
+                                        onChange={e => {
+                                            const v = Math.max(0, parseInt(e.target.value) || 0);
+                                            setDeliveryMap(prev => ({ ...prev, [wh.wb_warehouse_name]: v }));
+                                        }}
+                                        style={{
+                                            width: 60,
+                                            padding: '4px 8px',
+                                            fontSize: 14,
+                                            border: '1px solid var(--color-border)',
+                                            borderRadius: 6,
+                                            textAlign: 'center',
+                                        }}
+                                    />
+                                </td>
+                                <td style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 500 }}>
+                                    {total} дн{isFirst ? ` (${assemblyDays}+${days}+${wbAcceptanceDays})` : ''}
+                                </td>
+                            </tr>
+                        );
+                    })}
+                </tbody>
+            </table>
+
+            {/* Save button */}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 12, marginTop: 20 }}>
+                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>По умолчанию: 3 дня, если не задано</span>
+                <button
+                    className="btn btn-primary"
+                    onClick={handleSave}
+                    disabled={saving}
+                >
+                    {saving ? 'Сохранение...' : 'Сохранить'}
+                </button>
+            </div>
+        </div>
     );
 }

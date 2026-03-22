@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
@@ -48,18 +48,39 @@ export default function LogisticsPage() {
     // Filters
     const [groupBy, setGroupBy] = useState<GroupBy>('wb_warehouse');
     const [showSoonReady, setShowSoonReady] = useState(false);
+    const [warehouseFilter, setWarehouseFilter] = useState('');
+
+    // View mode
+    const [viewMode, setViewMode] = useState<'cards' | 'table'>(() => {
+        if (typeof window !== 'undefined') {
+            return (localStorage.getItem('logistics_view') as 'cards' | 'table') || 'cards';
+        }
+        return 'cards';
+    });
+    const switchViewMode = (mode: 'cards' | 'table') => {
+        setViewMode(mode);
+        localStorage.setItem('logistics_view', mode);
+    };
+
+    // Checkboxes for bulk selection
+    const [checkedIds, setCheckedIds] = useState<Set<number>>(new Set());
 
     // Vehicle modal
     const [showVehicleModal, setShowVehicleModal] = useState(false);
     const [vehicleInfo, setVehicleInfo] = useState('');
     const [vehicleBrand, setVehicleBrand] = useState('');
     const [driverPhone, setDriverPhone] = useState('');
-    const [pickupDate, setPickupDate] = useState('');
-    const [pickupTimeSlot, setPickupTimeSlot] = useState('');
-    const [pickupCost, setPickupCost] = useState<number | ''>('');
-    const [deliveryDate, setDeliveryDate] = useState('');
     const [selectedIds, setSelectedIds] = useState<number[]>([]);
     const [actionLoading, setActionLoading] = useState(false);
+
+    // Per-request params in modal: { [requestId]: { pickup_date, pickup_time_slot, pickup_cost, delivery_date } }
+    interface PerRequestParams {
+        pickup_date: string;
+        pickup_time_slot: string;
+        pickup_cost: number | '';
+        delivery_date: string;
+    }
+    const [perRequestParams, setPerRequestParams] = useState<Record<number, PerRequestParams>>({});
 
     // ─── Load data ────────────────────────────────────────────────────────
 
@@ -119,47 +140,110 @@ export default function LogisticsPage() {
 
     useEffect(() => { if (activeTab === 'history') loadHistory(); }, [activeTab, loadHistory]);
 
+    // ─── Warehouse list for filter ──────────────────────────────────────────
+
+    const warehouseOptions = (() => {
+        const key = groupBy === 'wb_warehouse'
+            ? (i: AssemblyRequest) => i.wb_warehouse_name || ''
+            : (i: AssemblyRequest) => i.warehouse_name || '';
+        const names = new Set(items.map(key).filter(Boolean));
+        return Array.from(names).sort();
+    })();
+
+    // ─── Filtered items ─────────────────────────────────────────────────
+
+    const filteredItems = warehouseFilter
+        ? items.filter(i => {
+            const val = groupBy === 'wb_warehouse' ? i.wb_warehouse_name : i.warehouse_name;
+            return val === warehouseFilter;
+        })
+        : items;
+
     // ─── Grouping ─────────────────────────────────────────────────────────
 
-    const grouped = groupItems(items, groupBy);
+    const grouped = groupItems(filteredItems, groupBy);
 
     // ─── Summary ──────────────────────────────────────────────────────────
 
-    const totalRequests = items.length;
-    const totalPallets = items.reduce((s, i) => s + i.pallets_count, 0);
-    const totalWeight = items.reduce((s, i) => s + (i.total_weight_kg || 0), 0);
+    const totalRequests = filteredItems.length;
+    const totalPallets = filteredItems.reduce((s, i) => s + i.pallets_count, 0);
+    const totalWeight = filteredItems.reduce((s, i) => s + (i.total_weight_kg || 0), 0);
+
+    // ─── Checked items summary ──────────────────────────────────────────
+
+    const checkedItems = filteredItems.filter(i => checkedIds.has(i.id));
+    const checkedPallets = checkedItems.reduce((s, i) => s + i.pallets_count, 0);
+    const checkedWeight = checkedItems.reduce((s, i) => s + (i.total_weight_kg || 0), 0);
+
+    const toggleChecked = (id: number) => {
+        setCheckedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
 
     // ─── Actions ──────────────────────────────────────────────────────────
 
     const openVehicleModal = (ids: number[]) => {
         setSelectedIds(ids);
         setVehicleInfo('');
+        setVehicleBrand('');
+        setDriverPhone('');
+        const params: Record<number, PerRequestParams> = {};
+        for (const id of ids) {
+            params[id] = { pickup_date: '', pickup_time_slot: '', pickup_cost: '', delivery_date: '' };
+        }
+        setPerRequestParams(params);
         setShowVehicleModal(true);
     };
 
     const vehicleFormValid = vehicleInfo.trim() && vehicleBrand.trim() && driverPhone.trim()
-        && pickupDate && pickupTimeSlot && pickupCost !== '' && deliveryDate;
+        && selectedIds.every(id => {
+            const p = perRequestParams[id];
+            return p && p.pickup_date && p.pickup_time_slot && p.pickup_cost !== '' && p.delivery_date;
+        });
+
+    const updateParam = (id: number, field: keyof PerRequestParams, value: string | number) => {
+        setPerRequestParams(prev => ({
+            ...prev,
+            [id]: { ...prev[id], [field]: value },
+        }));
+    };
 
     const handleAssignVehicle = async () => {
         if (!vehicleFormValid || selectedIds.length === 0) return;
         setActionLoading(true);
         setError('');
-        const data = {
-            vehicle_info: vehicleInfo.trim(),
-            vehicle_brand: vehicleBrand.trim(),
-            driver_phone: driverPhone.trim(),
-            pickup_date: pickupDate,
-            pickup_time_slot: pickupTimeSlot,
-            pickup_cost: Number(pickupCost),
-            delivery_date: deliveryDate,
-        };
         try {
+            const bulkItems = selectedIds.map(id => {
+                const p = perRequestParams[id];
+                return {
+                    request_id: id,
+                    pickup_date: p.pickup_date,
+                    pickup_time_slot: p.pickup_time_slot,
+                    pickup_cost: Number(p.pickup_cost),
+                    delivery_date: p.delivery_date,
+                };
+            });
             if (selectedIds.length === 1) {
-                await api.assignVehicle(selectedIds[0], data);
+                await api.assignVehicle(selectedIds[0], {
+                    vehicle_info: vehicleInfo.trim(),
+                    vehicle_brand: vehicleBrand.trim(),
+                    driver_phone: driverPhone.trim(),
+                    ...bulkItems[0],
+                });
             } else {
-                await api.assignVehicleBulk(selectedIds, data);
+                await api.assignVehicleBulk({
+                    vehicle_info: vehicleInfo.trim(),
+                    vehicle_brand: vehicleBrand.trim(),
+                    driver_phone: driverPhone.trim(),
+                    items: bulkItems,
+                });
             }
             setShowVehicleModal(false);
+            setCheckedIds(new Set());
             await load();
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
@@ -213,22 +297,42 @@ export default function LogisticsPage() {
                 </button>
             </div>
 
-            {/* Tab switcher */}
-            <div style={{ display: 'flex', gap: 0, marginBottom: 16 }}>
-                <button
-                    className={`btn ${activeTab === 'active' ? 'btn-primary' : 'btn-secondary'}`}
-                    onClick={() => setActiveTab('active')}
-                    style={{ borderRadius: '8px 0 0 8px' }}
-                >
-                    Активные
-                </button>
-                <button
-                    className={`btn ${activeTab === 'history' ? 'btn-primary' : 'btn-secondary'}`}
-                    onClick={() => setActiveTab('history')}
-                    style={{ borderRadius: '0 8px 8px 0' }}
-                >
-                    История отправок
-                </button>
+            {/* Tab switcher + view toggle */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <div style={{ display: 'flex', gap: 0 }}>
+                    <button
+                        className={`btn ${activeTab === 'active' ? 'btn-primary' : 'btn-secondary'}`}
+                        onClick={() => setActiveTab('active')}
+                        style={{ borderRadius: '8px 0 0 8px' }}
+                    >
+                        Активные
+                    </button>
+                    <button
+                        className={`btn ${activeTab === 'history' ? 'btn-primary' : 'btn-secondary'}`}
+                        onClick={() => setActiveTab('history')}
+                        style={{ borderRadius: '0 8px 8px 0' }}
+                    >
+                        История отправок
+                    </button>
+                </div>
+                {activeTab === 'active' && (
+                    <div style={{ display: 'flex', gap: 0 }}>
+                        <button
+                            className={`btn btn-sm ${viewMode === 'cards' ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={() => switchViewMode('cards')}
+                            style={{ borderRadius: '8px 0 0 8px' }}
+                        >
+                            Карточки
+                        </button>
+                        <button
+                            className={`btn btn-sm ${viewMode === 'table' ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={() => switchViewMode('table')}
+                            style={{ borderRadius: '0 8px 8px 0' }}
+                        >
+                            Таблица
+                        </button>
+                    </div>
+                )}
             </div>
 
             {/* Error */}
@@ -250,10 +354,22 @@ export default function LogisticsPage() {
                                 <select
                                     className="form-input"
                                     value={groupBy}
-                                    onChange={e => setGroupBy(e.target.value as GroupBy)}
+                                    onChange={e => { setGroupBy(e.target.value as GroupBy); setWarehouseFilter(''); }}
                                 >
                                     <option value="wb_warehouse">По складу сдачи WB</option>
                                     <option value="warehouse">По складу забора</option>
+                                </select>
+                            </div>
+                            <div className="form-group" style={{ margin: 0 }}>
+                                <select
+                                    className="form-input"
+                                    value={warehouseFilter}
+                                    onChange={e => setWarehouseFilter(e.target.value)}
+                                >
+                                    <option value="">Все склады</option>
+                                    {warehouseOptions.map(w => (
+                                        <option key={w} value={w}>{w}</option>
+                                    ))}
                                 </select>
                             </div>
                             <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 14 }}>
@@ -294,7 +410,80 @@ export default function LogisticsPage() {
                                 Здесь появятся заявки в статусе &laquo;Готово&raquo; и &laquo;Машина назначена&raquo;
                             </div>
                         </div>
+                    ) : viewMode === 'table' ? (
+                        /* ─── Table view ─── */
+                        <div className="glass-card" style={{ overflow: 'auto' }}>
+                            <table className="data-table" style={{ fontSize: 13 }}>
+                                <thead>
+                                    <tr>
+                                        <th style={{ width: 32 }}></th>
+                                        <th>Заявка</th>
+                                        <th>Забор</th>
+                                        <th>Сдача WB</th>
+                                        <th style={{ textAlign: 'right' }}>Палет</th>
+                                        <th style={{ textAlign: 'right' }}>Вес</th>
+                                        <th style={{ textAlign: 'right' }}>Позиции</th>
+                                        <th>Статус</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {grouped.map(group => (
+                                        <React.Fragment key={group.key}>
+                                            <tr>
+                                                <td colSpan={8} style={{ background: 'var(--color-bg-secondary)', fontWeight: 600, fontSize: 13, padding: '8px 12px' }}>
+                                                    {group.label || 'Без склада'}
+                                                    <span style={{ fontWeight: 400, color: 'var(--color-text-muted)', marginLeft: 8 }}>
+                                                        {group.items.length} заявок, {group.items.reduce((s, i) => s + i.pallets_count, 0)} палет
+                                                    </span>
+                                                </td>
+                                            </tr>
+                                            {group.items.map(item => {
+                                                const statusCfg = STATUS_MAP[item.status] || { label: item.status, className: '' };
+                                                const canCheck = item.status === 'READY';
+                                                const isChecked = checkedIds.has(item.id);
+                                                return (
+                                                    <tr
+                                                        key={item.id}
+                                                        style={{
+                                                            cursor: 'pointer',
+                                                            background: isChecked ? 'rgba(59, 130, 246, 0.06)' : undefined,
+                                                        }}
+                                                        onClick={() => canCheck && toggleChecked(item.id)}
+                                                    >
+                                                        <td onClick={e => e.stopPropagation()} style={{ textAlign: 'center' }}>
+                                                            {canCheck && (
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={isChecked}
+                                                                    onChange={() => toggleChecked(item.id)}
+                                                                    style={{ width: 16, height: 16, accentColor: 'var(--color-primary)', cursor: 'pointer' }}
+                                                                />
+                                                            )}
+                                                        </td>
+                                                        <td onClick={e => e.stopPropagation()}>
+                                                            <Link
+                                                                href={`/p/${slug}/warehouse/assembly/${item.id}`}
+                                                                style={{ fontWeight: 600, textDecoration: 'none', color: 'var(--color-primary)' }}
+                                                            >
+                                                                {item.number}
+                                                            </Link>
+                                                        </td>
+                                                        <td style={{ color: 'var(--color-text-muted)' }}>{item.warehouse_name || '\u2014'}</td>
+                                                        <td>{item.wb_warehouse_name || '\u2014'}</td>
+                                                        <td style={{ textAlign: 'right' }}>{item.pallets_count}</td>
+                                                        <td style={{ textAlign: 'right' }}>{item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014'}</td>
+                                                        <td style={{ textAlign: 'right' }}>{item.items?.length || 0}</td>
+                                                        <td><span className={`badge ${statusCfg.className}`}>{statusCfg.label}</span></td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </React.Fragment>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
                     ) : (
+                        /* ─── Cards view ─── */
                         <div>
                             {grouped.map(group => (
                                 <div key={group.key} style={{ marginBottom: 24 }}>
@@ -315,6 +504,8 @@ export default function LogisticsPage() {
                                                 {sub.items.map(item => {
                                                     const soon = isSoonReady(item);
                                                     const statusCfg = STATUS_MAP[item.status] || { label: item.status, className: '' };
+                                                    const isChecked = checkedIds.has(item.id);
+                                                    const canCheck = item.status === 'READY';
 
                                                     return (
                                                         <div
@@ -323,15 +514,30 @@ export default function LogisticsPage() {
                                                             style={{
                                                                 padding: 16,
                                                                 opacity: soon ? 0.5 : 1,
+                                                                border: isChecked ? '2px solid var(--color-primary)' : undefined,
+                                                                cursor: canCheck ? 'pointer' : undefined,
                                                             }}
+                                                            onClick={canCheck ? () => toggleChecked(item.id) : undefined}
                                                         >
                                                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                                                                <Link
-                                                                    href={`/p/${slug}/warehouse/assembly/${item.id}`}
-                                                                    style={{ fontWeight: 600, textDecoration: 'none', color: 'var(--color-text)' }}
-                                                                >
-                                                                    {item.number}
-                                                                </Link>
+                                                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                                    {canCheck && (
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={isChecked}
+                                                                            onChange={() => toggleChecked(item.id)}
+                                                                            onClick={e => e.stopPropagation()}
+                                                                            style={{ width: 18, height: 18, accentColor: 'var(--color-primary)', cursor: 'pointer' }}
+                                                                        />
+                                                                    )}
+                                                                    <Link
+                                                                        href={`/p/${slug}/warehouse/assembly/${item.id}`}
+                                                                        style={{ fontWeight: 600, textDecoration: 'none', color: 'var(--color-text)' }}
+                                                                        onClick={e => e.stopPropagation()}
+                                                                    >
+                                                                        {item.number}
+                                                                    </Link>
+                                                                </div>
                                                                 <span className={`badge ${statusCfg.className}`}>
                                                                     {soon && item.estimated_ready_date
                                                                         ? formatDate(item.estimated_ready_date)
@@ -482,50 +688,102 @@ export default function LogisticsPage() {
                 )
             )}
 
+            {/* Floating action bar */}
+            {checkedIds.size > 0 && (
+                <div style={{
+                    position: 'fixed',
+                    bottom: 0,
+                    left: 0,
+                    right: 0,
+                    background: 'rgba(30, 30, 30, 0.95)',
+                    backdropFilter: 'blur(8px)',
+                    color: '#fff',
+                    padding: '12px 24px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    zIndex: 1000,
+                    borderTop: '1px solid rgba(255,255,255,0.1)',
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14 }}>
+                        <span style={{ color: 'var(--color-success)' }}>&#10003;</span>
+                        Выбрано: {checkedItems.length} заявки &middot; {checkedPallets} палет &middot; {checkedWeight > 0 ? formatNumber(checkedWeight, 0) : 0} кг
+                    </div>
+                    <button
+                        className="btn btn-primary"
+                        onClick={() => openVehicleModal(Array.from(checkedIds))}
+                        disabled={actionLoading}
+                    >
+                        Назначить машину
+                    </button>
+                </div>
+            )}
+
             {/* Vehicle modal */}
             {showVehicleModal && (
                 <div className="modal-overlay" onClick={() => setShowVehicleModal(false)}>
-                    <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
+                    <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 960, width: '95vw', maxHeight: '90vh', overflow: 'auto', background: '#fff' }}>
                         <h2 className="modal-title">Назначить машину</h2>
-                        <div style={{ marginBottom: 12, fontSize: 14, color: 'var(--color-text-muted)' }}>
-                            Заявок: {selectedIds.length}
-                        </div>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                            <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+
+                        {/* Block 1: Common vehicle data */}
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 16 }}>
+                            <div className="form-group" style={{ margin: 0 }}>
                                 <label className="form-label">Описание машины *</label>
                                 <input className="form-input" value={vehicleInfo} onChange={e => setVehicleInfo(e.target.value)} placeholder="Номер, водитель, ТК..." autoFocus />
                             </div>
-                            <div className="form-group">
+                            <div className="form-group" style={{ margin: 0 }}>
                                 <label className="form-label">Марка машины *</label>
                                 <input className="form-input" value={vehicleBrand} onChange={e => setVehicleBrand(e.target.value)} placeholder="ГАЗ-330, КАМАЗ..." />
                             </div>
-                            <div className="form-group">
+                            <div className="form-group" style={{ margin: 0 }}>
                                 <label className="form-label">Телефон водителя *</label>
                                 <input className="form-input" value={driverPhone} onChange={e => setDriverPhone(e.target.value)} placeholder="+7 999 123-45-67" />
                             </div>
-                            <div className="form-group">
-                                <label className="form-label">Дата забора *</label>
-                                <input className="form-input" type="date" value={pickupDate} onChange={e => setPickupDate(e.target.value)} />
-                            </div>
-                            <div className="form-group">
-                                <label className="form-label">Интервал *</label>
-                                <select className="form-input" value={pickupTimeSlot} onChange={e => setPickupTimeSlot(e.target.value)}>
-                                    <option value="">Выберите...</option>
-                                    <option value="08:00-12:00">08:00 — 12:00</option>
-                                    <option value="12:00-16:00">12:00 — 16:00</option>
-                                    <option value="16:00-20:00">16:00 — 20:00</option>
-                                    <option value="20:00-00:00">20:00 — 00:00</option>
-                                </select>
-                            </div>
-                            <div className="form-group">
-                                <label className="form-label">Стоимость забора, \u20BD *</label>
-                                <input className="form-input" type="number" min={0} value={pickupCost} onChange={e => setPickupCost(e.target.value ? Number(e.target.value) : '')} placeholder="15000" />
-                            </div>
-                            <div className="form-group">
-                                <label className="form-label">Дата сдачи на WB *</label>
-                                <input className="form-input" type="date" value={deliveryDate} onChange={e => setDeliveryDate(e.target.value)} />
+                        </div>
+
+                        {/* Block 2: Per-request params */}
+                        <div style={{ borderTop: '1px solid var(--color-border)', paddingTop: 12 }}>
+                            <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 8 }}>Параметры по заявкам ({selectedIds.length})</div>
+                            <div style={{ maxHeight: 300, overflow: 'auto' }}>
+                                <table className="data-table" style={{ fontSize: 13, marginBottom: 0 }}>
+                                    <thead>
+                                        <tr>
+                                            <th>Заявка</th>
+                                            <th>Склад WB</th>
+                                            <th>Дата забора *</th>
+                                            <th>Интервал *</th>
+                                            <th>Стоимость, ₽ *</th>
+                                            <th>Дата сдачи *</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {selectedIds.map(id => {
+                                            const item = items.find(i => i.id === id);
+                                            const p = perRequestParams[id] || { pickup_date: '', pickup_time_slot: '', pickup_cost: '', delivery_date: '' };
+                                            return (
+                                                <tr key={id}>
+                                                    <td style={{ fontWeight: 500, whiteSpace: 'nowrap' }}>{item?.number || `#${id}`}</td>
+                                                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>{item?.wb_warehouse_name || '\u2014'}</td>
+                                                    <td><input className="form-input" type="date" value={p.pickup_date} onChange={e => updateParam(id, 'pickup_date', e.target.value)} style={{ minWidth: 130, padding: '4px 6px', fontSize: 13 }} /></td>
+                                                    <td>
+                                                        <select className="form-input" value={p.pickup_time_slot} onChange={e => updateParam(id, 'pickup_time_slot', e.target.value)} style={{ minWidth: 110, padding: '4px 6px', fontSize: 13 }}>
+                                                            <option value="">...</option>
+                                                            <option value="08:00-12:00">08-12</option>
+                                                            <option value="12:00-16:00">12-16</option>
+                                                            <option value="16:00-20:00">16-20</option>
+                                                            <option value="20:00-00:00">20-00</option>
+                                                        </select>
+                                                    </td>
+                                                    <td><input className="form-input" type="number" min={0} value={p.pickup_cost} onChange={e => updateParam(id, 'pickup_cost', e.target.value ? Number(e.target.value) : '')} placeholder="0" style={{ minWidth: 80, padding: '4px 6px', fontSize: 13 }} /></td>
+                                                    <td><input className="form-input" type="date" value={p.delivery_date} onChange={e => updateParam(id, 'delivery_date', e.target.value)} style={{ minWidth: 130, padding: '4px 6px', fontSize: 13 }} /></td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
                             </div>
                         </div>
+
                         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
                             <button className="btn btn-secondary" onClick={() => setShowVehicleModal(false)}>Отмена</button>
                             <button className="btn btn-primary" onClick={handleAssignVehicle} disabled={actionLoading || !vehicleFormValid}>

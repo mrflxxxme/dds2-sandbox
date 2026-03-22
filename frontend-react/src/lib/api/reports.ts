@@ -1,6 +1,9 @@
 /** Reports API methods */
 import { ApiClient } from './client';
-import type { DdsMonthRow, Transaction, DDSPnLResponse, CostHistoryResponse } from '@/types/api';
+import type {
+    DdsMonthRow, Transaction, DDSPnLResponse, CostHistoryResponse,
+    WbStocksResponse, WbStocksArticlesResponse, WbStockHistoryResponse,
+} from '@/types/api';
 
 export function addReportMethods(api: ApiClient) {
     return {
@@ -126,28 +129,44 @@ export function addReportMethods(api: ApiClient) {
         saveTaxRates(payload: { year: number; tax_regime: string; months: any[] }) {
             return api.request<any>('POST', '/api/v1/reports/tax_rates', payload);
         },
-        getStockAnalytics(trendDays: number = 7, subject?: string, brand?: string, article?: string) {
+        getStockAnalytics(trendDays: number = 7, subject?: string, brand?: string, article?: string, mode?: string) {
             const q = new URLSearchParams();
             q.set('trend_days', String(trendDays));
             if (subject) q.set('subject', subject);
             if (brand) q.set('brand', brand);
             if (article) q.set('article', article);
+            if (mode) q.set('mode', mode);
             return api.request<any>('GET', `/api/v1/reports/stock_analytics?${q.toString()}`);
         },
         syncWarehouseStocks() {
             return api.request<{ synced: number }>('POST', '/api/v1/reports/stock_warehouses/sync');
         },
         getWarehouseStocks() {
-            return api.request<any>('GET', '/api/v1/reports/stock_warehouses');
+            return api.request<WbStocksResponse>('GET', '/api/v1/reports/stock_warehouses');
+        },
+        getWarehouseStocksByArticle(search?: string) {
+            const q = new URLSearchParams();
+            if (search) q.set('search', search);
+            const qs = q.toString();
+            return api.request<WbStocksArticlesResponse>('GET', `/api/v1/reports/stock_warehouses/articles${qs ? '?' + qs : ''}`);
+        },
+        getStockHistory(dateFrom: string, dateTo: string, warehouse?: string) {
+            const q = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
+            if (warehouse) q.set('warehouse', warehouse);
+            return api.request<WbStockHistoryResponse>('GET', `/api/v1/reports/stock_warehouses/history?${q.toString()}`);
         },
         getStockNeed(supplyDays: number = 14, analysisDays: number = 14, mode: string = 'actual') {
             return api.request<any>('GET', `/api/v1/reports/stock_need?supply_days=${supplyDays}&analysis_days=${analysisDays}&mode=${mode}`);
         },
+        getOrderCitiesStatus() {
+            return api.request<{ has_data: boolean; total_mappings: number; date_from: string | null; date_to: string | null; last_updated: string | null }>('GET', '/api/v1/reports/stock_analytics/order_cities_status');
+        },
         async uploadOrderCities(file: File) {
             const formData = new FormData();
             formData.append('file', file);
+            // Use dedicated Next.js API route to avoid rewrite proxy timeout on large files
             return api.uploadFormData<{ ok: boolean; total_mappings: number; affected_rows: number }>(
-                '/api/v1/reports/stock_analytics/upload_order_cities', formData
+                '/api/upload-order-cities', formData
             );
         },
         getOrderGeography(dateFrom: string, dateTo: string, brand?: string, category?: string, article?: string) {

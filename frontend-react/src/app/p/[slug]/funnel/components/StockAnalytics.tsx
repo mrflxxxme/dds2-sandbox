@@ -237,9 +237,17 @@ export function StockAnalytics() {
                         </tr>
                         {pageArticles.map((a: any) => (
                             <tr key={a.nm_id} style={{ transition: 'background 0.15s' }}
-                                onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-tertiary)')}
-                                onMouseLeave={e => (e.currentTarget.style.background = '')}>
-                                <td style={{ position: 'sticky', left: 0, background: 'inherit', zIndex: 1, fontWeight: 600 }}>
+                                onMouseEnter={e => {
+                                    e.currentTarget.style.background = 'var(--color-bg-tertiary)';
+                                    const stickyTd = e.currentTarget.querySelector('td') as HTMLElement;
+                                    if (stickyTd) stickyTd.style.background = 'var(--color-bg-tertiary)';
+                                }}
+                                onMouseLeave={e => {
+                                    e.currentTarget.style.background = '';
+                                    const stickyTd = e.currentTarget.querySelector('td') as HTMLElement;
+                                    if (stickyTd) stickyTd.style.background = '#f5f5f7';
+                                }}>
+                                <td style={{ position: 'sticky', left: 0, background: '#f5f5f7', zIndex: 1, fontWeight: 600, boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }}>
                                     {a.vendor_code || `#${a.nm_id}`}
                                 </td>
                                 <td style={{ textAlign: 'right' }}>{formatNumber(a.orders_30d)}</td>

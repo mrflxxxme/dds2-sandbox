@@ -44,15 +44,19 @@ class AssignVehicle(BaseModel):
     delivery_date: date
 
 
-class AssignVehicleBulk(BaseModel):
-    ids: list[int]
-    vehicle_info: str
-    vehicle_brand: str
-    driver_phone: str
+class BulkAssignItem(BaseModel):
+    request_id: int
     pickup_date: date
     pickup_time_slot: str
     pickup_cost: Decimal
     delivery_date: date
+
+
+class AssignVehicleBulk(BaseModel):
+    vehicle_info: str
+    vehicle_brand: str
+    driver_phone: str
+    items: list[BulkAssignItem]
 
 
 class ShipBulk(BaseModel):

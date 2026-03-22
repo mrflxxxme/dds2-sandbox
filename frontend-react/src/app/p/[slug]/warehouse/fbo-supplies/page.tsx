@@ -393,7 +393,23 @@ export default function FboSuppliesPage() {
                                                 )}
                                             </td>
                                             <td onClick={e => e.stopPropagation()}>
-                                                {supply.outbound_shipment_id ? (
+                                                {supply.assembly_request_id ? (
+                                                    <Link href={`/p/${slug}/warehouse/assembly/${supply.assembly_request_id}`}>
+                                                        <span className="badge" style={{
+                                                            background: supply.assembly_request_status === 'SHIPPED' ? 'var(--color-success)' :
+                                                                supply.assembly_request_status === 'VEHICLE_ASSIGNED' ? 'var(--color-info)' :
+                                                                supply.assembly_request_status === 'READY' ? 'var(--color-warning)' :
+                                                                'var(--color-bg-secondary)',
+                                                            color: ['SHIPPED', 'VEHICLE_ASSIGNED', 'READY'].includes(supply.assembly_request_status || '') ? '#fff' : 'var(--color-text)',
+                                                            padding: '4px 8px',
+                                                            borderRadius: 4,
+                                                            fontSize: 12,
+                                                            cursor: 'pointer',
+                                                        }}>
+                                                            {supply.assembly_request_number}
+                                                        </span>
+                                                    </Link>
+                                                ) : supply.outbound_shipment_id ? (
                                                     <button
                                                         className="btn btn-secondary btn-sm"
                                                         onClick={() => handleUnlink(supply.id)}

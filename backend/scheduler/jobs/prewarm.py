@@ -11,7 +11,7 @@ logger = logging.getLogger("dds.scheduler")
 
 
 async def prewarm_project(project_id: int):
-    """Pre-compute OPIU and BDR for a single project (current + previous month)."""
+    """Pre-compute OPIU, BDR, and warehouse stocks for a single project."""
     today = date.today()
     month_start = today.replace(day=1)
     if month_start.month == 1:
@@ -25,6 +25,7 @@ async def prewarm_project(project_id: int):
     try:
         async with AsyncSessionLocal() as db:
             from backend.services import opiu_service, wb_bdr_service
+
             await asyncio.wait_for(
                 opiu_service.get_opiu(db, project_id, d_from, d_to),
                 timeout=120,
@@ -34,10 +35,42 @@ async def prewarm_project(project_id: int):
                 timeout=120,
             )
         logger.info(f"🔥 Prewarm: project {project_id} — OPIU + BDR cached ({d_from}→{d_to})")
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(f"🔥 Prewarm: project {project_id} — timeout (>120s), skipping")
     except Exception as e:
         logger.warning(f"🔥 Prewarm: project {project_id} failed: {e}")
+
+    # Prewarm warehouse stocks (separate try-block so OPIU/BDR failure doesn't block it)
+    try:
+        async with AsyncSessionLocal() as db:
+            from datetime import timedelta
+
+            from backend.services.warehouse_stock_service import (
+                get_stock_history,
+                get_warehouse_stocks,
+                get_warehouse_stocks_by_article,
+            )
+
+            await asyncio.wait_for(
+                get_warehouse_stocks(db, project_id),
+                timeout=60,
+            )
+            await asyncio.wait_for(
+                get_warehouse_stocks_by_article(db, project_id),
+                timeout=60,
+            )
+            # History for last 30 days
+            history_from = (today - timedelta(days=30)).isoformat()
+            history_to = today.isoformat()
+            await asyncio.wait_for(
+                get_stock_history(db, project_id, history_from, history_to),
+                timeout=60,
+            )
+        logger.info(f"🔥 Prewarm: project {project_id} — warehouse stocks cached")
+    except TimeoutError:
+        logger.warning(f"🔥 Prewarm: project {project_id} — stocks timeout (>60s), skipping")
+    except Exception as e:
+        logger.warning(f"🔥 Prewarm: project {project_id} stocks failed: {e}")
 
 
 async def prewarm_all_reports():

@@ -30,6 +30,7 @@ from backend.scheduler.jobs.wb_finance import (
     sync_all_projects_wb_finance,
     sync_all_projects_wb_finance_daily,
 )
+from backend.scheduler.jobs.wb_stocks import sync_all_projects_wb_stocks
 
 logger = logging.getLogger("dds.scheduler")
 
@@ -138,6 +139,16 @@ def start_scheduler():
         trigger=IntervalTrigger(hours=1),
         id="fbo_supplies_sync",
         name="FBO supplies sync (every 1h)",
+        replace_existing=True,
+        misfire_grace_time=600,
+    )
+
+    # WB warehouse stocks sync: every 1 hour
+    _scheduler.add_job(
+        sync_all_projects_wb_stocks,
+        trigger=IntervalTrigger(hours=1),
+        id="wb_stocks_sync",
+        name="WB warehouse stocks sync (every 1h)",
         replace_existing=True,
         misfire_grace_time=600,
     )

@@ -306,7 +306,7 @@ class TestListFboSupplies:
 
         supplies, total = await list_fbo_supplies(db_session, project_id=1, search="SEARCH-12345")
         assert total >= 1
-        found = [s for s in supplies if s.wb_supply_id == "SEARCH-12345"]
+        found = [s for s in supplies if s["wb_supply_id"] == "SEARCH-12345"]
         assert len(found) == 1
 
     async def test_list_filter_by_status(self, db_session):
@@ -323,7 +323,7 @@ class TestListFboSupplies:
 
         supplies, _total = await list_fbo_supplies(db_session, project_id=1, status="ACCEPTED")
         for s in supplies:
-            assert s.wb_status == "ACCEPTED"
+            assert s["wb_status"] == "ACCEPTED"
 
     async def test_list_filter_by_warehouse(self, db_session):
         """Filter by warehouse returns only matching supplies."""
@@ -340,7 +340,7 @@ class TestListFboSupplies:
 
         supplies, total = await list_fbo_supplies(db_session, project_id=1, warehouse="Электросталь")
         assert total == 1
-        assert supplies[0].warehouse_name == "Электросталь"
+        assert supplies[0]["warehouse_name"] == "Электросталь"
 
     async def test_list_pagination(self, db_session):
         """Pagination returns correct slice."""

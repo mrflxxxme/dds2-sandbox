@@ -194,18 +194,21 @@ async def assign_vehicle_bulk(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Bulk assign vehicle to multiple requests."""
+    """Bulk assign vehicle to multiple requests with per-request parameters."""
     try:
-        assign_payload = AssignVehicle(
-            vehicle_info=payload.vehicle_info,
-            vehicle_brand=payload.vehicle_brand,
-            driver_phone=payload.driver_phone,
-            pickup_date=payload.pickup_date,
-            pickup_time_slot=payload.pickup_time_slot,
-            pickup_cost=payload.pickup_cost,
-            delivery_date=payload.delivery_date,
-        )
-        results = await assembly_service.assign_vehicle_bulk(db, project.id, payload.ids, assign_payload)
+        results = []
+        for item in payload.items:
+            assign_payload = AssignVehicle(
+                vehicle_info=payload.vehicle_info,
+                vehicle_brand=payload.vehicle_brand,
+                driver_phone=payload.driver_phone,
+                pickup_date=item.pickup_date,
+                pickup_time_slot=item.pickup_time_slot,
+                pickup_cost=item.pickup_cost,
+                delivery_date=item.delivery_date,
+            )
+            req = await assembly_service.assign_vehicle(db, project.id, item.request_id, assign_payload)
+            results.append(req)
         response = []
         for req in results:
             resp = await assembly_service._build_response(db, req)
