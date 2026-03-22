@@ -23,6 +23,11 @@ def upgrade() -> None:
     conn.execute(sa.text("ALTER TABLE order_city_map ADD COLUMN IF NOT EXISTS okrug VARCHAR(100)"))
     conn.execute(sa.text("ALTER TABLE order_city_map ADD COLUMN IF NOT EXISTS order_date DATE"))
 
+    # 1b. wb_stock_snapshots: add in_way_from_client (missing from 4b113f1a37a6)
+    conn.execute(
+        sa.text("ALTER TABLE wb_stock_snapshots ADD COLUMN IF NOT EXISTS in_way_from_client INTEGER DEFAULT 0 NOT NULL")
+    )
+
     # 2. warehouses: add wb_acceptance_days
     conn.execute(sa.text("ALTER TABLE warehouses ADD COLUMN IF NOT EXISTS wb_acceptance_days INTEGER DEFAULT 2"))
 
