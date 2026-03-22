@@ -69,6 +69,17 @@
           }
         ],
         "description": "Проверка Float в моделях после каждого ответа"
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "new_files=$(git diff --name-only --diff-filter=A HEAD 2>/dev/null); if [ -z \"$new_files\" ]; then exit 0; fi; hints=''; for f in $new_files; do case \"$f\" in backend/models/*.py) hints=\"$hints\n[DOCS] Новая модель $f — обнови DOMAIN_*.md и проверь SOFT_MODELS в check_conventions.sh\" ;; backend/services/*.py) hints=\"$hints\n[DOCS] Новый сервис $f — обнови DOMAIN_*.md\" ;; backend/routers/*.py) hints=\"$hints\n[DOCS] Новый роутер $f — обнови DOMAIN_*.md\" ;; migrations/versions/*.py) hints=\"$hints\n[DOCS] Новая миграция $f — обнови DOMAIN_*.md\" ;; esac; done; if [ -n \"$hints\" ]; then echo \"$hints\" >&2; echo '[DOCS] Запусти /docs для автообновления документации' >&2; fi; exit 0",
+            "timeout": 10
+          }
+        ],
+        "description": "Напоминание обновить документацию при создании новых моделей/сервисов/роутеров/миграций"
       }
     ],
     "UserPromptSubmit": [
