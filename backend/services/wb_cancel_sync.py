@@ -38,8 +38,8 @@ async def sync_cancel_stats(
 
     key_row, api_key = await _get_wb_key(db, project_id)
 
-    async with WBApiClient(api_key) as client:
-        orders = await client.get_orders(date_from=date_from, flag=0)
+    client = WBApiClient(api_key)
+    orders = await client.get_orders(date_from=date_from, flag=0)
 
     if not orders:
         logger.info("Cancel sync: project=%d — no orders from %s", project_id, date_from)
