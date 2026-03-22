@@ -1,5 +1,5 @@
 # ruff: noqa: RUF001
-"""add okrug, order_date, updated_at to order_city_map
+"""add okrug, order_date to order_city_map
 
 Revision ID: m7_order_city_map_add_columns
 Revises: 4b113f1a37a6
@@ -24,18 +24,8 @@ def upgrade() -> None:
         "order_city_map",
         sa.Column("order_date", sa.Date(), nullable=True),
     )
-    op.add_column(
-        "order_city_map",
-        sa.Column(
-            "updated_at",
-            sa.DateTime(),
-            server_default=sa.text("now()"),
-            nullable=True,
-        ),
-    )
 
 
 def downgrade() -> None:
-    op.drop_column("order_city_map", "updated_at")
     op.drop_column("order_city_map", "order_date")
     op.drop_column("order_city_map", "okrug")
