@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001
 """Funnel product trends — per-product metrics with linear regression.
 
 Extracted from analysis.py for maintainability.
@@ -11,6 +12,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbFunnelDaily
+from backend.services.funnel.bdr_rates import BdrRates, compute_profit_bdr
 from backend.services.tariff_service import get_avg_buyout_map, get_tariff_map
 
 logger = logging.getLogger("dds.funnel")
@@ -44,10 +46,11 @@ def _linear_regression_trend(values: list[float]) -> float:
 async def get_product_trends(
     db: AsyncSession,
     pid: int,
-    tax_rate: float,
+    tax_info: dict,
     trend_days: int = 7,
     brand: str | None = None,
     search: str | None = None,
+    bdr_rates_map: dict[int, BdrRates] | None = None,
 ) -> dict:
     """
     Per-product metrics with linear regression trends.
@@ -55,6 +58,8 @@ async def get_product_trends(
     """
     today = date.today()
     d_from = today - timedelta(days=trend_days)
+
+    tax_rate = tax_info.get("usn_rate", 0) + tax_info.get("nds_rate", 0)  # legacy fallback
 
     q = select(WbFunnelDaily).where(
         WbFunnelDaily.project_id == pid,
@@ -74,7 +79,7 @@ async def get_product_trends(
     result = await db.execute(q)
     rows = result.scalars().all()
 
-    # Load maps
+    # Load maps (for fallback)
     tariff_map = await get_tariff_map(db, pid)
     buyout_map = await get_avg_buyout_map(db, pid)
 
@@ -108,18 +113,39 @@ async def get_product_trends(
         avg_price = float(latest.avg_price or 0)
         cost_price = float(latest.cost_price or 0)
         tariff_rate = tariff_map.get(meta["subject"] or "", 0)
-        has_tariff = tariff_rate > 0
 
         avg_daily_orders = total_orders_count / n_days if n_days else 0
         turnover_days = round(stocks_wb / avg_daily_orders, 1) if avg_daily_orders > 0 else 0
 
-        buyout = buyout_map.get(nm_id, 100)
-        revenue = total_orders_sum * buyout / 100
-        commission = revenue * tariff_rate / 100
-        tax = revenue * tax_rate / 100
-        cost_total = cost_price * total_orders_count
-        profit = revenue - commission - cost_total - total_adv_sum - tax
-        margin = round((profit / revenue * 100), 2) if revenue else 0
+        # Profit calculation: BDR or legacy
+        bdr = bdr_rates_map.get(nm_id) if bdr_rates_map else None
+        if bdr:
+            m = compute_profit_bdr(total_orders_sum, total_orders_count, total_adv_sum, cost_price, bdr, tax_info)
+            revenue = m["revenue"]
+            commission = m["commission"]
+            profit = m["profit"]
+            margin = m["margin"]
+            commission_rate = m["commission_rate"]
+            has_tariff = True
+            has_bdr = True
+            spp_rate = m["spp_rate"]
+            to_pay_rate = m["to_pay_rate"]
+            buyout = bdr.buyout_pct * 100
+            cost_total = m["cost_total"]
+        else:
+            buyout = buyout_map.get(nm_id, 100)
+            revenue = total_orders_sum * buyout / 100
+            commission = revenue * tariff_rate / 100
+            tax = revenue * tax_rate / 100
+            cost_total = cost_price * total_orders_count
+            profit = revenue - commission - cost_total - total_adv_sum - tax
+            margin = round((profit / revenue * 100), 2) if revenue else 0
+            commission_rate = tariff_rate
+            has_tariff = tariff_rate > 0
+            has_bdr = False
+            spp_rate = 0
+            to_pay_rate = 0
+
         drr = round((total_adv_sum / total_orders_sum * 100), 2) if total_orders_sum else 0
         ctr = round((total_adv_clicks / total_adv_views * 100), 2) if total_adv_views else 0
 
@@ -128,10 +154,9 @@ async def get_product_trends(
 
         # ── Linear regression trends per metric ──
         daily_orders = [r.orders_count or 0 for r in daily_rows]
-        daily_revenue = [float(r.orders_sum_rub or 0) for r in daily_rows]
+        daily_revenue_arr = [float(r.orders_sum_rub or 0) for r in daily_rows]
         daily_open = [r.open_card or 0 for r in daily_rows]
         daily_adv = [float(r.adv_sum or 0) for r in daily_rows]
-        daily_adv_views_arr = [r.adv_views or 0 for r in daily_rows]  # noqa: F841
         daily_stocks = [r.stocks_wb or 0 for r in daily_rows]
         daily_avg_price = [float(r.avg_price or 0) for r in daily_rows]
 
@@ -141,6 +166,7 @@ async def get_product_trends(
         daily_add_to_cart_pct = []
         daily_cart_to_order = []
         daily_turnover = []
+        daily_profit = []
 
         for r in daily_rows:
             os_ = float(r.orders_sum_rub or 0)
@@ -156,14 +182,21 @@ async def get_product_trends(
             daily_ctr.append((clicks / views * 100) if views else 0)
             daily_add_to_cart_pct.append((cart_c / open_c * 100) if open_c else 0)
             daily_cart_to_order.append((oc / cart_c * 100) if cart_c else 0)
-
-            rev = os_ * buyout / 100 if buyout else os_
-            comm = rev * tariff_rate / 100
-            t = rev * tax_rate / 100
-            cp = float(r.cost_price or 0) * oc
-            p = rev - comm - cp - adv - t
-            daily_margin.append((p / rev * 100) if rev else 0)
             daily_turnover.append(stk / oc if oc else 0)
+
+            # Daily profit & margin using same method as totals
+            if bdr:
+                dm = compute_profit_bdr(os_, oc, adv, float(r.cost_price or 0), bdr, tax_info)
+                daily_margin.append(dm["margin"])
+                daily_profit.append(dm["profit"])
+            else:
+                rev = os_ * buyout / 100 if buyout else os_
+                comm = rev * tariff_rate / 100
+                t = rev * tax_rate / 100
+                cp = float(r.cost_price or 0) * oc
+                p = rev - comm - cp - adv - t
+                daily_margin.append((p / rev * 100) if rev else 0)
+                daily_profit.append(p)
 
         output.append(
             {
@@ -183,30 +216,25 @@ async def get_product_trends(
                 "margin": margin,
                 "profit": round(profit, 2),
                 "commission": round(commission, 2),
-                "commission_rate": round(tariff_rate, 2),
+                "commission_rate": round(commission_rate, 2),
                 "has_tariff": has_tariff,
+                "has_bdr": has_bdr,
+                "spp_rate": round(spp_rate, 2),
+                "to_pay_rate": round(to_pay_rate, 2),
                 "avg_price": avg_price,
                 "drr": drr,
                 "adv_sum": round(total_adv_sum, 2),
                 "ctr": ctr,
                 "cost_price": cost_price,
+                "cost_total": round(cost_total, 2),
                 "trend_turnover": _linear_regression_trend(daily_turnover),
                 "trend_orders": _linear_regression_trend(daily_orders),
-                "trend_revenue": _linear_regression_trend(daily_revenue),
+                "trend_revenue": _linear_regression_trend(daily_revenue_arr),
                 "trend_open": _linear_regression_trend(daily_open),
                 "trend_add_to_cart_pct": _linear_regression_trend(daily_add_to_cart_pct),
                 "trend_cart_to_order": _linear_regression_trend(daily_cart_to_order),
                 "trend_margin": _linear_regression_trend(daily_margin),
-                "trend_profit": _linear_regression_trend(
-                    [
-                        float(r.orders_sum_rub or 0) * buyout / 100
-                        - float(r.orders_sum_rub or 0) * buyout / 100 * tariff_rate / 100
-                        - float(r.adv_sum or 0)
-                        - float(r.orders_sum_rub or 0) * buyout / 100 * tax_rate / 100
-                        - float(r.cost_price or 0) * (r.orders_count or 0)
-                        for r in daily_rows
-                    ]
-                ),
+                "trend_profit": _linear_regression_trend(daily_profit),
                 "trend_avg_price": _linear_regression_trend(daily_avg_price),
                 "trend_drr": _linear_regression_trend(daily_drr),
                 "trend_adv": _linear_regression_trend(daily_adv),

@@ -23,6 +23,7 @@ export default function FunnelPage() {
     const [initDone, setInitDone] = useState(false);
     const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
     const [missingDays, setMissingDays] = useState<number | null>(null);
+    const [hasBdr, setHasBdr] = useState(false);
 
     // Filters
     const [dateFrom, setDateFrom] = useState('');
@@ -70,6 +71,7 @@ export default function FunnelPage() {
             setDetailed(res.detailed || false);
             setSummary(sum);
             setTaxRate(tax.tax_rate || 6);
+            setHasBdr(res.has_bdr || false);
             return res.data || [];
         } catch (e: unknown) {
             console.error(e);
@@ -169,6 +171,18 @@ export default function FunnelPage() {
                             {missingDays === 0 && (
                                 <span style={{ fontSize: 12, color: '#10b981' }}>✅ Все дни синхронизированы</span>
                             )}
+                            {hasBdr && (
+                                <span title="Прибыль рассчитана по данным БДР за 7 дней — учитывает реальную комиссию WB, логистику, штрафы, хранение"
+                                    style={{ fontSize: 12, color: '#3b82f6', background: 'rgba(59,130,246,0.1)', padding: '2px 8px', borderRadius: 4, cursor: 'help' }}>
+                                    ℹ️ Прибыль по БДР
+                                </span>
+                            )}
+                            {!hasBdr && (
+                                <span title="Загрузите финансовый отчёт WB для точного расчёта прибыли"
+                                    style={{ fontSize: 12, color: '#f59e0b', background: 'rgba(245,158,11,0.1)', padding: '2px 8px', borderRadius: 4, cursor: 'help' }}>
+                                    ⚠️ Нет данных БДР — прибыль по тарифам
+                                </span>
+                            )}
                             <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
                                 <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>Налог %:</span>
                                 <input type="number" value={taxRate} step="0.1"
@@ -252,7 +266,7 @@ export default function FunnelPage() {
                     <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                         <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
                             {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> : (
-                                <table className="data-table" style={{ minWidth: detailed ? 1800 : 1200, borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#ffffff' }}>
+                                <table className="data-table" style={{ minWidth: detailed ? 2000 : 1400, borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#ffffff' }}>
                                 <thead>
                                     <tr ref={headerRow1Ref}>
                                         <th rowSpan={2} style={{ position: 'sticky', left: 0, top: 0, background: '#ffffff', color: '#374151', backdropFilter: 'none', zIndex: 22, verticalAlign: 'bottom', borderBottom: '2px solid #e5e7eb', minWidth: 100, borderRight: '1px solid #e5e7eb', padding: '8px 12px', boxShadow: !detailed ? 'inset -6px 0 6px -6px rgba(0,0,0,0.08)' : 'none' }}>ДАТА</th>
@@ -262,7 +276,7 @@ export default function FunnelPage() {
                                         {detailed && <th rowSpan={2} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', zIndex: 20, verticalAlign: 'bottom', borderBottom: '2px solid #e5e7eb' }}>Бренд</th>}
                                         <th colSpan={5} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb' }}>ВОРОНКА</th>
                                         <th colSpan={7} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ВНУТРЕННЯЯ РЕКЛАМА</th>
-                                        <th colSpan={detailed ? 7 : 6} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ФИНАНСЫ</th>
+                                        <th colSpan={detailed ? 9 : 8} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ФИНАНСЫ</th>
                                         <th colSpan={2} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>КОНВЕРСИЯ</th>
                                     </tr>
                                     <tr>
@@ -281,8 +295,10 @@ export default function FunnelPage() {
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>ДРР</th>
 
                                         {detailed && <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>Себест. ₽</th>}
-                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', borderLeft: !detailed ? '1px solid #e5e7eb' : 'none' }}>Налог ₽</th>
-                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Ком. %</th>
+                                        <th title="СПП — скидка Wildberries за счёт WB, не влияет на выплату, но снижает налог" style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', borderLeft: !detailed ? '1px solid #e5e7eb' : 'none', cursor: 'help' }}>СПП %</th>
+                                        <th title="Процент выкупа — сколько заказов фактически выкупается" style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', cursor: 'help' }}>Выкуп %</th>
+                                        <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Налог ₽</th>
+                                        <th title="Расходы WB — комиссия + логистика + штрафы + хранение" style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', cursor: 'help' }}>Расх. WB %</th>
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Комиссия ₽</th>
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Прибыль ₽</th>
                                         <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Маржа</th>
@@ -323,7 +339,9 @@ export default function FunnelPage() {
                                                 <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: r.drr > 30 ? '#ef4444' : r.drr > 15 ? '#f59e0b' : r.drr > 0 ? '#10b981' : '#9ca3af', fontWeight: r.drr > 30 ? 600 : 400, background: r.drr > 30 ? '#fef2f2' : undefined }}>{fmtPct(r.drr)}</td>
                                                 {/* Финансы */}
                                                 {detailed && <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6' }}>{r.cost_price ? fmt(r.cost_total) : <span style={{ color: '#f59e0b', fontSize: 11 }}>—</span>}</td>}
-                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: '#6b7280', borderLeft: !detailed ? '1px solid #f3f4f6' : 'none' }}>{fmt(r.tax)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: !detailed ? '1px solid #f3f4f6' : 'none', color: (r.spp_rate || 0) > 40 ? '#ef4444' : (r.spp_rate || 0) > 20 ? '#f59e0b' : '#10b981', fontSize: 12 }}>{r.spp_rate ? fmtPct(r.spp_rate) : '—'}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: '#374151', fontSize: 12 }}>{r.buyout_percent ? fmtPct(r.buyout_percent) : '—'}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: '#6b7280' }}>{fmt(r.tax)}</td>
                                                 <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: r.commission_rate > 0 ? '#6366f1' : '#9ca3af', fontSize: 12 }}>{r.commission_rate > 0 ? fmtPct(r.commission_rate) : '—'}</td>
                                                 <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: r.commission > 0 ? '#6366f1' : '#9ca3af', fontWeight: 500 }}>{r.commission > 0 ? fmt(r.commission) : '—'}</td>
                                                 <td style={{ textAlign: 'right', fontWeight: 700, borderBottom: '1px solid #f3f4f6', color: r.profit > 0 ? '#10b981' : '#ef4444', background: r.profit > 0 ? '#f0fdf4' : r.profit < 0 ? '#fef2f2' : undefined }}>{fmt(r.profit)}</td>

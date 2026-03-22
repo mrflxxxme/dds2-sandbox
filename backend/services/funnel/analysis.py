@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001
 """
 Funnel analysis — advanced analytics and trend detection.
 
@@ -13,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbFunnelDaily
+from backend.services.funnel.bdr_rates import BdrRates, compute_profit_bdr
 from backend.services.tariff_service import get_avg_buyout_map, get_tariff_map
 
 logger = logging.getLogger("dds.funnel")
@@ -21,16 +23,19 @@ logger = logging.getLogger("dds.funnel")
 async def get_day_analysis(
     db: AsyncSession,
     pid: int,
-    tax_rate: float,
+    tax_info: dict,
     target_date: str,
     brand: str | None,
     subject: str | None,
     trend_days: int = 14,
+    bdr_rates_map: dict[int, BdrRates] | None = None,
 ) -> dict:
     """Day analysis: summary, comparison, top products, trend, anomalies."""
     td = date.fromisoformat(target_date)
     prev_d = td - timedelta(days=1)
     trend_start = td - timedelta(days=trend_days - 1)
+
+    tax_rate = tax_info.get("usn_rate", 0) + tax_info.get("nds_rate", 0)  # legacy fallback
 
     def _base_filter(q):
         q = q.where(WbFunnelDaily.project_id == pid)
@@ -60,6 +65,7 @@ async def get_day_analysis(
         total_clicks = 0
         total_cost = 0.0
         total_commission = 0.0
+        total_tax = 0.0
 
         for r in raw_rows:
             total_open += int(r.open_card or 0)
@@ -67,20 +73,30 @@ async def get_day_analysis(
             total_orders += int(r.orders_count or 0)
             orders_sum = float(r.orders_sum_rub or 0)
             total_os += orders_sum
-            total_adv += float(r.adv_sum or 0)
+            adv = float(r.adv_sum or 0)
+            total_adv += adv
             total_views += int(r.adv_views or 0)
             total_clicks += int(r.adv_clicks or 0)
-            total_cost += float(r.cost_price or 0) * (r.orders_count or 0)
+            cost_per_unit = float(r.cost_price or 0)
+            orders_count = int(r.orders_count or 0)
 
-            buyout_pct = buyout_map.get(r.nm_id, 100)
-            revenue = orders_sum * buyout_pct / 100
-            total_revenue += revenue
+            bdr = bdr_rates_map.get(r.nm_id) if bdr_rates_map else None
+            if bdr:
+                m = compute_profit_bdr(orders_sum, orders_count, adv, cost_per_unit, bdr, tax_info)
+                total_revenue += m["revenue"]
+                total_commission += m["commission"]
+                total_cost += m["cost_total"]
+                total_tax += m["tax"]
+            else:
+                buyout_pct = buyout_map.get(r.nm_id, 100)
+                revenue = orders_sum * buyout_pct / 100
+                total_revenue += revenue
+                rate = tariff_map.get(r.subject or "", 0)
+                total_commission += revenue * rate / 100
+                total_cost += cost_per_unit * orders_count
+                total_tax += revenue * tax_rate / 100
 
-            rate = tariff_map.get(r.subject or "", 0)
-            total_commission += revenue * rate / 100
-
-        tax = total_revenue * tax_rate / 100
-        profit = total_revenue - total_adv - total_commission - total_cost - tax
+        profit = total_revenue - total_adv - total_commission - total_cost - total_tax
         drr = (total_adv / total_os * 100) if total_os else 0
         ctr = (total_clicks / total_views * 100) if total_views else 0
         cpc = (total_adv / total_clicks) if total_clicks else 0
@@ -97,11 +113,12 @@ async def get_day_analysis(
             "ctr": round(ctr, 2),
             "cpc": round(cpc, 2),
             "drr": round(drr, 2),
-            "tax": round(tax, 2),
+            "tax": round(total_tax, 2),
             "profit": round(profit, 2),
             "margin": round((profit / total_revenue * 100) if total_revenue else 0, 2),
             "commission": round(total_commission, 2),
             "cost_total": round(total_cost, 2),
+            "has_bdr": bool(bdr_rates_map),
         }
 
     today_agg = await _day_agg(td)

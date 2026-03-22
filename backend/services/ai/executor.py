@@ -82,10 +82,11 @@ async def execute_tool(
 async def _get_funnel_data(db, project_id, tax_rate, brand, inp):
     from backend.services.funnel.queries import get_funnel_aggregated
 
+    tax_info = {"tax_regime": "usn_income", "usn_rate": tax_rate, "nds_rate": 0, "cost_as_expense": False}
     data = await get_funnel_aggregated(
         db,
         project_id,
-        tax_rate,
+        tax_info,
         date_from=inp.get("date_from"),
         date_to=inp.get("date_to"),
         brand=brand,
@@ -112,10 +113,11 @@ async def _get_funnel_data(db, project_id, tax_rate, brand, inp):
 async def _get_top_products(db, project_id, tax_rate, brand, inp):
     from backend.services.funnel.product_trends import get_product_trends
 
+    tax_info = {"tax_regime": "usn_income", "usn_rate": tax_rate, "nds_rate": 0, "cost_as_expense": False}
     result = await get_product_trends(
         db,
         project_id,
-        tax_rate,
+        tax_info,
         trend_days=inp.get("trend_days", 7),
         brand=brand,
         search=inp.get("search"),
@@ -219,10 +221,11 @@ async def _compare_periods(db, project_id, tax_rate, brand, inp):
 async def _get_product_info(db, project_id, tax_rate, brand, inp):
     from backend.services.funnel.product_trends import get_product_trends
 
+    tax_info = {"tax_regime": "usn_income", "usn_rate": tax_rate, "nds_rate": 0, "cost_as_expense": False}
     result = await get_product_trends(
         db,
         project_id,
-        tax_rate,
+        tax_info,
         trend_days=7,
         brand=brand,
         search=inp.get("search"),
@@ -320,10 +323,11 @@ async def _get_day_analysis(db, project_id, tax_rate, brand, inp):
 
         target_date = utcnow().strftime("%Y-%m-%d")
 
+    tax_info = {"tax_regime": "usn_income", "usn_rate": tax_rate, "nds_rate": 0, "cost_as_expense": False}
     result = await get_day_analysis(
         db,
         project_id,
-        tax_rate,
+        tax_info,
         target_date=target_date,
         brand=brand,
     )

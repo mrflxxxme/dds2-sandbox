@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001
 """
 Router: /funnel — WB Sales funnel analytics (воронка продаж).
 Thin HTTP layer — all business logic is in services/funnel/ package.
@@ -48,6 +49,38 @@ class BulkCostRequest(BaseModel):
 
 class TaxRateRequest(BaseModel):
     tax_rate: float
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+
+async def _load_tax_info(db: AsyncSession, project: Project) -> dict:
+    """Load tax settings from TaxRate table, fall back to project.tax_rate."""
+    from datetime import date
+
+    from backend.services.bdr_loaders import load_tax_settings
+
+    today = date.today()
+    tax_info = await load_tax_settings(db, project.id, today, today)
+
+    # If no TaxRate rows configured, fall back to legacy project.tax_rate
+    if tax_info.get("usn_rate", 0) == 0 and tax_info.get("nds_rate", 0) == 0:
+        legacy_rate = float(project.tax_rate or 6)
+        tax_info = {
+            "tax_regime": "usn_income",
+            "usn_rate": legacy_rate,
+            "nds_rate": 0,
+            "cost_as_expense": False,
+        }
+
+    return tax_info
+
+
+async def _load_bdr_rates(db: AsyncSession, project_id: int):
+    """Load BDR rates for profit calculation."""
+    from backend.services.funnel.bdr_rates import get_bdr_rates
+
+    return await get_bdr_rates(db, project_id)
 
 
 # ─── Sync endpoints ─────────────────────────────────────────────────────────
@@ -169,17 +202,35 @@ async def get_funnel_data(
     db: AsyncSession = Depends(get_db),
 ):
     """Get funnel data. Aggregated by day if no article filter, detailed otherwise."""
-    tax_rate = float(project.tax_rate or 6)
+    tax_info = await _load_tax_info(db, project)
+    bdr_rates_map = await _load_bdr_rates(db, project.id)
     detailed = bool(vendor_code)
 
     if not detailed:
-        data = await funnel_service.get_funnel_aggregated(db, project.id, tax_rate, date_from, date_to, brand, subject)
-        return {"data": data, "tax_rate": tax_rate, "detailed": False}
+        data = await funnel_service.get_funnel_aggregated(
+            db,
+            project.id,
+            tax_info,
+            date_from,
+            date_to,
+            brand,
+            subject,
+            bdr_rates_map=bdr_rates_map,
+        )
+        return {"data": data, "tax_info": tax_info, "has_bdr": bool(bdr_rates_map), "detailed": False}
     else:
         data = await funnel_service.get_funnel_detailed(
-            db, project.id, tax_rate, date_from, date_to, brand, vendor_code, subject
+            db,
+            project.id,
+            tax_info,
+            date_from,
+            date_to,
+            brand,
+            vendor_code,
+            subject,
+            bdr_rates_map=bdr_rates_map,
         )
-        return {"data": data, "tax_rate": tax_rate, "detailed": True}
+        return {"data": data, "tax_info": tax_info, "has_bdr": bool(bdr_rates_map), "detailed": True}
 
 
 @router.get("/summary")
@@ -287,8 +338,18 @@ async def get_day_analysis(
     db: AsyncSession = Depends(get_db),
 ):
     """Day analysis: summary, comparison, top products, trend, anomalies."""
-    tax_rate = float(project.tax_rate or 6)
-    return await funnel_service.get_day_analysis(db, project.id, tax_rate, target_date, brand, subject, trend_days)
+    tax_info = await _load_tax_info(db, project)
+    bdr_rates_map = await _load_bdr_rates(db, project.id)
+    return await funnel_service.get_day_analysis(
+        db,
+        project.id,
+        tax_info,
+        target_date,
+        brand,
+        subject,
+        trend_days,
+        bdr_rates_map=bdr_rates_map,
+    )
 
 
 @router.get("/trends")
@@ -300,8 +361,17 @@ async def get_product_trends(
     db: AsyncSession = Depends(get_db),
 ):
     """Per-product metrics with linear regression trends."""
-    tax_rate = float(project.tax_rate or 6)
-    return await funnel_service.get_product_trends(db, project.id, tax_rate, trend_days, brand, search)
+    tax_info = await _load_tax_info(db, project)
+    bdr_rates_map = await _load_bdr_rates(db, project.id)
+    return await funnel_service.get_product_trends(
+        db,
+        project.id,
+        tax_info,
+        trend_days,
+        brand,
+        search,
+        bdr_rates_map=bdr_rates_map,
+    )
 
 
 # ─── Tariffs (WB commission rates) ──────────────────────────────────────────

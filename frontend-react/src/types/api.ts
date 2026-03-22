@@ -371,6 +371,11 @@ export interface FunnelDayRow {
   drr?: number;
   add_to_cart_pct?: number;
   cart_to_order_pct?: number;
+  has_bdr?: boolean;
+  spp_rate?: number;
+  to_pay_rate?: number;
+  buyout_pct?: number;
+  buyout_percent?: number;
 }
 
 export interface FunnelSummary {
@@ -617,7 +622,9 @@ export interface FunnelFilters {
 export interface FunnelDataResponse {
   data: FunnelDayRow[];
   detailed: boolean;
-  tax_rate: number;
+  tax_rate?: number;
+  has_bdr?: boolean;
+  tax_info?: Record<string, unknown>;
 }
 
 export interface FunnelSyncStatus {
