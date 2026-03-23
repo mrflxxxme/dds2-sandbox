@@ -1,0 +1,33 @@
+name: Server Disk Cleanup
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 0'  # Every Sunday at 3:00 AM UTC
+
+jobs:
+  cleanup:
+    name: Cleanup Docker & Logs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Cleanup App Server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            echo "=== BEFORE ==="
+            df -h /
+
+            # Remove unused Docker images, containers, networks
+            docker system prune -af --filter "until=72h" 2>&1
+
+            # Truncate large log files
+            find /var/lib/docker/containers -name "*.log" -size +100M -exec truncate -s 10M {} \; 2>/dev/null || true
+
+            echo ""
+            echo "=== AFTER ==="
+            df -h /

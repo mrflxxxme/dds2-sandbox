@@ -111,7 +111,7 @@ services:
         limits:
           memory: 64M
     healthcheck:
-      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health" ]
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/nginx-health" ]
       interval: 10s
       timeout: 5s
       retries: 3
