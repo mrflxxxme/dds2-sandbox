@@ -10,7 +10,7 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Debug deploy on App Server
+      - name: Recreate nginx on App Server
         env:
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
@@ -21,44 +21,11 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} '
             cd /opt/dds_app
-
-            echo "=== GIT STATUS ==="
-            git status 2>&1
-            git log --oneline -3 2>&1
-
-            echo "=== GIT PULL ==="
-            git pull origin main 2>&1 || echo "!!! GIT PULL FAILED !!!"
-
-            echo "=== DISK ==="
-            df -h / 2>&1
-
-            echo "=== DOCKER BUILD BACKEND ==="
-            docker compose -f docker-compose.app.yml build backend 2>&1 | tail -30
-
-            echo "=== DOCKER BUILD WORKER ==="
-            docker compose -f docker-compose.app.yml build worker 2>&1 | tail -10
-
-            echo "=== DOCKER BUILD FRONTEND ==="
-            docker compose -f docker-compose.app.yml build frontend-react 2>&1 | tail -10
-
-            echo "=== DOCKER UP ==="
-            docker compose -f docker-compose.app.yml up -d --remove-orphans 2>&1
-
-            echo "=== WAIT ==="
-            sleep 20
-
+            echo "=== FORCE RECREATE NGINX ==="
+            docker compose -f docker-compose.app.yml up -d --force-recreate nginx 2>&1
+            sleep 30
             echo "=== PS ==="
             docker compose -f docker-compose.app.yml ps 2>&1
-
-            echo "=== ALEMBIC ==="
-            docker compose -f docker-compose.app.yml exec -T backend alembic upgrade head 2>&1 || echo "!!! ALEMBIC FAILED !!!"
-
-            echo "=== HEALTH ==="
-            curl -sf http://localhost/health 2>&1 && echo "HTTP OK" || echo "!!! HTTP FAILED !!!"
-            curl -sf https://app.vyatkin-wb.ru/health 2>&1 && echo "HTTPS OK" || echo "!!! HTTPS FAILED !!!"
-
-            echo "=== BACKEND LOGS LAST 20 ==="
-            docker compose -f docker-compose.app.yml logs backend --tail=20 --no-color 2>&1
           ' > /tmp/debug_output.txt 2>&1 || true
           cat /tmp/debug_output.txt
 
@@ -72,8 +39,8 @@ jobs:
 
           output = open('/tmp/debug_output.txt').read() if os.path.exists('/tmp/debug_output.txt') else 'No output captured'
 
-          body = f"## Debug Deploy Results\n```\n{output}\n```"
-          payload = json.dumps({"title": "[Debug] Deploy test", "body": body}).encode()
+          body = f"## Nginx Recreate Results\n```\n{output}\n```"
+          payload = json.dumps({"title": "[Debug] Nginx recreate", "body": body}).encode()
 
           req = urllib.request.Request(
               f"https://api.github.com/repos/{os.environ['REPO']}/issues",
