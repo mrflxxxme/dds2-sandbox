@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
@@ -39,9 +39,22 @@ export default function AssemblyNewPage() {
     const [error, setError] = useState('');
     const [submitting, setSubmitting] = useState(false);
     const [loadingFboItems, setLoadingFboItems] = useState(false);
+    const [fboDropdownOpen, setFboDropdownOpen] = useState(false);
+    const fboDropdownRef = useRef<HTMLDivElement>(null);
 
     // Stock data by barcode
     const [stockMap, setStockMap] = useState<Map<string, number>>(new Map());
+
+    // Close dropdown on outside click
+    useEffect(() => {
+        const handler = (e: MouseEvent) => {
+            if (fboDropdownRef.current && !fboDropdownRef.current.contains(e.target as Node)) {
+                setFboDropdownOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, []);
 
     // ─── Load reference data ──────────────────────────────────────────────
 
@@ -67,7 +80,11 @@ export default function AssemblyNewPage() {
         setLoading(false);
     }, [fboSearchInput]);
 
-    useEffect(() => { loadFboSupplies(); }, [loadFboSupplies]);
+    // Debounced search for FBO supplies
+    useEffect(() => {
+        const timer = setTimeout(() => { loadFboSupplies(); }, 300);
+        return () => clearTimeout(timer);
+    }, [loadFboSupplies]);
 
     // Load stock when warehouse changes
     useEffect(() => {
@@ -222,21 +239,77 @@ export default function AssemblyNewPage() {
                         </select>
                     </div>
 
-                    {/* FBO Supply */}
-                    <div className="form-group">
+                    {/* FBO Supply — searchable dropdown */}
+                    <div className="form-group" ref={fboDropdownRef} style={{ position: 'relative' }}>
                         <label className="form-label">Поставка FBO</label>
-                        <select
+                        <input
                             className="form-input"
-                            value={fboSupplyId}
-                            onChange={e => setFboSupplyId(e.target.value ? Number(e.target.value) : '')}
-                        >
-                            <option value="">Выберите поставку...</option>
-                            {fboSupplies.map(s => (
-                                <option key={s.id} value={s.id}>
-                                    {s.wb_supply_id} &mdash; {s.warehouse_name || 'Без склада'} ({s.total_qty} шт.)
-                                </option>
-                            ))}
-                        </select>
+                            type="text"
+                            placeholder="Введите номер поставки..."
+                            value={fboDropdownOpen ? fboSearchInput : (
+                                fboSupplyId
+                                    ? (() => {
+                                        const s = fboSupplies.find(s => s.id === fboSupplyId);
+                                        return s ? `${s.wb_supply_id} — ${s.warehouse_name || 'Без склада'} (${s.total_qty} шт.)` : fboSearchInput;
+                                    })()
+                                    : fboSearchInput
+                            )}
+                            onChange={e => {
+                                setFboSearchInput(e.target.value);
+                                if (!fboDropdownOpen) setFboDropdownOpen(true);
+                                if (!e.target.value) {
+                                    setFboSupplyId('');
+                                }
+                            }}
+                            onFocus={() => setFboDropdownOpen(true)}
+                        />
+                        {fboSupplyId && !fboDropdownOpen && (
+                            <button
+                                type="button"
+                                onClick={() => { setFboSupplyId(''); setFboSearchInput(''); }}
+                                style={{
+                                    position: 'absolute', right: 8, top: 32,
+                                    background: 'none', border: 'none', cursor: 'pointer',
+                                    color: 'var(--color-text-muted)', fontSize: 16,
+                                }}
+                            >
+                                &times;
+                            </button>
+                        )}
+                        {fboDropdownOpen && (
+                            <div style={{
+                                position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 50,
+                                background: 'var(--color-bg)', border: '1px solid var(--color-border)',
+                                borderRadius: 8, maxHeight: 240, overflowY: 'auto',
+                                boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+                            }}>
+                                {loading ? (
+                                    <div style={{ padding: 12, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка...</div>
+                                ) : fboSupplies.length === 0 ? (
+                                    <div style={{ padding: 12, textAlign: 'center', color: 'var(--color-text-muted)' }}>Поставки не найдены</div>
+                                ) : (
+                                    fboSupplies.map(s => (
+                                        <div
+                                            key={s.id}
+                                            onClick={() => {
+                                                setFboSupplyId(s.id);
+                                                setFboSearchInput('');
+                                                setFboDropdownOpen(false);
+                                            }}
+                                            style={{
+                                                padding: '8px 12px', cursor: 'pointer',
+                                                background: s.id === fboSupplyId ? 'var(--color-bg-secondary)' : undefined,
+                                                fontSize: 13,
+                                            }}
+                                            onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-secondary)')}
+                                            onMouseLeave={e => (e.currentTarget.style.background = s.id === fboSupplyId ? 'var(--color-bg-secondary)' : '')}
+                                        >
+                                            <strong>{s.wb_supply_id}</strong> — {s.warehouse_name || 'Без склада'} ({s.total_qty} шт.)
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        )}
                     </div>
 
                     {/* Ready date */}
