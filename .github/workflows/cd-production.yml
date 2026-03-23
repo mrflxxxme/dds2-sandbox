@@ -94,11 +94,8 @@ jobs:
             git checkout main 2>/dev/null || true
             git pull origin main
 
-            echo "🔨 Building images..."
-            docker compose -f docker-compose.app.yml build backend worker frontend-react
-
-            echo "🔄 Rolling restart..."
-            docker compose -f docker-compose.app.yml up -d --remove-orphans --force-recreate nginx
+            echo "🔨 Building and restarting all services..."
+            docker compose -f docker-compose.app.yml up -d --build --remove-orphans --force-recreate backend worker frontend-react nginx
 
             echo "🗄️ Running migrations on Data server..."
             docker compose -f docker-compose.app.yml exec -T backend alembic upgrade head
