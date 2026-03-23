@@ -1,0 +1,94 @@
+name: Debug Deploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    name: Debug Deploy Steps
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Debug deploy on App Server
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} '
+            cd /opt/dds_app
+
+            echo "=== GIT STATUS ==="
+            git status 2>&1
+            git log --oneline -3 2>&1
+
+            echo "=== GIT PULL ==="
+            git pull origin main 2>&1 || echo "!!! GIT PULL FAILED !!!"
+
+            echo "=== DISK ==="
+            df -h / 2>&1
+
+            echo "=== DOCKER BUILD BACKEND ==="
+            docker compose -f docker-compose.app.yml build backend 2>&1 | tail -30
+
+            echo "=== DOCKER BUILD WORKER ==="
+            docker compose -f docker-compose.app.yml build worker 2>&1 | tail -10
+
+            echo "=== DOCKER BUILD FRONTEND ==="
+            docker compose -f docker-compose.app.yml build frontend-react 2>&1 | tail -10
+
+            echo "=== DOCKER UP ==="
+            docker compose -f docker-compose.app.yml up -d --remove-orphans 2>&1
+
+            echo "=== WAIT ==="
+            sleep 20
+
+            echo "=== PS ==="
+            docker compose -f docker-compose.app.yml ps 2>&1
+
+            echo "=== ALEMBIC ==="
+            docker compose -f docker-compose.app.yml exec -T backend alembic upgrade head 2>&1 || echo "!!! ALEMBIC FAILED !!!"
+
+            echo "=== HEALTH ==="
+            curl -sf http://localhost/health 2>&1 && echo "HTTP OK" || echo "!!! HTTP FAILED !!!"
+            curl -sf https://app.vyatkin-wb.ru/health 2>&1 && echo "HTTPS OK" || echo "!!! HTTPS FAILED !!!"
+
+            echo "=== BACKEND LOGS LAST 20 ==="
+            docker compose -f docker-compose.app.yml logs backend --tail=20 --no-color 2>&1
+          ' > /tmp/debug_output.txt 2>&1 || true
+          cat /tmp/debug_output.txt
+
+      - name: Post results to issue
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 << 'PYEOF'
+          import json, urllib.request, os
+
+          output = open('/tmp/debug_output.txt').read() if os.path.exists('/tmp/debug_output.txt') else 'No output captured'
+
+          body = f"## Debug Deploy Results\n```\n{output}\n```"
+          payload = json.dumps({"title": "[Debug] Deploy test", "body": body}).encode()
+
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['REPO']}/issues",
+              data=payload,
+              headers={
+                  "Authorization": f"token {os.environ['GH_PAT']}",
+                  "Accept": "application/vnd.github+json",
+                  "Content-Type": "application/json"
+              }
+          )
+          try:
+              resp = urllib.request.urlopen(req)
+              result = json.loads(resp.read())
+              print(f"Created issue #{result['number']}: {result['html_url']}")
+          except Exception as e:
+              print(f"Error: {e}")
+              exit(1)
+          PYEOF
