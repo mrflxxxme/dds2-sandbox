@@ -17,8 +17,9 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Functional index — must use raw SQL (op.create_index doesn't support expressions)
     op.execute(
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+        "CREATE INDEX IF NOT EXISTS "
         "ix_wb_finance_project_coalesce_dt "
         "ON wb_finance_rows (project_id, COALESCE(sale_dt, rr_dt))"
     )
