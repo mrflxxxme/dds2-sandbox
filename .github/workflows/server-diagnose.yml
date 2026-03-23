@@ -8,84 +8,59 @@ jobs:
     name: Check Server Health
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      issues: write
 
     steps:
-      - name: Check App Server containers
-        id: app
+      - name: Collect App Server info
         uses: appleboy/ssh-action@v1
+        id: app_ssh
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          capture_stdout: true
           script: |
-            echo "=== CONTAINERS ==="
             cd /opt/dds_app
-            docker compose -f docker-compose.app.yml ps
-            echo ""
-            echo "=== BACKEND LOGS (last 50) ==="
-            docker compose -f docker-compose.app.yml logs backend --tail=50 --no-color 2>&1
-            echo ""
-            echo "=== WORKER LOGS (last 20) ==="
-            docker compose -f docker-compose.app.yml logs worker --tail=20 --no-color 2>&1
-            echo ""
-            echo "=== DISK SPACE ==="
-            df -h /
-            echo ""
-            echo "=== MEMORY ==="
-            free -h
+            echo "=== CONTAINERS ===" && docker compose -f docker-compose.app.yml ps 2>&1
+            echo "=== BACKEND LOGS ===" && docker compose -f docker-compose.app.yml logs backend --tail=50 --no-color 2>&1
+            echo "=== WORKER LOGS ===" && docker compose -f docker-compose.app.yml logs worker --tail=20 --no-color 2>&1
+            echo "=== DISK ===" && df -h / 2>&1
+            echo "=== MEMORY ===" && free -h 2>&1
 
-      - name: Check Data Server (DB, Redis, PgBouncer)
-        id: data
+      - name: Collect Data Server info
         uses: appleboy/ssh-action@v1
+        id: data_ssh
         with:
           host: ${{ secrets.DATA_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          capture_stdout: true
           script: |
-            echo "=== DATA CONTAINERS ==="
             cd /opt/dds_data
-            docker compose ps
-            echo ""
-            echo "=== DB CHECK ==="
-            docker compose exec -T db psql -U dds dds_db -c "SELECT 'DB_OK' as status;" 2>&1
-            echo ""
-            echo "=== ACTIVE QUERIES ==="
-            docker compose exec -T db psql -U dds dds_db -c "SELECT pid, state, wait_event_type, left(query,100) as query FROM pg_stat_activity WHERE state != 'idle' ORDER BY query_start;" 2>&1
-            echo ""
-            echo "=== BLOCKING QUERIES ==="
-            docker compose exec -T db psql -U dds dds_db -c "SELECT blocked.pid AS blocked_pid, blocking.pid AS blocking_pid, left(blocked.query,80) AS blocked_query FROM pg_stat_activity blocked JOIN pg_locks bl ON bl.pid = blocked.pid JOIN pg_locks blk ON blk.locktype = bl.locktype AND blk.relation = bl.relation AND blk.pid != bl.pid JOIN pg_stat_activity blocking ON blocking.pid = blk.pid WHERE NOT bl.granted;" 2>&1
-            echo ""
-            echo "=== PGBOUNCER CHECK ==="
-            docker compose exec -T pgbouncer psql -U dds -p 6432 dds_db -c "SELECT 'PGBOUNCER_OK';" 2>&1
-            echo ""
-            echo "=== PGBOUNCER LOGS (last 20) ==="
-            docker compose logs pgbouncer --tail=20 --no-color 2>&1
-            echo ""
-            echo "=== DB LOGS (last 20) ==="
-            docker compose logs db --tail=20 --no-color 2>&1
-            echo ""
-            echo "=== REDIS CHECK ==="
-            docker compose exec -T redis redis-cli ping 2>&1
-            echo ""
-            echo "=== DISK SPACE ==="
-            df -h /
-            echo ""
-            echo "=== MEMORY ==="
-            free -h
+            echo "=== DATA CONTAINERS ===" && docker compose ps 2>&1
+            echo "=== DB CHECK ===" && docker compose exec -T db psql -U dds dds_db -c "SELECT 'DB_OK';" 2>&1
+            echo "=== ACTIVE QUERIES ===" && docker compose exec -T db psql -U dds dds_db -c "SELECT pid,state,wait_event_type,left(query,100) FROM pg_stat_activity WHERE state!='idle';" 2>&1
+            echo "=== LOCKS ===" && docker compose exec -T db psql -U dds dds_db -c "SELECT count(*) as blocked FROM pg_stat_activity WHERE wait_event_type='Lock';" 2>&1
+            echo "=== PGBOUNCER ===" && docker compose exec -T pgbouncer psql -U dds -p 6432 dds_db -c "SELECT 'PGB_OK';" 2>&1
+            echo "=== PGBOUNCER LOGS ===" && docker compose logs pgbouncer --tail=20 --no-color 2>&1
+            echo "=== DB LOGS ===" && docker compose logs db --tail=20 --no-color 2>&1
+            echo "=== REDIS ===" && docker compose exec -T redis redis-cli ping 2>&1
+            echo "=== DISK ===" && df -h / 2>&1
+            echo "=== MEMORY ===" && free -h 2>&1
 
-      - name: Post results to GitHub Issue
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const appOutput = `${{ steps.app.outputs.stdout }}`;
-            const dataOutput = `${{ steps.data.outputs.stdout }}`;
-            const body = `# Server Diagnostics Report\n\n## App Server (${new Date().toISOString()})\n\`\`\`\n${appOutput}\n\`\`\`\n\n## Data Server\n\`\`\`\n${dataOutput}\n\`\`\``;
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `[Auto] Server Diagnostics ${new Date().toISOString().slice(0,16)}`,
-              body: body,
-              labels: ['diagnostics']
-            });
+      - name: Create diagnostic issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --repo ${{ github.repository }} \
+            --title "[Diag] Server check $(date -u +%Y-%m-%dT%H:%M)" \
+            --label "diagnostics" \
+            --body "## App Server
+          \`\`\`
+          ${{ steps.app_ssh.outputs.stdout }}
+          \`\`\`
+
+          ## Data Server
+          \`\`\`
+          ${{ steps.data_ssh.outputs.stdout }}
+          \`\`\`"
