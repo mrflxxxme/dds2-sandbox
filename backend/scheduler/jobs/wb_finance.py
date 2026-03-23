@@ -98,7 +98,7 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                         date_from = max_daily_date + timedelta(days=1)
                     else:
                         date_from = last_monday
-                    date_to = today - timedelta(days=1)  # yesterday
+                    date_to = today  # include today (WB may have partial data)
 
                     if date_from > date_to:
                         logger.info(

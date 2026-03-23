@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.wb_finance import WbFinanceRow
 from backend.models import WbFunnelDaily, CostOrderItem, WbCostOverride
+from backend.models.wb_order_cancel import WbOrderCancelDaily
 
 logger = logging.getLogger("dds.bdr_loaders")
 
@@ -190,4 +191,30 @@ async def load_tax_settings(db: AsyncSession, pid: int, d_from: date, d_to: date
         "usn_rate": float(row.usn_rate or 0),
         "nds_rate": float(row.nds_rate or 0),
         "cost_as_expense": row.cost_as_expense or False,
+    }
+
+
+# ─── Cancel stats loader (for accurate buyout_pct) ──────────────────────────
+
+async def load_cancel_stats(
+    db: AsyncSession, pid: int, d_from: date, d_to: date
+) -> dict[int, dict[str, int]]:
+    """Load order cancel stats per nm_id from wb_order_cancel_daily.
+
+    Returns: {nm_id: {"total": N, "cancelled": M}, ...}
+    """
+    result = await db.execute(
+        select(
+            WbOrderCancelDaily.nm_id,
+            func.sum(WbOrderCancelDaily.total_orders).label("total"),
+            func.sum(WbOrderCancelDaily.cancelled_orders).label("cancelled"),
+        ).where(
+            WbOrderCancelDaily.project_id == pid,
+            WbOrderCancelDaily.dt >= d_from,
+            WbOrderCancelDaily.dt <= d_to,
+        ).group_by(WbOrderCancelDaily.nm_id)
+    )
+    return {
+        r.nm_id: {"total": int(r.total or 0), "cancelled": int(r.cancelled or 0)}
+        for r in result
     }

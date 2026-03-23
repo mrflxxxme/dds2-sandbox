@@ -13,12 +13,12 @@ ZERO = D("0")
 # ─── SQL aggregation query ────────────────────────────────────────────────────
 
 _DATE_FILTER = """(
-    (rr_dt BETWEEN :date_from AND :date_to)
-    OR (rr_dt IS NULL AND date_from >= :date_from AND date_to <= :date_to)
+    COALESCE(sale_dt, rr_dt) BETWEEN :date_from AND :date_to
+    OR (sale_dt IS NULL AND rr_dt IS NULL AND date_from >= :date_from AND date_to <= :date_to)
   )"""
 
 _SELECT_COLS = """
-    COALESCE(to_char(rr_dt, 'YYYY-MM'), to_char(date_from, 'YYYY-MM')) AS month_key,
+    COALESCE(to_char(sale_dt, 'YYYY-MM'), to_char(rr_dt, 'YYYY-MM'), to_char(date_from, 'YYYY-MM')) AS month_key,
     COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub WHEN doc_type_name = 'Возврат' THEN -retail_price_withdisc_rub ELSE 0 END), 0) AS realization,
     COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_amount WHEN doc_type_name = 'Возврат' THEN -retail_amount ELSE 0 END), 0) AS sales_amount,
     COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_for_pay ELSE 0 END), 0) AS ppvz_for_pay_sale,
@@ -62,7 +62,7 @@ def build_cost_qty_sql(brand: str | None, article: str | None) -> str:
     if article:
         where += " AND LOWER(sa_name) LIKE :article_like"
     return f"""SELECT
-        COALESCE(to_char(rr_dt, 'YYYY-MM'), to_char(date_from, 'YYYY-MM')) AS month_key,
+        COALESCE(to_char(sale_dt, 'YYYY-MM'), to_char(rr_dt, 'YYYY-MM'), to_char(date_from, 'YYYY-MM')) AS month_key,
         sa_name, nm_id,
         COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN quantity ELSE 0 END), 0)
         - COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN quantity ELSE 0 END), 0) AS total_qty
