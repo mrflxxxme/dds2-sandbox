@@ -90,6 +90,8 @@ jobs:
             cd ${{ secrets.DEPLOY_PATH }}
 
             echo "📥 Pulling main branch..."
+            git stash --include-untracked 2>/dev/null || true
+            git checkout main 2>/dev/null || true
             git pull origin main
 
             echo "🔨 Building images..."
@@ -97,6 +99,9 @@ jobs:
 
             echo "🔄 Rolling restart..."
             docker compose -f docker-compose.app.yml up -d --remove-orphans
+
+            echo "🔄 Reloading nginx config..."
+            docker compose -f docker-compose.app.yml exec -T nginx nginx -s reload 2>/dev/null || true
 
             echo "🗄️ Running migrations on Data server..."
             docker compose -f docker-compose.app.yml exec -T backend alembic upgrade head
