@@ -173,9 +173,24 @@ def start_scheduler():
         misfire_grace_time=3600,
     )
 
+    # Startup catch-up: run finance daily sync 30s after start
+    # to recover from missed jobs (e.g. worker restart during scheduled time)
+    from datetime import datetime, timedelta
+
+    from apscheduler.triggers.date import DateTrigger
+
+    _scheduler.add_job(
+        sync_all_projects_wb_finance_daily,
+        trigger=DateTrigger(run_date=datetime.now(MSK) + timedelta(seconds=30)),
+        id="wb_finance_daily_catchup",
+        name="WB finance daily catch-up (startup)",
+        replace_existing=True,
+        misfire_grace_time=60,
+    )
+
     _scheduler.start()
     logger.info(
-        "✅ Scheduler started — daily sync 3x/day + backfill + ad check + wb_finance weekly Mon + wb_finance daily Tue-Sun + prewarm 1h + AI digest 07:00"
+        "✅ Scheduler started — daily sync 3x/day + backfill + ad check + wb_finance weekly Mon + wb_finance daily Tue-Sun + prewarm 1h + AI digest 07:00 + finance catch-up"
     )
 
 
