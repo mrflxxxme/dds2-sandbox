@@ -54,8 +54,14 @@ FBW_BOX_TYPE_MAP: dict[int, str] = {
 }
 
 
-def _map_fbw_status(status_id: int) -> str:
-    """Map FBW statusID to WbSupplyStatus enum value."""
+def _map_fbw_status(status_id: int, accepted_qty: int | None = None) -> str:
+    """Map FBW statusID to WbSupplyStatus enum value.
+
+    WB API returns statusID=5 (CANCELLED) even when items were partially accepted.
+    If accepted_qty > 0 and statusID=5, treat as ACCEPTED (partially received).
+    """
+    if status_id == 5 and accepted_qty and accepted_qty > 0:
+        return WbSupplyStatus.ACCEPTED
     return FBW_STATUS_MAP.get(status_id, WbSupplyStatus.ACTIVE)
 
 
@@ -724,7 +730,8 @@ def _update_supply_from_fbw_list(supply: WbFboSupply, wb_data: dict) -> None:
     """
     status_id = wb_data.get("statusID")
     if status_id is not None:
-        supply.wb_status = _map_fbw_status(status_id)
+        # Use existing accepted_qty from DB to detect partial acceptance
+        supply.wb_status = _map_fbw_status(status_id, supply.accepted_qty)
 
     planned = _parse_wb_date(wb_data.get("supplyDate"))
     if planned:
