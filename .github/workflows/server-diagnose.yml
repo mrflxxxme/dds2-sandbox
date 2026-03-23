@@ -86,20 +86,32 @@ jobs:
       - name: Create diagnostic issue
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
         run: |
-          APP_OUT=$(cat /tmp/app_output.txt 2>/dev/null || echo "No output")
-          DATA_OUT=$(cat /tmp/data_output.txt 2>/dev/null || echo "No output")
-
-          python3 -c "
+          python3 << 'PYEOF'
           import json, urllib.request, os
-          body = '## App Server\n\`\`\`\n' + os.environ['APP_OUT'] + '\n\`\`\`\n\n## Data Server\n\`\`\`\n' + os.environ['DATA_OUT'] + '\n\`\`\`'
-          data = json.dumps({'title': '[Diag] Server check', 'body': body}).encode()
+
+          app = open('/tmp/app_output.txt').read() if os.path.exists('/tmp/app_output.txt') else 'No output'
+          data_out = open('/tmp/data_output.txt').read() if os.path.exists('/tmp/data_output.txt') else 'No output'
+
+          body = f"## App Server\n```\n{app}\n```\n\n## Data Server\n```\n{data_out}\n```"
+          payload = json.dumps({"title": "[Diag] Server check", "body": body}).encode()
+
           req = urllib.request.Request(
-              'https://api.github.com/repos/${{ github.repository }}/issues',
-              data=data,
-              headers={'Authorization': 'token ' + os.environ['GH_PAT'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}
+              f"https://api.github.com/repos/{os.environ['REPO']}/issues",
+              data=payload,
+              headers={
+                  "Authorization": f"token {os.environ['GH_PAT']}",
+                  "Accept": "application/vnd.github+json",
+                  "Content-Type": "application/json"
+              }
           )
-          resp = urllib.request.urlopen(req)
-          result = json.loads(resp.read())
-          print(f'Created issue #{result[\"number\"]}: {result[\"html_url\"]}')
-          " APP_OUT="$APP_OUT" DATA_OUT="$DATA_OUT"
+          try:
+              resp = urllib.request.urlopen(req)
+              result = json.loads(resp.read())
+              print(f"Created issue #{result['number']}: {result['html_url']}")
+          except Exception as e:
+              print(f"Error: {e}")
+              import traceback; traceback.print_exc()
+              exit(1)
+          PYEOF
