@@ -141,7 +141,15 @@ async def lifespan(app: FastAPI):
 
                 tg_bot_ref, tg_dp = create_bot()
 
-                if settings.TELEGRAM_USE_POLLING:
+                use_polling = settings.TELEGRAM_USE_POLLING
+                if use_polling and settings.DDS_ENV == "production":
+                    logger.warning(
+                        "TELEGRAM_USE_POLLING=True ignored in production — "
+                        "forcing webhook mode to avoid bot conflicts"
+                    )
+                    use_polling = False
+
+                if use_polling:
                     import asyncio
 
                     # Start polling in background task (non-blocking)
@@ -174,10 +182,11 @@ async def lifespan(app: FastAPI):
     try:
         from backend.integrations.telegram_bot import bot as tg_bot_shutdown, dp as tg_dp_shutdown
 
-        if tg_dp_shutdown and settings.TELEGRAM_USE_POLLING:
+        _shutdown_polling = settings.TELEGRAM_USE_POLLING and settings.DDS_ENV != "production"
+        if tg_dp_shutdown and _shutdown_polling:
             await tg_dp_shutdown.stop_polling()
         if tg_bot_shutdown:
-            if not settings.TELEGRAM_USE_POLLING:
+            if not _shutdown_polling:
                 await tg_bot_shutdown.delete_webhook()
             await tg_bot_shutdown.session.close()
     except Exception:
