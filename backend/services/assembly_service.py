@@ -318,8 +318,8 @@ async def create_assembly_request(
     fbo_supply = fbo_result.scalar_one_or_none()
     if not fbo_supply:
         raise ValueError("FBO supply not found")
-    if fbo_supply.wb_status not in ("ACTIVE", "ON_DELIVERY"):
-        raise ValueError("FBO supply must be ACTIVE or ON_DELIVERY")
+    if fbo_supply.wb_status not in ("ACTIVE", "ON_DELIVERY", "IN_PROGRESS"):
+        raise ValueError("FBO supply must be ACTIVE, ON_DELIVERY or IN_PROGRESS")
 
     # Check no active assembly request for this FBO supply
     existing_result = await db.execute(
