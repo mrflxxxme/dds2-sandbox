@@ -32,6 +32,18 @@ const STATUS_OPTIONS_FILTER: { value: string; label: string }[] = [
     { value: 'CANCELLED', label: 'Отменена' },
 ];
 
+// ─── Status colors for Tailwind badge ────────────────────────────────────────
+
+const STATUS_COLORS: Record<string, string> = {
+    PENDING:          'bg-amber-100 text-amber-700 border-amber-200 focus:ring-amber-400',
+    IN_PROGRESS:      'bg-blue-100 text-blue-700 border-blue-200 focus:ring-blue-400',
+    READY:            'bg-green-100 text-green-700 border-green-200 focus:ring-green-400',
+    VEHICLE_ASSIGNED: 'bg-sky-100 text-sky-700 border-sky-200',
+    SHIPPED:          'bg-emerald-100/60 text-emerald-600 border-emerald-200',
+    DELIVERED:        'bg-emerald-100 text-emerald-700 border-emerald-200',
+    CANCELLED:        'bg-slate-100 text-slate-500 border-slate-200',
+};
+
 // ─── Inline Status Badge ────────────────────────────────────────────────────
 
 function StatusBadge({
@@ -43,41 +55,40 @@ function StatusBadge({
 }) {
     const status = STATUS_MAP[item.status] || { label: item.status, className: '' };
     const canEdit = EDITABLE_STATUSES.includes(item.status);
+    const colorClass = STATUS_COLORS[item.status] || 'bg-slate-100 text-slate-700 border-slate-200';
 
     if (!canEdit) {
         return (
-            <span
-                className={`badge ${status.className}`}
-                style={item.status === 'SHIPPED' ? { opacity: 0.6 } : undefined}
-            >
+            <span className={`inline-block text-xs font-semibold rounded-full py-1.5 px-3 border ${colorClass}`}>
                 {status.label}
             </span>
         );
     }
 
     return (
-        <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
-            <span className={`badge ${status.className}`} style={{ paddingRight: 20 }}>
-                {status.label}
-                <span style={{ position: 'absolute', right: 4, top: '50%', transform: 'translateY(-50%)', fontSize: 10, opacity: 0.6 }}>▾</span>
-            </span>
+        <div className="relative inline-block" onClick={(e) => e.stopPropagation()}>
             <select
                 value={item.status}
                 onChange={(e) => {
                     e.stopPropagation();
                     onStatusChange(item.id, e.target.value as AssemblyStatus);
                 }}
-                onClick={(e) => e.stopPropagation()}
-                style={{
-                    position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer',
-                    width: '100%', height: '100%',
-                }}
+                className={`
+                    appearance-none cursor-pointer outline-none border transition-all text-xs font-semibold rounded-full
+                    py-1.5 pl-3 pr-8 shadow-sm focus:ring-2 focus:ring-offset-1
+                    ${colorClass}
+                `}
             >
                 <option value="PENDING">Ожидает сборку</option>
                 <option value="IN_PROGRESS">В сборке</option>
                 <option value="READY">Готово</option>
             </select>
-        </span>
+            <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2">
+                <svg className="w-3.5 h-3.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 9l-7 7-7-7" />
+                </svg>
+            </div>
+        </div>
     );
 }
 
@@ -114,6 +125,8 @@ function EditableCell({
         const num = parseFloat(inputVal);
         if (!isNaN(num) && num !== value) {
             onSave(num);
+        } else {
+            setInputVal(String(value || ''));
         }
     };
 
@@ -128,41 +141,41 @@ function EditableCell({
                 onChange={(e) => setInputVal(e.target.value)}
                 onBlur={handleSave}
                 onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleSave();
-                    if (e.key === 'Escape') setEditing(false);
+                    if (e.key === 'Enter') inputRef.current?.blur();
+                    if (e.key === 'Escape') { setInputVal(String(value || '')); setEditing(false); }
                 }}
                 onClick={(e) => e.stopPropagation()}
-                style={{
-                    width: 70, textAlign: 'right', fontSize: 13,
-                    padding: '2px 6px', border: '1px solid var(--color-primary)',
-                    borderRadius: 4, outline: 'none',
-                }}
+                className="w-20 text-right bg-white border-2 border-blue-500 rounded-md px-2 py-1 outline-none text-sm font-medium shadow-[0_0_0_3px_rgba(59,130,246,0.1)] transition-all"
+                style={{ minWidth: 60 }}
             />
         );
     }
 
-    const displayVal = value > 0 ? (suffix ? `${formatNumber(value, 1)} ${suffix}` : String(value)) : '\u2014';
+    const displayVal = value > 0 ? (suffix ? `${formatNumber(value, 1)} ${suffix}` : String(value)) : (highlight ? 'Указать...' : '\u2014');
 
     return (
-        <span
+        <div
             onClick={(e) => {
                 if (!editable) return;
                 e.stopPropagation();
                 setInputVal(String(value || ''));
                 setEditing(true);
             }}
-            style={{
-                cursor: editable ? 'pointer' : 'default',
-                padding: '2px 6px',
-                borderRadius: 4,
-                transition: 'background 0.15s',
-                ...(highlight ? { background: 'rgba(239, 68, 68, 0.1)', color: 'var(--color-danger)', fontWeight: 500 } : {}),
-                ...(editable ? { borderBottom: '1px dashed var(--color-border)' } : {}),
-            }}
+            className={`
+                group inline-flex items-center justify-end px-2 py-1 rounded-md transition-colors
+                border border-transparent
+                ${editable ? 'cursor-pointer hover:bg-slate-50 hover:border-slate-200' : ''}
+                ${highlight ? 'bg-red-50 text-red-600' : 'text-slate-700'}
+            `}
             title={editable ? 'Нажмите для редактирования' : undefined}
         >
-            {displayVal}
-        </span>
+            {editable && (
+                <svg className="w-3 h-3 mr-1.5 opacity-0 group-hover:opacity-50 transition-opacity text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                </svg>
+            )}
+            <span className="font-medium text-sm">{displayVal}</span>
+        </div>
     );
 }
 
