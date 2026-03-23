@@ -14,3 +14,4 @@ backups/
 *.pdf
 tmp_*.txt
 .claude/settings.local.json
+memory/

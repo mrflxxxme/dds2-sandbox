@@ -20,6 +20,7 @@ def upgrade() -> None:
         "ix_wb_finance_project_sale_dt",
         "wb_finance_rows",
         ["project_id", "sale_dt"],
+        if_not_exists=True,
     )
 
 

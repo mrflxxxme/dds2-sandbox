@@ -1,0 +1,45 @@
+name: Server Restart
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to restart'
+        required: true
+        default: 'nginx'
+        type: choice
+        options:
+          - nginx
+          - backend
+          - worker
+          - frontend-react
+          - all
+
+jobs:
+  restart:
+    name: Restart Service
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Restart service on App Server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd /opt/dds_app
+            SERVICE="${{ github.event.inputs.service }}"
+
+            if [ "$SERVICE" = "all" ]; then
+              echo "Restarting all services..."
+              docker compose -f docker-compose.app.yml restart
+            else
+              echo "Restarting $SERVICE..."
+              docker compose -f docker-compose.app.yml restart "$SERVICE"
+            fi
+
+            sleep 10
+            echo "=== Status after restart ==="
+            docker compose -f docker-compose.app.yml ps

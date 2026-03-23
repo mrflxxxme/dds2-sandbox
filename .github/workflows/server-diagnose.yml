@@ -1,0 +1,117 @@
+name: Server Diagnostics
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    name: Check Server Health
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+
+    steps:
+      - name: Install sshpass
+        run: sudo apt-get install -y sshpass
+
+      - name: Collect App Server info
+        env:
+          SSHPASS: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSHPASS" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} '
+            cd /opt/dds_app
+            echo "=== CONTAINERS ==="
+            docker compose -f docker-compose.app.yml ps 2>&1
+            echo ""
+            echo "=== BACKEND LOGS ==="
+            docker compose -f docker-compose.app.yml logs backend --tail=50 --no-color 2>&1
+            echo ""
+            echo "=== WORKER LOGS ==="
+            docker compose -f docker-compose.app.yml logs worker --tail=20 --no-color 2>&1
+            echo ""
+            echo "=== DISK ==="
+            df -h / 2>&1
+            echo ""
+            echo "=== MEMORY ==="
+            free -h 2>&1
+          ' > /tmp/app_output.txt 2>&1 || true
+          cat /tmp/app_output.txt
+
+      - name: Collect Data Server info
+        env:
+          SSHPASS: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DATA_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} '
+            cd /opt/dds_data
+            echo "=== DATA CONTAINERS ==="
+            docker compose ps 2>&1
+            echo ""
+            echo "=== DB CHECK ==="
+            docker compose exec -T db psql -U dds dds_db -c "SELECT version();" 2>&1
+            echo ""
+            echo "=== ACTIVE QUERIES ==="
+            docker compose exec -T db psql -U dds dds_db -c "SELECT pid,state,wait_event_type,left(query,100) FROM pg_stat_activity WHERE state!='"'"'idle'"'"';" 2>&1
+            echo ""
+            echo "=== LOCK COUNT ==="
+            docker compose exec -T db psql -U dds dds_db -c "SELECT count(*) as blocked FROM pg_stat_activity WHERE wait_event_type='"'"'Lock'"'"';" 2>&1
+            echo ""
+            echo "=== PGBOUNCER ==="
+            docker compose exec -T pgbouncer psql -U dds -p 6432 dds_db -c "SELECT 1;" 2>&1
+            echo ""
+            echo "=== PGBOUNCER LOGS ==="
+            docker compose logs pgbouncer --tail=20 --no-color 2>&1
+            echo ""
+            echo "=== DB LOGS ==="
+            docker compose logs db --tail=20 --no-color 2>&1
+            echo ""
+            echo "=== REDIS ==="
+            docker compose exec -T redis redis-cli ping 2>&1
+            echo ""
+            echo "=== DISK ==="
+            df -h / 2>&1
+            echo ""
+            echo "=== MEMORY ==="
+            free -h 2>&1
+          ' > /tmp/data_output.txt 2>&1 || true
+          cat /tmp/data_output.txt
+
+      - name: Create diagnostic issue
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 << 'PYEOF'
+          import json, urllib.request, os
+
+          app = open('/tmp/app_output.txt').read() if os.path.exists('/tmp/app_output.txt') else 'No output'
+          data_out = open('/tmp/data_output.txt').read() if os.path.exists('/tmp/data_output.txt') else 'No output'
+
+          body = f"## App Server\n```\n{app}\n```\n\n## Data Server\n```\n{data_out}\n```"
+          payload = json.dumps({"title": "[Diag] Server check", "body": body}).encode()
+
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['REPO']}/issues",
+              data=payload,
+              headers={
+                  "Authorization": f"token {os.environ['GH_PAT']}",
+                  "Accept": "application/vnd.github+json",
+                  "Content-Type": "application/json"
+              }
+          )
+          try:
+              resp = urllib.request.urlopen(req)
+              result = json.loads(resp.read())
+              print(f"Created issue #{result['number']}: {result['html_url']}")
+          except Exception as e:
+              print(f"Error: {e}")
+              import traceback; traceback.print_exc()
+              exit(1)
+          PYEOF
