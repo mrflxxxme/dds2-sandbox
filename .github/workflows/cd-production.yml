@@ -98,10 +98,7 @@ jobs:
             docker compose -f docker-compose.app.yml build backend worker frontend-react
 
             echo "🔄 Rolling restart..."
-            docker compose -f docker-compose.app.yml up -d --remove-orphans
-
-            echo "🔄 Reloading nginx config..."
-            docker compose -f docker-compose.app.yml exec -T nginx nginx -s reload 2>/dev/null || true
+            docker compose -f docker-compose.app.yml up -d --remove-orphans --force-recreate nginx
 
             echo "🗄️ Running migrations on Data server..."
             docker compose -f docker-compose.app.yml exec -T backend alembic upgrade head
