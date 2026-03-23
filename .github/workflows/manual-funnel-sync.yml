@@ -26,7 +26,8 @@ jobs:
       - name: Create sync script
         run: |
           cat > /tmp/dds_sync.py << 'PYEOF'
-          import asyncio, json, logging, sys
+          import asyncio, json, logging, sys, os
+          sys.path.insert(0, '/app')
           logging.basicConfig(level=logging.INFO)
           async def main():
               pid, d_from, d_to = int(sys.argv[1]), sys.argv[2], sys.argv[3]
