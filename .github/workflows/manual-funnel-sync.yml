@@ -10,7 +10,7 @@ on:
       date_to:
         description: 'Date to (YYYY-MM-DD)'
         required: true
-        default: '2026-03-23'
+        default: '2026-03-22'
       project_id:
         description: 'Project ID'
         required: true
@@ -36,35 +36,31 @@ jobs:
           echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
-          # Create sync script locally, then scp + execute
-          cat > /tmp/sync.py << 'PYEOF'
-          import asyncio, json, logging, sys
-          logging.basicConfig(level=logging.INFO)
-
-          async def main():
-              pid = int(sys.argv[1])
-              d_from = sys.argv[2]
-              d_to = sys.argv[3]
-              from backend.database import AsyncSessionLocal
-              from backend.services.funnel.sync import run_funnel_sync
-              async with AsyncSessionLocal() as db:
-                  result = await run_funnel_sync(
-                      db, pid, d_from, d_to,
-                      include_completed_campaigns=True,
-                  )
-                  print(json.dumps(result, indent=2, default=str))
-
-          asyncio.run(main())
-          PYEOF
-
-          scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key /tmp/sync.py ${USER}@${HOST}:/tmp/sync.py
-
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} << SSHEOF
+          set -e
           cd /opt/dds_app
           echo "=== Starting manual funnel sync ==="
           echo "Project: ${PROJECT_ID}, Range: ${DATE_FROM} -> ${DATE_TO}"
-          docker compose -f docker-compose.app.yml exec -T worker python3 /tmp/sync.py ${PROJECT_ID} ${DATE_FROM} ${DATE_TO} 2>&1 || echo "SYNC FAILED"
+
+          # Write sync script to host, then docker cp into worker container
+          WORKER_CONTAINER=\$(docker compose -f docker-compose.app.yml ps -q worker)
+
+          cat > /tmp/dds_sync.py << 'PYEOF'
+          import asyncio, json, logging, sys
+          logging.basicConfig(level=logging.INFO)
+          async def main():
+              pid, d_from, d_to = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+              from backend.database import AsyncSessionLocal
+              from backend.services.funnel.sync import run_funnel_sync
+              async with AsyncSessionLocal() as db:
+                  result = await run_funnel_sync(db, pid, d_from, d_to, include_completed_campaigns=True)
+                  print(json.dumps(result, indent=2, default=str))
+          asyncio.run(main())
+          PYEOF
+
+          docker cp /tmp/dds_sync.py \${WORKER_CONTAINER}:/tmp/dds_sync.py
+          docker compose -f docker-compose.app.yml exec -T worker python3 /tmp/dds_sync.py ${PROJECT_ID} ${DATE_FROM} ${DATE_TO} 2>&1
           echo ""
           echo "=== Verifying data ==="
-          docker compose exec -T db psql -U dds dds_db -c "SELECT date, COUNT(*) as products, SUM(open_card) as opens, SUM(orders_count) as orders, SUM(orders_sum_rub)::numeric(18,2) as orders_sum, SUM(adv_sum)::numeric(18,2) as adv_sum, SUM(adv_clicks) as adv_clicks FROM wb_funnel_daily WHERE date IN ('${DATE_FROM}', '${DATE_TO}') AND project_id = ${PROJECT_ID} GROUP BY date ORDER BY date;"
+          docker compose -f docker-compose.app.yml exec -T db psql -U dds dds_db -c "SELECT date, COUNT(*) as products, SUM(open_card) as opens, SUM(orders_count) as orders, SUM(orders_sum_rub)::numeric(18,2) as orders_sum, SUM(adv_sum)::numeric(18,2) as adv_sum, SUM(adv_clicks) as adv_clicks FROM wb_funnel_daily WHERE date IN ('${DATE_FROM}', '${DATE_TO}') AND project_id = ${PROJECT_ID} GROUP BY date ORDER BY date;"
           SSHEOF
