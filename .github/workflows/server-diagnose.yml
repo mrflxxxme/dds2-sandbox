@@ -12,55 +12,99 @@ jobs:
       issues: write
 
     steps:
+      - name: Install sshpass
+        run: sudo apt-get install -y sshpass
+
       - name: Collect App Server info
-        uses: appleboy/ssh-action@v1
-        id: app_ssh
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script: |
+        env:
+          SSHPASS: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSHPASS" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} '
             cd /opt/dds_app
-            echo "=== CONTAINERS ===" && docker compose -f docker-compose.app.yml ps 2>&1
-            echo "=== BACKEND LOGS ===" && docker compose -f docker-compose.app.yml logs backend --tail=50 --no-color 2>&1
-            echo "=== WORKER LOGS ===" && docker compose -f docker-compose.app.yml logs worker --tail=20 --no-color 2>&1
-            echo "=== DISK ===" && df -h / 2>&1
-            echo "=== MEMORY ===" && free -h 2>&1
+            echo "=== CONTAINERS ==="
+            docker compose -f docker-compose.app.yml ps 2>&1
+            echo ""
+            echo "=== BACKEND LOGS ==="
+            docker compose -f docker-compose.app.yml logs backend --tail=50 --no-color 2>&1
+            echo ""
+            echo "=== WORKER LOGS ==="
+            docker compose -f docker-compose.app.yml logs worker --tail=20 --no-color 2>&1
+            echo ""
+            echo "=== DISK ==="
+            df -h / 2>&1
+            echo ""
+            echo "=== MEMORY ==="
+            free -h 2>&1
+          ' > /tmp/app_output.txt 2>&1 || true
+          cat /tmp/app_output.txt
 
       - name: Collect Data Server info
-        uses: appleboy/ssh-action@v1
-        id: data_ssh
-        with:
-          host: ${{ secrets.DATA_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script: |
+        env:
+          SSHPASS: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DATA_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} '
             cd /opt/dds_data
-            echo "=== DATA CONTAINERS ===" && docker compose ps 2>&1
-            echo "=== DB CHECK ===" && docker compose exec -T db psql -U dds dds_db -c "SELECT 'DB_OK';" 2>&1
-            echo "=== ACTIVE QUERIES ===" && docker compose exec -T db psql -U dds dds_db -c "SELECT pid,state,wait_event_type,left(query,100) FROM pg_stat_activity WHERE state!='idle';" 2>&1
-            echo "=== LOCKS ===" && docker compose exec -T db psql -U dds dds_db -c "SELECT count(*) as blocked FROM pg_stat_activity WHERE wait_event_type='Lock';" 2>&1
-            echo "=== PGBOUNCER ===" && docker compose exec -T pgbouncer psql -U dds -p 6432 dds_db -c "SELECT 'PGB_OK';" 2>&1
-            echo "=== PGBOUNCER LOGS ===" && docker compose logs pgbouncer --tail=20 --no-color 2>&1
-            echo "=== DB LOGS ===" && docker compose logs db --tail=20 --no-color 2>&1
-            echo "=== REDIS ===" && docker compose exec -T redis redis-cli ping 2>&1
-            echo "=== DISK ===" && df -h / 2>&1
-            echo "=== MEMORY ===" && free -h 2>&1
+            echo "=== DATA CONTAINERS ==="
+            docker compose ps 2>&1
+            echo ""
+            echo "=== DB CHECK ==="
+            docker compose exec -T db psql -U dds dds_db -c "SELECT version();" 2>&1
+            echo ""
+            echo "=== ACTIVE QUERIES ==="
+            docker compose exec -T db psql -U dds dds_db -c "SELECT pid,state,wait_event_type,left(query,100) FROM pg_stat_activity WHERE state!='"'"'idle'"'"';" 2>&1
+            echo ""
+            echo "=== LOCK COUNT ==="
+            docker compose exec -T db psql -U dds dds_db -c "SELECT count(*) as blocked FROM pg_stat_activity WHERE wait_event_type='"'"'Lock'"'"';" 2>&1
+            echo ""
+            echo "=== PGBOUNCER ==="
+            docker compose exec -T pgbouncer psql -U dds -p 6432 dds_db -c "SELECT 1;" 2>&1
+            echo ""
+            echo "=== PGBOUNCER LOGS ==="
+            docker compose logs pgbouncer --tail=20 --no-color 2>&1
+            echo ""
+            echo "=== DB LOGS ==="
+            docker compose logs db --tail=20 --no-color 2>&1
+            echo ""
+            echo "=== REDIS ==="
+            docker compose exec -T redis redis-cli ping 2>&1
+            echo ""
+            echo "=== DISK ==="
+            df -h / 2>&1
+            echo ""
+            echo "=== MEMORY ==="
+            free -h 2>&1
+          ' > /tmp/data_output.txt 2>&1 || true
+          cat /tmp/data_output.txt
 
       - name: Create diagnostic issue
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh issue create \
-            --repo ${{ github.repository }} \
-            --title "[Diag] Server check $(date -u +%Y-%m-%dT%H:%M)" \
-            --label "diagnostics" \
-            --body "## App Server
-          \`\`\`
-          ${{ steps.app_ssh.outputs.stdout }}
-          \`\`\`
+          APP_OUT=$(cat /tmp/app_output.txt 2>/dev/null || echo "No output")
+          DATA_OUT=$(cat /tmp/data_output.txt 2>/dev/null || echo "No output")
+
+          cat > /tmp/issue_body.md << 'ENDOFTEMPLATE'
+          ## App Server
+          ```
+          ENDOFTEMPLATE
+          echo "$APP_OUT" >> /tmp/issue_body.md
+          cat >> /tmp/issue_body.md << 'ENDOFTEMPLATE'
+          ```
 
           ## Data Server
-          \`\`\`
-          ${{ steps.data_ssh.outputs.stdout }}
-          \`\`\`"
+          ```
+          ENDOFTEMPLATE
+          echo "$DATA_OUT" >> /tmp/issue_body.md
+          echo '```' >> /tmp/issue_body.md
+
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "[Diag] $(date -u +%Y-%m-%dT%H:%M)" \
+            --body-file /tmp/issue_body.md
