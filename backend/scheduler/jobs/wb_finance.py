@@ -2,8 +2,8 @@
 
 Two modes:
 - Weekly (Monday): download full weekly reports (period=None, default).
-  Deletes any daily rows for the same period before downloading to avoid duplicates
-  (daily and weekly reports have different rrd_ids for the same transactions).
+  Deletes any daily rows for the same period AFTER successful download to avoid
+  data loss if sync fails (daily and weekly reports have different rrd_ids).
 - Daily (Tue–Sun): download daily reports to fill current incomplete week (period="daily")
 """
 
@@ -133,30 +133,6 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                     date_from = max_weekly_date + timedelta(days=1) if max_weekly_date else prev_monday
                     date_to = today
 
-                    # Delete daily rows that overlap with the weekly period
-                    # (daily and weekly have different rrd_ids → would cause duplicates)
-                    del_result = await db.execute(
-                        delete(WbFinanceRow).where(
-                            and_(
-                                WbFinanceRow.project_id == pid,
-                                WbFinanceRow.date_from == WbFinanceRow.date_to,  # daily rows
-                                WbFinanceRow.rr_dt >= date_from,
-                                WbFinanceRow.rr_dt <= date_to,
-                            )
-                        )
-                    )
-                    deleted = del_result.rowcount
-                    if deleted:
-                        await db.commit()
-                        logger.info(
-                            "💰 WB Finance weekly: project %s — deleted %d daily rows "
-                            "for period %s → %s before weekly sync",
-                            pid,
-                            deleted,
-                            date_from,
-                            date_to,
-                        )
-
                     logger.info(
                         "💰 WB Finance weekly: project %s — fetching %s → %s",
                         pid,
@@ -174,6 +150,31 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                     )
                 else:
                     sync_result = await sync_wb_finance(db, pid, date_from, date_to)
+
+                # Delete daily rows AFTER successful weekly sync to avoid data loss
+                # if sync fails (daily and weekly have different rrd_ids → duplicates)
+                if period != "daily":
+                    del_result = await db.execute(
+                        delete(WbFinanceRow).where(
+                            and_(
+                                WbFinanceRow.project_id == pid,
+                                WbFinanceRow.date_from == WbFinanceRow.date_to,  # daily rows
+                                WbFinanceRow.rr_dt >= date_from,
+                                WbFinanceRow.rr_dt <= date_to,
+                            )
+                        )
+                    )
+                    deleted = del_result.rowcount
+                    if deleted:
+                        await db.commit()
+                        logger.info(
+                            "💰 WB Finance weekly: project %s — deleted %d daily rows "
+                            "for period %s → %s after weekly sync",
+                            pid,
+                            deleted,
+                            date_from,
+                            date_to,
+                        )
 
                 rows = sync_result.get("rows_synced", 0)
                 status = sync_result.get("status", "?")
