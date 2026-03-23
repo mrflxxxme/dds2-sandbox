@@ -15,3 +15,7 @@ backups/
 tmp_*.txt
 .claude/settings.local.json
 memory/
+backend/TZ_*.md
+backend/*_mockup.png
+.claude/worktrees/
+.claude/plans/

@@ -153,6 +153,9 @@ async def lifespan(app: FastAPI):
                 if use_polling:
                     import asyncio
 
+                    # Remove any active webhook before starting polling
+                    await tg_bot_ref.delete_webhook(drop_pending_updates=True)
+                    logger.info("Telegram bot: webhook deleted before polling")
                     # Start polling in background task (non-blocking)
                     _polling_task = asyncio.create_task(tg_dp.start_polling(tg_bot_ref))
                     logger.info("Telegram bot: polling started (local dev)")
