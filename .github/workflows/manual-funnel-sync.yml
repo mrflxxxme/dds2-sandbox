@@ -59,7 +59,7 @@ jobs:
           PYEOF
 
           docker cp /tmp/dds_sync.py \${WORKER_CONTAINER}:/tmp/dds_sync.py
-          docker compose -f docker-compose.app.yml exec -T worker python3 /tmp/dds_sync.py ${PROJECT_ID} ${DATE_FROM} ${DATE_TO} 2>&1
+          docker compose -f docker-compose.app.yml exec -T -w /app worker python3 /tmp/dds_sync.py ${PROJECT_ID} ${DATE_FROM} ${DATE_TO} 2>&1
           echo ""
           echo "=== Verifying data ==="
           docker compose -f docker-compose.app.yml exec -T db psql -U dds dds_db -c "SELECT date, COUNT(*) as products, SUM(open_card) as opens, SUM(orders_count) as orders, SUM(orders_sum_rub)::numeric(18,2) as orders_sum, SUM(adv_sum)::numeric(18,2) as adv_sum, SUM(adv_clicks) as adv_clicks FROM wb_funnel_daily WHERE date IN ('${DATE_FROM}', '${DATE_TO}') AND project_id = ${PROJECT_ID} GROUP BY date ORDER BY date;"
