@@ -68,7 +68,7 @@ export default function AssemblyNewPage() {
         setLoading(true);
         try {
             const resp = await api.getFboSupplies({
-                status: 'ACTIVE,ON_DELIVERY',
+                status: 'ACTIVE,ON_DELIVERY,IN_PROGRESS',
                 search: fboSearchInput || undefined,
                 limit: 100,
                 exclude_with_assembly: true,

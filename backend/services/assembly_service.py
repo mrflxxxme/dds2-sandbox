@@ -447,10 +447,18 @@ async def start_assembly(db: AsyncSession, project_id: int, request_id: int) -> 
 
 
 async def mark_ready(db: AsyncSession, project_id: int, request_id: int) -> AssemblyRequest:
-    """IN_PROGRESS -> READY. Set actual_ready_date = today."""
+    """IN_PROGRESS -> READY. Set actual_ready_date = today.
+
+    Requires pallets_count > 0 and pallet_weight_kg > 0.
+    """
     req = await get_assembly_request(db, project_id, request_id)
     if not req:
         raise ValueError("Assembly request not found")
+
+    if not req.pallets_count or req.pallets_count <= 0:
+        raise ValueError("Укажите количество палет перед завершением сборки")
+    if not req.pallet_weight_kg or req.pallet_weight_kg <= 0:
+        raise ValueError("Укажите вес палеты перед завершением сборки")
 
     _check_transition(AssemblyStatus(req.status), AssemblyStatus.READY)
     old = req.status
