@@ -197,12 +197,33 @@ async def get_funnel_data(
     brand: str | None = Query(None),
     vendor_code: str | None = Query(None),
     subject: str | None = Query(None),
+    group_by: str = Query("day"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get funnel data. Aggregated by day if no article filter, detailed otherwise."""
+    """Get funnel data. Supports grouping by day, sku, or detailed (per article filter)."""
     tax_info = await _load_tax_info(db, project)
     bdr_rates_map = await _load_bdr_rates(db, project.id)
+
+    if group_by == "sku" and not vendor_code:
+        data = await funnel_service.get_funnel_by_sku(
+            db,
+            project.id,
+            tax_info,
+            date_from,
+            date_to,
+            brand,
+            subject,
+            bdr_rates_map=bdr_rates_map,
+        )
+        return {
+            "data": data,
+            "tax_info": tax_info,
+            "has_bdr": bool(bdr_rates_map),
+            "detailed": False,
+            "group_by": "sku",
+        }
+
     detailed = bool(vendor_code)
 
     if not detailed:
@@ -216,7 +237,13 @@ async def get_funnel_data(
             subject,
             bdr_rates_map=bdr_rates_map,
         )
-        return {"data": data, "tax_info": tax_info, "has_bdr": bool(bdr_rates_map), "detailed": False}
+        return {
+            "data": data,
+            "tax_info": tax_info,
+            "has_bdr": bool(bdr_rates_map),
+            "detailed": False,
+            "group_by": "day",
+        }
     else:
         data = await funnel_service.get_funnel_detailed(
             db,
@@ -229,7 +256,7 @@ async def get_funnel_data(
             subject,
             bdr_rates_map=bdr_rates_map,
         )
-        return {"data": data, "tax_info": tax_info, "has_bdr": bool(bdr_rates_map), "detailed": True}
+        return {"data": data, "tax_info": tax_info, "has_bdr": bool(bdr_rates_map), "detailed": True, "group_by": "day"}
 
 
 @router.get("/summary")

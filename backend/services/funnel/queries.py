@@ -285,6 +285,208 @@ async def get_funnel_aggregated(
     return data
 
 
+async def get_funnel_by_sku(
+    db: AsyncSession,
+    pid: int,
+    tax_info: dict,
+    date_from: str | None,
+    date_to: str | None,
+    brand: str | None,
+    subject: str | None,
+    bdr_rates_map: BdrRatesLookup | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    """Get funnel data aggregated by SKU (nm_id) for the entire period.
+
+    Same profit logic as get_funnel_aggregated but grouped by product instead of day.
+    """
+    q = select(WbFunnelDaily).where(WbFunnelDaily.project_id == pid)
+
+    if date_from:
+        q = q.where(WbFunnelDaily.date >= date.fromisoformat(date_from))
+    if date_to:
+        q = q.where(WbFunnelDaily.date <= date.fromisoformat(date_to))
+    if subject:
+        q = q.where(WbFunnelDaily.subject == subject)
+    if brand:
+        q = q.where(WbFunnelDaily.brand == brand)
+
+    q = q.order_by(WbFunnelDaily.date.desc())
+    result = await db.execute(q)
+    rows = result.scalars().all()
+
+    tariff_map = await get_tariff_map(db, pid)
+    buyout_map = await get_avg_buyout_map(db, pid)
+    tax_rate = tax_info.get("usn_rate", 0) + tax_info.get("nds_rate", 0)
+    has_bdr = bool(bdr_rates_map)
+
+    from collections import defaultdict
+
+    sku_agg: dict = defaultdict(
+        lambda: {
+            "nm_id": 0,
+            "vendor_code": "",
+            "brand": "",
+            "subject": "",
+            "max_date": None,
+            "open_card": 0,
+            "add_to_cart": 0,
+            "orders_count": 0,
+            "orders_sum_rub": 0.0,
+            "revenue": 0.0,
+            "adv_sum": 0.0,
+            "adv_views": 0,
+            "adv_clicks": 0,
+            "cost_total": 0.0,
+            "commission": 0.0,
+            "tax": 0.0,
+            "profit": 0.0,
+            "has_tariff_gaps": False,
+            "has_bdr": has_bdr,
+            "cart_to_order_pcts": [],
+            "add_to_cart_pcts": [],
+            "avg_prices": [],
+            "bdr_revenue": 0.0,
+            "bdr_profit": 0.0,
+            "bdr_tax": 0.0,
+            "bdr_commission": 0.0,
+            "bdr_cost_total": 0.0,
+            "w_spp_sum": 0.0,
+            "w_topay_sum": 0.0,
+            "w_total": 0.0,
+            "leg_revenue": 0.0,
+            "leg_commission": 0.0,
+        }
+    )
+
+    for r in rows:
+        nm_id = r.nm_id
+        agg = sku_agg[nm_id]
+
+        # Keep latest product info (rows ordered by date desc)
+        if agg["nm_id"] == 0:
+            agg["nm_id"] = nm_id
+            agg["vendor_code"] = r.vendor_code or ""
+            agg["brand"] = r.brand or ""
+            agg["subject"] = r.subject or ""
+
+        orders_sum = float(r.orders_sum_rub or 0)
+        cost_per_unit = float(r.cost_price or 0)
+        orders_count = int(r.orders_count or 0)
+        adv = float(r.adv_sum or 0)
+
+        agg["open_card"] += int(r.open_card or 0)
+        agg["add_to_cart"] += int(r.add_to_cart or 0)
+        agg["orders_count"] += orders_count
+        agg["orders_sum_rub"] += orders_sum
+        agg["adv_sum"] += adv
+        agg["adv_views"] += int(r.adv_views or 0)
+        agg["adv_clicks"] += int(r.adv_clicks or 0)
+
+        if r.cart_to_order_pct:
+            agg["cart_to_order_pcts"].append(float(r.cart_to_order_pct))
+        if r.add_to_cart_pct:
+            agg["add_to_cart_pcts"].append(float(r.add_to_cart_pct))
+        if r.avg_price:
+            agg["avg_prices"].append(float(r.avg_price))
+
+        bdr = bdr_rates_map.get(nm_id, r.date) if bdr_rates_map else None
+        if bdr:
+            m = compute_profit_bdr(orders_sum, orders_count, adv, cost_per_unit, bdr, tax_info)
+            agg["bdr_revenue"] += m["revenue"]
+            agg["bdr_profit"] += m["profit"]
+            agg["bdr_tax"] += m["tax"]
+            agg["bdr_commission"] += m["commission"]
+            agg["bdr_cost_total"] += m["cost_total"]
+            agg["w_spp_sum"] += bdr.spp_rate * orders_sum
+            agg["w_topay_sum"] += bdr.to_pay_rate * orders_sum
+            agg["w_total"] += orders_sum
+        else:
+            buyout_pct = buyout_map.get(nm_id, 100)
+            revenue = orders_sum * buyout_pct / 100
+            subj = r.subject or ""
+            rate = tariff_map.get(subj, 0)
+            if rate == 0 and revenue > 0:
+                agg["has_tariff_gaps"] = True
+            agg["leg_revenue"] += revenue
+            agg["leg_commission"] += revenue * rate / 100
+            agg["cost_total"] += cost_per_unit * orders_count * buyout_pct / 100
+
+    data = []
+    for _nm_id, agg in sku_agg.items():
+        orders_sum = agg["orders_sum_rub"]
+        adv = agg["adv_sum"]
+        views = agg["adv_views"]
+        clicks = agg["adv_clicks"]
+        orders_count = agg["orders_count"]
+
+        revenue = agg["bdr_revenue"] + agg["leg_revenue"]
+        commission = agg["bdr_commission"] + agg["leg_commission"]
+        cost_total = agg["bdr_cost_total"] + agg["cost_total"]
+
+        leg_tax = agg["leg_revenue"] * tax_rate / 100
+        tax = agg["bdr_tax"] + leg_tax
+
+        profit = (
+            agg["bdr_profit"]
+            + (
+                agg["leg_revenue"]
+                - adv * (agg["leg_revenue"] / revenue if revenue else 0)
+                - agg["leg_commission"]
+                - agg["cost_total"]
+                - leg_tax
+            )
+            if revenue
+            else 0
+        )
+
+        margin = (profit / revenue * 100) if revenue else 0
+        buyout_pct = (revenue / orders_sum * 100) if orders_sum else 0
+        traffic = _traffic_metrics(orders_sum, adv, views, clicks, orders_count)
+
+        avg_cart_to_order = (
+            sum(agg["cart_to_order_pcts"]) / len(agg["cart_to_order_pcts"]) if agg["cart_to_order_pcts"] else 0
+        )
+        avg_add_to_cart = sum(agg["add_to_cart_pcts"]) / len(agg["add_to_cart_pcts"]) if agg["add_to_cart_pcts"] else 0
+        avg_price = sum(agg["avg_prices"]) / len(agg["avg_prices"]) if agg["avg_prices"] else 0
+
+        data.append(
+            {
+                "nm_id": agg["nm_id"],
+                "vendor_code": agg["vendor_code"],
+                "brand": agg["brand"],
+                "subject": agg["subject"],
+                "open_card": agg["open_card"],
+                "add_to_cart": agg["add_to_cart"],
+                "orders_count": orders_count,
+                "orders_sum_rub": round(orders_sum, 2),
+                "buyout_percent": round(buyout_pct, 2),
+                "revenue": round(revenue, 2),
+                "adv_sum": round(adv, 2),
+                "adv_views": views,
+                "adv_clicks": clicks,
+                "avg_price": round(avg_price, 2),
+                "add_to_cart_pct": round(avg_add_to_cart, 2),
+                "cart_to_order_pct": round(avg_cart_to_order, 2),
+                "tax": round(tax, 2),
+                "profit": round(profit, 2),
+                "margin": round(margin, 2),
+                "commission": round(commission, 2),
+                "commission_rate": round((commission / revenue * 100) if revenue else 0, 2),
+                "cost_total": round(cost_total, 2),
+                "spp_rate": round(agg["w_spp_sum"] / agg["w_total"] * 100, 2) if agg["w_total"] > 0 else 0,
+                "to_pay_rate": round(agg["w_topay_sum"] / agg["w_total"] * 100, 2) if agg["w_total"] > 0 else 0,
+                "has_tariff_gaps": agg["has_tariff_gaps"],
+                "has_bdr": agg["has_bdr"],
+                **traffic,
+            }
+        )
+
+    # Sort by orders_sum descending, limit
+    data.sort(key=lambda x: x["orders_sum_rub"], reverse=True)
+    return data[:limit]
+
+
 async def get_funnel_detailed(
     db: AsyncSession,
     pid: int,

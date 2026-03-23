@@ -1,20 +1,21 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
-import type { FunnelDayRow, FunnelSummary, FunnelFilters, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse } from '@/types/api';
+import type { FunnelDayRow, FunnelSkuRow, FunnelSummary, FunnelFilters, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
         syncFunnel(dateFrom: string, dateTo: string) {
             return api.request<{ ok: boolean; days_synced: number }>('POST', '/api/v1/funnel/sync', { date_from: dateFrom, date_to: dateTo });
         },
-        getFunnelData(params?: { date_from?: string; date_to?: string; brand?: string; vendor_code?: string; subject?: string }) {
+        getFunnelData(params?: { date_from?: string; date_to?: string; brand?: string; vendor_code?: string; subject?: string; group_by?: 'day' | 'sku' }) {
             const q = new URLSearchParams();
             if (params?.date_from) q.set('date_from', params.date_from);
             if (params?.date_to) q.set('date_to', params.date_to);
             if (params?.brand) q.set('brand', params.brand);
             if (params?.vendor_code) q.set('vendor_code', params.vendor_code);
             if (params?.subject) q.set('subject', params.subject);
-            return api.request<{ data: FunnelDayRow[]; detailed: boolean; tax_rate: number }>('GET', `/api/v1/funnel/data?${q.toString()}`);
+            if (params?.group_by) q.set('group_by', params.group_by);
+            return api.request<{ data: (FunnelDayRow | FunnelSkuRow)[]; detailed: boolean; tax_rate: number; group_by?: string }>('GET', `/api/v1/funnel/data?${q.toString()}`);
         },
         getFunnelSummary(dateFrom?: string, dateTo?: string, brand?: string, subject?: string) {
             const q = new URLSearchParams();

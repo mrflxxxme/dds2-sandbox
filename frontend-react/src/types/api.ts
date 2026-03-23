@@ -378,6 +378,40 @@ export interface FunnelDayRow {
   buyout_percent?: number;
 }
 
+export interface FunnelSkuRow {
+  nm_id: number;
+  vendor_code: string;
+  brand: string | null;
+  subject: string | null;
+  open_card: number;
+  add_to_cart: number;
+  orders_count: number;
+  orders_sum_rub: number;
+  buyout_percent: number;
+  revenue: number;
+  adv_sum: number;
+  adv_views: number;
+  adv_clicks: number;
+  avg_price: number;
+  add_to_cart_pct: number;
+  cart_to_order_pct: number;
+  tax: number;
+  profit: number;
+  margin: number;
+  commission: number;
+  commission_rate: number;
+  cost_total: number;
+  spp_rate: number;
+  to_pay_rate: number;
+  has_tariff_gaps: boolean;
+  has_bdr: boolean;
+  ctr: number;
+  cpc: number;
+  cpm: number;
+  cr: number;
+  drr: number;
+}
+
 export interface FunnelSummary {
   opens: number;
   open_card?: number;
