@@ -23,27 +23,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: Create sync script
-        run: |
-          cat > /tmp/dds_sync.py << 'PYEOF'
-          import asyncio, json, logging, sys, os
-          sys.path.insert(0, '/app')
-          logging.basicConfig(level=logging.INFO)
-          async def main():
-              pid, d_from, d_to = int(sys.argv[1]), sys.argv[2], sys.argv[3]
-              from backend.database import AsyncSessionLocal
-              from backend.services.funnel.sync import run_funnel_sync
-              async with AsyncSessionLocal() as db:
-                  result = await run_funnel_sync(db, pid, d_from, d_to, include_completed_campaigns=True)
-                  print(json.dumps(result, indent=2, default=str))
-          asyncio.run(main())
-          PYEOF
-          # Remove leading whitespace from heredoc
-          sed -i 's/^          //' /tmp/dds_sync.py
-          echo "=== Script content ==="
-          cat /tmp/dds_sync.py
-
-      - name: Run sync on App Server
+      - name: Create and upload sync script
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           HOST: ${{ secrets.DEPLOY_HOST }}
@@ -56,20 +36,55 @@ jobs:
           echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
-          # Copy script to server, then into worker container
+          # Create script with no indentation issues
+          cat > /tmp/dds_sync.py << 'PYEOF'
+          import sys
+          sys.path.insert(0, '/app')
+          import asyncio, json, logging
+          logging.basicConfig(level=logging.INFO)
+          async def main():
+              from backend.database import AsyncSessionLocal
+              from backend.services.funnel.sync import run_funnel_sync
+              pid = int(sys.argv[1])
+              d_from, d_to = sys.argv[2], sys.argv[3]
+              async with AsyncSessionLocal() as db:
+                  result = await run_funnel_sync(db, pid, d_from, d_to, include_completed_campaigns=True)
+                  print(json.dumps(result, indent=2, default=str))
+          asyncio.run(main())
+          PYEOF
+
+          # Strip leading whitespace (heredoc indentation)
+          python3 -c "
+          import textwrap, pathlib
+          p = pathlib.Path('/tmp/dds_sync.py')
+          p.write_text(textwrap.dedent(p.read_text()))
+          "
+
+          echo "=== Script ==="
+          cat /tmp/dds_sync.py
+
+          # Upload to server
           scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key /tmp/dds_sync.py ${USER}@${HOST}:/tmp/dds_sync.py
 
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} << SSHEOF
-          set -e
-          cd /opt/dds_app
-          echo "=== Starting manual funnel sync ==="
-          echo "Project: ${PROJECT_ID}, Range: ${DATE_FROM} -> ${DATE_TO}"
+          # Docker cp into worker and run
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} \
+            "cd /opt/dds_app && \
+             WORKER=\$(docker compose -f docker-compose.app.yml ps -q worker) && \
+             docker cp /tmp/dds_sync.py \${WORKER}:/tmp/dds_sync.py && \
+             docker compose -f docker-compose.app.yml exec -T worker python3 /tmp/dds_sync.py ${PROJECT_ID} ${DATE_FROM} ${DATE_TO}"
 
-          WORKER_CONTAINER=\$(docker compose -f docker-compose.app.yml ps -q worker)
-          docker cp /tmp/dds_sync.py \${WORKER_CONTAINER}:/tmp/dds_sync.py
-          docker compose -f docker-compose.app.yml exec -T -w /app worker python3 /tmp/dds_sync.py ${PROJECT_ID} ${DATE_FROM} ${DATE_TO} 2>&1
+      - name: Verify data on DB server
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DATA_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          DATE_FROM: ${{ inputs.date_from }}
+          DATE_TO: ${{ inputs.date_to }}
+          PROJECT_ID: ${{ inputs.project_id }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
 
-          echo ""
-          echo "=== Verifying data ==="
-          docker compose -f docker-compose.app.yml exec -T db psql -U dds dds_db -c "SELECT date, COUNT(*) as products, SUM(open_card) as opens, SUM(orders_count) as orders, SUM(orders_sum_rub)::numeric(18,2) as orders_sum, SUM(adv_sum)::numeric(18,2) as adv_sum, SUM(adv_clicks) as adv_clicks FROM wb_funnel_daily WHERE date IN ('${DATE_FROM}', '${DATE_TO}') AND project_id = ${PROJECT_ID} GROUP BY date ORDER BY date;"
-          SSHEOF
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} \
+            "cd /opt/dds_data && docker compose exec -T db psql -U dds dds_db -c \"SELECT date, COUNT(*) as products, SUM(open_card) as opens, SUM(orders_count) as orders, SUM(orders_sum_rub)::numeric(18,2) as orders_sum, SUM(adv_sum)::numeric(18,2) as adv_sum, SUM(adv_clicks) as adv_clicks FROM wb_funnel_daily WHERE date BETWEEN '${DATE_FROM}' AND '${DATE_TO}' AND project_id = ${PROJECT_ID} GROUP BY date ORDER BY date;\""
