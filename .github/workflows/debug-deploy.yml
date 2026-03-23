@@ -5,12 +5,12 @@ on:
 
 jobs:
   debug:
-    name: Debug Deploy Steps
+    name: Debug Server State
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
 
     steps:
-      - name: Recreate nginx on App Server
+      - name: Check server state
         env:
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
@@ -21,41 +21,37 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} '
             cd /opt/dds_app
-            echo "=== FORCE RECREATE NGINX ==="
-            docker compose -f docker-compose.app.yml up -d --force-recreate nginx 2>&1
-            sleep 30
-            echo "=== PS ==="
-            docker compose -f docker-compose.app.yml ps 2>&1
+            echo "=== GIT BRANCH ==="
+            git branch --show-current
+            echo "=== GIT LOG ==="
+            git log --oneline -5
+            echo "=== NGINX CONF (health section) ==="
+            grep -A3 "nginx-health\|/health" nginx/nginx.conf 2>&1
+            echo "=== DOCKER COMPOSE HEALTHCHECK ==="
+            grep -A3 "healthcheck" docker-compose.app.yml 2>&1 | head -20
+            echo "=== TEST NGINX-HEALTH ==="
+            docker compose -f docker-compose.app.yml exec -T nginx wget --spider http://localhost/nginx-health 2>&1 || echo "FAILED"
+            echo "=== TEST /HEALTH ==="
+            docker compose -f docker-compose.app.yml exec -T nginx wget --spider http://localhost/health 2>&1 || echo "FAILED"
           ' > /tmp/debug_output.txt 2>&1 || true
           cat /tmp/debug_output.txt
 
-      - name: Post results to issue
+      - name: Post results
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           REPO: ${{ github.repository }}
         run: |
           python3 << 'PYEOF'
           import json, urllib.request, os
-
-          output = open('/tmp/debug_output.txt').read() if os.path.exists('/tmp/debug_output.txt') else 'No output captured'
-
-          body = f"## Nginx Recreate Results\n```\n{output}\n```"
-          payload = json.dumps({"title": "[Debug] Nginx recreate", "body": body}).encode()
-
+          output = open('/tmp/debug_output.txt').read() if os.path.exists('/tmp/debug_output.txt') else 'No output'
+          body = f"## Debug\n```\n{output}\n```"
+          payload = json.dumps({"title": "[Debug] Server state check", "body": body}).encode()
           req = urllib.request.Request(
               f"https://api.github.com/repos/{os.environ['REPO']}/issues",
               data=payload,
-              headers={
-                  "Authorization": f"token {os.environ['GH_PAT']}",
-                  "Accept": "application/vnd.github+json",
-                  "Content-Type": "application/json"
-              }
+              headers={"Authorization": f"token {os.environ['GH_PAT']}", "Accept": "application/vnd.github+json", "Content-Type": "application/json"}
           )
-          try:
-              resp = urllib.request.urlopen(req)
-              result = json.loads(resp.read())
-              print(f"Created issue #{result['number']}: {result['html_url']}")
-          except Exception as e:
-              print(f"Error: {e}")
-              exit(1)
+          resp = urllib.request.urlopen(req)
+          result = json.loads(resp.read())
+          print(f"Issue #{result['number']}")
           PYEOF
