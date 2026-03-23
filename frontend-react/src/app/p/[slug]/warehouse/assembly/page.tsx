@@ -418,6 +418,7 @@ export default function AssemblyListPage() {
                                 <th>Статус</th>
                                 <th>Склад</th>
                                 <th>FBO поставка</th>
+                                <th style={{ textAlign: 'right' }}>Товары</th>
                                 <th style={{ textAlign: 'right' }}>Палеты</th>
                                 <th style={{ textAlign: 'right' }}>Общий вес</th>
                                 <th>Дата готовности</th>
@@ -448,6 +449,9 @@ export default function AssemblyListPage() {
                                                     {item.wb_warehouse_name}
                                                 </div>
                                             )}
+                                        </td>
+                                        <td style={{ textAlign: 'right', fontSize: 13 }}>
+                                            {item.items ? item.items.reduce((sum, i) => sum + (i.quantity || 0), 0) : '\u2014'}
                                         </td>
                                         <td style={{ textAlign: 'right' }}>
                                             <EditableCell

@@ -48,6 +48,7 @@ export default function LogisticsPage() {
     // Filters
     const [groupBy, setGroupBy] = useState<GroupBy>('wb_warehouse');
     const [showSoonReady, setShowSoonReady] = useState(false);
+    const [showInProgress, setShowInProgress] = useState(false);
     const [warehouseFilter, setWarehouseFilter] = useState('');
 
     // View mode
@@ -94,6 +95,12 @@ export default function LogisticsPage() {
 
             let allItems = [...readyResp.items, ...vehicleResp.items];
 
+            // Optionally load IN_PROGRESS (all assemblies currently being worked on)
+            if (showInProgress) {
+                const inProgressResp = await api.getAssemblyRequests({ status: 'IN_PROGRESS', limit: 500 });
+                allItems = [...allItems, ...inProgressResp.items];
+            }
+
             // Optionally load "soon ready" (PENDING/IN_PROGRESS with estimated_ready_date <= today+2)
             if (showSoonReady) {
                 const today = new Date();
@@ -113,12 +120,20 @@ export default function LogisticsPage() {
                 allItems = [...allItems, ...soonItems];
             }
 
+            // Deduplicate by id (in case showInProgress + showSoonReady overlap)
+            const seen = new Set<number>();
+            allItems = allItems.filter(item => {
+                if (seen.has(item.id)) return false;
+                seen.add(item.id);
+                return true;
+            });
+
             setItems(allItems);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         }
         setLoading(false);
-    }, [showSoonReady]);
+    }, [showSoonReady, showInProgress]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -372,6 +387,14 @@ export default function LogisticsPage() {
                                     ))}
                                 </select>
                             </div>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 14 }}>
+                                <input
+                                    type="checkbox"
+                                    checked={showInProgress}
+                                    onChange={e => setShowInProgress(e.target.checked)}
+                                />
+                                Показывать в работе
+                            </label>
                             <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 14 }}>
                                 <input
                                     type="checkbox"
