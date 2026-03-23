@@ -265,6 +265,24 @@ async def change_password(
     return {"status": "ok", "message": "Пароль изменён"}
 
 
+# ─── Logout ──────────────────────────────────────────────────────────────────
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str
+
+
+@router.post("/logout")
+async def logout(
+    body: LogoutRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Revoke the refresh token to end the session."""
+    await revoke_refresh_token(body.refresh_token)
+    logger.info(f"User logged out: {current_user.username} (id={current_user.id})")
+    return {"status": "ok", "message": "Сессия завершена"}
+
+
 # ─── Refresh Token ───────────────────────────────────────────────────────────
 
 
@@ -273,10 +291,11 @@ class RefreshRequest(BaseModel):
 
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
+async def refresh_token(body: RefreshRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Exchange a valid refresh token for a new access + refresh token pair.
     The old refresh token is revoked (token rotation for security).
     """
+    await check_rate_limit(request, "refresh")
     user_id = await verify_refresh_token(body.refresh_token)
     if user_id is None:
         raise HTTPException(

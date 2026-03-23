@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     SECRET_KEY: str = ""
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30  # 30 min (short-lived, refresh extends session)
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30  # 30 days
-    MIN_PASSWORD_LENGTH: int = 6
+    MIN_PASSWORD_LENGTH: int = 8
 
     # Environment
     DDS_ENV: str = "development"  # development | staging | production
@@ -83,11 +83,19 @@ class Settings(BaseSettings):
     @field_validator("SECRET_KEY")
     @classmethod
     def validate_secret_key(cls, v: str) -> str:
+        import os
+
+        env = os.getenv("DDS_ENV", "development")
         if not v or v in (
             "",
             "change-me-in-production-use-a-strong-random-key",
             "change-me-to-a-random-64-char-string",
         ):
+            if env == "production":
+                raise ValueError(
+                    "SECRET_KEY MUST be set in production! "
+                    "Generate with: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+                )
             generated = secrets.token_urlsafe(48)
             warnings.warn(
                 f"\n⚠️  SECRET_KEY не задан! Сгенерирован временный ключ.\n"

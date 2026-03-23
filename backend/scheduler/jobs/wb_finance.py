@@ -7,12 +7,15 @@ Two modes:
 - Daily (Tue–Sun): download daily reports to fill current incomplete week (period="daily")
 """
 
+import asyncio
 import logging
 from datetime import date, timedelta
 
 from backend.database import AsyncSessionLocal
+from backend.models import SyncLog
 from backend.scheduler.helpers import get_sync_project_ids
 from backend.utils.telegram import send_alert
+from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.scheduler")
 
@@ -53,7 +56,33 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
     today = date.today()
 
     for pid in project_ids:
+        sync_log = None
+        log_status = "ERROR"
+        rows_synced = 0
+
         try:
+            async with AsyncSessionLocal() as db:
+                # Create sync_log entry
+                from backend.services.integrations_service import _get_wb_key
+
+                try:
+                    key, _api_key = await _get_wb_key(db, pid)
+                    key_id = key.id
+                except ValueError:
+                    logger.debug("WB Finance %s: project %d has no WB key, skipping", job_label, pid)
+                    continue
+
+                sync_log = SyncLog(
+                    integration_id=key_id,
+                    service="wb",
+                    sync_type=f"wb_finance_{job_label}",
+                    started_at=utcnow(),
+                    status="RUNNING",
+                )
+                db.add(sync_log)
+                await db.flush()
+                log_id = sync_log.id
+
             async with AsyncSessionLocal() as db:
                 # Find max rr_dt already in DB (only from weekly rows to avoid
                 # daily rows inflating freshness)
@@ -108,6 +137,7 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                             max_daily_date,
                             last_monday,
                         )
+                        log_status = "OK"
                         continue
                     logger.info(
                         "💰 WB Finance daily: project %s — fetching %s → %s (period=daily)",
@@ -128,6 +158,7 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                             pid,
                             max_weekly_date,
                         )
+                        log_status = "OK"
                         continue
 
                     date_from = max_weekly_date + timedelta(days=1) if max_weekly_date else prev_monday
@@ -141,15 +172,15 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                     )
 
                 if period == "daily":
-                    sync_result = await sync_wb_finance(
-                        db,
-                        pid,
-                        date_from,
-                        date_to,
-                        period="daily",
+                    sync_result = await asyncio.wait_for(
+                        sync_wb_finance(db, pid, date_from, date_to, period="daily"),
+                        timeout=600,
                     )
                 else:
-                    sync_result = await sync_wb_finance(db, pid, date_from, date_to)
+                    sync_result = await asyncio.wait_for(
+                        sync_wb_finance(db, pid, date_from, date_to),
+                        timeout=600,
+                    )
 
                 # Delete daily rows AFTER successful weekly sync to avoid data loss
                 # if sync fails (daily and weekly have different rrd_ids → duplicates)
@@ -176,14 +207,14 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                             date_to,
                         )
 
-                rows = sync_result.get("rows_synced", 0)
-                status = sync_result.get("status", "?")
+                rows_synced = sync_result.get("rows_synced", 0)
+                log_status = sync_result.get("status", "OK")
                 logger.info(
                     "💰 WB Finance %s: project %s — %s, %s rows synced",
                     job_label,
                     pid,
-                    status,
-                    rows,
+                    log_status,
+                    rows_synced,
                 )
 
             # Sync order cancel stats (for accurate buyout_pct)
@@ -205,7 +236,14 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                     cancel_err,
                 )
 
+        except asyncio.TimeoutError:
+            log_status = "TIMEOUT"
+            logger.error("💰 WB Finance %s: project %s — TIMEOUT (600s)", job_label, pid)
+            await send_alert(
+                f"WB Finance Sync ({job_label}) *TIMEOUT*\nProject: {pid}",
+            )
         except Exception as e:
+            log_status = "ERROR"
             logger.error(
                 "💰 WB Finance %s sync failed for project %s: %s",
                 job_label,
@@ -216,5 +254,22 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                 f"WB Finance Sync ({job_label}) *ERROR*\n" f"Project: {pid}\n" f"Error: {str(e)[:300]}",
                 exc=e,
             )
+        finally:
+            # GUARANTEED: update sync_log — never leave RUNNING
+            if sync_log is not None:
+                try:
+                    async with AsyncSessionLocal() as db:
+                        from sqlalchemy import update
+
+                        await db.execute(
+                            update(SyncLog).where(SyncLog.id == log_id).values(
+                                status=log_status,
+                                rows_inserted=rows_synced,
+                                finished_at=utcnow(),
+                            )
+                        )
+                        await db.commit()
+                except Exception as log_err:
+                    logger.error("Failed to update sync_log for project %s: %s", pid, log_err)
 
     logger.info("💰 WB Finance %s sync: completed for all projects", job_label)

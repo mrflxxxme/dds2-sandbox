@@ -70,7 +70,7 @@ async def get_product_trends(
         q = q.where(WbFunnelDaily.brand == brand)
     if search:
         _s = search.replace("%", r"\%").replace("_", r"\_")
-        vc_filter = WbFunnelDaily.vendor_code.ilike(f"%{_s}%")
+        vc_filter = WbFunnelDaily.vendor_code.ilike(f"%{_s}%", escape="\\")
         if search.isdigit():
             vc_filter = or_(vc_filter, WbFunnelDaily.nm_id == int(search))
         q = q.where(vc_filter)

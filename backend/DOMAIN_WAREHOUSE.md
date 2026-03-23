@@ -25,16 +25,17 @@ Nomenclature ← _resolve_barcode()       # все items резолвятся ч
 
 ## Ключевые зависимости
 
-### Ядро стока (warehouse_service.py):
+### Ядро стока (разбит на 4 файла):
 
+#### warehouse_stock_engine.py (323 строки) — движения и остатки:
 ```python
-# L122 — Генерирует автономер: IN-1, OUT-2, TR-3
+# Генерирует автономер: IN-1, OUT-2, TR-3
 async def _next_number(db, project_id, prefix, model_class) -> str:
 
-# L146 — Резолвит баркод → Nomenclature. Raises ValueError если не найден.
+# Резолвит баркод → Nomenclature. Raises ValueError если не найден.
 async def _resolve_barcode(db, project_id, barcode) -> Nomenclature:
 
-# L163 — ЕДИНСТВЕННАЯ точка изменения остатков.
+# ЕДИНСТВЕННАЯ точка изменения остатков.
 # delta > 0 = приход, delta < 0 = расход. Raises ValueError при qty < 0.
 # Создаёт WarehouseStock (upsert) + StockMovement (audit).
 async def _update_stock(
@@ -42,6 +43,11 @@ async def _update_stock(
     delta, movement_type, reference_type, reference_id=None, comment=None
 ) -> None:
 ```
+
+#### warehouse_crud.py (241 строк) — CRUD складов
+#### warehouse_inbound.py (254 строки) — приёмка (create, accept, cancel, update)
+#### warehouse_outbound.py (365 строк) — отгрузка + перемещения
+#### warehouse_service.py (59 строк) — re-export для обратной совместимости
 
 ### Модели (models/warehouse.py):
 - `Warehouse` L26 — SoftDelete, warehouse_type: EXTERNAL|FULFILLMENT, assembly_days
@@ -175,8 +181,12 @@ DRAFT → IN_TRANSIT → COMPLETED
 | schemas/warehouse.py | Pydantic: Create/Update/Schema для складских сущностей |
 | schemas/wb_fbo.py | Pydantic: FBO supply schemas |
 | schemas/assembly.py | Pydantic: Assembly schemas |
-| services/warehouse_service.py | CRUD + stock engine (921 строк) |
-| services/fbo_supply_service.py | FBO синхронизация + авто-доставка (794 строки) |
+| services/warehouse_service.py | Re-export (59 строк) |
+| services/warehouse_crud.py | CRUD складов (241 строка) |
+| services/warehouse_inbound.py | Приёмка (254 строки) |
+| services/warehouse_outbound.py | Отгрузка + перемещения (365 строк) |
+| services/warehouse_stock_engine.py | Движения + остатки (323 строки) |
+| services/fbo_supply_service.py | FBO синхронизация + авто-доставка (856 строк — нужен рефакторинг) |
 | services/warehouse_stock_service.py | WB остатки sync + compute_need (100 строк) |
 | routers/warehouse.py | 21 endpoint: склады, stock, receipt, shipment, transfer, FBO |
 | routers/assembly.py | 14 endpoints: заявки на сборку (см. DOMAIN_ASSEMBLY.md) |

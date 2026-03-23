@@ -10,7 +10,8 @@
 - `routers/planning.py` — HTTP endpoints
 - `routers/planning_customs.py` — таможенные endpoints
 - `routers/planning_wb_payouts.py` — WB-выплаты endpoints
-- `models/planning.py` — Order, LeadTime, PlannedPayment, PlannedIncome, WbPayout, PaymentFactLink
+- `models/planning.py` — Order, LeadTime, PlannedPayment, PlannedIncome, WbPayout, PaymentFactLink, BrandPlan
+- `services/planning/brand_plan.py` — CRUD план-факт по брендам
 - `models/customs.py` — CustomsTopup, CustomsAlloc, CustomsDT
 - `schemas/planning.py`
 - `tests/test_api_planning.py`
@@ -25,6 +26,7 @@
 - `customs_topup` — авансы на таможню
 - `customs_alloc` — распределение авансов по заказам
 - `customs_dt` — ДТ (декларации на товары)
+- `brand_plans` — план по брендам (year, month, brand → planned revenue/orders)
 
 ## Business Rules
 1. **Заказ:** order_no уникален, содержит суммы в CNY + RUB + логистику

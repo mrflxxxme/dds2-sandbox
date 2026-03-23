@@ -122,7 +122,7 @@ fi
 echo ""
 
 # ─── 7. Missing project_id in service functions ─────────────────────
-echo "── Check 6: Service functions without project_id parameter ──"
+echo "── Check 7: Service functions without project_id parameter ──"
 # Check for async def functions in services that do DB queries but miss project_id
 # This is a heuristic — warns about functions that have 'db' but no 'project_id'
 FOUND=$(grep -rn "async def.*db:.*Session" backend/services/ --include="*.py" \
@@ -163,6 +163,43 @@ if [ -n "$FOUND" ]; then
     warn "$COUNT service files use .scalars().all() — verify they have .limit() or bounded input"
 else
     ok "No unbounded .all() calls"
+fi
+echo ""
+
+# ─── 10. db.delete() on SoftDelete models ────────────────────────────
+echo "── Check 10: db.delete() on SoftDelete models (use soft_delete()) ──"
+# Models with SoftDeleteMixin — should never use db.delete()
+FOUND=$(grep -rn "db\.delete(" backend/services/ backend/routers/ --include="*.py" \
+    | grep -v "__pycache__" \
+    | grep -v "# no-soft-delete-check" \
+    | grep -v "test_" \
+    2>/dev/null || true)
+if [ -n "$FOUND" ]; then
+    warn "db.delete() found — verify these are on models WITHOUT SoftDeleteMixin"
+    echo "$FOUND"
+else
+    ok "No db.delete() calls found"
+fi
+echo ""
+
+# ─── 11. ilike() without escape parameter ────────────────────────────
+echo "── Check 11: ilike() without escape parameter ──"
+FOUND=$(grep -rn "\.ilike(f\"" backend/ --include="*.py" \
+    | grep -v "escape=" \
+    | grep -v "__pycache__" \
+    | grep -v "test_" \
+    2>/dev/null || true)
+FOUND2=$(grep -rn "\.ilike(f'" backend/ --include="*.py" \
+    | grep -v "escape=" \
+    | grep -v "__pycache__" \
+    | grep -v "test_" \
+    2>/dev/null || true)
+if [ -n "$FOUND" ] || [ -n "$FOUND2" ]; then
+    warn "ilike() with f-string but no escape= — add escape=\"\\\\\" parameter"
+    echo "$FOUND"
+    echo "$FOUND2"
+else
+    ok "All ilike() calls have escape parameter"
 fi
 echo ""
 
