@@ -15,20 +15,24 @@ logger = logging.getLogger("dds.funnel")
 
 
 async def get_missing_costs(db: AsyncSession, pid: int) -> list[dict]:
-    """Return products without cost_price that participate in funnel calculations.
+    """Return products without cost_price from BOTH funnel and finance data.
+
+    Merges two sources:
+    1. wb_funnel_daily — products with orders but no cost_price
+    2. wb_finance_rows — products with sales in BDR but no cost anywhere
 
     Excludes products that have cost from:
-    - WbCostOverride (manual overrides)
-    - Cost order history (avg cost by vendor_code)
-    Includes aggregated order totals and barcode from nomenclature.
+    - WbCostOverride (manual overrides by nm_id)
+    - Cost order history (avg cost by vendor_code/sa_name)
     """
+    from backend.models.wb_finance import WbFinanceRow
     from backend.services.bdr_loaders import load_avg_costs, load_cost_overrides
 
     # Load existing cost sources
     cost_ovr = await load_cost_overrides(db, pid)
     avg_costs = await load_avg_costs(db, pid)
 
-    # Aggregate funnel data for items with no cost
+    # ── Source 1: Funnel (wb_funnel_daily) ──
     q = (
         select(
             WbFunnelDaily.nm_id,
@@ -66,14 +70,14 @@ async def get_missing_costs(db: AsyncSession, pid: int) -> list[dict]:
             if n.article_wb and n.barcode:
                 barcode_map[n.article_wb] = n.barcode
 
+    seen_nm_ids: set[int] = set()
     result = []
     for r in rows:
-        # Skip if has manual override
         if r.nm_id in cost_ovr and cost_ovr[r.nm_id] > 0:
             continue
-        # Skip if has avg cost from order history
         if r.vendor_code and r.vendor_code in avg_costs and avg_costs[r.vendor_code] > 0:
             continue
+        seen_nm_ids.add(r.nm_id)
         result.append(
             {
                 "nm_id": r.nm_id,
@@ -87,6 +91,54 @@ async def get_missing_costs(db: AsyncSession, pid: int) -> list[dict]:
             }
         )
 
+    # ── Source 2: Finance (wb_finance_rows) — products in BDR without cost ──
+    finance_q = (
+        select(
+            func.max(WbFinanceRow.nm_id).label("nm_id"),
+            WbFinanceRow.sa_name,
+            func.max(WbFinanceRow.brand_name).label("brand"),
+            func.max(WbFinanceRow.subject_name).label("subject"),
+            func.sum(WbFinanceRow.retail_price_withdisc_rub).label("total_orders"),
+            func.count().label("total_qty"),
+        )
+        .where(
+            WbFinanceRow.project_id == pid,
+            WbFinanceRow.sa_name.isnot(None),
+            func.lower(func.coalesce(WbFinanceRow.sa_name, "")) != "неопознанный товар",
+        )
+        .group_by(WbFinanceRow.sa_name)
+    )
+    finance_rows = (await db.execute(finance_q)).all()
+
+    for r in finance_rows:
+        nm_id = int(r.nm_id or 0)
+        sa_name = r.sa_name or ""
+
+        # Skip if already found in funnel source
+        if nm_id and nm_id in seen_nm_ids:
+            continue
+        # Skip if has cost from any source
+        if nm_id and nm_id in cost_ovr and cost_ovr[nm_id] > 0:
+            continue
+        if sa_name and sa_name in avg_costs and avg_costs[sa_name] > 0:
+            continue
+
+        seen_nm_ids.add(nm_id)
+        result.append(
+            {
+                "nm_id": nm_id,
+                "barcode": barcode_map.get(nm_id, ""),
+                "vendor_code": sa_name,
+                "subject": r.subject or "",
+                "brand": r.brand or "",
+                "total_orders": round(float(r.total_orders or 0), 2),
+                "total_qty": int(r.total_qty or 0),
+                "days_count": 0,
+            }
+        )
+
+    # Sort by total_orders descending
+    result.sort(key=lambda x: x["total_orders"], reverse=True)
     return result
 
 
