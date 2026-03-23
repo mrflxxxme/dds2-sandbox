@@ -310,7 +310,7 @@ async def get_funnel_detailed(
         q = q.where(WbFunnelDaily.brand == brand)
     if vendor_code:
         _vc = vendor_code.replace("%", r"\%").replace("_", r"\_")
-        vc_filter = WbFunnelDaily.vendor_code.ilike(f"%{_vc}%")
+        vc_filter = WbFunnelDaily.vendor_code.ilike(f"%{_vc}%", escape="\\")
         if vendor_code.isdigit():
             vc_filter = or_(vc_filter, WbFunnelDaily.nm_id == int(vendor_code))
         q = q.where(vc_filter)

@@ -1,7 +1,7 @@
 # Domain: Frontend (Next.js 15 + React 19)
 
 ## Ownership
-- `src/app/p/[slug]/` — все страницы (dashboard, import, txn, inbox, reports, dds, planning, orders, cost, funnel, trends, refs, settings, team)
+- `src/app/p/[slug]/` — все страницы (dashboard, import, txn, inbox, reports, dds, planning, orders, cost, funnel, trends, refs, settings, team, opiu, plan-fact, warehouse/*, order-geography, bulk-cost, container-loader)
 - `src/lib/api.ts` — API клиент (80+ методов, JWT auth + refresh)
 - `src/lib/utils.ts` — formatNumber, formatDate, exportToExcel
 - `src/components/` — DataTable, FormModal, PageHeader, TabLayout, Toast

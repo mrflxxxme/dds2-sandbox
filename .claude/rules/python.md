@@ -12,7 +12,7 @@ paths:
 ## Железные правила (нарушение = баг)
 1. `project_id` — КАЖДЫЙ запрос к БД
 2. `is_deleted == False` — для SoftDeleteMixin моделей
-3. `soft_delete()` — никогда `db.delete()`
+3. `soft_delete()` для моделей с SoftDeleteMixin — никогда `db.delete()` на них
 4. `from backend.utils.time import utcnow` — никогда `datetime.utcnow()`
 5. `Numeric(18, 2)` для денег — никогда Float
 6. Параметризованный `:param` SQL — никогда f-string в `text()`
@@ -41,8 +41,8 @@ models/ (ORM, без логики)
 
 ## Анти-паттерны (НЕ ДЕЛАТЬ)
 - `.scalars().all()` без `.limit()`
-- `ilike(f"%{input}%")` без экранирования
-- Сервис > 400 строк без разбиения
+- `ilike(f"%{input}%")` без экранирования и без `escape="\\"`
+- Сервис > 500 строк без разбиения
 - Функция > 50 строк
 - Вложенность > 4 уровней
 - Мутация без `invalidate_cache()`

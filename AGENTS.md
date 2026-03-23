@@ -8,22 +8,31 @@
 ```
 backend/
   main.py, config.py, database.py, auth.py, cache.py, storage.py, exceptions.py
-  models/        — ORM (auth, refs, transactions, planning, cost, customs, integrations, wb_finance, fx_rates, tax, enums)
-  schemas/       — Pydantic (auth, common, cost, imports, integrations, planning, refs, reports, tax, transactions)
-  routers/       — HTTP (auth, projects, import_txn, refs, reports, planning, cost, integrations, funnel, ws)
-  services/      — Logic (reports/, planning/, cost/, funnel/, transactions, refs, integrations, opiu, wb_bdr, wb_finance_sync, fx, tax)
+  models/        — ORM (auth, refs, transactions, planning, cost, customs, integrations,
+                         wb_finance, fx_rates, tax, warehouse, wb_fbo, audit, telegram, enums)
+  schemas/       — Pydantic (auth, common, cost, imports, integrations, planning, refs,
+                            reports, tax, transactions, warehouse, assembly, telegram)
+  routers/       — HTTP (auth, projects, import_txn, refs, reports, planning, cost,
+                         integrations, funnel, warehouse, assembly, telegram, telegram_webhook, ws)
+  services/      — Logic (reports/, planning/, cost/, funnel/, ai/,
+                         transactions, refs, integrations, opiu, wb_bdr, wb_finance_sync,
+                         warehouse_*, assembly, fbo_supply, telegram, fx, tax)
   etl/parsers/   — Bank parsers (vtb.py, wb.py, helpers.py)
+  integrations/  — External APIs (wb_api.py, resilience.py, telegram_bot.py)
   utils/         — crypto, file_validation, queries, time, telegram
+  scheduler/jobs/ — Background (funnel, wb_finance, wb_stocks, fbo_supplies, ai_digest, health_check, prewarm)
   seeds/         — default_categories.py
 
 frontend-react/src/
-  app/p/[slug]/  — pages: dashboard, import, txn, inbox, reports, dds, planning, orders, cost, funnel, trends, refs, settings, team
+  app/p/[slug]/  — pages: dashboard, import, txn, inbox, reports, dds, planning, orders,
+                         cost, funnel, trends, refs, settings, team, opiu, plan-fact,
+                         warehouse/*, order-geography, bulk-cost, container-loader
   lib/api.ts     — 80+ API methods, JWT auth + refresh
   lib/utils.ts   — formatNumber, formatDate, exportToExcel
   components/    — DataTable, FormModal, PageHeader, TabLayout, Toast
   types/api.ts   — TypeScript interfaces
 
-tests/           — 23 files, 249 tests
+tests/           — 35 files, 630+ tests
 ```
 
 ## ⚠️ CRITICAL Rules
@@ -61,9 +70,9 @@ tests/           — 23 files, 249 tests
 - `invalidate_cache` **сам добавляет** `:*` → передавать ТОЛЬКО prefix без wildcard
 - Cache key format: `reports:{report}:project_id={pid}:...` → проверь формат в Redis перед написанием invalidation
 - Массовый flush кэша → НЕ удалять все ключи разом (worker starvation), стартовать по одному
-- `ilike(f"%{input}%")` → экранировать `%`/`_`
+- `ilike(f"%{input}%")` → экранировать `%`/`_` + передавать `escape="\\"` в ilike()
 - Сервис > 400 строк → разбить
-- `db.delete(model)` → `model.soft_delete()` (наследовать `SoftDeleteMixin`)
+- `db.delete(model)` на моделях с SoftDeleteMixin → `model.soft_delete()` (без SoftDeleteMixin — допустимо)
 - Новая модель без timestamps → наследовать `TimestampMixin`
 - Generic `raise Exception` → `raise HTTPException` с кодом из `_status_to_code()`
 - Ошибка Redis/MinIO → graceful degradation (warning, не crash)

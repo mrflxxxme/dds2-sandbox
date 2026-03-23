@@ -3,11 +3,14 @@ Scheduler job: sync FBO supplies for all projects with active WB integrations.
 Runs every 1 hour.
 """
 
+import asyncio
 import logging
 
 from backend.database import AsyncSessionLocal
+from backend.models import SyncLog
 from backend.scheduler.helpers import get_sync_project_ids
 from backend.utils.telegram import send_alert
+from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.scheduler")
 
@@ -32,6 +35,11 @@ async def sync_all_projects_fbo_supplies():
     errors = 0
 
     for project_id in project_ids:
+        sync_log = None
+        log_id = None
+        log_status = "ERROR"
+        rows_synced = 0
+
         try:
             async with AsyncSessionLocal() as db:
                 try:
@@ -40,9 +48,26 @@ async def sync_all_projects_fbo_supplies():
                     logger.debug("FBO supplies sync: project %d has no WB key, skipping", project_id)
                     continue
 
-                api_client = WBApiClient(api_key)
-                result = await sync_fbo_supplies(db, project_id, api_client, key.id)
+                # Create sync_log entry
+                sync_log = SyncLog(
+                    integration_id=key.id,
+                    service="wb",
+                    sync_type="fbo_supplies",
+                    started_at=utcnow(),
+                    status="RUNNING",
+                )
+                db.add(sync_log)
+                await db.flush()
+                log_id = sync_log.id
 
+                api_client = WBApiClient(api_key)
+                result = await asyncio.wait_for(
+                    sync_fbo_supplies(db, project_id, api_client, key.id),
+                    timeout=600,
+                )
+
+                rows_synced = result.get("synced", 0)
+                log_status = "OK"
                 logger.info(
                     "FBO supplies sync: project %d — %d synced (%d new, %d updated)",
                     project_id,
@@ -52,7 +77,16 @@ async def sync_all_projects_fbo_supplies():
                 )
                 ok += 1
 
+        except asyncio.TimeoutError:
+            log_status = "TIMEOUT"
+            logger.error("FBO supplies sync: project %d — TIMEOUT (600s)", project_id)
+            errors += 1
+            try:
+                await send_alert(f"FBO sync TIMEOUT for project {project_id}")
+            except Exception:
+                logger.warning("FBO supplies sync: failed to send alert for project %d", project_id)
         except Exception as e:
+            log_status = "ERROR"
             logger.error(
                 "FBO supplies sync: project %d failed — %s",
                 project_id,
@@ -64,6 +98,23 @@ async def sync_all_projects_fbo_supplies():
                 await send_alert(f"FBO sync failed for project {project_id}: {str(e)[:200]}")
             except Exception:
                 logger.warning("FBO supplies sync: failed to send alert for project %d", project_id)
+        finally:
+            # GUARANTEED: update sync_log — never leave RUNNING
+            if log_id is not None:
+                try:
+                    async with AsyncSessionLocal() as db:
+                        from sqlalchemy import update
+
+                        await db.execute(
+                            update(SyncLog).where(SyncLog.id == log_id).values(
+                                status=log_status,
+                                rows_inserted=rows_synced,
+                                finished_at=utcnow(),
+                            )
+                        )
+                        await db.commit()
+                except Exception as log_err:
+                    logger.error("Failed to update sync_log for project %d: %s", project_id, log_err)
 
     logger.info("FBO supplies sync: done — %d ok, %d errors", ok, errors)
 

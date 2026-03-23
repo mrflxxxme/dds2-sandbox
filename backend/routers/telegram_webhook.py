@@ -44,7 +44,9 @@ async def telegram_webhook(request: Request):
     Returns 200 immediately, processes update in background
     to avoid Telegram's read timeout (AI responses can take 30-60s).
     """
-    # Validate secret token
+    # Validate secret token (reject if secret not configured)
+    if not settings.TELEGRAM_WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="Webhook secret not configured")
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
     if secret != settings.TELEGRAM_WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="Invalid webhook secret")

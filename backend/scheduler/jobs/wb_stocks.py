@@ -91,9 +91,12 @@ async def sync_all_projects_wb_stocks():
                 except Exception as e:
                     sync_log.status = "ERROR"
                     sync_log.error_msg = str(e)[:1000]
-                    sync_log.finished_at = utcnow()
-                    await db.commit()
                     raise
+                finally:
+                    # GUARANTEED: update sync_log — never leave RUNNING
+                    if sync_log.status != "OK":
+                        sync_log.finished_at = utcnow()
+                    await db.commit()
 
         except Exception as e:
             logger.error(

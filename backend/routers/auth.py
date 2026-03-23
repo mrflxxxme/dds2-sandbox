@@ -265,6 +265,24 @@ async def change_password(
     return {"status": "ok", "message": "Пароль изменён"}
 
 
+# ─── Logout ──────────────────────────────────────────────────────────────────
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str
+
+
+@router.post("/logout")
+async def logout(
+    body: LogoutRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Revoke the refresh token to end the session."""
+    await revoke_refresh_token(body.refresh_token)
+    logger.info(f"User logged out: {current_user.username} (id={current_user.id})")
+    return {"status": "ok", "message": "Сессия завершена"}
+
+
 # ─── Refresh Token ───────────────────────────────────────────────────────────
 
 

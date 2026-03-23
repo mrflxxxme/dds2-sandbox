@@ -14,7 +14,7 @@ bash scripts/check_conventions.sh                 # Проверка конве�
 ## Железные правила (нарушение = баг)
 1. **project_id** — КАЖДЫЙ запрос к БД MUST фильтровать по `project_id`
 2. **is_deleted** — КАЖДЫЙ запрос к SoftDeleteMixin моделям MUST `.where(Model.is_deleted == False)`
-3. **soft_delete** — удаление: `model.soft_delete()` (НИКОГДА `db.delete()`)
+3. **soft_delete** — удаление моделей с SoftDeleteMixin: `model.soft_delete()` (НИКОГДА `db.delete()` для них)
 4. **datetime** — ТОЛЬКО `from backend.utils.time import utcnow` (НИКОГДА `datetime.utcnow()`)
 5. **деньги** — ТОЛЬКО `Numeric(18, 2)` (НИКОГДА Float)
 6. **SQL** — ТОЛЬКО параметризованный `:param` binding (НИКОГДА f-string в `text()`)
@@ -106,9 +106,10 @@ src/types/api.ts — TypeScript интерфейсы
 | Отчёты | `backend/DOMAIN_REPORTS.md` | services/reports/, opiu_service.py, wb_bdr_service.py |
 | Планирование | `backend/DOMAIN_PLANNING.md` | services/planning/, routers/planning.py |
 | Себестоимость | `backend/DOMAIN_COST.md` | services/cost/, etl/cost_parsers.py |
-| Склад | `backend/DOMAIN_WAREHOUSE.md` | services/warehouse_service.py, services/fbo_supply_service.py |
+| Склад | `backend/DOMAIN_WAREHOUSE.md` | services/warehouse_*, services/fbo_supply_service.py |
 | WB Интеграция | `backend/DOMAIN_WB.md` | integrations/, services/funnel/, scheduler/jobs/ |
 | Сборка/Логистика | `backend/DOMAIN_ASSEMBLY.md` | services/assembly_service.py, routers/assembly.py |
+| Telegram/AI | `backend/DOMAIN_TELEGRAM.md` | integrations/telegram_bot.py, services/ai/, services/telegram_service.py |
 | Фронтенд | `frontend-react/DOMAIN_FRONTEND.md` | src/app/, src/lib/api.ts |
 
 ## Перед началом задачи
@@ -138,12 +139,14 @@ src/types/api.ts — TypeScript интерфейсы
 
 ## Антипаттерны (НЕ ДЕЛАТЬ)
 - Запрос без `project_id` или `is_deleted` фильтра
-- `db.delete()` вместо `soft_delete()`
+- `db.delete()` на моделях с SoftDeleteMixin (вместо `soft_delete()`)
 - f-string в SQL `text()`
 - Float для денег
 - `datetime.utcnow()` / `datetime.now()`
 - Бизнес-логика в роутере
 - `.scalars().all()` без `.limit()`
-- `ilike(f"%{input}%")` без экранирования `%`/`_`
+- `ilike(f"%{input}%")` без экранирования `%`/`_` и без `escape="\\"`
 - Мутация без `invalidate_cache()`
-- Сервис > 400 строк без разбиения
+- Сервис > 500 строк без разбиения
+- `asyncio.get_event_loop()` вместо `asyncio.get_running_loop()`
+- `print()` в backend коде вместо `logging.getLogger()`

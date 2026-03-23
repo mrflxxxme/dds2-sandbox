@@ -83,11 +83,19 @@ class Settings(BaseSettings):
     @field_validator("SECRET_KEY")
     @classmethod
     def validate_secret_key(cls, v: str) -> str:
+        import os
+
+        env = os.getenv("DDS_ENV", "development")
         if not v or v in (
             "",
             "change-me-in-production-use-a-strong-random-key",
             "change-me-to-a-random-64-char-string",
         ):
+            if env == "production":
+                raise ValueError(
+                    "SECRET_KEY MUST be set in production! "
+                    "Generate with: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+                )
             generated = secrets.token_urlsafe(48)
             warnings.warn(
                 f"\n⚠️  SECRET_KEY не задан! Сгенерирован временный ключ.\n"

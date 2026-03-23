@@ -24,16 +24,28 @@
 - `routers/reports_stock.py` — складские отчёты
 - `models/integrations.py` — IntegrationKey, SyncLog, WbFunnelDaily, WbCostOverride, WbWarehouseStock
 - `models/wb_finance.py` — WbFinanceRow, WbFinanceSyncLog
+- `models/wb_order_cancel.py` — WbOrderCancelDaily (статистика отмен)
+- `models/wb_tariff.py` — WbTariff (коэффициенты WB)
+- `services/tariff_service.py` — управление тарифами WB
+- `services/wb_cancel_sync.py` — синхронизация статистики отмен
+- `services/funnel/anomalies.py` — детекция аномалий в рекламе
+- `services/funnel/product_trends.py` — тренды по товарам
+- `services/funnel/capital.py` — расчёт оборотного капитала
+- `services/funnel/bdr_rates.py` — ставки для БДР
+- `services/funnel/stock_helpers.py` — хелперы остатков
+- `scheduler/jobs/wb_stocks.py` — синхронизация остатков WB
 - `utils/crypto.py` — шифрование API-ключей
 
 ## Tables
 - `integration_keys` — зашифрованные API-ключи (service: wb/ozon)
-- `sync_log` — лог синхронизаций (status: RUNNING/OK/ERROR/STALE)
+- `sync_log` — лог синхронизаций (status: RUNNING/OK/ERROR/STALE/TIMEOUT)
 - `wb_funnel_daily` — ежедневные данные воронки по nmID
 - `wb_cost_override` — ручные себестоимости
 - `wb_warehouse_stocks` — остатки по складам
 - `wb_finance_rows` — кэш финансового отчёта WB
 - `wb_finance_sync_log` — лог синхронизации финансов
+- `wb_order_cancel_daily` — ежедневная статистика отмен
+- `wb_tariffs` — коэффициенты WB (SoftDeleteMixin)
 
 ## Business Rules
 
