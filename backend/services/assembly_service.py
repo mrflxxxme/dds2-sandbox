@@ -132,23 +132,38 @@ async def _build_items_with_stock(
     db: AsyncSession,
     request: AssemblyRequest,
 ) -> list[dict]:
-    """Build items list with product_name and stock_quantity."""
-    items_out: list[dict] = []
-    for item in request.items:
-        # Get nomenclature name
-        nom_result = await db.execute(select(Nomenclature).where(Nomenclature.id == item.nomenclature_id))
-        nom = nom_result.scalar_one_or_none()
-        product_name = (nom.subject or nom.article_seller or item.barcode) if nom else item.barcode
+    """Build items list with product_name and stock_quantity.
 
-        # Get stock quantity
+    Uses batch queries instead of per-item N+1 queries.
+    """
+    if not request.items:
+        return []
+
+    nom_ids = [item.nomenclature_id for item in request.items if item.nomenclature_id]
+
+    # Batch load nomenclature names
+    nom_map: dict[int, Nomenclature] = {}
+    if nom_ids:
+        nom_result = await db.execute(select(Nomenclature).where(Nomenclature.id.in_(nom_ids)))
+        nom_map = {n.id: n for n in nom_result.scalars().all()}
+
+    # Batch load stock quantities
+    stock_map: dict[int, int] = {}
+    if nom_ids:
         stock_result = await db.execute(
-            select(WarehouseStock.quantity).where(
+            select(WarehouseStock.nomenclature_id, WarehouseStock.quantity).where(
                 WarehouseStock.project_id == request.project_id,
                 WarehouseStock.warehouse_id == request.warehouse_id,
-                WarehouseStock.nomenclature_id == item.nomenclature_id,
+                WarehouseStock.nomenclature_id.in_(nom_ids),
             )
         )
-        stock_qty = stock_result.scalar_one_or_none() or 0
+        for row in stock_result.all():
+            stock_map[row.nomenclature_id] = stock_map.get(row.nomenclature_id, 0) + row.quantity
+
+    items_out: list[dict] = []
+    for item in request.items:
+        nom = nom_map.get(item.nomenclature_id)
+        product_name = (nom.subject or nom.article_seller or item.barcode) if nom else item.barcode
 
         items_out.append(
             {
@@ -157,7 +172,7 @@ async def _build_items_with_stock(
                 "barcode": item.barcode,
                 "quantity": item.quantity,
                 "product_name": product_name,
-                "stock_quantity": stock_qty,
+                "stock_quantity": stock_map.get(item.nomenclature_id, 0),
             }
         )
     return items_out
@@ -172,7 +187,12 @@ async def _build_response(
     Loads warehouse.name, wb_fbo_supply.name, wb_fbo_supply.warehouse_name.
     Computes total_weight_kg = pallets_count * pallet_weight_kg.
     """
-    await db.refresh(request, ["warehouse", "wb_fbo_supply", "items"])
+    # Relationships are pre-loaded via selectinload in list/get queries.
+    # Refresh only for direct calls (e.g. after create/update).
+    try:
+        _ = request.warehouse
+    except Exception:
+        await db.refresh(request, ["warehouse", "wb_fbo_supply", "items"])
 
     pallets = request.pallets_count or 0
     weight = request.pallet_weight_kg or Decimal("0")
@@ -262,7 +282,11 @@ async def list_assembly_requests(
 
     # Items
     items_q = (
-        base.options(selectinload(AssemblyRequest.items))
+        base.options(
+            selectinload(AssemblyRequest.items),
+            selectinload(AssemblyRequest.warehouse),
+            selectinload(AssemblyRequest.wb_fbo_supply),
+        )
         .order_by(AssemblyRequest.created_at.desc())
         .limit(limit)
         .offset(offset)
@@ -283,7 +307,11 @@ async def get_assembly_request(
     """
     result = await db.execute(
         select(AssemblyRequest)
-        .options(selectinload(AssemblyRequest.items))
+        .options(
+            selectinload(AssemblyRequest.items),
+            selectinload(AssemblyRequest.warehouse),
+            selectinload(AssemblyRequest.wb_fbo_supply),
+        )
         .where(
             AssemblyRequest.id == request_id,
             AssemblyRequest.project_id == project_id,

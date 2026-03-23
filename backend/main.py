@@ -5,15 +5,16 @@ Entry point: lifespan, middleware, router registration.
 See AGENTS.md for full architecture overview.
 """
 
+import asyncio
 import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from backend.auth import ensure_default_admin, get_current_user, require_admin
 from backend.config import settings
@@ -86,15 +87,28 @@ logging.root.setLevel(logging.INFO)
 logger = logging.getLogger("dds")
 
 
-class RequestIdMiddleware(BaseHTTPMiddleware):
-    """Add X-Request-ID to each request for traceability."""
+class RequestIdMiddleware:
+    """Add X-Request-ID to each request for traceability (pure ASGI)."""
 
-    async def dispatch(self, request: Request, call_next):
-        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4())[:8])
-        request.state.request_id = request_id
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request_id
-        return response
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        headers = dict(scope.get("headers", []))
+        request_id = headers.get(b"x-request-id", b"").decode() or str(uuid.uuid4())[:8]
+        scope.setdefault("state", {})["request_id"] = request_id
+
+        async def send_wrapper(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers_list = list(message.get("headers", []))
+                headers_list.append([b"x-request-id", request_id.encode()])
+                message = {**message, "headers": headers_list}
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
 
 
 @asynccontextmanager
@@ -233,83 +247,110 @@ app.add_middleware(SlowRequestMiddleware)
 # ─── Audit Log Middleware ────────────────────────────────────────────────────
 
 
-class AuditLogMiddleware(BaseHTTPMiddleware):
-    """Log all mutation requests (POST/PUT/PATCH/DELETE) to audit_log table."""
+_AUDIT_SKIP_PATHS = {
+    "/health",
+    "/api/v1/auth/login",
+    "/api/v1/auth/register",
+    "/api/v1/auth/refresh",
+    "/api/v1/bot/webhook",
+}
 
-    SKIP_PATHS = {
-        "/health",
-        "/api/v1/auth/login",
-        "/api/v1/auth/register",
-        "/api/v1/auth/refresh",
-        "/api/v1/bot/webhook",
-    }
 
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
+def _extract_user_id_from_headers(headers: dict[bytes, bytes]) -> int | None:
+    """Extract user_id from JWT Authorization header."""
+    try:
+        auth_header = (headers.get(b"authorization") or b"").decode()
+        if auth_header.startswith("Bearer "):
+            import jwt
 
-        # Only log mutations
-        if request.method in ("GET", "OPTIONS", "HEAD"):
-            return response
+            token = auth_header[7:]
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+            return payload.get("sub") or payload.get("user_id")
+    except Exception:
+        pass
+    return None
 
-        # Skip non-API and auth paths
-        path = request.url.path
-        if path in self.SKIP_PATHS or not path.startswith("/api/"):
-            return response
 
-        # Fire-and-forget audit write
-        try:
-            user_id = self._extract_user_id(request)
-            if user_id is None:
-                return response  # Skip audit for unauthenticated requests
+def _extract_project_id_from_headers(headers: dict[bytes, bytes]) -> int | None:
+    """Extract project_id from X-Project-Id header."""
+    try:
+        pid = (headers.get(b"x-project-id") or b"").decode()
+        return int(pid) if pid else None
+    except (ValueError, TypeError):
+        return None
 
-            project_id = self._extract_project_id(request)
-            ip = request.headers.get("X-Real-IP", request.client.host if request.client else None)
 
+async def _write_audit_log(
+    user_id: int,
+    project_id: int | None,
+    method: str,
+    path: str,
+    status_code: int,
+    ip: str | None,
+) -> None:
+    """Write audit log entry with timeout. Best-effort, never blocks."""
+    try:
+        async with asyncio.timeout(5):
             async with AsyncSessionLocal() as session:
                 from backend.models.audit import AuditLog
                 from backend.utils.time import utcnow
 
-                log = AuditLog(
-                    user_id=user_id,
-                    project_id=project_id,
-                    method=request.method,
-                    endpoint=path,
-                    status_code=response.status_code,
-                    ip=ip,
-                    created_at=utcnow(),
+                session.add(
+                    AuditLog(
+                        user_id=user_id,
+                        project_id=project_id,
+                        method=method,
+                        endpoint=path,
+                        status_code=status_code,
+                        ip=ip,
+                        created_at=utcnow(),
+                    )
                 )
-                session.add(log)
                 await session.commit()
-        except Exception as e:
-            logger.warning("AuditLog write failed: %s", e)
+    except Exception as e:
+        logger.warning("AuditLog write failed: %s", e)
 
-        return response
 
-    @staticmethod
-    def _extract_user_id(request: Request) -> int | None:
-        """Extract user_id from JWT Authorization header."""
-        try:
-            auth_header = request.headers.get("Authorization", "")
-            if auth_header.startswith("Bearer "):
-                import jwt
+class AuditLogMiddleware:
+    """Log mutation requests to audit_log (pure ASGI, background task)."""
 
-                from backend.config import settings
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-                token = auth_header[7:]
-                payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-                return payload.get("sub") or payload.get("user_id")
-        except Exception:
-            pass
-        return None
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
 
-    @staticmethod
-    def _extract_project_id(request: Request) -> int | None:
-        """Extract project_id from X-Project-Id header."""
-        try:
-            pid = request.headers.get("X-Project-Id")
-            return int(pid) if pid else None
-        except (ValueError, TypeError):
-            return None
+        method = scope.get("method", "GET")
+        path = scope.get("path", "")
+
+        # Skip non-mutations and non-API paths
+        if method in ("GET", "OPTIONS", "HEAD") or path in _AUDIT_SKIP_PATHS or not path.startswith("/api/"):
+            return await self.app(scope, receive, send)
+
+        headers = dict(scope.get("headers", []))
+        user_id = _extract_user_id_from_headers(headers)
+        if user_id is None:
+            return await self.app(scope, receive, send)
+
+        project_id = _extract_project_id_from_headers(headers)
+        ip = (headers.get(b"x-real-ip") or b"").decode() or None
+        if not ip:
+            client = scope.get("client")
+            ip = client[0] if client else None
+
+        status_code = 0
+
+        async def send_wrapper(message: Message) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message.get("status", 0)
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+        # Fire-and-forget in background task — never blocks response
+        asyncio.create_task(_write_audit_log(user_id, project_id, method, path, status_code, ip))
 
 
 app.add_middleware(AuditLogMiddleware)
