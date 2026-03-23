@@ -22,6 +22,7 @@ services:
       MINIO_BUCKET: ${MINIO_BUCKET:-dds-files}
       MINIO_SECURE: "false"
       DDS_ROLE: api
+      DDS_ENV: production
     ports:
       - "10.0.0.2:8000:8000"
     deploy:
@@ -52,6 +53,7 @@ services:
       MINIO_BUCKET: ${MINIO_BUCKET:-dds-files}
       MINIO_SECURE: "false"
       DDS_ROLE: worker
+      DDS_ENV: production
       DB_POOL_SIZE: 5
       DB_MAX_OVERFLOW: 10
     entrypoint: ["./entrypoint-worker.sh"]
