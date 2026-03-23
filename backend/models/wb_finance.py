@@ -79,6 +79,7 @@ class WbFinanceRow(Base):
         UniqueConstraint("project_id", "rrd_id", name="uq_wb_finance_rrd"),
         Index("ix_wb_finance_project_dates", "project_id", "date_from", "date_to"),
         Index("ix_wb_finance_project_rr_dt", "project_id", "rr_dt"),
+        Index("ix_wb_finance_project_sale_dt", "project_id", "sale_dt"),
         Index("ix_wb_finance_project_sa", "project_id", "sa_name"),
     )
 

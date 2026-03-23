@@ -102,15 +102,15 @@ async def _get_fact_daily(
 
     result = await db.execute(
         text(
-            f"SELECT rr_dt, "
+            f"SELECT COALESCE(sale_dt, rr_dt) AS dt, "
             f"  COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' "
             f"    THEN retail_price_withdisc_rub ELSE 0 END), 0) "
             f"  - COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' "
             f"    THEN retail_price_withdisc_rub ELSE 0 END), 0) AS realization "
             f"FROM wb_finance_rows "
-            f"WHERE project_id = :pid AND rr_dt BETWEEN :start AND :end "
+            f"WHERE project_id = :pid AND COALESCE(sale_dt, rr_dt) BETWEEN :start AND :end "
             f"{brand_clause} "
-            f"GROUP BY rr_dt ORDER BY rr_dt"
+            f"GROUP BY dt ORDER BY dt"
         ),
         params,
     )

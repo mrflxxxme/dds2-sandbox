@@ -13,8 +13,8 @@ ZERO = D("0")
 # ─── SQL aggregation query ────────────────────────────────────────────────────
 
 _DATE_FILTER = """(
-    (rr_dt BETWEEN :date_from AND :date_to)
-    OR (rr_dt IS NULL AND date_from >= :date_from AND date_to <= :date_to)
+    COALESCE(sale_dt, rr_dt) BETWEEN :date_from AND :date_to
+    OR (sale_dt IS NULL AND rr_dt IS NULL AND date_from >= :date_from AND date_to <= :date_to)
   )"""
 
 _SELECT_COLS_BDR = """
