@@ -32,6 +32,7 @@ from backend.services.bdr_enrichment import (
 from backend.services.bdr_loaders import (
     load_ads,
     load_avg_costs,
+    load_cancel_stats,
     load_cost_overrides,
     load_orders_stocks,
     load_tax_settings,
@@ -122,6 +123,7 @@ async def get_wb_bdr(
     cost_map = await load_avg_costs(db, project_id)
     cost_overrides = await load_cost_overrides(db, project_id)
     tax_info = await load_tax_settings(db, project_id, date_from, date_to)
+    cancel_stats = await load_cancel_stats(db, project_id, date_from, date_to)
 
     period_days = max((date_to - date_from).days + 1, 1)
 
@@ -168,6 +170,12 @@ async def get_wb_bdr(
         metrics["orders_sum"] = os_data.get("orders_sum", 0)
         metrics["stocks_wb"] = os_data.get("stocks_wb", 0)
 
+        # Per-article buyout from order cancel data (more accurate than finance report)
+        cs = cancel_stats.get(nm_id)
+        if cs and cs["total"] > 0:
+            delivered = cs["total"] - cs["cancelled"]
+            metrics["buyout_pct"] = round(float(delivered / cs["total"] * 100), 2)
+
         metrics["_period_days"] = period_days
 
         result_articles.append(metrics)
@@ -182,8 +190,16 @@ async def get_wb_bdr(
     total_sale_qty = summary_result.get("sale_qty_gross", 0) or summary_result.get("sale_qty", 0)
     total_ret_qty = summary_result.get("ret_qty", 0)
     net_sale_qty = summary_result.get("sale_qty", 0)
-    total_qty = total_sale_qty + total_ret_qty
-    summary_result["buyout_pct"] = round(total_sale_qty / total_qty * 100, 2) if total_qty > 0 else 0
+
+    # Buyout % from order cancel data (accurate), fallback to finance report formula
+    total_orders_all = sum(cs["total"] for cs in cancel_stats.values())
+    total_cancelled_all = sum(cs["cancelled"] for cs in cancel_stats.values())
+    if total_orders_all > 0:
+        delivered = total_orders_all - total_cancelled_all
+        summary_result["buyout_pct"] = round(delivered / total_orders_all * 100, 2)
+    else:
+        total_qty = total_sale_qty + total_ret_qty
+        summary_result["buyout_pct"] = round(total_sale_qty / total_qty * 100, 2) if total_qty > 0 else 0
     summary_result["avg_sale_price"] = (
         round(summary_result.get("sales_amount", 0) / net_sale_qty, 2) if net_sale_qty > 0 else 0
     )
