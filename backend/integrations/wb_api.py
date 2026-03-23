@@ -78,6 +78,8 @@ class WBApiClient:
                     )
                 if response.status_code >= 500:
                     raise ValueError(f"WB API server error: HTTP {response.status_code}")
+                if response.status_code == 204:
+                    return []  # No data for requested period (normal for current day)
                 if response.status_code != 200:
                     raise ValueError(f"WB API error: HTTP {response.status_code} — {response.text[:200]}")
 

@@ -127,7 +127,7 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                         date_from = max_daily_date + timedelta(days=1)
                     else:
                         date_from = last_monday
-                    date_to = today  # include today (WB may have partial data)
+                    date_to = today - timedelta(days=1)  # yesterday — today's data not yet available on WB
 
                     if date_from > date_to:
                         logger.info(
@@ -236,7 +236,7 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                     cancel_err,
                 )
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log_status = "TIMEOUT"
             logger.error("💰 WB Finance %s: project %s — TIMEOUT (600s)", job_label, pid)
             await send_alert(
@@ -262,7 +262,9 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                         from sqlalchemy import update
 
                         await db.execute(
-                            update(SyncLog).where(SyncLog.id == log_id).values(
+                            update(SyncLog)
+                            .where(SyncLog.id == log_id)
+                            .values(
                                 status=log_status,
                                 rows_inserted=rows_synced,
                                 finished_at=utcnow(),
