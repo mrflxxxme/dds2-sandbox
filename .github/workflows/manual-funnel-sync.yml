@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: Create and upload sync script
+      - name: Run sync on App Server
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           HOST: ${{ secrets.DEPLOY_HOST }}
@@ -36,55 +36,18 @@ jobs:
           echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
-          # Create script with no indentation issues
-          cat > /tmp/dds_sync.py << 'PYEOF'
-          import sys
-          sys.path.insert(0, '/app')
+          # Use single SSH command with inline python via docker exec
+          # This is the same approach that works when run manually via SSH
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} \
+            "cd /opt/dds_app && docker compose -f docker-compose.app.yml exec -T -w /app worker python3 -c \"
+          import sys; sys.path.insert(0, '/app')
           import asyncio, json, logging
           logging.basicConfig(level=logging.INFO)
           async def main():
               from backend.database import AsyncSessionLocal
               from backend.services.funnel.sync import run_funnel_sync
-              pid = int(sys.argv[1])
-              d_from, d_to = sys.argv[2], sys.argv[3]
               async with AsyncSessionLocal() as db:
-                  result = await run_funnel_sync(db, pid, d_from, d_to, include_completed_campaigns=True)
+                  result = await run_funnel_sync(db, ${PROJECT_ID}, '${DATE_FROM}', '${DATE_TO}', include_completed_campaigns=True)
                   print(json.dumps(result, indent=2, default=str))
           asyncio.run(main())
-          PYEOF
-
-          # Strip leading whitespace (heredoc indentation)
-          python3 -c "
-          import textwrap, pathlib
-          p = pathlib.Path('/tmp/dds_sync.py')
-          p.write_text(textwrap.dedent(p.read_text()))
-          "
-
-          echo "=== Script ==="
-          cat /tmp/dds_sync.py
-
-          # Upload to server
-          scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key /tmp/dds_sync.py ${USER}@${HOST}:/tmp/dds_sync.py
-
-          # Docker cp into worker and run
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} \
-            "cd /opt/dds_app && \
-             WORKER=\$(docker compose -f docker-compose.app.yml ps -q worker) && \
-             docker cp /tmp/dds_sync.py \${WORKER}:/tmp/dds_sync.py && \
-             docker compose -f docker-compose.app.yml exec -T worker python3 /tmp/dds_sync.py ${PROJECT_ID} ${DATE_FROM} ${DATE_TO}"
-
-      - name: Verify data on DB server
-        env:
-          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          HOST: ${{ secrets.DATA_HOST }}
-          USER: ${{ secrets.DEPLOY_USER }}
-          DATE_FROM: ${{ inputs.date_from }}
-          DATE_TO: ${{ inputs.date_to }}
-          PROJECT_ID: ${{ inputs.project_id }}
-        run: |
-          mkdir -p ~/.ssh
-          echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} \
-            "cd /opt/dds_data && docker compose exec -T db psql -U dds dds_db -c \"SELECT date, COUNT(*) as products, SUM(open_card) as opens, SUM(orders_count) as orders, SUM(orders_sum_rub)::numeric(18,2) as orders_sum, SUM(adv_sum)::numeric(18,2) as adv_sum, SUM(adv_clicks) as adv_clicks FROM wb_funnel_daily WHERE date BETWEEN '${DATE_FROM}' AND '${DATE_TO}' AND project_id = ${PROJECT_ID} GROUP BY date ORDER BY date;\""
+          \""
