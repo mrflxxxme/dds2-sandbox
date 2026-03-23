@@ -1,0 +1,73 @@
+name: Check Sync Log
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Query sync_log on production DB
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Install sshpass
+        run: sudo apt-get install -y sshpass
+
+      - name: Query sync_log and funnel data
+        env:
+          SSHPASS: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DATA_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSHPASS" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} '
+            cd /opt/dds_data
+
+            echo "=== LAST 20 SYNC LOGS ==="
+            docker compose exec -T db psql -U dds dds_db -c "
+              SELECT id, sync_type, status, started_at, finished_at,
+                     rows_fetched, rows_inserted, LEFT(error_msg, 150) as err
+              FROM sync_log
+              ORDER BY started_at DESC
+              LIMIT 20;
+            "
+
+            echo ""
+            echo "=== SYNC LOGS FOR TODAY (2026-03-23) ==="
+            docker compose exec -T db psql -U dds dds_db -c "
+              SELECT id, sync_type, status, started_at, finished_at,
+                     rows_inserted, LEFT(error_msg, 200) as err
+              FROM sync_log
+              WHERE started_at >= '\''2026-03-23'\''
+              ORDER BY started_at;
+            "
+
+            echo ""
+            echo "=== FUNNEL DATA FOR 2026-03-22 (aggregated) ==="
+            docker compose exec -T db psql -U dds dds_db -c "
+              SELECT date,
+                     COUNT(*) as products,
+                     SUM(open_card) as total_opens,
+                     SUM(orders_count) as total_orders,
+                     SUM(orders_sum_rub)::numeric(18,2) as total_orders_sum,
+                     SUM(adv_sum)::numeric(18,2) as total_adv_sum,
+                     SUM(adv_clicks) as total_adv_clicks,
+                     SUM(adv_views) as total_adv_views
+              FROM wb_funnel_daily
+              WHERE date IN ('\''2026-03-21'\'', '\''2026-03-22'\'', '\''2026-03-23'\'')
+                AND project_id = 4
+              GROUP BY date
+              ORDER BY date;
+            "
+
+            echo ""
+            echo "=== SCHEDULER STATUS ==="
+            docker compose -f /opt/dds_app/docker-compose.app.yml exec -T worker python3 -c "
+            import requests
+            r = requests.get('\''http://localhost:8000/api/v1/funnel/sync_status'\'', timeout=5)
+            import json
+            print(json.dumps(r.json(), indent=2, default=str))
+            " 2>&1 || echo "Could not query scheduler status"
+          '
