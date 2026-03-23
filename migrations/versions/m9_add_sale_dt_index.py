@@ -16,10 +16,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-        "ix_wb_finance_project_sale_dt "
-        "ON wb_finance_rows (project_id, sale_dt)"
+    op.create_index(
+        "ix_wb_finance_project_sale_dt",
+        "wb_finance_rows",
+        ["project_id", "sale_dt"],
+        if_not_exists=True,
     )
 
 
