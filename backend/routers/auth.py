@@ -291,10 +291,11 @@ class RefreshRequest(BaseModel):
 
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
+async def refresh_token(body: RefreshRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Exchange a valid refresh token for a new access + refresh token pair.
     The old refresh token is revoked (token rotation for security).
     """
+    await check_rate_limit(request, "refresh")
     user_id = await verify_refresh_token(body.refresh_token)
     if user_id is None:
         raise HTTPException(

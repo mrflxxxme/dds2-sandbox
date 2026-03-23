@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     SECRET_KEY: str = ""
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30  # 30 min (short-lived, refresh extends session)
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30  # 30 days
-    MIN_PASSWORD_LENGTH: int = 6
+    MIN_PASSWORD_LENGTH: int = 8
 
     # Environment
     DDS_ENV: str = "development"  # development | staging | production
