@@ -1,9 +1,10 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
+import { Toast } from '@/components';
 import type { AssemblyRequest, AssemblyStatus, Warehouse } from '@/types/api';
 
 // ─── Status config ──────────────────────────────────────────────────────────
@@ -18,7 +19,9 @@ const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> =
     CANCELLED:        { label: 'Отменена',           className: 'badge-secondary' },
 };
 
-const STATUS_OPTIONS: { value: string; label: string }[] = [
+const EDITABLE_STATUSES: AssemblyStatus[] = ['PENDING', 'IN_PROGRESS', 'READY'];
+
+const STATUS_OPTIONS_FILTER: { value: string; label: string }[] = [
     { value: '', label: 'Все статусы' },
     { value: 'PENDING', label: 'Ожидает сборку' },
     { value: 'IN_PROGRESS', label: 'В сборке' },
@@ -28,6 +31,140 @@ const STATUS_OPTIONS: { value: string; label: string }[] = [
     { value: 'DELIVERED', label: 'Принята WB' },
     { value: 'CANCELLED', label: 'Отменена' },
 ];
+
+// ─── Inline Status Badge ────────────────────────────────────────────────────
+
+function StatusBadge({
+    item,
+    onStatusChange,
+}: {
+    item: AssemblyRequest;
+    onStatusChange: (id: number, newStatus: AssemblyStatus) => void;
+}) {
+    const status = STATUS_MAP[item.status] || { label: item.status, className: '' };
+    const canEdit = EDITABLE_STATUSES.includes(item.status);
+
+    if (!canEdit) {
+        return (
+            <span
+                className={`badge ${status.className}`}
+                style={item.status === 'SHIPPED' ? { opacity: 0.6 } : undefined}
+            >
+                {status.label}
+            </span>
+        );
+    }
+
+    return (
+        <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+            <span className={`badge ${status.className}`} style={{ paddingRight: 20 }}>
+                {status.label}
+                <span style={{ position: 'absolute', right: 4, top: '50%', transform: 'translateY(-50%)', fontSize: 10, opacity: 0.6 }}>▾</span>
+            </span>
+            <select
+                value={item.status}
+                onChange={(e) => {
+                    e.stopPropagation();
+                    onStatusChange(item.id, e.target.value as AssemblyStatus);
+                }}
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                    position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer',
+                    width: '100%', height: '100%',
+                }}
+            >
+                <option value="PENDING">Ожидает сборку</option>
+                <option value="IN_PROGRESS">В сборке</option>
+                <option value="READY">Готово</option>
+            </select>
+        </span>
+    );
+}
+
+// ─── Inline Editable Cell ───────────────────────────────────────────────────
+
+function EditableCell({
+    value,
+    suffix,
+    editable,
+    highlight,
+    step,
+    onSave,
+}: {
+    value: number;
+    suffix?: string;
+    editable: boolean;
+    highlight?: boolean;
+    step?: number;
+    onSave: (val: number) => void;
+}) {
+    const [editing, setEditing] = useState(false);
+    const [inputVal, setInputVal] = useState('');
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (editing && inputRef.current) {
+            inputRef.current.focus();
+            inputRef.current.select();
+        }
+    }, [editing]);
+
+    const handleSave = () => {
+        setEditing(false);
+        const num = parseFloat(inputVal);
+        if (!isNaN(num) && num !== value) {
+            onSave(num);
+        }
+    };
+
+    if (editing && editable) {
+        return (
+            <input
+                ref={inputRef}
+                type="number"
+                min={0}
+                step={step || 1}
+                value={inputVal}
+                onChange={(e) => setInputVal(e.target.value)}
+                onBlur={handleSave}
+                onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleSave();
+                    if (e.key === 'Escape') setEditing(false);
+                }}
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                    width: 70, textAlign: 'right', fontSize: 13,
+                    padding: '2px 6px', border: '1px solid var(--color-primary)',
+                    borderRadius: 4, outline: 'none',
+                }}
+            />
+        );
+    }
+
+    const displayVal = value > 0 ? (suffix ? `${formatNumber(value, 1)} ${suffix}` : String(value)) : '\u2014';
+
+    return (
+        <span
+            onClick={(e) => {
+                if (!editable) return;
+                e.stopPropagation();
+                setInputVal(String(value || ''));
+                setEditing(true);
+            }}
+            style={{
+                cursor: editable ? 'pointer' : 'default',
+                padding: '2px 6px',
+                borderRadius: 4,
+                transition: 'background 0.15s',
+                ...(highlight ? { background: 'rgba(239, 68, 68, 0.1)', color: 'var(--color-danger)', fontWeight: 500 } : {}),
+                ...(editable ? { borderBottom: '1px dashed var(--color-border)' } : {}),
+            }}
+            title={editable ? 'Нажмите для редактирования' : undefined}
+        >
+            {displayVal}
+        </span>
+    );
+}
 
 // ─── Component ──────────────────────────────────────────────────────────────
 
@@ -41,6 +178,7 @@ export default function AssemblyListPage() {
     const [total, setTotal] = useState(0);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
     // Filters
     const [warehouseId, setWarehouseId] = useState<number | ''>('');
@@ -95,10 +233,94 @@ export default function AssemblyListPage() {
 
     const totalPages = Math.ceil(total / PAGE_SIZE);
 
+    // ─── Inline actions ─────────────────────────────────────────────────
+
+    const updateItemLocal = (id: number, patch: Partial<AssemblyRequest>) => {
+        setItems(prev => prev.map(it => it.id === id ? { ...it, ...patch } : it));
+    };
+
+    const handleStatusChange = async (id: number, newStatus: AssemblyStatus) => {
+        const item = items.find(it => it.id === id);
+        if (!item || item.status === newStatus) return;
+
+        // Client-side validation for READY
+        if (newStatus === 'READY') {
+            if (!item.pallets_count || item.pallets_count <= 0 || !item.total_weight_kg || item.total_weight_kg <= 0) {
+                setToast({ message: 'Укажите количество палет и вес перед переводом в «Готово»', type: 'error' });
+                return;
+            }
+        }
+
+        const oldStatus = item.status;
+        updateItemLocal(id, { status: newStatus });
+
+        try {
+            if (newStatus === 'IN_PROGRESS') {
+                await api.startAssembly(id);
+            } else if (newStatus === 'READY') {
+                await api.markAssemblyReady(id);
+            } else if (newStatus === 'PENDING') {
+                await api.updateAssemblyRequest(id, { status: 'PENDING' } as never);
+            }
+            setToast({ message: `Статус изменён → ${STATUS_MAP[newStatus]?.label || newStatus}`, type: 'success' });
+        } catch (e: unknown) {
+            updateItemLocal(id, { status: oldStatus });
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка смены статуса', type: 'error' });
+        }
+    };
+
+    const handlePalletsChange = async (item: AssemblyRequest, newPallets: number) => {
+        const oldPallets = item.pallets_count;
+        const oldWeight = item.total_weight_kg || 0;
+
+        // Recalculate pallet_weight_kg: keep total weight, adjust per-pallet
+        const newPalletWeight = newPallets > 0 && oldWeight > 0
+            ? oldWeight / newPallets
+            : item.pallet_weight_kg || 0;
+
+        const newTotal = newPallets * newPalletWeight;
+        updateItemLocal(item.id, { pallets_count: newPallets, total_weight_kg: newTotal });
+
+        try {
+            await api.updateAssemblyRequest(item.id, {
+                pallets_count: newPallets,
+                pallet_weight_kg: Number(newPalletWeight.toFixed(2)),
+            });
+            setToast({ message: 'Палеты обновлены', type: 'success' });
+        } catch (e: unknown) {
+            updateItemLocal(item.id, { pallets_count: oldPallets, total_weight_kg: oldWeight });
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка сохранения', type: 'error' });
+        }
+    };
+
+    const handleWeightChange = async (item: AssemblyRequest, newTotalWeight: number) => {
+        const oldWeight = item.total_weight_kg || 0;
+        const pallets = item.pallets_count || 1;
+        const newPalletWeight = pallets > 0 ? newTotalWeight / pallets : 0;
+
+        updateItemLocal(item.id, { total_weight_kg: newTotalWeight, pallet_weight_kg: newPalletWeight });
+
+        try {
+            await api.updateAssemblyRequest(item.id, {
+                pallets_count: pallets,
+                pallet_weight_kg: Number(newPalletWeight.toFixed(2)),
+            });
+            setToast({ message: 'Вес обновлён', type: 'success' });
+        } catch (e: unknown) {
+            updateItemLocal(item.id, { total_weight_kg: oldWeight });
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка сохранения', type: 'error' });
+        }
+    };
+
     // ─── Render ───────────────────────────────────────────────────────────
 
     return (
         <div className="animate-in">
+            {/* Toast */}
+            {toast && (
+                <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} duration={toast.type === 'error' ? 4000 : 2500} />
+            )}
+
             {/* Header */}
             <div className="page-header">
                 <div>
@@ -140,7 +362,7 @@ export default function AssemblyListPage() {
                             value={statusFilter}
                             onChange={e => { setStatusFilter(e.target.value); setPage(0); }}
                         >
-                            {STATUS_OPTIONS.map(o => (
+                            {STATUS_OPTIONS_FILTER.map(o => (
                                 <option key={o.value} value={o.value}>{o.label}</option>
                             ))}
                         </select>
@@ -204,7 +426,8 @@ export default function AssemblyListPage() {
                         </thead>
                         <tbody>
                             {items.map(item => {
-                                const status = STATUS_MAP[item.status] || { label: item.status, className: '' };
+                                const canEdit = EDITABLE_STATUSES.includes(item.status);
+                                const needsHighlight = item.status === 'IN_PROGRESS';
                                 return (
                                     <tr
                                         key={item.id}
@@ -213,12 +436,7 @@ export default function AssemblyListPage() {
                                     >
                                         <td style={{ fontWeight: 500 }}>{item.number}</td>
                                         <td>
-                                            <span
-                                                className={`badge ${status.className}`}
-                                                style={item.status === 'SHIPPED' ? { opacity: 0.6 } : undefined}
-                                            >
-                                                {status.label}
-                                            </span>
+                                            <StatusBadge item={item} onStatusChange={handleStatusChange} />
                                         </td>
                                         <td style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
                                             {item.warehouse_name || '\u2014'}
@@ -231,9 +449,23 @@ export default function AssemblyListPage() {
                                                 </div>
                                             )}
                                         </td>
-                                        <td style={{ textAlign: 'right' }}>{item.pallets_count}</td>
                                         <td style={{ textAlign: 'right' }}>
-                                            {item.total_weight_kg ? formatNumber(item.total_weight_kg, 1) + ' кг' : '\u2014'}
+                                            <EditableCell
+                                                value={item.pallets_count}
+                                                editable={canEdit}
+                                                highlight={needsHighlight && (!item.pallets_count || item.pallets_count <= 0)}
+                                                onSave={(val) => handlePalletsChange(item, val)}
+                                            />
+                                        </td>
+                                        <td style={{ textAlign: 'right' }}>
+                                            <EditableCell
+                                                value={item.total_weight_kg || 0}
+                                                suffix="кг"
+                                                editable={canEdit}
+                                                highlight={needsHighlight && (!item.total_weight_kg || item.total_weight_kg <= 0)}
+                                                step={0.1}
+                                                onSave={(val) => handleWeightChange(item, val)}
+                                            />
                                         </td>
                                         <td>{formatDate(item.estimated_ready_date)}</td>
                                         <td>{formatDate(item.created_at)}</td>
