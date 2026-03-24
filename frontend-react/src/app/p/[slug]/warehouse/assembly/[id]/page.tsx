@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
@@ -147,6 +147,28 @@ export default function AssemblyDetailPage() {
             setError(e instanceof Error ? e.message : 'Ошибка обновления из FBO');
         }
         setActionLoading(false);
+    };
+
+    const canEditFields = assembly && !['SHIPPED', 'DELIVERED', 'CANCELLED'].includes(assembly.status);
+
+    const handleFieldSave = async (field: 'pallets_count' | 'estimated_ready_date', value: number | string) => {
+        if (!assembly) return;
+        const old = { pallets_count: assembly.pallets_count, estimated_ready_date: assembly.estimated_ready_date };
+        try {
+            if (field === 'pallets_count') {
+                const newPallets = Number(value);
+                const weight = assembly.pallet_weight_kg || 0;
+                const newTotal = newPallets * weight;
+                setAssembly({ ...assembly, pallets_count: newPallets, total_weight_kg: newTotal });
+                await api.updateAssemblyRequest(id, { pallets_count: newPallets, pallet_weight_kg: weight });
+            } else {
+                setAssembly({ ...assembly, estimated_ready_date: value as string });
+                await api.updateAssemblyRequest(id, { estimated_ready_date: value as string || undefined });
+            }
+        } catch (e: unknown) {
+            setAssembly({ ...assembly, ...old });
+            setError(e instanceof Error ? e.message : 'Ошибка сохранения');
+        }
     };
 
     // ─── Render ───────────────────────────────────────────────────────────
@@ -307,9 +329,23 @@ export default function AssemblyDetailPage() {
                     <InfoField label="FBO поставка" value={assembly.wb_supply_name || String(assembly.wb_fbo_supply_id)} />
                     <InfoField label="Склад WB" value={assembly.wb_warehouse_name || '\u2014'} />
                     <InfoField label="Создана" value={formatDateTime(assembly.created_at)} />
-                    <InfoField label="Дата готовности (план)" value={formatDate(assembly.estimated_ready_date)} />
+                    <EditableInfoField
+                        label="Дата готовности (план)"
+                        value={assembly.estimated_ready_date?.slice(0, 10) || ''}
+                        displayValue={formatDate(assembly.estimated_ready_date)}
+                        type="date"
+                        editable={!!canEditFields}
+                        onSave={(v) => handleFieldSave('estimated_ready_date', v)}
+                    />
                     <InfoField label="Дата готовности (факт)" value={formatDate(assembly.actual_ready_date)} />
-                    <InfoField label="Палеты" value={String(assembly.pallets_count)} />
+                    <EditableInfoField
+                        label="Палеты"
+                        value={String(assembly.pallets_count || '')}
+                        displayValue={String(assembly.pallets_count)}
+                        type="number"
+                        editable={!!canEditFields}
+                        onSave={(v) => handleFieldSave('pallets_count', Number(v))}
+                    />
                     <InfoField label="Вес 1 палеты" value={assembly.pallet_weight_kg ? formatNumber(assembly.pallet_weight_kg, 1) + ' кг' : '\u2014'} />
                     <InfoField label="Общий вес" value={assembly.total_weight_kg ? formatNumber(assembly.total_weight_kg, 1) + ' кг' : '\u2014'} />
                     {assembly.vehicle_info && (
@@ -557,6 +593,66 @@ function InfoField({ label, value }: { label: string; value: string }) {
         <div>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{label}</div>
             <div style={{ fontSize: 14, fontWeight: 500 }}>{value}</div>
+        </div>
+    );
+}
+
+function EditableInfoField({
+    label, value, displayValue, type, editable, onSave,
+}: {
+    label: string; value: string; displayValue: string;
+    type: 'date' | 'number'; editable: boolean;
+    onSave: (val: string) => void;
+}) {
+    const [editing, setEditing] = useState(false);
+    const [inputVal, setInputVal] = useState(value);
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (editing && inputRef.current) {
+            inputRef.current.focus();
+            if (type === 'number') inputRef.current.select();
+        }
+    }, [editing, type]);
+
+    const handleSave = () => {
+        setEditing(false);
+        if (inputVal !== value) onSave(inputVal);
+    };
+
+    return (
+        <div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{label}</div>
+            {editing && editable ? (
+                <input
+                    ref={inputRef}
+                    type={type}
+                    min={type === 'number' ? 0 : undefined}
+                    value={inputVal}
+                    onChange={(e) => setInputVal(e.target.value)}
+                    onBlur={handleSave}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter') inputRef.current?.blur();
+                        if (e.key === 'Escape') { setInputVal(value); setEditing(false); }
+                    }}
+                    className="bg-white border-2 border-blue-500 rounded-md px-2 py-1 outline-none text-sm font-medium shadow-[0_0_0_3px_rgba(59,130,246,0.1)]"
+                    style={{ width: type === 'number' ? 80 : 140 }}
+                />
+            ) : (
+                <div
+                    onClick={editable ? () => { setInputVal(value); setEditing(true); } : undefined}
+                    className={editable ? 'group cursor-pointer inline-flex items-center gap-1' : ''}
+                    style={{ fontSize: 14, fontWeight: 500 }}
+                    title={editable ? 'Нажмите для редактирования' : undefined}
+                >
+                    {displayValue || '\u2014'}
+                    {editable && (
+                        <svg className="w-3.5 h-3.5 opacity-0 group-hover:opacity-50 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                        </svg>
+                    )}
+                </div>
+            )}
         </div>
     );
 }

@@ -49,9 +49,11 @@ const STATUS_COLORS: Record<string, string> = {
 function StatusBadge({
     item,
     onStatusChange,
+    onShip,
 }: {
     item: AssemblyRequest;
     onStatusChange: (id: number, newStatus: AssemblyStatus) => void;
+    onShip?: (item: AssemblyRequest) => void;
 }) {
     const status = STATUS_MAP[item.status] || { label: item.status, className: '' };
     const canEdit = EDITABLE_STATUSES.includes(item.status);
@@ -59,9 +61,19 @@ function StatusBadge({
 
     if (!canEdit) {
         return (
-            <span className={`inline-block text-xs font-semibold rounded-full py-1.5 px-3 border ${colorClass}`}>
-                {status.label}
-            </span>
+            <div className="inline-flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                <span className={`inline-block text-xs font-semibold rounded-full py-1.5 px-3 border ${colorClass}`}>
+                    {status.label}
+                </span>
+                {item.status === 'VEHICLE_ASSIGNED' && onShip && (
+                    <button
+                        className="text-xs font-semibold rounded-full py-1.5 px-3 border bg-emerald-100 text-emerald-700 border-emerald-200 hover:bg-emerald-200 transition-colors"
+                        onClick={(e) => { e.stopPropagation(); onShip(item); }}
+                    >
+                        Отгрузить
+                    </button>
+                )}
+            </div>
         );
     }
 
@@ -166,6 +178,81 @@ function EditableCell({
                 border border-transparent
                 ${editable ? 'cursor-pointer hover:bg-slate-50 hover:border-slate-200' : ''}
                 ${highlight ? 'bg-red-50 text-red-600' : 'text-slate-700'}
+            `}
+            title={editable ? 'Нажмите для редактирования' : undefined}
+        >
+            {editable && (
+                <svg className="w-3 h-3 mr-1.5 opacity-0 group-hover:opacity-50 transition-opacity text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                </svg>
+            )}
+            <span className="font-medium text-sm">{displayVal}</span>
+        </div>
+    );
+}
+
+// ─── Inline Editable Date Cell ──────────────────────────────────────────────
+
+function EditableDateCell({
+    value,
+    editable,
+    onSave,
+}: {
+    value: string | null | undefined;
+    editable: boolean;
+    onSave: (val: string) => void;
+}) {
+    const [editing, setEditing] = useState(false);
+    const [inputVal, setInputVal] = useState('');
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (editing && inputRef.current) {
+            inputRef.current.focus();
+        }
+    }, [editing]);
+
+    const handleSave = () => {
+        setEditing(false);
+        if (inputVal !== (value?.slice(0, 10) || '')) {
+            onSave(inputVal);
+        }
+    };
+
+    if (editing && editable) {
+        return (
+            <input
+                ref={inputRef}
+                type="date"
+                value={inputVal}
+                onChange={(e) => setInputVal(e.target.value)}
+                onBlur={handleSave}
+                onKeyDown={(e) => {
+                    if (e.key === 'Enter') inputRef.current?.blur();
+                    if (e.key === 'Escape') { setInputVal(value?.slice(0, 10) || ''); setEditing(false); }
+                }}
+                onClick={(e) => e.stopPropagation()}
+                className="bg-white border-2 border-blue-500 rounded-md px-2 py-1 outline-none text-sm font-medium shadow-[0_0_0_3px_rgba(59,130,246,0.1)] transition-all"
+                style={{ minWidth: 130 }}
+            />
+        );
+    }
+
+    const displayVal = value ? formatDate(value) : '\u2014';
+
+    return (
+        <div
+            onClick={(e) => {
+                if (!editable) return;
+                e.stopPropagation();
+                setInputVal(value?.slice(0, 10) || '');
+                setEditing(true);
+            }}
+            className={`
+                group inline-flex items-center px-2 py-1 rounded-md transition-colors
+                border border-transparent
+                ${editable ? 'cursor-pointer hover:bg-slate-50 hover:border-slate-200' : ''}
+                text-slate-700
             `}
             title={editable ? 'Нажмите для редактирования' : undefined}
         >
@@ -289,7 +376,7 @@ export default function AssemblyListPage() {
         // Recalculate pallet_weight_kg: keep total weight, adjust per-pallet
         const newPalletWeight = newPallets > 0 && oldWeight > 0
             ? oldWeight / newPallets
-            : item.pallet_weight_kg || 0;
+            : Number(item.pallet_weight_kg) || 0;
 
         const newTotal = newPallets * newPalletWeight;
         updateItemLocal(item.id, { pallets_count: newPallets, total_weight_kg: newTotal });
@@ -297,7 +384,7 @@ export default function AssemblyListPage() {
         try {
             await api.updateAssemblyRequest(item.id, {
                 pallets_count: newPallets,
-                pallet_weight_kg: Number(newPalletWeight.toFixed(2)),
+                pallet_weight_kg: Math.round(newPalletWeight * 100) / 100,
             });
             setToast({ message: 'Палеты обновлены', type: 'success' });
         } catch (e: unknown) {
@@ -316,12 +403,42 @@ export default function AssemblyListPage() {
         try {
             await api.updateAssemblyRequest(item.id, {
                 pallets_count: pallets,
-                pallet_weight_kg: Number(newPalletWeight.toFixed(2)),
+                pallet_weight_kg: Math.round(newPalletWeight * 100) / 100,
             });
             setToast({ message: 'Вес обновлён', type: 'success' });
         } catch (e: unknown) {
             updateItemLocal(item.id, { total_weight_kg: oldWeight });
             setToast({ message: e instanceof Error ? e.message : 'Ошибка сохранения', type: 'error' });
+        }
+    };
+
+    const handleDateChange = async (item: AssemblyRequest, newDate: string) => {
+        const oldDate = item.estimated_ready_date;
+        updateItemLocal(item.id, { estimated_ready_date: newDate || null });
+
+        try {
+            await api.updateAssemblyRequest(item.id, {
+                estimated_ready_date: newDate || undefined,
+            });
+            setToast({ message: 'Дата готовности обновлена', type: 'success' });
+        } catch (e: unknown) {
+            updateItemLocal(item.id, { estimated_ready_date: oldDate });
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка сохранения', type: 'error' });
+        }
+    };
+
+    const handleShipFromList = async (item: AssemblyRequest) => {
+        if (!confirm(`Отгрузить заявку ${item.number}? Остатки будут списаны со склада.`)) return;
+
+        const oldStatus = item.status;
+        updateItemLocal(item.id, { status: 'SHIPPED' as AssemblyStatus });
+
+        try {
+            await api.shipAssembly(item.id);
+            setToast({ message: `Заявка ${item.number} отгружена`, type: 'success' });
+        } catch (e: unknown) {
+            updateItemLocal(item.id, { status: oldStatus });
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка отгрузки', type: 'error' });
         }
     };
 
@@ -450,7 +567,7 @@ export default function AssemblyListPage() {
                                     >
                                         <td style={{ fontWeight: 500 }}>{item.number}</td>
                                         <td>
-                                            <StatusBadge item={item} onStatusChange={handleStatusChange} />
+                                            <StatusBadge item={item} onStatusChange={handleStatusChange} onShip={handleShipFromList} />
                                         </td>
                                         <td style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
                                             {item.warehouse_name || '\u2014'}
@@ -484,7 +601,13 @@ export default function AssemblyListPage() {
                                                 onSave={(val) => handleWeightChange(item, val)}
                                             />
                                         </td>
-                                        <td>{formatDate(item.estimated_ready_date)}</td>
+                                        <td>
+                                            <EditableDateCell
+                                                value={item.estimated_ready_date}
+                                                editable={canEdit}
+                                                onSave={(val) => handleDateChange(item, val)}
+                                            />
+                                        </td>
                                         <td>{formatDate(item.created_at)}</td>
                                     </tr>
                                 );

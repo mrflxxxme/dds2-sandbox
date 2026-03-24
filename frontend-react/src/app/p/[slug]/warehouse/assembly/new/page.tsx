@@ -96,7 +96,7 @@ export default function AssemblyNewPage() {
             .then((rows: WarehouseStockRow[]) => {
                 const map = new Map<string, number>();
                 for (const row of rows) {
-                    map.set(row.barcode, (map.get(row.barcode) || 0) + row.quantity);
+                    map.set(row.barcode, (map.get(row.barcode) || 0) + row.available);
                 }
                 setStockMap(map);
             })
