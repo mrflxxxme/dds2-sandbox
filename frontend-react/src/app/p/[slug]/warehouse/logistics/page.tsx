@@ -571,6 +571,9 @@ export default function LogisticsPage() {
                                                             <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
                                                                 <div>Палет: {item.pallets_count} &middot; Вес: {item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014'}</div>
                                                                 <div>Позиций: {item.items?.length || 0}</div>
+                                                                {item.wb_supply_id_wb && (
+                                                                    <div style={{ fontFamily: 'monospace', fontSize: 12 }}>Поставка: {item.wb_supply_id_wb}</div>
+                                                                )}
                                                                 {item.wb_warehouse_name && (
                                                                     <div>WB: {item.wb_warehouse_name}</div>
                                                                 )}
