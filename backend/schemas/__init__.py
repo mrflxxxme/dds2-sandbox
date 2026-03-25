@@ -42,6 +42,15 @@ from backend.schemas.integrations import (
     SyncLogSchema,
 )
 
+# Monitoring
+from backend.schemas.monitoring import (
+    MonitoringOverview,
+    SchedulerJobInfo,
+    SchedulerStatus,
+    SyncLogEntry,
+    SyncTypeStatus,
+)
+
 # Planning
 from backend.schemas.planning import (
     BrandPlanSchema,
@@ -208,6 +217,12 @@ __all__ = [
     # Integrations
     "IntegrationKeySchema",
     "SyncLogSchema",
+    # Monitoring
+    "MonitoringOverview",
+    "SchedulerJobInfo",
+    "SchedulerStatus",
+    "SyncLogEntry",
+    "SyncTypeStatus",
     # Tax
     "TaxRateMonth",
     "TaxRateSaveRequest",

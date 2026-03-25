@@ -27,6 +27,7 @@ from backend.routers import (
     funnel,
     import_txn,
     integrations,
+    monitoring,
     planning,
     projects,
     refs,
@@ -168,8 +169,11 @@ async def lifespan(app: FastAPI):
                     import asyncio
 
                     # Remove any active webhook before starting polling
-                    await tg_bot_ref.delete_webhook(drop_pending_updates=True)
-                    logger.info("Telegram bot: webhook deleted before polling")
+                    try:
+                        await tg_bot_ref.delete_webhook(drop_pending_updates=True)
+                        logger.info("Telegram bot: webhook deleted before polling")
+                    except Exception as e:
+                        logger.warning("Telegram bot: failed to delete webhook: %s — polling may fail", e)
                     # Start polling in background task (non-blocking)
                     _polling_task = asyncio.create_task(tg_dp.start_polling(tg_bot_ref))
                     logger.info("Telegram bot: polling started (local dev)")
@@ -413,6 +417,12 @@ app.include_router(
     integrations.router,
     prefix="/api/v1",
     tags=["Integrations"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    monitoring.router,
+    prefix="/api/v1",
+    tags=["Monitoring"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

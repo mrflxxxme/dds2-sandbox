@@ -50,6 +50,7 @@ const navGroups = [
     {
         title: 'Настройки',
         items: [
+            { href: '/monitoring', label: 'Мониторинг', icon: '📡' },
             { href: '/settings', label: 'Настройка проекта', icon: '⚙️' },
             { href: '/team', label: 'Команда', icon: '👥' },
         ],

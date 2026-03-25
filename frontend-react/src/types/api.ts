@@ -944,6 +944,55 @@ export interface ChartTooltipProps {
   label?: string;
 }
 
+// ─── Monitoring ─────────────────────────────────────────────────────────────
+
+export interface SyncTypeStatus {
+  service: string;
+  sync_type: string;
+  last_ok_at: string | null;
+  last_error_at: string | null;
+  last_error_msg: string | null;
+  last_status: string | null;
+  total_24h: number;
+  ok_24h: number;
+  error_24h: number;
+  avg_duration_sec: number | null;
+  is_running: boolean;
+  running_since: string | null;
+}
+
+export interface SchedulerJobInfo {
+  id: string;
+  name: string;
+  next_run: string | null;
+  is_active: boolean;
+}
+
+export interface MonitoringOverview {
+  sync_types: SyncTypeStatus[];
+  scheduler: {
+    running: boolean;
+    jobs: SchedulerJobInfo[];
+  };
+  total_syncs_24h: number;
+  total_errors_24h: number;
+  health: Record<string, string>;
+}
+
+export interface MonitoringSyncLogEntry {
+  id: number;
+  integration_id: number;
+  service: string;
+  sync_type: string;
+  started_at: string | null;
+  finished_at: string | null;
+  status: string;
+  rows_fetched: number;
+  rows_inserted: number;
+  error_msg: string | null;
+  duration_sec: number | null;
+}
+
 export interface PieLabelProps {
   cx: number;
   cy: number;
