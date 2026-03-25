@@ -635,21 +635,30 @@ function EditableInfoField({
                         if (e.key === 'Enter') inputRef.current?.blur();
                         if (e.key === 'Escape') { setInputVal(value); setEditing(false); }
                     }}
-                    className="bg-white border-2 border-blue-500 rounded-md px-2 py-1 outline-none text-sm font-medium shadow-[0_0_0_3px_rgba(59,130,246,0.1)]"
-                    style={{ width: type === 'number' ? 80 : 140 }}
+                    className="form-input"
+                    style={{ width: type === 'number' ? 80 : 160, padding: '4px 8px', fontSize: 14, fontWeight: 500 }}
                 />
             ) : (
                 <div
                     onClick={editable ? () => { setInputVal(value); setEditing(true); } : undefined}
-                    className={editable ? 'group cursor-pointer inline-flex items-center gap-1' : ''}
-                    style={{ fontSize: 14, fontWeight: 500 }}
+                    style={{
+                        fontSize: 14,
+                        fontWeight: 500,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        cursor: editable ? 'pointer' : undefined,
+                        padding: editable ? '2px 8px 2px 0' : undefined,
+                        borderRadius: editable ? 6 : undefined,
+                        transition: 'background 0.15s',
+                    }}
                     title={editable ? 'Нажмите для редактирования' : undefined}
+                    onMouseEnter={editable ? (e) => { e.currentTarget.style.background = 'rgba(59,130,246,0.08)'; } : undefined}
+                    onMouseLeave={editable ? (e) => { e.currentTarget.style.background = ''; } : undefined}
                 >
                     {displayValue || '\u2014'}
                     {editable && (
-                        <svg className="w-3.5 h-3.5 opacity-0 group-hover:opacity-50 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                        </svg>
+                        <span style={{ color: 'var(--color-primary, #3b82f6)', fontSize: 13, opacity: 0.6 }}>✎</span>
                     )}
                 </div>
             )}
