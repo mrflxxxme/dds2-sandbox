@@ -523,7 +523,7 @@ export default function LogisticsPage() {
                                                 {sub.label || 'Без склада'}
                                             </div>
 
-                                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
+                                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
                                                 {sub.items.map(item => {
                                                     const soon = isSoonReady(item);
                                                     const statusCfg = STATUS_MAP[item.status] || { label: item.status, className: '' };
