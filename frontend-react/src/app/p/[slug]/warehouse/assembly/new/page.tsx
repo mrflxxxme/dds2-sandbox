@@ -264,17 +264,53 @@ export default function AssemblyNewPage() {
                             onFocus={() => setFboDropdownOpen(true)}
                         />
                         {fboSupplyId && !fboDropdownOpen && (
-                            <button
-                                type="button"
-                                onClick={() => { setFboSupplyId(''); setFboSearchInput(''); }}
-                                style={{
-                                    position: 'absolute', right: 8, top: 32,
-                                    background: 'none', border: 'none', cursor: 'pointer',
-                                    color: 'var(--color-text-muted)', fontSize: 16,
-                                }}
-                            >
-                                &times;
-                            </button>
+                            <div style={{ position: 'absolute', right: 8, top: 30, display: 'flex', gap: 4 }}>
+                                <button
+                                    type="button"
+                                    title="Обновить данные из WB"
+                                    onClick={async () => {
+                                        try {
+                                            setLoadingFboItems(true);
+                                            await api.syncFboSupplies();
+                                            // Reload items
+                                            const items: WbFboSupplyItem[] = await api.getFboSupplyItems(Number(fboSupplyId));
+                                            const grouped = new Map<string, FormItem>();
+                                            for (const item of items) {
+                                                const existing = grouped.get(item.barcode);
+                                                if (existing) {
+                                                    existing.quantity += item.quantity;
+                                                } else {
+                                                    grouped.set(item.barcode, {
+                                                        barcode: item.barcode,
+                                                        quantity: item.quantity,
+                                                        product_name: item.product_name || item.article_seller || undefined,
+                                                    });
+                                                }
+                                            }
+                                            setFormItems(Array.from(grouped.values()));
+                                            // Reload FBO list to update qty
+                                            await loadFboSupplies();
+                                        } catch { /* ignore */ }
+                                        setLoadingFboItems(false);
+                                    }}
+                                    style={{
+                                        background: 'none', border: 'none', cursor: 'pointer',
+                                        color: 'var(--color-primary)', fontSize: 14,
+                                    }}
+                                >
+                                    🔄
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => { setFboSupplyId(''); setFboSearchInput(''); }}
+                                    style={{
+                                        background: 'none', border: 'none', cursor: 'pointer',
+                                        color: 'var(--color-text-muted)', fontSize: 16,
+                                    }}
+                                >
+                                    &times;
+                                </button>
+                            </div>
                         )}
                         {fboDropdownOpen && (
                             <div style={{
