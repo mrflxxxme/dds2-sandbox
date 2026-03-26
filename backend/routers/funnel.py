@@ -205,6 +205,31 @@ async def get_funnel_data(
     tax_info = await _load_tax_info(db, project)
     bdr_rates_map = await _load_bdr_rates(db, project.id)
 
+    if group_by == "abc":
+        # Use full SKU data + ABC classification
+        data = await funnel_service.get_funnel_by_sku(
+            db,
+            project.id,
+            tax_info,
+            date_from,
+            date_to,
+            brand,
+            subject,
+            bdr_rates_map=bdr_rates_map,
+        )
+        # Add ABC classification
+        from backend.services.funnel.ad_campaigns_service import _assign_abc
+
+        _assign_abc(data, "revenue", "abc_revenue")
+        _assign_abc(data, "profit", "abc_profit")
+        return {
+            "data": data,
+            "tax_info": tax_info,
+            "has_bdr": bool(bdr_rates_map),
+            "detailed": False,
+            "group_by": "abc",
+        }
+
     if group_by == "sku" and not vendor_code:
         data = await funnel_service.get_funnel_by_sku(
             db,

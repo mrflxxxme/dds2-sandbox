@@ -483,7 +483,143 @@ async def get_funnel_by_sku(
         )
 
     # Sort by orders_sum descending, limit
+    # Filter out groups with no orders and no ads
+    data = [d for d in data if d["orders_sum_rub"] > 0 or d["adv_sum"] > 0]
     data.sort(key=lambda x: x["orders_sum_rub"], reverse=True)
+    return data[:limit]
+
+
+async def get_funnel_abc_analysis(
+    db: AsyncSession,
+    pid: int,
+    tax_info: dict,
+    date_from: str | None,
+    date_to: str | None,
+    brand: str | None,
+    subject: str | None,
+    bdr_rates_map: BdrRatesLookup | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    """ABC analysis — group by nm_id, compute revenue/profit from BDR, assign ABC categories.
+
+    Uses the same _assign_abc logic as ad_campaigns_service.
+    Returns simplified rows: ABC badges, revenue, profit, margin, orders, ads, DRR.
+    """
+    from backend.services.funnel.ad_campaigns_service import _assign_abc
+
+    q = select(WbFunnelDaily).where(WbFunnelDaily.project_id == pid)
+
+    if date_from:
+        q = q.where(WbFunnelDaily.date >= date.fromisoformat(date_from))
+    if date_to:
+        q = q.where(WbFunnelDaily.date <= date.fromisoformat(date_to))
+    if subject:
+        q = q.where(WbFunnelDaily.subject == subject)
+    if brand:
+        q = q.where(WbFunnelDaily.brand == brand)
+
+    q = q.order_by(WbFunnelDaily.date.desc())
+    result = await db.execute(q)
+    rows = result.scalars().all()
+
+    tariff_map = await get_tariff_map(db, pid)
+    buyout_map = await get_avg_buyout_map(db, pid)
+    tax_rate = tax_info.get("usn_rate", 0) + tax_info.get("nds_rate", 0)
+
+    from collections import defaultdict
+
+    sku_agg: dict = defaultdict(
+        lambda: {
+            "nm_id": 0,
+            "vendor_code": "",
+            "brand": "",
+            "subject": "",
+            "orders_count": 0,
+            "orders_sum": 0.0,
+            "adv_sum": 0.0,
+            "adv_views": 0,
+            "adv_clicks": 0,
+            "bdr_revenue": 0.0,
+            "bdr_profit": 0.0,
+            "leg_revenue": 0.0,
+            "leg_profit": 0.0,
+        }
+    )
+
+    for r in rows:
+        nm_id = r.nm_id
+        agg = sku_agg[nm_id]
+
+        if agg["nm_id"] == 0:
+            agg["nm_id"] = nm_id
+            agg["vendor_code"] = r.vendor_code or ""
+            agg["brand"] = r.brand or ""
+            agg["subject"] = r.subject or ""
+
+        orders_sum = float(r.orders_sum_rub or 0)
+        cost_per_unit = float(r.cost_price or 0)
+        orders_count = int(r.orders_count or 0)
+        adv = float(r.adv_sum or 0)
+
+        agg["orders_count"] += orders_count
+        agg["orders_sum"] += orders_sum
+        agg["adv_sum"] += adv
+        agg["adv_views"] += int(r.adv_views or 0)
+        agg["adv_clicks"] += int(r.adv_clicks or 0)
+
+        bdr = bdr_rates_map.get(nm_id, r.date) if bdr_rates_map else None
+        if bdr:
+            m = compute_profit_bdr(orders_sum, orders_count, adv, cost_per_unit, bdr, tax_info)
+            agg["bdr_revenue"] += m["revenue"]
+            agg["bdr_profit"] += m["profit"]
+        else:
+            buyout_pct = buyout_map.get(nm_id, 100)
+            revenue = orders_sum * buyout_pct / 100
+            subj = r.subject or ""
+            rate = tariff_map.get(subj, 0)
+            commission = revenue * rate / 100
+            cost_total = cost_per_unit * orders_count * buyout_pct / 100
+            tax = revenue * tax_rate / 100
+            leg_profit = revenue - adv - commission - cost_total - tax
+            agg["leg_revenue"] += revenue
+            agg["leg_profit"] += leg_profit
+
+    data = []
+    for _nm_id, agg in sku_agg.items():
+        revenue = agg["bdr_revenue"] + agg["leg_revenue"]
+        profit = agg["bdr_profit"] + agg["leg_profit"]
+        orders_sum = agg["orders_sum"]
+        adv = agg["adv_sum"]
+
+        margin_pct = (profit / revenue * 100) if revenue else 0
+        drr = (adv / orders_sum * 100) if orders_sum else 0
+
+        data.append(
+            {
+                "nm_id": agg["nm_id"],
+                "vendor_code": agg["vendor_code"],
+                "subject": agg["subject"],
+                "brand": agg["brand"],
+                "orders_sum": round(orders_sum, 2),
+                "orders_count": agg["orders_count"],
+                "adv_sum": round(adv, 2),
+                "adv_views": agg["adv_views"],
+                "adv_clicks": agg["adv_clicks"],
+                "revenue": round(revenue, 2),
+                "profit": round(profit, 2),
+                "abc_revenue": "C",
+                "abc_profit": "C",
+                "drr": round(drr, 2),
+                "margin_pct": round(margin_pct, 2),
+            }
+        )
+
+    # ABC classification
+    _assign_abc(data, "revenue", "abc_revenue")
+    _assign_abc(data, "profit", "abc_profit")
+
+    # Sort by revenue descending
+    data.sort(key=lambda x: x["revenue"], reverse=True)
     return data[:limit]
 
 
@@ -674,6 +810,8 @@ async def get_funnel_by_brand(
             }
         )
 
+    # Filter out groups with no orders and no ads
+    data = [d for d in data if d["orders_sum_rub"] > 0 or d["adv_sum"] > 0]
     data.sort(key=lambda x: x["orders_sum_rub"], reverse=True)
     return data[:limit]
 
@@ -865,6 +1003,8 @@ async def get_funnel_by_subject(
             }
         )
 
+    # Filter out groups with no orders and no ads
+    data = [d for d in data if d["orders_sum_rub"] > 0 or d["adv_sum"] > 0]
     data.sort(key=lambda x: x["orders_sum_rub"], reverse=True)
     return data[:limit]
 

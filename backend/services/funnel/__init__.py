@@ -34,6 +34,7 @@ from backend.services.funnel.queries import (
     bulk_set_cost_overrides,
     get_cost_overrides,
     get_filters,
+    get_funnel_abc_analysis,
     get_funnel_aggregated,
     get_funnel_by_brand,
     get_funnel_by_sku,
@@ -68,6 +69,7 @@ __all__ = [
     "run_backfill_bg",
     "batch_resync_ads",
     # queries
+    "get_funnel_abc_analysis",
     "get_funnel_aggregated",
     "get_funnel_by_brand",
     "get_funnel_by_sku",

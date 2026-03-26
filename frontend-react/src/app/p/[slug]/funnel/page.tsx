@@ -1,11 +1,11 @@
 'use client';
-import { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
 import { usePermissions } from '@/lib/hooks/usePermissions';
 import { MultiLineChart } from './components/MultiLineChart';
 import { DayAnalysisTab } from './components/DayAnalysisTab';
 import { AdsTab } from './components/AdsTab';
-import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters } from '@/types/api';
+import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelAbcRow, FunnelSummary, FunnelFilters } from '@/types/api';
 
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
 const fmtPct = (n: number) => (n || 0).toFixed(2) + '%';
@@ -28,9 +28,11 @@ export default function FunnelPage() {
     const [hasBdr, setHasBdr] = useState(false);
 
     // Group by mode
-    const [groupBy, setGroupBy] = useState<'day' | 'sku' | 'brand' | 'subject'>('day');
+    const [groupBy, setGroupBy] = useState<'day' | 'sku' | 'brand' | 'subject' | 'abc'>('day');
     const [skuData, setSkuData] = useState<FunnelSkuRow[]>([]);
     const [groupData, setGroupData] = useState<FunnelGroupRow[]>([]);
+    const [abcData, setAbcData] = useState<FunnelAbcRow[]>([]);
+    const [expandedAbc, setExpandedAbc] = useState<Set<string>>(new Set());
 
     // Filters
     const [dateFrom, setDateFrom] = useState('');
@@ -63,7 +65,7 @@ export default function FunnelPage() {
         } catch { return null; }
     }, []);
 
-    const loadData = useCallback(async (df?: string, dt?: string, gb?: 'day' | 'sku' | 'brand' | 'subject') => {
+    const loadData = useCallback(async (df?: string, dt?: string, gb?: 'day' | 'sku' | 'brand' | 'subject' | 'abc') => {
         const from = df || dateFrom;
         const to = dt || dateTo;
         const mode = gb || groupBy;
@@ -74,18 +76,26 @@ export default function FunnelPage() {
                 api.getFunnelData({ date_from: from, date_to: to, brand, vendor_code: search, subject, group_by: mode }),
                 api.getFunnelSummary(from, to, brand, subject),
             ]);
-            if (mode === 'sku') {
+            if (mode === 'abc') {
+                setAbcData((res.data || []) as any[]);
+                setData([]);
+                setSkuData([]);
+                setGroupData([]);
+            } else if (mode === 'sku') {
                 setSkuData((res.data || []) as FunnelSkuRow[]);
                 setData([]);
                 setGroupData([]);
+                setAbcData([]);
             } else if (mode === 'brand' || mode === 'subject') {
                 setGroupData((res.data || []) as FunnelGroupRow[]);
                 setData([]);
                 setSkuData([]);
+                setAbcData([]);
             } else {
                 setData((res.data || []) as FunnelDayRow[]);
                 setSkuData([]);
                 setGroupData([]);
+                setAbcData([]);
             }
             setDetailed(res.detailed || false);
             setSummary(sum);
@@ -292,11 +302,11 @@ export default function FunnelPage() {
                     {/* Group by toggle */}
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                         <h3 style={{ fontSize: 16, fontWeight: 600, color: '#111827', margin: 0 }}>
-                            {groupBy === 'day' ? 'Сводка по дням' : groupBy === 'sku' ? 'Сводка по товарам' : groupBy === 'brand' ? 'Сводка по брендам' : 'Сводка по категориям'}
+                            {groupBy === 'day' ? 'Сводка по дням' : groupBy === 'sku' ? 'Сводка по товарам' : groupBy === 'brand' ? 'Сводка по брендам' : groupBy === 'abc' ? 'ABC анализ' : 'Сводка по категориям'}
                         </h3>
                         <div style={{ display: 'flex', gap: 0, border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden' }}>
-                            {(['day', 'sku', 'brand', 'subject'] as const).map((mode, idx) => {
-                                const labels = { day: 'По дням', sku: 'По артикулам', brand: 'По брендам', subject: 'По категориям' };
+                            {(['day', 'sku', 'brand', 'subject', 'abc'] as const).map((mode, idx) => {
+                                const labels = { day: 'По дням', sku: 'По артикулам', brand: 'По брендам', subject: 'По категориям', abc: 'ABC анализ' };
                                 return (
                                     <button
                                         key={mode}
@@ -494,6 +504,142 @@ export default function FunnelPage() {
                             </div>
                         </div>
                     )}
+
+                    {/* ABC Analysis — 3 grouped rows A/B/C with expand to show SKU items */}
+                    {groupBy === 'abc' && (() => {
+                        const ABC_COLORS: Record<string, string> = { A: '#22c55e', B: '#f59e0b', C: '#ef4444' };
+                        const ABC_LABELS: Record<string, string> = { A: 'Категория A (80% выручки)', B: 'Категория B (15% выручки)', C: 'Категория C (5% выручки)' };
+                        const abcBadge = (val: string) => (
+                            <span style={{ display: 'inline-block', width: 32, height: 24, lineHeight: '24px', textAlign: 'center', borderRadius: 6, fontWeight: 700, fontSize: 14, color: '#fff', background: ABC_COLORS[val] || '#9ca3af' }}>{val}</span>
+                        );
+                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                        const d = abcData as any[];
+                        const totalRev = d.reduce((s: number, r: any) => s + (r.revenue || 0), 0);
+                        const groups = (['A', 'B', 'C'] as const).map(cat => {
+                            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                            const items = d.filter((r: any) => r.abc_revenue === cat);
+                            const sum = (key: string) => items.reduce((s: number, r: any) => s + (r[key] || 0), 0);
+                            const revenue = sum('revenue'); const profit = sum('profit');
+                            const ordersCount = sum('orders_count'); const ordersSum = sum('orders_sum_rub');
+                            const adv = sum('adv_sum'); const views = sum('adv_views'); const clicks = sum('adv_clicks');
+                            const openCard = sum('open_card'); const addToCart = sum('add_to_cart');
+                            const tax = sum('tax'); const commission = sum('commission'); const costTotal = sum('cost_total');
+                            const margin = revenue ? (profit / revenue * 100) : 0;
+                            const drr = ordersSum ? (adv / ordersSum * 100) : 0;
+                            const pctRev = totalRev ? (revenue / totalRev * 100) : 0;
+                            const ctr = views ? (clicks / views * 100) : 0;
+                            const cpc = clicks ? (adv / clicks) : 0;
+                            const cpm = views ? (adv / views * 1000) : 0;
+                            const cartPct = openCard ? (addToCart / openCard * 100) : 0;
+                            const orderPct = addToCart ? (ordersCount / addToCart * 100) : 0;
+                            return { cat, items, revenue, profit, ordersCount, ordersSum, adv, views, clicks, openCard, addToCart, tax, commission, costTotal, margin, drr, pctRev, ctr, cpc, cpm, cartPct, orderPct };
+                        });
+                        const thS = { position: 'sticky' as const, top: 0, background: '#fff', zIndex: 20, borderBottom: '2px solid #e5e7eb', padding: '8px 10px', fontSize: 11, textAlign: 'right' as const, color: '#374151' };
+                        return (
+                        <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
+                            <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 320px)' }}>
+                                {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> : (
+                                <table className="data-table" style={{ minWidth: 1800, borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#fff' }}>
+                                    <thead>
+                                        <tr>
+                                            <th style={{ ...thS, width: 30, textAlign: 'center' }}></th>
+                                            <th style={{ ...thS, textAlign: 'left', minWidth: 200 }}>КАТЕГОРИЯ</th>
+                                            <th style={thS}>ТОВАРОВ</th>
+                                            <th style={thS}>ДОЛЯ ВЫР.</th>
+                                            <th style={thS}>ПЕРЕХОДЫ</th>
+                                            <th style={thS}>КОРЗИНЫ</th>
+                                            <th style={thS}>ЗАКАЗЫ</th>
+                                            <th style={thS}>СУММА ₽</th>
+                                            <th style={thS}>ВЫРУЧКА ₽</th>
+                                            <th style={thS}>РАСХОДЫ РЕКЛ.</th>
+                                            <th style={thS}>ПРОСМОТРЫ</th>
+                                            <th style={thS}>КЛИКИ</th>
+                                            <th style={thS}>CTR</th>
+                                            <th style={thS}>CPC</th>
+                                            <th style={thS}>CPM</th>
+                                            <th style={thS}>ДРР</th>
+                                            <th style={thS}>НАЛОГ ₽</th>
+                                            <th style={thS}>КОМИССИЯ ₽</th>
+                                            <th style={thS}>ПРИБЫЛЬ ₽</th>
+                                            <th style={thS}>МАРЖА</th>
+                                            <th style={thS}>В КОРЗИНУ</th>
+                                            <th style={thS}>В ЗАКАЗ</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {d.length === 0 && <tr><td colSpan={22} style={{ textAlign: 'center', padding: 40, color: '#9ca3af' }}>Нет данных</td></tr>}
+                                        {groups.map(g => {
+                                            const isExp = expandedAbc.has(g.cat);
+                                            const tdS = { padding: '10px 10px', borderBottom: '1px solid #e5e7eb', textAlign: 'right' as const };
+                                            return (
+                                                <React.Fragment key={g.cat}>
+                                                    <tr style={{ cursor: 'pointer', background: ABC_COLORS[g.cat] + '08', fontWeight: 600 }}
+                                                        onClick={() => setExpandedAbc(prev => { const n = new Set(prev); n.has(g.cat) ? n.delete(g.cat) : n.add(g.cat); return n; })}>
+                                                        <td style={{ ...tdS, textAlign: 'center' }}>{isExp ? '▼' : '▶'}</td>
+                                                        <td style={{ ...tdS, textAlign: 'left' }}><span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>{abcBadge(g.cat)} {ABC_LABELS[g.cat]}</span></td>
+                                                        <td style={tdS}>{g.items.length}</td>
+                                                        <td style={tdS}>{fmtPct(g.pctRev)}</td>
+                                                        <td style={tdS}>{fmt(g.openCard)}</td>
+                                                        <td style={tdS}>{fmt(g.addToCart)}</td>
+                                                        <td style={tdS}>{fmt(g.ordersCount)}</td>
+                                                        <td style={tdS}>{fmt(g.ordersSum)}</td>
+                                                        <td style={tdS}>{fmt(g.revenue)}</td>
+                                                        <td style={{ ...tdS, color: '#f97316' }}>{fmt(g.adv)}</td>
+                                                        <td style={tdS}>{fmt(g.views)}</td>
+                                                        <td style={tdS}>{fmt(g.clicks)}</td>
+                                                        <td style={tdS}>{fmtPct(g.ctr)}</td>
+                                                        <td style={tdS}>{fmt(g.cpc)}</td>
+                                                        <td style={tdS}>{fmt(g.cpm)}</td>
+                                                        <td style={{ ...tdS, color: g.drr > 30 ? '#ef4444' : g.drr > 15 ? '#f59e0b' : '#10b981' }}>{fmtPct(g.drr)}</td>
+                                                        <td style={tdS}>{fmt(g.tax)}</td>
+                                                        <td style={tdS}>{fmt(g.commission)}</td>
+                                                        <td style={{ ...tdS, color: g.profit >= 0 ? '#10b981' : '#ef4444', fontWeight: 700 }}>{fmt(g.profit)}</td>
+                                                        <td style={{ ...tdS, color: g.margin > 20 ? '#10b981' : g.margin > 0 ? '#65a30d' : '#ef4444' }}>{fmtPct(g.margin)}</td>
+                                                        <td style={tdS}>{fmtPct(g.cartPct)}</td>
+                                                        <td style={tdS}>{fmtPct(g.orderPct)}</td>
+                                                    </tr>
+                                                    {isExp && g.items.map((r: any, i: number) => (
+                                                        <tr key={r.nm_id || i} style={{ background: i % 2 === 0 ? '#fafafa' : '#fff', fontSize: 12 }}>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}></td>
+                                                            <td style={{ ...tdS, textAlign: 'left', borderBottom: '1px solid #f3f4f6' }}>
+                                                                <div style={{ fontWeight: 500 }}>{r.vendor_code || r.nm_id}</div>
+                                                                <div style={{ fontSize: 11, color: '#9ca3af' }}>{r.subject} · {r.brand}</div>
+                                                            </td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6', color: '#9ca3af' }}>—</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}></td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmt(r.open_card)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmt(r.add_to_cart)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmt(r.orders_count)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmt(r.orders_sum_rub)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmt(r.revenue)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6', color: '#f97316' }}>{fmt(r.adv_sum)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmt(r.adv_views)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmt(r.adv_clicks)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmtPct(r.ctr)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmt(r.cpc)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmt(r.cpm)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6', color: r.drr > 30 ? '#ef4444' : r.drr > 15 ? '#f59e0b' : '#10b981' }}>{fmtPct(r.drr)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmt(r.tax)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmt(r.commission)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6', color: r.profit >= 0 ? '#10b981' : '#ef4444' }}>{fmt(r.profit)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmtPct(r.margin)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmtPct(r.add_to_cart_pct)}</td>
+                                                            <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmtPct(r.cart_to_order_pct)}</td>
+                                                        </tr>
+                                                    ))}
+                                                </React.Fragment>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                                )}
+                            </div>
+                            <div style={{ padding: '12px 20px', borderTop: '1px solid #e5e7eb', fontSize: 12, color: '#9ca3af', background: '#f9fafb' }}>
+                                Всего товаров: {d.length} | A — {groups[0]?.items.length || 0} шт, B — {groups[1]?.items.length || 0} шт, C — {groups[2]?.items.length || 0} шт
+                            </div>
+                        </div>
+                        );
+                    })()}
 
                     {/* Day Table with sticky header — both rows pinned */}
                     {groupBy === 'day' && <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>

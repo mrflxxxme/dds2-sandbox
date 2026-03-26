@@ -529,7 +529,7 @@ class TestGetFunnelBySubject:
         """Zero orders_sum_rub and zero clicks — no ZeroDivisionError."""
         from backend.services.funnel.queries import get_funnel_by_subject
 
-        row = _make_funnel_row(orders_sum_rub=0.0, orders_count=0, adv_sum=0.0, adv_views=0, adv_clicks=0)
+        row = _make_funnel_row(orders_sum_rub=0.0, orders_count=0, adv_sum=1.0, adv_views=10, adv_clicks=0)
         mock_db = _make_db_with_rows([row])
 
         with (

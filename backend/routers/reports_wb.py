@@ -30,7 +30,7 @@ async def get_wb_bdr(
 
     from backend.services import wb_bdr_service
 
-    if group_by not in ("article", "brand", "subject"):
+    if group_by not in ("article", "brand", "subject", "abc"):
         group_by = "article"
     try:
         return await asyncio.wait_for(
@@ -45,8 +45,10 @@ async def get_wb_bdr(
             ),
             timeout=60,
         )
-    except TimeoutError:
-        raise HTTPException(status_code=504, detail="Отчёт ВБ БДР: таймаут (>60с). Попробуйте уменьшить период.")
+    except TimeoutError as err:
+        raise HTTPException(
+            status_code=504, detail="Отчет ВБ БДР: таймаут (>60с). Попробуйте уменьшить период."
+        ) from err
 
 
 @router.get("/wb_bdr/available_weeks")

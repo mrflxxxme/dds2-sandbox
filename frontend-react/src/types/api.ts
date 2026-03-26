@@ -422,6 +422,24 @@ export interface FunnelSkuRow {
   drr: number;
 }
 
+export interface FunnelAbcRow {
+    nm_id: number;
+    vendor_code: string;
+    subject: string;
+    brand: string;
+    orders_sum: number;
+    orders_count: number;
+    adv_sum: number;
+    adv_views: number;
+    adv_clicks: number;
+    revenue: number;
+    profit: number;
+    abc_revenue: string;
+    abc_profit: string;
+    drr: number;
+    margin_pct: number;
+}
+
 export interface FunnelGroupRow extends Omit<FunnelSkuRow, 'nm_id' | 'vendor_code'> {
     brand?: string;
     subject?: string;

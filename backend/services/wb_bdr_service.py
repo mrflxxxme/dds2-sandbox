@@ -79,6 +79,11 @@ async def get_wb_bdr(
 
     Uses SQL-level aggregation for performance (handles 1M+ rows).
     """
+    # ── 0. ABC mode: fetch per-article data, then classify ──
+    original_group_by = group_by
+    if group_by == "abc":
+        group_by = "article"
+
     # ── 1. Get sync status ──
     from backend.services.wb_finance_sync import get_sync_status
 
@@ -351,5 +356,5 @@ async def get_wb_bdr(
         "total_rows": total_rows,
         "sync_status": sync_status,
         "tax_info": tax_info,
-        "group_by": group_by,
+        "group_by": original_group_by,
     }

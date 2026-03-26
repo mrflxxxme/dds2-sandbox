@@ -68,7 +68,7 @@ function TopProductsWidget({ articles }: { articles: any[] }) {
                                         <td style={{ padding: '10px 12px', color: '#6b7280', fontSize: 12 }}>{a.subject || '—'}</td>
                                         <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: profitColor }}>{formatNumber(a.profit || 0)}</td>
                                         <td style={{ padding: '10px 12px', textAlign: 'right', color: '#374151' }}>{a.margin_pct?.toFixed(1) || '—'}%</td>
-                                        <td style={{ padding: '10px 12px', textAlign: 'right', color: '#374151' }}>{a.roi || '—'}%</td>
+                                        <td style={{ padding: '10px 12px', textAlign: 'right', color: '#374151' }}>{a.roi?.toFixed(2) || '—'}%</td>
                                         <td style={{ padding: '10px 12px', textAlign: 'right', color: '#374151' }}>{formatNumber(a.sales_amount || 0)}</td>
                                         <td style={{ padding: '10px 12px', textAlign: 'right', color: '#f59e0b', fontWeight: 500 }}>{formatNumber(a.adv_sum || 0)}</td>
                                         <td style={{ padding: '10px 16px', textAlign: 'right', color: '#374151' }}>{a.drr?.toFixed(1) || '—'}%</td>
@@ -112,9 +112,10 @@ export function WbBdr() {
     const [syncStatus, setSyncStatus] = useState<any>(null);
     const [syncing, setSyncing] = useState(false);
     const [availableDates, setAvailableDates] = useState<string[]>([]);
-    const [groupBy, setGroupBy] = useState<'article' | 'brand' | 'subject'>('article');
+    const [groupBy, setGroupBy] = useState<'article' | 'brand' | 'subject' | 'abc'>('article');
     const [sortKey, setSortKey] = useState<string>('profit');
     const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+    const [expandedAbc, setExpandedAbc] = useState<Record<string, boolean>>({});
 
     React.useEffect(() => {
         api.getWbBdrSyncStatus().then(setSyncStatus).catch(() => {});
@@ -149,7 +150,7 @@ export function WbBdr() {
     const brands = data?.brands || [];
     const taxInfo = data?.tax_info || {};
 
-    const groupLabel = groupBy === 'brand' ? 'Бренд' : groupBy === 'subject' ? 'Категория' : 'Артикул';
+    const groupLabel = groupBy === 'brand' ? 'Бренд' : groupBy === 'subject' ? 'Категория' : groupBy === 'abc' ? 'Артикул' : 'Артикул';
 
     const bdrColumns: { key: string; label: string; color?: string; sticky?: boolean }[] = [
         { key: 'sa_name', label: groupLabel, sticky: true },
@@ -216,6 +217,55 @@ export function WbBdr() {
         return arr;
     }, [rawArticles, sortKey, sortDir]);
 
+    const abcGroups = React.useMemo(() => {
+        if (groupBy !== 'abc') return [];
+        const groups: { label: string; color: string; bg: string; articles: any[] }[] = [
+            { label: 'A', color: '#22c55e', bg: 'rgba(34,197,94,0.08)', articles: [] },
+            { label: 'B', color: '#f59e0b', bg: 'rgba(245,158,11,0.08)', articles: [] },
+            { label: 'C', color: '#ef4444', bg: 'rgba(239,68,68,0.08)', articles: [] },
+        ];
+        for (const a of articles) {
+            const cat = a.abc_revenue || 'C';
+            const g = groups.find(g => g.label === cat);
+            if (g) g.articles.push(a);
+        }
+        return groups.map(g => {
+            const sum: Record<string, number> = {};
+            const numKeys = bdrColumns.filter(c => c.key !== 'sa_name' && c.key !== 'brand' && c.key !== 'subject' && c.key !== 'nm_id' && c.key !== 'abc_profit' && c.key !== 'abc_revenue');
+            for (const col of numKeys) {
+                sum[col.key] = g.articles.reduce((acc, a) => acc + (parseFloat(a[col.key]) || 0), 0);
+            }
+            // Recalculate averages and percentages
+            const saleQty = sum.sale_qty || 0;
+            const realization = sum.realization || 0;
+            const salesAmount = sum.sales_amount || 0;
+            const costTotal = sum.cost_total || 0;
+            const profit = sum.profit || 0;
+            const advSum = sum.adv_sum || 0;
+            const ordersSum = sum.orders_sum || 0;
+            const addToCart = sum.add_to_cart || 0;
+            const ordersCount = sum.orders_count || 0;
+            sum.avg_sale_price = saleQty > 0 ? salesAmount / saleQty : 0;
+            sum.avg_retail_price = saleQty > 0 ? realization / saleQty : 0;
+            sum.avg_logistics = saleQty > 0 ? (sum.logistics || 0) / saleQty : 0;
+            sum.avg_profit_per_item = saleQty > 0 ? profit / saleQty : 0;
+            sum.margin_pct = realization > 0 ? profit / realization * 100 : 0;
+            sum.roi = costTotal > 0 ? profit / costTotal * 100 : 0;
+            sum.drr = salesAmount > 0 ? advSum / salesAmount * 100 : 0;
+            sum.drr_orders = ordersSum > 0 ? advSum / ordersSum * 100 : 0;
+            sum.conversion_to_order = addToCart > 0 ? ordersCount / addToCart * 100 : 0;
+            const totalRealAll = rawArticles.reduce((acc: number, a: any) => acc + (parseFloat(a.realization) || 0), 0);
+            sum.revenue_share = totalRealAll > 0 ? realization / totalRealAll * 100 : 0;
+            // Buyout %: weighted average
+            const totalSaleQtyGross = sum.sale_qty_gross || sum.sale_qty || 0;
+            const totalRetQty = sum.ret_qty || 0;
+            const totalQty = totalSaleQtyGross + totalRetQty;
+            sum.buyout_pct = totalQty > 0 ? totalSaleQtyGross / totalQty * 100 : 0;
+            return { ...g, summary: sum, count: g.articles.length };
+        });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [articles, groupBy, rawArticles]);
+
     const thStyle = (col: { key: string; color?: string; sticky?: boolean }): React.CSSProperties => ({
         cursor: 'pointer', userSelect: 'none' as const, whiteSpace: 'nowrap' as const,
         background: '#f9fafb', color: col.color || '#4b5563', borderBottom: '2px solid #e5e7eb',
@@ -280,7 +330,7 @@ export function WbBdr() {
                     <div>
                         <label style={{ fontSize: 12, opacity: 0.7, display: 'block', marginBottom: 4 }}>Группировка</label>
                         <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid #e5e7eb', background: '#f3f4f6', height: 38 }}>
-                            {([['article', 'По артикулам'], ['brand', 'По брендам'], ['subject', 'По категориям']] as const).map(([val, lbl]) => (
+                            {([['article', 'По артикулам'], ['brand', 'По брендам'], ['subject', 'По категориям'], ['abc', 'ABC анализ']] as const).map(([val, lbl]) => (
                                 <button key={val} onClick={() => { setGroupBy(val); }}
                                     style={{ padding: '0 14px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer', background: groupBy === val ? '#6366f1' : 'transparent', color: groupBy === val ? '#fff' : '#6b7280', transition: 'all 0.2s ease', whiteSpace: 'nowrap' }}>
                                     {lbl}
@@ -298,7 +348,8 @@ export function WbBdr() {
 
             {s && !loading && (
                 <>
-                    {/* KPI Cards */}
+                    {/* KPI Cards — hide for ABC view */}
+                    {groupBy !== 'abc' && (
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
                         <KpiCard label="Итого к оплате" value={formatNumber(s.to_pay)} sub="₽" />
                         <KpiCard label="Реализация" value={formatNumber(s.realization)} sub="₽" />
@@ -315,8 +366,10 @@ export function WbBdr() {
                         <KpiCard label="Чистая прибыль" value={formatNumber(s.profit || 0)} sub={pct(s.profit || 0, s.realization)} color={s.profit >= 0 ? '#22c55e' : '#ff6b6b'} />
                         <KpiCard label="% выкупа" value={s.buyout_pct?.toFixed(2) + '%'} sub="" />
                     </div>
+                    )}
 
-                    <TopProductsWidget articles={rawArticles} />
+                    {/* Top-10 — hide for ABC view */}
+                    {groupBy !== 'abc' && <TopProductsWidget articles={rawArticles} />}
 
                     {/* No cost warning */}
                     {(() => { const n = articles.filter((a: any) => !a.cost_price || a.cost_price === 0).length; return n > 0 ? (
@@ -326,6 +379,213 @@ export function WbBdr() {
                     ) : null; })()}
 
                     {/* Articles Table */}
+                    {groupBy === 'abc' && abcGroups.length > 0 ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                            {/* ABC Summary row */}
+                            <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
+                                <div style={{ overflow: 'auto' }}>
+                                    <table className="data-table" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                                        <thead>
+                                            <tr>
+                                                {bdrColumns.map(col => (
+                                                    <th key={col.key} style={thStyle(col)} onClick={() => toggleSort(col.key)}>{col.label}{sortIcon(col.key)}</th>
+                                                ))}
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {/* Total summary row */}
+                                            {(() => { const r = s; return (
+                                            <tr style={{ fontWeight: 700, background: '#eef2ff', color: '#111827' }}>
+                                                <td style={{ position: 'sticky', left: 0, background: '#e0e7ff', zIndex: 11, borderRight: '1px solid #c7d2fe' }}>Итого:</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.to_pay)}</td>
+                                                <td>-</td><td>-</td><td>-</td>
+                                                <td style={{ textAlign: 'right' }}>--</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.other_deduction || 0)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.avg_retail_price)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.avg_sale_price)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.realization)}</td>
+                                                <td style={{ textAlign: 'right' }}>{r.turnover_days || '--'}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.sales_amount)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.ppvz_for_pay)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.returns_amount)}</td>
+                                                <td style={{ textAlign: 'right', color: '#8b5cf6' }}>{formatNumber(r.cost_total || 0)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.penalties)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.orders_count || 0)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.orders_sum || 0)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.commission)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.total_wb_reward)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.compensation)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.avg_logistics)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.cap_cost || 0)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.cap_retail || 0)}</td>
+                                                <td style={{ textAlign: 'right' }}>{r.gmroi || '--'}</td>
+                                                <td style={{ textAlign: 'right' }}>{r.gmroi_year || '--'}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.ret_qty)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.sale_qty)}</td>
+                                                <td style={{ textAlign: 'right' }}>{r.buyout_pct?.toFixed(2)}%</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.avg_profit_per_item || 0)}</td>
+                                                <td style={{ textAlign: 'right', color: '#ef4444' }}>{formatNumber(r.tax_total || 0)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.tax_base || r.sales_amount || 0)}</td>
+                                                <td style={{ textAlign: 'right', color: r.profit >= 0 ? '#22c55e' : '#ff6b6b', fontWeight: 700 }}>{formatNumber(r.profit || 0)}</td>
+                                                <td style={{ textAlign: 'right' }}>{r.roi?.toFixed(2) || '--'}%</td>
+                                                <td style={{ textAlign: 'right' }}>100%</td>
+                                                <td style={{ textAlign: 'right' }}>{r.margin_pct?.toFixed(2) || '--'}%</td>
+                                                <td style={{ textAlign: 'right', color: '#f59e0b' }}>{formatNumber(r.adv_sum || 0)}</td>
+                                                <td style={{ textAlign: 'right' }}>{r.drr?.toFixed(2) || '--'}%</td>
+                                                <td style={{ textAlign: 'right' }}>{r.drr_orders?.toFixed(2) || '--'}%</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.acceptance || 0)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.logistics)}</td>
+                                                <td style={{ textAlign: 'right' }}>{formatNumber(r.storage)}</td>
+                                                <td>-</td><td>-</td>
+                                            </tr>
+                                            ); })()}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            {/* ABC Groups */}
+                            {abcGroups.map(g => {
+                                const isExpanded = expandedAbc[g.label] || false;
+                                const gs = g.summary;
+                                return (
+                                    <div key={g.label} className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
+                                        {/* Group header */}
+                                        <div
+                                            onClick={() => setExpandedAbc(prev => ({ ...prev, [g.label]: !prev[g.label] }))}
+                                            style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 20px', cursor: 'pointer', background: g.bg, borderBottom: isExpanded ? '1px solid #e5e7eb' : 'none', transition: 'all 0.2s ease' }}
+                                        >
+                                            <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 32, height: 32, borderRadius: 8, background: g.color, color: '#fff', fontWeight: 800, fontSize: 16 }}>{g.label}</span>
+                                            <div>
+                                                <div style={{ fontWeight: 700, fontSize: 14, color: '#111827' }}>
+                                                    Категория {g.label} — {g.count} {g.count === 1 ? 'артикул' : g.count < 5 ? 'артикула' : 'артикулов'}
+                                                </div>
+                                                <div style={{ fontSize: 12, opacity: 0.7, marginTop: 2 }}>
+                                                    Выручка: {formatNumber(gs.realization || 0)} | Прибыль: <span style={{ color: (gs.profit || 0) >= 0 ? '#22c55e' : '#ef4444', fontWeight: 600 }}>{formatNumber(gs.profit || 0)}</span> | Реклама: {formatNumber(gs.adv_sum || 0)} | Маржа: {gs.margin_pct?.toFixed(1) || 0}% | Кап. розн.: {formatNumber(gs.cap_retail || 0)} | Кап. с/с: {formatNumber(gs.cap_cost || 0)}
+                                                </div>
+                                            </div>
+                                            <div style={{ marginLeft: 'auto', fontSize: 14, opacity: 0.5 }}>{isExpanded ? '▲' : '▼'}</div>
+                                        </div>
+                                        {/* Expanded table */}
+                                        {isExpanded && (
+                                            <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 400px)' }}>
+                                                <table className="data-table" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                                                    <thead>
+                                                        <tr>
+                                                            {bdrColumns.map(col => (
+                                                                <th key={col.key} style={thStyle(col)} onClick={() => toggleSort(col.key)}>{col.label}{sortIcon(col.key)}</th>
+                                                            ))}
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {/* Group summary row */}
+                                                        <tr style={{ fontWeight: 700, background: g.bg, color: '#111827' }}>
+                                                            <td style={{ position: 'sticky', left: 0, background: g.bg, zIndex: 11, borderRight: '1px solid #e5e7eb' }}>
+                                                                <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 4, background: g.color, color: '#fff', fontWeight: 700, fontSize: 11, marginRight: 6 }}>{g.label}</span>
+                                                                Итого
+                                                            </td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.to_pay || 0)}</td>
+                                                            <td>-</td><td>-</td><td>-</td>
+                                                            <td style={{ textAlign: 'right' }}>--</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.other_deduction || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.avg_retail_price || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.avg_sale_price || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.realization || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{gs.turnover_days?.toFixed(0) || '--'}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.sales_amount || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.ppvz_for_pay || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.returns_amount || 0)}</td>
+                                                            <td style={{ textAlign: 'right', color: '#8b5cf6' }}>{formatNumber(gs.cost_total || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.penalties || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.orders_count || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.orders_sum || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.commission || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.total_wb_reward || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.compensation || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.avg_logistics || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.cap_cost || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.cap_retail || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{gs.gmroi?.toFixed(0) || '--'}</td>
+                                                            <td style={{ textAlign: 'right' }}>{gs.gmroi_year?.toFixed(0) || '--'}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.ret_qty || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.sale_qty || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{gs.buyout_pct?.toFixed(2) || '--'}%</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.avg_profit_per_item || 0)}</td>
+                                                            <td style={{ textAlign: 'right', color: '#ef4444' }}>{formatNumber(gs.tax_total || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.tax_base || 0)}</td>
+                                                            <td style={{ textAlign: 'right', color: (gs.profit || 0) >= 0 ? '#22c55e' : '#ff6b6b', fontWeight: 700 }}>{formatNumber(gs.profit || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{gs.roi?.toFixed(2) || '--'}%</td>
+                                                            <td style={{ textAlign: 'right' }}>{gs.revenue_share?.toFixed(2) || '--'}%</td>
+                                                            <td style={{ textAlign: 'right' }}>{gs.margin_pct?.toFixed(2) || '--'}%</td>
+                                                            <td style={{ textAlign: 'right', color: '#f59e0b' }}>{formatNumber(gs.adv_sum || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{gs.drr?.toFixed(2) || '--'}%</td>
+                                                            <td style={{ textAlign: 'right' }}>{gs.drr_orders?.toFixed(2) || '--'}%</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.acceptance || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.logistics || 0)}</td>
+                                                            <td style={{ textAlign: 'right' }}>{formatNumber(gs.storage || 0)}</td>
+                                                            <td>-</td><td>-</td>
+                                                        </tr>
+                                                        {/* Individual articles */}
+                                                        {g.articles.map((a: any, i: number) => {
+                                                            const rowBg = i % 2 === 0 ? '#ffffff' : '#f9fafb';
+                                                            return (
+                                                            <tr key={a.sa_name || i} style={{ background: rowBg, color: '#111827' }}>
+                                                                <td style={{ position: 'sticky', left: 0, background: rowBg, zIndex: 11, fontWeight: 500, borderRight: '1px solid #e5e7eb' }}>{a.sa_name || '--'}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.to_pay)}</td>
+                                                                <td>{a.brand || '--'}</td>
+                                                                <td>{a.subject || '--'}</td>
+                                                                <td>{a.nm_id || '--'}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.cost_price || 0)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.other_deduction || 0)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_retail_price)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_sale_price)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.realization)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{a.turnover_days || '--'}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.sales_amount)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.ppvz_for_pay)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.returns_amount)}</td>
+                                                                <td style={{ textAlign: 'right', color: '#8b5cf6' }}>{formatNumber(a.cost_total || 0)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.penalties)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.orders_count || 0)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.orders_sum || 0)}</td>
+                                                                <td style={{ textAlign: 'right', color: a.commission < 0 ? '#ff6b6b' : undefined }}>{formatNumber(a.commission)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.total_wb_reward)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.compensation)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_logistics)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.cap_cost || 0)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.cap_retail || 0)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{a.gmroi || '--'}</td>
+                                                                <td style={{ textAlign: 'right' }}>{a.gmroi_year || '--'}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.ret_qty)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.sale_qty)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{a.buyout_pct?.toFixed(2) || '--'}%</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_profit_per_item || 0)}</td>
+                                                                <td style={{ textAlign: 'right', color: '#ef4444' }}>{formatNumber(a.tax_total || 0)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.tax_base || 0)}</td>
+                                                                <td style={{ textAlign: 'right', color: a.profit >= 0 ? '#22c55e' : '#ff6b6b', fontWeight: 600 }}>{formatNumber(a.profit || 0)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{a.roi?.toFixed(2) || '--'}%</td>
+                                                                <td style={{ textAlign: 'right' }}>{a.revenue_share?.toFixed(2) || '--'}%</td>
+                                                                <td style={{ textAlign: 'right' }}>{a.margin_pct?.toFixed(2) || '--'}%</td>
+                                                                <td style={{ textAlign: 'right', color: '#f59e0b' }}>{formatNumber(a.adv_sum || 0)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{a.drr?.toFixed(2) || '--'}%</td>
+                                                                <td style={{ textAlign: 'right' }}>{a.drr_orders?.toFixed(2) || '--'}%</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.acceptance || 0)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.logistics)}</td>
+                                                                <td style={{ textAlign: 'right' }}>{formatNumber(a.storage)}</td>
+                                                                <td style={{ textAlign: 'center' }}><span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 4, background: g.color, color: '#fff', fontWeight: 700, fontSize: 11 }}>{a.abc_profit}</span></td>
+                                                                <td style={{ textAlign: 'center' }}><span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 4, background: g.color, color: '#fff', fontWeight: 700, fontSize: 11 }}>{a.abc_revenue}</span></td>
+                                                            </tr>
+                                                            );
+                                                        })}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    ) : (
                     <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                         <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
                             <table className="data-table" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
@@ -373,7 +633,7 @@ export function WbBdr() {
                                         <td style={{ textAlign: 'right', color: '#ef4444' }}>{formatNumber(r.tax_total || 0)}</td>
                                         <td style={{ textAlign: 'right' }}>{formatNumber(r.tax_base || r.sales_amount || 0)}</td>
                                         <td style={{ textAlign: 'right', color: r.profit >= 0 ? '#22c55e' : '#ff6b6b', fontWeight: 700 }}>{formatNumber(r.profit || 0)}</td>
-                                        <td style={{ textAlign: 'right' }}>{r.roi || '—'}%</td>
+                                        <td style={{ textAlign: 'right' }}>{r.roi?.toFixed(2) || '—'}%</td>
                                         <td style={{ textAlign: 'right' }}>100%</td>
                                         <td style={{ textAlign: 'right' }}>{r.margin_pct?.toFixed(2) || '—'}%</td>
                                         <td style={{ textAlign: 'right', color: '#f59e0b' }}>{formatNumber(r.adv_sum || 0)}</td>
@@ -422,7 +682,7 @@ export function WbBdr() {
                                             <td style={{ textAlign: 'right', color: '#ef4444' }}>{formatNumber(a.tax_total || 0)}</td>
                                             <td style={{ textAlign: 'right' }}>{formatNumber(a.tax_base || 0)}</td>
                                             <td style={{ textAlign: 'right', color: a.profit >= 0 ? '#22c55e' : '#ff6b6b', fontWeight: 600 }}>{formatNumber(a.profit || 0)}</td>
-                                            <td style={{ textAlign: 'right' }}>{a.roi || '—'}%</td>
+                                            <td style={{ textAlign: 'right' }}>{a.roi?.toFixed(2) || '—'}%</td>
                                             <td style={{ textAlign: 'right' }}>{a.revenue_share?.toFixed(2) || '—'}%</td>
                                             <td style={{ textAlign: 'right' }}>{a.margin_pct?.toFixed(2) || '—'}%</td>
                                             <td style={{ textAlign: 'right', color: '#f59e0b' }}>{formatNumber(a.adv_sum || 0)}</td>
@@ -441,6 +701,7 @@ export function WbBdr() {
                             {articles.length === 0 && <div className="empty-state" style={{ padding: 20 }}>Нет данных за выбранный период</div>}
                         </div>
                     </div>
+                    )}
 
                     {/* Tax Summary */}
                     {s.tax_total > 0 && (

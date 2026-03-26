@@ -48,6 +48,7 @@ ignore = [
 "backend/etl/cost_parser_helpers.py" = ["RUF001", "S110", "SIM105", "UP038"]  # Cyrillic size patterns, try-except-pass, isinstance style (from cost_parsers.py)
 "backend/routers/planning.py" = ["RUF001"]  # Cyrillic strings (ЗАКАЗ direction default)
 "backend/services/planning/brand_plan.py" = ["RUF001", "S608"]  # Cyrillic strings, SQL with brand clause (parameterized)
+"backend/routers/reports_wb.py" = ["B904", "RUF001", "RUF002", "RUF006", "S110", "SIM105"]  # Redis graceful degradation, Cyrillic strings, background tasks
 
 [lint.isort]
 known-first-party = ["backend"]
