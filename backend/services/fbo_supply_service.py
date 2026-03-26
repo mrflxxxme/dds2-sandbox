@@ -531,10 +531,12 @@ async def get_fbo_supply_items(
     project_id: int,
     supply_id: int,
     api_client=None,
+    force_refresh: bool = False,
 ) -> list[WbFboSupplyItem]:
     """
     Get items for a specific FBO supply. Validates project_id ownership.
     Lazy-load: if no items in DB and api_client provided, fetch from WB API.
+    force_refresh: always re-fetch from WB API and update DB.
     """
     # Verify supply belongs to project
     result = await db.execute(
@@ -556,8 +558,8 @@ async def get_fbo_supply_items(
     )
     items = result.scalars().all()
 
-    # Lazy-load from WB API if no items cached
-    if not items and api_client and supply.wb_supply_id.isdigit():
+    # Lazy-load from WB API if no items cached or force refresh
+    if (not items or force_refresh) and api_client and supply.wb_supply_id.isdigit():
         try:
             wb_id_int = int(supply.wb_supply_id)
             goods = await api_client.get_fbw_supply_goods(

@@ -86,6 +86,7 @@ async def list_fbo_warehouses(
 @router.get("/{supply_id}/items")
 async def get_fbo_supply_items(
     supply_id: int,
+    refresh: bool = Query(False),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -103,6 +104,7 @@ async def get_fbo_supply_items(
             project.id,
             supply_id,
             api_client=api_client,
+            force_refresh=refresh,
         )
         return [WbFboSupplyItemSchema.model_validate(i) for i in items]
     except ValueError as e:

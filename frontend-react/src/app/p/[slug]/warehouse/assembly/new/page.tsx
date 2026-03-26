@@ -273,7 +273,7 @@ export default function AssemblyNewPage() {
                                             setLoadingFboItems(true);
                                             await api.syncFboSupplies();
                                             // Reload items
-                                            const items: WbFboSupplyItem[] = await api.getFboSupplyItems(Number(fboSupplyId));
+                                            const items: WbFboSupplyItem[] = await api.getFboSupplyItems(Number(fboSupplyId), true);
                                             const grouped = new Map<string, FormItem>();
                                             for (const item of items) {
                                                 const existing = grouped.get(item.barcode);

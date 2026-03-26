@@ -100,8 +100,9 @@ export function addWarehouseMethods(api: ApiClient) {
             const qs = query.toString();
             return api.request<WbFboSupplyListResponse>('GET', `/api/v1/warehouse/fbo-supplies${qs ? `?${qs}` : ''}`);
         },
-        getFboSupplyItems(supplyId: number) {
-            return api.request<WbFboSupplyItem[]>('GET', `/api/v1/warehouse/fbo-supplies/${supplyId}/items`);
+        getFboSupplyItems(supplyId: number, refresh?: boolean) {
+            const qs = refresh ? '?refresh=true' : '';
+            return api.request<WbFboSupplyItem[]>('GET', `/api/v1/warehouse/fbo-supplies/${supplyId}/items${qs}`);
         },
         syncFboSupplies() {
             return api.request<FboSyncResult>('POST', '/api/v1/warehouse/fbo-supplies/sync');
