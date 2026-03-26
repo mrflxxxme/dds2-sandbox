@@ -412,6 +412,11 @@ export interface FunnelSkuRow {
   drr: number;
 }
 
+export interface FunnelGroupRow extends Omit<FunnelSkuRow, 'nm_id' | 'vendor_code'> {
+    brand?: string;
+    subject?: string;
+}
+
 export interface FunnelSummary {
   opens: number;
   open_card?: number;
@@ -1242,6 +1247,31 @@ export interface CapitalResponse {
   total_products: number;
   period_days: number;
   elasticity: number;
+}
+
+// ─── Unified Ad Sync ────────────────────────────────────────────────────────
+
+export interface UnifiedSyncProgress {
+  phase: 'campaigns' | 'budgets' | 'funnel' | 'done' | 'error' | 'idle';
+  campaigns_total?: number;
+  budgets_done?: number;
+  budgets_total?: number;
+  funnel_days_done?: number;
+  funnel_days_total?: number;
+  rows?: number;
+  error?: string;
+  message?: string;
+  detail?: string;
+}
+
+export interface FirstSyncProgress {
+  phase: 'nomenclature' | 'campaigns' | 'budgets' | 'funnel' | 'backfill' | 'done' | 'error' | 'idle';
+  step?: number;
+  total_steps?: number;
+  detail?: string;
+  funnel_days_done?: number;
+  funnel_days_total?: number;
+  error?: string;
 }
 
 // ─── Ad Campaigns (Ads Tab) ─────────────────────────────────────────────────

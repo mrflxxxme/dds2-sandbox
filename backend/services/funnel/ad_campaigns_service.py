@@ -30,6 +30,29 @@ def get_sync_progress(project_id: int) -> dict:
     return _sync_progress.get(project_id, {"status": "idle"})
 
 
+async def _sort_campaigns_by_spend(db: AsyncSession, project_id: int, campaign_ids: list[int]) -> list[int]:
+    """Sort campaign IDs by spend in last 7 days (descending). High spenders first."""
+    if not campaign_ids:
+        return campaign_ids
+
+    from datetime import timedelta
+
+    seven_days_ago = utcnow().date() - timedelta(days=7)
+    CD = WbAdCampaignDaily
+    spend_q = (
+        select(CD.campaign_id, func.coalesce(func.sum(CD.spend), Decimal("0")).label("total_spend"))
+        .where(CD.project_id == project_id)
+        .where(CD.campaign_id.in_(campaign_ids))
+        .where(CD.date >= seven_days_ago)
+        .group_by(CD.campaign_id)
+    )
+    rows = (await db.execute(spend_q)).all()
+    spend_map: dict[int, Decimal] = {r.campaign_id: r.total_spend for r in rows}
+
+    # Sort: campaigns with spend first (descending), then campaigns without spend
+    return sorted(campaign_ids, key=lambda cid: float(spend_map.get(cid, Decimal("0"))), reverse=True)
+
+
 async def sync_ad_campaigns(db: AsyncSession, project_id: int) -> dict:
     """Fetch campaign details + budgets from WB and upsert into wb_ad_campaigns."""
     _sync_progress[project_id] = {"status": "fetching_campaigns"}
@@ -53,6 +76,10 @@ async def sync_ad_campaigns(db: AsyncSession, project_id: int) -> dict:
         return {"synced": 0}
 
     campaign_ids = [c["advertId"] for c in campaigns if c.get("advertId")]
+
+    # Prioritize campaigns by spend (last 7 days) — high spenders first for budget fetch
+    campaign_ids = await _sort_campaigns_by_spend(db, project_id, campaign_ids)
+
     _sync_progress[project_id] = {
         "status": "fetching_budgets",
         "campaigns_total": len(campaigns),
@@ -183,6 +210,75 @@ async def sync_ad_campaigns_bg(project_id: int) -> None:
     except Exception as e:
         _sync_progress[project_id] = {"status": "error", "error": str(e)[:200]}
         logger.error(f"Ad campaigns bg sync failed for project {project_id}: {e}")
+
+
+async def sync_ad_budgets_only(db: AsyncSession, project_id: int) -> dict:
+    """Fetch ONLY budgets for active campaigns (status=9). Lightweight sync for scheduler every 10 min.
+
+    Detects budget changes and writes events.
+    """
+    api_key = await get_wb_key(db, project_id, "wb_advert")
+    if not api_key:
+        api_key = await get_wb_key(db, project_id, "wb_analytics")
+    if not api_key:
+        api_key = await get_wb_key(db, project_id, "wb")
+    if not api_key:
+        logger.warning(f"sync_ad_budgets_only: no WB key for project {project_id}")
+        return {"updated": 0, "error": "no_api_key"}
+
+    # Load active campaigns from DB
+    active_q = select(WbAdCampaign).where(
+        WbAdCampaign.project_id == project_id,
+        WbAdCampaign.status == 9,
+    )
+    active_campaigns = (await db.execute(active_q)).scalars().all()
+    if not active_campaigns:
+        logger.info(f"sync_ad_budgets_only: no active campaigns for project {project_id}")
+        return {"updated": 0}
+
+    campaign_ids = [c.campaign_id for c in active_campaigns]
+    existing = {c.campaign_id: c for c in active_campaigns}
+
+    # Prioritize by spend
+    campaign_ids = await _sort_campaigns_by_spend(db, project_id, campaign_ids)
+
+    budgets = await fetch_campaign_budgets_batch(api_key, campaign_ids)
+
+    # Detect changes and write events
+    now = utcnow()
+    events = []
+    updated_count = 0
+    for cid, new_budget in budgets.items():
+        old_campaign = existing.get(cid)
+        if not old_campaign:
+            continue
+
+        old_budget = float(old_campaign.budget or 0)
+        new_budget_f = float(new_budget or 0)
+
+        if abs(old_budget - new_budget_f) >= 1:
+            events.append(
+                WbAdCampaignEvent(
+                    project_id=project_id,
+                    campaign_id=cid,
+                    event_type="budget_change",
+                    old_value=str(round(old_budget, 2)),
+                    new_value=str(round(new_budget_f, 2)),
+                )
+            )
+
+        # Update budget in DB
+        old_campaign.budget = new_budget
+        old_campaign.updated_at = now
+        updated_count += 1
+
+    if events:
+        db.add_all(events)
+        logger.info(f"sync_ad_budgets_only: {len(events)} budget changes for project {project_id}")
+
+    await db.commit()
+    logger.info(f"sync_ad_budgets_only: {updated_count}/{len(campaign_ids)} budgets updated for project {project_id}")
+    return {"updated": updated_count, "events": len(events)}
 
 
 def _assign_abc(items: list[dict], value_key: str, abc_key: str) -> None:

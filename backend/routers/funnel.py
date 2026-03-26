@@ -224,6 +224,44 @@ async def get_funnel_data(
             "group_by": "sku",
         }
 
+    if group_by == "brand" and not vendor_code:
+        data = await funnel_service.get_funnel_by_brand(
+            db,
+            project.id,
+            tax_info,
+            date_from,
+            date_to,
+            brand,
+            subject,
+            bdr_rates_map=bdr_rates_map,
+        )
+        return {
+            "data": data,
+            "tax_info": tax_info,
+            "has_bdr": bool(bdr_rates_map),
+            "detailed": False,
+            "group_by": "brand",
+        }
+
+    if group_by == "subject" and not vendor_code:
+        data = await funnel_service.get_funnel_by_subject(
+            db,
+            project.id,
+            tax_info,
+            date_from,
+            date_to,
+            brand,
+            subject,
+            bdr_rates_map=bdr_rates_map,
+        )
+        return {
+            "data": data,
+            "tax_info": tax_info,
+            "has_bdr": bool(bdr_rates_map),
+            "detailed": False,
+            "group_by": "subject",
+        }
+
     detailed = bool(vendor_code)
 
     if not detailed:
@@ -569,3 +607,62 @@ async def sync_funnel_progress(
     from backend.services.funnel.sync import get_funnel_sync_progress
 
     return get_funnel_sync_progress(project.id)
+
+
+# ─── Unified Sync ────────────────────────────────────────────────────────────
+
+
+@router.post("/unified_sync")
+async def unified_sync(
+    date_from: str = Query(...),
+    date_to: str = Query(...),
+    project: Project = Depends(get_current_project),
+):
+    """Run unified ad sync: campaigns + budgets → funnel. Background task."""
+    from backend.services.funnel.unified_sync import get_unified_sync_progress, run_unified_ad_sync_bg
+
+    progress = get_unified_sync_progress(project.id)
+    if progress.get("phase") in ("campaigns", "budgets", "funnel"):
+        return {"status": "already_running", **progress}
+
+    logger.info(f"Starting unified sync for project {project.id}: {date_from} → {date_to}")
+    task = asyncio.create_task(run_unified_ad_sync_bg(project.id, date_from, date_to))
+    task.add_done_callback(
+        lambda t: logger.error(f"Unified sync task error: {t.exception()}") if t.exception() else None
+    )
+    return {"status": "started", "message": "Unified sync запущен"}
+
+
+@router.get("/unified_sync_progress")
+async def unified_sync_progress(
+    project: Project = Depends(get_current_project),
+):
+    """Get progress of unified sync."""
+    from backend.services.funnel.unified_sync import get_unified_sync_progress
+
+    return get_unified_sync_progress(project.id)
+
+
+@router.post("/first_sync")
+async def first_sync(
+    project: Project = Depends(get_current_project),
+):
+    """Run first-time sync pipeline: nomenclature → campaigns → funnel 30d → backfill 60d."""
+    from backend.services.funnel.unified_sync import get_first_sync_progress, run_first_sync_bg
+
+    progress = get_first_sync_progress(project.id)
+    if progress.get("phase") in ("nomenclature", "campaigns", "funnel"):
+        return {"status": "already_running", **progress}
+
+    asyncio.create_task(run_first_sync_bg(project.id))  # noqa: RUF006
+    return {"status": "started", "message": "Первичная синхронизация запущена"}
+
+
+@router.get("/first_sync_progress")
+async def first_sync_progress(
+    project: Project = Depends(get_current_project),
+):
+    """Get progress of first sync pipeline."""
+    from backend.services.funnel.unified_sync import get_first_sync_progress
+
+    return get_first_sync_progress(project.id)

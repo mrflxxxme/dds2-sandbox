@@ -1,13 +1,13 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
-import type { FunnelDayRow, FunnelSkuRow, FunnelSummary, FunnelFilters, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct } from '@/types/api';
+import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, UnifiedSyncProgress, FirstSyncProgress } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
         syncFunnel(dateFrom: string, dateTo: string) {
             return api.request<{ ok: boolean; days_synced: number }>('POST', '/api/v1/funnel/sync', { date_from: dateFrom, date_to: dateTo });
         },
-        getFunnelData(params?: { date_from?: string; date_to?: string; brand?: string; vendor_code?: string; subject?: string; group_by?: 'day' | 'sku' }) {
+        getFunnelData(params?: { date_from?: string; date_to?: string; brand?: string; vendor_code?: string; subject?: string; group_by?: 'day' | 'sku' | 'brand' | 'subject' }) {
             const q = new URLSearchParams();
             if (params?.date_from) q.set('date_from', params.date_from);
             if (params?.date_to) q.set('date_to', params.date_to);
@@ -15,7 +15,7 @@ export function addFunnelMethods(api: ApiClient) {
             if (params?.vendor_code) q.set('vendor_code', params.vendor_code);
             if (params?.subject) q.set('subject', params.subject);
             if (params?.group_by) q.set('group_by', params.group_by);
-            return api.request<{ data: (FunnelDayRow | FunnelSkuRow)[]; detailed: boolean; tax_rate: number; group_by?: string }>('GET', `/api/v1/funnel/data?${q.toString()}`);
+            return api.request<{ data: (FunnelDayRow | FunnelSkuRow | FunnelGroupRow)[]; detailed: boolean; tax_rate: number; has_bdr?: boolean; group_by?: string }>('GET', `/api/v1/funnel/data?${q.toString()}`);
         },
         getFunnelSummary(dateFrom?: string, dateTo?: string, brand?: string, subject?: string) {
             const q = new URLSearchParams();
@@ -111,6 +111,18 @@ export function addFunnelMethods(api: ApiClient) {
         },
         getSyncFunnelProgress() {
             return api.request<{ status: string; days_total?: number; days_done?: number; rows?: number; error?: string }>('GET', '/api/v1/funnel/sync_funnel_progress');
+        },
+        unifiedSync(dateFrom: string, dateTo: string) {
+            return api.request<{ status: string }>('POST', `/api/v1/funnel/unified_sync?date_from=${dateFrom}&date_to=${dateTo}`);
+        },
+        getUnifiedSyncProgress() {
+            return api.request<UnifiedSyncProgress>('GET', '/api/v1/funnel/unified_sync_progress');
+        },
+        firstSync() {
+            return api.request<{ status: string }>('POST', '/api/v1/funnel/first_sync');
+        },
+        getFirstSyncProgress() {
+            return api.request<FirstSyncProgress>('GET', '/api/v1/funnel/first_sync_progress');
         },
     };
 }

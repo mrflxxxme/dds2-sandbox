@@ -341,3 +341,54 @@ async def sync_nomenclature_all_projects():
             logger.error(f"Nomenclature sync TIMEOUT for project {pid}")
         except Exception as e:
             logger.error(f"Nomenclature sync failed for project {pid}: {e}")
+
+
+# ─── Budget-only sync (every 10 min) ─────────────────────────────────────────
+
+
+async def sync_budgets_all_projects():
+    """Sync ONLY budgets of active campaigns for all projects. Lightweight, every 10 min."""
+    from backend.services.funnel.ad_campaigns_service import sync_ad_budgets_only
+
+    logger.info("⏰ Scheduler: starting budget-only sync for all projects")
+    project_ids = await get_sync_project_ids()
+    if not project_ids:
+        logger.info("Scheduler: no projects with WB keys for budget sync")
+        return
+
+    for pid in project_ids:
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await asyncio.wait_for(
+                    sync_ad_budgets_only(db, pid),
+                    timeout=300,
+                )
+                logger.info(
+                    f"Budget sync: project {pid} — updated={result.get('updated', 0)}, "
+                    f"events={result.get('events', 0)}"
+                )
+        except TimeoutError:
+            logger.error(f"Budget sync TIMEOUT for project {pid}")
+        except Exception as e:
+            logger.error(f"Budget sync failed for project {pid}: {e}")
+
+
+# ─── Funnel hourly sync (last 2 days) ────────────────────────────────────────
+
+
+async def sync_funnel_hourly():
+    """Hourly funnel sync: last 2 days for all projects."""
+    logger.info("⏰ Scheduler: starting hourly funnel sync (last 2 days)")
+    project_ids = await get_sync_project_ids()
+    if not project_ids:
+        logger.info("Scheduler: no projects with WB keys for hourly funnel sync")
+        return
+
+    for pid in project_ids:
+        try:
+            d_from = (date.today() - timedelta(days=1)).isoformat()
+            d_to = date.today().isoformat()
+            logger.info(f"Hourly funnel: project {pid} — {d_from} → {d_to}")
+            await _run_and_log(pid, d_from, d_to, "funnel_hourly")
+        except Exception as e:
+            logger.error(f"Hourly funnel sync failed for project {pid}: {e}")

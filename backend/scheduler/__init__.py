@@ -24,6 +24,8 @@ from backend.scheduler.jobs.funnel import (
     fast_backfill_tick,
     sync_ad_campaigns_all_projects,
     sync_all_projects_funnel,
+    sync_budgets_all_projects,
+    sync_funnel_hourly,
     sync_nomenclature_all_projects,
 )
 from backend.scheduler.jobs.health_check import health_monitor
@@ -92,12 +94,34 @@ def start_scheduler():
         misfire_grace_time=60,
     )
 
-    # Ad campaigns sync: hourly at :17 — names, types, budgets
+    # Ad campaigns sync: every 30 min at :02 and :32 — names, types, statuses, budgets
     _scheduler.add_job(
         sync_ad_campaigns_all_projects,
-        trigger=CronTrigger(minute=17, timezone=MSK),
+        trigger=CronTrigger(minute="2,32", timezone=MSK),
         id="sync_ad_campaigns",
-        name="WB Ad Campaigns Sync (hourly)",
+        name="WB Ad Campaigns Sync (every 30min)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=300,
+    )
+
+    # Budget-only sync: every 10 min — lightweight, active campaigns only
+    _scheduler.add_job(
+        sync_budgets_all_projects,
+        trigger=IntervalTrigger(minutes=10),
+        id="sync_budgets",
+        name="WB Ad Budgets Sync (every 10min)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=120,
+    )
+
+    # Funnel hourly sync: every hour at :45 — last 2 days
+    _scheduler.add_job(
+        sync_funnel_hourly,
+        trigger=CronTrigger(minute=45, timezone=MSK),
+        id="sync_funnel_hourly",
+        name="WB Funnel Sync (hourly, last 2 days)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=300,

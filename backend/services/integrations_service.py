@@ -4,17 +4,15 @@ Extracted from routers/integrations.py to keep router as thin HTTP layer.
 """
 
 import logging
-from datetime import datetime, date, timedelta, timezone
-
-from backend.utils.time import utcnow
+from datetime import date, timedelta
 from decimal import Decimal
-from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import IntegrationKey, SyncLog, WbPayout, Nomenclature
-from backend.utils.crypto import encrypt as _encrypt, decrypt as _decrypt
+from backend.models import IntegrationKey, Nomenclature, SyncLog, WbPayout
+from backend.utils.crypto import decrypt as _decrypt, encrypt as _encrypt
+from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.integrations")
 
@@ -26,21 +24,23 @@ async def list_keys(db: AsyncSession, project_id: int) -> list[dict]:
     """List all integration keys for a project (with masked previews)."""
     result = await db.execute(
         select(IntegrationKey)
-        .where(IntegrationKey.project_id == project_id, IntegrationKey.is_deleted == False)
+        .where(IntegrationKey.project_id == project_id, IntegrationKey.is_deleted.is_(False))
         .order_by(IntegrationKey.created_at.desc())
     )
     keys = result.scalars().all()
     output = []
     for k in keys:
-        output.append({
-            "id": k.id,
-            "service": k.service,
-            "label": k.label,
-            "is_active": k.is_active,
-            "created_at": k.created_at,
-            "last_sync_at": k.last_sync_at,
-            "key_preview": "***" + _decrypt(k.encrypted_key)[-4:],
-        })
+        output.append(
+            {
+                "id": k.id,
+                "service": k.service,
+                "label": k.label,
+                "is_active": k.is_active,
+                "created_at": k.created_at,
+                "last_sync_at": k.last_sync_at,
+                "key_preview": "***" + _decrypt(k.encrypted_key)[-4:],
+            }
+        )
     return output
 
 
@@ -49,7 +49,7 @@ async def add_key(
     project_id: int,
     service: str,
     api_key: str,
-    label: Optional[str] = None,
+    label: str | None = None,
 ) -> dict:
     """
     Add a new integration API key (encrypted).
@@ -63,6 +63,7 @@ async def add_key(
     # Test connection before saving
     if service == "wb":
         from backend.integrations.wb_api import WBApiClient
+
         client = WBApiClient(api_key)
         valid = await client.test_connection()
         if not valid:
@@ -80,14 +81,26 @@ async def add_key(
     await db.commit()
     await db.refresh(key)
 
-    # Auto-restart scheduler jobs
+    # Auto-restart scheduler jobs + trigger first sync
     if service == "wb":
         try:
             from backend.scheduler import restart_backfill_jobs
+
             restart_backfill_jobs()
             logger.info("Scheduler jobs restarted for project %s after WB key added", project_id)
         except Exception as e:
             logger.warning("Could not restart scheduler jobs: %s", e)
+
+        # Launch first sync pipeline in background
+        try:
+            import asyncio
+
+            from backend.services.funnel.unified_sync import run_first_sync_bg
+
+            asyncio.create_task(run_first_sync_bg(project_id))  # noqa: RUF006
+            logger.info("First sync pipeline launched for project %s", project_id)
+        except Exception as e:
+            logger.warning("Could not launch first sync: %s", e)
 
     return {
         "id": key.id,
@@ -125,8 +138,8 @@ async def _get_wb_key(db: AsyncSession, project_id: int) -> tuple:
         select(IntegrationKey).where(
             IntegrationKey.project_id == project_id,
             IntegrationKey.service == "wb",
-            IntegrationKey.is_active == True,
-            IntegrationKey.is_deleted == False,
+            IntegrationKey.is_active.is_(True),
+            IntegrationKey.is_deleted.is_(False),
         )
     )
     key = result.scalar_one_or_none()
@@ -139,7 +152,7 @@ async def sync_wb_sales(
     db: AsyncSession,
     project_id: int,
     sync_type: str = "sales",
-    date_from: Optional[date] = None,
+    date_from: date | None = None,
 ) -> SyncLog:
     """
     Sync data from Wildberries API.
@@ -293,7 +306,9 @@ async def sync_wb_nomenclature(db: AsyncSession, project_id: int) -> SyncLog:
         sync_log.rows_inserted = inserted
         sync_log.status = "OK"
         sync_log.finished_at = utcnow()
-        sync_log.error_msg = f"cards={len(raw_cards)}, barcodes={len(nom_items)}, inserted={inserted}, updated={updated}"
+        sync_log.error_msg = (
+            f"cards={len(raw_cards)}, barcodes={len(nom_items)}, inserted={inserted}, updated={updated}"
+        )
 
         key.last_sync_at = utcnow()
         await db.commit()
@@ -316,20 +331,15 @@ async def sync_wb_nomenclature(db: AsyncSession, project_id: int) -> SyncLog:
 async def get_sync_log(
     db: AsyncSession,
     project_id: int,
-    service: Optional[str] = None,
+    service: str | None = None,
     limit: int = 20,
 ) -> list:
     """Get sync history for a project."""
     key_ids_q = select(IntegrationKey.id).where(
         IntegrationKey.project_id == project_id,
-        IntegrationKey.is_deleted == False,
+        IntegrationKey.is_deleted.is_(False),
     )
-    q = (
-        select(SyncLog)
-        .where(SyncLog.integration_id.in_(key_ids_q))
-        .order_by(SyncLog.started_at.desc())
-        .limit(limit)
-    )
+    q = select(SyncLog).where(SyncLog.integration_id.in_(key_ids_q)).order_by(SyncLog.started_at.desc()).limit(limit)
     if service:
         q = q.where(SyncLog.service == service)
     result = await db.execute(q)

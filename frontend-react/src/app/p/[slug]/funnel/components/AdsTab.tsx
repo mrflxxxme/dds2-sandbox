@@ -1,8 +1,8 @@
 'use client';
-import { Fragment, useEffect, useState, useCallback } from 'react';
+import { Fragment, useEffect, useState, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
 import { exportToExcel } from '@/lib/utils';
-import type { AdTabProduct } from '@/types/api';
+import type { AdTabProduct, UnifiedSyncProgress } from '@/types/api';
 
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
 const fmtPct = (n: number) => (n || 0).toFixed(2) + '%';
@@ -31,6 +31,24 @@ const TYPE_MAP: Record<string, string> = {
     unified: 'Авто',
 };
 
+/** Build human-readable progress string from UnifiedSyncProgress */
+function formatProgress(p: UnifiedSyncProgress): string {
+    switch (p.phase) {
+        case 'campaigns':
+            return 'Загрузка кампаний...';
+        case 'budgets':
+            return `Бюджеты: ${p.budgets_done || 0} / ${p.budgets_total || '?'}`;
+        case 'funnel':
+            return `Воронка: ${p.funnel_days_done || 0} / ${p.funnel_days_total || '?'} дней`;
+        case 'done':
+            return `✅ Готово: ${p.campaigns_total || 0} кампаний, ${p.funnel_days_done || 0} дней`;
+        case 'error':
+            return p.error || p.detail || 'Ошибка синхронизации';
+        default:
+            return '';
+    }
+}
+
 interface AdsTabProps {
     dateFrom: string;
     dateTo: string;
@@ -42,10 +60,11 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
     const [data, setData] = useState<AdTabProduct[]>([]);
     const [loading, setLoading] = useState(false);
     const [syncing, setSyncing] = useState(false);
-    const [syncProgress, setSyncProgress] = useState<string>('');
+    const [progress, setProgress] = useState('');
     const [error, setError] = useState('');
     const [expandedNm, setExpandedNm] = useState<Set<number>>(new Set());
     const [expandedCamp, setExpandedCamp] = useState<Set<string>>(new Set());
+    const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     const loadData = useCallback(async () => {
         if (!dateFrom || !dateTo) return;
@@ -63,112 +82,71 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
 
     useEffect(() => { loadData(); }, [loadData]);
 
-    // Poll campaigns sync progress — shared between start and page load
-    const startCampaignsPoll = useCallback(() => {
+    // Cleanup poll on unmount
+    useEffect(() => {
+        return () => {
+            if (pollRef.current) clearInterval(pollRef.current);
+        };
+    }, []);
+
+    /** Process a progress response — returns true if polling should continue */
+    const handleProgressUpdate = useCallback((p: UnifiedSyncProgress): boolean => {
+        if (p.phase === 'idle') {
+            return false;
+        }
+        if (p.phase === 'done') {
+            setProgress(formatProgress(p));
+            setSyncing(false);
+            loadData();
+            setTimeout(() => setProgress(''), 5000);
+            return false;
+        }
+        if (p.phase === 'error') {
+            setProgress('');
+            setSyncing(false);
+            setError(p.error || p.detail || 'Ошибка синхронизации');
+            return false;
+        }
+        // Active phase
+        setProgress(formatProgress(p));
+        setSyncing(true);
+        return true;
+    }, [loadData]);
+
+    /** Start polling unified sync progress */
+    const startPoll = useCallback(() => {
+        if (pollRef.current) clearInterval(pollRef.current);
         const poll = setInterval(async () => {
             try {
-                const p = await api.getSyncCampaignsProgress();
-                if (p.status === 'fetching_campaigns') {
-                    setSyncProgress('Загрузка списка кампаний...');
-                    setSyncing(true);
-                } else if (p.status === 'fetching_budgets') {
-                    setSyncProgress(`Бюджеты: ${p.budgets_done || 0} / ${p.budgets_total || '?'}`);
-                    setSyncing(true);
-                } else if (p.status === 'saving') {
-                    setSyncProgress('Сохранение...');
-                    setSyncing(true);
-                } else if (p.status === 'done') {
+                const p = await api.getUnifiedSyncProgress();
+                if (!handleProgressUpdate(p)) {
                     clearInterval(poll);
-                    setSyncProgress(`✅ Готово: ${p.campaigns_total || 0} кампаний, ${p.budgets_done || 0} бюджетов`);
-                    setSyncing(false);
-                    await loadData();
-                    setTimeout(() => setSyncProgress(''), 5000);
-                } else if (p.status === 'error') {
-                    clearInterval(poll);
-                    setSyncProgress('');
-                    setSyncing(false);
-                    setError(p.error || 'Ошибка синхронизации');
-                } else if (p.status === 'idle') {
-                    // If we were polling after page load and it's idle, stop
-                    if (!syncing) clearInterval(poll);
+                    if (pollRef.current === poll) pollRef.current = null;
                 }
             } catch { /* ignore poll errors */ }
         }, 5000);
+        pollRef.current = poll;
         // Safety timeout: stop after 10 min
-        setTimeout(() => { clearInterval(poll); setSyncing(false); }, 600000);
-        return poll;
-    }, [loadData, syncing]);
+        setTimeout(() => {
+            clearInterval(poll);
+            if (pollRef.current === poll) {
+                pollRef.current = null;
+                setSyncing(false);
+            }
+        }, 600000);
+    }, [handleProgressUpdate]);
 
-    // On mount: check if sync is already running on backend, start polling inline
+    // On mount: check if unified sync is already running, resume polling
     useEffect(() => {
         let cancelled = false;
-        const isRunning = (s: string) => s && s !== 'idle' && s !== 'done' && s !== 'error';
-
-        const updateCampaignsProgress = (p: Record<string, unknown>) => {
-            if (p.status === 'fetching_campaigns') setSyncProgress('Загрузка списка кампаний...');
-            else if (p.status === 'fetching_budgets') setSyncProgress(`Бюджеты: ${p.budgets_done || 0} / ${p.budgets_total || '?'}`);
-            else if (p.status === 'saving') setSyncProgress('Сохранение...');
-            else if (p.status === 'done') {
-                setSyncProgress(`✅ Готово: ${p.campaigns_total || 0} кампаний`);
-                setSyncing(false);
-                loadData();
-                setTimeout(() => setSyncProgress(''), 5000);
-                return false; // stop polling
-            } else if (p.status === 'error') {
-                setSyncProgress(''); setSyncing(false);
-                return false;
-            }
-            return true; // continue polling
-        };
-
-        const updateFunnelProgress = (p: Record<string, unknown>) => {
-            if (p.status === 'fetching_ads') setFunnelProgress((p.detail as string) || 'Загрузка рекламных данных...');
-            else if (p.status === 'fetching_funnel') setFunnelProgress(`Воронка: ${p.days_done || 0} / ${p.days_total || '?'} дней`);
-            else if (p.status === 'saving') setFunnelProgress(`Сохранение: ${p.days_done || 0} / ${p.days_total || '?'} дней`);
-            else if (p.status === 'done') {
-                setFunnelProgress(`✅ Готово: ${p.days_done} дней, ${p.rows || 0} строк`);
-                setFunnelSyncing(false);
-                loadData();
-                setTimeout(() => setFunnelProgress(''), 5000);
-                return false;
-            } else if (p.status === 'error') {
-                setFunnelProgress(''); setFunnelSyncing(false);
-                return false;
-            }
-            return true;
-        };
-
         (async () => {
-            // Check campaigns
             try {
-                const p = await api.getSyncCampaignsProgress();
+                const p = await api.getUnifiedSyncProgress();
                 if (cancelled) return;
-                if (isRunning(p.status as string)) {
+                if (p.phase && p.phase !== 'idle' && p.phase !== 'done' && p.phase !== 'error') {
                     setSyncing(true);
-                    updateCampaignsProgress(p);
-                    const poll = setInterval(async () => {
-                        try {
-                            const pp = await api.getSyncCampaignsProgress();
-                            if (!updateCampaignsProgress(pp)) clearInterval(poll);
-                        } catch { /* ignore */ }
-                    }, 5000);
-                    setTimeout(() => clearInterval(poll), 600000);
-                }
-            } catch { /* ignore */ }
-            // Check funnel
-            try {
-                const p = await api.getSyncFunnelProgress();
-                if (cancelled) return;
-                if (isRunning(p.status as string)) {
-                    setFunnelSyncing(true);
-                    updateFunnelProgress(p);
-                    const poll = setInterval(async () => {
-                        try {
-                            const pp = await api.getSyncFunnelProgress();
-                            if (!updateFunnelProgress(pp)) clearInterval(poll);
-                        } catch { /* ignore */ }
-                    }, 5000);
-                    setTimeout(() => clearInterval(poll), 600000);
+                    setProgress(formatProgress(p));
+                    startPoll();
                 }
             } catch { /* ignore */ }
         })();
@@ -176,68 +154,17 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleSync = async () => {
+        if (!dateFrom || !dateTo) return;
         setSyncing(true);
-        setSyncProgress('Запуск...');
+        setProgress('Запуск...');
         setError('');
         try {
-            await api.syncAdCampaigns();
-            startCampaignsPoll();
+            await api.unifiedSync(dateFrom, dateTo);
+            startPoll();
         } catch (e: unknown) {
             setError((e as Error).message || 'Ошибка синхронизации');
             setSyncing(false);
-            setSyncProgress('');
-        }
-    };
-
-    // Funnel sync (for campaign-level stats)
-    const [funnelSyncing, setFunnelSyncing] = useState(false);
-    const [funnelProgress, setFunnelProgress] = useState('');
-
-    const startFunnelPoll = useCallback(() => {
-        const poll = setInterval(async () => {
-            try {
-                const p = await api.getSyncFunnelProgress();
-                if (p.status === 'fetching_ads') {
-                    setFunnelProgress(p.detail || 'Загрузка рекламных данных...');
-                    setFunnelSyncing(true);
-                } else if (p.status === 'fetching_funnel') {
-                    setFunnelProgress(`Воронка: ${p.days_done || 0} / ${p.days_total || '?'} дней`);
-                    setFunnelSyncing(true);
-                } else if (p.status === 'saving') {
-                    setFunnelProgress(`Сохранение: ${p.days_done || 0} / ${p.days_total || '?'} дней`);
-                    setFunnelSyncing(true);
-                } else if (p.status === 'done') {
-                    clearInterval(poll);
-                    setFunnelProgress(`✅ Готово: ${p.days_done} дней, ${p.rows || 0} строк`);
-                    setFunnelSyncing(false);
-                    await loadData();
-                    setTimeout(() => setFunnelProgress(''), 5000);
-                } else if (p.status === 'error') {
-                    clearInterval(poll);
-                    setFunnelProgress('');
-                    setFunnelSyncing(false);
-                    setError(p.error || 'Ошибка синхронизации воронки');
-                } else if (p.status === 'idle') {
-                    if (!funnelSyncing) clearInterval(poll);
-                }
-            } catch { /* ignore */ }
-        }, 5000);
-        setTimeout(() => { clearInterval(poll); setFunnelSyncing(false); }, 600000);
-        return poll;
-    }, [loadData, funnelSyncing]);
-
-    const handleFunnelSync = async () => {
-        if (!dateFrom || !dateTo) return;
-        setFunnelSyncing(true);
-        setFunnelProgress('Запуск...');
-        setError('');
-        try {
-            await api.syncFunnelBg(dateFrom, dateTo);
-            startFunnelPoll();
-        } catch (e: unknown) {
-            setError((e as Error).message || 'Ошибка');
-            setFunnelSyncing(false);
-            setFunnelProgress('');
+            setProgress('');
         }
     };
 
@@ -298,17 +225,11 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
                     <button className="btn btn-outline" onClick={handleExport} disabled={!data.length}>
                         📥 Excel
                     </button>
-                    <button className="btn btn-primary" onClick={handleSync} disabled={syncing}>
-                        {syncing ? '⏳ Кампании...' : '🔄 Кампании'}
+                    <button className="btn btn-primary" onClick={handleSync} disabled={syncing || !dateFrom || !dateTo}>
+                        {syncing ? '⏳ Обновление...' : '🔄 Обновить'}
                     </button>
-                    <button className="btn btn-primary" onClick={handleFunnelSync} disabled={funnelSyncing} style={{ background: '#6366f1' }}>
-                        {funnelSyncing ? '⏳ Воронка...' : '📊 Воронка'}
-                    </button>
-                    {syncProgress && (
-                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{syncProgress}</span>
-                    )}
-                    {funnelProgress && (
-                        <span style={{ fontSize: 12, color: '#6366f1' }}>{funnelProgress}</span>
+                    {progress && (
+                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{progress}</span>
                     )}
                 </div>
             </div>
@@ -331,13 +252,13 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
             )}
 
             {/* Long period warning */}
-            {isLongPeriod && !funnelSyncing && (
+            {isLongPeriod && !syncing && (
                 <div style={{ fontSize: 13, color: '#6366f1', background: 'rgba(99,102,241,0.08)', padding: '10px 16px', borderRadius: 8, marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span>📅 Период {periodDays} дней — загрузка статистики по кампаниям займёт ~{Math.ceil(periodDays / 3)} мин. Рекомендуем до 30 дней.</span>
+                    <span>📅 Период {periodDays} дней — загрузка займёт ~{Math.ceil(periodDays / 3)} мин. Рекомендуем до 30 дней.</span>
                     <button
                         className="btn btn-sm"
                         style={{ background: '#6366f1', color: '#fff', marginLeft: 12, whiteSpace: 'nowrap' }}
-                        onClick={handleFunnelSync}
+                        onClick={handleSync}
                     >
                         Загрузить в фоне
                     </button>
@@ -441,18 +362,18 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
                                                         <td style={{ ...stickyCol, width: 24, background: '#f0f4ff', borderRight: 'none', paddingLeft: 16, borderBottom: '1px solid #e8ecf4', boxShadow: 'none' }}>
                                                             {hasEvents && <span style={{ fontSize: 9, color: '#94a3b8' }}>{isCampExpanded ? '▼' : '▶'}</span>}
                                                         </td>
-                                                        {/* col 2: name (instead of artciule) */}
+                                                        {/* col 2: name (instead of article) */}
                                                         <td style={{ ...stickyCol, left: 24, background: '#f0f4ff', padding: '6px 12px', borderBottom: '1px solid #e8ecf4', fontSize: 12, boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.05)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 240 }}>
                                                             <span style={{ marginRight: 4 }}>📢</span>
                                                             {c.name || c.campaign_id}
                                                         </td>
-                                                        {/* col 3: type (instead of товар) */}
+                                                        {/* col 3: type */}
                                                         <td style={campTd}>{TYPE_MAP[c.campaign_type || ''] || c.campaign_type || '—'}</td>
-                                                        {/* col 4: status (instead of бренд) */}
+                                                        {/* col 4: status */}
                                                         <td style={campTd}>
                                                             <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 12, fontSize: 11, fontWeight: 600, background: st.color + '20', color: st.color }}>{st.label}</span>
                                                         </td>
-                                                        {/* col 5-11: просмотры, клики, расход, CTR, CPC, CPM, ДРР */}
+                                                        {/* col 5-11: views, clicks, spend, CTR, CPC, CPM, DRR */}
                                                         <td style={campTdNum}>{c.views ? fmt(c.views) : '—'}</td>
                                                         <td style={campTdNum}>{c.clicks ? fmt(c.clicks) : '—'}</td>
                                                         <td style={{ ...campTdNum, fontWeight: c.spend ? 600 : 400, color: c.spend ? '#374151' : '#9ca3af' }}>{c.spend ? fmt(c.spend) : '—'}</td>
@@ -460,11 +381,11 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
                                                         <td style={campTdNum}>{c.cpc ? fmt(c.cpc) : '—'}</td>
                                                         <td style={campTdNum}>{c.cpm ? fmt(c.cpm) : '—'}</td>
                                                         <td style={campTd}></td>
-                                                        {/* col 12-14: ABC выр, ABC приб, остатки — пустые */}
+                                                        {/* col 12-14: ABC rev, ABC profit, stock — empty */}
                                                         <td style={campTd}></td>
                                                         <td style={campTd}></td>
                                                         <td style={campTd}></td>
-                                                        {/* col 15: бюджет */}
+                                                        {/* col 15: budget */}
                                                         <td style={{ ...campTdNum, fontWeight: 600 }}>{fmt(c.budget)}</td>
                                                     </tr>
                                                     {isCampExpanded && events.map((ev, i) => {

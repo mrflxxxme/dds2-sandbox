@@ -80,6 +80,8 @@ from backend.schemas.refs import (
     CounterpartyCategorySchema,
     OpeningBalanceSchema,
     OverrideSchema,
+    ProductTagMappingPayload,
+    ProductTagSchema,
 )
 
 # Reports
@@ -170,6 +172,8 @@ __all__ = [
     "OpeningBalanceSchema",
     "CategoryRefSchema",
     "CategoryRefCreate",
+    "ProductTagSchema",
+    "ProductTagMappingPayload",
     # Transactions
     "TransactionSchema",
     "TransactionFilter",
