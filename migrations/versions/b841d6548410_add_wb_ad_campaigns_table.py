@@ -26,7 +26,7 @@ def upgrade() -> None:
         sa.Column("project_id", sa.Integer(), nullable=False),
         sa.Column("campaign_id", sa.Integer(), nullable=False),
         sa.Column("name", sa.String(length=500), nullable=True),
-        sa.Column("campaign_type", sa.Integer(), nullable=True),
+        sa.Column("campaign_type", sa.String(length=20), nullable=True),
         sa.Column("status", sa.Integer(), nullable=False),
         sa.Column("budget", sa.Numeric(precision=18, scale=2), nullable=False),
         sa.Column("nm_ids", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
