@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, usePathname } from 'next/navigation';
 import { api } from '@/lib/api';
+import { usePermissions } from '@/lib/hooks/usePermissions';
 import Link from 'next/link';
 
 const dashboardItem = { href: '', label: 'Дашборд', icon: '📊' };
@@ -9,50 +10,55 @@ const dashboardItem = { href: '', label: 'Дашборд', icon: '📊' };
 const navGroups = [
     {
         title: 'Финансы',
+        section: 'finance',
         items: [
-            { href: '/import', label: 'Импорт документов', icon: '📥' },
-            { href: '/txn', label: 'Операции', icon: '💳' },
-            { href: '/inbox', label: 'INBOX — Неразнесённые', icon: '🔴' },
-            { href: '/reports', label: 'Отчёты', icon: '📈' },
-            { href: '/cost', label: 'Себестоимость', icon: '💰' },
-            { href: '/refs', label: 'Справочники', icon: '📋' },
+            { href: '/import', label: 'Импорт документов', icon: '📥', pageKey: 'import' },
+            { href: '/txn', label: 'Операции', icon: '💳', pageKey: 'txn' },
+            { href: '/inbox', label: 'INBOX — Неразнесённые', icon: '🔴', pageKey: 'inbox' },
+            { href: '/reports', label: 'Отчёты', icon: '📈', pageKey: 'reports' },
+            { href: '/cost', label: 'Себестоимость', icon: '💰', pageKey: 'cost' },
+            { href: '/refs', label: 'Справочники', icon: '📋', pageKey: 'refs' },
         ],
     },
     {
         title: 'Склад',
+        section: 'warehouse',
         items: [
-            { href: '/warehouse', label: 'Склады', icon: '🏢' },
-            { href: '/warehouse/assembly', label: 'Заявки на сборку', icon: '📋' },
-            { href: '/warehouse/logistics', label: 'Лист логиста', icon: '🚛' },
-            { href: '/warehouse/stock', label: 'Сводные остатки', icon: '📦' },
-            { href: '/warehouse/fbo-supplies', label: 'Поставки FBO', icon: '📮' },
-            { href: '/warehouse/wb-stocks', label: 'Остатки WB', icon: '🏭' },
-            { href: '/warehouse/analytics', label: 'Аналитика остатков', icon: '📊' },
+            { href: '/warehouse', label: 'Склады', icon: '🏢', pageKey: 'warehouse' },
+            { href: '/warehouse/assembly', label: 'Заявки на сборку', icon: '📋', pageKey: 'assembly' },
+            { href: '/warehouse/logistics', label: 'Лист логиста', icon: '🚛', pageKey: 'logistics' },
+            { href: '/warehouse/stock', label: 'Сводные остатки', icon: '📦', pageKey: 'stocks' },
+            { href: '/warehouse/fbo-supplies', label: 'Поставки FBO', icon: '📮', pageKey: 'fbo' },
+            { href: '/warehouse/wb-stocks', label: 'Остатки WB', icon: '🏭', pageKey: 'stocks' },
+            { href: '/warehouse/analytics', label: 'Аналитика остатков', icon: '📊', pageKey: 'stock-analytics' },
         ],
     },
     {
         title: 'Заказы',
+        section: 'orders',
         items: [
-            { href: '/planning', label: 'Планирование', icon: '📦' },
-            { href: '/container-loader', label: 'Загрузка контейнера', icon: '🚛' },
+            { href: '/planning', label: 'Планирование', icon: '📦', pageKey: 'planning' },
+            { href: '/container-loader', label: 'Загрузка контейнера', icon: '🚛', pageKey: 'container' },
         ],
     },
     {
         title: 'Продажи',
+        section: 'sales',
         items: [
-            { href: '/funnel', label: 'Воронка продаж', icon: '📊' },
-            { href: '/trends', label: 'Метрики и тренды', icon: '📈' },
-            { href: '/order-geography', label: 'Куда заказывают', icon: '🗺️' },
-            { href: '/opiu', label: 'ОПИУ', icon: '📋' },
-            { href: '/plan-fact', label: 'План-Факт', icon: '🎯' },
+            { href: '/funnel', label: 'Воронка продаж', icon: '📊', pageKey: 'funnel' },
+            { href: '/trends', label: 'Метрики и тренды', icon: '📈', pageKey: 'trends' },
+            { href: '/order-geography', label: 'Куда заказывают', icon: '🗺️', pageKey: 'geography' },
+            { href: '/opiu', label: 'ОПИУ', icon: '📋', pageKey: 'opiu' },
+            { href: '/plan-fact', label: 'План-Факт', icon: '🎯', pageKey: 'plan-fact' },
         ],
     },
     {
         title: 'Настройки',
+        section: 'settings',
         items: [
-            { href: '/monitoring', label: 'Мониторинг', icon: '📡' },
-            { href: '/settings', label: 'Настройка проекта', icon: '⚙️' },
-            { href: '/team', label: 'Команда', icon: '👥' },
+            { href: '/monitoring', label: 'Мониторинг', icon: '📡', pageKey: 'monitoring' },
+            { href: '/settings', label: 'Настройка проекта', icon: '⚙️', pageKey: 'project-settings' },
+            { href: '/team', label: 'Команда', icon: '👥', pageKey: 'team' },
         ],
     },
 ];
@@ -64,6 +70,7 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
     const [username, setUsername] = useState('');
     const [projectName, setProjectName] = useState('');
     const [mounted, setMounted] = useState(false);
+    const { canAccess, canManage, loading: permLoading } = usePermissions();
 
     useEffect(() => {
         setMounted(true);
@@ -86,6 +93,12 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
         return pathname === full;
     };
 
+    // Filter nav groups based on permissions
+    const filteredGroups = navGroups.map(group => {
+        const visibleItems = group.items.filter(item => canAccess(item.pageKey));
+        return { ...group, items: visibleItems };
+    }).filter(group => group.items.length > 0);
+
     return (
         <div>
             <aside className="sidebar">
@@ -100,14 +113,14 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
                 </div>
 
                 <nav className="sidebar-nav">
-                    {/* Дашборд — отдельно, без группы */}
+                    {/* Дашборд — отдельно, без группы, всегда виден */}
                     <Link href={`/p/${slug}`}
                         className={`sidebar-link ${isActive('') ? 'active' : ''}`}>
                         <span>{dashboardItem.icon}</span>
                         <span>{dashboardItem.label}</span>
                     </Link>
 
-                    {navGroups.map(group => (
+                    {filteredGroups.map(group => (
                         <div key={group.title}>
                             <div className="sidebar-section" style={{ marginTop: 8 }}>{group.title}</div>
                             {group.items.map(item => (

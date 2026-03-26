@@ -3,19 +3,17 @@ Tests for master_logic business rules.
 """
 
 from datetime import datetime
-from decimal import Decimal
 
 import pandas as pd
-import pytest
 
 from backend.etl.master_logic import (
+    apply_master_logic,
+    extract_annex_id,
+    extract_invoice_id,
+    get_purpose_tag,
+    make_cp_key,
     make_txn_id,
     make_txn_id_hash,
-    make_cp_key,
-    get_purpose_tag,
-    extract_invoice_id,
-    extract_annex_id,
-    apply_master_logic,
 )
 
 
@@ -65,9 +63,7 @@ class TestMakeTxnId:
 
 class TestMakeTxnIdHash:
     def test_returns_hex_string(self):
-        h = make_txn_id_hash(
-            datetime(2024, 1, 1), "ACC", "RUB", "ACC2", "CP", 100, 0, "test"
-        )
+        h = make_txn_id_hash(datetime(2024, 1, 1), "ACC", "RUB", "ACC2", "CP", 100, 0, "test")
         assert len(h) == 40  # SHA1 hex digest
         assert all(c in "0123456789abcdef" for c in h)
 
@@ -147,23 +143,28 @@ class TestApplyMasterLogic:
     def _make_df(self, rows):
         """Create normalized DataFrame from list of dicts."""
         from backend.etl.parsers import NORM_COLS
+
         df = pd.DataFrame(rows, columns=NORM_COLS)
         return df
 
     def test_internal_transfer(self):
         our_accounts = {"ACC1", "ACC2"}
-        df = self._make_df([{
-            "date": datetime(2024, 1, 1),
-            "bank": "VTB",
-            "account": "ACC1",
-            "currency": "RUB",
-            "counterparty": "Internal",
-            "inn": None,
-            "counterparty_account": "ACC2",  # ← our account
-            "purpose": "Internal transfer",
-            "income": 0,
-            "expense": 100000,
-        }])
+        df = self._make_df(
+            [
+                {
+                    "date": datetime(2024, 1, 1),
+                    "bank": "VTB",
+                    "account": "ACC1",
+                    "currency": "RUB",
+                    "counterparty": "Internal",
+                    "inn": None,
+                    "counterparty_account": "ACC2",  # ← our account
+                    "purpose": "Internal transfer",
+                    "income": 0,
+                    "expense": 100000,
+                }
+            ]
+        )
 
         result = apply_master_logic(df, our_accounts, set(), {}, {})
 
@@ -172,18 +173,22 @@ class TestApplyMasterLogic:
         assert result.iloc[0]["status"] == "NO_CASHFLOW"
 
     def test_fx_buy(self):
-        df = self._make_df([{
-            "date": datetime(2024, 1, 1),
-            "bank": "VTB",
-            "account": "ACC1",
-            "currency": "RUB",
-            "counterparty": "Bank",
-            "inn": None,
-            "counterparty_account": "EXTERNAL",
-            "purpose": "Конверсия CNY/RUB курс 12.50",
-            "income": 0,
-            "expense": 125000,
-        }])
+        df = self._make_df(
+            [
+                {
+                    "date": datetime(2024, 1, 1),
+                    "bank": "VTB",
+                    "account": "ACC1",
+                    "currency": "RUB",
+                    "counterparty": "Bank",
+                    "inn": None,
+                    "counterparty_account": "EXTERNAL",
+                    "purpose": "Конверсия CNY/RUB курс 12.50",
+                    "income": 0,
+                    "expense": 125000,
+                }
+            ]
+        )
 
         result = apply_master_logic(df, {"ACC1"}, set(), {}, {})
 
@@ -192,18 +197,22 @@ class TestApplyMasterLogic:
 
     def test_customs_payment(self):
         customs_accounts = {"CUSTOMS_ACC"}
-        df = self._make_df([{
-            "date": datetime(2024, 1, 1),
-            "bank": "VTB",
-            "account": "ACC1",
-            "currency": "RUB",
-            "counterparty": "Customs",
-            "inn": None,
-            "counterparty_account": "CUSTOMS_ACC",
-            "purpose": "Customs duties payment",
-            "income": 0,
-            "expense": 50000,
-        }])
+        df = self._make_df(
+            [
+                {
+                    "date": datetime(2024, 1, 1),
+                    "bank": "VTB",
+                    "account": "ACC1",
+                    "currency": "RUB",
+                    "counterparty": "Customs",
+                    "inn": None,
+                    "counterparty_account": "CUSTOMS_ACC",
+                    "purpose": "Customs duties payment",
+                    "income": 0,
+                    "expense": 50000,
+                }
+            ]
+        )
 
         result = apply_master_logic(df, {"ACC1"}, customs_accounts, {}, {})
 
@@ -211,18 +220,22 @@ class TestApplyMasterLogic:
         assert result.iloc[0]["is_cashflow2"] == 1
 
     def test_oper_default(self):
-        df = self._make_df([{
-            "date": datetime(2024, 1, 1),
-            "bank": "VTB",
-            "account": "ACC1",
-            "currency": "RUB",
-            "counterparty": "ООО Supplier",
-            "inn": "1234567890",
-            "counterparty_account": "EXTERNAL_ACC",
-            "purpose": "Payment for goods",
-            "income": 0,
-            "expense": 100000,
-        }])
+        df = self._make_df(
+            [
+                {
+                    "date": datetime(2024, 1, 1),
+                    "bank": "VTB",
+                    "account": "ACC1",
+                    "currency": "RUB",
+                    "counterparty": "ООО Supplier",
+                    "inn": "1234567890",
+                    "counterparty_account": "EXTERNAL_ACC",
+                    "purpose": "Payment for goods",
+                    "income": 0,
+                    "expense": 100000,
+                }
+            ]
+        )
 
         result = apply_master_logic(df, {"ACC1"}, set(), {}, {})
 
@@ -231,18 +244,22 @@ class TestApplyMasterLogic:
         assert result.iloc[0]["status"] == "UNASSIGNED"
 
     def test_category_override_priority(self):
-        df = self._make_df([{
-            "date": datetime(2024, 1, 1),
-            "bank": "VTB",
-            "account": "ACC1",
-            "currency": "RUB",
-            "counterparty": "ООО Test",
-            "inn": "111",
-            "counterparty_account": "EXT",
-            "purpose": "test",
-            "income": 0,
-            "expense": 1000,
-        }])
+        df = self._make_df(
+            [
+                {
+                    "date": datetime(2024, 1, 1),
+                    "bank": "VTB",
+                    "account": "ACC1",
+                    "currency": "RUB",
+                    "counterparty": "ООО Test",
+                    "inn": "111",
+                    "counterparty_account": "EXT",
+                    "purpose": "test",
+                    "income": 0,
+                    "expense": 1000,
+                }
+            ]
+        )
 
         result_no_override = apply_master_logic(df, {"ACC1"}, set(), {}, {})
         txn_id = result_no_override.iloc[0]["txn_id"]
@@ -258,18 +275,22 @@ class TestApplyMasterLogic:
         assert result.iloc[0]["status"] == "OK"
 
     def test_category_cp_fallback(self):
-        df = self._make_df([{
-            "date": datetime(2024, 1, 1),
-            "bank": "VTB",
-            "account": "ACC1",
-            "currency": "RUB",
-            "counterparty": "ООО Supplier",
-            "inn": "999",
-            "counterparty_account": "EXT",
-            "purpose": "payment",
-            "income": 0,
-            "expense": 5000,
-        }])
+        df = self._make_df(
+            [
+                {
+                    "date": datetime(2024, 1, 1),
+                    "bank": "VTB",
+                    "account": "ACC1",
+                    "currency": "RUB",
+                    "counterparty": "ООО Supplier",
+                    "inn": "999",
+                    "counterparty_account": "EXT",
+                    "purpose": "payment",
+                    "income": 0,
+                    "expense": 5000,
+                }
+            ]
+        )
 
         cp_categories = {"999": {"cat_lvl1": "Поставщики", "cat_lvl2": "Оплата товара"}}
         result = apply_master_logic(df, {"ACC1"}, set(), cp_categories, {})
@@ -279,18 +300,22 @@ class TestApplyMasterLogic:
         assert result.iloc[0]["status"] == "OK"
 
     def test_purpose_tag_extraction(self):
-        df = self._make_df([{
-            "date": datetime(2024, 1, 1),
-            "bank": "VTB",
-            "account": "ACC1",
-            "currency": "RUB",
-            "counterparty": "CP",
-            "inn": None,
-            "counterparty_account": "EXT",
-            "purpose": "Payment for INVOICE INV-777 forwarding ANNEX #12",
-            "income": 0,
-            "expense": 10000,
-        }])
+        df = self._make_df(
+            [
+                {
+                    "date": datetime(2024, 1, 1),
+                    "bank": "VTB",
+                    "account": "ACC1",
+                    "currency": "RUB",
+                    "counterparty": "CP",
+                    "inn": None,
+                    "counterparty_account": "EXT",
+                    "purpose": "Payment for INVOICE INV-777 forwarding ANNEX #12",
+                    "income": 0,
+                    "expense": 10000,
+                }
+            ]
+        )
 
         result = apply_master_logic(df, {"ACC1"}, set(), {}, {})
 

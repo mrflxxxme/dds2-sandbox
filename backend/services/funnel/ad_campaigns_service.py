@@ -1,7 +1,7 @@
 """Service for WB advertising campaigns — sync and query for Ads tab."""
 
 import logging
-from datetime import date as date_type
+from datetime import date as date_type, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -344,14 +344,18 @@ async def get_ad_tab_data(
     rows = (await db.execute(query)).all()
 
     # Load all campaigns for project
-    campaigns_q = select(WbAdCampaign).where(
-        WbAdCampaign.project_id == project_id,
+    campaigns_q = (
+        select(WbAdCampaign)
+        .where(
+            WbAdCampaign.project_id == project_id,
+        )
+        .limit(5000)
     )
     campaigns = (await db.execute(campaigns_q)).scalars().all()
 
     # Load recent events (last 30 days)
 
-    thirty_days_ago = utcnow() - __import__("datetime").timedelta(days=30)
+    thirty_days_ago = utcnow() - timedelta(days=30)
     events_q = (
         select(WbAdCampaignEvent)
         .where(WbAdCampaignEvent.project_id == project_id)

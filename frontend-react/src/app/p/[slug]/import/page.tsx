@@ -1,6 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { api } from '@/lib/api';
+import { usePermissions } from '@/lib/hooks/usePermissions';
 
 const importTypes = [
     { id: 'VTB_RUB_MAIN', label: 'ВТБ Рубли Основной (.xlsx)', icon: '🏦', requiresAccount: true },
@@ -23,6 +24,7 @@ export default function ImportPage() {
     const [loading, setLoading] = useState(false);
     const [result, setResult] = useState<any>(null);
     const [error, setError] = useState('');
+    const { canEdit } = usePermissions();
 
     useEffect(() => {
         api.getAccounts().then(setAccounts).catch(() => { });
@@ -113,10 +115,12 @@ export default function ImportPage() {
                             onChange={e => setFile(e.target.files?.[0] || null)}
                             style={{ padding: '8px 12px' }} />
                     </div>
-                    <button className="btn btn-primary" onClick={handleUpload}
-                        disabled={!file || loading}>
-                        {loading ? '⏳ Загрузка...' : '📤 Загрузить'}
-                    </button>
+                    {canEdit() && (
+                        <button className="btn btn-primary" onClick={handleUpload}
+                            disabled={!file || loading}>
+                            {loading ? '⏳ Загрузка...' : '📤 Загрузить'}
+                        </button>
+                    )}
                 </div>
             </div>
 

@@ -190,7 +190,7 @@ async def run_first_sync_bg(project_id: int) -> None:
                 campaigns_count = 0
 
         # Phase 3: Funnel — last 30 days
-        today = date.today()
+        today = utcnow().date()
         date_from_30 = (today - timedelta(days=30)).isoformat()
         date_to = today.isoformat()
 

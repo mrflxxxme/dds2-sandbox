@@ -347,7 +347,11 @@ async def set_cost_override(
     db: AsyncSession = Depends(get_db),
 ):
     """Set or update manual cost price for an nmId."""
-    return await funnel_service.set_cost_override(db, project.id, body.nm_id, body.cost_price)
+    result = await funnel_service.set_cost_override(db, project.id, body.nm_id, body.cost_price)
+    from backend.cache import invalidate_cache
+
+    await invalidate_cache("reports:wb_bdr")
+    return result
 
 
 @router.post("/costs/bulk")
@@ -386,6 +390,9 @@ async def set_tax_rate(
     """Set project tax rate."""
     project.tax_rate = Decimal(str(body.tax_rate))
     await db.commit()
+    from backend.cache import invalidate_cache
+
+    await invalidate_cache("reports:wb_bdr")
     return {"status": "ok", "tax_rate": body.tax_rate}
 
 
@@ -651,7 +658,7 @@ async def first_sync(
     from backend.services.funnel.unified_sync import get_first_sync_progress, run_first_sync_bg
 
     progress = get_first_sync_progress(project.id)
-    if progress.get("phase") in ("nomenclature", "campaigns", "funnel"):
+    if progress.get("phase") in ("nomenclature", "campaigns", "funnel", "backfill"):
         return {"status": "already_running", **progress}
 
     asyncio.create_task(run_first_sync_bg(project.id))  # noqa: RUF006

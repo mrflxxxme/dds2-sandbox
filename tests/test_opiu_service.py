@@ -6,7 +6,7 @@ Note: _accumulate_row was removed when OPIU was migrated to SQL GROUP BY aggrega
 Row-level accumulation is now done in SQL (see _build_aggregate_sql).
 These tests validate the totals structure and P&L formula correctness.
 """
-import pytest
+
 from decimal import Decimal
 
 D = Decimal
@@ -17,10 +17,10 @@ ZERO = D("0")
 
 from backend.services.opiu_service import _empty_totals
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: _empty_totals
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestEmptyTotals:
     """Verify initial state of P&L accumulators."""
@@ -35,9 +35,17 @@ class TestEmptyTotals:
         """Must contain all P&L metric fields."""
         t = _empty_totals()
         required = [
-            "realization", "sales_amount", "logistics", "commission",
-            "penalties", "storage", "acceptance", "deductions",
-            "ad_deduction", "additional_payment", "compensation_ppvz",
+            "realization",
+            "sales_amount",
+            "logistics",
+            "commission",
+            "penalties",
+            "storage",
+            "acceptance",
+            "deductions",
+            "ad_deduction",
+            "additional_payment",
+            "compensation_ppvz",
         ]
         for field in required:
             assert field in t, f"Missing field '{field}' in _empty_totals()"
@@ -47,6 +55,7 @@ class TestEmptyTotals:
 # Tests: P&L formula chain (using pre-filled data)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestPnLFormulas:
     """Verify P&L calculations using pre-filled accumulator data."""
 
@@ -54,14 +63,14 @@ class TestPnLFormulas:
         """Build a realistic P&L scenario with pre-filled metrics."""
         t = _empty_totals()
         # Simulate: 10 sales @ 1000 retail, 2 returns
-        t["realization"] = D("8000")       # 10*1000 - 2*1000
-        t["sales_amount"] = D("6400")      # 10*800 - 2*800
-        t["commission"] = D("1600")        # sales - ppvz_net
+        t["realization"] = D("8000")  # 10*1000 - 2*1000
+        t["sales_amount"] = D("6400")  # 10*800 - 2*800
+        t["commission"] = D("1600")  # sales - ppvz_net
         t["logistics"] = D("500")
         t["storage"] = D("200")
         t["penalties"] = D("100")
         t["acceptance"] = D("80")
-        t["deductions"] = D("350")         # 300 ad + 50 non-ad
+        t["deductions"] = D("350")  # 300 ad + 50 non-ad
         t["ad_deduction"] = D("300")
         t["additional_payment"] = D("80")  # 10*10 - 2*10
         t["compensation_ppvz"] = D("0")
@@ -83,16 +92,30 @@ class TestPnLFormulas:
         """Direct = logistics + commission + penalties + storage + ads + other_ded + acceptance."""
         t = self._build_scenario()
         other_ded = t["deductions"] - t["ad_deduction"]
-        direct = (t["logistics"] + t["commission"] + t["penalties"] +
-                  t["storage"] + t["ad_deduction"] + other_ded + t["acceptance"])
+        direct = (
+            t["logistics"]
+            + t["commission"]
+            + t["penalties"]
+            + t["storage"]
+            + t["ad_deduction"]
+            + other_ded
+            + t["acceptance"]
+        )
         assert direct == D("2830")
 
     def test_gross_margin(self):
         """Gross margin = sales_amount - direct_costs + compensation."""
         t = self._build_scenario()
         other_ded = t["deductions"] - t["ad_deduction"]
-        direct = (t["logistics"] + t["commission"] + t["penalties"] +
-                  t["storage"] + t["ad_deduction"] + other_ded + t["acceptance"])
+        direct = (
+            t["logistics"]
+            + t["commission"]
+            + t["penalties"]
+            + t["storage"]
+            + t["ad_deduction"]
+            + other_ded
+            + t["acceptance"]
+        )
         comp = t["additional_payment"] + t["compensation_ppvz"]
         margin = t["sales_amount"] - direct + comp
         assert margin == D("3650")
@@ -108,8 +131,15 @@ class TestPnLFormulas:
         """Net profit = EBITDA - taxes."""
         t = self._build_scenario()
         other_ded = t["deductions"] - t["ad_deduction"]
-        direct = (t["logistics"] + t["commission"] + t["penalties"] +
-                  t["storage"] + t["ad_deduction"] + other_ded + t["acceptance"])
+        direct = (
+            t["logistics"]
+            + t["commission"]
+            + t["penalties"]
+            + t["storage"]
+            + t["ad_deduction"]
+            + other_ded
+            + t["acceptance"]
+        )
         comp = t["additional_payment"] + t["compensation_ppvz"]
         margin = t["sales_amount"] - direct + comp
 

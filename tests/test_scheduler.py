@@ -4,14 +4,13 @@ Tests for backend/scheduler.py — Background WB funnel sync scheduler.
 Tests internal logic with mocked DB and WB API. Does NOT start the actual scheduler.
 """
 
-import asyncio
-from datetime import date, timedelta
+from datetime import UTC, date, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 # ─── _get_missing_dates ──────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_get_missing_dates_finds_gaps():
@@ -28,9 +27,12 @@ async def test_get_missing_dates_finds_gaps():
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("backend.scheduler.helpers.AsyncSessionLocal", return_value=mock_session), \
-         patch("backend.scheduler.helpers.get_failed_dates", return_value=set()):
+    with (
+        patch("backend.scheduler.helpers.AsyncSessionLocal", return_value=mock_session),
+        patch("backend.scheduler.helpers.get_failed_dates", return_value=set()),
+    ):
         from backend.scheduler.helpers import get_missing_dates
+
         missing = await get_missing_dates(project_id=1, lookback_days=5)
 
     # Should have 4 missing dates (lookback 5 days, minus yesterday which has data, minus today)
@@ -58,9 +60,12 @@ async def test_get_missing_dates_skips_poisoned():
     # Mark 2 days ago as poisoned
     poisoned_date = (today - timedelta(days=2)).isoformat()
 
-    with patch("backend.scheduler.helpers.AsyncSessionLocal", return_value=mock_session), \
-         patch("backend.scheduler.helpers.get_failed_dates", return_value={poisoned_date}):
+    with (
+        patch("backend.scheduler.helpers.AsyncSessionLocal", return_value=mock_session),
+        patch("backend.scheduler.helpers.get_failed_dates", return_value={poisoned_date}),
+    ):
         from backend.scheduler.helpers import get_missing_dates
+
         missing = await get_missing_dates(project_id=1, lookback_days=5)
 
     # Poisoned date should be excluded
@@ -68,6 +73,7 @@ async def test_get_missing_dates_skips_poisoned():
 
 
 # ─── _get_sync_project_ids ───────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_get_sync_project_ids_with_global_key():
@@ -95,6 +101,7 @@ async def test_get_sync_project_ids_with_global_key():
 
     with patch("backend.scheduler.helpers.AsyncSessionLocal", return_value=mock_session):
         from backend.scheduler.helpers import get_sync_project_ids
+
         pids = await get_sync_project_ids()
 
     assert pids == [1, 2, 3]
@@ -124,6 +131,7 @@ async def test_get_sync_project_ids_without_global_key():
 
     with patch("backend.scheduler.helpers.AsyncSessionLocal", return_value=mock_session):
         from backend.scheduler.helpers import get_sync_project_ids
+
         pids = await get_sync_project_ids()
 
     assert pids == [2]
@@ -131,9 +139,11 @@ async def test_get_sync_project_ids_without_global_key():
 
 # ─── get_scheduler_info ──────────────────────────────────────────────────────
 
+
 def test_get_scheduler_info_when_not_running():
     """get_scheduler_info returns running=False when scheduler is None."""
     import backend.scheduler as sched_mod
+
     original = sched_mod._scheduler
     try:
         sched_mod._scheduler = None
@@ -145,13 +155,14 @@ def test_get_scheduler_info_when_not_running():
 
 def test_get_scheduler_info_when_running():
     """get_scheduler_info returns job list when scheduler is running."""
+    from datetime import datetime
+
     import backend.scheduler as sched_mod
-    from datetime import datetime, timezone
 
     mock_job = MagicMock()
     mock_job.id = "fast_backfill"
     mock_job.name = "Fast backfill"
-    mock_job.next_run_time = datetime(2026, 3, 6, 12, 0, tzinfo=timezone.utc)
+    mock_job.next_run_time = datetime(2026, 3, 6, 12, 0, tzinfo=UTC)
 
     mock_scheduler = MagicMock()
     mock_scheduler.running = True

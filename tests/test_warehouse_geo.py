@@ -2,21 +2,22 @@
 Tests for warehouse_geo module — pure geo-mapping functions.
 Tests haversine distance, find_nearest_warehouse, and compute_need for hypothetical mode.
 """
+
 import pytest
 
-from backend.services.warehouse_geo import (
-    haversine,
-    find_nearest_warehouse,
-    REGION_COORDS,
-    WAREHOUSE_COORDS,
-    SC_PREFIX,
-)
 from backend.services.stock_analytics_service import compute_need
-
+from backend.services.warehouse_geo import (
+    REGION_COORDS,
+    SC_PREFIX,
+    WAREHOUSE_COORDS,
+    find_nearest_warehouse,
+    haversine,
+)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: haversine distance
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestHaversine:
     """Verify Haversine distance formula."""
@@ -51,6 +52,7 @@ class TestHaversine:
 # Tests: find_nearest_warehouse
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestFindNearestWarehouse:
     """Verify nearest warehouse mapping by region name."""
 
@@ -60,8 +62,18 @@ class TestFindNearestWarehouse:
         result = find_nearest_warehouse("Московская область", all_whs)
         assert result is not None
         # Should be one of the Moscow-area warehouses (within ~50km of Moscow)
-        moscow_area = ["Коледино", "Электросталь", "Тула", "Белая дача", "Истра",
-                        "Вёшки", "Обухово", "Белые Столбы", "Радумля 1", "Пушкино"]
+        moscow_area = [
+            "Коледино",
+            "Электросталь",
+            "Тула",
+            "Белая дача",
+            "Истра",
+            "Вёшки",
+            "Обухово",
+            "Белые Столбы",
+            "Радумля 1",
+            "Пушкино",
+        ]
         assert any(kw in result for kw in moscow_area)
 
     def test_spb_region(self):
@@ -119,6 +131,7 @@ class TestFindNearestWarehouse:
 # Tests: COORDS consistency
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestCoordsConsistency:
     """Verify coordinate data integrity."""
 
@@ -143,6 +156,7 @@ class TestCoordsConsistency:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: compute_need (used in both actual and hypothetical)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestComputeNeed:
     """Verify restocking need computation."""
@@ -181,6 +195,7 @@ class TestComputeNeed:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: Hypothetical warehouse mapping scenario
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestHypotheticalScenario:
     """End-to-end scenario: simulate hypothetical warehouse mapping."""

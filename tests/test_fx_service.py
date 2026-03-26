@@ -3,22 +3,21 @@ Tests for fx_service — pure functions and rate calculation logic.
 No DB required for pure functions.
 Tests extract_rate_from_purpose and find_rate_for_date.
 """
-import pytest
-from datetime import date
-from decimal import Decimal
 
+from datetime import date
+
+import pytest
 
 # ─── Imports ─────────────────────────────────────────────────────────────────
-
 from backend.services.fx_service import (
     extract_rate_from_purpose,
     find_rate_for_date,
 )
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: extract_rate_from_purpose
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestExtractRateFromPurpose:
     """Extract CNY/RUB exchange rate from VTB transaction purpose text."""
@@ -26,17 +25,13 @@ class TestExtractRateFromPurpose:
     @pytest.mark.asyncio
     async def test_standard_vtb_format(self):
         """Standard VTB format: 'по курсу Банка CNY/RUB 11.472'."""
-        rate = await extract_rate_from_purpose(
-            "Перевод CNY по курсу Банка CNY/RUB 11.472 от 15.01.2024"
-        )
+        rate = await extract_rate_from_purpose("Перевод CNY по курсу Банка CNY/RUB 11.472 от 15.01.2024")
         assert rate == 11.472
 
     @pytest.mark.asyncio
     async def test_comma_decimal(self):
         """Russian format with comma: CNY/RUB 11,472."""
-        rate = await extract_rate_from_purpose(
-            "Конверсия CNY/RUB 11,472 — покупка валюты"
-        )
+        rate = await extract_rate_from_purpose("Конверсия CNY/RUB 11,472 — покупка валюты")
         assert rate == 11.472
 
     @pytest.mark.asyncio
@@ -95,6 +90,7 @@ class TestExtractRateFromPurpose:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: find_rate_for_date
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestFindRateForDate:
     """Find closest exchange rate from a rates_map dict."""
@@ -182,15 +178,14 @@ class TestFindRateForDate:
 # Tests: RATE_RE regex pattern
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestRateRegex:
     """Verify the RATE_RE regex pattern directly."""
 
     @pytest.mark.asyncio
     async def test_multiple_rates_picks_first(self):
         """If multiple rates in text, should pick the first."""
-        result = await extract_rate_from_purpose(
-            "CNY/RUB 11.5 конвертировано по CNY/RUB 12.0"
-        )
+        result = await extract_rate_from_purpose("CNY/RUB 11.5 конвертировано по CNY/RUB 12.0")
         assert result == 11.5
 
     @pytest.mark.asyncio

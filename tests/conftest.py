@@ -3,6 +3,7 @@ Shared fixtures for DDS tests.
 """
 
 import io
+
 import pandas as pd
 import pytest
 
@@ -108,7 +109,7 @@ def wb_excel() -> bytes:
 @pytest.fixture
 def vtb_multi_excel() -> bytes:
     """Generate a multi-sheet VTB bank statement (3 accounts in one file).
-    
+
     Mimics real VTB format: each sheet = one account.
     Sheet name = account number.
     Row 1: ВЫПИСКА
@@ -118,8 +119,9 @@ def vtb_multi_excel() -> bytes:
     Row 8+: data
     """
     import openpyxl
+
     wb = openpyxl.Workbook()
-    
+
     # Sheet 1: RUB deposit (will be skipped — usually not needed, but parsed)
     ws1 = wb.active
     ws1.title = "42102810316110029573"
@@ -129,11 +131,35 @@ def vtb_multi_excel() -> bytes:
     ws1.append(["Входящий остаток RUB:", 0, "Исходящий остаток RUB:", 0])
     ws1.append([None])
     ws1.append([None])
-    ws1.append(["Дата", "Номер", "Вид операции", "Контрагент", "ИНН контрагента",
-                "БИК банка контрагента", "Счет контрагента", "Дебет, RUR", "Кредит, RUR", "Назначение"])
-    ws1.append(["01.02.2026", "100", "01", "ООО Тест", "7701234567", "044525411",
-                "40702810000000001234", 50000, 0, "Размещение депозита"])
-    
+    ws1.append(
+        [
+            "Дата",
+            "Номер",
+            "Вид операции",
+            "Контрагент",
+            "ИНН контрагента",
+            "БИК банка контрагента",
+            "Счет контрагента",
+            "Дебет, RUR",
+            "Кредит, RUR",
+            "Назначение",
+        ]
+    )
+    ws1.append(
+        [
+            "01.02.2026",
+            "100",
+            "01",
+            "ООО Тест",
+            "7701234567",
+            "044525411",
+            "40702810000000001234",
+            50000,
+            0,
+            "Размещение депозита",
+        ]
+    )
+
     # Sheet 2: RUB main
     ws2 = wb.create_sheet("40702810400810052145")
     ws2.append(["ВЫПИСКА"])
@@ -142,13 +168,49 @@ def vtb_multi_excel() -> bytes:
     ws2.append(["Входящий остаток RUB:", 44922.18, "Исходящий остаток RUB:", 310355.96])
     ws2.append([None])
     ws2.append([None])
-    ws2.append(["Дата", "Номер", "Вид операции", "Контрагент", "ИНН контрагента",
-                "БИК банка контрагента", "Счет контрагента", "Дебет, RUR", "Кредит, RUR", "Назначение"])
-    ws2.append(["03.02.2026", "407", "01", "ООО Партнер", "1800027275", "044525450",
-                "40702810800000001893", 0, 6900000, "Перевод собственных средств"])
-    ws2.append(["04.02.2026", "537451", "01", "ООО Поставщик", "7704217370", "044525593",
-                "40702810901300010687", 0, 286032.91, "Оплата по договору"])
-    
+    ws2.append(
+        [
+            "Дата",
+            "Номер",
+            "Вид операции",
+            "Контрагент",
+            "ИНН контрагента",
+            "БИК банка контрагента",
+            "Счет контрагента",
+            "Дебет, RUR",
+            "Кредит, RUR",
+            "Назначение",
+        ]
+    )
+    ws2.append(
+        [
+            "03.02.2026",
+            "407",
+            "01",
+            "ООО Партнер",
+            "1800027275",
+            "044525450",
+            "40702810800000001893",
+            0,
+            6900000,
+            "Перевод собственных средств",
+        ]
+    )
+    ws2.append(
+        [
+            "04.02.2026",
+            "537451",
+            "01",
+            "ООО Поставщик",
+            "7704217370",
+            "044525593",
+            "40702810901300010687",
+            0,
+            286032.91,
+            "Оплата по договору",
+        ]
+    )
+
     # Sheet 3: CNY
     ws3 = wb.create_sheet("40702156916110000346")
     ws3.append(["ВЫПИСКА"])
@@ -157,12 +219,39 @@ def vtb_multi_excel() -> bytes:
     ws3.append(["Входящий остаток CNY:", 621.99, "Исходящий остаток CNY:", 58222.79])
     ws3.append(["                                     RUR:", 6760.35, "RUR:", 660747.15])
     ws3.append([None])
-    ws3.append(["Дата", "Номер", "Вид операции", "Контрагент", "ИНН контрагента",
-                "БИК банка контрагента", "Счет контрагента", "Дебет, CNY", "Кредит, CNY",
-                "Дебет, RUR", "Кредит, RUR", "Назначение"])
-    ws3.append(["05.02.2026", "18", "01", "БАНК ВТБ (ПАО)", "7702070139", "044525411",
-                "30301156700810000001", 106000, 0, 1171459, 0, "Перевод CNY"])
-    
+    ws3.append(
+        [
+            "Дата",
+            "Номер",
+            "Вид операции",
+            "Контрагент",
+            "ИНН контрагента",
+            "БИК банка контрагента",
+            "Счет контрагента",
+            "Дебет, CNY",
+            "Кредит, CNY",
+            "Дебет, RUR",
+            "Кредит, RUR",
+            "Назначение",
+        ]
+    )
+    ws3.append(
+        [
+            "05.02.2026",
+            "18",
+            "01",
+            "БАНК ВТБ (ПАО)",
+            "7702070139",
+            "044525411",
+            "30301156700810000001",
+            106000,
+            0,
+            1171459,
+            0,
+            "Перевод CNY",
+        ]
+    )
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -171,11 +260,11 @@ def vtb_multi_excel() -> bytes:
 @pytest.fixture
 def wb_multi_xml_xls() -> bytes:
     """Generate a multi-account WB statement in XML SpreadsheetML format.
-    
+
     Two accounts in one sheet, separated by ИТОГО row.
     Format: XML SpreadsheetML (.xls)
     """
-    xml = '''<?xml version="1.0" encoding="utf-8"?>
+    xml = """<?xml version="1.0" encoding="utf-8"?>
 <?mso-application progid="Excel.Sheet"?>
 <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
  xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
@@ -280,7 +369,5 @@ def wb_multi_xml_xls() -> bytes:
    <Row><Cell><Data ss:Type="String"></Data></Cell></Row>
   </Table>
  </Worksheet>
-</Workbook>'''
-    return xml.encode('utf-8')
-
-
+</Workbook>"""
+    return xml.encode("utf-8")

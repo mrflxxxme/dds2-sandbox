@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
 import { Toast } from '@/components';
+import { usePermissions } from '@/lib/hooks/usePermissions';
 import type { AssemblyRequest, AssemblyStatus, Warehouse } from '@/types/api';
 
 // ─── Status config ──────────────────────────────────────────────────────────
@@ -272,6 +273,7 @@ export default function AssemblyListPage() {
     const params = useParams();
     const router = useRouter();
     const slug = params.slug as string;
+    const { canEdit } = usePermissions();
 
     // Data
     const [items, setItems] = useState<AssemblyRequest[]>([]);
@@ -457,9 +459,11 @@ export default function AssemblyListPage() {
                     <h1 className="page-title">Заявки на сборку</h1>
                     <p className="page-subtitle">Всего: {total}</p>
                 </div>
-                <Link href={`/p/${slug}/warehouse/assembly/new`}>
-                    <button className="btn btn-primary">Создать заявку</button>
-                </Link>
+                {canEdit() && (
+                    <Link href={`/p/${slug}/warehouse/assembly/new`}>
+                        <button className="btn btn-primary">Создать заявку</button>
+                    </Link>
+                )}
             </div>
 
             {/* Filters */}

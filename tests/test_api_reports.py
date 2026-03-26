@@ -4,13 +4,14 @@ API tests — Reports endpoints.
 
 import pytest
 
-
 # ─── Helper: create project and get headers ──────────────────────────────────
+
 
 async def _project_headers(client, auth_headers) -> dict:
     """Create a test project and return headers with X-Project-Id."""
     resp = await client.post(
-        "/api/v1/projects", json={"name": "Reports Test"},
+        "/api/v1/projects",
+        json={"name": "Reports Test"},
         headers=auth_headers,
     )
     project = resp.json()
@@ -18,6 +19,7 @@ async def _project_headers(client, auth_headers) -> dict:
 
 
 # ─── Balance ─────────────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_balance_empty(client, auth_headers):
@@ -36,6 +38,7 @@ async def test_balance_requires_auth(client):
 
 
 # ─── DDS Month ───────────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_dds_month_empty(client, auth_headers):
@@ -60,6 +63,7 @@ async def test_dds_month_requires_params(client, auth_headers):
 
 # ─── FX Control ──────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_fx_control_empty(client, auth_headers):
     """FX control with no data should return empty list."""
@@ -71,6 +75,7 @@ async def test_fx_control_empty(client, auth_headers):
 
 # ─── Customs Control ────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_customs_control_empty(client, auth_headers):
     """Customs control with no data should return empty list."""
@@ -81,6 +86,7 @@ async def test_customs_control_empty(client, auth_headers):
 
 
 # ─── Balance Daily ───────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_balance_daily_empty(client, auth_headers):
@@ -104,6 +110,7 @@ async def test_balance_daily_requires_params(client, auth_headers):
 
 # ─── Income Daily ────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_income_daily_empty(client, auth_headers):
     """Income daily with no data should return empty list."""
@@ -118,6 +125,7 @@ async def test_income_daily_empty(client, auth_headers):
 
 # ─── Income by Category ─────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_income_by_category_empty(client, auth_headers):
     """Income by category with no data should return empty list."""
@@ -131,6 +139,7 @@ async def test_income_by_category_empty(client, auth_headers):
 
 
 # ─── Dashboard Summary ──────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_dashboard_summary_empty(client, auth_headers):
@@ -200,6 +209,7 @@ async def test_dashboard_transactions_empty(client, auth_headers):
 
 # ─── WB BDR ─────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_wb_bdr_empty(client, auth_headers):
     """WB BDR with no finance data should return valid structure."""
@@ -226,18 +236,18 @@ async def test_wb_bdr_requires_params(client, auth_headers):
 @pytest.mark.asyncio
 async def test_wb_bdr_requires_auth(client):
     """WB BDR requires authentication."""
-    resp = await client.get(
-        "/api/v1/reports/wb_bdr?date_from=2024-01-01&date_to=2024-01-31"
-    )
+    resp = await client.get("/api/v1/reports/wb_bdr?date_from=2024-01-01&date_to=2024-01-31")
     assert resp.status_code in (401, 403, 422)
 
 
 # ─── OPIU ────────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_opiu_empty(client, auth_headers):
     """OPIU with no finance data should return valid structure."""
     import asyncio
+
     headers = await _project_headers(client, auth_headers)
     # OPIU uses async computation — may return {"computing": true} on first call
     for _ in range(5):
@@ -266,17 +276,17 @@ async def test_opiu_requires_params(client, auth_headers):
 @pytest.mark.asyncio
 async def test_opiu_requires_auth(client):
     """OPIU requires authentication."""
-    resp = await client.get(
-        "/api/v1/reports/opiu?date_from=2024-01-01&date_to=2024-03-31"
-    )
+    resp = await client.get("/api/v1/reports/opiu?date_from=2024-01-01&date_to=2024-03-31")
     assert resp.status_code in (401, 403, 422)
 
 
 # ─── Cache Prewarm ──────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_prewarm_project_no_crash():
     """prewarm_project should not crash even for non-existent project."""
     from backend.scheduler import prewarm_project
+
     # Should complete without raising (fail-safe design)
     await prewarm_project(999999)

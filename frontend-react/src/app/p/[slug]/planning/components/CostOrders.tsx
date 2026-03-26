@@ -2,9 +2,11 @@
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
+import { usePermissions } from '@/lib/hooks/usePermissions';
 import { OrderItemsDetail } from './OrderItemsDetail';
 
 export function CostOrders() {
+    const { canEdit } = usePermissions();
     const [orders, setOrders] = useState<any[]>([]);
     const [items, setItems] = useState<any[]>([]);
     const [selected, setSelected] = useState<string | null>(null);
@@ -124,7 +126,7 @@ export function CostOrders() {
                 <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Заказы</h3>
                 <div style={{ display: 'flex', gap: 8 }}>
                     <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(orders, 'cost_orders')}>📥 Excel</button>
-                    <button className="btn btn-primary btn-sm" onClick={() => { setShowCreate(!showCreate); setEditOrder(null); }}>+ Создать заказ</button>
+                    {canEdit() && <button className="btn btn-primary btn-sm" onClick={() => { setShowCreate(!showCreate); setEditOrder(null); }}>+ Создать заказ</button>}
                 </div>
             </div>
             {msg && <div style={{ fontSize: 13, marginBottom: 8, padding: '6px 12px', borderRadius: 6, background: msg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', color: msg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)' }}>{msg} <span style={{ float: 'right', cursor: 'pointer' }} onClick={() => setMsg('')}>✕</span></div>}

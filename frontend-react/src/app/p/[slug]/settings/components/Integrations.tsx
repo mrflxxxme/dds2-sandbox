@@ -2,8 +2,10 @@
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatDateTime } from '@/lib/utils';
+import { usePermissions } from '@/lib/hooks/usePermissions';
 
 export function Integrations() {
+    const { canEdit } = usePermissions();
     const [keys, setKeys] = useState<any[]>([]);
     const [syncLog, setSyncLog] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
@@ -37,7 +39,7 @@ export function Integrations() {
             <div className="glass-card" style={{ marginBottom: 24 }}>
                 <div className="table-toolbar">
                     <h3 style={{ fontSize: 16, fontWeight: 600 }}>🔌 API Интеграции</h3>
-                    <button className="btn btn-primary btn-sm" onClick={() => setShowAdd(true)}>+ Добавить ключ</button>
+                    {canEdit() && <button className="btn btn-primary btn-sm" onClick={() => setShowAdd(true)}>+ Добавить ключ</button>}
                 </div>
                 {showAdd && (
                     <div style={{ background: 'var(--color-bg-input)', border: '1px solid var(--color-border)', borderRadius: 10, padding: 16, marginBottom: 16 }}>

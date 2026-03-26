@@ -4,6 +4,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
 import { DataTable } from '@/components';
+import { usePermissions } from '@/lib/hooks/usePermissions';
 import type { Warehouse, StockTransfer } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 
@@ -11,6 +12,7 @@ export default function WarehousePage() {
     const params = useParams();
     const slug = params.slug as string;
     const router = useRouter();
+    const { canEdit } = usePermissions();
 
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
     const [transfers, setTransfers] = useState<StockTransfer[]>([]);
@@ -117,7 +119,7 @@ export default function WarehousePage() {
                     <h1 className="page-title">Склады</h1>
                     <p className="page-subtitle">Управление складами, приёмка, отгрузка, перемещение</p>
                 </div>
-                <button className="btn btn-primary" onClick={() => setShowCreate(true)}>+ Создать склад</button>
+                {canEdit() && <button className="btn btn-primary" onClick={() => setShowCreate(true)}>+ Создать склад</button>}
             </div>
 
             {/* В пути */}

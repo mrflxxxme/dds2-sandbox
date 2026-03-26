@@ -2,6 +2,7 @@
 import { useEffect, useState, ChangeEvent } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
+import { usePermissions } from '@/lib/hooks/usePermissions';
 import type {
     UnassignedGroupRow, Transaction, CategoryRef,
     AutoCategorizeRule, AutoCategorizePreview,
@@ -15,6 +16,7 @@ export default function InboxPage() {
     const [tab, setTab] = useState<'income' | 'expense' | 'single'>('income');
     const [msg, setMsg] = useState('');
     const [expanded, setExpanded] = useState<string | null>(null);
+    const { canEdit } = usePermissions();
     // Auto-categorize state
     const [showRules, setShowRules] = useState(false);
     const [rules, setRules] = useState<AutoCategorizeRule[]>([]);
@@ -182,10 +184,12 @@ export default function InboxPage() {
                                     </tbody>
                                 </table>
                             </div>
-                            <button className="btn btn-primary" style={{ width: '100%' }} disabled={autoLoading}
-                                onClick={applyAutoCat}>
-                                {autoLoading ? '⏳ Применяю...' : `✅ Применить авто-разнёску (${preview.length} операций)`}
-                            </button>
+                            {canEdit() && (
+                                <button className="btn btn-primary" style={{ width: '100%' }} disabled={autoLoading}
+                                    onClick={applyAutoCat}>
+                                    {autoLoading ? '⏳ Применяю...' : `✅ Применить авто-разнёску (${preview.length} операций)`}
+                                </button>
+                            )}
                         </>
                     )}
                 </div>

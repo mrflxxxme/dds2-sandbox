@@ -77,7 +77,7 @@ export default function AcceptInvitePage() {
                 {status === 'loading' && (
                     <>
                         <div style={{ fontSize: 48, marginBottom: 16 }}>⏳</div>
-                        <h1 style={{ fontSize: 20, fontWeight: 600, color: '#fff', marginBottom: 8 }}>
+                        <h1 style={{ fontSize: 20, fontWeight: 600, color: 'var(--color-text, #111)', marginBottom: 8 }}>
                             Принимаем приглашение...
                         </h1>
                         <p style={{ color: '#888', fontSize: 14 }}>Подождите немного</p>
@@ -90,7 +90,7 @@ export default function AcceptInvitePage() {
                         <h1 style={{ fontSize: 20, fontWeight: 600, color: '#10b981', marginBottom: 8 }}>
                             Добро пожаловать!
                         </h1>
-                        <p style={{ color: '#ccc', fontSize: 14, marginBottom: 24 }}>{message}</p>
+                        <p style={{ color: 'var(--color-text-muted, #666)', fontSize: 14, marginBottom: 24 }}>{message}</p>
                         {projectSlug && (
                             <p style={{ color: '#888', fontSize: 12 }}>
                                 Перенаправляем в проект...
@@ -112,10 +112,10 @@ export default function AcceptInvitePage() {
                 {status === 'login' && (
                     <>
                         <div style={{ fontSize: 48, marginBottom: 16 }}>🔐</div>
-                        <h1 style={{ fontSize: 20, fontWeight: 600, color: '#fff', marginBottom: 8 }}>
+                        <h1 style={{ fontSize: 20, fontWeight: 600, color: 'var(--color-text, #111)', marginBottom: 8 }}>
                             Приглашение в проект
                         </h1>
-                        <p style={{ color: '#ccc', fontSize: 14, marginBottom: 24 }}>{message}</p>
+                        <p style={{ color: 'var(--color-text-muted, #666)', fontSize: 14, marginBottom: 24 }}>{message}</p>
                         <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
                             <button onClick={goToLogin} style={{
                                 padding: '10px 24px', background: 'rgba(139,92,246,0.15)',
@@ -141,7 +141,7 @@ export default function AcceptInvitePage() {
                         <h1 style={{ fontSize: 20, fontWeight: 600, color: '#ef4444', marginBottom: 8 }}>
                             Ошибка
                         </h1>
-                        <p style={{ color: '#ccc', fontSize: 14, marginBottom: 24 }}>{message}</p>
+                        <p style={{ color: 'var(--color-text-muted, #666)', fontSize: 14, marginBottom: 24 }}>{message}</p>
                         <button
                             onClick={() => router.push('/')}
                             style={{

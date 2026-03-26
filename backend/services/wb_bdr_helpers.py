@@ -107,7 +107,7 @@ def build_bdr_aggregate_sql(
     if brand:
         where += " AND brand_name = :brand"
     if article:
-        where += " AND LOWER(sa_name) LIKE :article_like"
+        where += r" AND LOWER(sa_name) LIKE :article_like ESCAPE '\\'"
     return f"SELECT {select_cols} FROM wb_finance_rows WHERE {where} GROUP BY {group_col} ORDER BY {group_col}"  # noqa: S608
 
 
@@ -125,7 +125,7 @@ def build_group_nm_ids_sql(group_by: str, brand: str | None, article: str | None
     if brand:
         where += " AND brand_name = :brand"
     if article:
-        where += " AND LOWER(sa_name) LIKE :article_like"
+        where += r" AND LOWER(sa_name) LIKE :article_like ESCAPE '\\'"
     return (
         f"SELECT DISTINCT NULLIF(nm_id, 0) AS nm_id, {group_col} AS group_key"
         f" FROM wb_finance_rows WHERE {where} AND nm_id IS NOT NULL AND nm_id != 0"
@@ -146,7 +146,7 @@ def build_group_sa_names_sql(group_by: str, brand: str | None, article: str | No
     if brand:
         where += " AND brand_name = :brand"
     if article:
-        where += " AND LOWER(sa_name) LIKE :article_like"
+        where += r" AND LOWER(sa_name) LIKE :article_like ESCAPE '\\'"
     return (
         f"SELECT DISTINCT sa_name, {group_col} AS group_key"
         f" FROM wb_finance_rows WHERE {where} AND sa_name IS NOT NULL"
@@ -166,7 +166,7 @@ def build_total_count_sql(brand: str | None, article: str | None) -> str:
     if brand:
         where += " AND brand_name = :brand"
     if article:
-        where += " AND LOWER(sa_name) LIKE :article_like"
+        where += r" AND LOWER(sa_name) LIKE :article_like ESCAPE '\\'"
     return f"SELECT COUNT(*) AS cnt FROM wb_finance_rows WHERE {where}"  # noqa: S608
 
 

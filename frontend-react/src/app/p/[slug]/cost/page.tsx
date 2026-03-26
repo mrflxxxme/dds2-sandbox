@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useState, ChangeEvent, KeyboardEvent } from 'react';
 import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
+import { usePermissions } from '@/lib/hooks/usePermissions';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 import type {
     CostHistoryResponse, CostHistoryArticle, CostHistoryOrder,

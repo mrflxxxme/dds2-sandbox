@@ -37,7 +37,17 @@ export interface ProjectMember {
   project_id: number;
   username: string;
   email?: string;
+  first_name?: string;
+  last_name?: string;
+  role: 'owner' | 'admin' | 'editor' | 'viewer';
+  pages: string[];
   joined_at: string;
+}
+
+export interface MyPermissions {
+  role: 'owner' | 'admin' | 'editor' | 'viewer';
+  pages: string[];
+  is_owner: boolean;
 }
 
 export interface ProjectInvite {

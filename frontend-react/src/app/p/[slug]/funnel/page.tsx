@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
+import { usePermissions } from '@/lib/hooks/usePermissions';
 import { MultiLineChart } from './components/MultiLineChart';
 import { DayAnalysisTab } from './components/DayAnalysisTab';
 import { AdsTab } from './components/AdsTab';
@@ -12,6 +13,7 @@ const fmtPct = (n: number) => (n || 0).toFixed(2) + '%';
 /* ─── Main page ──────────────────────────────────────────────── */
 
 export default function FunnelPage() {
+    const { canEdit } = usePermissions();
     const [tab, setTab] = useState<'funnel' | 'day-analysis' | 'ads'>('funnel');
     const [data, setData] = useState<FunnelDayRow[]>([]);
     const [detailed, setDetailed] = useState(false);

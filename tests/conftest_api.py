@@ -6,23 +6,24 @@ Uses existing DB schema from Alembic (no create_all / drop_all).
 """
 
 import os
+
 os.environ["TESTING"] = "1"  # Disable rate limiter before importing app
 
 import asyncio
 import uuid
+
 import pytest
 import pytest_asyncio
-from httpx import AsyncClient, ASGITransport
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import text
 
 from backend.config import settings
 from backend.database import get_db
 from backend.main import app
 
-
 # ─── Session-scoped event loop ────────────────────────────────────────────────
+
 
 @pytest.fixture(scope="session")
 def event_loop():
@@ -58,6 +59,7 @@ app.dependency_overrides[get_db] = override_get_db
 
 # ─── Fixtures ────────────────────────────────────────────────────────────────
 
+
 @pytest_asyncio.fixture
 async def client():
     """Async HTTP test client for FastAPI app."""
@@ -79,19 +81,23 @@ async def auth_headers(client: AsyncClient) -> dict:
     username = f"testuser_{uuid.uuid4().hex[:8]}"
 
     # Register
-    await client.post("/api/v1/auth/register", json={
-        "username": username,
-        "password": "testpass123",
-        "email": f"{username}@test.com",
-    })
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": username,
+            "password": "testpass123",
+            "email": f"{username}@test.com",
+        },
+    )
 
     # Login
-    resp = await client.post("/api/v1/auth/login", json={
-        "username": username,
-        "password": "testpass123",
-    })
-    data = resp.json()
-    assert "access_token" in data, (
-        f"Login failed ({resp.status_code}): {data}"
+    resp = await client.post(
+        "/api/v1/auth/login",
+        json={
+            "username": username,
+            "password": "testpass123",
+        },
     )
+    data = resp.json()
+    assert "access_token" in data, f"Login failed ({resp.status_code}): {data}"
     return {"Authorization": f"Bearer {data['access_token']}"}

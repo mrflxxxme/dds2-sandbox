@@ -1,6 +1,6 @@
 /** Projects & Team API methods */
 import { ApiClient } from './client';
-import type { Project, ProjectInvite, MessageResponse } from '@/types/api';
+import type { Project, ProjectInvite, ProjectMember, MyPermissions, MessageResponse } from '@/types/api';
 
 export function addProjectMethods(api: ApiClient) {
     return {
@@ -46,6 +46,12 @@ export function addProjectMethods(api: ApiClient) {
         },
         acceptInvite(token: string) {
             return api.request<MessageResponse>('POST', `/api/v1/projects/invite/accept/${token}`);
+        },
+        getMyPermissions(slug: string) {
+            return api.request<MyPermissions>('GET', `/api/v1/projects/${slug}/my-permissions`);
+        },
+        updateMemberRole(slug: string, userId: number, role: string, pages: string[]) {
+            return api.request<MessageResponse>('PUT', `/api/v1/projects/${slug}/members/${userId}/role`, { role, pages });
         },
     };
 }

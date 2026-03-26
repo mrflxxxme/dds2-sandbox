@@ -247,7 +247,7 @@ class TestApplyTaxArticle:
         _apply_tax_article(art, tax_info)
 
         assert art["tax_usn"] == round(10000 * 0.06, 2)
-        assert art["profit"] == round(5000 - 500 - 1000 - 600, 2)  # to_pay - adv - cost - tax
+        assert art["profit"] == (5000 - 500 - 1000 - 600)  # to_pay - adv - cost - tax
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -309,8 +309,8 @@ class TestEnrichArticle:
     def test_capitalization(self):
         art = self._base_article()
         _enrich_article(art, 100000, 90000, 7)
-        assert art["cap_cost"] == round(200 * 200, 2)  # stocks * cost_price
-        assert art["cap_retail"] == round(200 * 500, 2)  # stocks * avg_retail
+        assert art["cap_cost"] == (200 * 200)  # stocks * cost_price
+        assert art["cap_retail"] == (200 * 500)  # stocks * avg_retail
 
     def test_gmroi(self):
         art = self._base_article()

@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { exportToExcel } from '@/lib/utils';
+import { usePermissions } from '@/lib/hooks/usePermissions';
 
 export default function RefsPage() {
     const [tab, setTab] = useState<'accounts' | 'cp' | 'overrides' | 'balances' | 'categories'>('accounts');
@@ -41,6 +42,7 @@ function AccountsTab() {
     const [showForm, setShowForm] = useState(false);
     const [form, setForm] = useState({ account: '', bank: 'VTB', currency: 'RUB', account_type: 'OPER', account_name: '', is_our_account: true, is_customs_payee: false });
     const [msg, setMsg] = useState('');
+    const { canEdit } = usePermissions();
 
     useEffect(() => { load(); }, []);
     const load = async () => { try { setData(await api.getAccounts()); } catch { } };
@@ -59,7 +61,7 @@ function AccountsTab() {
                 <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Счета (REF_ACCOUNTS)</h3>
                 <div style={{ display: 'flex', gap: 8 }}>
                     <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'accounts')}>📥 Excel</button>
-                    <button className="btn btn-primary btn-sm" onClick={() => setShowForm(!showForm)}>+ Добавить</button>
+                    {canEdit() && <button className="btn btn-primary btn-sm" onClick={() => setShowForm(!showForm)}>+ Добавить</button>}
                 </div>
             </div>
             {msg && <div style={{ color: 'var(--color-success)', fontSize: 13, marginBottom: 8 }}>{msg}</div>}
@@ -121,6 +123,7 @@ function CpCategoriesTab() {
     const [showForm, setShowForm] = useState(false);
     const [form, setForm] = useState({ cp_key: '', cp_name: '', cat_lvl1: '', cat_lvl2: '', note: '' });
     const [msg, setMsg] = useState('');
+    const { canEdit } = usePermissions();
 
     useEffect(() => { load(); }, []);
     const load = async () => { try { setData(await api.getCpCategories()); } catch { } };
@@ -138,7 +141,7 @@ function CpCategoriesTab() {
                 <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Категории контрагентов ({data.length})</h3>
                 <div style={{ display: 'flex', gap: 8 }}>
                     <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'cp_categories')}>📥 Excel</button>
-                    <button className="btn btn-primary btn-sm" onClick={() => setShowForm(!showForm)}>+ Добавить</button>
+                    {canEdit() && <button className="btn btn-primary btn-sm" onClick={() => setShowForm(!showForm)}>+ Добавить</button>}
                 </div>
             </div>
             {msg && <div style={{ color: 'var(--color-success)', fontSize: 13, marginBottom: 8 }}>{msg}</div>}
@@ -217,6 +220,7 @@ function BalancesTab() {
     const [showForm, setShowForm] = useState(false);
     const [form, setForm] = useState({ date_open: new Date().toISOString().slice(0, 10), account: '', currency: 'RUB', opening_balance: 0 });
     const [msg, setMsg] = useState('');
+    const { canEdit } = usePermissions();
 
     useEffect(() => { load(); }, []);
     const load = async () => { try { setData(await api.getOpeningBalances()); } catch { } };
@@ -230,7 +234,7 @@ function BalancesTab() {
                 <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Начальные остатки</h3>
                 <div style={{ display: 'flex', gap: 8 }}>
                     <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'opening_balances')}>📥 Excel</button>
-                    <button className="btn btn-primary btn-sm" onClick={() => setShowForm(!showForm)}>+ Добавить</button>
+                    {canEdit() && <button className="btn btn-primary btn-sm" onClick={() => setShowForm(!showForm)}>+ Добавить</button>}
                 </div>
             </div>
             {msg && <div style={{ color: 'var(--color-success)', fontSize: 13, marginBottom: 8 }}>{msg}</div>}
@@ -268,6 +272,7 @@ function CategoriesTab() {
     const [showForm, setShowForm] = useState(false);
     const [form, setForm] = useState({ direction: 'income', cat_lvl1: '', cat_lvl2: '' });
     const [msg, setMsg] = useState('');
+    const { canEdit } = usePermissions();
 
     useEffect(() => { load(); }, []);
     const load = async () => { try { setData(await api.getCategoryRef()); } catch { } };
@@ -287,7 +292,7 @@ function CategoriesTab() {
                 <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Справочник категорий</h3>
                 <div style={{ display: 'flex', gap: 8 }}>
                     <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'categories')}>📥 Excel</button>
-                    <button className="btn btn-primary btn-sm" onClick={() => setShowForm(!showForm)}>+ Добавить</button>
+                    {canEdit() && <button className="btn btn-primary btn-sm" onClick={() => setShowForm(!showForm)}>+ Добавить</button>}
                 </div>
             </div>
             {msg && <div style={{ color: 'var(--color-success)', fontSize: 13, marginBottom: 8 }}>{msg}</div>}

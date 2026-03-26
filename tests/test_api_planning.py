@@ -3,15 +3,17 @@ API tests — Planning endpoints (orders, payments, incomes, cashflow, customs).
 """
 
 import random
+
 import pytest
 
-
 # ─── Helper ──────────────────────────────────────────────────────────────────
+
 
 async def _project_headers(client, auth_headers) -> dict:
     """Create a test project and return headers with X-Project-Id."""
     resp = await client.post(
-        "/api/v1/projects", json={"name": "Planning Test"},
+        "/api/v1/projects",
+        json={"name": "Planning Test"},
         headers=auth_headers,
     )
     project = resp.json()
@@ -19,6 +21,7 @@ async def _project_headers(client, auth_headers) -> dict:
 
 
 # ─── Orders ──────────────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_orders_list_empty(client, auth_headers):
@@ -37,13 +40,17 @@ async def test_orders_crud(client, auth_headers):
 
     # Create
     order_no = random.randint(10000, 99999)
-    resp = await client.post("/api/v1/planning/orders", json={
-        "order_no": order_no,
-        "planned_ship_date": "2024-06-01",
-        "order_amount": 50000.0,
-        "logistics_cny": 1000.0,
-        "customs_rub": 25000.0,
-    }, headers=headers)
+    resp = await client.post(
+        "/api/v1/planning/orders",
+        json={
+            "order_no": order_no,
+            "planned_ship_date": "2024-06-01",
+            "order_amount": 50000.0,
+            "logistics_cny": 1000.0,
+            "customs_rub": 25000.0,
+        },
+        headers=headers,
+    )
     assert resp.status_code == 200
     order = resp.json()
 
@@ -67,6 +74,7 @@ async def test_orders_require_auth(client):
 
 # ─── Lead Times ──────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_lead_times_list_empty(client, auth_headers):
     """Lead times list should return empty or default for a new project."""
@@ -77,6 +85,7 @@ async def test_lead_times_list_empty(client, auth_headers):
 
 
 # ─── Planned Payments ────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_payments_list_empty(client, auth_headers):
@@ -95,20 +104,28 @@ async def test_payments_crud(client, auth_headers):
 
     # Create order first (payment needs order_no)
     order_no = random.randint(20000, 29999)
-    await client.post("/api/v1/planning/orders", json={
-        "order_no": order_no,
-        "planned_ship_date": "2024-06-01",
-    }, headers=headers)
+    await client.post(
+        "/api/v1/planning/orders",
+        json={
+            "order_no": order_no,
+            "planned_ship_date": "2024-06-01",
+        },
+        headers=headers,
+    )
 
     # Create payment
-    resp = await client.post("/api/v1/planning/payments", json={
-        "order_no": order_no,
-        "pay_date": "2024-06-15",
-        "amount": 10000.0,
-        "currency": "RUB",
-        "amount_rub": 10000.0,
-        "direction": "ЗАКАЗ",
-    }, headers=headers)
+    resp = await client.post(
+        "/api/v1/planning/payments",
+        json={
+            "order_no": order_no,
+            "pay_date": "2024-06-15",
+            "amount": 10000.0,
+            "currency": "RUB",
+            "amount_rub": 10000.0,
+            "direction": "ЗАКАЗ",
+        },
+        headers=headers,
+    )
     assert resp.status_code == 200
     payment = resp.json()
 
@@ -127,6 +144,7 @@ async def test_payments_crud(client, auth_headers):
 
 # ─── Planned Incomes ────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_incomes_list_empty(client, auth_headers):
     """Incomes list should return empty for a new project."""
@@ -143,11 +161,15 @@ async def test_incomes_crud(client, auth_headers):
     headers = await _project_headers(client, auth_headers)
 
     # Create
-    resp = await client.post("/api/v1/planning/incomes", json={
-        "source": "WB",
-        "date": "2024-07-01",
-        "amount_rub": 100000.0,
-    }, headers=headers)
+    resp = await client.post(
+        "/api/v1/planning/incomes",
+        json={
+            "source": "WB",
+            "date": "2024-07-01",
+            "amount_rub": 100000.0,
+        },
+        headers=headers,
+    )
     assert resp.status_code == 200
     income = resp.json()
 
@@ -166,6 +188,7 @@ async def test_incomes_crud(client, auth_headers):
 
 # ─── Cashflow Daily ─────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_cashflow_daily(client, auth_headers):
     """Cashflow daily should return a valid series."""
@@ -182,6 +205,7 @@ async def test_cashflow_daily(client, auth_headers):
 
 # ─── Customs Topup ───────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_customs_topup_empty(client, auth_headers):
     """Customs topup list should return empty for a new project."""
@@ -192,6 +216,7 @@ async def test_customs_topup_empty(client, auth_headers):
 
 
 # ─── WB Payouts ──────────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_wb_payouts_empty(client, auth_headers):

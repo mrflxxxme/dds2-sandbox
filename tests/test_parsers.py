@@ -7,17 +7,17 @@ from decimal import Decimal
 import pytest
 
 from backend.etl.parsers import (
-    parse_vtb_rub,
+    NORM_COLS,
+    _clean_str,
+    _find_columns,
+    _parse_date,
+    _to_decimal,
+    parse_statement,
     parse_vtb_cny,
     parse_vtb_multi,
+    parse_vtb_rub,
     parse_wb_main,
     parse_wb_multi,
-    parse_statement,
-    _find_columns,
-    _to_decimal,
-    _clean_str,
-    _parse_date,
-    NORM_COLS,
 )
 
 
@@ -66,25 +66,34 @@ class TestHelpers:
 class TestFindColumns:
     def test_finds_exact_match(self):
         import pandas as pd
+
         df = pd.DataFrame(columns=["Дата", "Контрагент", "Дебет RUR"])
-        result = _find_columns(df, {
-            "date": ["Дата"],
-            "counterparty": ["Контрагент"],
-        })
+        result = _find_columns(
+            df,
+            {
+                "date": ["Дата"],
+                "counterparty": ["Контрагент"],
+            },
+        )
         assert result == {"date": "Дата", "counterparty": "Контрагент"}
 
     def test_finds_partial_match(self):
         import pandas as pd
+
         df = pd.DataFrame(columns=["Дата операции", "Сумма дебет", "Назначение платежа"])
-        result = _find_columns(df, {
-            "date": ["Дата"],
-            "purpose": ["Назначение"],
-        })
+        result = _find_columns(
+            df,
+            {
+                "date": ["Дата"],
+                "purpose": ["Назначение"],
+            },
+        )
         assert result["date"] == "Дата операции"
         assert result["purpose"] == "Назначение платежа"
 
     def test_missing_column_raises(self):
         import pandas as pd
+
         df = pd.DataFrame(columns=["Дата", "Сумма"])
         with pytest.raises(KeyError, match="not found"):
             _find_columns(df, {"counterparty": ["Контрагент"]})
@@ -184,6 +193,7 @@ class TestParseVtbMulti:
     def test_amounts_correct(self, vtb_multi_excel):
         """Verify debit/credit parsing for each currency type."""
         from decimal import Decimal
+
         df, _ = parse_vtb_multi(vtb_multi_excel)
 
         # CNY row: expense=106000
@@ -221,6 +231,7 @@ class TestParseWbMulti:
     def test_amounts_correct(self, wb_multi_xml_xls):
         """Verify income/expense parsing."""
         from decimal import Decimal
+
         df, _ = parse_wb_multi(wb_multi_xml_xls)
 
         # Account 1, first row: income=500000 (credit/Оборот Кт)
@@ -235,5 +246,3 @@ class TestParseWbMulti:
         """parse_statement('WB_MULTI', ...) should dispatch correctly."""
         df, skipped = parse_statement("WB_MULTI", wb_multi_xml_xls, "ignored")
         assert len(df) == 3
-
-

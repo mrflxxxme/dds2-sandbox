@@ -5,14 +5,14 @@ Tests the _linear_regression_trend pure function and analysis output structure.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-
 
 # ─── _linear_regression_trend ────────────────────────────────────────────────
+
 
 def test_linear_regression_trend_positive():
     """Positive trend: increasing values should give positive trendPct."""
     from backend.services.funnel.analysis import _linear_regression_trend
+
     values = [10.0, 20.0, 30.0, 40.0, 50.0]
     result = _linear_regression_trend(values)
     assert result > 0, f"Expected positive trend, got {result}"
@@ -21,6 +21,7 @@ def test_linear_regression_trend_positive():
 def test_linear_regression_trend_negative():
     """Negative trend: decreasing values should give negative trendPct."""
     from backend.services.funnel.analysis import _linear_regression_trend
+
     values = [50.0, 40.0, 30.0, 20.0, 10.0]
     result = _linear_regression_trend(values)
     assert result < 0, f"Expected negative trend, got {result}"
@@ -29,6 +30,7 @@ def test_linear_regression_trend_negative():
 def test_linear_regression_trend_flat():
     """Flat: all same values should give 0 trend."""
     from backend.services.funnel.analysis import _linear_regression_trend
+
     values = [100.0, 100.0, 100.0, 100.0, 100.0]
     result = _linear_regression_trend(values)
     assert result == 0.0
@@ -37,6 +39,7 @@ def test_linear_regression_trend_flat():
 def test_linear_regression_trend_empty():
     """Empty or single value should return 0."""
     from backend.services.funnel.analysis import _linear_regression_trend
+
     assert _linear_regression_trend([]) == 0
     assert _linear_regression_trend([42.0]) == 0
 
@@ -44,6 +47,7 @@ def test_linear_regression_trend_empty():
 def test_linear_regression_trend_two_values():
     """Two values should work correctly."""
     from backend.services.funnel.analysis import _linear_regression_trend
+
     result = _linear_regression_trend([10.0, 20.0])
     assert result > 0
 
@@ -51,6 +55,7 @@ def test_linear_regression_trend_two_values():
 def test_linear_regression_trend_zero_mean():
     """If mean is zero should return 0 (avoid division by zero)."""
     from backend.services.funnel.analysis import _linear_regression_trend
+
     result = _linear_regression_trend([0.0, 0.0, 0.0])
     assert result == 0
 
@@ -58,10 +63,13 @@ def test_linear_regression_trend_zero_mean():
 # ─── Cost parsers integration ────────────────────────────────────────────────
 # Tests for cost Excel parsers (extracted from cost_service)
 
+
 def test_detect_and_normalize_divandek():
     """Test divandek format detection and normalization."""
     import io
+
     import pandas as pd
+
     from backend.etl.cost_parsers import detect_and_normalize_excel
 
     data = {
@@ -84,7 +92,9 @@ def test_detect_and_normalize_divandek():
 def test_detect_and_normalize_carpet():
     """Test carpet (Chinese) format detection and normalization."""
     import io
+
     import pandas as pd
+
     from backend.etl.cost_parsers import detect_and_normalize_excel
 
     data = {
@@ -107,7 +117,9 @@ def test_detect_and_normalize_carpet():
 def test_detect_and_normalize_unknown_format():
     """Unknown format should raise ValueError."""
     import io
+
     import pandas as pd
+
     from backend.etl.cost_parsers import detect_and_normalize_excel
 
     data = {"Column1": [1, 2], "Column2": [3, 4]}
@@ -122,7 +134,9 @@ def test_detect_and_normalize_unknown_format():
 def test_detect_and_normalize_divandek_cn():
     """Test divandek CN (客户编号) format detection."""
     import io
+
     import pandas as pd
+
     from backend.etl.cost_parsers import detect_and_normalize_excel
 
     data = {

@@ -93,7 +93,8 @@ async def get_wb_bdr(
     if brand:
         params["brand"] = brand
     if article:
-        params["article_like"] = f"%{article.lower()}%"
+        safe_article = article.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params["article_like"] = f"%{safe_article}%"
 
     result = await db.execute(text(build_bdr_aggregate_sql(brand, article, group_by=group_by)), params)
     agg_rows = result.mappings().all()
