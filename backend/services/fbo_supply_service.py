@@ -745,6 +745,11 @@ def _update_supply_from_fbw_list(supply: WbFboSupply, wb_data: dict) -> None:
     if box_type:
         supply.cargo_type = box_type
 
+    # Update total_qty if available in list response
+    qty = wb_data.get("quantity") or wb_data.get("totalQuantity")
+    if qty and int(qty) > 0:
+        supply.total_qty = int(qty)
+
 
 def _update_supply_from_fbw_detail(supply: WbFboSupply, detail: dict) -> None:
     """
