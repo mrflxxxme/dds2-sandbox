@@ -182,12 +182,12 @@ def start_scheduler():
         misfire_grace_time=600,
     )
 
-    # FBO supplies sync: every 1 hour
+    # FBO supplies sync + statuses: every 30 min
     _scheduler.add_job(
         sync_all_projects_fbo_supplies,
-        trigger=IntervalTrigger(hours=1),
+        trigger=IntervalTrigger(minutes=30),
         id="fbo_supplies_sync",
-        name="FBO supplies sync (every 1h)",
+        name="FBO supplies sync (every 30min)",
         replace_existing=True,
         misfire_grace_time=600,
     )

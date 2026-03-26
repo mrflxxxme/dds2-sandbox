@@ -28,7 +28,7 @@ async def sync_all_projects_fbo_supplies():
         return
 
     from backend.integrations.wb_api import WBApiClient
-    from backend.services.fbo_supply_service import sync_fbo_supplies
+    from backend.services.fbo_supply_service import sync_fbo_statuses, sync_fbo_supplies
     from backend.services.integrations_service import _get_wb_key
 
     ok = 0
@@ -67,6 +67,18 @@ async def sync_all_projects_fbo_supplies():
                 )
 
                 rows_synced = result.get("synced", 0)
+
+                # Also sync statuses for active supplies
+                status_result = await asyncio.wait_for(
+                    sync_fbo_statuses(db, project_id, api_client, key.id),
+                    timeout=120,
+                )
+                logger.info(
+                    "FBO statuses sync: project %d — %d updated",
+                    project_id,
+                    status_result.get("updated", 0),
+                )
+
                 log_status = "OK"
                 logger.info(
                     "FBO supplies sync: project %d — %d synced (%d new, %d updated)",
@@ -77,7 +89,7 @@ async def sync_all_projects_fbo_supplies():
                 )
                 ok += 1
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log_status = "TIMEOUT"
             logger.error("FBO supplies sync: project %d — TIMEOUT (600s)", project_id)
             errors += 1
@@ -106,7 +118,9 @@ async def sync_all_projects_fbo_supplies():
                         from sqlalchemy import update
 
                         await db.execute(
-                            update(SyncLog).where(SyncLog.id == log_id).values(
+                            update(SyncLog)
+                            .where(SyncLog.id == log_id)
+                            .values(
                                 status=log_status,
                                 rows_inserted=rows_synced,
                                 finished_at=utcnow(),
