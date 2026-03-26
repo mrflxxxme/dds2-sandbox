@@ -288,8 +288,11 @@ export default function AssemblyNewPage() {
                                                 }
                                             }
                                             setFormItems(Array.from(grouped.values()));
-                                            // Reload FBO list to update qty
-                                            await loadFboSupplies();
+                                            // Update total_qty in fboSupplies list from actual items
+                                            const actualQty = Array.from(grouped.values()).reduce((s, i) => s + i.quantity, 0);
+                                            setFboSupplies(prev => prev.map(s =>
+                                                s.id === Number(fboSupplyId) ? { ...s, total_qty: actualQty } : s
+                                            ));
                                         } catch { /* ignore */ }
                                         setLoadingFboItems(false);
                                     }}
