@@ -178,6 +178,31 @@ async def get_wb_bdr(
                 grouped_cancel[gk]["total"] += cs_val.get("total", 0)
                 grouped_cancel[gk]["cancelled"] += cs_val.get("cancelled", 0)
 
+        # Cost: aggregate avg_cost per article by group (sum costs for cost_total later)
+        # grouped_cost_sum: group_key → sum of avg_cost_per_article across all articles in group
+        # grouped_cost_count: group_key → number of articles with known cost in group
+        # We compute group cost_total = avg(cost_prices) * sale_qty from SQL row
+        grouped_cost_sum: dict[str, float] = {}
+        grouped_cost_count: dict[str, int] = {}
+        for sa_name_key, cost_val in cost_map.items():
+            gk = sa_to_group.get(sa_name_key, "")
+            if gk and cost_val > 0:
+                grouped_cost_sum[gk] = grouped_cost_sum.get(gk, 0.0) + cost_val
+                grouped_cost_count[gk] = grouped_cost_count.get(gk, 0) + 1
+        # Also fold in cost_overrides (by nm_id → group) for articles missing cost_map entry
+        for nm_id_key, override_val in cost_overrides.items():
+            gk = nm_to_group.get(nm_id_key, "")
+            if gk and override_val > 0:
+                # Only add if this nm_id's sa_name is NOT already in cost_map for this group
+                grouped_cost_sum[gk] = grouped_cost_sum.get(gk, 0.0) + override_val
+                grouped_cost_count[gk] = grouped_cost_count.get(gk, 0) + 1
+        # Build grouped_avg_cost: group_key → weighted-mean cost per unit
+        grouped_avg_cost: dict[str, float] = {
+            gk: grouped_cost_sum[gk] / grouped_cost_count[gk]
+            for gk in grouped_cost_sum
+            if grouped_cost_count.get(gk, 0) > 0
+        }
+
     # ── 6. Compute metrics per article from SQL rows ──
     total_metrics = _empty_metrics()
     total_adv = ZERO
@@ -206,9 +231,13 @@ async def get_wb_bdr(
             metrics["adv_sum"] = adv_sum
             total_adv += D(str(adv_sum))
 
-            # Cost: no meaningful per-unit cost_price for groups
-            metrics["cost_price"] = 0
-            metrics["cost_total"] = 0
+            # Cost: aggregate avg cost across articles in this group
+            cost_price = grouped_avg_cost.get(sa_name, 0)
+            sale_qty = metrics["sale_qty"]
+            cost_total = cost_price * sale_qty if sale_qty > 0 else 0
+            metrics["cost_price"] = round(cost_price, 2)
+            metrics["cost_total"] = round(cost_total, 2)
+            total_cost += D(str(cost_total))
 
             os_data = grouped_orders.get(sa_name, {})
             metrics["orders_count"] = os_data.get("orders_count", 0)
