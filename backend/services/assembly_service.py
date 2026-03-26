@@ -20,7 +20,7 @@ Implementation notes:
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -274,7 +274,17 @@ async def list_assembly_requests(
     if search:
         # Escape % and _ in search string before ILIKE
         escaped = search.replace("%", r"\%").replace("_", r"\_")
-        base = base.where(AssemblyRequest.number.ilike(f"%{escaped}%"))
+        # Search by assembly number OR WB supply ID (e.g. FBW-37969677)
+        supply_ids_q = select(WbFboSupply.id).where(
+            WbFboSupply.project_id == project_id,
+            WbFboSupply.wb_supply_id.ilike(f"%{escaped}%", escape="\\"),
+        )
+        base = base.where(
+            or_(
+                AssemblyRequest.number.ilike(f"%{escaped}%", escape="\\"),
+                AssemblyRequest.wb_fbo_supply_id.in_(supply_ids_q),
+            )
+        )
 
     # Total count
     count_q = select(func.count()).select_from(base.subquery())

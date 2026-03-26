@@ -499,3 +499,73 @@ async def remove_tariff(
     if not ok:
         raise HTTPException(404, "Тариф не найден")
     return {"status": "ok"}
+
+
+# ─── Ads Tab ──────────────────────────────────────────────────────────────────
+
+
+@router.get("/ad_tab")
+async def get_ad_tab(
+    date_from: str = Query(...),
+    date_to: str = Query(...),
+    brand: str = Query(""),
+    subject: str = Query(""),
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+):
+    """Get advertising data grouped by product with linked campaigns."""
+    from backend.services.funnel.ad_campaigns_service import get_ad_tab_data
+
+    return await get_ad_tab_data(db, project.id, date_from, date_to, brand, subject)
+
+
+@router.post("/sync_campaigns")
+async def sync_campaigns(
+    project: Project = Depends(get_current_project),
+):
+    """Sync ad campaigns from WB (names, types, budgets). Runs in background."""
+    from backend.services.funnel.ad_campaigns_service import get_sync_progress, sync_ad_campaigns_bg
+
+    progress = get_sync_progress(project.id)
+    if progress.get("status") in ("fetching_campaigns", "fetching_budgets", "saving"):
+        return {"status": "already_running", **progress}
+
+    asyncio.create_task(sync_ad_campaigns_bg(project.id))  # noqa: RUF006
+    return {"status": "started", "message": "Синхронизация запущена в фоне"}
+
+
+@router.get("/sync_campaigns_progress")
+async def sync_campaigns_progress(
+    project: Project = Depends(get_current_project),
+):
+    """Get progress of background ad campaigns sync."""
+    from backend.services.funnel.ad_campaigns_service import get_sync_progress
+
+    return get_sync_progress(project.id)
+
+
+@router.post("/sync_funnel_bg")
+async def sync_funnel_bg(
+    date_from: str = Query(...),
+    date_to: str = Query(...),
+    project: Project = Depends(get_current_project),
+):
+    """Run full funnel sync in background with progress tracking."""
+    from backend.services.funnel.sync import get_funnel_sync_progress, run_funnel_sync_bg
+
+    progress = get_funnel_sync_progress(project.id)
+    if progress.get("status") in ("fetching_ads", "fetching_funnel", "saving"):
+        return {"status": "already_running", **progress}
+
+    asyncio.create_task(run_funnel_sync_bg(project.id, date_from, date_to))  # noqa: RUF006
+    return {"status": "started", "message": "Синхронизация воронки запущена"}
+
+
+@router.get("/sync_funnel_progress")
+async def sync_funnel_progress(
+    project: Project = Depends(get_current_project),
+):
+    """Get progress of background funnel sync."""
+    from backend.services.funnel.sync import get_funnel_sync_progress
+
+    return get_funnel_sync_progress(project.id)

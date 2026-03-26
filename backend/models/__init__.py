@@ -55,6 +55,8 @@ from backend.models.fx_rates import (
 from backend.models.integrations import (
     IntegrationKey,
     SyncLog,
+    WbAdCampaign,
+    WbAdCampaignEvent,
     WbCostOverride,
     WbFunnelDaily,
     WbStockSnapshot,
@@ -197,6 +199,8 @@ __all__ = [
     "IntegrationKey",
     "SyncLog",
     "WbFunnelDaily",
+    "WbAdCampaign",
+    "WbAdCampaignEvent",
     "WbCostOverride",
     "WbStockSnapshot",
     "WbWarehouseStock",

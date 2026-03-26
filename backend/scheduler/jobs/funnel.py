@@ -9,12 +9,15 @@ from sqlalchemy import select, update
 
 from backend.database import AsyncSessionLocal
 from backend.models import IntegrationKey, SyncLog
-from backend.utils.time import utcnow
 from backend.scheduler.helpers import (
-    get_sync_project_ids, get_missing_dates, get_days_with_incomplete_ads,
-    split_into_windows, BACKFILL_DAYS,
+    BACKFILL_DAYS,
+    get_days_with_incomplete_ads,
+    get_missing_dates,
+    get_sync_project_ids,
+    split_into_windows,
 )
 from backend.utils.telegram import send_alert
+from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.scheduler")
 
@@ -31,16 +34,20 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
 
     async with AsyncSessionLocal() as db:
         int_key = await db.execute(
-            select(IntegrationKey.id).where(
+            select(IntegrationKey.id)
+            .where(
                 IntegrationKey.project_id == project_id,
                 IntegrationKey.service.in_(["wb", "wb_analytics"]),
-                IntegrationKey.is_active == True,
-            ).limit(1)
+                IntegrationKey.is_active.is_(True),
+            )
+            .limit(1)
         )
         key_id = int_key.scalar() or None
         sync_log = SyncLog(
-            integration_id=key_id, service="wb_funnel",
-            sync_type=sync_type, status="RUNNING",
+            integration_id=key_id,
+            service="wb_funnel",
+            sync_type=sync_type,
+            status="RUNNING",
         )
         db.add(sync_log)
         await db.commit()
@@ -54,13 +61,16 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
         async with AsyncSessionLocal() as db:
             result = await asyncio.wait_for(
                 run_funnel_sync(
-                    db, project_id, d_from, d_to,
+                    db,
+                    project_id,
+                    d_from,
+                    d_to,
                     include_completed_campaigns=include_completed,
                 ),
                 timeout=600,
             )
             status = "OK" if not result.get("errors") else "PARTIAL"
-    except asyncio.TimeoutError:
+    except TimeoutError:
         result = {"rows": 0, "errors": [f"Timeout: 10min exceeded ({d_from}→{d_to})"]}
         status = "TIMEOUT"
         logger.error(f"Scheduler: project {project_id} [{sync_type}] TIMEOUT {d_from}→{d_to}")
@@ -72,7 +82,9 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
         try:
             async with AsyncSessionLocal() as db:
                 await db.execute(
-                    update(SyncLog).where(SyncLog.id == log_id).values(
+                    update(SyncLog)
+                    .where(SyncLog.id == log_id)
+                    .values(
                         status=status,
                         rows_inserted=result.get("rows", 0),
                         finished_at=utcnow(),
@@ -103,6 +115,7 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
 
 # ─── Daily sync ──────────────────────────────────────────────────────────────
 
+
 async def sync_all_projects_funnel():
     """Daily sync: today + yesterday for all projects."""
     logger.info("⏰ Scheduler: starting daily funnel sync for all projects")
@@ -121,6 +134,7 @@ async def sync_all_projects_funnel():
 
 
 # ─── Fast backfill ───────────────────────────────────────────────────────────
+
 
 async def fast_backfill_tick():
     """Fill missing days ONLY. Runs every 3 min. Auto-stops when complete."""
@@ -145,7 +159,9 @@ async def fast_backfill_tick():
                 if missing:
                     all_filled = False
                     d_from, d_to = missing[0], missing[-1]
-                    logger.info(f"⏩ Backfill: project {pid} — syncing range {d_from}→{d_to} ({len(missing)} days remaining)")
+                    logger.info(
+                        f"⏩ Backfill: project {pid} — syncing range {d_from}→{d_to} ({len(missing)} days remaining)"
+                    )
                     res = await _run_and_log(pid, d_from, d_to, "backfill")
                     if res:
                         logger.info(f"⏩ Backfill: project {pid} — {d_from}→{d_to} done, +{res.get('rows', 0)} rows")
@@ -162,16 +178,18 @@ async def fast_backfill_tick():
 
 def _stop_fast_backfill():
     from backend.scheduler import get_scheduler_instance
+
     sched = get_scheduler_instance()
     if sched:
         try:
             sched.remove_job("fast_backfill")
             logger.info("Fast backfill job removed from scheduler")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"fast_backfill removal: {e}")
 
 
 # ─── Ad anomaly check ────────────────────────────────────────────────────────
+
 
 async def ad_anomaly_check():
     """Check for days with incomplete ad data and re-sync them."""
@@ -187,12 +205,16 @@ async def ad_anomaly_check():
                 if incomplete_days:
                     all_ads_ok = False
                     windows = split_into_windows(incomplete_days, max_window=30)
-                    logger.info(f"📊 Ad anomaly: project {pid} — {len(incomplete_days)} incomplete days, {len(windows)} windows")
+                    logger.info(
+                        f"📊 Ad anomaly: project {pid} — {len(incomplete_days)} incomplete days, {len(windows)} windows"
+                    )
                     for w_from, w_to in windows:
                         logger.info(f"📊 Ad anomaly: project {pid} — re-syncing window {w_from}→{w_to}")
                         res = await _run_and_log(pid, w_from, w_to, "ad_resync")
                         if res:
-                            logger.info(f"📊 Ad anomaly: project {pid} — {w_from}→{w_to} re-synced, +{res.get('rows', 0)} rows")
+                            logger.info(
+                                f"📊 Ad anomaly: project {pid} — {w_from}→{w_to} re-synced, +{res.get('rows', 0)} rows"
+                            )
                         await asyncio.sleep(5)
                 else:
                     logger.info(f"📊 Ad anomaly: project {pid} — all ads complete ✅")
@@ -205,10 +227,117 @@ async def ad_anomaly_check():
 
 def _stop_ad_anomaly_check():
     from backend.scheduler import get_scheduler_instance
+
     sched = get_scheduler_instance()
     if sched:
         try:
             sched.remove_job("ad_anomaly_check")
             logger.info("Ad anomaly check job removed from scheduler")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"ad_anomaly_check removal: {e}")
+
+
+# ─── Ad campaigns sync (hourly) ─────────────────────────────────────────────
+
+
+async def sync_ad_campaigns_all_projects():
+    """Sync ad campaigns (names, types, budgets) for all projects with WB keys."""
+    from backend.services.funnel.ad_campaigns_service import sync_ad_campaigns
+
+    logger.info("⏰ Scheduler: starting hourly ad campaigns sync")
+    project_ids = await get_sync_project_ids()
+    if not project_ids:
+        logger.info("Scheduler: no projects with WB keys for ad campaigns sync")
+        return
+
+    for pid in project_ids:
+        log_id = None
+        status = "ERROR"
+        synced = 0
+        error_msg = None
+
+        try:
+            # Create sync_log entry
+            async with AsyncSessionLocal() as db:
+                int_key = await db.execute(
+                    select(IntegrationKey.id)
+                    .where(
+                        IntegrationKey.project_id == pid,
+                        IntegrationKey.service.in_(["wb", "wb_advert", "wb_analytics"]),
+                        IntegrationKey.is_active.is_(True),
+                    )
+                    .limit(1)
+                )
+                key_id = int_key.scalar() or None
+                sync_log = SyncLog(
+                    integration_id=key_id,
+                    service="wb_funnel",
+                    sync_type="ad_campaigns",
+                    status="RUNNING",
+                )
+                db.add(sync_log)
+                await db.commit()
+                await db.refresh(sync_log)
+                log_id = sync_log.id
+
+            async with AsyncSessionLocal() as db:
+                result = await asyncio.wait_for(
+                    sync_ad_campaigns(db, pid),
+                    timeout=600,
+                )
+                synced = result.get("synced", 0)
+                status = "OK"
+                logger.info(f"Ad campaigns sync: project {pid} — {synced} campaigns")
+        except TimeoutError:
+            status = "TIMEOUT"
+            error_msg = "Timeout 10min exceeded"
+            logger.error(f"Ad campaigns sync TIMEOUT for project {pid}")
+        except Exception as e:
+            error_msg = str(e)[:500]
+            logger.error(f"Ad campaigns sync failed for project {pid}: {e}")
+        finally:
+            if log_id:
+                try:
+                    async with AsyncSessionLocal() as db:
+                        await db.execute(
+                            update(SyncLog)
+                            .where(SyncLog.id == log_id)
+                            .values(
+                                status=status,
+                                rows_inserted=synced,
+                                finished_at=utcnow(),
+                                error_msg=error_msg,
+                            )
+                        )
+                        await db.commit()
+                except Exception as log_err:
+                    logger.error(f"Failed to update sync_log {log_id}: {log_err}")
+
+
+# ─── Nomenclature sync (2x/day) ──────────────────────────────────────────────
+
+
+async def sync_nomenclature_all_projects():
+    """Sync nomenclature (barcodes, brands, categories) for all projects with WB keys."""
+    from backend.services.integrations_service import sync_wb_nomenclature
+
+    logger.info("⏰ Scheduler: starting nomenclature sync")
+    project_ids = await get_sync_project_ids()
+    if not project_ids:
+        logger.info("Scheduler: no projects with WB keys for nomenclature sync")
+        return
+
+    for pid in project_ids:
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await asyncio.wait_for(
+                    sync_wb_nomenclature(db, pid),
+                    timeout=300,
+                )
+                logger.info(
+                    f"Nomenclature sync: project {pid} — " f"inserted={result.rows_inserted}, status={result.status}"
+                )
+        except TimeoutError:
+            logger.error(f"Nomenclature sync TIMEOUT for project {pid}")
+        except Exception as e:
+            logger.error(f"Nomenclature sync failed for project {pid}: {e}")

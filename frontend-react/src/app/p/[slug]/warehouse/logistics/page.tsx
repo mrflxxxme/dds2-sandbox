@@ -775,6 +775,7 @@ export default function LogisticsPage() {
                                     <thead>
                                         <tr>
                                             <th>Заявка</th>
+                                            <th>Палеты</th>
                                             <th>Склад WB</th>
                                             <th>Дата забора *</th>
                                             <th>Интервал *</th>
@@ -789,6 +790,7 @@ export default function LogisticsPage() {
                                             return (
                                                 <tr key={id}>
                                                     <td style={{ fontWeight: 500, whiteSpace: 'nowrap' }}>{item?.number || `#${id}`}</td>
+                                                    <td style={{ textAlign: 'center' }}>{item?.pallets_count || '\u2014'}</td>
                                                     <td style={{ fontSize: 12, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>{item?.wb_warehouse_name || '\u2014'}</td>
                                                     <td><input className="form-input" type="date" value={p.pickup_date} onChange={e => updateParam(id, 'pickup_date', e.target.value)} style={{ minWidth: 130, padding: '4px 6px', fontSize: 13 }} /></td>
                                                     <td>

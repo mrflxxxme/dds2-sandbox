@@ -16,6 +16,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbFunnelDaily
+from backend.models.integrations import WbAdCampaignDaily
 from backend.services.funnel.wb_api_client import (
     fetch_ad_campaigns,
     fetch_ad_stats,
@@ -25,6 +26,28 @@ from backend.services.funnel.wb_api_client import (
 )
 
 logger = logging.getLogger("dds.funnel")
+
+# In-memory progress tracker for funnel sync
+from typing import Any
+
+_funnel_sync_progress: dict[int, dict[str, Any]] = {}
+
+
+def get_funnel_sync_progress(project_id: int) -> dict:
+    """Get current funnel sync progress."""
+    return _funnel_sync_progress.get(project_id, {"status": "idle"})
+
+
+async def run_funnel_sync_bg(project_id: int, date_from: str, date_to: str) -> None:
+    """Run funnel sync in background with progress tracking."""
+    from backend.database import AsyncSessionLocal
+
+    try:
+        async with AsyncSessionLocal() as db:
+            await run_funnel_sync(db, project_id, date_from, date_to)
+    except Exception as e:
+        _funnel_sync_progress[project_id] = {"status": "error", "error": str(e)[:200]}
+        logger.error(f"Funnel sync bg error: {e}")
 
 
 async def run_funnel_sync(
@@ -62,7 +85,14 @@ async def run_funnel_sync(
         d += timedelta(days=1)
 
     if not dates:
+        _funnel_sync_progress[pid] = {"status": "idle"}
         return {"status": "error", "rows": 0, "days": 0, "errors": ["Пустой диапазон дат"]}
+
+    _funnel_sync_progress[pid] = {
+        "status": "fetching_ads",
+        "days_total": len(dates),
+        "days_done": 0,
+    }
 
     # Use same cost sources as BDR (weighted average + overrides)
     from backend.services.bdr_loaders import load_avg_costs, load_cost_overrides
@@ -79,16 +109,24 @@ async def run_funnel_sync(
         logger.warning(f"Cost lookup failed: {e}")
 
     # Fetch ad campaigns
+    _funnel_sync_progress[pid]["detail"] = "Загрузка списка кампаний..."
     campaign_ids = await fetch_ad_campaigns(adv_key, include_completed=include_completed_campaigns)
+    _funnel_sync_progress[pid]["detail"] = f"Найдено {len(campaign_ids)} кампаний, загрузка статистики..."
 
     # Fetch ad stats for the whole range
     ad_stats = {}
     if campaign_ids:
         ad_stats = await fetch_ad_stats(adv_key, campaign_ids, dates[0], dates[-1])
 
-    # ── Try bulk history endpoint first (7 days/request, requires Джем) ────
-    # Split into 7-day windows and fetch all funnel data upfront
-    HISTORY_WINDOW = 7
+    _funnel_sync_progress[pid] = {
+        "status": "fetching_funnel",
+        "days_total": len(dates),
+        "days_done": 0,
+    }
+
+    # ── Try bulk history endpoint first (5 days/request, requires Джем) ────
+    # WB limits history to recent dates; older dates fall back to per-day
+    HISTORY_WINDOW = 5
     funnel_by_day: dict = {}  # {date_str: {nm_id: {...}}}
     use_history = True
 
@@ -99,11 +137,12 @@ async def run_funnel_sync(
         if use_history:
             history_data = await fetch_funnel_history(analytics_key, w_from, w_to)
             if history_data is None:
-                # 402 — Джем not available, fall back to per-day for ALL remaining
+                # 402/400 — Джем not available or date too old, fall back to per-day
                 use_history = False
-                logger.info("Falling back to per-day funnel fetch (no Джем)")
+                logger.info("Falling back to per-day funnel fetch (Джем unavailable or date limit exceeded)")
             else:
                 funnel_by_day.update(history_data)
+                _funnel_sync_progress[pid]["days_done"] = len(funnel_by_day)
                 logger.info(f"History batch {w_from}→{w_to}: {len(history_data)} days")
                 if i + HISTORY_WINDOW < len(dates):
                     await asyncio.sleep(1)
@@ -117,6 +156,7 @@ async def run_funnel_sync(
                 day_data = await fetch_funnel(analytics_key, ds)
                 if day_data:
                     funnel_by_day[ds] = day_data
+                _funnel_sync_progress[pid]["days_done"] = len(funnel_by_day)
             except Exception as e:
                 logger.error(f"Funnel fetch error {ds}: {e}")
 
@@ -127,10 +167,16 @@ async def run_funnel_sync(
             f"(vs {len(dates)} requests per-day)"
         )
 
+    _funnel_sync_progress[pid] = {
+        "status": "saving",
+        "days_total": len(dates),
+        "days_done": 0,
+    }
+
     # ── Upsert per day ────────────────────────────────────────────────────
     total_rows = 0
     errors = []
-    for date_str in dates:
+    for day_idx, date_str in enumerate(dates):
         funnel_data = funnel_by_day.get(date_str)
         if not funnel_data:
             continue
@@ -214,6 +260,59 @@ async def run_funnel_sync(
                 await db.rollback()
             except Exception:
                 pass
+
+        _funnel_sync_progress[pid] = {
+            "status": "saving",
+            "days_total": len(dates),
+            "days_done": day_idx + 1,
+        }
+
+    # ── Upsert per-campaign daily stats ─────────────────────────────────────
+    by_campaign = ad_stats.get("_by_campaign") or {}
+    if by_campaign:
+        try:
+            camp_rows = []
+            for date_str, camps in by_campaign.items():
+                for camp_id, stats in camps.items():
+                    camp_rows.append(
+                        {
+                            "project_id": pid,
+                            "campaign_id": camp_id,
+                            "date": date.fromisoformat(date_str),
+                            "views": stats.get("views", 0),
+                            "clicks": stats.get("clicks", 0),
+                            "spend": stats.get("sum", 0),
+                        }
+                    )
+            if camp_rows:
+                BATCH = 1000
+                for i in range(0, len(camp_rows), BATCH):
+                    batch = camp_rows[i : i + BATCH]
+                    stmt = pg_insert(WbAdCampaignDaily).values(batch)
+                    stmt = stmt.on_conflict_do_update(
+                        constraint="uq_ad_campaign_daily",
+                        set_={
+                            "views": stmt.excluded.views,
+                            "clicks": stmt.excluded.clicks,
+                            "spend": stmt.excluded.spend,
+                        },
+                    )
+                    await db.execute(stmt)
+                await db.commit()
+                logger.info(f"Campaign daily stats upserted: {len(camp_rows)} rows")
+        except Exception as e:
+            logger.error(f"Campaign daily stats save error: {e}")
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+
+    _funnel_sync_progress[pid] = {
+        "status": "done",
+        "days_total": len(dates),
+        "days_done": len(dates),
+        "rows": total_rows,
+    }
 
     return {"status": "ok", "rows": total_rows, "days": len(dates), "errors": errors[:5]}
 

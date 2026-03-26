@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
 import { MultiLineChart } from './components/MultiLineChart';
 import { DayAnalysisTab } from './components/DayAnalysisTab';
+import { AdsTab } from './components/AdsTab';
 import type { FunnelDayRow, FunnelSkuRow, FunnelSummary, FunnelFilters } from '@/types/api';
 
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
@@ -11,7 +12,7 @@ const fmtPct = (n: number) => (n || 0).toFixed(2) + '%';
 /* ─── Main page ──────────────────────────────────────────────── */
 
 export default function FunnelPage() {
-    const [tab, setTab] = useState<'funnel' | 'day-analysis'>('funnel');
+    const [tab, setTab] = useState<'funnel' | 'day-analysis' | 'ads'>('funnel');
     const [data, setData] = useState<FunnelDayRow[]>([]);
     const [detailed, setDetailed] = useState(false);
     const [summary, setSummary] = useState<FunnelSummary|null>(null);
@@ -108,13 +109,21 @@ export default function FunnelPage() {
             const f = await loadFilters();
             await loadSyncStatus();
             if (f?.min_date && f?.max_date) {
-                setDateFrom(f.min_date);
-                setDateTo(f.max_date);
-                await loadData(f.min_date, f.max_date);
+                // Default to last 30 days for Ads tab, full range for others
+                const today = new Date();
+                const thirtyDaysAgo = new Date(today);
+                thirtyDaysAgo.setDate(today.getDate() - 30);
+                const defaultFrom = tab === 'ads'
+                    ? thirtyDaysAgo.toISOString().slice(0, 10)
+                    : f.min_date;
+                const defaultTo = f.max_date;
+                setDateFrom(defaultFrom);
+                setDateTo(defaultTo);
+                await loadData(defaultFrom, defaultTo);
             }
             setInitDone(true);
         })();
-    }, []);
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     useEffect(() => { if (initDone && dateFrom && dateTo) loadData(); }, [dateFrom, dateTo, brand, subject, search]);
 
@@ -154,7 +163,43 @@ export default function FunnelPage() {
             <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
                 <button className={`tab-btn ${tab === 'funnel' ? 'active' : ''}`} onClick={() => setTab('funnel')}>Воронка</button>
                 <button className={`tab-btn ${tab === 'day-analysis' ? 'active' : ''}`} onClick={() => setTab('day-analysis')}>🔍 Анализ дня</button>
+                <button className={`tab-btn ${tab === 'ads' ? 'active' : ''}`} onClick={() => {
+                    setTab('ads');
+                    // Default to last 30 days for ads tab
+                    const today = new Date();
+                    const d30 = new Date(today);
+                    d30.setDate(today.getDate() - 30);
+                    const from30 = d30.toISOString().slice(0, 10);
+                    const toNow = filters.max_date || today.toISOString().slice(0, 10);
+                    if (dateFrom < from30) {
+                        setDateFrom(from30);
+                        setDateTo(toNow);
+                    }
+                }}>📢 Реклама</button>
             </div>
+
+            {/* Shared filters — visible on funnel + ads tabs */}
+            {(tab === 'funnel' || tab === 'ads') && (
+                <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
+                        min={filters.min_date || undefined} max={filters.max_date || undefined}
+                        style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }} />
+                    <span style={{ color: 'var(--color-text-dim)' }}>—</span>
+                    <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
+                        min={filters.min_date || undefined} max={filters.max_date || undefined}
+                        style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }} />
+                    <select value={brand} onChange={e => setBrand(e.target.value)}
+                        style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }}>
+                        <option value="">Все бренды</option>
+                        {filters.brands?.map((b: string) => <option key={b} value={b}>{b}</option>)}
+                    </select>
+                    <select value={subject} onChange={e => setSubject(e.target.value)}
+                        style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }}>
+                        <option value="">Все категории</option>
+                        {filters.subjects?.map((s: string) => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                </div>
+            )}
 
             {tab === 'funnel' && (
                 <>
@@ -226,25 +271,8 @@ export default function FunnelPage() {
                         </div>
                     )}
 
-                    {/* Filters */}
+                    {/* Search filter (funnel only) */}
                     <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-                        <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
-                            min={filters.min_date || undefined} max={filters.max_date || undefined}
-                            style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }} />
-                        <span style={{ color: 'var(--color-text-dim)' }}>—</span>
-                        <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
-                            min={filters.min_date || undefined} max={filters.max_date || undefined}
-                            style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }} />
-                        <select value={brand} onChange={e => setBrand(e.target.value)}
-                            style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }}>
-                            <option value="">Все бренды</option>
-                            {filters.brands?.map((b: string) => <option key={b} value={b}>{b}</option>)}
-                        </select>
-                        <select value={subject} onChange={e => setSubject(e.target.value)}
-                            style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }}>
-                            <option value="">Все категории</option>
-                            {filters.subjects?.map((s: string) => <option key={s} value={s}>{s}</option>)}
-                        </select>
                         <input placeholder="🔍 Артикул..." value={search} onChange={e => setSearch(e.target.value)}
                             style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13, width: 160 }} />
                         {detailed && (
@@ -477,6 +505,11 @@ export default function FunnelPage() {
             {/* ─── Day Analysis tab ─── */}
             {tab === 'day-analysis' && (
                 <DayAnalysisTab brand={brand} subject={subject} filters={filters} />
+            )}
+
+            {/* ─── Ads tab ─── */}
+            {tab === 'ads' && (
+                <AdsTab dateFrom={dateFrom} dateTo={dateTo} brand={brand} subject={subject} />
             )}
 
         </div >

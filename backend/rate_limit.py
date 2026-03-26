@@ -23,9 +23,13 @@ RATE_LIMITS = {
 }
 
 _SKIP_PATHS = {"/health", "/docs", "/openapi.json"}
+_SKIP_SUFFIXES = ("_progress", "/metrics")
 
 
 def _get_limit_key(path: str) -> str:
+    # Progress/status endpoints are read-only polling — use default limit
+    if path.endswith(tuple(_SKIP_SUFFIXES)):
+        return "default"
     if "/sync" in path:
         return "sync"
     if "/import" in path:

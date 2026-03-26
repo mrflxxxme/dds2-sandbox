@@ -1,6 +1,6 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
-import type { FunnelDayRow, FunnelSkuRow, FunnelSummary, FunnelFilters, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse } from '@/types/api';
+import type { FunnelDayRow, FunnelSkuRow, FunnelSummary, FunnelFilters, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
@@ -93,6 +93,24 @@ export function addFunnelMethods(api: ApiClient) {
             if (params?.elasticity != null) q.set('elasticity', String(params.elasticity));
             if (params?.illiquid_threshold != null) q.set('illiquid_threshold', String(params.illiquid_threshold));
             return api.request<CapitalResponse>('GET', `/api/v1/funnel/capital?${q.toString()}`);
+        },
+        getAdTab(params: { date_from: string; date_to: string; brand?: string; subject?: string }) {
+            const q = new URLSearchParams({ date_from: params.date_from, date_to: params.date_to });
+            if (params.brand) q.set('brand', params.brand);
+            if (params.subject) q.set('subject', params.subject);
+            return api.request<AdTabProduct[]>('GET', `/api/v1/funnel/ad_tab?${q.toString()}`);
+        },
+        syncAdCampaigns() {
+            return api.request<{ status: string }>('POST', '/api/v1/funnel/sync_campaigns');
+        },
+        getSyncCampaignsProgress() {
+            return api.request<{ status: string; campaigns_total?: number; budgets_done?: number; budgets_total?: number; error?: string }>('GET', '/api/v1/funnel/sync_campaigns_progress');
+        },
+        syncFunnelBg(dateFrom: string, dateTo: string) {
+            return api.request<{ status: string }>('POST', `/api/v1/funnel/sync_funnel_bg?date_from=${dateFrom}&date_to=${dateTo}`);
+        },
+        getSyncFunnelProgress() {
+            return api.request<{ status: string; days_total?: number; days_done?: number; rows?: number; error?: string }>('GET', '/api/v1/funnel/sync_funnel_progress');
         },
     };
 }

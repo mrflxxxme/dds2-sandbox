@@ -468,7 +468,7 @@ export default function AssemblyListPage() {
                     <div className="form-group" style={{ flex: 1, minWidth: 200 }}>
                         <input
                             className="form-input"
-                            placeholder="Поиск по номеру... (Enter)"
+                            placeholder="Поиск по номеру или поставке WB... (Enter)"
                             value={searchInput}
                             onChange={e => setSearchInput(e.target.value)}
                             onKeyDown={handleSearchKeyDown}

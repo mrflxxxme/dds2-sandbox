@@ -1243,3 +1243,49 @@ export interface CapitalResponse {
   period_days: number;
   elasticity: number;
 }
+
+// ─── Ad Campaigns (Ads Tab) ─────────────────────────────────────────────────
+
+export interface AdCampaignEvent {
+  event_type: string;  // budget_change, status_change
+  old_value: string;
+  new_value: string;
+  created_at: string;
+}
+
+export interface AdCampaign {
+  campaign_id: number;
+  name: string | null;
+  campaign_type: string | null;
+  status: number;
+  budget: number;
+  views?: number;
+  clicks?: number;
+  spend?: number;
+  ctr?: number;
+  cpc?: number;
+  cpm?: number;
+  events?: AdCampaignEvent[];
+}
+
+export interface AdTabProduct {
+  nm_id: number;
+  vendor_code: string | null;
+  subject: string | null;
+  brand: string | null;
+  adv_views: number;
+  adv_clicks: number;
+  adv_sum: number;
+  orders_sum_rub: number;
+  orders_count: number;
+  ctr: number;
+  cpc: number;
+  cpm: number;
+  drr: number;
+  abc_revenue: string;
+  abc_profit: string;
+  bdr_revenue: number;
+  bdr_profit: number;
+  stock_qty: number;
+  campaigns: AdCampaign[];
+}

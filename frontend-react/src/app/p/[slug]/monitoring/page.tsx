@@ -17,6 +17,7 @@ const SYNC_TYPE_LABELS: Record<string, string> = {
     wb_finance_daily: 'Финансы (днев.)',
     fbo_supplies: 'Поставки FBO',
     warehouse_stocks: 'Остатки WB',
+    ad_campaigns: 'Рекл. кампании',
 };
 
 function getSyncTypeLabel(syncType: string): string {

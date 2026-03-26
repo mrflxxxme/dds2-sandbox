@@ -1,5 +1,5 @@
 """
-Integration models: IntegrationKey, SyncLog, WbFunnelDaily, WbCostOverride.
+Integration models: IntegrationKey, SyncLog, WbFunnelDaily, WbCostOverride, WbAdCampaign, WbAdCampaignDaily.
 """
 
 from datetime import date, datetime
@@ -17,6 +17,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -97,6 +98,66 @@ class WbFunnelDaily(Base):
     __table_args__ = (
         UniqueConstraint("project_id", "date", "nm_id", name="uq_funnel_daily"),
         Index("ix_funnel_project_date", "project_id", "date"),
+    )
+
+
+class WbAdCampaign(Base):
+    """WB advertising campaign metadata: name, type, status, budget, linked products."""
+
+    __tablename__ = "wb_ad_campaigns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    campaign_id: Mapped[int] = mapped_column(Integer, nullable=False)  # WB advertId
+    name: Mapped[str | None] = mapped_column(String(500))
+    campaign_type: Mapped[str | None] = mapped_column(String(20))  # cpm, cpc, unified
+    status: Mapped[int] = mapped_column(Integer, default=9)  # 7=completed, 9=active, 11=paused
+    budget: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)  # remaining budget (rubles)
+    nm_ids: Mapped[list | None] = mapped_column(JSONB, default=list)  # linked product IDs
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "campaign_id", name="uq_ad_campaign_project"),
+        Index("ix_ad_campaign_project", "project_id"),
+    )
+
+
+class WbAdCampaignEvent(Base):
+    """History of ad campaign changes: budget and status."""
+
+    __tablename__ = "wb_ad_campaign_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    campaign_id: Mapped[int] = mapped_column(Integer, nullable=False)  # WB advertId
+    event_type: Mapped[str] = mapped_column(String(30), nullable=False)  # budget_change, status_change
+    old_value: Mapped[str | None] = mapped_column(String(50))
+    new_value: Mapped[str | None] = mapped_column(String(50))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    __table_args__ = (
+        Index("ix_ad_event_project_campaign", "project_id", "campaign_id"),
+        Index("ix_ad_event_created", "created_at"),
+    )
+
+
+class WbAdCampaignDaily(Base):
+    """Daily ad stats per campaign: views, clicks, spend."""
+
+    __tablename__ = "wb_ad_campaign_daily"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    campaign_id: Mapped[int] = mapped_column(Integer, nullable=False)  # WB advertId
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    views: Mapped[int] = mapped_column(Integer, default=0)
+    clicks: Mapped[int] = mapped_column(Integer, default=0)
+    spend: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "campaign_id", "date", name="uq_ad_campaign_daily"),
+        Index("ix_ad_campaign_daily_project_date", "project_id", "date"),
+        Index("ix_ad_campaign_daily_campaign", "project_id", "campaign_id"),
     )
 
 

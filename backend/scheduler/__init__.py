@@ -22,7 +22,9 @@ from backend.scheduler.jobs.fbo_supplies import enrich_all_projects_fbo_supplies
 from backend.scheduler.jobs.funnel import (
     ad_anomaly_check,
     fast_backfill_tick,
+    sync_ad_campaigns_all_projects,
     sync_all_projects_funnel,
+    sync_nomenclature_all_projects,
 )
 from backend.scheduler.jobs.health_check import health_monitor
 from backend.scheduler.jobs.prewarm import prewarm_all_reports, prewarm_project  # noqa: F401
@@ -89,6 +91,29 @@ def start_scheduler():
         replace_existing=True,
         misfire_grace_time=60,
     )
+
+    # Ad campaigns sync: hourly at :17 — names, types, budgets
+    _scheduler.add_job(
+        sync_ad_campaigns_all_projects,
+        trigger=CronTrigger(minute=17, timezone=MSK),
+        id="sync_ad_campaigns",
+        name="WB Ad Campaigns Sync (hourly)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=300,
+    )
+
+    # Nomenclature sync: 2x/day at 08:30 and 20:30 MSK
+    for nom_hour in [8, 20]:
+        _scheduler.add_job(
+            sync_nomenclature_all_projects,
+            trigger=CronTrigger(hour=nom_hour, minute=30, timezone=MSK),
+            id=f"nomenclature_sync_{nom_hour:02d}",
+            name=f"WB Nomenclature Sync ({nom_hour:02d}:30 MSK)",
+            replace_existing=True,
+            max_instances=1,
+            misfire_grace_time=600,
+        )
 
     # WB finance report sync — WEEKLY: Mon 03/06/09 (full week reports)
     for job_hour in [3, 6, 9]:

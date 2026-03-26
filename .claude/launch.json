@@ -2,11 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "docker-stack",
-      "runtimeExecutable": "echo",
-      "runtimeArgs": ["server already running"],
-      "port": 3000,
-      "autoPort": false
+      "name": "frontend",
+      "runtimeExecutable": "docker",
+      "runtimeArgs": ["compose", "logs", "-f", "frontend-react"],
+      "port": 3000
     }
   ]
 }
