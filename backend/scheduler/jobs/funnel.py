@@ -357,20 +357,68 @@ async def sync_budgets_all_projects():
         return
 
     for pid in project_ids:
+        log_id = None
+        status = "ERROR"
+        updated = 0
+        events = 0
+        error_msg = None
+
         try:
+            async with AsyncSessionLocal() as db:
+                int_key = await db.execute(
+                    select(IntegrationKey.id)
+                    .where(
+                        IntegrationKey.project_id == pid,
+                        IntegrationKey.service.in_(["wb", "wb_advert"]),
+                        IntegrationKey.is_active.is_(True),
+                    )
+                    .limit(1)
+                )
+                key_id = int_key.scalar() or None
+                sync_log = SyncLog(
+                    integration_id=key_id,
+                    service="wb_funnel",
+                    sync_type="ad_budgets",
+                    status="RUNNING",
+                )
+                db.add(sync_log)
+                await db.commit()
+                await db.refresh(sync_log)
+                log_id = sync_log.id
+
             async with AsyncSessionLocal() as db:
                 result = await asyncio.wait_for(
                     sync_ad_budgets_only(db, pid),
                     timeout=300,
                 )
-                logger.info(
-                    f"Budget sync: project {pid} — updated={result.get('updated', 0)}, "
-                    f"events={result.get('events', 0)}"
-                )
+                updated = result.get("updated", 0)
+                events = result.get("events", 0)
+                status = "OK"
+                logger.info(f"Budget sync: project {pid} — updated={updated}, events={events}")
         except TimeoutError:
+            status = "TIMEOUT"
+            error_msg = "Timeout 5min exceeded"
             logger.error(f"Budget sync TIMEOUT for project {pid}")
         except Exception as e:
+            error_msg = str(e)[:500]
             logger.error(f"Budget sync failed for project {pid}: {e}")
+        finally:
+            if log_id:
+                try:
+                    async with AsyncSessionLocal() as db:
+                        await db.execute(
+                            update(SyncLog)
+                            .where(SyncLog.id == log_id)
+                            .values(
+                                status=status,
+                                rows_inserted=updated,
+                                finished_at=utcnow(),
+                                error_msg=error_msg,
+                            )
+                        )
+                        await db.commit()
+                except Exception as log_err:
+                    logger.error(f"Failed to update sync_log {log_id}: {log_err}")
 
 
 # ─── Funnel hourly sync (last 2 days) ────────────────────────────────────────

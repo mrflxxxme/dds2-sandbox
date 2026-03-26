@@ -4,7 +4,6 @@ Sub-router extracted from reports.py for maintainability.
 """
 
 from datetime import date, timedelta
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,22 +19,33 @@ router = APIRouter()
 async def get_wb_bdr(
     date_from: date = Query(...),
     date_to: date = Query(...),
-    brand: Optional[str] = Query(None),
-    article: Optional[str] = Query(None),
+    brand: str | None = Query(None),
+    article: str | None = Query(None),
+    group_by: str = Query("article"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """WB BDR (P&L) report from locally cached finance data."""
     import asyncio
+
     from backend.services import wb_bdr_service
+
+    if group_by not in ("article", "brand", "subject"):
+        group_by = "article"
     try:
         return await asyncio.wait_for(
             wb_bdr_service.get_wb_bdr(
-                db, project.id, date_from, date_to, brand=brand, article=article,
+                db,
+                project.id,
+                date_from,
+                date_to,
+                brand=brand,
+                article=article,
+                group_by=group_by,
             ),
             timeout=60,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         raise HTTPException(status_code=504, detail="Отчёт ВБ БДР: таймаут (>60с). Попробуйте уменьшить период.")
 
 
@@ -45,12 +55,16 @@ async def get_wb_bdr_available_weeks(
     db: AsyncSession = Depends(get_db),
 ):
     """Return available date ranges that have wb_finance data."""
+    from sqlalchemy import distinct, select
+
     from backend.models.wb_finance import WbFinanceRow
-    from sqlalchemy import select, distinct
+
     result = await db.execute(
-        select(distinct(WbFinanceRow.rr_dt)).where(
+        select(distinct(WbFinanceRow.rr_dt))
+        .where(
             WbFinanceRow.project_id == project.id,
-        ).order_by(WbFinanceRow.rr_dt.desc())
+        )
+        .order_by(WbFinanceRow.rr_dt.desc())
     )
     dates = [str(r[0]) for r in result if r[0] is not None]
     return {"available_dates": dates}
@@ -63,6 +77,7 @@ async def get_wb_bdr_sync_status(
 ):
     """Get WB finance data sync status for the project."""
     from backend.services.wb_finance_sync import get_sync_status
+
     return await get_sync_status(db, project.id)
 
 
@@ -70,8 +85,8 @@ async def get_wb_bdr_sync_status(
 async def get_opiu(
     date_from: date = Query(...),
     date_to: date = Query(...),
-    brand: Optional[str] = Query(None),
-    article: Optional[str] = Query(None),
+    brand: str | None = Query(None),
+    article: str | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -79,6 +94,7 @@ async def get_opiu(
     import asyncio
     import json
     import logging
+
     from backend.cache import get_redis
 
     _log = logging.getLogger("dds.reports")
@@ -120,14 +136,20 @@ async def get_opiu(
             pass
 
     if not already_computing:
+
         async def _compute_background():
             try:
                 from backend.database import AsyncSessionLocal
                 from backend.services import opiu_service
+
                 async with AsyncSessionLocal() as bg_db:
                     await opiu_service.get_opiu(
-                        bg_db, project_id, date_from, date_to,
-                        brand=brand, article=article,
+                        bg_db,
+                        project_id,
+                        date_from,
+                        date_to,
+                        brand=brand,
+                        article=article,
                     )
                 _log.info("OPIU background compute done for project %s", project_id)
                 # Clear error flag on success
@@ -171,6 +193,7 @@ async def trigger_wb_bdr_sync(
 ):
     """Manually trigger WB finance data sync (last 2 months)."""
     import asyncio
+
     from backend.database import AsyncSessionLocal
     from backend.services.wb_finance_sync import sync_wb_finance
 
@@ -184,6 +207,7 @@ async def trigger_wb_bdr_sync(
                 await sync_wb_finance(bg_db, project_id, date_from, today)
         except Exception:
             import logging
+
             logging.getLogger("dds.reports").error(
                 "Background WB finance sync failed for project %s", project_id, exc_info=True
             )
@@ -194,13 +218,17 @@ async def trigger_wb_bdr_sync(
 
 @router.get("/cost_history")
 async def get_cost_history(
-    article: Optional[str] = Query(None),
-    brand: Optional[str] = Query(None),
+    article: str | None = Query(None),
+    brand: str | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Cost price history: articles × orders pivot table."""
     from backend.services import cost_history_service
+
     return await cost_history_service.get_cost_history(
-        db, project.id, article_search=article, brand_filter=brand,
+        db,
+        project.id,
+        article_search=article,
+        brand_filter=brand,
     )

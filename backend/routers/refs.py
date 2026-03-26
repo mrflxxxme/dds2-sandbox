@@ -4,22 +4,25 @@ Router: /refs — accounts, cp_categories, overrides, opening_balances, category
 Delegates CRUD logic to services/refs_service.py.
 """
 
-from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models import Project
-from backend.schemas import (
-    AccountSchema, CounterpartyCategorySchema, OpeningBalanceSchema, CategoryRefCreate,
-)
 from backend.project_context import get_current_project
+from backend.schemas import (
+    AccountSchema,
+    CategoryRefCreate,
+    CounterpartyCategorySchema,
+    OpeningBalanceSchema,
+)
 from backend.services import refs_service
 
 router = APIRouter(prefix="/refs")
 
 
 # ─── Accounts ─────────────────────────────────────────────────────────────────
+
 
 @router.get("/accounts")
 async def get_accounts(
@@ -52,6 +55,7 @@ async def delete_account(
 
 # ─── Counterparty Categories ──────────────────────────────────────────────────
 
+
 @router.get("/cp_categories")
 async def get_cp_categories(
     project: Project = Depends(get_current_project),
@@ -83,6 +87,7 @@ async def delete_cp_category(
 
 # ─── Overrides ────────────────────────────────────────────────────────────────
 
+
 @router.get("/overrides")
 async def get_overrides(
     project: Project = Depends(get_current_project),
@@ -105,6 +110,7 @@ async def delete_override(
 
 # ─── Opening Balances ─────────────────────────────────────────────────────────
 
+
 @router.get("/opening_balances")
 async def get_opening_balances(
     project: Project = Depends(get_current_project),
@@ -124,6 +130,7 @@ async def upsert_opening_balance(
 
 # ─── Category Reference ──────────────────────────────────────────────────────
 
+
 @router.get("/categories")
 async def get_categories(
     project: Project = Depends(get_current_project),
@@ -142,7 +149,10 @@ async def add_category(
         raise HTTPException(400, "cat_lvl1 is required")
 
     cat = await refs_service.add_category(
-        db, project.id, payload.cat_lvl1.strip(), (payload.cat_lvl2 or "").strip() or None,
+        db,
+        project.id,
+        payload.cat_lvl1.strip(),
+        (payload.cat_lvl2 or "").strip() or None,
         direction=payload.direction.strip(),
     )
     return {"ok": True, "id": cat.id}
@@ -162,12 +172,14 @@ async def delete_category(
 
 # ─── Warehouse Settings ──────────────────────────────────────────────────────
 
+
 @router.get("/warehouses")
 async def get_warehouses(
     project: Project = Depends(get_current_project),
 ):
     """List all available warehouses from WAREHOUSE_COORDS."""
     from backend.services import settings_service
+
     return settings_service.get_all_warehouses()
 
 
@@ -178,6 +190,7 @@ async def get_excluded_warehouses(
 ):
     """Get excluded warehouse names for current project."""
     from backend.services import settings_service
+
     return await settings_service.get_excluded_warehouses(db, project.id)
 
 
@@ -189,9 +202,62 @@ async def set_excluded_warehouses(
 ):
     """Set excluded warehouses. Body: {"warehouses": ["Новосибирск", ...]}"""
     from backend.services import settings_service
+
     warehouses = payload.get("warehouses", [])
     if not isinstance(warehouses, list):
         raise HTTPException(400, "warehouses must be a list of strings")
     result = await settings_service.set_excluded_warehouses(db, project.id, warehouses)
     return {"ok": True, "excluded": result}
 
+
+# ─── Product Tags ────────────────────────────────────────────────────────────
+
+from backend.schemas.refs import ProductTagMappingPayload, ProductTagSchema
+
+
+@router.get("/tags", response_model=list[ProductTagSchema])
+async def get_product_tags(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await refs_service.list_product_tags(db, project.id)
+
+
+@router.post("/tags", response_model=ProductTagSchema)
+async def upsert_product_tag(
+    payload: ProductTagSchema,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await refs_service.upsert_product_tag(db, project.id, payload.model_dump(exclude_unset=True))
+
+
+@router.delete("/tags/{tag_id}")
+async def delete_product_tag(
+    tag_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    deleted = await refs_service.delete_product_tag(db, project.id, tag_id)
+    if not deleted:
+        raise HTTPException(404, "Tag not found")
+    return {"ok": True}
+
+
+@router.get("/tags/mapping")
+async def get_product_tag_mapping(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns {nm_id: [tag_id_1, ...]}"""
+    return await refs_service.get_product_tag_mapping(db, project.id)
+
+
+@router.post("/tags/mapping")
+async def update_product_tag_mapping(
+    payload: ProductTagMappingPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    await refs_service.update_product_tag_mapping(db, project.id, payload.nm_ids, payload.add_tags, payload.remove_tags)
+    return {"ok": True}

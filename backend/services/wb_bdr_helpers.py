@@ -76,15 +76,81 @@ _SELECT_COLS_BDR = """
 """
 
 
-def build_bdr_aggregate_sql(brand: str | None, article: str | None) -> str:
-    """Build per-article SQL aggregation query with optional filters."""
+def build_bdr_aggregate_sql(
+    brand: str | None,
+    article: str | None,
+    group_by: str = "article",
+) -> str:
+    """Build SQL aggregation query with optional filters.
+
+    group_by: "article" (default) | "brand" | "subject"
+    """
+    # Determine GROUP BY column and SELECT columns based on grouping
+    if group_by == "brand":
+        group_col = "brand_name"
+        select_cols = _SELECT_COLS_BDR.replace(
+            "sa_name,",
+            "brand_name AS sa_name,",
+        )
+    elif group_by == "subject":
+        group_col = "subject_name"
+        select_cols = _SELECT_COLS_BDR.replace(
+            "sa_name,",
+            "subject_name AS sa_name,",
+        )
+    else:
+        group_col = "sa_name"
+        select_cols = _SELECT_COLS_BDR
+
     where = f"project_id = :project_id AND {_DATE_FILTER}"
     where += " AND LOWER(COALESCE(sa_name, '')) != 'неопознанный товар'"
     if brand:
         where += " AND brand_name = :brand"
     if article:
         where += " AND LOWER(sa_name) LIKE :article_like"
-    return f"SELECT {_SELECT_COLS_BDR} FROM wb_finance_rows" f" WHERE {where} GROUP BY sa_name ORDER BY sa_name"  # noqa: S608
+    return f"SELECT {select_cols} FROM wb_finance_rows WHERE {where} GROUP BY {group_col} ORDER BY {group_col}"  # noqa: S608
+
+
+def build_group_nm_ids_sql(group_by: str, brand: str | None, article: str | None) -> str:
+    """Get nm_id → group_key mapping for aggregating enrichment data by brand/subject."""
+    if group_by == "brand":
+        group_col = "brand_name"
+    elif group_by == "subject":
+        group_col = "subject_name"
+    else:
+        return ""
+    where = f"project_id = :project_id AND {_DATE_FILTER}"
+    where += " AND LOWER(COALESCE(sa_name, '')) != 'неопознанный товар'"
+    where += f" AND {group_col} IS NOT NULL AND {group_col} != ''"
+    if brand:
+        where += " AND brand_name = :brand"
+    if article:
+        where += " AND LOWER(sa_name) LIKE :article_like"
+    return (
+        f"SELECT DISTINCT NULLIF(nm_id, 0) AS nm_id, {group_col} AS group_key"
+        f" FROM wb_finance_rows WHERE {where} AND nm_id IS NOT NULL AND nm_id != 0"
+    )
+
+
+def build_group_sa_names_sql(group_by: str, brand: str | None, article: str | None) -> str:
+    """Get sa_name → group_key mapping for aggregating cost data by brand/subject."""
+    if group_by == "brand":
+        group_col = "brand_name"
+    elif group_by == "subject":
+        group_col = "subject_name"
+    else:
+        return ""
+    where = f"project_id = :project_id AND {_DATE_FILTER}"
+    where += " AND LOWER(COALESCE(sa_name, '')) != 'неопознанный товар'"
+    where += f" AND {group_col} IS NOT NULL AND {group_col} != ''"
+    if brand:
+        where += " AND brand_name = :brand"
+    if article:
+        where += " AND LOWER(sa_name) LIKE :article_like"
+    return (
+        f"SELECT DISTINCT sa_name, {group_col} AS group_key"
+        f" FROM wb_finance_rows WHERE {where} AND sa_name IS NOT NULL"
+    )
 
 
 def build_brands_sql_bdr() -> str:

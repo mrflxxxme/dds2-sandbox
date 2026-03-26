@@ -666,3 +666,32 @@ async def first_sync_progress(
     from backend.services.funnel.unified_sync import get_first_sync_progress
 
     return get_first_sync_progress(project.id)
+
+
+@router.get("/products")
+async def get_funnel_products(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns a unique list of products seen in the funnel for tag assignment."""
+    from sqlalchemy import select
+
+    from backend.models.integrations import WbFunnelDaily
+
+    result = await db.execute(
+        select(WbFunnelDaily.nm_id, WbFunnelDaily.brand, WbFunnelDaily.vendor_code, WbFunnelDaily.photo_url)
+        .where(WbFunnelDaily.project_id == project.id)
+        .distinct()
+        .order_by(WbFunnelDaily.nm_id.desc())
+    )
+    products = []
+    for r in result:
+        products.append(
+            {
+                "nm_id": r.nm_id,
+                "brand": r.brand or "Другое",
+                "vendor_code": r.vendor_code or str(r.nm_id),
+                "photo_url": r.photo_url,
+            }
+        )
+    return {"products": products}

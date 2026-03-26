@@ -89,10 +89,11 @@ export function addReportMethods(api: ApiClient) {
             if (article) url += `&article=${encodeURIComponent(article)}`;
             return api.request<any>('GET', url);
         },
-        getWbBdr(dateFrom: string, dateTo: string, brand?: string, article?: string) {
+        getWbBdr(dateFrom: string, dateTo: string, brand?: string, article?: string, groupBy?: string) {
             let url = `/api/v1/reports/wb_bdr?date_from=${dateFrom}&date_to=${dateTo}`;
             if (brand) url += `&brand=${encodeURIComponent(brand)}`;
             if (article) url += `&article=${encodeURIComponent(article)}`;
+            if (groupBy) url += `&group_by=${encodeURIComponent(groupBy)}`;
             return api.request<any>('GET', url);
         },
         getWbBdrSyncStatus() {

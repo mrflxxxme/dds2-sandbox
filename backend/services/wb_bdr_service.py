@@ -40,6 +40,8 @@ from backend.services.bdr_loaders import (
 from backend.services.wb_bdr_helpers import (
     build_bdr_aggregate_sql,
     build_brands_sql_bdr,
+    build_group_nm_ids_sql,
+    build_group_sa_names_sql,
     build_total_count_sql,
     compute_metrics_from_sql,
     empty_metrics,
@@ -68,6 +70,7 @@ async def get_wb_bdr(
     date_to: date,
     brand: str | None = None,
     article: str | None = None,
+    group_by: str = "article",
 ) -> dict:
     """
     Build BDR from locally cached WB finance data.
@@ -92,7 +95,7 @@ async def get_wb_bdr(
     if article:
         params["article_like"] = f"%{article.lower()}%"
 
-    result = await db.execute(text(build_bdr_aggregate_sql(brand, article)), params)
+    result = await db.execute(text(build_bdr_aggregate_sql(brand, article, group_by=group_by)), params)
     agg_rows = result.mappings().all()
 
     if not agg_rows:
@@ -127,6 +130,54 @@ async def get_wb_bdr(
 
     period_days = max((date_to - date_from).days + 1, 1)
 
+    # ── 5b. For brand/subject grouping, build nm_id→group and sa_name→group maps ──
+    nm_to_group: dict[int, str] = {}
+    sa_to_group: dict[str, str] = {}
+    if group_by in ("brand", "subject"):
+        nm_sql = build_group_nm_ids_sql(group_by, brand, article)
+        if nm_sql:
+            nm_result = await db.execute(text(nm_sql), params)
+            for r in nm_result.mappings():
+                nm_id_val = r["nm_id"]
+                if nm_id_val:
+                    nm_to_group[int(nm_id_val)] = r["group_key"] or ""
+
+        sa_sql = build_group_sa_names_sql(group_by, brand, article)
+        if sa_sql:
+            sa_result = await db.execute(text(sa_sql), params)
+            for r in sa_result.mappings():
+                sa_to_group[r["sa_name"] or ""] = r["group_key"] or ""
+
+    # Pre-aggregate enrichment data by group (brand/subject)
+    if group_by in ("brand", "subject"):
+        # Ads: aggregate by group
+        grouped_ads: dict[str, float] = {}
+        for nm_id_key, adv_val in ads_map.items():
+            gk = nm_to_group.get(nm_id_key, "")
+            if gk:
+                grouped_ads[gk] = grouped_ads.get(gk, 0) + adv_val
+
+        # Orders/stocks: aggregate by group
+        grouped_orders: dict[str, dict] = {}
+        for nm_id_key, os_val in orders_stocks_map.items():
+            gk = nm_to_group.get(nm_id_key, "")
+            if gk:
+                if gk not in grouped_orders:
+                    grouped_orders[gk] = {"orders_count": 0, "orders_sum": 0, "stocks_wb": 0}
+                grouped_orders[gk]["orders_count"] += os_val.get("orders_count", 0)
+                grouped_orders[gk]["orders_sum"] += os_val.get("orders_sum", 0)
+                grouped_orders[gk]["stocks_wb"] += os_val.get("stocks_wb", 0)
+
+        # Cancel stats: aggregate by group
+        grouped_cancel: dict[str, dict] = {}
+        for nm_id_key, cs_val in cancel_stats.items():
+            gk = nm_to_group.get(nm_id_key, "")
+            if gk:
+                if gk not in grouped_cancel:
+                    grouped_cancel[gk] = {"total": 0, "cancelled": 0}
+                grouped_cancel[gk]["total"] += cs_val.get("total", 0)
+                grouped_cancel[gk]["cancelled"] += cs_val.get("cancelled", 0)
+
     # ── 6. Compute metrics per article from SQL rows ──
     total_metrics = _empty_metrics()
     total_adv = ZERO
@@ -149,32 +200,54 @@ async def get_wb_bdr(
             if key not in _skip_sum:
                 total_metrics[key] += D(str(metrics.get(key, 0)))
 
-        # Ads: per-article from WbFunnelDaily
-        adv_sum = float(ads_map.get(nm_id, 0))
-        metrics["adv_sum"] = adv_sum
-        total_adv += D(str(adv_sum))
+        if group_by in ("brand", "subject"):
+            # Grouped enrichment: use pre-aggregated maps
+            adv_sum = float(grouped_ads.get(sa_name, 0))
+            metrics["adv_sum"] = adv_sum
+            total_adv += D(str(adv_sum))
 
-        # Cost from history (avg), fallback to manual override by nm_id
-        cost_price = cost_map.get(sa_name, 0)
-        if cost_price == 0 and nm_id in cost_overrides:
-            cost_price = cost_overrides[nm_id]
-        sale_qty = metrics["sale_qty"]
-        cost_total = cost_price * sale_qty if sale_qty > 0 else 0
-        metrics["cost_price"] = round(cost_price, 2)
-        metrics["cost_total"] = round(cost_total, 2)
-        total_cost += D(str(cost_total))
+            # Cost: no meaningful per-unit cost_price for groups
+            metrics["cost_price"] = 0
+            metrics["cost_total"] = 0
 
-        # Orders & stocks from funnel
-        os_data = orders_stocks_map.get(nm_id, {})
-        metrics["orders_count"] = os_data.get("orders_count", 0)
-        metrics["orders_sum"] = os_data.get("orders_sum", 0)
-        metrics["stocks_wb"] = os_data.get("stocks_wb", 0)
+            os_data = grouped_orders.get(sa_name, {})
+            metrics["orders_count"] = os_data.get("orders_count", 0)
+            metrics["orders_sum"] = os_data.get("orders_sum", 0)
+            metrics["stocks_wb"] = os_data.get("stocks_wb", 0)
 
-        # Per-article buyout from order cancel data (more accurate than finance report)
-        cs = cancel_stats.get(nm_id)
-        if cs and cs["total"] > 0:
-            delivered = cs["total"] - cs["cancelled"]
-            metrics["buyout_pct"] = round(float(delivered / cs["total"] * 100), 2)
+            cs = grouped_cancel.get(sa_name)
+            if cs and cs["total"] > 0:
+                delivered = cs["total"] - cs["cancelled"]
+                metrics["buyout_pct"] = round(float(delivered / cs["total"] * 100), 2)
+
+            metrics["nm_id"] = 0
+        else:
+            # Per-article enrichment (original logic)
+            adv_sum = float(ads_map.get(nm_id, 0))
+            metrics["adv_sum"] = adv_sum
+            total_adv += D(str(adv_sum))
+
+            # Cost from history (avg), fallback to manual override by nm_id
+            cost_price = cost_map.get(sa_name, 0)
+            if cost_price == 0 and nm_id in cost_overrides:
+                cost_price = cost_overrides[nm_id]
+            sale_qty = metrics["sale_qty"]
+            cost_total = cost_price * sale_qty if sale_qty > 0 else 0
+            metrics["cost_price"] = round(cost_price, 2)
+            metrics["cost_total"] = round(cost_total, 2)
+            total_cost += D(str(cost_total))
+
+            # Orders & stocks from funnel
+            os_data = orders_stocks_map.get(nm_id, {})
+            metrics["orders_count"] = os_data.get("orders_count", 0)
+            metrics["orders_sum"] = os_data.get("orders_sum", 0)
+            metrics["stocks_wb"] = os_data.get("stocks_wb", 0)
+
+            # Per-article buyout from order cancel data (more accurate than finance report)
+            cs = cancel_stats.get(nm_id)
+            if cs and cs["total"] > 0:
+                delivered = cs["total"] - cs["cancelled"]
+                metrics["buyout_pct"] = round(float(delivered / cs["total"] * 100), 2)
 
         metrics["_period_days"] = period_days
 
@@ -248,4 +321,5 @@ async def get_wb_bdr(
         "total_rows": total_rows,
         "sync_status": sync_status,
         "tax_info": tax_info,
+        "group_by": group_by,
     }
