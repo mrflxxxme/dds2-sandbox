@@ -86,6 +86,9 @@ from backend.models.refs import (
     CounterpartyCategory,
     OpeningBalance,
     Override,
+    ProductStatusMap,  # noqa: F401
+    ProductTag,  # noqa: F401
+    ProductTagMap,  # noqa: F401
     ProjectSetting,
 )
 

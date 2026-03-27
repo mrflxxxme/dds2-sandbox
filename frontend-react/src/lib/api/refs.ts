@@ -1,6 +1,16 @@
 /** Refs API methods */
 import { ApiClient } from './client';
-import type { Account, CounterpartyCategory, CategoryRef, MessageResponse } from '@/types/api';
+import type {
+    Account,
+    CounterpartyCategory,
+    CategoryRef,
+    MessageResponse,
+    ProductTag,
+    ProductTagMappingPayload,
+    ProductStatusPayload,
+    ProductStatusBulkPayload,
+    FunnelProductsResponse,
+} from '@/types/api';
 
 export function addRefMethods(api: ApiClient) {
     return {
@@ -31,5 +41,20 @@ export function addRefMethods(api: ApiClient) {
         getWarehouses() { return api.request<Array<{ name: string; lat: number; lng: number }>>('GET', '/api/v1/refs/warehouses'); },
         getExcludedWarehouses() { return api.request<string[]>('GET', '/api/v1/refs/excluded-warehouses'); },
         setExcludedWarehouses(warehouses: string[]) { return api.request<{ ok: boolean; excluded: string[] }>('PUT', '/api/v1/refs/excluded-warehouses', { warehouses }); },
+
+        // Product Tags
+        getProductTags() { return api.request<ProductTag[]>('GET', '/api/v1/refs/tags'); },
+        upsertProductTag(data: Partial<ProductTag>) { return api.request<ProductTag>('POST', '/api/v1/refs/tags', data); },
+        deleteProductTag(id: number) { return api.request<MessageResponse>('DELETE', `/api/v1/refs/tags/${id}`); },
+        getProductTagMapping() { return api.request<Record<string, number[]>>('GET', '/api/v1/refs/tags/mapping'); },
+        updateProductTagMapping(payload: ProductTagMappingPayload) { return api.request<MessageResponse>('POST', '/api/v1/refs/tags/mapping', payload); },
+
+        // Product Statuses
+        getProductStatuses() { return api.request<Record<string, string>>('GET', '/api/v1/refs/product-statuses'); },
+        setProductStatus(data: ProductStatusPayload) { return api.request<MessageResponse>('PATCH', '/api/v1/refs/product-statuses', data); },
+        bulkSetProductStatus(data: ProductStatusBulkPayload) { return api.request<MessageResponse>('POST', '/api/v1/refs/product-statuses/bulk', data); },
+
+        // Funnel Products (for tag/status assignment)
+        getFunnelProducts() { return api.request<FunnelProductsResponse>('GET', '/api/v1/funnel/products'); },
     };
 }

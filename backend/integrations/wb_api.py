@@ -481,6 +481,7 @@ def parse_wb_cards_to_nomenclature(cards: list[dict]) -> list[dict]:
 
     for card in cards:
         nm_id = card.get("nmID")
+        imt_id = card.get("imtID")
         brand = card.get("brand", "")
         subject = card.get("subjectName", "")
         vendor_code = card.get("vendorCode", "")
@@ -509,6 +510,7 @@ def parse_wb_cards_to_nomenclature(cards: list[dict]) -> list[dict]:
                         "subject": subject,
                         "article_seller": vendor_code,
                         "article_wb": nm_id,
+                        "imt_id": imt_id,
                         "volume_l": round(volume_l, 4),
                     }
                 )

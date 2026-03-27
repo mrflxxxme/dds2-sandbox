@@ -139,3 +139,19 @@ class ProductTagMap(Base):
         UniqueConstraint("tag_id", "nm_id", name="uq_product_tag_map"),
         Index("ix_product_tag_map_project_nm_id", "project_id", "nm_id"),
     )
+
+
+class ProductStatusMap(Base):
+    """One status per product per project."""
+
+    __tablename__ = "product_status_map"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    nm_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "nm_id", name="uq_product_status_nm"),
+        Index("ix_product_status_map_project_nm_id", "project_id", "nm_id"),
+    )

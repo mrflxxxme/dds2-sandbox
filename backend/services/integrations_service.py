@@ -287,6 +287,7 @@ async def sync_wb_nomenclature(db: AsyncSession, project_id: int) -> SyncLog:
                 nom.subject = item.get("subject") or nom.subject
                 nom.article_seller = item.get("article_seller") or nom.article_seller
                 nom.article_wb = item.get("article_wb") or nom.article_wb
+                nom.imt_id = item.get("imt_id") or nom.imt_id
                 if item.get("volume_l"):
                     nom.volume_l = Decimal(str(item["volume_l"]))
                 nom.updated_at = utcnow()
@@ -299,6 +300,7 @@ async def sync_wb_nomenclature(db: AsyncSession, project_id: int) -> SyncLog:
                     subject=item.get("subject"),
                     article_seller=item.get("article_seller"),
                     article_wb=item.get("article_wb"),
+                    imt_id=item.get("imt_id"),
                     volume_l=Decimal(str(item.get("volume_l", 0))),
                 )
                 db.add(nom)

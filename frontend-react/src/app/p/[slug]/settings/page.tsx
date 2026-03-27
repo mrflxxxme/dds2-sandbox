@@ -7,9 +7,10 @@ import { TaxRates } from './components/TaxRates';
 import { WbTariffs } from './components/WbTariffs';
 import { TelegramBot } from './components/TelegramBot';
 import { BrandPlans } from './components/BrandPlans';
+import { ProductClassification } from './components/ProductClassification';
 
 export default function SettingsPage() {
-    const [tab, setTab] = useState<'integrations' | 'nomenclature' | 'leadtimes' | 'duties' | 'taxrates' | 'tariffs' | 'telegram' | 'brand_plans'>('integrations');
+    const [tab, setTab] = useState<'integrations' | 'nomenclature' | 'leadtimes' | 'duties' | 'taxrates' | 'tariffs' | 'telegram' | 'brand_plans' | 'classification'>('integrations');
 
     return (
         <div className="animate-in">
@@ -22,6 +23,7 @@ export default function SettingsPage() {
             <div style={{ display: 'flex', gap: 4, marginBottom: 20, flexWrap: 'wrap' }}>
                 {[
                     { key: 'integrations' as const, label: '🔌 API Интеграции' },
+                    { key: 'classification' as const, label: '🏷️ Ярлыки товаров' },
                     { key: 'nomenclature' as const, label: '📋 Номенклатура' },
                     { key: 'leadtimes' as const, label: '⏱ Lead Times' },
                     { key: 'duties' as const, label: '⚖️ Пошлины / Утиль' },
@@ -35,6 +37,7 @@ export default function SettingsPage() {
                 ))}
             </div>
             {tab === 'integrations' && <Integrations />}
+            {tab === 'classification' && <ProductClassification />}
             {tab === 'nomenclature' && <Nomenclature />}
             {tab === 'leadtimes' && <LeadTimes />}
             {tab === 'duties' && <DutyRules />}

@@ -84,6 +84,31 @@ class ProductTagMappingPayload(BaseModel):
     remove_tags: list[int]
 
 
+VALID_PRODUCT_STATUSES = {"active", "new", "clearance"}
+
+
+class ProductStatusPayload(BaseModel):
+    """Set status for one product."""
+
+    nm_id: int
+    status: str
+
+    def model_post_init(self, __context: object) -> None:
+        if self.status not in VALID_PRODUCT_STATUSES:
+            raise ValueError(f"status must be one of {VALID_PRODUCT_STATUSES}")
+
+
+class ProductStatusBulkPayload(BaseModel):
+    """Bulk set status for multiple products."""
+
+    nm_ids: list[int]
+    status: str
+
+    def model_post_init(self, __context: object) -> None:
+        if self.status not in VALID_PRODUCT_STATUSES:
+            raise ValueError(f"status must be one of {VALID_PRODUCT_STATUSES}")
+
+
 class ExcludedWarehousesPayload(BaseModel):
     """Input payload for setting excluded warehouses."""
 

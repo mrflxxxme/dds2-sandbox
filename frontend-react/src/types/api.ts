@@ -686,6 +686,41 @@ export interface FunnelFilters {
   max_date: string | null;
 }
 
+// ─── Product Classification ──────────────────────────────────────────────────
+
+export interface ProductTag {
+  id: number;
+  name: string;
+  color: string;
+}
+
+export interface ProductTagMappingPayload {
+  nm_ids: number[];
+  add_tags: number[];
+  remove_tags: number[];
+}
+
+export interface ProductStatusPayload {
+  nm_id: number;
+  status: string;
+}
+
+export interface ProductStatusBulkPayload {
+  nm_ids: number[];
+  status: string;
+}
+
+export interface FunnelProduct {
+  nm_id: number;
+  brand: string;
+  vendor_code: string;
+  imt_id: number | null;
+}
+
+export interface FunnelProductsResponse {
+  products: FunnelProduct[];
+}
+
 export interface FunnelDataResponse {
   data: FunnelDayRow[];
   detailed: boolean;

@@ -98,7 +98,7 @@ async def test_create_and_list_cp_categories(client, auth_headers):
         "/api/v1/refs/cp_categories",
         json={
             "cp_key": f"INN:{uid}",
-            "cp_name": "ООО Ромашка",
+            "cp_name": "ООО Ромашка",  # noqa: RUF001
             "cat_lvl1": "Расходы",
             "cat_lvl2": "Зарплата",
         },
@@ -206,3 +206,162 @@ async def test_create_category_requires_lvl1(client, auth_headers):
         headers=headers,
     )
     assert resp.status_code == 400
+
+
+# ─── Product Tags ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_create_and_list_product_tags(client, auth_headers):
+    """CRUD: create tag, list, update, delete."""
+    headers = await _project_headers(client, auth_headers)
+    uid = uuid.uuid4().hex[:8]
+
+    # Create
+    resp = await client.post(
+        "/api/v1/refs/tags",
+        json={"name": f"Tag_{uid}", "color": "#FF5733"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, f"Create tag failed: {resp.text}"
+    tag = resp.json()
+    assert tag["name"] == f"Tag_{uid}"
+    assert tag["color"] == "#FF5733"
+    tag_id = tag["id"]
+
+    # List
+    resp = await client.get("/api/v1/refs/tags", headers=headers)
+    assert resp.status_code == 200
+    tags = resp.json()
+    assert any(t["id"] == tag_id for t in tags)
+
+    # Update (upsert with id)
+    resp = await client.post(
+        "/api/v1/refs/tags",
+        json={"id": tag_id, "name": f"Tag_{uid}_v2", "color": "#00FF00"},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["name"] == f"Tag_{uid}_v2"
+
+    # Delete
+    resp = await client.delete(f"/api/v1/refs/tags/{tag_id}", headers=headers)
+    assert resp.status_code == 200
+
+    # Verify deleted
+    resp = await client.get("/api/v1/refs/tags", headers=headers)
+    assert not any(t["id"] == tag_id for t in resp.json())
+
+
+@pytest.mark.asyncio
+async def test_product_tag_mapping(client, auth_headers):
+    """Assign and remove tags from products (nm_ids)."""
+    headers = await _project_headers(client, auth_headers)
+    uid = uuid.uuid4().hex[:8]
+
+    # Create two tags
+    resp1 = await client.post("/api/v1/refs/tags", json={"name": f"A_{uid}", "color": "#111111"}, headers=headers)
+    resp2 = await client.post("/api/v1/refs/tags", json={"name": f"B_{uid}", "color": "#222222"}, headers=headers)
+    tag_a = resp1.json()["id"]
+    tag_b = resp2.json()["id"]
+
+    nm_ids = [100001, 100002]
+
+    # Assign both tags to both products
+    resp = await client.post(
+        "/api/v1/refs/tags/mapping",
+        json={"nm_ids": nm_ids, "add_tags": [tag_a, tag_b], "remove_tags": []},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+
+    # Get mapping
+    resp = await client.get("/api/v1/refs/tags/mapping", headers=headers)
+    assert resp.status_code == 200
+    mapping = resp.json()
+    assert tag_a in mapping.get("100001", mapping.get(100001, []))
+    assert tag_b in mapping.get("100002", mapping.get(100002, []))
+
+    # Remove tag_a from product 100001
+    resp = await client.post(
+        "/api/v1/refs/tags/mapping",
+        json={"nm_ids": [100001], "add_tags": [], "remove_tags": [tag_a]},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+
+    # Verify removal
+    resp = await client.get("/api/v1/refs/tags/mapping", headers=headers)
+    mapping = resp.json()
+    nm1_tags = mapping.get("100001", mapping.get(100001, []))
+    assert tag_a not in nm1_tags
+
+
+# ─── Product Statuses ────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_product_status_crud(client, auth_headers):
+    """Set and get product status."""
+    headers = await _project_headers(client, auth_headers)
+
+    # Set status for a product
+    resp = await client.patch(
+        "/api/v1/refs/product-statuses",
+        json={"nm_id": 200001, "status": "new"},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+
+    # Get all statuses
+    resp = await client.get("/api/v1/refs/product-statuses", headers=headers)
+    assert resp.status_code == 200
+    statuses = resp.json()
+    assert statuses.get("200001", statuses.get(200001)) == "new"
+
+    # Update status
+    resp = await client.patch(
+        "/api/v1/refs/product-statuses",
+        json={"nm_id": 200001, "status": "active"},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+
+    # Verify updated
+    resp = await client.get("/api/v1/refs/product-statuses", headers=headers)
+    statuses = resp.json()
+    assert statuses.get("200001", statuses.get(200001)) == "active"
+
+
+@pytest.mark.asyncio
+async def test_product_status_bulk(client, auth_headers):
+    """Bulk set status for multiple products."""
+    headers = await _project_headers(client, auth_headers)
+
+    nm_ids = [300001, 300002, 300003]
+
+    resp = await client.post(
+        "/api/v1/refs/product-statuses/bulk",
+        json={"nm_ids": nm_ids, "status": "clearance"},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+
+    # Verify all set
+    resp = await client.get("/api/v1/refs/product-statuses", headers=headers)
+    statuses = resp.json()
+    for nm_id in nm_ids:
+        assert statuses.get(str(nm_id), statuses.get(nm_id)) == "clearance"
+
+
+@pytest.mark.asyncio
+async def test_product_status_invalid(client, auth_headers):
+    """Invalid status value should be rejected."""
+    headers = await _project_headers(client, auth_headers)
+
+    resp = await client.patch(
+        "/api/v1/refs/product-statuses",
+        json={"nm_id": 400001, "status": "invalid_status"},
+        headers=headers,
+    )
+    assert resp.status_code == 422 or resp.status_code == 400

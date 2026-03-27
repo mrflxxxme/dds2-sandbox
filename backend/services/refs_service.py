@@ -393,3 +393,63 @@ async def update_product_tag_mapping(
 
     await db.commit()
     return True
+
+
+# ─── Product Statuses ────────────────────────────────────────────────────────
+
+
+async def get_product_statuses(db: AsyncSession, project_id: int) -> dict[int, str]:
+    """Get {nm_id: status} mapping for all products in project."""
+    from backend.models.refs import ProductStatusMap
+
+    result = await db.execute(
+        select(ProductStatusMap.nm_id, ProductStatusMap.status).where(
+            ProductStatusMap.project_id == project_id,
+        )
+    )
+    return {r.nm_id: r.status for r in result}
+
+
+async def set_product_status(db: AsyncSession, project_id: int, nm_id: int, status: str) -> bool:
+    """Set or update status for a single product (upsert)."""
+    from backend.models.refs import ProductStatusMap
+
+    result = await db.execute(
+        select(ProductStatusMap).where(
+            ProductStatusMap.project_id == project_id,
+            ProductStatusMap.nm_id == nm_id,
+        )
+    )
+    existing = result.scalar_one_or_none()
+    if existing:
+        existing.status = status
+    else:
+        db.add(ProductStatusMap(project_id=project_id, nm_id=nm_id, status=status))
+    await db.commit()
+    return True
+
+
+async def bulk_set_product_status(db: AsyncSession, project_id: int, nm_ids: list[int], status: str) -> bool:
+    """Bulk set status for multiple products."""
+    from backend.models.refs import ProductStatusMap
+
+    if not nm_ids:
+        return True
+
+    # Fetch existing
+    result = await db.execute(
+        select(ProductStatusMap).where(
+            ProductStatusMap.project_id == project_id,
+            ProductStatusMap.nm_id.in_(nm_ids),
+        )
+    )
+    existing_map = {row.nm_id: row for row in result.scalars().all()}
+
+    for nm_id in nm_ids:
+        if nm_id in existing_map:
+            existing_map[nm_id].status = status
+        else:
+            db.add(ProductStatusMap(project_id=project_id, nm_id=nm_id, status=status))
+
+    await db.commit()
+    return True

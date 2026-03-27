@@ -16,7 +16,13 @@ from backend.schemas import (
     CounterpartyCategorySchema,
     OpeningBalanceSchema,
 )
-from backend.schemas.refs import ExcludedWarehousesPayload, ProductTagMappingPayload, ProductTagSchema
+from backend.schemas.refs import (
+    ExcludedWarehousesPayload,
+    ProductStatusBulkPayload,
+    ProductStatusPayload,
+    ProductTagMappingPayload,
+    ProductTagSchema,
+)
 from backend.services import refs_service
 
 router = APIRouter(prefix="/refs")
@@ -256,4 +262,36 @@ async def update_product_tag_mapping(
     db: AsyncSession = Depends(get_db),
 ):
     await refs_service.update_product_tag_mapping(db, project.id, payload.nm_ids, payload.add_tags, payload.remove_tags)
+    return {"ok": True}
+
+
+# ─── Product Statuses ────────────────────────────────────────────────────────
+
+
+@router.get("/product-statuses")
+async def get_product_statuses(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns {nm_id: status} mapping."""
+    return await refs_service.get_product_statuses(db, project.id)
+
+
+@router.patch("/product-statuses")
+async def set_product_status(
+    payload: ProductStatusPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    await refs_service.set_product_status(db, project.id, payload.nm_id, payload.status)
+    return {"ok": True}
+
+
+@router.post("/product-statuses/bulk")
+async def bulk_set_product_status(
+    payload: ProductStatusBulkPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    await refs_service.bulk_set_product_status(db, project.id, payload.nm_ids, payload.status)
     return {"ok": True}

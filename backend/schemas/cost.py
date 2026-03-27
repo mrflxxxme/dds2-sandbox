@@ -4,71 +4,72 @@ Cost schemas.
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional, List
+
 from pydantic import BaseModel, ConfigDict
 
 
 class NomenclatureSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    id: Optional[int] = None
+    id: int | None = None
     barcode: str
-    brand: Optional[str] = None
-    subject: Optional[str] = None
-    article_seller: Optional[str] = None
-    article_wb: Optional[int] = None
-    volume_l: Optional[Decimal] = None
-    updated_at: Optional[datetime] = None
+    brand: str | None = None
+    subject: str | None = None
+    article_seller: str | None = None
+    article_wb: int | None = None
+    imt_id: int | None = None
+    volume_l: Decimal | None = None
+    updated_at: datetime | None = None
 
 
 class DutyRuleSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    id: Optional[int] = None
+    id: int | None = None
     subject: str
     basis: str
     rate: Decimal
     util_collect_rub: Decimal = Decimal("0")
-    note: Optional[str] = None
+    note: str | None = None
 
 
 class CostOrderItemSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    id: Optional[int] = None
+    id: int | None = None
     order_no: str
     barcode: str
-    subject: Optional[str] = None
-    article_seller: Optional[str] = None
+    subject: str | None = None
+    article_seller: str | None = None
     qty: int = 1
     price_cny: Decimal = Decimal("0")
-    weight_kg: Optional[Decimal] = None
-    area_m2: Optional[Decimal] = None
-    volume_m3: Optional[Decimal] = None
-    cost_rub: Optional[Decimal] = None
-    delivery_rub: Optional[Decimal] = None
-    duty_rub: Optional[Decimal] = None
-    vat_rub: Optional[Decimal] = None
-    util_rub: Optional[Decimal] = None
-    total_rub: Optional[Decimal] = None
-    total_cny: Optional[Decimal] = None
+    weight_kg: Decimal | None = None
+    area_m2: Decimal | None = None
+    volume_m3: Decimal | None = None
+    cost_rub: Decimal | None = None
+    delivery_rub: Decimal | None = None
+    duty_rub: Decimal | None = None
+    vat_rub: Decimal | None = None
+    util_rub: Decimal | None = None
+    total_rub: Decimal | None = None
+    total_cny: Decimal | None = None
     unrecognized: bool = False
 
 
 class CostOrderSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    id: Optional[int] = None
+    id: int | None = None
     order_no: str
-    invoice_no: Optional[str] = None
-    ship_date: Optional[date] = None
-    actual_arrival_date: Optional[date] = None
-    transport_type: Optional[str] = "AUTO"
+    invoice_no: str | None = None
+    ship_date: date | None = None
+    actual_arrival_date: date | None = None
+    transport_type: str | None = "AUTO"
     delivery_cost_cny: Decimal = Decimal("0")
     delivery_cost_usd: Decimal = Decimal("0")
     rate_cny: Decimal = Decimal("1")
     rate_eur: Decimal = Decimal("1")
     rate_usd: Decimal = Decimal("1")
-    note: Optional[str] = None
-    dt_number: Optional[str] = None
-    created_at: Optional[datetime] = None
-    items: Optional[List[CostOrderItemSchema]] = None
+    note: str | None = None
+    dt_number: str | None = None
+    created_at: datetime | None = None
+    items: list[CostOrderItemSchema] | None = None
 
 
 class CostUploadResult(BaseModel):
@@ -80,20 +81,22 @@ class CostUploadResult(BaseModel):
 
 class VatRateUpdate(BaseModel):
     """Input: update project VAT rate."""
+
     vat_rate: Decimal
 
 
 class CostOrderCreate(BaseModel):
     """Input: create/update cost order."""
+
     order_no: str
-    invoice_no: Optional[str] = None
-    ship_date: Optional[date] = None
-    actual_arrival_date: Optional[date] = None
-    transport_type: Optional[str] = "AUTO"
+    invoice_no: str | None = None
+    ship_date: date | None = None
+    actual_arrival_date: date | None = None
+    transport_type: str | None = "AUTO"
     delivery_cost_cny: Decimal = Decimal("0")
     delivery_cost_usd: Decimal = Decimal("0")
     rate_cny: Decimal = Decimal("1")
     rate_eur: Decimal = Decimal("1")
     rate_usd: Decimal = Decimal("1")
-    note: Optional[str] = None
-    dt_number: Optional[str] = None
+    note: str | None = None
+    dt_number: str | None = None

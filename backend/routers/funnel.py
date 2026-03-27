@@ -711,24 +711,49 @@ async def get_funnel_products(
     db: AsyncSession = Depends(get_db),
 ):
     """Returns a unique list of products seen in the funnel for tag assignment."""
-    from sqlalchemy import select
+    from sqlalchemy import func, select
 
+    from backend.models.cost import Nomenclature
     from backend.models.integrations import WbFunnelDaily
 
-    result = await db.execute(
-        select(WbFunnelDaily.nm_id, WbFunnelDaily.brand, WbFunnelDaily.vendor_code, WbFunnelDaily.photo_url)
+    # Subquery: distinct products from funnel
+    subq = (
+        select(
+            WbFunnelDaily.nm_id,
+            func.max(WbFunnelDaily.brand).label("brand"),
+            func.max(WbFunnelDaily.vendor_code).label("vendor_code"),
+        )
         .where(WbFunnelDaily.project_id == project.id)
-        .distinct()
-        .order_by(WbFunnelDaily.nm_id.desc())
+        .group_by(WbFunnelDaily.nm_id)
+        .subquery()
+    )
+
+    # Left join nomenclature to get imt_id
+    result = await db.execute(
+        select(
+            subq.c.nm_id,
+            subq.c.brand,
+            subq.c.vendor_code,
+            Nomenclature.imt_id,
+        )
+        .outerjoin(
+            Nomenclature,
+            (Nomenclature.article_wb == subq.c.nm_id) & (Nomenclature.project_id == project.id),
+        )
+        .order_by(subq.c.nm_id.desc())
     )
     products = []
+    seen_nm = set()
     for r in result:
+        if r.nm_id in seen_nm:
+            continue
+        seen_nm.add(r.nm_id)
         products.append(
             {
                 "nm_id": r.nm_id,
                 "brand": r.brand or "Другое",
                 "vendor_code": r.vendor_code or str(r.nm_id),
-                "photo_url": r.photo_url,
+                "imt_id": r.imt_id,
             }
         )
     return {"products": products}
