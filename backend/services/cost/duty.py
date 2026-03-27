@@ -15,7 +15,8 @@ async def get_duty_rules(db: AsyncSession, project_id: int, limit: int = 500, of
         select(DutyRule)
         .where(DutyRule.project_id == project_id, DutyRule.is_deleted == False)
         .order_by(DutyRule.subject)
-        .limit(limit).offset(offset)
+        .limit(limit)
+        .offset(offset)
     )
     return result.scalars().all()
 
@@ -25,7 +26,9 @@ async def upsert_duty_rule(db: AsyncSession, project_id: int, payload: dict):
     if not subject:
         return None, "subject required"
     result = await db.execute(
-        select(DutyRule).where(DutyRule.project_id == project_id, DutyRule.is_deleted == False, DutyRule.subject == subject)
+        select(DutyRule).where(
+            DutyRule.project_id == project_id, DutyRule.is_deleted == False, DutyRule.subject == subject
+        )
     )
     rule = result.scalar_one_or_none()
     if rule:
@@ -49,7 +52,7 @@ async def upsert_duty_rule(db: AsyncSession, project_id: int, payload: dict):
 
 async def delete_duty_rule(db: AsyncSession, project_id: int, rule_id: int):
     result = await db.execute(
-        select(DutyRule).where(DutyRule.id == rule_id, DutyRule.project_id == project_id)
+        select(DutyRule).where(DutyRule.id == rule_id, DutyRule.project_id == project_id, DutyRule.is_deleted == False)
     )
     rule = result.scalar_one_or_none()
     if not rule:

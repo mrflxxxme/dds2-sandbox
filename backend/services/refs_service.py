@@ -37,6 +37,7 @@ async def upsert_account(db: AsyncSession, project_id: int, payload: dict) -> Ac
             select(Account).where(
                 Account.id == payload["id"],
                 Account.project_id == project_id,
+                Account.is_deleted == False,
             )
         )
         acc = result.scalar_one_or_none()
@@ -62,6 +63,7 @@ async def delete_account(db: AsyncSession, project_id: int, account_id: int) -> 
         select(Account).where(
             Account.id == account_id,
             Account.project_id == project_id,
+            Account.is_deleted == False,
         )
     )
     acc = result.scalar_one_or_none()
@@ -94,6 +96,7 @@ async def upsert_cp_category(db: AsyncSession, project_id: int, payload: dict) -
             select(CounterpartyCategory).where(
                 CounterpartyCategory.id == payload["id"],
                 CounterpartyCategory.project_id == project_id,
+                CounterpartyCategory.is_deleted == False,
             )
         )
         cpc = result.scalar_one_or_none()
@@ -120,6 +123,7 @@ async def delete_cp_category(db: AsyncSession, project_id: int, cpc_id: int) -> 
         select(CounterpartyCategory).where(
             CounterpartyCategory.id == cpc_id,
             CounterpartyCategory.project_id == project_id,
+            CounterpartyCategory.is_deleted == False,
         )
     )
     cpc = result.scalar_one_or_none()
@@ -146,6 +150,7 @@ async def delete_override(db: AsyncSession, project_id: int, override_id: int) -
         select(Override).where(
             Override.id == override_id,
             Override.project_id == project_id,
+            Override.is_deleted == False,
         )
     )
     ovr = result.scalar_one_or_none()
@@ -245,6 +250,7 @@ async def delete_category(db: AsyncSession, cat_id: int, project_id: int) -> boo
         select(CategoryRef).where(
             CategoryRef.id == cat_id,
             CategoryRef.project_id == project_id,
+            CategoryRef.is_deleted == False,
         )
     )
     cat = result.scalar_one_or_none()
@@ -279,6 +285,7 @@ async def upsert_product_tag(db: AsyncSession, project_id: int, payload: dict):
             select(ProductTag).where(
                 ProductTag.id == payload["id"],
                 ProductTag.project_id == project_id,
+                ProductTag.is_deleted == False,
             )
         )
         tag = result.scalar_one_or_none()
@@ -311,6 +318,7 @@ async def delete_product_tag(db: AsyncSession, project_id: int, tag_id: int) -> 
         select(ProductTag).where(
             ProductTag.id == tag_id,
             ProductTag.project_id == project_id,
+            ProductTag.is_deleted == False,
         )
     )
     tag = result.scalar_one_or_none()

@@ -40,6 +40,7 @@ def _ensure_account(db: Session, account_no: str, source_type: str, project_id: 
         select(Account).where(
             Account.account == account_no,
             Account.project_id == project_id,
+            Account.is_deleted == False,
         )
     ).scalar_one_or_none()
     if existing:

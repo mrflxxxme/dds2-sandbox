@@ -7,17 +7,18 @@ import re
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import CustomsTopup, CustomsAlloc, CustomsDT
-
+from backend.models import CustomsAlloc, CustomsDT, CustomsTopup
 
 # ─── Customs Topup / Alloc ───────────────────────────────────────────────────
 
+
 async def get_customs_topup(db: AsyncSession, project_id: int):
     result = await db.execute(
-        select(CustomsTopup).where(CustomsTopup.project_id == project_id)
+        select(CustomsTopup)
+        .where(CustomsTopup.project_id == project_id, CustomsTopup.is_deleted == False)
         .order_by(CustomsTopup.date.desc())
     )
     topups = result.scalars().all()
@@ -26,7 +27,8 @@ async def get_customs_topup(db: AsyncSession, project_id: int):
         select(
             CustomsAlloc.topup_txn_id,
             func.sum(CustomsAlloc.alloc_amount).label("allocated"),
-        ).where(CustomsAlloc.project_id == project_id)
+        )
+        .where(CustomsAlloc.project_id == project_id)
         .group_by(CustomsAlloc.topup_txn_id)
     )
     alloc_map = {row.topup_txn_id: Decimal(str(row.allocated or 0)) for row in alloc_result}
@@ -53,9 +55,7 @@ async def create_alloc(db: AsyncSession, project_id: int, data: dict):
 
 async def delete_alloc(db: AsyncSession, project_id: int, alloc_id: int):
     result = await db.execute(
-        select(CustomsAlloc).where(
-            CustomsAlloc.id == alloc_id, CustomsAlloc.project_id == project_id
-        )
+        select(CustomsAlloc).where(CustomsAlloc.id == alloc_id, CustomsAlloc.project_id == project_id)
     )
     obj = result.scalar_one_or_none()
     if not obj:
@@ -67,6 +67,7 @@ async def delete_alloc(db: AsyncSession, project_id: int, alloc_id: int):
 
 # ─── Customs DT ──────────────────────────────────────────────────────────────
 
+
 async def upload_fts_and_create_dts(db: AsyncSession, project_id: int, parsed: list[dict]):
     """Create CustomsDT records from parsed FTS data, skipping duplicates."""
     created, skipped = 0, 0
@@ -75,6 +76,7 @@ async def upload_fts_and_create_dts(db: AsyncSession, project_id: int, parsed: l
             select(CustomsDT).where(
                 CustomsDT.project_id == project_id,
                 CustomsDT.dt_number == item["dt_number"],
+                CustomsDT.is_deleted == False,
             )
         )
         if existing.scalar_one_or_none():
@@ -94,7 +96,8 @@ async def upload_fts_and_create_dts(db: AsyncSession, project_id: int, parsed: l
 
 async def get_customs_dt_list(db: AsyncSession, project_id: int):
     result = await db.execute(
-        select(CustomsDT).where(CustomsDT.project_id == project_id)
+        select(CustomsDT)
+        .where(CustomsDT.project_id == project_id, CustomsDT.is_deleted == False)
         .order_by(CustomsDT.dt_date.desc())
     )
     return result.scalars().all()
@@ -102,7 +105,9 @@ async def get_customs_dt_list(db: AsyncSession, project_id: int):
 
 async def update_customs_dt(db: AsyncSession, project_id: int, dt_id: int, payload: dict):
     result = await db.execute(
-        select(CustomsDT).where(CustomsDT.id == dt_id, CustomsDT.project_id == project_id)
+        select(CustomsDT).where(
+            CustomsDT.id == dt_id, CustomsDT.project_id == project_id, CustomsDT.is_deleted == False
+        )
     )
     dt = result.scalar_one_or_none()
     if not dt:
@@ -117,7 +122,9 @@ async def update_customs_dt(db: AsyncSession, project_id: int, dt_id: int, paylo
 
 async def delete_customs_dt(db: AsyncSession, project_id: int, dt_id: int):
     result = await db.execute(
-        select(CustomsDT).where(CustomsDT.id == dt_id, CustomsDT.project_id == project_id)
+        select(CustomsDT).where(
+            CustomsDT.id == dt_id, CustomsDT.project_id == project_id, CustomsDT.is_deleted == False
+        )
     )
     dt = result.scalar_one_or_none()
     if not dt:
@@ -128,6 +135,7 @@ async def delete_customs_dt(db: AsyncSession, project_id: int, dt_id: int):
 
 
 # ─── FTS PDF parsing ────────────────────────────────────────────────────────
+
 
 def parse_fts_pdf(pdf_bytes: bytes) -> list[dict]:
     """Parse FTS customs report PDF and extract DT lines grouped by DT number."""
@@ -143,14 +151,14 @@ def parse_fts_pdf(pdf_bytes: bytes) -> list[dict]:
                 if not line:
                     continue
                 m = re.match(
-                    r'^\d+\s+'                    # row number
-                    r'(\d{2}\.\d{2}\.\d{4})\s+'   # operation date
-                    r'([\d\s]+[,\.]\d{2})\s+'     # amount
-                    r'ДТ\s+'                       # doc type = ДТ
-                    r'\d+\s+'                      # customs code
-                    r'\d{2}\.\d{2}\.\d{4}\s+'     # doc date
-                    r'(\d{8}/\d{6}/\d{7})',       # DT number
-                    line
+                    r"^\d+\s+"  # row number
+                    r"(\d{2}\.\d{2}\.\d{4})\s+"  # operation date
+                    r"([\d\s]+[,\.]\d{2})\s+"  # amount
+                    r"ДТ\s+"  # doc type = ДТ
+                    r"\d+\s+"  # customs code
+                    r"\d{2}\.\d{2}\.\d{4}\s+"  # doc date
+                    r"(\d{8}/\d{6}/\d{7})",  # DT number
+                    line,
                 )
                 if m:
                     op_date_str = m.group(1)
@@ -158,11 +166,7 @@ def parse_fts_pdf(pdf_bytes: bytes) -> list[dict]:
                     dt_number = m.group(3)
                     try:
                         amount = float(amount_str)
-                        op_date = date(
-                            int(op_date_str[6:10]),
-                            int(op_date_str[3:5]),
-                            int(op_date_str[0:2])
-                        )
+                        op_date = date(int(op_date_str[6:10]), int(op_date_str[3:5]), int(op_date_str[0:2]))
                     except (ValueError, IndexError):
                         continue
 
@@ -172,7 +176,6 @@ def parse_fts_pdf(pdf_bytes: bytes) -> list[dict]:
                     results[dt_number]["lines"].append(amount)
 
     return [
-        {"dt_number": k, "dt_date": v["dt_date"].isoformat(), "amount_rub": round(v["total"], 2),
-         "lines": v["lines"]}
+        {"dt_number": k, "dt_date": v["dt_date"].isoformat(), "amount_rub": round(v["total"], 2), "lines": v["lines"]}
         for k, v in sorted(results.items(), key=lambda x: x[1]["dt_date"])
     ]

@@ -3,21 +3,21 @@ Cost — Cost Order Items (get, upload Excel, recalculate).
 """
 
 from decimal import Decimal
-from typing import Optional
 
 import pandas as pd
-from sqlalchemy import select, delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import CostOrder, CostOrderItem, Nomenclature, DutyRule, DutyBasis
-from backend.services.cost.helpers import safe_float, safe_decimal, DEFAULT_VAT_RATE
 from backend.etl.cost_parsers import detect_and_normalize_excel
+from backend.models import CostOrder, CostOrderItem, DutyBasis, DutyRule, Nomenclature
+from backend.services.cost.helpers import DEFAULT_VAT_RATE, safe_decimal
 
 
 async def get_cost_order_items(db: AsyncSession, project_id: int, order_no: str):
     """Get items with nomenclature lookup for article_wb."""
     result = await db.execute(
-        select(CostOrderItem).where(CostOrderItem.order_no == order_no)
+        select(CostOrderItem)
+        .where(CostOrderItem.order_no == order_no)
         .order_by(CostOrderItem.subject, CostOrderItem.article_seller)
     )
     items = result.scalars().all()
@@ -36,12 +36,15 @@ async def get_cost_order_items(db: AsyncSession, project_id: int, order_no: str)
     return items, nom_map
 
 
-async def upload_order_items(db: AsyncSession, project_id: int, order_no: str,
-                             data: bytes, vat_rate: Optional[Decimal] = None):
+async def upload_order_items(
+    db: AsyncSession, project_id: int, order_no: str, data: bytes, vat_rate: Decimal | None = None
+):
     """Upload Excel items, calculate cost/duty/delivery per unit. Returns (inserted, unrecognized)."""
     # Check order exists
     result = await db.execute(
-        select(CostOrder).where(CostOrder.order_no == order_no, CostOrder.project_id == project_id)
+        select(CostOrder).where(
+            CostOrder.order_no == order_no, CostOrder.project_id == project_id, CostOrder.is_deleted == False
+        )
     )
     order = result.scalar_one_or_none()
     if not order:
@@ -56,9 +59,7 @@ async def upload_order_items(db: AsyncSession, project_id: int, order_no: str,
     await db.execute(delete(CostOrderItem).where(CostOrderItem.order_no == order_no))
 
     # Load nomenclature and duty rules
-    nom_result = await db.execute(
-        select(Nomenclature).where(Nomenclature.project_id == project_id)
-    )
+    nom_result = await db.execute(select(Nomenclature).where(Nomenclature.project_id == project_id))
     nom_map = {n.barcode: n for n in nom_result.scalars().all()}
 
     duty_result = await db.execute(
@@ -73,11 +74,12 @@ async def upload_order_items(db: AsyncSession, project_id: int, order_no: str,
         total_volume = float((vol_series * qty_series).sum())
     else:
         total_volume = 0.0
-    total_qty_all = int(pd.to_numeric(df.get("qty", 1), errors="coerce").fillna(1).sum()) if "qty" in df.columns else len(df)
-    delivery_rub_total = (
-        float(order.delivery_cost_cny) * float(order.rate_cny) +
-        float(order.delivery_cost_usd) * float(order.rate_usd)
+    total_qty_all = (
+        int(pd.to_numeric(df.get("qty", 1), errors="coerce").fillna(1).sum()) if "qty" in df.columns else len(df)
     )
+    delivery_rub_total = float(order.delivery_cost_cny) * float(order.rate_cny) + float(
+        order.delivery_cost_usd
+    ) * float(order.rate_usd)
 
     inserted = 0
     unrecognized = 0
@@ -155,20 +157,19 @@ async def upload_order_items(db: AsyncSession, project_id: int, order_no: str,
     return inserted, unrecognized, None
 
 
-async def recalculate_order_items(db: AsyncSession, project_id: int, order_no: str,
-                                  vat_rate: Optional[Decimal] = None):
+async def recalculate_order_items(db: AsyncSession, project_id: int, order_no: str, vat_rate: Decimal | None = None):
     """Recalculate cost/duty/vat/delivery for existing items in an order."""
     result = await db.execute(
-        select(CostOrder).where(CostOrder.order_no == order_no, CostOrder.project_id == project_id)
+        select(CostOrder).where(
+            CostOrder.order_no == order_no, CostOrder.project_id == project_id, CostOrder.is_deleted == False
+        )
     )
     order = result.scalar_one_or_none()
     if not order:
         return None, f"Заказ {order_no} не найден"
 
     # Load items
-    items_result = await db.execute(
-        select(CostOrderItem).where(CostOrderItem.order_no == order_no)
-    )
+    items_result = await db.execute(select(CostOrderItem).where(CostOrderItem.order_no == order_no))
     items = items_result.scalars().all()
     if not items:
         return 0, None
@@ -177,16 +178,17 @@ async def recalculate_order_items(db: AsyncSession, project_id: int, order_no: s
     nom_result = await db.execute(select(Nomenclature).where(Nomenclature.project_id == project_id))
     nom_map = {n.barcode: n for n in nom_result.scalars().all()}
 
-    duty_result = await db.execute(select(DutyRule).where(DutyRule.project_id == project_id, DutyRule.is_deleted == False))
+    duty_result = await db.execute(
+        select(DutyRule).where(DutyRule.project_id == project_id, DutyRule.is_deleted == False)
+    )
     duty_map = {r.subject: r for r in duty_result.scalars().all()}
 
     # Calculate total volume for delivery split
     total_volume = sum(float(item.volume_m3 or 0) * int(item.qty or 1) for item in items)
     total_qty_all = sum(int(item.qty or 1) for item in items)
-    delivery_rub_total = (
-        float(order.delivery_cost_cny) * float(order.rate_cny) +
-        float(order.delivery_cost_usd) * float(order.rate_usd)
-    )
+    delivery_rub_total = float(order.delivery_cost_cny) * float(order.rate_cny) + float(
+        order.delivery_cost_usd
+    ) * float(order.rate_usd)
 
     vat_rate_dec = Decimal(str(vat_rate / 100)) if vat_rate else DEFAULT_VAT_RATE
     updated = 0

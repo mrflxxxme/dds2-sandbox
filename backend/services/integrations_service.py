@@ -119,6 +119,7 @@ async def delete_key(db: AsyncSession, project_id: int, key_id: int) -> bool:
         select(IntegrationKey).where(
             IntegrationKey.id == key_id,
             IntegrationKey.project_id == project_id,
+            IntegrationKey.is_deleted == False,
         )
     )
     key = result.scalar_one_or_none()
@@ -190,6 +191,7 @@ async def sync_wb_sales(
                 result = await db.execute(
                     select(WbPayout.request_id).where(
                         WbPayout.project_id == project_id,
+                        WbPayout.is_deleted == False,
                         WbPayout.request_id.in_(req_ids),
                     )
                 )

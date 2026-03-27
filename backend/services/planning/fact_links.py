@@ -18,6 +18,7 @@ async def get_fact_links(db: AsyncSession, project_id: int, payment_id: int):
         select(PlannedPayment).where(
             PlannedPayment.id == payment_id,
             PlannedPayment.project_id == project_id,
+            PlannedPayment.is_deleted == False,
         )
     )
     if not pp.scalar_one_or_none():
@@ -38,6 +39,7 @@ async def create_fact_link(
         select(PlannedPayment).where(
             PlannedPayment.id == payment_id,
             PlannedPayment.project_id == project_id,
+            PlannedPayment.is_deleted == False,
         )
     )
     if not pp.scalar_one_or_none():
@@ -80,6 +82,7 @@ async def delete_fact_link(db: AsyncSession, project_id: int, link_id: int):
         select(PlannedPayment).where(
             PlannedPayment.id == link.payment_id,
             PlannedPayment.project_id == project_id,
+            PlannedPayment.is_deleted == False,
         )
     )
     if not pp.scalar_one_or_none():

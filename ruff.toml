@@ -56,6 +56,13 @@ ignore = [
 "backend/services/planning/crud.py" = ["E712"]  # SQLAlchemy == False
 "backend/services/planning/wb.py" = ["E712", "RUF001"]  # SQLAlchemy == False, Cyrillic strings
 "backend/services/reports/queries.py" = ["E711", "E712", "SIM108"]  # SQLAlchemy is None/== False, ternary
+"backend/services/refs_service.py" = ["E712"]  # SQLAlchemy == False
+"backend/services/integrations_service.py" = ["E712"]  # SQLAlchemy == False
+"backend/services/cost/orders.py" = ["E712", "RUF001", "RUF006", "S110", "SIM105"]  # SQLAlchemy == False, Cyrillic, background task, try-except-pass
+"backend/services/cost/items.py" = ["E712", "F841"]  # SQLAlchemy == False, unused var (nom_map reassign)
+"backend/services/cost/duty.py" = ["E712"]  # SQLAlchemy == False
+"backend/services/planning/customs.py" = ["E712", "S112"]  # SQLAlchemy == False, try-except-continue
+"backend/etl/sync_wb_payouts.py" = ["E712"]  # SQLAlchemy == False
 
 [lint.isort]
 known-first-party = ["backend"]

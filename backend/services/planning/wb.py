@@ -22,6 +22,7 @@ async def upload_wb_payouts(db: AsyncSession, project_id: int, parsed: list[dict
             select(WbPayout).where(
                 WbPayout.project_id == project_id,
                 WbPayout.request_id == item["request_id"],
+                WbPayout.is_deleted == False,
             )
         )
         obj = result.scalar_one_or_none()
@@ -61,6 +62,7 @@ async def delete_wb_payout(db: AsyncSession, project_id: int, payout_id: int):
         select(WbPayout).where(
             WbPayout.id == payout_id,
             WbPayout.project_id == project_id,
+            WbPayout.is_deleted == False,
         )
     )
     obj = result.scalar_one_or_none()
@@ -77,6 +79,7 @@ async def manual_reconcile_wb(db: AsyncSession, project_id: int, payout_id: int,
         select(WbPayout).where(
             WbPayout.id == payout_id,
             WbPayout.project_id == project_id,
+            WbPayout.is_deleted == False,
         )
     )
     payout = result.scalar_one_or_none()
@@ -122,6 +125,7 @@ async def reconcile_wb_payouts(db: AsyncSession, project_id: int):
     matched_result = await db.execute(
         select(WbPayout.matched_txn_id).where(
             WbPayout.project_id == project_id,
+            WbPayout.is_deleted == False,
             WbPayout.matched_txn_id.isnot(None),
         )
     )
@@ -271,6 +275,7 @@ async def refresh_wb_forecast(
         select(PlannedIncome.date).where(
             PlannedIncome.source == "WB",
             PlannedIncome.project_id == project_id,
+            PlannedIncome.is_deleted == False,
         )
     )
     manual_dates = {row[0] for row in manual_result}

@@ -62,8 +62,8 @@ async def search_transactions(
         escaped = _escape_like(search)
         q = q.where(
             or_(
-                Transaction.counterparty.ilike(f"%{escaped}%"),
-                Transaction.purpose.ilike(f"%{escaped}%"),
+                Transaction.counterparty.ilike(f"%{escaped}%", escape="\\"),
+                Transaction.purpose.ilike(f"%{escaped}%", escape="\\"),
             )
         )
     if event_type:

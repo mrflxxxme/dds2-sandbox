@@ -179,7 +179,9 @@ async def get_order_summary(
     order_no: int,
 ) -> dict | None:
     """Return plan vs fact for a specific order."""
-    result = await db.execute(select(Order).where(Order.order_no == order_no, Order.project_id == project_id))
+    result = await db.execute(
+        select(Order).where(Order.order_no == order_no, Order.project_id == project_id, Order.is_deleted == False)
+    )
     order = result.scalar_one_or_none()
     if not order:
         return None
