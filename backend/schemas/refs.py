@@ -109,6 +109,13 @@ class ProductStatusBulkPayload(BaseModel):
             raise ValueError(f"status must be one of {VALID_PRODUCT_STATUSES}")
 
 
+class ImtAliasPayload(BaseModel):
+    """Set alias for an imt_id group."""
+
+    imt_id: int
+    name: str
+
+
 class ExcludedWarehousesPayload(BaseModel):
     """Input payload for setting excluded warehouses."""
 

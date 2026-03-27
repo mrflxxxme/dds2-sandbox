@@ -155,3 +155,16 @@ class ProductStatusMap(Base):
         UniqueConstraint("project_id", "nm_id", name="uq_product_status_nm"),
         Index("ix_product_status_map_project_nm_id", "project_id", "nm_id"),
     )
+
+
+class ImtAlias(Base):
+    """User-defined alias for imt_id groups."""
+
+    __tablename__ = "imt_aliases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    imt_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    __table_args__ = (UniqueConstraint("project_id", "imt_id", name="uq_imt_alias"),)

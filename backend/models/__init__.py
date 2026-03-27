@@ -84,6 +84,7 @@ from backend.models.refs import (
     Account,
     CategoryRef,
     CounterpartyCategory,
+    ImtAlias,  # noqa: F401
     OpeningBalance,
     Override,
     ProductStatusMap,  # noqa: F401

@@ -453,3 +453,28 @@ async def bulk_set_product_status(db: AsyncSession, project_id: int, nm_ids: lis
 
     await db.commit()
     return True
+
+
+# ─── IMT Aliases ─────────────────────────────────────────────────────────────
+
+
+async def get_imt_aliases(db: AsyncSession, project_id: int) -> dict[int, str]:
+    """Get {imt_id: alias_name} mapping."""
+    from backend.models.refs import ImtAlias
+
+    result = await db.execute(select(ImtAlias.imt_id, ImtAlias.name).where(ImtAlias.project_id == project_id))
+    return {r.imt_id: r.name for r in result}
+
+
+async def set_imt_alias(db: AsyncSession, project_id: int, imt_id: int, name: str) -> bool:
+    """Set or update alias for an imt_id group (upsert)."""
+    from backend.models.refs import ImtAlias
+
+    result = await db.execute(select(ImtAlias).where(ImtAlias.project_id == project_id, ImtAlias.imt_id == imt_id))
+    existing = result.scalar_one_or_none()
+    if existing:
+        existing.name = name
+    else:
+        db.add(ImtAlias(project_id=project_id, imt_id=imt_id, name=name))
+    await db.commit()
+    return True

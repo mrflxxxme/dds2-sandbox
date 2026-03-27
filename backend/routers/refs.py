@@ -18,6 +18,7 @@ from backend.schemas import (
 )
 from backend.schemas.refs import (
     ExcludedWarehousesPayload,
+    ImtAliasPayload,
     ProductStatusBulkPayload,
     ProductStatusPayload,
     ProductTagMappingPayload,
@@ -294,4 +295,26 @@ async def bulk_set_product_status(
     db: AsyncSession = Depends(get_db),
 ):
     await refs_service.bulk_set_product_status(db, project.id, payload.nm_ids, payload.status)
+    return {"ok": True}
+
+
+# ─── IMT Aliases ─────────────────────────────────────────────────────────────
+
+
+@router.get("/imt-aliases")
+async def get_imt_aliases(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns {imt_id: alias_name} mapping."""
+    return await refs_service.get_imt_aliases(db, project.id)
+
+
+@router.patch("/imt-aliases")
+async def set_imt_alias(
+    payload: ImtAliasPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    await refs_service.set_imt_alias(db, project.id, payload.imt_id, payload.name)
     return {"ok": True}

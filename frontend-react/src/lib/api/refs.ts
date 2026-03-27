@@ -54,6 +54,10 @@ export function addRefMethods(api: ApiClient) {
         setProductStatus(data: ProductStatusPayload) { return api.request<MessageResponse>('PATCH', '/api/v1/refs/product-statuses', data); },
         bulkSetProductStatus(data: ProductStatusBulkPayload) { return api.request<MessageResponse>('POST', '/api/v1/refs/product-statuses/bulk', data); },
 
+        // IMT Aliases
+        getImtAliases() { return api.request<Record<string, string>>('GET', '/api/v1/refs/imt-aliases'); },
+        setImtAlias(data: { imt_id: number; name: string }) { return api.request<MessageResponse>('PATCH', '/api/v1/refs/imt-aliases', data); },
+
         // Funnel Products (for tag/status assignment)
         getFunnelProducts() { return api.request<FunnelProductsResponse>('GET', '/api/v1/funnel/products'); },
     };
