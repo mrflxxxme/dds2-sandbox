@@ -7,7 +7,7 @@ export function addIntegrationMethods(api: ApiClient) {
         getIntegrationKeys() {
             return api.request<Array<{
                 id: number; service: string; label: string | null;
-                encrypted_key: string; is_active: boolean;
+                key_preview: string | null; is_active: boolean;
                 created_at: string; last_sync_at: string | null;
             }>>('GET', '/api/v1/integrations/keys');
         },

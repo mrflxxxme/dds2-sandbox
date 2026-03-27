@@ -60,7 +60,7 @@ export function Integrations() {
                         <div key={k.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderBottom: '1px solid var(--color-border)' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                                 <div style={{ width: 36, height: 36, borderRadius: 8, background: 'rgba(139, 92, 246, 0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16 }}>W</div>
-                                <div><div style={{ fontWeight: 500 }}>{k.label || 'Wildberries API'}</div><div style={{ fontSize: 12, color: 'var(--color-text-dim)', fontFamily: 'monospace' }}>{k.encrypted_key}</div></div>
+                                <div><div style={{ fontWeight: 500 }}>{k.label || 'Wildberries API'}</div><div style={{ fontSize: 12, color: 'var(--color-text-dim)', fontFamily: 'monospace' }}>{k.key_preview || '••••••••'}</div></div>
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                                 <span className="badge badge-success">Подключено</span>
