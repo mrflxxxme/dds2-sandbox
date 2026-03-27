@@ -664,6 +664,7 @@ export default function LogisticsPage() {
                                     <th>Дата сдачи</th>
                                     <th>План сдачи</th>
                                     <th style={{ textAlign: 'right' }}>Палеты</th>
+                                    <th style={{ textAlign: 'right' }}>Стоимость</th>
                                     <th style={{ textAlign: 'right' }}>Вес</th>
                                 </tr>
                             </thead>
@@ -704,6 +705,9 @@ export default function LogisticsPage() {
                                             <td>{item.wb_fbo_actual_date ? formatDate(item.wb_fbo_actual_date) : '\u2014'}</td>
                                             <td>{item.wb_fbo_planned_date ? formatDate(item.wb_fbo_planned_date) : '\u2014'}</td>
                                             <td style={{ textAlign: 'right' }}>{item.pallets_count}</td>
+                                            <td style={{ textAlign: 'right' }}>
+                                                {item.pickup_cost ? formatNumber(item.pickup_cost, 0) : '\u2014'}
+                                            </td>
                                             <td style={{ textAlign: 'right' }}>
                                                 {item.total_weight_kg ? formatNumber(item.total_weight_kg, 1) + ' кг' : '\u2014'}
                                             </td>
