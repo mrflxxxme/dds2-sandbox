@@ -33,6 +33,7 @@ from backend.routers import (
     refs,
     reports,
     telegram,
+    telegram_miniapp,
     telegram_webhook,
     warehouse,
     ws,
@@ -461,6 +462,9 @@ app.include_router(
     tags=["Warehouse"],
     dependencies=[Depends(get_current_user)],
 )
+
+# Telegram Mini App (auth handled internally — /tma/auth is public, /tma/chat needs JWT)
+app.include_router(telegram_miniapp.router, prefix="/api/v1", tags=["Telegram Mini App"])
 
 # Telegram webhook (NO auth — Telegram calls this directly)
 app.include_router(telegram_webhook.router, prefix="/api/v1", tags=["Telegram Webhook"])
