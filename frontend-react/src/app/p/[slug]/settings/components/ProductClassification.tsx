@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '@/lib/api';
 import type { ProductTag, FunnelProduct } from '@/types/api';
-import { formatNumber } from '@/lib/utils';
+import { formatNumber, exportToExcel } from '@/lib/utils';
 
 const STATUS_OPTIONS = [
     { value: '', label: '—' },
@@ -46,6 +46,12 @@ export function ProductClassification() {
     const [tagColor, setTagColor] = useState('#3B82F6');
     const [editingTagId, setEditingTagId] = useState<number | null>(null);
     const [msg, setMsg] = useState('');
+
+    // Bulk paste
+    const [showBulkPaste, setShowBulkPaste] = useState(false);
+    const [pasteText, setPasteText] = useState('');
+    const [pasteResolved, setPasteResolved] = useState<{ found: FunnelProduct[]; notFound: string[] }>({ found: [], notFound: [] });
+    const [bulkSaving, setBulkSaving] = useState(false);
 
     const loadData = useCallback(async () => {
         setLoading(true);
@@ -105,10 +111,7 @@ export function ProductClassification() {
     // --- Status ---
     const handleStatusChange = async (nmId: number, status: string) => {
         try {
-            if (status === '') {
-                // No "unset" endpoint, just set to active as default
-                return;
-            }
+            if (status === '') return;
             await api.setProductStatus({ nm_id: nmId, status });
             setStatuses(prev => ({ ...prev, [String(nmId)]: status }));
         } catch (e: unknown) {
@@ -116,7 +119,7 @@ export function ProductClassification() {
         }
     };
 
-    // --- Bulk actions ---
+    // --- Bulk actions (checkbox-based) ---
     const selectAll = () => {
         if (selected.size === filteredProducts.length) {
             setSelected(new Set());
@@ -156,6 +159,115 @@ export function ProductClassification() {
         selected.forEach(nmId => { updated[String(nmId)] = status; });
         setStatuses(updated);
         setMsg('');
+    };
+
+    // --- Bulk paste resolve ---
+    const resolvePaste = useCallback((text: string) => {
+        if (!text.trim()) {
+            setPasteResolved({ found: [], notFound: [] });
+            return;
+        }
+        // Split by newlines, tabs, commas, semicolons, spaces
+        const codes = text
+            .split(/[\n\r\t,;]+/)
+            .map(s => s.trim())
+            .filter(Boolean);
+
+        const found: FunnelProduct[] = [];
+        const notFound: string[] = [];
+        const seenNm = new Set<number>();
+
+        // Build lookup maps
+        const byNmId = new Map<number, FunnelProduct>();
+        const byVendor = new Map<string, FunnelProduct>();
+        products.forEach(p => {
+            byNmId.set(p.nm_id, p);
+            byVendor.set(p.vendor_code.toLowerCase(), p);
+        });
+
+        for (const code of codes) {
+            // Try nm_id (numeric)
+            const asNum = parseInt(code, 10);
+            let product: FunnelProduct | undefined;
+            if (!isNaN(asNum) && byNmId.has(asNum)) {
+                product = byNmId.get(asNum);
+            }
+            // Try vendor_code
+            if (!product) {
+                product = byVendor.get(code.toLowerCase());
+            }
+            if (product && !seenNm.has(product.nm_id)) {
+                seenNm.add(product.nm_id);
+                found.push(product);
+            } else if (!product) {
+                notFound.push(code);
+            }
+        }
+        setPasteResolved({ found, notFound });
+    }, [products]);
+
+    const handlePasteChange = (text: string) => {
+        setPasteText(text);
+        resolvePaste(text);
+    };
+
+    const applyPasteTag = async (tagId: number) => {
+        if (pasteResolved.found.length === 0) return;
+        setBulkSaving(true);
+        try {
+            await api.updateProductTagMapping({
+                nm_ids: pasteResolved.found.map(p => p.nm_id),
+                add_tags: [tagId],
+                remove_tags: [],
+            });
+            await loadData();
+            setPasteText('');
+            setPasteResolved({ found: [], notFound: [] });
+            setMsg('');
+        } catch (e: unknown) {
+            setMsg(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setBulkSaving(false);
+    };
+
+    const applyPasteStatus = async (status: string) => {
+        if (pasteResolved.found.length === 0 || !status) return;
+        setBulkSaving(true);
+        try {
+            await api.bulkSetProductStatus({
+                nm_ids: pasteResolved.found.map(p => p.nm_id),
+                status,
+            });
+            const updated = { ...statuses };
+            pasteResolved.found.forEach(p => { updated[String(p.nm_id)] = status; });
+            setStatuses(updated);
+            setPasteText('');
+            setPasteResolved({ found: [], notFound: [] });
+            setMsg('');
+        } catch (e: unknown) {
+            setMsg(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setBulkSaving(false);
+    };
+
+    // --- Excel export ---
+    const handleExport = () => {
+        const rows = filteredProducts.map(p => {
+            const nmTags = (tagMapping[String(p.nm_id)] || [])
+                .map(tid => tags.find(t => t.id === tid)?.name)
+                .filter(Boolean)
+                .join(', ');
+            const status = statuses[String(p.nm_id)] || '';
+            return {
+                'Артикул': p.vendor_code,
+                'nm_id': p.nm_id,
+                'Бренд': p.brand,
+                'Статус': status ? STATUS_LABELS[status] || status : '',
+                'Ярлыки': nmTags,
+                'Склейка (imt_id)': p.imt_id || '',
+            };
+        });
+        exportToExcel(rows, 'product_classification');
     };
 
     // --- Filter ---
@@ -250,7 +362,7 @@ export function ProductClassification() {
                     </div>
                 </div>
 
-                {/* Bulk actions */}
+                {/* Bulk actions (checkbox) */}
                 {selected.size > 0 && (
                     <div className="glass-card" style={{ padding: 16 }}>
                         <h3 style={{ margin: '0 0 8px', fontSize: 14, fontWeight: 600 }}>
@@ -296,8 +408,8 @@ export function ProductClassification() {
             {/* Right panel — Product table */}
             <div style={{ flex: 1, minWidth: 0 }}>
                 <div className="glass-card" style={{ padding: 16 }}>
-                    {/* Filters */}
-                    <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+                    {/* Filters + Export */}
+                    <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
                         <input className="form-input" placeholder="Поиск по артикулу / nm_id"
                             value={search} onChange={e => setSearch(e.target.value)}
                             style={{ width: 200 }} />
@@ -318,7 +430,75 @@ export function ProductClassification() {
                             {imtIds.map(id => <option key={id} value={String(id)}>#{id}</option>)}
                         </select>
                         <button className="btn btn-secondary btn-sm" onClick={loadData}>Обновить</button>
+                        <button className="btn btn-secondary btn-sm" onClick={handleExport}>Excel</button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => setShowBulkPaste(!showBulkPaste)}
+                            style={showBulkPaste ? { background: 'var(--color-primary)', color: '#fff' } : {}}>
+                            Массовая привязка
+                        </button>
                     </div>
+
+                    {/* Bulk paste panel */}
+                    {showBulkPaste && (
+                        <div style={{ marginBottom: 16, padding: 16, background: 'var(--color-bg-input)', borderRadius: 8 }}>
+                            <div style={{ display: 'flex', gap: 16 }}>
+                                <div style={{ flex: 1 }}>
+                                    <label className="form-label" style={{ fontSize: 12, marginBottom: 4 }}>
+                                        Вставьте артикулы или nm_id (по одному на строку, или через запятую/Tab из Excel):
+                                    </label>
+                                    <textarea
+                                        className="form-input"
+                                        value={pasteText}
+                                        onChange={e => handlePasteChange(e.target.value)}
+                                        placeholder={'Пример:\nx99_2680v4\nhdd_500\n701808093\n...'}
+                                        style={{ width: '100%', height: 120, resize: 'vertical', fontFamily: 'monospace', fontSize: 12 }}
+                                    />
+                                    {pasteResolved.found.length > 0 && (
+                                        <p style={{ fontSize: 12, color: 'var(--color-success)', marginTop: 4 }}>
+                                            Найдено: {pasteResolved.found.length} товаров
+                                        </p>
+                                    )}
+                                    {pasteResolved.notFound.length > 0 && (
+                                        <p style={{ fontSize: 12, color: 'var(--color-danger)', marginTop: 4 }}>
+                                            Не найдено ({pasteResolved.notFound.length}): {pasteResolved.notFound.slice(0, 5).join(', ')}
+                                            {pasteResolved.notFound.length > 5 && ` ...и ещё ${pasteResolved.notFound.length - 5}`}
+                                        </p>
+                                    )}
+                                </div>
+                                <div style={{ width: 200, flexShrink: 0 }}>
+                                    {pasteResolved.found.length > 0 && (
+                                        <>
+                                            <label className="form-label" style={{ fontSize: 12, marginBottom: 4 }}>Назначить ярлык:</label>
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
+                                                {tags.map(t => (
+                                                    <button key={t.id} className="btn btn-sm" onClick={() => applyPasteTag(t.id)}
+                                                        disabled={bulkSaving}
+                                                        style={{ background: t.color, color: '#fff', fontSize: 12 }}>
+                                                        + {t.name}
+                                                    </button>
+                                                ))}
+                                                {tags.length === 0 && <p style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>Сначала создайте ярлык</p>}
+                                            </div>
+                                            <label className="form-label" style={{ fontSize: 12, marginBottom: 4 }}>Установить статус:</label>
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                                {STATUS_OPTIONS.filter(s => s.value).map(s => (
+                                                    <button key={s.value} className="btn btn-sm btn-secondary" onClick={() => applyPasteStatus(s.value)}
+                                                        disabled={bulkSaving}
+                                                        style={{ fontSize: 12 }}>
+                                                        {s.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </>
+                                    )}
+                                    {pasteResolved.found.length === 0 && pasteText.trim() && (
+                                        <p style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 20 }}>
+                                            Ни один товар не найден
+                                        </p>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
                     <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 8 }}>
                         Показано: {formatNumber(filteredProducts.length, 0)} из {formatNumber(products.length, 0)}
