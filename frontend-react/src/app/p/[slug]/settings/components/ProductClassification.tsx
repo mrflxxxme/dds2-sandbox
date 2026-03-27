@@ -280,14 +280,18 @@ export function ProductClassification() {
     // --- Sync nomenclature (imt_id) ---
     const [syncing, setSyncing] = useState(false);
     const handleSyncNomenclature = async () => {
+        if (syncing) return;
         setSyncing(true);
         try {
             await api.syncNomenclature();
             await loadData();
+            setMsg('Склейки обновлены');
         } catch (e: unknown) {
-            setMsg(e instanceof Error ? e.message : 'Ошибка синхронизации');
+            const errMsg = e instanceof Error ? e.message : 'Ошибка синхронизации';
+            setMsg(errMsg.includes('429') || errMsg.includes('много') ? 'Подождите минуту и попробуйте снова' : errMsg);
+        } finally {
+            setSyncing(false);
         }
-        setSyncing(false);
     };
 
     // --- Excel export ---
