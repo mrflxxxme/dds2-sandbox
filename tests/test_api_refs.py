@@ -365,3 +365,54 @@ async def test_product_status_invalid(client, auth_headers):
         headers=headers,
     )
     assert resp.status_code == 422 or resp.status_code == 400
+
+
+# ─── IMT Aliases ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_imt_alias_crud(client, auth_headers):
+    """Set and get imt_id alias."""
+    headers = await _project_headers(client, auth_headers)
+
+    # Set alias
+    resp = await client.patch(
+        "/api/v1/refs/imt-aliases",
+        json={"imt_id": 663797476, "name": "Chashki FSART"},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+
+    # Get aliases
+    resp = await client.get("/api/v1/refs/imt-aliases", headers=headers)
+    assert resp.status_code == 200
+    aliases = resp.json()
+    assert aliases.get("663797476", aliases.get(663797476)) == "Chashki FSART"
+
+    # Update alias
+    resp = await client.patch(
+        "/api/v1/refs/imt-aliases",
+        json={"imt_id": 663797476, "name": "Kruzhki FSART"},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+
+    # Verify updated
+    resp = await client.get("/api/v1/refs/imt-aliases", headers=headers)
+    aliases = resp.json()
+    assert aliases.get("663797476", aliases.get(663797476)) == "Kruzhki FSART"
+
+
+@pytest.mark.asyncio
+async def test_imt_alias_multiple(client, auth_headers):
+    """Multiple aliases for different imt_ids."""
+    headers = await _project_headers(client, auth_headers)
+
+    # Set two aliases
+    await client.patch("/api/v1/refs/imt-aliases", json={"imt_id": 111, "name": "Group A"}, headers=headers)
+    await client.patch("/api/v1/refs/imt-aliases", json={"imt_id": 222, "name": "Group B"}, headers=headers)
+
+    resp = await client.get("/api/v1/refs/imt-aliases", headers=headers)
+    aliases = resp.json()
+    assert aliases.get("111", aliases.get(111)) == "Group A"
+    assert aliases.get("222", aliases.get(222)) == "Group B"

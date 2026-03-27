@@ -33,6 +33,7 @@ export function ProductClassification() {
     const [statuses, setStatuses] = useState<Record<string, string>>({});
     const [imtAliases, setImtAliases] = useState<Record<string, string>>({});
     const [editingImtId, setEditingImtId] = useState<number | null>(null);
+    const [editingImtNmId, setEditingImtNmId] = useState<number | null>(null); // which row shows the input
     const [editingImtName, setEditingImtName] = useState('');
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -256,15 +257,16 @@ export function ProductClassification() {
     };
 
     // --- IMT alias editing ---
-    const startEditImtAlias = (imtId: number) => {
+    const startEditImtAlias = (imtId: number, nmId: number) => {
         setEditingImtId(imtId);
+        setEditingImtNmId(nmId);
         setEditingImtName(imtAliases[String(imtId)] || '');
     };
 
     const saveImtAlias = async () => {
         if (editingImtId === null) return;
         const name = editingImtName.trim();
-        if (!name) { setEditingImtId(null); return; }
+        if (!name) { setEditingImtId(null); setEditingImtNmId(null); return; }
         try {
             await api.setImtAlias({ imt_id: editingImtId, name });
             setImtAliases(prev => ({ ...prev, [String(editingImtId)]: name }));
@@ -272,6 +274,7 @@ export function ProductClassification() {
             setMsg(e instanceof Error ? e.message : 'Ошибка');
         }
         setEditingImtId(null);
+        setEditingImtNmId(null);
     };
 
     // --- Sync nomenclature (imt_id) ---
@@ -624,25 +627,24 @@ export function ProductClassification() {
                                                     })}
                                                 </div>
                                             </td>
-                                            <td style={{ fontSize: 12 }}>
+                                            <td style={{ fontSize: 12, cursor: p.imt_id ? 'pointer' : 'default' }}
+                                                onClick={() => { if (p.imt_id && editingImtNmId !== p.nm_id) startEditImtAlias(p.imt_id, p.nm_id); }}>
                                                 {p.imt_id ? (
-                                                    editingImtId === p.imt_id ? (
+                                                    editingImtNmId === p.nm_id ? (
                                                         <input
                                                             className="form-input"
                                                             value={editingImtName}
                                                             onChange={e => setEditingImtName(e.target.value)}
                                                             onBlur={saveImtAlias}
-                                                            onKeyDown={e => { if (e.key === 'Enter') saveImtAlias(); if (e.key === 'Escape') setEditingImtId(null); }}
+                                                            onKeyDown={e => { if (e.key === 'Enter') saveImtAlias(); if (e.key === 'Escape') { setEditingImtId(null); setEditingImtNmId(null); } }}
+                                                            onClick={e => e.stopPropagation()}
                                                             autoFocus
-                                                            style={{ width: 120, fontSize: 12, padding: '2px 4px' }}
+                                                            style={{ width: 130, fontSize: 12, padding: '2px 4px' }}
                                                             placeholder={`#${p.imt_id}`}
                                                         />
                                                     ) : (
-                                                        <span
-                                                            onClick={() => startEditImtAlias(p.imt_id!)}
-                                                            style={{ cursor: 'pointer', color: imtAliases[String(p.imt_id)] ? 'var(--color-text)' : 'var(--color-text-dim)' }}
-                                                            title="Клик для редактирования названия склейки"
-                                                        >
+                                                        <span style={{ color: imtAliases[String(p.imt_id)] ? 'var(--color-text)' : 'var(--color-text-dim)' }}
+                                                            title="Клик для редактирования названия склейки">
                                                             {imtAliases[String(p.imt_id)] || `#${p.imt_id}`}
                                                         </span>
                                                     )
