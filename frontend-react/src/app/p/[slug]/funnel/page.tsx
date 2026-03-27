@@ -40,6 +40,10 @@ export default function FunnelPage() {
     const [brand, setBrand] = useState('');
     const [subject, setSubject] = useState('');
     const [search, setSearch] = useState('');
+    const [filterTag, setFilterTag] = useState('');
+    const [filterImt, setFilterImt] = useState('');
+    const [tagOptions, setTagOptions] = useState<{ id: number; name: string }[]>([]);
+    const [imtOptions, setImtOptions] = useState<{ id: string; name: string }[]>([]);
 
     // Which charts to display (multiple selection)
     const [chartFields, setChartFields] = useState<{ field: string; label: string; color: string }[]>([
@@ -127,6 +131,16 @@ export default function FunnelPage() {
         (async () => {
             const f = await loadFilters();
             await loadSyncStatus();
+            // Load tag & imt options for filter dropdowns
+            try {
+                const [tagsRes, imtRes] = await Promise.all([
+                    api.getProductTags(),
+                    api.getImtAliases(),
+                ]);
+                setTagOptions((tagsRes || []).map((t: any) => ({ id: t.id, name: t.name })));
+                const imtEntries = Object.entries(imtRes || {}).map(([id, name]) => ({ id, name: String(name) }));
+                setImtOptions(imtEntries);
+            } catch { /* optional filters */ }
             if (f?.min_date && f?.max_date) {
                 // Default to last 30 days for Ads tab, full range for others
                 const today = new Date();
@@ -215,6 +229,20 @@ export default function FunnelPage() {
                         <option value="">Все категории</option>
                         {filters.subjects?.map((s: string) => <option key={s} value={s}>{s}</option>)}
                     </select>
+                    {tagOptions.length > 0 && (
+                        <select value={filterTag} onChange={e => setFilterTag(e.target.value)}
+                            style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }}>
+                            <option value="">Все ярлыки</option>
+                            {tagOptions.map(t => <option key={t.id} value={t.name}>{t.name}</option>)}
+                        </select>
+                    )}
+                    {imtOptions.length > 0 && (
+                        <select value={filterImt} onChange={e => setFilterImt(e.target.value)}
+                            style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }}>
+                            <option value="">Все склейки</option>
+                            {imtOptions.map(t => <option key={t.id} value={t.name}>{t.name}</option>)}
+                        </select>
+                    )}
                 </div>
             )}
 
@@ -460,7 +488,11 @@ export default function FunnelPage() {
                                                 Нет данных за выбранный период
                                             </td></tr>
                                         )}
-                                        {groupData.map((r, i) => {
+                                        {groupData.filter(r => {
+                                            if (filterTag && groupBy === 'tag' && r.tag !== filterTag) return false;
+                                            if (filterImt && groupBy === 'imt' && r.imt_group !== filterImt) return false;
+                                            return true;
+                                        }).map((r, i) => {
                                             const grpLabel = groupBy === 'brand' ? (r.brand || '\u2014') : groupBy === 'tag' ? (r.tag || '\u2014') : groupBy === 'imt' ? (r.imt_group || '\u2014') : (r.subject || '\u2014');
                                             const rowBg = i % 2 === 0 ? '#ffffff' : '#f9fafb';
                                             return (
