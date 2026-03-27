@@ -38,8 +38,9 @@ export default function PlanFactPage() {
     const loadBrands = useCallback(async () => {
         try {
             const b = await api.getWbBrands();
-            setBrands(b);
-            if (b.length && !brand) setBrand(b[0]);
+            const filtered = b.filter(name => name !== 'Неопознанный Товар');
+            setBrands(filtered);
+            if (filtered.length && !brand) setBrand(filtered[0]);
         } catch { /* ignore */ }
     }, []);
 

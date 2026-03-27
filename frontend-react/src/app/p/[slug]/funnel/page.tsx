@@ -132,9 +132,7 @@ export default function FunnelPage() {
                 const today = new Date();
                 const thirtyDaysAgo = new Date(today);
                 thirtyDaysAgo.setDate(today.getDate() - 30);
-                const defaultFrom = tab === 'ads'
-                    ? thirtyDaysAgo.toISOString().slice(0, 10)
-                    : f.min_date;
+                const defaultFrom = thirtyDaysAgo.toISOString().slice(0, 10);
                 const defaultTo = f.max_date;
                 setDateFrom(defaultFrom);
                 setDateTo(defaultTo);

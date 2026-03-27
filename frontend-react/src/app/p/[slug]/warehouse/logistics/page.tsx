@@ -182,13 +182,13 @@ export default function LogisticsPage() {
 
     const totalRequests = filteredItems.length;
     const totalPallets = filteredItems.reduce((s, i) => s + i.pallets_count, 0);
-    const totalWeight = filteredItems.reduce((s, i) => s + (i.total_weight_kg || 0), 0);
+    const totalWeight = filteredItems.reduce((s, i) => s + (Number(i.total_weight_kg) || 0), 0);
 
     // ─── Checked items summary ──────────────────────────────────────────
 
     const checkedItems = filteredItems.filter(i => checkedIds.has(i.id));
     const checkedPallets = checkedItems.reduce((s, i) => s + i.pallets_count, 0);
-    const checkedWeight = checkedItems.reduce((s, i) => s + (i.total_weight_kg || 0), 0);
+    const checkedWeight = checkedItems.reduce((s, i) => s + (Number(i.total_weight_kg) || 0), 0);
 
     const toggleChecked = (id: number) => {
         setCheckedIds(prev => {
