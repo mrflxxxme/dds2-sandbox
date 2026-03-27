@@ -250,6 +250,19 @@ export function ProductClassification() {
         setBulkSaving(false);
     };
 
+    // --- Sync nomenclature (imt_id) ---
+    const [syncing, setSyncing] = useState(false);
+    const handleSyncNomenclature = async () => {
+        setSyncing(true);
+        try {
+            await api.syncNomenclature();
+            await loadData();
+        } catch (e: unknown) {
+            setMsg(e instanceof Error ? e.message : 'Ошибка синхронизации');
+        }
+        setSyncing(false);
+    };
+
     // --- Excel export ---
     const handleExport = () => {
         const rows = filteredProducts.map(p => {
@@ -434,6 +447,9 @@ export function ProductClassification() {
                         <button className="btn btn-secondary btn-sm" onClick={() => setShowBulkPaste(!showBulkPaste)}
                             style={showBulkPaste ? { background: 'var(--color-primary)', color: '#fff' } : {}}>
                             Массовая привязка
+                        </button>
+                        <button className="btn btn-secondary btn-sm" onClick={handleSyncNomenclature} disabled={syncing}>
+                            {syncing ? 'Синхронизация...' : 'Обновить склейки'}
                         </button>
                     </div>
 
