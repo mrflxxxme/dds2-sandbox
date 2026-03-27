@@ -1097,6 +1097,7 @@ export interface AssemblyRequestItem {
   barcode: string;
   quantity: number;
   product_name?: string;
+  brand?: string;
   stock_quantity: number;
 }
 
@@ -1129,6 +1130,7 @@ export interface AssemblyRequest {
   vehicle_assigned_at?: string;
   shipped_at?: string;
   comment?: string;
+  brands?: string;
   items: AssemblyRequestItem[];
   created_at: string;
   updated_at: string;

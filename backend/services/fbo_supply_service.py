@@ -770,6 +770,9 @@ def _update_supply_from_fbw_detail(supply: WbFboSupply, detail: dict) -> None:
     accepted = detail.get("acceptedQuantity")
     if accepted is not None:
         supply.accepted_qty = accepted
+        # Recalculate status: WB returns statusID=5 (CANCELLED) even for partial acceptance
+        if accepted > 0 and supply.wb_status == WbSupplyStatus.CANCELLED:
+            supply.wb_status = WbSupplyStatus.ACCEPTED
 
 
 async def _upsert_supply_items_fbw(

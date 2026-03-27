@@ -172,6 +172,7 @@ async def _build_items_with_stock(
                 "barcode": item.barcode,
                 "quantity": item.quantity,
                 "product_name": product_name,
+                "brand": nom.brand if nom else None,
                 "stock_quantity": stock_map.get(item.nomenclature_id, 0),
             }
         )
@@ -227,7 +228,8 @@ async def _build_response(
         "vehicle_assigned_at": request.vehicle_assigned_at,
         "shipped_at": request.shipped_at,
         "comment": request.comment,
-        "items": await _build_items_with_stock(db, request),
+        "items": (items := await _build_items_with_stock(db, request)),
+        "brands": ", ".join(sorted({i["brand"] for i in items if i.get("brand")})) or None,
         "created_at": request.created_at,
         "updated_at": request.updated_at,
     }

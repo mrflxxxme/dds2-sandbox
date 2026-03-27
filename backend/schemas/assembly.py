@@ -74,6 +74,7 @@ class AssemblyItemResponse(BaseModel):
     barcode: str
     quantity: int
     product_name: str | None = None
+    brand: str | None = None
     stock_quantity: int = 0
 
 
@@ -108,6 +109,7 @@ class AssemblyRequestResponse(BaseModel):
     vehicle_assigned_at: datetime | None = None
     shipped_at: datetime | None = None
     comment: str | None = None
+    brands: str | None = None  # comma-separated unique brands from items
     items: list[AssemblyItemResponse] = []
     created_at: datetime
     updated_at: datetime

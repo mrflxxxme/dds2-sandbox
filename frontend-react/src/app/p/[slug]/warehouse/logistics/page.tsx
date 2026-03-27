@@ -441,6 +441,7 @@ export default function LogisticsPage() {
                                     <tr>
                                         <th style={{ width: 32 }}></th>
                                         <th>Заявка</th>
+                                        <th>Бренд</th>
                                         <th>Забор</th>
                                         <th>Сдача WB</th>
                                         <th style={{ textAlign: 'right' }}>Палет</th>
@@ -453,7 +454,7 @@ export default function LogisticsPage() {
                                     {grouped.map(group => (
                                         <React.Fragment key={group.key}>
                                             <tr>
-                                                <td colSpan={8} style={{ background: 'var(--color-bg-secondary)', fontWeight: 600, fontSize: 13, padding: '8px 12px' }}>
+                                                <td colSpan={9} style={{ background: 'var(--color-bg-secondary)', fontWeight: 600, fontSize: 13, padding: '8px 12px' }}>
                                                     {group.label || 'Без склада'}
                                                     <span style={{ fontWeight: 400, color: 'var(--color-text-muted)', marginLeft: 8 }}>
                                                         {group.items.length} заявок, {group.items.reduce((s, i) => s + i.pallets_count, 0)} палет
@@ -491,6 +492,7 @@ export default function LogisticsPage() {
                                                                 {item.number}
                                                             </Link>
                                                         </td>
+                                                        <td style={{ fontSize: 12 }}>{item.brands || '\u2014'}</td>
                                                         <td style={{ color: 'var(--color-text-muted)' }}>{item.warehouse_name || '\u2014'}</td>
                                                         <td>{item.wb_warehouse_name || '\u2014'}</td>
                                                         <td style={{ textAlign: 'right' }}>{item.pallets_count}</td>
@@ -569,6 +571,9 @@ export default function LogisticsPage() {
                                                             </div>
 
                                                             <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                                                                {item.brands && (
+                                                                    <div style={{ fontWeight: 500, color: 'var(--color-text)' }}>{item.brands}</div>
+                                                                )}
                                                                 <div>Палет: {item.pallets_count} &middot; Вес: {item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014'}</div>
                                                                 <div>Позиций: {item.items?.length || 0}</div>
                                                                 {item.wb_supply_id_wb && (
@@ -657,6 +662,7 @@ export default function LogisticsPage() {
                                 <tr>
                                     <th>Статус</th>
                                     <th>№</th>
+                                    <th>Бренд</th>
                                     <th>Поставка WB</th>
                                     <th>Статус WB</th>
                                     <th>Склад забора</th>
@@ -683,6 +689,9 @@ export default function LogisticsPage() {
                                             </td>
                                             <td style={{ fontWeight: 500 }}>
                                                 {item.number}
+                                            </td>
+                                            <td style={{ fontSize: 12 }}>
+                                                {item.brands || '\u2014'}
                                             </td>
                                             <td style={{ fontFamily: 'monospace', fontSize: 12 }}>
                                                 {item.wb_supply_id_wb || '\u2014'}

@@ -550,6 +550,7 @@ export default function AssemblyListPage() {
                             <tr>
                                 <th>№</th>
                                 <th>Статус</th>
+                                <th>Бренд</th>
                                 <th>Склад</th>
                                 <th>FBO поставка</th>
                                 <th style={{ textAlign: 'right' }}>Товары</th>
@@ -572,6 +573,9 @@ export default function AssemblyListPage() {
                                         <td style={{ fontWeight: 500 }}>{item.number}</td>
                                         <td>
                                             <StatusBadge item={item} onStatusChange={handleStatusChange} onShip={handleShipFromList} />
+                                        </td>
+                                        <td style={{ fontSize: 13 }}>
+                                            {item.brands || '\u2014'}
                                         </td>
                                         <td style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
                                             {item.warehouse_name || '\u2014'}
