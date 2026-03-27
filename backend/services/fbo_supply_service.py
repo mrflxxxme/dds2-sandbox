@@ -770,9 +770,14 @@ def _update_supply_from_fbw_detail(supply: WbFboSupply, detail: dict) -> None:
     accepted = detail.get("acceptedQuantity")
     if accepted is not None:
         supply.accepted_qty = accepted
-        # Recalculate status: WB returns statusID=5 (CANCELLED) even for partial acceptance
-        if accepted > 0 and supply.wb_status == WbSupplyStatus.CANCELLED:
-            supply.wb_status = WbSupplyStatus.ACCEPTED
+
+    # Recalculate status using detail's statusID with updated accepted_qty
+    detail_status_id = detail.get("statusID")
+    if detail_status_id is not None:
+        supply.wb_status = _map_fbw_status(detail_status_id, supply.accepted_qty)
+    elif accepted is not None and accepted > 0 and supply.wb_status == WbSupplyStatus.CANCELLED:
+        # Fallback: no statusID in detail, but accepted_qty > 0 means partial acceptance
+        supply.wb_status = WbSupplyStatus.ACCEPTED
 
 
 async def _upsert_supply_items_fbw(

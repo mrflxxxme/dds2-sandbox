@@ -519,123 +519,116 @@ export default function LogisticsPage() {
                                         </span>
                                     </h2>
 
-                                    {group.subGroups.map(sub => (
-                                        <div key={sub.key} style={{ marginBottom: 16 }}>
-                                            <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 8, padding: '0 4px', color: 'var(--color-text-muted)' }}>
-                                                {sub.label || 'Без склада'}
-                                            </div>
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
+                                        {group.subGroups.flatMap(sub => sub.items).map(item => {
+                                            const soon = isSoonReady(item);
+                                            const statusCfg = STATUS_MAP[item.status] || { label: item.status, className: '' };
+                                            const isChecked = checkedIds.has(item.id);
+                                            const canCheck = item.status === 'READY';
 
-                                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
-                                                {sub.items.map(item => {
-                                                    const soon = isSoonReady(item);
-                                                    const statusCfg = STATUS_MAP[item.status] || { label: item.status, className: '' };
-                                                    const isChecked = checkedIds.has(item.id);
-                                                    const canCheck = item.status === 'READY';
+                                            return (
+                                                <div
+                                                    key={item.id}
+                                                    className="glass-card"
+                                                    style={{
+                                                        padding: 16,
+                                                        opacity: soon ? 0.5 : 1,
+                                                        border: isChecked ? '2px solid var(--color-primary)' : undefined,
+                                                        cursor: canCheck ? 'pointer' : undefined,
+                                                    }}
+                                                    onClick={canCheck ? () => toggleChecked(item.id) : undefined}
+                                                >
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                            {canCheck && (
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={isChecked}
+                                                                    onChange={() => toggleChecked(item.id)}
+                                                                    onClick={e => e.stopPropagation()}
+                                                                    style={{ width: 18, height: 18, accentColor: 'var(--color-primary)', cursor: 'pointer' }}
+                                                                />
+                                                            )}
+                                                            <Link
+                                                                href={`/p/${slug}/warehouse/assembly/${item.id}`}
+                                                                style={{ fontWeight: 600, textDecoration: 'none', color: 'var(--color-text)' }}
+                                                                onClick={e => e.stopPropagation()}
+                                                            >
+                                                                {item.number}
+                                                            </Link>
+                                                        </div>
+                                                        <span className={`badge ${statusCfg.className}`}>
+                                                            {soon && item.estimated_ready_date
+                                                                ? formatDate(item.estimated_ready_date)
+                                                                : statusCfg.label}
+                                                        </span>
+                                                    </div>
 
-                                                    return (
-                                                        <div
-                                                            key={item.id}
-                                                            className="glass-card"
-                                                            style={{
-                                                                padding: 16,
-                                                                opacity: soon ? 0.5 : 1,
-                                                                border: isChecked ? '2px solid var(--color-primary)' : undefined,
-                                                                cursor: canCheck ? 'pointer' : undefined,
-                                                            }}
-                                                            onClick={canCheck ? () => toggleChecked(item.id) : undefined}
-                                                        >
-                                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                                                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                                                    {canCheck && (
-                                                                        <input
-                                                                            type="checkbox"
-                                                                            checked={isChecked}
-                                                                            onChange={() => toggleChecked(item.id)}
-                                                                            onClick={e => e.stopPropagation()}
-                                                                            style={{ width: 18, height: 18, accentColor: 'var(--color-primary)', cursor: 'pointer' }}
-                                                                        />
-                                                                    )}
-                                                                    <Link
-                                                                        href={`/p/${slug}/warehouse/assembly/${item.id}`}
-                                                                        style={{ fontWeight: 600, textDecoration: 'none', color: 'var(--color-text)' }}
-                                                                        onClick={e => e.stopPropagation()}
+                                                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                                                        {item.warehouse_name && (
+                                                            <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 2 }}>{item.warehouse_name}</div>
+                                                        )}
+                                                        {item.brands && (
+                                                            <div style={{ fontWeight: 500, color: 'var(--color-text)' }}>{item.brands}</div>
+                                                        )}
+                                                        <div>Палет: {item.pallets_count} &middot; Вес: {item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014'}</div>
+                                                        <div>Позиций: {item.items?.length || 0}</div>
+                                                        {item.wb_supply_id_wb && (
+                                                            <div style={{ fontFamily: 'monospace', fontSize: 12 }}>Поставка: {item.wb_supply_id_wb}</div>
+                                                        )}
+                                                        {item.wb_warehouse_name && (
+                                                            <div>WB: {item.wb_warehouse_name}</div>
+                                                        )}
+                                                    </div>
+
+                                                    {!soon && (
+                                                        <div style={{ display: 'flex', gap: 8 }}>
+                                                            {item.status === 'READY' && (
+                                                                <button
+                                                                    className="btn btn-primary btn-sm"
+                                                                    onClick={() => openVehicleModal([item.id])}
+                                                                    disabled={actionLoading}
+                                                                >
+                                                                    Назначить машину
+                                                                </button>
+                                                            )}
+                                                            {item.status === 'VEHICLE_ASSIGNED' && (
+                                                                <>
+                                                                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', flex: 1 }}>
+                                                                        {item.vehicle_info}
+                                                                    </div>
+                                                                    <button
+                                                                        className="btn btn-primary btn-sm"
+                                                                        onClick={() => handleShip(item.id)}
+                                                                        disabled={actionLoading}
                                                                     >
-                                                                        {item.number}
-                                                                    </Link>
-                                                                </div>
-                                                                <span className={`badge ${statusCfg.className}`}>
-                                                                    {soon && item.estimated_ready_date
-                                                                        ? formatDate(item.estimated_ready_date)
-                                                                        : statusCfg.label}
-                                                                </span>
-                                                            </div>
-
-                                                            <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
-                                                                {item.brands && (
-                                                                    <div style={{ fontWeight: 500, color: 'var(--color-text)' }}>{item.brands}</div>
-                                                                )}
-                                                                <div>Палет: {item.pallets_count} &middot; Вес: {item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014'}</div>
-                                                                <div>Позиций: {item.items?.length || 0}</div>
-                                                                {item.wb_supply_id_wb && (
-                                                                    <div style={{ fontFamily: 'monospace', fontSize: 12 }}>Поставка: {item.wb_supply_id_wb}</div>
-                                                                )}
-                                                                {item.wb_warehouse_name && (
-                                                                    <div>WB: {item.wb_warehouse_name}</div>
-                                                                )}
-                                                            </div>
-
-                                                            {!soon && (
-                                                                <div style={{ display: 'flex', gap: 8 }}>
-                                                                    {item.status === 'READY' && (
-                                                                        <button
-                                                                            className="btn btn-primary btn-sm"
-                                                                            onClick={() => openVehicleModal([item.id])}
-                                                                            disabled={actionLoading}
-                                                                        >
-                                                                            Назначить машину
-                                                                        </button>
-                                                                    )}
-                                                                    {item.status === 'VEHICLE_ASSIGNED' && (
-                                                                        <>
-                                                                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', flex: 1 }}>
-                                                                                {item.vehicle_info}
-                                                                            </div>
-                                                                            <button
-                                                                                className="btn btn-primary btn-sm"
-                                                                                onClick={() => handleShip(item.id)}
-                                                                                disabled={actionLoading}
-                                                                            >
-                                                                                Отгрузить
-                                                                            </button>
-                                                                        </>
-                                                                    )}
-                                                                </div>
+                                                                        Отгрузить
+                                                                    </button>
+                                                                </>
                                                             )}
                                                         </div>
-                                                    );
-                                                })}
-                                            </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
 
-                                            {/* Bulk assign for READY items in this sub-group */}
-                                            {(() => {
-                                                const readyIds = sub.items.filter(i => i.status === 'READY').map(i => i.id);
-                                                if (readyIds.length > 1) {
-                                                    return (
-                                                        <div style={{ marginTop: 8, padding: '0 4px' }}>
-                                                            <button
-                                                                className="btn btn-secondary btn-sm"
-                                                                onClick={() => openVehicleModal(readyIds)}
-                                                                disabled={actionLoading}
-                                                            >
-                                                                Назначить машину для всех ({readyIds.length})
-                                                            </button>
-                                                        </div>
-                                                    );
-                                                }
-                                                return null;
-                                            })()}
-                                        </div>
-                                    ))}
+                                    {/* Bulk assign buttons per sub-group */}
+                                    {group.subGroups.map(sub => {
+                                        const readyIds = sub.items.filter(i => i.status === 'READY').map(i => i.id);
+                                        if (readyIds.length <= 1) return null;
+                                        return (
+                                            <div key={sub.key} style={{ marginTop: 8, padding: '0 4px' }}>
+                                                <button
+                                                    className="btn btn-secondary btn-sm"
+                                                    onClick={() => openVehicleModal(readyIds)}
+                                                    disabled={actionLoading}
+                                                >
+                                                    Назначить машину для всех {sub.label ? `"${sub.label}"` : ''} ({readyIds.length})
+                                                </button>
+                                            </div>
+                                        );
+                                    })}
                                 </div>
                             ))}
                         </div>

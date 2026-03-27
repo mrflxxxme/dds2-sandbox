@@ -36,6 +36,7 @@ async def list_assembly_requests(
     search: str | None = Query(None),
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
+    brand: str | None = Query(None),
     limit: int = Query(50, le=500),
     offset: int = Query(0, ge=0),
     project: Project = Depends(get_current_project),
@@ -50,6 +51,7 @@ async def list_assembly_requests(
         search=search,
         date_from=date_from,
         date_to=date_to,
+        brand=brand,
         limit=limit,
         offset=offset,
     )

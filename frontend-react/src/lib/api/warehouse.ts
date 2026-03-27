@@ -120,7 +120,8 @@ export function addWarehouseMethods(api: ApiClient) {
         // ─── Assembly Requests ──────────────────────────────────────────
         getAssemblyRequests(params?: {
             warehouse_id?: number; status?: string; search?: string;
-            date_from?: string; date_to?: string; limit?: number; offset?: number;
+            date_from?: string; date_to?: string; brand?: string;
+            limit?: number; offset?: number;
         }) {
             const query = new URLSearchParams();
             if (params) {

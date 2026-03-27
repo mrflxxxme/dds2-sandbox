@@ -289,15 +289,20 @@ export default function AssemblyListPage() {
     const [dateTo, setDateTo] = useState('');
     const [searchInput, setSearchInput] = useState('');
     const [search, setSearch] = useState('');
+    const [brandFilter, setBrandFilter] = useState('');
     const [page, setPage] = useState(0);
     const PAGE_SIZE = 50;
 
     // Warehouse options (FULFILLMENT only)
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+    const [brandOptions, setBrandOptions] = useState<string[]>([]);
 
     useEffect(() => {
         api.getWarehouses()
             .then(whs => setWarehouses(whs.filter(w => w.warehouse_type === 'FULFILLMENT')))
+            .catch(() => {});
+        api.getWbBrands()
+            .then(brands => setBrandOptions(brands.sort()))
             .catch(() => {});
     }, []);
 
@@ -313,6 +318,7 @@ export default function AssemblyListPage() {
                 search: search || undefined,
                 date_from: dateFrom || undefined,
                 date_to: dateTo || undefined,
+                brand: brandFilter || undefined,
                 limit: PAGE_SIZE,
                 offset: page * PAGE_SIZE,
             });
@@ -322,7 +328,7 @@ export default function AssemblyListPage() {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         }
         setLoading(false);
-    }, [warehouseId, statusFilter, search, dateFrom, dateTo, page]);
+    }, [warehouseId, statusFilter, search, dateFrom, dateTo, brandFilter, page]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -498,6 +504,18 @@ export default function AssemblyListPage() {
                         >
                             {STATUS_OPTIONS_FILTER.map(o => (
                                 <option key={o.value} value={o.value}>{o.label}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <div className="form-group">
+                        <select
+                            className="form-input"
+                            value={brandFilter}
+                            onChange={e => { setBrandFilter(e.target.value); setPage(0); }}
+                        >
+                            <option value="">Все бренды</option>
+                            {brandOptions.map(b => (
+                                <option key={b} value={b}>{b}</option>
                             ))}
                         </select>
                     </div>

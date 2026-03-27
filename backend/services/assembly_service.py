@@ -247,6 +247,7 @@ async def list_assembly_requests(
     search: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
+    brand: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[AssemblyRequest], int]:
@@ -287,6 +288,20 @@ async def list_assembly_requests(
                 AssemblyRequest.wb_fbo_supply_id.in_(supply_ids_q),
             )
         )
+
+    if brand:
+        brand_noms = select(Nomenclature.id).where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.brand == brand,
+        )
+        brand_requests = (
+            select(AssemblyRequestItem.assembly_request_id)
+            .where(
+                AssemblyRequestItem.nomenclature_id.in_(brand_noms),
+            )
+            .distinct()
+        )
+        base = base.where(AssemblyRequest.id.in_(brand_requests))
 
     # Total count
     count_q = select(func.count()).select_from(base.subquery())
