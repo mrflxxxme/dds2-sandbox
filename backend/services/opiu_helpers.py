@@ -40,7 +40,7 @@ def build_aggregate_sql(brand: str | None, article: str | None) -> str:
     if brand:
         where += " AND brand_name = :brand"
     if article:
-        where += " AND LOWER(sa_name) LIKE :article_like"
+        where += " AND LOWER(sa_name) LIKE :article_like ESCAPE '\\'"
     return f"SELECT {_SELECT_COLS} FROM wb_finance_rows WHERE {where} GROUP BY month_key ORDER BY month_key"  # noqa: S608
 
 
@@ -60,7 +60,7 @@ def build_cost_qty_sql(brand: str | None, article: str | None) -> str:
     if brand:
         where += " AND brand_name = :brand"
     if article:
-        where += " AND LOWER(sa_name) LIKE :article_like"
+        where += " AND LOWER(sa_name) LIKE :article_like ESCAPE '\\'"
     return f"""SELECT
         COALESCE(to_char(sale_dt, 'YYYY-MM'), to_char(rr_dt, 'YYYY-MM'), to_char(date_from, 'YYYY-MM')) AS month_key,
         sa_name, nm_id,
@@ -82,7 +82,7 @@ def build_article_nm_ids_sql() -> str:
     return (
         f"SELECT DISTINCT nm_id FROM wb_finance_rows"  # noqa: S608
         f" WHERE project_id = :project_id AND {_DATE_FILTER}"
-        f" AND LOWER(sa_name) LIKE :article_like AND nm_id IS NOT NULL AND nm_id != 0"
+        f" AND LOWER(sa_name) LIKE :article_like ESCAPE '\\' AND nm_id IS NOT NULL AND nm_id != 0"
     )
 
 

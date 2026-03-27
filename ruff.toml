@@ -49,6 +49,13 @@ ignore = [
 "backend/routers/planning.py" = ["RUF001"]  # Cyrillic strings (ЗАКАЗ direction default)
 "backend/services/planning/brand_plan.py" = ["RUF001", "S608"]  # Cyrillic strings, SQL with brand clause (parameterized)
 "backend/routers/reports_wb.py" = ["B904", "RUF001", "RUF002", "RUF006", "S110", "SIM105"]  # Redis graceful degradation, Cyrillic strings, background tasks
+"backend/etl/service.py" = ["E402", "E712", "RUF006"]  # late imports, SQLAlchemy == False, background task ref
+"backend/etl/sync_payments.py" = ["E712", "RUF001", "RUF002", "RUF003", "S110", "SIM105"]  # SQLAlchemy == False, Cyrillic strings, try-except-pass
+"backend/routers/ws.py" = ["S110"]  # WebSocket try-except-pass for disconnect
+"backend/services/fx_service.py" = ["E712"]  # SQLAlchemy == True/False
+"backend/services/planning/crud.py" = ["E712"]  # SQLAlchemy == False
+"backend/services/planning/wb.py" = ["E712", "RUF001"]  # SQLAlchemy == False, Cyrillic strings
+"backend/services/reports/queries.py" = ["E711", "E712", "SIM108"]  # SQLAlchemy is None/== False, ternary
 
 [lint.isort]
 known-first-party = ["backend"]

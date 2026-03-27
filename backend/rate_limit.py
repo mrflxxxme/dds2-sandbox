@@ -56,9 +56,17 @@ class RateLimitMiddleware:
         if path in _SKIP_PATHS or method == "OPTIONS":
             return await self.app(scope, receive, send)
 
-        # Get client IP from scope
-        client = scope.get("client")
-        client_ip = client[0] if client else "unknown"
+        # Try X-Real-IP first (behind reverse proxy), fallback to direct client IP
+        x_real_ip = None
+        for header_name, header_value in scope.get("headers", []):
+            if header_name == b"x-real-ip":
+                x_real_ip = header_value.decode()
+                break
+        if x_real_ip:
+            client_ip = x_real_ip
+        else:
+            client = scope.get("client")
+            client_ip = client[0] if client else "unknown"
         bucket = _get_limit_key(path)
         max_requests, window = RATE_LIMITS[bucket]
 

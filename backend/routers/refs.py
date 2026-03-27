@@ -16,6 +16,7 @@ from backend.schemas import (
     CounterpartyCategorySchema,
     OpeningBalanceSchema,
 )
+from backend.schemas.refs import ExcludedWarehousesPayload, ProductTagMappingPayload, ProductTagSchema
 from backend.services import refs_service
 
 router = APIRouter(prefix="/refs")
@@ -196,23 +197,18 @@ async def get_excluded_warehouses(
 
 @router.put("/excluded-warehouses")
 async def set_excluded_warehouses(
-    payload: dict,
+    payload: ExcludedWarehousesPayload,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Set excluded warehouses. Body: {"warehouses": ["Новосибирск", ...]}"""
     from backend.services import settings_service
 
-    warehouses = payload.get("warehouses", [])
-    if not isinstance(warehouses, list):
-        raise HTTPException(400, "warehouses must be a list of strings")
-    result = await settings_service.set_excluded_warehouses(db, project.id, warehouses)
+    result = await settings_service.set_excluded_warehouses(db, project.id, payload.warehouses)
     return {"ok": True, "excluded": result}
 
 
 # ─── Product Tags ────────────────────────────────────────────────────────────
-
-from backend.schemas.refs import ProductTagMappingPayload, ProductTagSchema
 
 
 @router.get("/tags", response_model=list[ProductTagSchema])

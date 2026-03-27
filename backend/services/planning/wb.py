@@ -2,18 +2,17 @@
 Planning — WB Payouts (CRUD, reconciliation, forecast).
 """
 
-from datetime import date, datetime, timedelta
-
-from backend.utils.time import utcnow
+from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select, func, and_, or_, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import WbPayout, PlannedIncome, Transaction
-
+from backend.models import PlannedIncome, Transaction, WbPayout
+from backend.utils.time import utcnow
 
 # ─── WB Payouts CRUD ─────────────────────────────────────────────────────────
+
 
 async def upload_wb_payouts(db: AsyncSession, project_id: int, parsed: list[dict]):
     """Upsert WB payouts from parsed Excel data."""
@@ -42,8 +41,14 @@ async def upload_wb_payouts(db: AsyncSession, project_id: int, parsed: list[dict
     return created, updated, skipped
 
 
-async def get_wb_payouts(db: AsyncSession, project_id: int, status: str | None = None, limit: int = 500, offset: int = 0):
-    q = select(WbPayout).where(WbPayout.project_id == project_id, WbPayout.is_deleted == False).order_by(WbPayout.created_at.desc())
+async def get_wb_payouts(
+    db: AsyncSession, project_id: int, status: str | None = None, limit: int = 500, offset: int = 0
+):
+    q = (
+        select(WbPayout)
+        .where(WbPayout.project_id == project_id, WbPayout.is_deleted == False)
+        .order_by(WbPayout.created_at.desc())
+    )
     if status:
         q = q.where(WbPayout.status == status)
     q = q.limit(limit).offset(offset)
@@ -52,10 +57,12 @@ async def get_wb_payouts(db: AsyncSession, project_id: int, status: str | None =
 
 
 async def delete_wb_payout(db: AsyncSession, project_id: int, payout_id: int):
-    result = await db.execute(select(WbPayout).where(
-        WbPayout.id == payout_id,
-        WbPayout.project_id == project_id,
-    ))
+    result = await db.execute(
+        select(WbPayout).where(
+            WbPayout.id == payout_id,
+            WbPayout.project_id == project_id,
+        )
+    )
     obj = result.scalar_one_or_none()
     if not obj:
         return None
@@ -66,18 +73,23 @@ async def delete_wb_payout(db: AsyncSession, project_id: int, payout_id: int):
 
 async def manual_reconcile_wb(db: AsyncSession, project_id: int, payout_id: int, txn_id: str):
     """Manually match a WB payout with a bank transaction."""
-    result = await db.execute(select(WbPayout).where(
-        WbPayout.id == payout_id,
-        WbPayout.project_id == project_id,
-    ))
+    result = await db.execute(
+        select(WbPayout).where(
+            WbPayout.id == payout_id,
+            WbPayout.project_id == project_id,
+        )
+    )
     payout = result.scalar_one_or_none()
     if not payout:
         return None, "Payout not found"
 
-    txn = await db.execute(select(Transaction).where(
-        Transaction.txn_id == txn_id,
-        Transaction.project_id == project_id,
-    ))
+    txn = await db.execute(
+        select(Transaction).where(
+            Transaction.txn_id == txn_id,
+            Transaction.project_id == project_id,
+            Transaction.is_deleted == False,
+        )
+    )
     if not txn.scalar_one_or_none():
         return None, "Transaction not found"
 
@@ -89,6 +101,7 @@ async def manual_reconcile_wb(db: AsyncSession, project_id: int, payout_id: int,
 
 
 # ─── WB payout reconciliation ───────────────────────────────────────────────
+
 
 async def reconcile_wb_payouts(db: AsyncSession, project_id: int):
     """
@@ -131,11 +144,10 @@ async def reconcile_wb_payouts(db: AsyncSession, project_id: int):
                 ),
                 Transaction.counterparty.ilike("%вайлдберриз%"),
                 Transaction.counterparty.ilike("%wildberries%"),
-            )
+            ),
         )
     )
-    candidates = [t for t in candidates_result.scalars().all()
-                  if t.txn_id not in already_matched]
+    candidates = [t for t in candidates_result.scalars().all() if t.txn_id not in already_matched]
 
     if not candidates:
         return
@@ -149,8 +161,8 @@ async def reconcile_wb_payouts(db: AsyncSession, project_id: int):
         for txn in candidates:
             if txn.txn_id in used_txn_ids:
                 continue
-            txn_date = txn.date.date() if hasattr(txn.date, 'date') else txn.date
-            payout_date = payout.created_at.date() if hasattr(payout.created_at, 'date') else payout.created_at
+            txn_date = txn.date.date() if hasattr(txn.date, "date") else txn.date
+            payout_date = payout.created_at.date() if hasattr(payout.created_at, "date") else payout.created_at
             delta = (txn_date - payout_date).days
             if delta < -2 or delta > 5:
                 continue
@@ -171,6 +183,7 @@ async def reconcile_wb_payouts(db: AsyncSession, project_id: int):
 
 # ─── WB Forecast ─────────────────────────────────────────────────────────────
 
+
 async def refresh_wb_forecast(
     db: AsyncSession,
     project_id: int,
@@ -190,7 +203,8 @@ async def refresh_wb_forecast(
         select(
             func.date(Transaction.date).label("day"),
             func.sum(Transaction.income).label("daily_income"),
-        ).where(
+        )
+        .where(
             Transaction.project_id == project_id,
             Transaction.income > 0,
             Transaction.date >= lookback,
@@ -203,8 +217,9 @@ async def refresh_wb_forecast(
                 Transaction.counterparty.ilike("%вайлдберриз%"),
                 Transaction.counterparty.ilike("%wildberries%"),
                 Transaction.counterparty.ilike("%вайлд%"),
-            )
-        ).group_by(func.date(Transaction.date))
+            ),
+        )
+        .group_by(func.date(Transaction.date))
     )
     daily_data = {row.day: Decimal(str(row.daily_income or 0)) for row in result}
 
@@ -221,7 +236,7 @@ async def refresh_wb_forecast(
             break
         wd = d.weekday()
         weekday_counts[wd] += 1
-        if hasattr(d, 'isoformat'):
+        if hasattr(d, "isoformat"):
             amount = daily_data.get(d, Decimal("0"))
             if amount == 0:
                 amount = daily_data.get(d.isoformat(), Decimal("0"))

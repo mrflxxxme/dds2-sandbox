@@ -198,6 +198,7 @@ async def get_order_summary(
             Transaction.project_id == project_id,
             Transaction.annex_id == str(order_no),
             Transaction.purpose_tag == "Заказ",
+            Transaction.is_deleted == False,
         )
     )
     txn_orders = txn_order_result.scalars().all()
@@ -207,6 +208,7 @@ async def get_order_summary(
             Transaction.project_id == project_id,
             Transaction.purpose_tag == "Логистика",
             Transaction.annex_id == str(order_no),
+            Transaction.is_deleted == False,
         )
     )
     txn_logistics = txn_log_result.scalars().all()

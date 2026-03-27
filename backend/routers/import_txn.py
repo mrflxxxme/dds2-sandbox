@@ -10,6 +10,7 @@ from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas import (
+    AutoRuleCreate,
     BulkCategoryAssignment,
     CategoryAssignByIds,
     CategoryAssignment,
@@ -229,26 +230,21 @@ async def get_auto_rules(project: Project = Depends(get_current_project), db: As
 
 @router.post("/transactions/auto_categorize/rules")
 async def create_auto_rule(
-    payload: dict,
+    payload: AutoRuleCreate,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new auto-categorization rule."""
     from backend.services import auto_categorize
 
-    keyword = payload.get("keyword", "").strip()
-    cat_lvl1 = payload.get("cat_lvl1", "").strip()
-    if not keyword or not cat_lvl1:
-        raise HTTPException(400, "keyword and cat_lvl1 required")
-
     rule = await auto_categorize.create_rule(
         db,
         project.id,
-        keyword=keyword,
-        cat_lvl1=cat_lvl1,
-        cat_lvl2=payload.get("cat_lvl2"),
-        direction=payload.get("direction", "expense"),
-        priority=payload.get("priority", 0),
+        keyword=payload.keyword.strip(),
+        cat_lvl1=payload.cat_lvl1.strip(),
+        cat_lvl2=payload.cat_lvl2,
+        direction=payload.direction,
+        priority=payload.priority,
     )
     return {
         "id": rule.id,

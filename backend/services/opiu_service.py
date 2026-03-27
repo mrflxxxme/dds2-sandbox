@@ -69,7 +69,8 @@ async def get_opiu(
     if brand:
         params["brand"] = brand
     if article:
-        params["article_like"] = f"%{article.lower()}%"
+        _esc = article.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params["article_like"] = f"%{_esc}%"
 
     # ── 1. SQL aggregation — returns ~3 rows instead of 634K ──
     result = await db.execute(text(build_aggregate_sql(brand, article)), params)

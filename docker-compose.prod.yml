@@ -3,15 +3,15 @@ services:
     image: postgres:15
     env_file: .env
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-dds}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dds_secret}
-      POSTGRES_DB: ${POSTGRES_DB:-dds_db}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set}
     command: postgres -c 'config_file=/etc/postgresql/postgresql.conf'
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dds}" ]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?POSTGRES_USER must be set}" ]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -29,7 +29,7 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/dds_db
+      DATABASE_URL: postgres://${POSTGRES_USER:?POSTGRES_USER must be set}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/dds_db
       POOL_MODE: transaction
       DEFAULT_POOL_SIZE: 20
       MIN_POOL_SIZE: 5
@@ -51,7 +51,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: redis-server --requirepass ${REDIS_PASSWORD:-dds_redis_secret} --maxmemory 256mb --maxmemory-policy volatile-lru
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set} --maxmemory 256mb --maxmemory-policy volatile-lru
     volumes:
       - redisdata:/data
     deploy:
@@ -59,7 +59,7 @@ services:
         limits:
           memory: 320M
     healthcheck:
-      test: [ "CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-dds_redis_secret}", "ping" ]
+      test: [ "CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}", "ping" ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -71,8 +71,8 @@ services:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY must be set}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY must be set}
     volumes:
       - miniodata:/data
     deploy:
@@ -99,12 +99,12 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@pgbouncer:5432/dds_db?prepared_statement_cache_size=0
-      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/dds_db
-      REDIS_URL: ${REDIS_URL:-redis://:dds_redis_secret@redis:6379/0}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?POSTGRES_USER must be set}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@pgbouncer:5432/dds_db?prepared_statement_cache_size=0
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:?POSTGRES_USER must be set}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/dds_db
+      REDIS_URL: ${REDIS_URL:?REDIS_URL must be set}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY must be set}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY must be set}
       MINIO_BUCKET: ${MINIO_BUCKET:-dds-files}
       MINIO_SECURE: ${MINIO_SECURE:-false}
       DDS_ROLE: api
@@ -132,12 +132,12 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@pgbouncer:5432/dds_db?prepared_statement_cache_size=0
-      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/dds_db
-      REDIS_URL: ${REDIS_URL:-redis://:dds_redis_secret@redis:6379/0}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?POSTGRES_USER must be set}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@pgbouncer:5432/dds_db?prepared_statement_cache_size=0
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:?POSTGRES_USER must be set}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/dds_db
+      REDIS_URL: ${REDIS_URL:?REDIS_URL must be set}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY must be set}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY must be set}
       MINIO_BUCKET: ${MINIO_BUCKET:-dds-files}
       MINIO_SECURE: ${MINIO_SECURE:-false}
       DDS_ROLE: worker
@@ -202,9 +202,9 @@ services:
     env_file: .env
     environment:
       PGHOST: db
-      POSTGRES_USER: ${POSTGRES_USER:-dds}
-      POSTGRES_DB: ${POSTGRES_DB:-dds_db}
-      PGPASSWORD: ${POSTGRES_PASSWORD:-dds_secret}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       BACKUP_DIR: /backups
       BACKUP_RETENTION_DAYS: "14"
       BACKUP_INTERVAL_HOURS: "6"

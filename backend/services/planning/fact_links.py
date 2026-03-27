@@ -47,6 +47,7 @@ async def create_fact_link(
         select(Transaction).where(
             Transaction.txn_id == txn_id,
             Transaction.project_id == project_id,
+            Transaction.is_deleted == False,
         )
     )
     if not txn.scalar_one_or_none():

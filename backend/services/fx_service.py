@@ -1,16 +1,17 @@
 """
 FX Service — rate extraction from transactions, backfill, and lookup.
 """
-import re
+
 import logging
+import re
 from datetime import date as date_type
 from decimal import Decimal
 
-from sqlalchemy import select, func, and_, or_
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import Transaction, FxRate
+from backend.models import FxRate, Transaction
 
 logger = logging.getLogger("dds.fx_service")
 
@@ -40,12 +41,15 @@ async def backfill_rates_from_transactions(db: AsyncSession, project_id: int) ->
     Returns {"inserted": N, "skipped": M}.
     """
     result = await db.execute(
-        select(Transaction).where(
+        select(Transaction)
+        .where(
             Transaction.project_id == project_id,
             Transaction.is_fx == True,
             Transaction.currency == "RUB",
             Transaction.expense > 0,
-        ).order_by(Transaction.date)
+            Transaction.is_deleted == False,
+        )
+        .order_by(Transaction.date)
     )
     rows = result.scalars().all()
 
@@ -58,18 +62,20 @@ async def backfill_rates_from_transactions(db: AsyncSession, project_id: int) ->
             skipped += 1
             continue
 
-        txn_date = txn.date.date() if hasattr(txn.date, 'date') else txn.date
+        txn_date = txn.date.date() if hasattr(txn.date, "date") else txn.date
 
         # Upsert: insert if not exists
-        stmt = pg_insert(FxRate).values(
-            project_id=project_id,
-            date=txn_date,
-            pair="CNY/RUB",
-            rate=Decimal(str(rate)),
-            source="vtb_import",
-            txn_id=txn.txn_id,
-        ).on_conflict_do_nothing(
-            constraint="uq_fx_rate_txn"
+        stmt = (
+            pg_insert(FxRate)
+            .values(
+                project_id=project_id,
+                date=txn_date,
+                pair="CNY/RUB",
+                rate=Decimal(str(rate)),
+                source="vtb_import",
+                txn_id=txn.txn_id,
+            )
+            .on_conflict_do_nothing(constraint="uq_fx_rate_txn")
         )
         res = await db.execute(stmt)
         if res.rowcount > 0:
@@ -103,11 +109,14 @@ async def get_rate_for_date(
 
     # Fallback: closest previous date
     result = await db.execute(
-        select(FxRate.rate).where(
+        select(FxRate.rate)
+        .where(
             FxRate.project_id == project_id,
             FxRate.date <= target_date,
             FxRate.pair == pair,
-        ).order_by(FxRate.date.desc()).limit(1)
+        )
+        .order_by(FxRate.date.desc())
+        .limit(1)
     )
     rate = result.scalar()
     if rate is not None:
@@ -115,11 +124,14 @@ async def get_rate_for_date(
 
     # Fallback: closest future date
     result = await db.execute(
-        select(FxRate.rate).where(
+        select(FxRate.rate)
+        .where(
             FxRate.project_id == project_id,
             FxRate.date >= target_date,
             FxRate.pair == pair,
-        ).order_by(FxRate.date.asc()).limit(1)
+        )
+        .order_by(FxRate.date.asc())
+        .limit(1)
     )
     rate = result.scalar()
     return float(rate) if rate is not None else None
@@ -133,10 +145,13 @@ async def get_rates_map(
     For dates without an exact rate, fills from the closest previous.
     """
     result = await db.execute(
-        select(FxRate.date, func.avg(FxRate.rate).label("rate")).where(
+        select(FxRate.date, func.avg(FxRate.rate).label("rate"))
+        .where(
             FxRate.project_id == project_id,
             FxRate.pair == pair,
-        ).group_by(FxRate.date).order_by(FxRate.date)
+        )
+        .group_by(FxRate.date)
+        .order_by(FxRate.date)
     )
     rates_raw = [(r.date, float(r.rate)) for r in result]
 

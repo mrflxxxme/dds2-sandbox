@@ -15,20 +15,21 @@ Usage (frontend):
 import asyncio
 import json
 import logging
-from typing import Dict, Set
-from weakref import WeakSet
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
-from jose import jwt, JWTError
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from jose import JWTError, jwt
+from sqlalchemy import select
 
 from backend.config import settings
+from backend.database import AsyncSessionLocal
+from backend.models.auth import ProjectMember
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 # Active WebSocket connections grouped by project_id
-_connections: Dict[int, Set[WebSocket]] = {}
+_connections: dict[int, set[WebSocket]] = {}
 _lock = asyncio.Lock()
 
 
@@ -101,17 +102,38 @@ async def ws_sync(
         await websocket.close(code=4001, reason="Invalid token")
         return
 
+    # Check project membership
+    user_id_str = payload.get("sub") or payload.get("user_id")
+    try:
+        user_id = int(user_id_str)
+    except (TypeError, ValueError):
+        await websocket.close(code=4001, reason="Invalid token")
+        return
+
+    async with AsyncSessionLocal() as db:
+        member = await db.scalar(
+            select(ProjectMember).where(
+                ProjectMember.project_id == project_id,
+                ProjectMember.user_id == user_id,
+            )
+        )
+    if not member:
+        await websocket.close(code=4003, reason="Not a project member")
+        return
+
     await websocket.accept()
     await _add_connection(project_id, websocket)
     logger.info("WS connected: project_id=%s, user=%s", project_id, payload.get("sub"))
 
     try:
         # Send initial connected message
-        await websocket.send_json({
-            "event": "connected",
-            "project_id": project_id,
-            "message": "Подключено к обновлениям синхронизации",
-        })
+        await websocket.send_json(
+            {
+                "event": "connected",
+                "project_id": project_id,
+                "message": "Подключено к обновлениям синхронизации",
+            }
+        )
 
         # Keep connection alive — wait for disconnect
         while True:
@@ -120,7 +142,7 @@ async def ws_sync(
                 data = await asyncio.wait_for(websocket.receive_text(), timeout=30)
                 if data == "ping":
                     await websocket.send_text("pong")
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Send keepalive ping
                 try:
                     await websocket.send_json({"event": "ping"})

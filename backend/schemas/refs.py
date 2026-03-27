@@ -82,3 +82,9 @@ class ProductTagMappingPayload(BaseModel):
     nm_ids: list[int]
     add_tags: list[int]
     remove_tags: list[int]
+
+
+class ExcludedWarehousesPayload(BaseModel):
+    """Input payload for setting excluded warehouses."""
+
+    warehouses: list[str]

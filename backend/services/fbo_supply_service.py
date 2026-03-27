@@ -420,11 +420,12 @@ async def list_fbo_supplies(
 
     # Search by wb_supply_id or name
     if search:
-        search_term = f"%{search}%"
+        _esc = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        search_term = f"%{_esc}%"
         base_query = base_query.where(
             or_(
-                WbFboSupply.wb_supply_id.ilike(search_term),
-                WbFboSupply.name.ilike(search_term),
+                WbFboSupply.wb_supply_id.ilike(search_term, escape="\\"),
+                WbFboSupply.name.ilike(search_term, escape="\\"),
             )
         )
 

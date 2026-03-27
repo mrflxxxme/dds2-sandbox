@@ -4,16 +4,20 @@ Extracted from etl/service.py for maintainability.
 """
 
 import re as _re
-import logging
 from decimal import Decimal, InvalidOperation
 
 import structlog
-from sqlalchemy.orm import Session
 from sqlalchemy import select, text
+from sqlalchemy.orm import Session
 
 from backend.models import (
-    Transaction, CustomsTopup, PlannedPayment, CustomsAlloc,
-    CustomsDT, PaymentFactLink, CostOrder,
+    CostOrder,
+    CustomsAlloc,
+    CustomsDT,
+    CustomsTopup,
+    PaymentFactLink,
+    PlannedPayment,
+    Transaction,
 )
 
 logger = structlog.get_logger("dds.etl")
@@ -21,16 +25,22 @@ logger = structlog.get_logger("dds.etl")
 
 def sync_customs_topup(db: Session, project_id: int):
     """Sync customs topup records from CUSTOMS_PAYMENT transactions."""
-    customs_txns = db.execute(
-        select(Transaction).where(
-            Transaction.project_id == project_id,
-            Transaction.event_type2 == "CUSTOMS_PAYMENT",
-            Transaction.expense > 0,
+    customs_txns = (
+        db.execute(
+            select(Transaction).where(
+                Transaction.project_id == project_id,
+                Transaction.event_type2 == "CUSTOMS_PAYMENT",
+                Transaction.expense > 0,
+                Transaction.is_deleted == False,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     existing_ids = set(
-        row[0] for row in db.execute(
+        row[0]
+        for row in db.execute(
             text("SELECT topup_txn_id FROM customs_topup WHERE project_id = :pid"),
             {"pid": project_id},
         )
@@ -58,12 +68,16 @@ def sync_plan_payments(db: Session, project_id: int):
     - ДОСТАВКА: Transaction.invoice_id == CostOrder.invoice_no AND purpose_tag == 'Логистика' → sum(expense)
     - ТАМОЖНЯ:  CustomsAlloc.order_no == order_no → sum(alloc_amount)
     """
-    payments = db.execute(
-        select(PlannedPayment).where(
-            PlannedPayment.project_id == project_id,
-            PlannedPayment.is_deleted == False,
+    payments = (
+        db.execute(
+            select(PlannedPayment).where(
+                PlannedPayment.project_id == project_id,
+                PlannedPayment.is_deleted == False,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     if not payments:
         return
 
@@ -72,13 +86,18 @@ def sync_plan_payments(db: Session, project_id: int):
         return
 
     # Build invoice_no map: order_no_int → invoice_no (str)
-    cost_orders = db.execute(
-        select(CostOrder).where(
-            CostOrder.project_id == project_id,
-            CostOrder.is_deleted == False,
+    cost_orders = (
+        db.execute(
+            select(CostOrder).where(
+                CostOrder.project_id == project_id,
+                CostOrder.is_deleted == False,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     from backend.services.cost.helpers import _order_no_to_int
+
     invoice_map = {}
     for co in cost_orders:
         try:
@@ -88,14 +107,18 @@ def sync_plan_payments(db: Session, project_id: int):
 
     # ЗАКАЗ fact
     order_fact_ccy = {}
-    txns_order = db.execute(
-        select(Transaction).where(
-            Transaction.project_id == project_id,
-            Transaction.is_deleted == False,
-            Transaction.purpose_tag == "Заказ",
-            Transaction.expense > 0,
+    txns_order = (
+        db.execute(
+            select(Transaction).where(
+                Transaction.project_id == project_id,
+                Transaction.is_deleted == False,
+                Transaction.purpose_tag == "Заказ",
+                Transaction.expense > 0,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for t in txns_order:
         if t.annex_id:
             try:
@@ -109,17 +132,22 @@ def sync_plan_payments(db: Session, project_id: int):
 
     # ДОСТАВКА fact
     delivery_fact_ccy = {}
-    txns_delivery = db.execute(
-        select(Transaction).where(
-            Transaction.project_id == project_id,
-            Transaction.is_deleted == False,
-            Transaction.purpose_tag == "Логистика",
-            Transaction.expense > 0,
+    txns_delivery = (
+        db.execute(
+            select(Transaction).where(
+                Transaction.project_id == project_id,
+                Transaction.is_deleted == False,
+                Transaction.purpose_tag == "Логистика",
+                Transaction.expense > 0,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     def _norm_invoice(s: str) -> str:
         return s.replace("С", "C").replace("с", "c").strip() if s else ""
+
     inv_to_order = {_norm_invoice(v): k for k, v in invoice_map.items() if v}
     for t in txns_delivery:
         inv_key = _norm_invoice(t.invoice_id) if t.invoice_id else ""
@@ -131,12 +159,8 @@ def sync_plan_payments(db: Session, project_id: int):
             delivery_fact_ccy[ono][ccy] = delivery_fact_ccy[ono].get(ccy, Decimal("0")) + (t.expense or Decimal("0"))
 
     # VTB Commission matching
-    _re_vtb_commission_amount = _re.compile(
-        r"ВТБ Шанхай.*?на сумму\s+([\d.,\s]+)\s*['\"]?CNY", _re.IGNORECASE
-    )
-    _re_pmnt_amount = _re.compile(
-        r"PMNT\s+([\d\s,.]+)\s*CNY", _re.IGNORECASE
-    )
+    _re_vtb_commission_amount = _re.compile(r"ВТБ Шанхай.*?на сумму\s+([\d.,\s]+)\s*['\"]?CNY", _re.IGNORECASE)
+    _re_pmnt_amount = _re.compile(r"PMNT\s+([\d\s,.]+)\s*CNY", _re.IGNORECASE)
 
     amount_to_payment = {}
     for p in payments:
@@ -158,15 +182,19 @@ def sync_plan_payments(db: Session, project_id: int):
                 except (ValueError, TypeError, InvalidOperation):
                     pass
 
-    txns_commission = db.execute(
-        select(Transaction).where(
-            Transaction.project_id == project_id,
-            Transaction.is_deleted == False,
-            Transaction.purpose_tag == "Комиссия",
-            Transaction.expense > 0,
-            Transaction.purpose.ilike("%ВТБ Шанхай%"),
+    txns_commission = (
+        db.execute(
+            select(Transaction).where(
+                Transaction.project_id == project_id,
+                Transaction.is_deleted == False,
+                Transaction.purpose_tag == "Комиссия",
+                Transaction.expense > 0,
+                Transaction.purpose.ilike("%ВТБ Шанхай%"),
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for t in txns_commission:
         purpose = t.purpose or ""
         m = _re_vtb_commission_amount.search(purpose)
@@ -191,44 +219,60 @@ def sync_plan_payments(db: Session, project_id: int):
                     if matched_dir == "ЗАКАЗ":
                         if matched_order not in order_fact_ccy:
                             order_fact_ccy[matched_order] = {}
-                        order_fact_ccy[matched_order][ccy] = order_fact_ccy[matched_order].get(ccy, Decimal("0")) + (t.expense or Decimal("0"))
+                        order_fact_ccy[matched_order][ccy] = order_fact_ccy[matched_order].get(ccy, Decimal("0")) + (
+                            t.expense or Decimal("0")
+                        )
                     elif matched_dir == "ДОСТАВКА":
                         if matched_order not in delivery_fact_ccy:
                             delivery_fact_ccy[matched_order] = {}
-                        delivery_fact_ccy[matched_order][ccy] = delivery_fact_ccy[matched_order].get(ccy, Decimal("0")) + (t.expense or Decimal("0"))
+                        delivery_fact_ccy[matched_order][ccy] = delivery_fact_ccy[matched_order].get(
+                            ccy, Decimal("0")
+                        ) + (t.expense or Decimal("0"))
             except (ValueError, InvalidOperation):
                 pass
 
     # ТАМОЖНЯ fact
     customs_fact = {}
-    allocs = db.execute(
-        select(CustomsAlloc).where(
-            CustomsAlloc.project_id == project_id,
+    allocs = (
+        db.execute(
+            select(CustomsAlloc).where(
+                CustomsAlloc.project_id == project_id,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for a in allocs:
         if a.order_no:
             customs_fact[a.order_no] = customs_fact.get(a.order_no, Decimal("0")) + (a.alloc_amount or Decimal("0"))
 
-    dts = db.execute(
-        select(CustomsDT).where(
-            CustomsDT.project_id == project_id,
-            CustomsDT.is_deleted == False,
-            CustomsDT.order_no.isnot(None),
+    dts = (
+        db.execute(
+            select(CustomsDT).where(
+                CustomsDT.project_id == project_id,
+                CustomsDT.is_deleted == False,
+                CustomsDT.order_no.isnot(None),
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for d in dts:
         customs_fact[d.order_no] = customs_fact.get(d.order_no, Decimal("0")) + (d.amount_rub or Decimal("0"))
 
     # Manual fact links
-    manual_links = db.execute(
-        select(PaymentFactLink).join(
-            PlannedPayment, PaymentFactLink.payment_id == PlannedPayment.id
-        ).where(
-            PlannedPayment.project_id == project_id,
-            PaymentFactLink.is_deleted == False,
+    manual_links = (
+        db.execute(
+            select(PaymentFactLink)
+            .join(PlannedPayment, PaymentFactLink.payment_id == PlannedPayment.id)
+            .where(
+                PlannedPayment.project_id == project_id,
+                PaymentFactLink.is_deleted == False,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     manual_map = {}
     for ml in manual_links:
         manual_map[ml.payment_id] = manual_map.get(ml.payment_id, Decimal("0")) + (ml.amount_rub or Decimal("0"))

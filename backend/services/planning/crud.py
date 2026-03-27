@@ -3,15 +3,15 @@ Planning — CRUD operations for Orders, Lead Times, Payments, Incomes.
 """
 
 import logging
-from datetime import date, datetime
-from decimal import Decimal
-from typing import Optional
 
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import (
-    PlannedPayment, PlannedIncome, Order, LeadTime,
+    LeadTime,
+    Order,
+    PlannedIncome,
+    PlannedPayment,
 )
 
 logger = logging.getLogger("dds.planning")
@@ -19,11 +19,14 @@ logger = logging.getLogger("dds.planning")
 
 # ─── Orders CRUD ─────────────────────────────────────────────────────────────
 
+
 async def get_orders(db: AsyncSession, project_id: int, limit: int = 500, offset: int = 0):
     result = await db.execute(
-        select(Order).where(Order.project_id == project_id, Order.is_deleted == False)
+        select(Order)
+        .where(Order.project_id == project_id, Order.is_deleted == False)
         .order_by(Order.planned_ship_date.desc().nullslast())
-        .limit(limit).offset(offset)
+        .limit(limit)
+        .offset(offset)
     )
     return result.scalars().all()
 
@@ -31,7 +34,7 @@ async def get_orders(db: AsyncSession, project_id: int, limit: int = 500, offset
 async def upsert_order(db: AsyncSession, project_id: int, data: dict, obj_id: int | None):
     if obj_id:
         result = await db.execute(
-            select(Order).where(Order.id == obj_id, Order.project_id == project_id)
+            select(Order).where(Order.id == obj_id, Order.project_id == project_id, Order.is_deleted == False)
         )
         obj = result.scalar_one_or_none()
         if obj:
@@ -50,7 +53,7 @@ async def upsert_order(db: AsyncSession, project_id: int, data: dict, obj_id: in
 
 async def delete_order(db: AsyncSession, project_id: int, order_id: int):
     result = await db.execute(
-        select(Order).where(Order.id == order_id, Order.project_id == project_id)
+        select(Order).where(Order.id == order_id, Order.project_id == project_id, Order.is_deleted == False)
     )
     obj = result.scalar_one_or_none()
     if not obj:
@@ -62,11 +65,9 @@ async def delete_order(db: AsyncSession, project_id: int, order_id: int):
 
 # ─── Lead Times CRUD ─────────────────────────────────────────────────────────
 
+
 async def get_lead_times(db: AsyncSession, project_id: int):
-    result = await db.execute(
-        select(LeadTime).where(LeadTime.project_id == project_id)
-        .order_by(LeadTime.direction)
-    )
+    result = await db.execute(select(LeadTime).where(LeadTime.project_id == project_id).order_by(LeadTime.direction))
     return result.scalars().all()
 
 
@@ -90,7 +91,10 @@ async def upsert_lead_time(db: AsyncSession, project_id: int, direction: str, da
 
 # ─── Payments CRUD ───────────────────────────────────────────────────────────
 
-async def get_payments(db: AsyncSession, project_id: int, order_no: int | None = None, limit: int = 500, offset: int = 0):
+
+async def get_payments(
+    db: AsyncSession, project_id: int, order_no: int | None = None, limit: int = 500, offset: int = 0
+):
     q = select(PlannedPayment).where(PlannedPayment.project_id == project_id, PlannedPayment.is_deleted == False)
     if order_no:
         q = q.where(PlannedPayment.order_no == order_no)
@@ -102,9 +106,7 @@ async def get_payments(db: AsyncSession, project_id: int, order_no: int | None =
 async def upsert_payment(db: AsyncSession, project_id: int, data: dict, obj_id: int | None):
     if obj_id:
         result = await db.execute(
-            select(PlannedPayment).where(
-                PlannedPayment.id == obj_id, PlannedPayment.project_id == project_id
-            )
+            select(PlannedPayment).where(PlannedPayment.id == obj_id, PlannedPayment.project_id == project_id)
         )
         obj = result.scalar_one_or_none()
         if obj:
@@ -123,9 +125,7 @@ async def upsert_payment(db: AsyncSession, project_id: int, data: dict, obj_id: 
 
 async def delete_payment(db: AsyncSession, project_id: int, payment_id: int):
     result = await db.execute(
-        select(PlannedPayment).where(
-            PlannedPayment.id == payment_id, PlannedPayment.project_id == project_id
-        )
+        select(PlannedPayment).where(PlannedPayment.id == payment_id, PlannedPayment.project_id == project_id)
     )
     obj = result.scalar_one_or_none()
     if not obj:
@@ -137,9 +137,7 @@ async def delete_payment(db: AsyncSession, project_id: int, payment_id: int):
 
 async def mark_paid(db: AsyncSession, project_id: int, payment_id: int):
     result = await db.execute(
-        select(PlannedPayment).where(
-            PlannedPayment.id == payment_id, PlannedPayment.project_id == project_id
-        )
+        select(PlannedPayment).where(PlannedPayment.id == payment_id, PlannedPayment.project_id == project_id)
     )
     obj = result.scalar_one_or_none()
     if not obj:
@@ -151,11 +149,14 @@ async def mark_paid(db: AsyncSession, project_id: int, payment_id: int):
 
 # ─── Incomes CRUD ────────────────────────────────────────────────────────────
 
+
 async def get_incomes(db: AsyncSession, project_id: int, limit: int = 500, offset: int = 0):
     result = await db.execute(
-        select(PlannedIncome).where(PlannedIncome.project_id == project_id)
+        select(PlannedIncome)
+        .where(PlannedIncome.project_id == project_id)
         .order_by(PlannedIncome.date)
-        .limit(limit).offset(offset)
+        .limit(limit)
+        .offset(offset)
     )
     return result.scalars().all()
 
@@ -163,9 +164,7 @@ async def get_incomes(db: AsyncSession, project_id: int, limit: int = 500, offse
 async def upsert_income(db: AsyncSession, project_id: int, data: dict, obj_id: int | None):
     if obj_id:
         result = await db.execute(
-            select(PlannedIncome).where(
-                PlannedIncome.id == obj_id, PlannedIncome.project_id == project_id
-            )
+            select(PlannedIncome).where(PlannedIncome.id == obj_id, PlannedIncome.project_id == project_id)
         )
         obj = result.scalar_one_or_none()
         if obj:
@@ -185,9 +184,7 @@ async def upsert_income(db: AsyncSession, project_id: int, data: dict, obj_id: i
 
 async def delete_income(db: AsyncSession, project_id: int, income_id: int):
     result = await db.execute(
-        select(PlannedIncome).where(
-            PlannedIncome.id == income_id, PlannedIncome.project_id == project_id
-        )
+        select(PlannedIncome).where(PlannedIncome.id == income_id, PlannedIncome.project_id == project_id)
     )
     obj = result.scalar_one_or_none()
     if not obj:

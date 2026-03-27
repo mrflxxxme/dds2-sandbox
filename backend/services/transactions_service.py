@@ -245,6 +245,7 @@ async def assign_category(
         select(Transaction).where(
             Transaction.txn_id == txn_id,
             Transaction.project_id == project_id,
+            Transaction.is_deleted == False,
         )
     )
     txn = result.scalar_one_or_none()

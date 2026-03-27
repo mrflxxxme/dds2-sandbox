@@ -112,6 +112,7 @@ from backend.schemas.tax import (
 
 # Transactions
 from backend.schemas.transactions import (
+    AutoRuleCreate,
     BulkCategoryAssignment,
     CategoryAssignByIds,
     CategoryAssignment,
@@ -175,6 +176,7 @@ __all__ = [
     "ProductTagSchema",
     "ProductTagMappingPayload",
     # Transactions
+    "AutoRuleCreate",
     "TransactionSchema",
     "TransactionFilter",
     "CategoryAssignment",

@@ -6,31 +6,32 @@ Sync modules extracted:
 - etl/sync_wb_payouts.py: WB payout bank reconciliation
 """
 
-import logging
-from datetime import datetime, timezone
+from decimal import Decimal
+
+import structlog
+from sqlalchemy import select, text
+from sqlalchemy.orm import Session
 
 from backend.utils.time import utcnow
-from decimal import Decimal, InvalidOperation
-from typing import Optional
-
-import pandas as pd
-import structlog
-from sqlalchemy.orm import Session
-from sqlalchemy import select, text
 
 logger = structlog.get_logger("dds.etl")
 
-from backend.models import (
-    Transaction, Account, CounterpartyCategory, Override,
-    ImportLog,
-)
-from backend.etl.parsers import parse_statement
 from backend.etl.master_logic import apply_master_logic
+from backend.etl.parsers import parse_statement
 
 # Re-export for backward compatibility (used by routers/planning.py)
-from backend.etl.sync_payments import sync_plan_payments as _sync_plan_payments
-from backend.etl.sync_payments import sync_customs_topup as _sync_customs_topup
+from backend.etl.sync_payments import (
+    sync_customs_topup as _sync_customs_topup,
+    sync_plan_payments as _sync_plan_payments,
+)
 from backend.etl.sync_wb_payouts import sync_wb_payouts as _sync_wb_payouts
+from backend.models import (
+    Account,
+    CounterpartyCategory,
+    ImportLog,
+    Override,
+    Transaction,
+)
 
 
 def _ensure_account(db: Session, account_no: str, source_type: str, project_id: int):
@@ -67,21 +68,29 @@ def _ensure_account(db: Session, account_no: str, source_type: str, project_id: 
 
 def _load_refs(db: Session, project_id: int) -> tuple:
     """Load reference data needed for master logic."""
-    accounts = db.execute(select(Account).where(Account.project_id == project_id, Account.is_deleted == False)).scalars().all()
+    accounts = (
+        db.execute(select(Account).where(Account.project_id == project_id, Account.is_deleted == False)).scalars().all()
+    )
     our_accounts = {a.account for a in accounts if a.is_our_account}
     customs_accounts = {a.account for a in accounts if a.is_customs_payee}
 
-    cp_cats = db.execute(select(CounterpartyCategory).where(CounterpartyCategory.project_id == project_id, CounterpartyCategory.is_deleted == False)).scalars().all()
-    cp_categories = {
-        c.cp_key: {"cat_lvl1": c.cat_lvl1, "cat_lvl2": c.cat_lvl2}
-        for c in cp_cats
-    }
+    cp_cats = (
+        db.execute(
+            select(CounterpartyCategory).where(
+                CounterpartyCategory.project_id == project_id, CounterpartyCategory.is_deleted == False
+            )
+        )
+        .scalars()
+        .all()
+    )
+    cp_categories = {c.cp_key: {"cat_lvl1": c.cat_lvl1, "cat_lvl2": c.cat_lvl2} for c in cp_cats}
 
-    overrides_db = db.execute(select(Override).where(Override.project_id == project_id, Override.is_deleted == False)).scalars().all()
-    overrides = {
-        o.txn_id: {"cat_lvl1": o.cat_lvl1, "cat_lvl2": o.cat_lvl2}
-        for o in overrides_db
-    }
+    overrides_db = (
+        db.execute(select(Override).where(Override.project_id == project_id, Override.is_deleted == False))
+        .scalars()
+        .all()
+    )
+    overrides = {o.txn_id: {"cat_lvl1": o.cat_lvl1, "cat_lvl2": o.cat_lvl2} for o in overrides_db}
 
     return our_accounts, customs_accounts, cp_categories, overrides
 
@@ -102,7 +111,9 @@ def import_statement(
     )
 
     log_ctx = logger.bind(
-        filename=filename, source_type=source_type, project_id=project_id,
+        filename=filename,
+        source_type=source_type,
+        project_id=project_id,
     )
     log_ctx.info("etl.import.start")
 
@@ -110,6 +121,7 @@ def import_statement(
     file_url = None
     try:
         import asyncio
+
         from backend.storage import upload_file
 
         async def _upload():
@@ -174,7 +186,8 @@ def import_statement(
         txn_ids = df["txn_id"].tolist()
         if txn_ids:
             existing_txn_ids = set(
-                row[0] for row in db.execute(
+                row[0]
+                for row in db.execute(
                     text("SELECT txn_id FROM transactions WHERE txn_id = ANY(:ids) AND project_id = :pid"),
                     {"ids": txn_ids, "pid": project_id},
                 )
@@ -184,7 +197,7 @@ def import_statement(
 
         def safe_dec(val):
             try:
-                return Decimal(str(val)) if val is not None and str(val) != 'nan' else Decimal("0")
+                return Decimal(str(val)) if val is not None and str(val) != "nan" else Decimal("0")
             except Exception as e:
                 logger.warning("Invalid decimal value %r converted to 0: %s", val, e)
                 return Decimal("0")
@@ -193,42 +206,44 @@ def import_statement(
             if val is None:
                 return None
             s = str(val).strip()
-            return s if s and s != 'nan' else None
+            return s if s and s != "nan" else None
 
         batch = []
-        for row in df.to_dict('records'):
+        for row in df.to_dict("records"):
             txn_id = row["txn_id"]
             if txn_id in existing_txn_ids:
                 skipped += 1
                 continue
 
-            batch.append(Transaction(
-                project_id=project_id,
-                date=row["date"],
-                bank=safe_str(row["bank"]) or "UNKNOWN",
-                account=safe_str(row["account"]) or account_no,
-                currency=safe_str(row["currency"]) or "RUB",
-                counterparty=safe_str(row.get("counterparty")),
-                inn=safe_str(row.get("inn")),
-                counterparty_account=safe_str(row.get("counterparty_account")),
-                purpose=safe_str(row.get("purpose")),
-                income=safe_dec(row.get("income", 0)),
-                expense=safe_dec(row.get("expense", 0)),
-                txn_id=txn_id,
-                cp_key=safe_str(row.get("cp_key")),
-                net=safe_dec(row.get("net", 0)),
-                is_internal=bool(row.get("is_internal", 0)),
-                is_fx=bool(row.get("is_fx", 0)),
-                event_type2=safe_str(row.get("event_type2")) or "OPER",
-                is_cashflow2=int(row.get("is_cashflow2", 1)),
-                cat_lvl1_2=safe_str(row.get("cat_lvl1_2")),
-                cat_lvl2_2=safe_str(row.get("cat_lvl2_2")),
-                status=safe_str(row.get("status")) or "UNASSIGNED",
-                account_text=safe_str(row.get("account_text")),
-                purpose_tag=safe_str(row.get("purpose_tag")),
-                invoice_id=safe_str(row.get("invoice_id")),
-                annex_id=safe_str(row.get("annex_id")),
-            ))
+            batch.append(
+                Transaction(
+                    project_id=project_id,
+                    date=row["date"],
+                    bank=safe_str(row["bank"]) or "UNKNOWN",
+                    account=safe_str(row["account"]) or account_no,
+                    currency=safe_str(row["currency"]) or "RUB",
+                    counterparty=safe_str(row.get("counterparty")),
+                    inn=safe_str(row.get("inn")),
+                    counterparty_account=safe_str(row.get("counterparty_account")),
+                    purpose=safe_str(row.get("purpose")),
+                    income=safe_dec(row.get("income", 0)),
+                    expense=safe_dec(row.get("expense", 0)),
+                    txn_id=txn_id,
+                    cp_key=safe_str(row.get("cp_key")),
+                    net=safe_dec(row.get("net", 0)),
+                    is_internal=bool(row.get("is_internal", 0)),
+                    is_fx=bool(row.get("is_fx", 0)),
+                    event_type2=safe_str(row.get("event_type2")) or "OPER",
+                    is_cashflow2=int(row.get("is_cashflow2", 1)),
+                    cat_lvl1_2=safe_str(row.get("cat_lvl1_2")),
+                    cat_lvl2_2=safe_str(row.get("cat_lvl2_2")),
+                    status=safe_str(row.get("status")) or "UNASSIGNED",
+                    account_text=safe_str(row.get("account_text")),
+                    purpose_tag=safe_str(row.get("purpose_tag")),
+                    invoice_id=safe_str(row.get("invoice_id")),
+                    annex_id=safe_str(row.get("annex_id")),
+                )
+            )
 
         if batch:
             db.add_all(batch)
@@ -255,12 +270,15 @@ def import_statement(
 
         log_ctx.info(
             "etl.import.done",
-            status="OK", inserted=inserted, skipped=skipped + parse_skipped,
+            status="OK",
+            inserted=inserted,
+            skipped=skipped + parse_skipped,
         )
 
         # 7. Invalidate caches
         try:
             import asyncio
+
             from backend.cache import invalidate_project_reports
 
             async def _invalidate_all():
@@ -289,12 +307,17 @@ def import_statement(
 def reapply_categories(db: Session, project_id: int):
     """Reapply categories to all cashflow transactions."""
     _, _, cp_categories, overrides = _load_refs(db, project_id)
-    txns = db.execute(
-        select(Transaction).where(
-            Transaction.project_id == project_id,
-            Transaction.is_cashflow2 == 1,
+    txns = (
+        db.execute(
+            select(Transaction).where(
+                Transaction.project_id == project_id,
+                Transaction.is_cashflow2 == 1,
+                Transaction.is_deleted == False,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for txn in txns:
         cp_key = txn.cp_key
         txn_id = txn.txn_id
