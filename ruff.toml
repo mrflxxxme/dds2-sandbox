@@ -63,6 +63,9 @@ ignore = [
 "backend/services/cost/duty.py" = ["E712"]  # SQLAlchemy == False
 "backend/services/planning/customs.py" = ["E712", "S112"]  # SQLAlchemy == False, try-except-continue
 "backend/etl/sync_wb_payouts.py" = ["E712"]  # SQLAlchemy == False
+"backend/services/cost/plan_gen.py" = ["E712", "RUF001", "RUF002"]  # SQLAlchemy == False, Cyrillic strings/docstrings
+"backend/scheduler/helpers.py" = ["E712"]  # SQLAlchemy == True/False
+"backend/scheduler/jobs/funnel.py" = ["E712", "RUF006", "S110", "SIM105"]  # SQLAlchemy == True/False, background tasks, try-except-pass
 
 [lint.isort]
 known-first-party = ["backend"]

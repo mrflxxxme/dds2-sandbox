@@ -39,6 +39,7 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
                 IntegrationKey.project_id == project_id,
                 IntegrationKey.service.in_(["wb", "wb_analytics"]),
                 IntegrationKey.is_active.is_(True),
+                IntegrationKey.is_deleted.is_(False),
             )
             .limit(1)
         )
@@ -265,6 +266,7 @@ async def sync_ad_campaigns_all_projects():
                         IntegrationKey.project_id == pid,
                         IntegrationKey.service.in_(["wb", "wb_advert", "wb_analytics"]),
                         IntegrationKey.is_active.is_(True),
+                        IntegrationKey.is_deleted.is_(False),
                     )
                     .limit(1)
                 )
@@ -371,6 +373,7 @@ async def sync_budgets_all_projects():
                         IntegrationKey.project_id == pid,
                         IntegrationKey.service.in_(["wb", "wb_advert"]),
                         IntegrationKey.is_active.is_(True),
+                        IntegrationKey.is_deleted.is_(False),
                     )
                     .limit(1)
                 )

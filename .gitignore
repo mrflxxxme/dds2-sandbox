@@ -21,3 +21,4 @@ backend/TZ_*.md
 backend/*_mockup.png
 .claude/worktrees/
 .claude/plans/
+nginx/ssl/

@@ -8,12 +8,12 @@ services:
     image: postgres:15
     env_file: .env
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-dds}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dds_secret}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: ${POSTGRES_DB:-dds_db}
     command: postgres -c 'config_file=/etc/postgresql/postgresql.conf'
     ports:
-      - "5432:5432"
+      - "10.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
@@ -39,7 +39,7 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/dds_db
+      DATABASE_URL: postgres://${POSTGRES_USER:?must be set}:${POSTGRES_PASSWORD:?must be set}@db:5432/dds_db
       POOL_MODE: transaction
       DEFAULT_POOL_SIZE: 30
       MIN_POOL_SIZE: 5
@@ -52,7 +52,7 @@ services:
     volumes:
       - ./userlist.txt:/etc/pgbouncer/userlist.txt:ro
     ports:
-      - "6432:5432"
+      - "10.0.0.1:6432:5432"
     deploy:
       resources:
         limits:
@@ -68,9 +68,9 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: redis-server --requirepass ${REDIS_PASSWORD:-dds_redis_secret} --maxmemory 256mb --maxmemory-policy allkeys-lru --bind 0.0.0.0
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set} --maxmemory 256mb --maxmemory-policy allkeys-lru --bind 0.0.0.0
     ports:
-      - "6379:6379"
+      - "10.0.0.1:6379:6379"
     volumes:
       - redisdata:/data
     deploy:
@@ -78,7 +78,7 @@ services:
         limits:
           memory: 384M
     healthcheck:
-      test: [ "CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-dds_redis_secret}", "ping" ]
+      test: [ "CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?must be set}", "ping" ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -90,11 +90,11 @@ services:
     image: minio/minio:RELEASE.2025-10-15T17-29-55Z
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY must be set}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY must be set}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "10.0.0.1:9000:9000"
+      - "10.0.0.1:9001:9001"
     volumes:
       - miniodata:/data
     deploy:
@@ -120,7 +120,7 @@ services:
       PGHOST: db
       POSTGRES_USER: ${POSTGRES_USER:-dds}
       POSTGRES_DB: ${POSTGRES_DB:-dds_db}
-      PGPASSWORD: ${POSTGRES_PASSWORD:-dds_secret}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?must be set}
       BACKUP_DIR: /backups
       BACKUP_RETENTION_DAYS: "14"
       BACKUP_INTERVAL_HOURS: "6"

@@ -1,13 +1,12 @@
 """Scheduler helpers — shared utilities, project detection, missing date logic."""
 
-import asyncio
 import logging
 import re
 from collections import Counter
 from datetime import date, timedelta
 
 from backend.database import AsyncSessionLocal
-from backend.models import Project, IntegrationKey, WbFunnelDaily, SyncLog
+from backend.models import IntegrationKey, Project, SyncLog, WbFunnelDaily
 
 logger = logging.getLogger("dds.scheduler")
 
@@ -38,13 +37,17 @@ def split_into_windows(dates: list[str], max_window: int = 30) -> list[tuple[str
 async def get_sync_project_ids() -> list[int]:
     """Get project IDs that should be synced (global or per-project WB keys)."""
     from sqlalchemy import select
+
     async with AsyncSessionLocal() as db:
         global_key = await db.execute(
-            select(IntegrationKey.id).where(
+            select(IntegrationKey.id)
+            .where(
                 IntegrationKey.service.in_(["wb", "wb_analytics"]),
                 IntegrationKey.is_active == True,
+                IntegrationKey.is_deleted == False,
                 IntegrationKey.project_id.is_(None),
-            ).limit(1)
+            )
+            .limit(1)
         )
         has_global = global_key.scalar() is not None
 
@@ -53,11 +56,14 @@ async def get_sync_project_ids() -> list[int]:
             return [r[0] for r in result if r[0]]
         else:
             result = await db.execute(
-                select(IntegrationKey.project_id).where(
+                select(IntegrationKey.project_id)
+                .where(
                     IntegrationKey.service.in_(["wb", "wb_analytics"]),
                     IntegrationKey.is_active == True,
+                    IntegrationKey.is_deleted == False,
                     IntegrationKey.project_id.isnot(None),
-                ).distinct()
+                )
+                .distinct()
             )
             return [r[0] for r in result if r[0]]
 
@@ -65,10 +71,10 @@ async def get_sync_project_ids() -> list[int]:
 async def get_failed_dates(project_id: int) -> set[str]:
     """Find dates that have failed >= MAX_DATE_FAILURES times (skipped)."""
     from sqlalchemy import select
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(SyncLog.sync_type, SyncLog.error_msg, SyncLog.status)
-            .where(
+            select(SyncLog.sync_type, SyncLog.error_msg, SyncLog.status).where(
                 SyncLog.service == "wb_funnel",
                 SyncLog.sync_type.in_(["backfill", "ad_resync"]),
                 SyncLog.status.in_(["TIMEOUT", "ERROR"]),
@@ -86,15 +92,18 @@ async def get_failed_dates(project_id: int) -> set[str]:
 async def get_missing_dates(project_id: int, lookback_days: int = BACKFILL_DAYS) -> list[str]:
     """Find dates in the last `lookback_days` that have NO funnel data."""
     from sqlalchemy import select
+
     today = date.today()
     start = today - timedelta(days=lookback_days)
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(WbFunnelDaily.date).where(
+            select(WbFunnelDaily.date)
+            .where(
                 WbFunnelDaily.project_id == project_id,
                 WbFunnelDaily.date >= start,
-            ).distinct()
+            )
+            .distinct()
         )
         existing_dates = {r[0] for r in result}
 
@@ -114,7 +123,8 @@ async def get_missing_dates(project_id: int, lookback_days: int = BACKFILL_DAYS)
 
 async def get_days_with_incomplete_ads(project_id: int, lookback_days: int = BACKFILL_DAYS) -> list[str]:
     """Find dates that have funnel data but ZERO ad data."""
-    from sqlalchemy import select, func
+    from sqlalchemy import func, select
+
     today = date.today()
     start = today - timedelta(days=lookback_days)
 
@@ -123,11 +133,13 @@ async def get_days_with_incomplete_ads(project_id: int, lookback_days: int = BAC
             select(
                 WbFunnelDaily.date,
                 func.sum(WbFunnelDaily.adv_sum).label("total_adv"),
-            ).where(
+            )
+            .where(
                 WbFunnelDaily.project_id == project_id,
                 WbFunnelDaily.date >= start,
                 WbFunnelDaily.date < today,
-            ).group_by(WbFunnelDaily.date)
+            )
+            .group_by(WbFunnelDaily.date)
             .order_by(WbFunnelDaily.date)
         )
         rows = list(result)

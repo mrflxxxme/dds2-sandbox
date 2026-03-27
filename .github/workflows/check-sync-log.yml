@@ -10,19 +10,16 @@ jobs:
     timeout-minutes: 3
 
     steps:
-      - name: Install sshpass
-        run: sudo apt-get install -y sshpass
-
-      - name: Query sync_log and funnel data
-        env:
-          SSHPASS: ${{ secrets.DEPLOY_SSH_KEY }}
-          HOST: ${{ secrets.DATA_HOST }}
-          USER: ${{ secrets.DEPLOY_USER }}
+      - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "$SSHPASS" > ~/.ssh/deploy_key
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} '
+          ssh-keyscan -H ${{ secrets.DATA_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Query sync_log and funnel data
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DATA_HOST }} '
             cd /opt/dds_data
 
             echo "=== LAST 20 SYNC LOGS ==="

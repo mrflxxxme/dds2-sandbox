@@ -12,19 +12,17 @@ jobs:
       issues: write
 
     steps:
-      - name: Install sshpass
-        run: sudo apt-get install -y sshpass
-
-      - name: Collect App Server info
-        env:
-          SSHPASS: ${{ secrets.DEPLOY_SSH_KEY }}
-          HOST: ${{ secrets.DEPLOY_HOST }}
-          USER: ${{ secrets.DEPLOY_USER }}
+      - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "$SSHPASS" > ~/.ssh/deploy_key
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} '
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh-keyscan -H ${{ secrets.DATA_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Collect App Server info
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} '
             cd /opt/dds_app
             echo "=== CONTAINERS ==="
             docker compose -f docker-compose.app.yml ps 2>&1
@@ -44,12 +42,8 @@ jobs:
           cat /tmp/app_output.txt
 
       - name: Collect Data Server info
-        env:
-          SSHPASS: ${{ secrets.DEPLOY_SSH_KEY }}
-          HOST: ${{ secrets.DATA_HOST }}
-          USER: ${{ secrets.DEPLOY_USER }}
         run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} '
+          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DATA_HOST }} '
             cd /opt/dds_data
             echo "=== DATA CONTAINERS ==="
             docker compose ps 2>&1

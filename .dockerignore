@@ -1,0 +1,39 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+
+# Data
+pgdata/
+backups/
+uploads/
+nginx/ssl/
+
+# Node
+node_modules/
+frontend-react/node_modules/
+frontend-react/.next/
+
+# Python
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Docs
+*.md
+docs/
+memory/
+
+# CI/CD
+.github/
+.claude/

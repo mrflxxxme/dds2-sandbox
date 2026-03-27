@@ -35,10 +35,10 @@ jobs:
           mkdir -p ~/.ssh
           echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${HOST} >> ~/.ssh/known_hosts 2>/dev/null || true
 
           # Use single SSH command with inline python via docker exec
-          # This is the same approach that works when run manually via SSH
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${USER}@${HOST} \
+          ssh -i ~/.ssh/deploy_key ${USER}@${HOST} \
             "cd /opt/dds_app && docker compose -f docker-compose.app.yml exec -T -w /app worker python3 -c \"
           import sys; sys.path.insert(0, '/app')
           import asyncio, json, logging

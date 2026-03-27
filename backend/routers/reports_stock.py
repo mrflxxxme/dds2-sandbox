@@ -207,6 +207,10 @@ async def upload_order_cities(
     if len(data) > 50 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Файл слишком большой (макс 50 МБ)")
 
+    from backend.utils.file_validation import validate_file_content
+
+    validate_file_content(data, file.filename or "upload.xlsx")
+
     mappings = parse_order_city_excel(data)
     if not mappings:
         raise HTTPException(status_code=400, detail="Не найдены данные городов в файле")

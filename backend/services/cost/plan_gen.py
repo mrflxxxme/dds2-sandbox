@@ -4,13 +4,16 @@ Cost — Payment plan generation from CostOrder data.
 
 from datetime import timedelta
 from decimal import Decimal
-from typing import Optional
 
-from sqlalchemy import select, delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import (
-    CostOrder, CostOrderItem, LeadTime, Order, PlannedPayment,
+    CostOrder,
+    CostOrderItem,
+    LeadTime,
+    Order,
+    PlannedPayment,
 )
 from backend.services.cost.helpers import _order_no_to_int, safe_float
 
@@ -19,7 +22,7 @@ async def generate_payment_plan(
     db: AsyncSession,
     project_id: int,
     order_no: str,
-    tax_rate: Optional[float] = None,
+    tax_rate: float | None = None,
 ) -> dict:
     """
     Generate planned payments from CostOrder data:
@@ -32,7 +35,9 @@ async def generate_payment_plan(
     """
     # 1. Get CostOrder
     result = await db.execute(
-        select(CostOrder).where(CostOrder.order_no == order_no, CostOrder.project_id == project_id)
+        select(CostOrder).where(
+            CostOrder.order_no == order_no, CostOrder.project_id == project_id, CostOrder.is_deleted == False
+        )
     )
     cost_order = result.scalar_one_or_none()
     if not cost_order:
@@ -41,9 +46,7 @@ async def generate_payment_plan(
         return {"error": "Укажите дату отправки (ship_date) перед генерацией плана", "status": 400}
 
     # 2. Get items (exclude barcode=0)
-    items_result = await db.execute(
-        select(CostOrderItem).where(CostOrderItem.order_no == order_no)
-    )
+    items_result = await db.execute(select(CostOrderItem).where(CostOrderItem.order_no == order_no))
     all_items = items_result.scalars().all()
     items = [i for i in all_items if i.barcode and str(i.barcode).strip() not in ("0", "")]
 
@@ -53,18 +56,15 @@ async def generate_payment_plan(
     # 3. Calculate totals
     order_cny = sum(safe_float(i.price_cny) * i.qty for i in items)
     order_rub = order_cny * float(cost_order.rate_cny)
-    delivery_rub = (
-        float(cost_order.delivery_cost_cny) * float(cost_order.rate_cny)
-        + float(cost_order.delivery_cost_usd) * float(cost_order.rate_usd)
-    )
+    delivery_rub = float(cost_order.delivery_cost_cny) * float(cost_order.rate_cny) + float(
+        cost_order.delivery_cost_usd
+    ) * float(cost_order.rate_usd)
     duty_rub = sum(safe_float(i.duty_rub) * i.qty for i in items)
     vat_rub = sum(safe_float(i.vat_rub) * i.qty for i in items)
     customs_rub = duty_rub + vat_rub
 
     # 4. Get lead times
-    lt_result = await db.execute(
-        select(LeadTime).where(LeadTime.project_id == project_id)
-    )
+    lt_result = await db.execute(select(LeadTime).where(LeadTime.project_id == project_id))
     lt_map = {lt.direction: lt.days for lt in lt_result.scalars().all()}
 
     transport_key = cost_order.transport_type or "AUTO"
@@ -80,7 +80,7 @@ async def generate_payment_plan(
     # 5. Create/update Order in planning module
     order_no_int = _order_no_to_int(order_no)
     ord_result = await db.execute(
-        select(Order).where(Order.order_no == order_no_int, Order.project_id == project_id)
+        select(Order).where(Order.order_no == order_no_int, Order.project_id == project_id, Order.is_deleted == False)
     )
     plan_order = ord_result.scalar_one_or_none()
     if not plan_order:
@@ -118,31 +118,49 @@ async def generate_payment_plan(
     payments = []
 
     if order_cny > 0:
-        payments.append(PlannedPayment(
-            project_id=project_id, order_no=order_no_int,
-            direction="ЗАКАЗ", pay_date=pay_date_order,
-            amount=Decimal(str(round(order_cny, 2))), currency="CNY",
-            fx_rate=cost_order.rate_cny,
-            amount_rub=Decimal(str(round(order_rub, 2))), is_paid=False,
-        ))
+        payments.append(
+            PlannedPayment(
+                project_id=project_id,
+                order_no=order_no_int,
+                direction="ЗАКАЗ",
+                pay_date=pay_date_order,
+                amount=Decimal(str(round(order_cny, 2))),
+                currency="CNY",
+                fx_rate=cost_order.rate_cny,
+                amount_rub=Decimal(str(round(order_rub, 2))),
+                is_paid=False,
+            )
+        )
 
     if delivery_rub > 0:
-        payments.append(PlannedPayment(
-            project_id=project_id, order_no=order_no_int,
-            direction="ДОСТАВКА", pay_date=pay_date_delivery,
-            amount=cost_order.delivery_cost_cny + cost_order.delivery_cost_usd,
-            currency="CNY/USD", fx_rate=None,
-            amount_rub=Decimal(str(round(delivery_rub, 2))), is_paid=False,
-        ))
+        payments.append(
+            PlannedPayment(
+                project_id=project_id,
+                order_no=order_no_int,
+                direction="ДОСТАВКА",
+                pay_date=pay_date_delivery,
+                amount=cost_order.delivery_cost_cny + cost_order.delivery_cost_usd,
+                currency="CNY/USD",
+                fx_rate=None,
+                amount_rub=Decimal(str(round(delivery_rub, 2))),
+                is_paid=False,
+            )
+        )
 
     if customs_rub > 0:
-        payments.append(PlannedPayment(
-            project_id=project_id, order_no=order_no_int,
-            direction="ТАМОЖНЯ", pay_date=pay_date_customs,
-            amount=Decimal(str(round(customs_rub, 2))), currency="RUB",
-            fx_rate=Decimal("1"),
-            amount_rub=Decimal(str(round(customs_rub, 2))), is_paid=False,
-        ))
+        payments.append(
+            PlannedPayment(
+                project_id=project_id,
+                order_no=order_no_int,
+                direction="ТАМОЖНЯ",
+                pay_date=pay_date_customs,
+                amount=Decimal(str(round(customs_rub, 2))),
+                currency="RUB",
+                fx_rate=Decimal("1"),
+                amount_rub=Decimal(str(round(customs_rub, 2))),
+                is_paid=False,
+            )
+        )
 
     for p in payments:
         db.add(p)

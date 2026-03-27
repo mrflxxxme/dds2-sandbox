@@ -98,7 +98,7 @@ services:
   # Node exporter for monitoring server host metrics (memory, disk, CPU)
   # NOTE: node_exporter must also be deployed on app (10.0.0.2:9100) and data (10.0.0.1:9100) servers
   node-exporter:
-    image: prom/node-exporter:latest
+    image: prom/node-exporter:v1.8.2
     command:
       - '--path.rootfs=/host'
       - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
@@ -118,7 +118,7 @@ services:
   # Pushgateway for backup age metric
   # Backup cron pushes: echo "dds_backup_last_success_timestamp $(date +%s)" | curl --data-binary @- http://10.0.0.3:9091/metrics/job/backup
   pushgateway:
-    image: prom/pushgateway:latest
+    image: prom/pushgateway:v1.9.0
     ports:
       - "10.0.0.3:9091:9091"
     deploy:

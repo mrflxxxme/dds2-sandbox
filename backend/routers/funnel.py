@@ -551,6 +551,11 @@ async def upload_tariffs_xlsx(
     data = await file.read()
     if len(data) > 10 * 1024 * 1024:
         raise HTTPException(400, "Файл слишком большой (макс 10 МБ)")
+
+    from backend.utils.file_validation import validate_file_content
+
+    validate_file_content(data, file.filename or "upload.xlsx")
+
     try:
         result = await upload_tariffs(db, project.id, data)
     except ValueError as e:
