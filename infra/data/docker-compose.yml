@@ -34,7 +34,7 @@ services:
       - data
 
   pgbouncer:
-    image: edoburu/pgbouncer:1.24.1-p1
+    image: edoburu/pgbouncer:v1.24.1-p1
     depends_on:
       db:
         condition: service_healthy
