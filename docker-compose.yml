@@ -26,7 +26,7 @@ services:
       - internal
 
   pgbouncer:
-    image: edoburu/pgbouncer:latest
+    image: edoburu/pgbouncer:1.24.1-p1
     depends_on:
       db:
         condition: service_healthy
@@ -74,7 +74,7 @@ services:
       - internal
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-10-15T17-29-55Z
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
@@ -223,7 +223,7 @@ services:
       - internal
 
   certbot:
-    image: certbot/certbot:latest
+    image: certbot/certbot:v3.1.0
     volumes:
       - certbot-webroot:/var/www/certbot
       - certbot-certs:/etc/letsencrypt
@@ -268,7 +268,7 @@ services:
   # ─── Monitoring ─────────────────────────────────────────────────────────────
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.53.5
     profiles: ["monitoring"]
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -289,7 +289,7 @@ services:
       - internal
 
   alertmanager:
-    image: prom/alertmanager:latest
+    image: prom/alertmanager:v0.27.0
     profiles: ["monitoring"]
     volumes:
       - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
@@ -309,7 +309,7 @@ services:
       - internal
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.4.0
     profiles: ["monitoring"]
     environment:
       - GF_SERVER_ROOT_URL=https://app.vyatkin-wb.ru/grafana/
@@ -332,7 +332,7 @@ services:
       - internal
 
   postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:latest
+    image: prometheuscommunity/postgres-exporter:v0.16.0
     profiles: ["monitoring"]
     environment:
       DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/${POSTGRES_DB:-dds_db}?sslmode=disable"
@@ -348,7 +348,7 @@ services:
       - internal
 
   redis-exporter:
-    image: oliver006/redis_exporter:latest
+    image: oliver006/redis_exporter:v1.66.0
     profiles: ["monitoring"]
     environment:
       REDIS_ADDR: "redis://default:${REDIS_PASSWORD:-dds_redis_secret}@redis:6379"

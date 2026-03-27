@@ -24,7 +24,7 @@ services:
       - internal
 
   pgbouncer:
-    image: edoburu/pgbouncer:latest
+    image: edoburu/pgbouncer:1.24.1-p1
     depends_on:
       db:
         condition: service_healthy
@@ -68,7 +68,7 @@ services:
       - internal
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-10-15T17-29-55Z
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY must be set}
@@ -175,7 +175,7 @@ services:
       - internal
 
   nginx:
-    image: nginx:alpine
+    image: nginx:1.27-alpine
     ports:
       - "80:80"
       - "443:443"
@@ -228,7 +228,7 @@ services:
   # ─── Monitoring ─────────────────────────────────────────────────────────────
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.53.5
     profiles: ["monitoring"]
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -247,7 +247,7 @@ services:
       - internal
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.4.0
     profiles: ["monitoring"]
     environment:
       - GF_SERVER_ROOT_URL=https://app.vyatkin-wb.ru/grafana/
@@ -270,7 +270,7 @@ services:
       - internal
 
   postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:latest
+    image: prometheuscommunity/postgres-exporter:v0.16.0
     profiles: ["monitoring"]
     environment:
       DATA_SOURCE_NAME: "postgresql://dds:${POSTGRES_PASSWORD}@db:5432/dds_db?sslmode=disable"
@@ -286,7 +286,7 @@ services:
       - internal
 
   redis-exporter:
-    image: oliver006/redis_exporter:latest
+    image: oliver006/redis_exporter:v1.66.0
     profiles: ["monitoring"]
     environment:
       REDIS_ADDR: "redis://default:${REDIS_PASSWORD}@redis:6379"

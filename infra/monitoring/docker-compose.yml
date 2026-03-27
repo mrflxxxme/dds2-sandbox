@@ -5,7 +5,7 @@
 
 services:
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.53.5
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
@@ -27,7 +27,7 @@ services:
       - monitoring
 
   alertmanager:
-    image: prom/alertmanager:latest
+    image: prom/alertmanager:v0.27.0
     volumes:
       - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
       - alertmanagerdata:/alertmanager
@@ -48,7 +48,7 @@ services:
       - monitoring
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.4.0
     environment:
       - GF_SERVER_ROOT_URL=https://app.vyatkin-wb.ru/grafana/
       - GF_SERVER_SERVE_FROM_SUB_PATH=true
@@ -72,7 +72,7 @@ services:
       - monitoring
 
   postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:latest
+    image: prometheuscommunity/postgres-exporter:v0.16.0
     environment:
       DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@10.0.0.1:5432/${POSTGRES_DB:-dds_db}?sslmode=disable"
     deploy:
@@ -84,7 +84,7 @@ services:
       - monitoring
 
   redis-exporter:
-    image: oliver006/redis_exporter:latest
+    image: oliver006/redis_exporter:v1.66.0
     environment:
       REDIS_ADDR: "redis://default:${REDIS_PASSWORD:-dds_redis_secret}@10.0.0.1:6379"
     deploy:
