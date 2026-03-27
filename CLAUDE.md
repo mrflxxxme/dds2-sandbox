@@ -84,10 +84,10 @@ Model → Alembic migration → Schema → Service → Router → Test
 
 ## Архитектура frontend
 ```
-src/app/p/[slug]/ — страницы (dashboard, import, txn, inbox, reports, planning, cost, funnel, trends, refs, settings)
-src/lib/api.ts — API клиент (JWT auth + auto-refresh)
+src/app/p/[slug]/ — страницы (dds, import, txn, inbox, reports, planning, cost, funnel, trends, refs, settings, opiu, orders, plan-fact, team, monitoring, bulk-cost, container-loader, order-geography, warehouse/*)
+src/lib/api/ — модульный API клиент (client.ts + 13 доменных файлов, JWT auth + auto-refresh)
 src/lib/utils.ts — formatNumber, formatDate, exportToExcel
-src/components/ — DataTable, FormModal, PageHeader, TabLayout, Toast
+src/components/ — DataTable, FormModal, PageHeader, PageGuard, TabLayout, Toast
 src/types/api.ts — TypeScript интерфейсы
 ```
 
@@ -105,7 +105,7 @@ src/types/api.ts — TypeScript интерфейсы
 | Транзакции | `backend/DOMAIN_TRANSACTIONS.md` | etl/, services/transactions_service.py |
 | Отчёты | `backend/DOMAIN_REPORTS.md` | services/reports/, opiu_service.py, wb_bdr_service.py |
 | Планирование | `backend/DOMAIN_PLANNING.md` | services/planning/, routers/planning.py |
-| Себестоимость | `backend/DOMAIN_COST.md` | services/cost/, etl/cost_parsers.py |
+| Себестоимость | `backend/DOMAIN_COST.md` | services/cost/, etl/cost_parsers.py, etl/cost_parser_helpers.py |
 | Склад | `backend/DOMAIN_WAREHOUSE.md` | services/warehouse_*, services/fbo_supply_service.py |
 | WB Интеграция | `backend/DOMAIN_WB.md` | integrations/, services/funnel/, scheduler/jobs/ |
 | Сборка/Логистика | `backend/DOMAIN_ASSEMBLY.md` | services/assembly_service.py, routers/assembly.py |

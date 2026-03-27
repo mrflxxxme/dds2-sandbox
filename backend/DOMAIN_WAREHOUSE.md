@@ -186,8 +186,8 @@ DRAFT → IN_TRANSIT → COMPLETED
 | services/warehouse_inbound.py | Приёмка (254 строки) |
 | services/warehouse_outbound.py | Отгрузка + перемещения (365 строк) |
 | services/warehouse_stock_engine.py | Движения + остатки (323 строки) |
-| services/fbo_supply_service.py | FBO синхронизация + авто-доставка (856 строк — нужен рефакторинг) |
-| services/warehouse_stock_service.py | WB остатки sync + compute_need (100 строк) |
+| services/fbo_supply_service.py | FBO синхронизация + авто-доставка (882 строки — нужен рефакторинг) |
+| services/warehouse_stock_service.py | WB остатки sync + compute_need (852 строки — нужен рефакторинг) |
 | routers/warehouse.py | 21 endpoint: склады, stock, receipt, shipment, transfer, FBO |
 | routers/assembly.py | 14 endpoints: заявки на сборку (см. DOMAIN_ASSEMBLY.md) |
 

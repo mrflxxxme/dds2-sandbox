@@ -19,6 +19,9 @@
 - `DOMAIN_PLANNING.md` — orders, payments, customs
 - `DOMAIN_COST.md` — cost, nomenclature, duties
 - `DOMAIN_WB.md` — WB API, funnel, sync
+- `DOMAIN_WAREHOUSE.md` — warehouse, stock, receipts, shipments, transfers, FBO
+- `DOMAIN_ASSEMBLY.md` — assembly requests, logistics
+- `DOMAIN_TELEGRAM.md` — telegram bot, AI digest, notifications
 
 ## Undomain files (shared/infra)
 - `services/refs_service.py` — CRUD для справочников (Account, Override, CounterpartyCategory)

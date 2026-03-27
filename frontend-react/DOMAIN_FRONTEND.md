@@ -1,11 +1,13 @@
 # Domain: Frontend (Next.js 15 + React 19)
 
 ## Ownership
-- `src/app/p/[slug]/` — все страницы (dashboard, import, txn, inbox, reports, dds, planning, orders, cost, funnel, trends, refs, settings, team, opiu, plan-fact, warehouse/*, order-geography, bulk-cost, container-loader)
-- `src/lib/api.ts` — API клиент (80+ методов, JWT auth + refresh)
+- `src/app/p/[slug]/` — все страницы (dds, import, txn, inbox, reports, planning, orders, cost, funnel, trends, refs, settings, team, opiu, plan-fact, monitoring, warehouse/*, order-geography, bulk-cost, container-loader)
+- `src/lib/api/` — модульный API клиент (client.ts — HTTP layer + JWT auth + refresh, 13 доменных файлов: auth, projects, reports, transactions, refs, integrations, cost, planning, funnel, imports, telegram, warehouse, monitoring)
+- `src/lib/api.ts` — re-export всех методов (42 строки)
 - `src/lib/utils.ts` — formatNumber, formatDate, exportToExcel
-- `src/components/` — DataTable, FormModal, PageHeader, TabLayout, Toast
-- `src/types/api.ts` — TypeScript интерфейсы
+- `src/lib/hooks/usePermissions.ts` — RBAC (owner, admin, editor, viewer)
+- `src/components/` — DataTable, FormModal, PageHeader, PageGuard, TabLayout, Toast
+- `src/types/api.ts` — TypeScript интерфейсы (1351 строка)
 
 ## Rules
 1. **Типы:** ВСЕГДА в `types/api.ts` (НИКОГДА inline)

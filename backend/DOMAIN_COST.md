@@ -9,7 +9,8 @@
 - `services/cost/helpers.py` — утилиты расчёта
 - `services/cost/plan_gen.py` — генерация плановых платежей из заказа
 - `services/cost_history_service.py` — история себестоимости
-- `etl/cost_parsers.py` — импорт из Excel (465 строк — ПРЕВЫШАЕТ лимит 400!)
+- `etl/cost_parsers.py` — импорт из Excel (76 строк, оркестратор)
+- `etl/cost_parser_helpers.py` — хелперы парсинга (408 строк)
 - `routers/cost.py` — HTTP endpoints
 - `models/cost.py` — Nomenclature, DutyRule, CostOrder, CostOrderItem
 - `schemas/cost.py`
@@ -33,7 +34,7 @@
 4. **Cost parsers:** 5 форматов Excel — каждый со своей структурой колонок
 
 ## Known Issues & Gotchas
-- `cost_parsers.py` — 465 строк (ПРЕВЫШАЕТ лимит 400, нужен рефакторинг)
+- ~~`cost_parsers.py` — 465 строк~~ — **ИСПРАВЛЕНО** (разбит на cost_parsers.py 76 строк + cost_parser_helpers.py 408 строк)
 - `.all()` без LIMIT в items.py — загружает всю nomenclature в память
 - Float division в funnel/sync.py для cost_price — должен быть Decimal
 - ~~N+1 запросы в get_cost_orders~~ — **ИСПРАВЛЕНО** (2026-03-16, batch-загрузка)

@@ -12,7 +12,7 @@
 └─────────────────┘     └──────────────┘     └────────────┘
 ```
 
-- **Frontend**: `frontend-react/` — Next.js 14, React, TypeScript
+- **Frontend**: `frontend-react/` — Next.js 15, React 19, TypeScript
 - **Backend**: `backend/` — FastAPI, SQLAlchemy, Pydantic
 - **БД**: PostgreSQL (Docker)
 - **Кэш**: Redis (Docker)
@@ -26,15 +26,24 @@
 
 | Модуль | Путь | Описание |
 |--------|------|----------|
-| **Дашборд** | `page.tsx` | Главная страница проекта, общая статистика |
+| **ДДС** | `dds/page.tsx` | Главная страница проекта, движение денежных средств |
 | **Импорт выписок** | `import/page.tsx` | Загрузка банковских выписок (XML/CSV) |
 | **Операции** | `txn/page.tsx` | Просмотр всех транзакций из выписок |
 | **INBOX** | `inbox/page.tsx` | Неразнесённые транзакции |
 | **Отчёты** | `reports/page.tsx` | Финансовые отчёты и аналитика |
+| **ОПИУ** | `opiu/page.tsx` | Отчёт о прибылях и убытках |
 | **Планирование** | `planning/page.tsx` | Заказы (PlanOrders) + Платежи (PlanPayments) |
+| **План-Факт** | `plan-fact/page.tsx` | Сравнение плана с фактом |
+| **Заказы** | `orders/page.tsx` | Заказы на товар |
 | **Себестоимость** | `cost/page.tsx` | Заказы, номенклатура, пошлины, файлы |
+| **Массовая себестоимость** | `bulk-cost/page.tsx` | Массовое обновление себестоимости |
 | **Воронка продаж** | `funnel/page.tsx` | Воронка WB: переходы → корзины → заказы + реклама |
+| **Тренды** | `trends/page.tsx` | Тренды по товарам |
+| **География заказов** | `order-geography/page.tsx` | Географическое распределение заказов |
+| **Склад** | `warehouse/page.tsx` | Складские операции (приёмка, отгрузка, FBO, сборка, логистика, аналитика) |
+| **Контейнер-загрузчик** | `container-loader/page.tsx` | Загрузка контейнеров |
 | **Справочники** | `refs/page.tsx` | Контрагенты, счета, категории |
+| **Мониторинг** | `monitoring/page.tsx` | Мониторинг системы |
 | **Настройки** | `settings/page.tsx` | Настройки проекта |
 | **Команда** | `team/page.tsx` | Управление командой |
 
@@ -42,7 +51,7 @@
 
 | Файл | Назначение |
 |------|-----------|
-| `src/lib/api.ts` | **API клиент** — все функции для запросов к backend |
+| `src/lib/api/` | **API клиент** — модульная структура (client.ts + 13 доменных файлов) |
 | `src/app/p/[slug]/layout.tsx` | **Layout** — боковая навигация, переключатель проектов |
 | `src/app/globals.css` | **Стили** — тёмная тема, glassmorphism, все UI-компоненты |
 | `src/app/layout.tsx` | Корневой layout (шрифты, метаданные) |
@@ -60,11 +69,22 @@
 | `projects.py` | `/api/projects` | CRUD проектов, переключение проектов |
 | `import_txn.py` | `/api` | Импорт выписок, парсинг XML/CSV, список транзакций |
 | `planning.py` | `/api` | Планирование: заказы, платежи, привязка транзакций |
+| `planning_customs.py` | `/api` | Таможенные операции (sub-router в planning) |
+| `planning_wb_payouts.py` | `/api` | WB выплаты (sub-router в planning) |
 | `cost.py` | `/api` | Себестоимость: заказы, номенклатура, пошлины |
 | `refs.py` | `/api` | Справочники: контрагенты, счета, категории |
 | `reports.py` | `/api` | Отчёты: P&L, баланс, аналитика |
+| `reports_wb.py` | `/api` | WB-специфичные отчёты (sub-router в reports) |
+| `reports_stock.py` | `/api` | Складские отчёты и прогноз (sub-router в reports) |
 | `integrations.py` | `/api` | WB интеграция, синхронизация номенклатуры |
-| `funnel.py` | `/api/v1/funnel` | Воронка продаж: синхронизация WB, данные, фильтры, себестоимость |
+| `funnel.py` | `/api/v1/funnel` | Воронка продаж: синхронизация WB, данные, фильтры |
+| `warehouse.py` | `/api/v1/warehouse` | Склад: приёмка, отгрузка, перемещения, FBO |
+| `assembly.py` | `/api/v1/assembly` | Заявки на сборку, логистика |
+| `fbo_supplies.py` | `/api/v1/fbo` | FBO поставки WB |
+| `telegram.py` | `/api/v1/telegram` | Telegram уведомления |
+| `telegram_webhook.py` | `/api/v1/telegram` | Telegram webhook |
+| `monitoring.py` | `/api/v1/monitoring` | Мониторинг системы |
+| `ws.py` | `/ws` | WebSocket |
 
 ### Ключевые файлы backend
 
@@ -184,4 +204,4 @@ services:
 
 ---
 
-*Последнее обновление: 2026-03-01*
+*Последнее обновление: 2026-03-27*

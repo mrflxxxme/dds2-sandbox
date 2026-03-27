@@ -29,6 +29,8 @@
 - `services/tariff_service.py` — управление тарифами WB
 - `services/wb_cancel_sync.py` — синхронизация статистики отмен
 - `services/funnel/anomalies.py` — детекция аномалий в рекламе
+- `services/funnel/ad_campaigns_service.py` — управление рекламными кампаниями
+- `services/funnel/unified_sync.py` — унифицированная синхронизация рекламы
 - `services/funnel/product_trends.py` — тренды по товарам
 - `services/funnel/capital.py` — расчёт оборотного капитала
 - `services/funnel/bdr_rates.py` — ставки для БДР
