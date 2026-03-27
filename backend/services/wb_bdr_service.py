@@ -19,7 +19,7 @@ import logging
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached
@@ -79,9 +79,9 @@ async def get_wb_bdr(
 
     Uses SQL-level aggregation for performance (handles 1M+ rows).
     """
-    # ── 0. ABC mode: fetch per-article data, then classify ──
+    # ── 0. ABC / tag / imt mode: fetch per-article data, then re-aggregate ──
     original_group_by = group_by
-    if group_by == "abc":
+    if group_by in ("abc", "tag", "imt"):
         group_by = "article"
 
     # ── 1. Get sync status ──
@@ -348,6 +348,10 @@ async def get_wb_bdr(
     # ── 10. ABC analysis ──
     compute_abc(result_articles)
 
+    # ── 11. Re-aggregate by tag / imt if needed ──
+    if original_group_by in ("tag", "imt"):
+        result_articles = await _reaggregate_by_classification(db, project_id, result_articles, original_group_by)
+
     return {
         "summary": serialize(summary_result),
         "articles": [serialize(a) for a in result_articles],
@@ -358,3 +362,115 @@ async def get_wb_bdr(
         "tax_info": tax_info,
         "group_by": original_group_by,
     }
+
+
+async def _reaggregate_by_classification(
+    db: AsyncSession,
+    project_id: int,
+    articles: list[dict],
+    mode: str,
+) -> list[dict]:
+    """Re-aggregate per-article BDR rows into tag or imt groups."""
+    from collections import defaultdict
+
+    from backend.models.cost import Nomenclature
+    from backend.models.refs import ImtAlias, ProductTag, ProductTagMap
+
+    # Build nm_id → group_keys mapping
+    nm_to_groups: dict[int, list[str]] = defaultdict(list)
+
+    if mode == "tag":
+        tag_result = await db.execute(
+            select(ProductTagMap.nm_id, ProductTag.name)
+            .join(ProductTag, ProductTag.id == ProductTagMap.tag_id)
+            .where(ProductTagMap.project_id == project_id, ProductTag.is_deleted.is_(False))
+        )
+        for nm_id, tag_name in tag_result:
+            nm_to_groups[nm_id].append(tag_name)
+    elif mode == "imt":
+        nom_result = await db.execute(
+            select(Nomenclature.article_wb, Nomenclature.imt_id).where(
+                Nomenclature.project_id == project_id, Nomenclature.imt_id.isnot(None)
+            )
+        )
+        nm_imt: dict[int, int] = {}
+        for article_wb, imt_id in nom_result:
+            if article_wb and imt_id:
+                nm_imt[article_wb] = imt_id
+
+        alias_result = await db.execute(select(ImtAlias.imt_id, ImtAlias.name).where(ImtAlias.project_id == project_id))
+        imt_aliases = {r.imt_id: r.name for r in alias_result}
+
+        for nm_id, imt_id in nm_imt.items():
+            label = imt_aliases.get(imt_id, f"#{imt_id}")
+            nm_to_groups[nm_id].append(label)
+
+    # Summable fields for aggregation
+    _SUM_KEYS = [
+        "realization",
+        "sales_amount",
+        "ret_amount",
+        "to_pay",
+        "logistics",
+        "storage_fee",
+        "acceptance",
+        "penalty",
+        "additional_payment",
+        "sale_qty",
+        "sale_qty_gross",
+        "ret_qty",
+        "deduction",
+        "ad_deduction",
+        "loan_deduction",
+        "other_deduction",
+        "adv_sum",
+        "cost_total",
+        "ppvz_reward",
+        "ppvz_sales_commission",
+        "ppvz_for_pay",
+        "ppvz_vw",
+        "ppvz_vw_nds",
+        "delivery_rub",
+        "rebill_logistic_cost",
+        "tax_usn",
+        "tax_nds",
+        "tax_total",
+        "profit",
+        "orders_count",
+        "orders_sum",
+        "stocks_wb",
+    ]
+
+    groups: dict[str, dict] = {}
+    for art in articles:
+        nm_id = art.get("nm_id", 0)
+        group_keys = nm_to_groups.get(nm_id)
+        if not group_keys:
+            group_keys = ["Без ярлыка" if mode == "tag" else "Без склейки"]
+
+        for gk in group_keys:
+            if gk not in groups:
+                groups[gk] = {k: 0 for k in _SUM_KEYS}
+                groups[gk]["sa_name"] = gk
+                groups[gk]["brand"] = ""
+                groups[gk]["subject"] = ""
+                groups[gk]["nm_id"] = 0
+                groups[gk]["_period_days"] = art.get("_period_days", 1)
+            grp = groups[gk]
+            for k in _SUM_KEYS:
+                grp[k] = grp.get(k, 0) + (art.get(k, 0) or 0)
+
+    # Recalculate derived fields
+    result = list(groups.values())
+    for grp in result:
+        sale_qty = grp.get("sale_qty", 0) or 0
+        ret_qty = grp.get("ret_qty", 0) or 0
+        total_qty = sale_qty + ret_qty
+        grp["buyout_pct"] = round(sale_qty / total_qty * 100, 2) if total_qty > 0 else 0
+        grp["avg_sale_price"] = round(grp.get("sales_amount", 0) / sale_qty, 2) if sale_qty > 0 else 0
+        grp["avg_retail_price"] = round(grp.get("realization", 0) / sale_qty, 2) if sale_qty > 0 else 0
+        grp["avg_logistics"] = round(grp.get("logistics", 0) / sale_qty, 2) if sale_qty > 0 else 0
+        grp["cost_price"] = round(grp["cost_total"] / sale_qty, 2) if sale_qty > 0 else 0
+
+    result.sort(key=lambda x: x.get("to_pay", 0), reverse=True)
+    return result

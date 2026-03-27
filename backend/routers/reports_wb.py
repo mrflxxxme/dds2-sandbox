@@ -30,7 +30,7 @@ async def get_wb_bdr(
 
     from backend.services import wb_bdr_service
 
-    if group_by not in ("article", "brand", "subject", "abc"):
+    if group_by not in ("article", "brand", "subject", "abc", "tag", "imt"):
         group_by = "article"
     try:
         return await asyncio.wait_for(

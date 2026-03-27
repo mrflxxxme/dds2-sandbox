@@ -112,7 +112,7 @@ export function WbBdr() {
     const [syncStatus, setSyncStatus] = useState<any>(null);
     const [syncing, setSyncing] = useState(false);
     const [availableDates, setAvailableDates] = useState<string[]>([]);
-    const [groupBy, setGroupBy] = useState<'article' | 'brand' | 'subject' | 'abc'>('article');
+    const [groupBy, setGroupBy] = useState<'article' | 'brand' | 'subject' | 'tag' | 'imt' | 'abc'>('article');
     const [sortKey, setSortKey] = useState<string>('profit');
     const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
     const [expandedAbc, setExpandedAbc] = useState<Record<string, boolean>>({});
@@ -150,13 +150,13 @@ export function WbBdr() {
     const brands = data?.brands || [];
     const taxInfo = data?.tax_info || {};
 
-    const groupLabel = groupBy === 'brand' ? 'Бренд' : groupBy === 'subject' ? 'Категория' : groupBy === 'abc' ? 'Артикул' : 'Артикул';
+    const groupLabel = groupBy === 'brand' ? 'Бренд' : groupBy === 'subject' ? 'Категория' : groupBy === 'tag' ? 'Ярлык' : groupBy === 'imt' ? 'Склейка' : groupBy === 'abc' ? 'Артикул' : 'Артикул';
 
     const bdrColumns: { key: string; label: string; color?: string; sticky?: boolean }[] = [
         { key: 'sa_name', label: groupLabel, sticky: true },
         { key: 'to_pay', label: 'К оплате' },
-        ...(groupBy !== 'brand' ? [{ key: 'brand', label: 'Бренд' }] : []),
-        ...(groupBy !== 'subject' ? [{ key: 'subject', label: 'Категория' }] : []),
+        ...(groupBy !== 'brand' && groupBy !== 'tag' && groupBy !== 'imt' ? [{ key: 'brand', label: 'Бренд' }] : []),
+        ...(groupBy !== 'subject' && groupBy !== 'tag' && groupBy !== 'imt' ? [{ key: 'subject', label: 'Категория' }] : []),
         ...(groupBy === 'article' ? [{ key: 'nm_id', label: 'Арт. МП' }] : []),
         { key: 'cost_price', label: 'Ср. С/С' },
         { key: 'other_deduction', label: 'Проч. удерж.' },
@@ -330,7 +330,7 @@ export function WbBdr() {
                     <div>
                         <label style={{ fontSize: 12, opacity: 0.7, display: 'block', marginBottom: 4 }}>Группировка</label>
                         <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid #e5e7eb', background: '#f3f4f6', height: 38 }}>
-                            {([['article', 'По артикулам'], ['brand', 'По брендам'], ['subject', 'По категориям'], ['abc', 'ABC анализ']] as const).map(([val, lbl]) => (
+                            {([['article', 'По артикулам'], ['brand', 'По брендам'], ['subject', 'По категориям'], ['tag', 'По ярлыкам'], ['imt', 'По склейкам'], ['abc', 'ABC анализ']] as const).map(([val, lbl]) => (
                                 <button key={val} onClick={() => { setGroupBy(val); }}
                                     style={{ padding: '0 14px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer', background: groupBy === val ? '#6366f1' : 'transparent', color: groupBy === val ? '#fff' : '#6b7280', transition: 'all 0.2s ease', whiteSpace: 'nowrap' }}>
                                     {lbl}
@@ -602,8 +602,8 @@ export function WbBdr() {
                                     <tr style={{ fontWeight: 700, background: '#eef2ff', color: '#111827' }}>
                                         <td style={{ position: 'sticky', left: 0, background: '#e0e7ff', zIndex: 11, borderRight: '1px solid #c7d2fe' }}>Итого:</td>
                                         <td style={{ textAlign: 'right' }}>{formatNumber(r.to_pay)}</td>
-                                        {groupBy !== 'brand' && <td>-</td>}
-                                        {groupBy !== 'subject' && <td>-</td>}
+                                        {groupBy !== 'brand' && groupBy !== 'tag' && groupBy !== 'imt' && <td>-</td>}
+                                        {groupBy !== 'subject' && groupBy !== 'tag' && groupBy !== 'imt' && <td>-</td>}
                                         {groupBy === 'article' && <td>-</td>}
                                         <td style={{ textAlign: 'right' }}>—</td>
                                         <td style={{ textAlign: 'right' }}>{formatNumber(r.other_deduction || 0)}</td>
@@ -651,8 +651,8 @@ export function WbBdr() {
                                         <tr key={a.sa_name || i} style={{ background: rowBg, color: '#111827' }}>
                                             <td style={{ position: 'sticky', left: 0, background: rowBg, zIndex: 11, fontWeight: 500, borderRight: '1px solid #e5e7eb' }}>{a.sa_name || '—'}</td>
                                             <td style={{ textAlign: 'right' }}>{formatNumber(a.to_pay)}</td>
-                                            {groupBy !== 'brand' && <td>{a.brand || '—'}</td>}
-                                            {groupBy !== 'subject' && <td>{a.subject || '—'}</td>}
+                                            {groupBy !== 'brand' && groupBy !== 'tag' && groupBy !== 'imt' && <td>{a.brand || '—'}</td>}
+                                            {groupBy !== 'subject' && groupBy !== 'tag' && groupBy !== 'imt' && <td>{a.subject || '—'}</td>}
                                             {groupBy === 'article' && <td>{a.nm_id || '—'}</td>}
                                             <td style={{ textAlign: 'right' }}>{formatNumber(a.cost_price || 0)}</td>
                                             <td style={{ textAlign: 'right' }}>{formatNumber(a.other_deduction || 0)}</td>

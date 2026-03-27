@@ -443,6 +443,8 @@ export interface FunnelAbcRow {
 export interface FunnelGroupRow extends Omit<FunnelSkuRow, 'nm_id' | 'vendor_code'> {
     brand?: string;
     subject?: string;
+    tag?: string;
+    imt_group?: string;
 }
 
 export interface FunnelSummary {

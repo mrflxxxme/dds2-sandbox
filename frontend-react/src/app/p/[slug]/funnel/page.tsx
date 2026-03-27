@@ -28,7 +28,7 @@ export default function FunnelPage() {
     const [hasBdr, setHasBdr] = useState(false);
 
     // Group by mode
-    const [groupBy, setGroupBy] = useState<'day' | 'sku' | 'brand' | 'subject' | 'abc'>('day');
+    const [groupBy, setGroupBy] = useState<'day' | 'sku' | 'brand' | 'subject' | 'tag' | 'imt' | 'abc'>('day');
     const [skuData, setSkuData] = useState<FunnelSkuRow[]>([]);
     const [groupData, setGroupData] = useState<FunnelGroupRow[]>([]);
     const [abcData, setAbcData] = useState<FunnelAbcRow[]>([]);
@@ -65,7 +65,7 @@ export default function FunnelPage() {
         } catch { return null; }
     }, []);
 
-    const loadData = useCallback(async (df?: string, dt?: string, gb?: 'day' | 'sku' | 'brand' | 'subject' | 'abc') => {
+    const loadData = useCallback(async (df?: string, dt?: string, gb?: 'day' | 'sku' | 'brand' | 'subject' | 'tag' | 'imt' | 'abc') => {
         const from = df || dateFrom;
         const to = dt || dateTo;
         const mode = gb || groupBy;
@@ -86,7 +86,7 @@ export default function FunnelPage() {
                 setData([]);
                 setGroupData([]);
                 setAbcData([]);
-            } else if (mode === 'brand' || mode === 'subject') {
+            } else if (mode === 'brand' || mode === 'subject' || mode === 'tag' || mode === 'imt') {
                 setGroupData((res.data || []) as FunnelGroupRow[]);
                 setData([]);
                 setSkuData([]);
@@ -303,8 +303,8 @@ export default function FunnelPage() {
                             {groupBy === 'day' ? 'Сводка по дням' : groupBy === 'sku' ? 'Сводка по товарам' : groupBy === 'brand' ? 'Сводка по брендам' : groupBy === 'abc' ? 'ABC анализ' : 'Сводка по категориям'}
                         </h3>
                         <div style={{ display: 'flex', gap: 0, border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden' }}>
-                            {(['day', 'sku', 'brand', 'subject', 'abc'] as const).map((mode, idx) => {
-                                const labels = { day: 'По дням', sku: 'По артикулам', brand: 'По брендам', subject: 'По категориям', abc: 'ABC анализ' };
+                            {(['day', 'sku', 'brand', 'subject', 'tag', 'imt', 'abc'] as const).map((mode, idx) => {
+                                const labels = { day: 'По дням', sku: 'По артикулам', brand: 'По брендам', subject: 'По категориям', tag: 'По ярлыкам', imt: 'По склейкам', abc: 'ABC анализ' };
                                 return (
                                     <button
                                         key={mode}
@@ -416,14 +416,14 @@ export default function FunnelPage() {
                     )}
 
                     {/* Brand / Subject Group Table */}
-                    {(groupBy === 'brand' || groupBy === 'subject') && (
+                    {(groupBy === 'brand' || groupBy === 'subject' || groupBy === 'tag' || groupBy === 'imt') && (
                         <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                             <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 320px)' }}>
                                 {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> : (
                                     <table className="data-table" style={{ minWidth: 1600, borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#ffffff' }}>
                                     <thead>
                                         <tr ref={headerRow1Ref}>
-                                            <th rowSpan={2} style={{ position: 'sticky', left: 0, top: 0, background: '#ffffff', color: '#374151', zIndex: 22, verticalAlign: 'bottom', borderBottom: '2px solid #e5e7eb', minWidth: 200, borderRight: '1px solid #e5e7eb', padding: '8px 12px', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.08)' }}>{groupBy === 'brand' ? 'БРЕНД' : 'КАТЕГОРИЯ'}</th>
+                                            <th rowSpan={2} style={{ position: 'sticky', left: 0, top: 0, background: '#ffffff', color: '#374151', zIndex: 22, verticalAlign: 'bottom', borderBottom: '2px solid #e5e7eb', minWidth: 200, borderRight: '1px solid #e5e7eb', padding: '8px 12px', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.08)' }}>{groupBy === 'brand' ? 'БРЕНД' : groupBy === 'tag' ? 'ЯРЛЫК' : groupBy === 'imt' ? 'СКЛЕЙКА' : 'КАТЕГОРИЯ'}</th>
                                             <th colSpan={5} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb' }}>ВОРОНКА ПРОДАЖ</th>
                                             <th colSpan={7} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ВНУТРЕННЯЯ РЕКЛАМА</th>
                                             <th colSpan={8} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ФИНАНСЫ</th>
@@ -461,7 +461,7 @@ export default function FunnelPage() {
                                             </td></tr>
                                         )}
                                         {groupData.map((r, i) => {
-                                            const grpLabel = groupBy === 'brand' ? (r.brand || '\u2014') : (r.subject || '\u2014');
+                                            const grpLabel = groupBy === 'brand' ? (r.brand || '\u2014') : groupBy === 'tag' ? (r.tag || '\u2014') : groupBy === 'imt' ? (r.imt_group || '\u2014') : (r.subject || '\u2014');
                                             const rowBg = i % 2 === 0 ? '#ffffff' : '#f9fafb';
                                             return (
                                                 <tr key={grpLabel} style={{ background: rowBg, color: '#111827' }}>
@@ -498,7 +498,7 @@ export default function FunnelPage() {
                                 )}
                             </div>
                             <div style={{ padding: '16px 20px', borderTop: '1px solid #e5e7eb', fontSize: 12, color: 'var(--color-text-dim)', background: '#f9fafb' }}>
-                                Всего {groupBy === 'brand' ? 'брендов' : 'категорий'}: {groupData.length}
+                                Всего {groupBy === 'brand' ? 'брендов' : groupBy === 'tag' ? 'ярлыков' : groupBy === 'imt' ? 'склеек' : 'категорий'}: {groupData.length}
                             </div>
                         </div>
                     )}

@@ -268,6 +268,44 @@ async def get_funnel_data(
             "group_by": "brand",
         }
 
+    if group_by == "tag" and not vendor_code:
+        data = await funnel_service.get_funnel_by_tag(
+            db,
+            project.id,
+            tax_info,
+            date_from,
+            date_to,
+            brand,
+            subject,
+            bdr_rates_map=bdr_rates_map,
+        )
+        return {
+            "data": data,
+            "tax_info": tax_info,
+            "has_bdr": bool(bdr_rates_map),
+            "detailed": False,
+            "group_by": "tag",
+        }
+
+    if group_by == "imt" and not vendor_code:
+        data = await funnel_service.get_funnel_by_imt(
+            db,
+            project.id,
+            tax_info,
+            date_from,
+            date_to,
+            brand,
+            subject,
+            bdr_rates_map=bdr_rates_map,
+        )
+        return {
+            "data": data,
+            "tax_info": tax_info,
+            "has_bdr": bool(bdr_rates_map),
+            "detailed": False,
+            "group_by": "imt",
+        }
+
     if group_by == "subject" and not vendor_code:
         data = await funnel_service.get_funnel_by_subject(
             db,

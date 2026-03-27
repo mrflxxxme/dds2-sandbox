@@ -45,6 +45,12 @@ from backend.services.funnel.queries import (
     set_cost_override,
 )
 
+# ─── Grouping (tag, imt) ─────────────────────────────────────────────────────
+from backend.services.funnel.queries_grouping import (
+    get_funnel_by_imt,
+    get_funnel_by_tag,
+)
+
 # ─── Sync ────────────────────────────────────────────────────────────────────
 from backend.services.funnel.sync import (
     batch_resync_ads,
@@ -88,4 +94,7 @@ __all__ = [
     "get_anomalies",
     # capital
     "get_capital_analysis",
+    # grouping
+    "get_funnel_by_tag",
+    "get_funnel_by_imt",
 ]
