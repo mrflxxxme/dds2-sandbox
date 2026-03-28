@@ -1,159 +1,243 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
 
-interface OpiuRow {
-    key: string;
-    label: string;
-    level: number;
-    bold: boolean;
-    total: number;
-    total_pct: number | null;
-}
+/**
+ * TMA P&L (ОПИУ) page — month/quarter/year period switcher + OPIU data.
+ *
+ * FIX #5: setTimeout cleanup via useRef + max retry count for polling.
+ */
 
 type Period = 'month' | 'quarter' | 'year';
 
-function getDateRange(period: Period): { from: string; to: string } {
+interface PnlSection {
+    label: string;
+    rows: Array<{ label: string; value: number }>;
+    total?: { label: string; value: number };
+}
+
+interface OpiuResponse {
+    rows: Array<{
+        article: string;
+        [key: string]: unknown;
+    }>;
+    totals: Record<string, number>;
+    status?: string;
+}
+
+const MAX_RETRIES = 10;
+const RETRY_DELAY_MS = 3000;
+
+function getDateRange(period: Period): { dateFrom: string; dateTo: string } {
     const now = new Date();
-    const to = now.toISOString().slice(0, 10);
-    const y = now.getFullYear();
-    const m = now.getMonth() + 1;
+    const year = now.getFullYear();
+    const month = now.getMonth(); // 0-indexed
 
-    if (period === 'month') {
-        return { from: `${y}-${String(m).padStart(2, '0')}-01`, to };
+    let dateFrom: Date;
+    let dateTo: Date;
+
+    switch (period) {
+        case 'month':
+            dateFrom = new Date(year, month, 1);
+            dateTo = new Date(year, month + 1, 0);
+            break;
+        case 'quarter': {
+            const qStart = Math.floor(month / 3) * 3;
+            dateFrom = new Date(year, qStart, 1);
+            dateTo = new Date(year, qStart + 3, 0);
+            break;
+        }
+        case 'year':
+            dateFrom = new Date(year, 0, 1);
+            dateTo = new Date(year, 11, 31);
+            break;
     }
-    if (period === 'quarter') {
-        const qm = Math.floor((m - 1) / 3) * 3 + 1;
-        return { from: `${y}-${String(qm).padStart(2, '0')}-01`, to };
-    }
-    return { from: `${y}-01-01`, to };
-}
 
-function compactMoney(n: number): string {
-    if (n == null) return '—';
-    const abs = Math.abs(n);
-    if (abs >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-    if (abs >= 1_000) return (n / 1_000).toFixed(1) + 'K';
-    return formatNumber(n, 0);
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    return { dateFrom: fmt(dateFrom), dateTo: fmt(dateTo) };
 }
-
-// Which rows to show (hide deeply nested detail)
-const VISIBLE_KEYS = new Set([
-    'revenue', 'mp_discount', 'net_sales',
-    'direct_costs', 'cost_of_sales', 'logistics', 'commission',
-    'storage', 'advertising', 'deductions', 'penalties', 'acceptance',
-    'gross_profit', 'compensation', 'taxes', 'operating_expenses',
-    'operating_profit', 'financial', 'net_profit',
-]);
 
 export default function TmaPnlPage() {
     const [period, setPeriod] = useState<Period>('month');
+    const [sections, setSections] = useState<PnlSection[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
-    const [rows, setRows] = useState<OpiuRow[]>([]);
-    const [computing, setComputing] = useState(false);
+
+    // FIX #5: useRef for timeout cleanup
+    const timeoutRef = useRef<NodeJS.Timeout>();
+    const retryCountRef = useRef(0);
 
     const loadData = useCallback(async () => {
+        setLoading(true);
         setError('');
+        retryCountRef.current = 0;
+
+        const { dateFrom, dateTo } = getDateRange(period);
+
         try {
-            const { from, to } = getDateRange(period);
-            const res = await api.getOpiu(from, to);
-            if (res.computing) {
-                setComputing(true);
-                setLoading(false);
-                setTimeout(() => loadData(), 3000);
+            const data = await api.request<OpiuResponse>(
+                'GET',
+                `/api/v1/reports/opiu?date_from=${dateFrom}&date_to=${dateTo}`
+            );
+
+            // If status is "computing", poll until ready (with max retries)
+            if (data.status === 'computing') {
+                if (retryCountRef.current < MAX_RETRIES) {
+                    retryCountRef.current++;
+                    timeoutRef.current = setTimeout(() => {
+                        loadData();
+                    }, RETRY_DELAY_MS);
+                } else {
+                    setError('Расчёт занимает слишком много времени. Попробуйте позже.');
+                    setLoading(false);
+                }
                 return;
             }
-            setComputing(false);
-            setRows(res.rows || []);
-        } catch (e: any) {
-            setError(e.message || 'Ошибка');
+
+            // Parse OPIU totals into display sections
+            const t = data.totals || {};
+            const parsed: PnlSection[] = [];
+
+            // Revenue section
+            parsed.push({
+                label: 'Выручка',
+                rows: [
+                    { label: 'Продажи (WB)', value: t.revenue_wb || 0 },
+                    { label: 'Прочие продажи', value: t.revenue_other || 0 },
+                ],
+                total: { label: 'Итого выручка', value: t.revenue_total || 0 },
+            });
+
+            // Cost of goods
+            parsed.push({
+                label: 'Себестоимость',
+                rows: [
+                    { label: 'Себестоимость товара', value: t.cogs || 0 },
+                    { label: 'Логистика', value: t.logistics || 0 },
+                    { label: 'Комиссия WB', value: t.wb_commission || 0 },
+                ],
+                total: { label: 'Валовая прибыль', value: t.gross_profit || 0 },
+            });
+
+            // Operating expenses
+            parsed.push({
+                label: 'Операционные расходы',
+                rows: [
+                    { label: 'Реклама', value: t.ads || t.ad_deduction || 0 },
+                    { label: 'Хранение', value: t.storage || 0 },
+                    { label: 'Штрафы', value: t.penalties || 0 },
+                    { label: 'Прочие удержания', value: t.other_deduction || 0 },
+                ].filter(r => r.value !== 0),
+                total: { label: 'Операционная прибыль', value: t.operating_profit || 0 },
+            });
+
+            // Net profit
+            if (t.net_profit !== undefined) {
+                parsed.push({
+                    label: 'Итог',
+                    rows: [
+                        { label: 'Налоги', value: t.tax || 0 },
+                    ].filter(r => r.value !== 0),
+                    total: { label: 'Чистая прибыль', value: t.net_profit || 0 },
+                });
+            }
+
+            setSections(parsed);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Ошибка загрузки');
+        } finally {
+            setLoading(false);
         }
-        setLoading(false);
     }, [period]);
 
-    useEffect(() => { setLoading(true); loadData(); }, [loadData]);
+    // FIX #5: Cleanup timeout on period change or unmount
+    useEffect(() => {
+        loadData();
+        return () => {
+            if (timeoutRef.current) {
+                clearTimeout(timeoutRef.current);
+            }
+        };
+    }, [loadData]);
 
-    function changePeriod(p: Period) {
+    const handlePeriodChange = useCallback((p: Period) => {
         haptic('selection');
         setPeriod(p);
-    }
-
-    const visibleRows = rows.filter(r => VISIBLE_KEYS.has(r.key));
+    }, []);
 
     return (
         <div className="tma-page">
-            <div className="tma-page-title">Отчет о прибылях и убытках</div>
+            <div className="tma-page-header">
+                <div className="tma-page-title">P&L (ОПИУ)</div>
+            </div>
 
-            <div className="tma-filter">
-                {([['month', 'Месяц'], ['quarter', 'Квартал'], ['year', 'Год']] as [Period, string][]).map(([key, label]) => (
+            {/* Period Switcher */}
+            <div className="tma-period-switch">
+                {([
+                    { key: 'month' as Period, label: 'Месяц' },
+                    { key: 'quarter' as Period, label: 'Квартал' },
+                    { key: 'year' as Period, label: 'Год' },
+                ]).map(({ key, label }) => (
                     <button
                         key={key}
-                        className={`tma-filter-chip ${period === key ? 'active' : ''}`}
-                        onClick={() => changePeriod(key)}
+                        className={`tma-period-btn${period === key ? ' active' : ''}`}
+                        onClick={() => handlePeriodChange(key)}
                     >
                         {label}
                     </button>
                 ))}
             </div>
 
-            {loading && !rows.length && (
-                <div className="tma-center" style={{ minHeight: '40vh' }}>
+            {loading ? (
+                <div className="tma-loading">
                     <div className="tma-spinner" />
-                    {computing && <div style={{ marginTop: 12, fontSize: 13, color: 'var(--tg-theme-hint-color, #999)' }}>Расчет данных...</div>}
+                    <div className="tma-loading-text">Загрузка...</div>
                 </div>
-            )}
-
-            {error && !rows.length && (
-                <div className="tma-error">
-                    <div className="tma-error-icon">😕</div>
-                    <div>{error}</div>
+            ) : error ? (
+                <div className="tma-empty">
+                    <div className="tma-empty-icon">⚠️</div>
+                    <div className="tma-empty-text">{error}</div>
+                    <button
+                        className="tma-btn tma-btn-primary"
+                        style={{ marginTop: 16 }}
+                        onClick={() => {
+                            haptic('light');
+                            loadData();
+                        }}
+                    >
+                        Повторить
+                    </button>
                 </div>
-            )}
-
-            {visibleRows.length > 0 && (
-                <div className="tma-card">
-                    {visibleRows.map((row) => {
-                        const isTotal = row.key === 'net_profit' || row.key === 'gross_profit' || row.key === 'operating_profit';
-                        const isSection = row.level === 0 && row.bold;
-                        const isNegative = row.total < 0;
-                        const isProfit = row.key.includes('profit') || row.key === 'net_sales' || row.key === 'revenue';
-
-                        return (
-                            <div
-                                key={row.key}
-                                className={`tma-opiu-row ${isTotal ? 'total' : ''} ${row.bold ? 'bold' : ''}`}
-                                style={{ paddingLeft: row.level > 1 ? (row.level - 1) * 12 : 0 }}
-                            >
-                                <span className="tma-opiu-label">
-                                    {row.label}
-                                </span>
-                                <span
-                                    className="tma-opiu-value"
-                                    style={{
-                                        color: isNegative ? '#ff3b30' :
-                                               isProfit && row.total > 0 ? '#34c759' :
-                                               undefined
-                                    }}
-                                >
-                                    {compactMoney(row.total)} ₽
-                                </span>
-                                <span className="tma-opiu-pct">
-                                    {row.total_pct != null ? `${row.total_pct.toFixed(1)}%` : ''}
+            ) : sections.length === 0 ? (
+                <div className="tma-empty">
+                    <div className="tma-empty-icon">📭</div>
+                    <div className="tma-empty-text">Нет данных за выбранный период</div>
+                </div>
+            ) : (
+                sections.map((section, si) => (
+                    <div key={si} className="tma-card">
+                        <div className="tma-pnl-section-header">{section.label}</div>
+                        {section.rows.map((row, ri) => (
+                            <div key={ri} className="tma-pnl-row">
+                                <span className="tma-pnl-label">{row.label}</span>
+                                <span className={`tma-pnl-value ${row.value >= 0 ? 'tma-stat-positive' : 'tma-stat-negative'}`}>
+                                    {formatNumber(row.value, 0)} ₽
                                 </span>
                             </div>
-                        );
-                    })}
-                </div>
-            )}
-
-            {!loading && !error && visibleRows.length === 0 && (
-                <div className="tma-error">
-                    <div className="tma-error-icon">📊</div>
-                    <div>Нет данных за выбранный период</div>
-                </div>
+                        ))}
+                        {section.total && (
+                            <div className="tma-pnl-row tma-pnl-total">
+                                <span className="tma-pnl-label">{section.total.label}</span>
+                                <span className={`tma-pnl-value ${section.total.value >= 0 ? 'tma-stat-positive' : 'tma-stat-negative'}`}>
+                                    {formatNumber(section.total.value, 0)} ₽
+                                </span>
+                            </div>
+                        )}
+                    </div>
+                ))
             )}
         </div>
     );

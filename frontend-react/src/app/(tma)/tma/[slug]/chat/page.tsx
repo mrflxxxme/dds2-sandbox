@@ -1,7 +1,15 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { api } from '@/lib/api';
 import { haptic } from '@/lib/telegram';
+
+/**
+ * TMA AI Chat page — chat with AI assistant about project financials.
+ *
+ * FIX #4: XSS-safe rendering — escape HTML entities BEFORE applying formatting.
+ * No dangerouslySetInnerHTML with raw user input.
+ */
 
 interface ChatMessage {
     role: 'user' | 'assistant';
@@ -9,154 +17,186 @@ interface ChatMessage {
 }
 
 const SUGGESTIONS = [
-    'Как дела с продажами?',
-    'Покажи БДР за неделю',
-    'Какие товары сливают бюджет?',
-    'Остатки на складе',
+    'Какая прибыль за этот месяц?',
+    'Топ расходов за неделю',
+    'Сравни доходы с прошлым месяцем',
+    'Какие товары самые прибыльные?',
 ];
+
+/**
+ * FIX #4: Safe text rendering — escape HTML first, then apply markdown-like formatting.
+ */
+function renderMessageSafe(text: string): string {
+    // 1. Escape HTML entities first to prevent XSS
+    let safe = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+
+    // 2. Apply markdown-like formatting on the escaped text
+    safe = safe.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+    safe = safe.replace(/\*(.*?)\*/g, '<i>$1</i>');
+    safe = safe.replace(/`(.*?)`/g, '<code>$1</code>');
+
+    // 3. Convert newlines to <br>
+    safe = safe.replace(/\n/g, '<br>');
+
+    return safe;
+}
 
 export default function TmaChatPage() {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [input, setInput] = useState('');
     const [sending, setSending] = useState(false);
-    const messagesRef = useRef<HTMLDivElement>(null);
-    const inputRef = useRef<HTMLTextAreaElement>(null);
+    const messagesEndRef = useRef<HTMLDivElement>(null);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+    const scrollToBottom = useCallback(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, []);
 
     useEffect(() => {
         scrollToBottom();
-    }, [messages]);
+    }, [messages, scrollToBottom]);
 
-    function scrollToBottom() {
-        if (messagesRef.current) {
-            messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
-        }
-    }
+    // Auto-resize textarea
+    const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+        setInput(e.target.value);
+        const el = e.target;
+        el.style.height = 'auto';
+        el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+    }, []);
 
-    async function sendMessage(text?: string) {
-        const msg = (text || input).trim();
-        if (!msg || sending) return;
+    const sendMessage = useCallback(async (text: string) => {
+        const trimmed = text.trim();
+        if (!trimmed || sending) return;
 
         haptic('light');
+        const userMsg: ChatMessage = { role: 'user', content: trimmed };
+        setMessages(prev => [...prev, userMsg]);
         setInput('');
-        setMessages(prev => [...prev, { role: 'user', content: msg }]);
         setSending(true);
 
-        try {
-            const projectId = api.getProjectId();
-            if (!projectId) throw new Error('Проект не выбран');
+        // Reset textarea height
+        if (textareaRef.current) {
+            textareaRef.current.style.height = 'auto';
+        }
 
-            const res = await api.request<{ reply: string }>(
-                'POST', '/api/v1/tma/chat',
-                { project_id: projectId, message: msg },
+        try {
+            const response = await api.request<{ reply: string }>(
+                'POST',
+                '/api/v1/tma/chat',
+                { message: trimmed }
             );
 
-            setMessages(prev => [...prev, { role: 'assistant', content: res.reply }]);
-            haptic('success');
-        } catch (e: any) {
-            setMessages(prev => [...prev, {
+            const assistantMsg: ChatMessage = {
                 role: 'assistant',
-                content: `Ошибка: ${e.message || 'не удалось получить ответ'}`,
-            }]);
+                content: response.reply || 'Нет ответа',
+            };
+            setMessages(prev => [...prev, assistantMsg]);
+            haptic('success');
+        } catch (err) {
+            const errorMsg: ChatMessage = {
+                role: 'assistant',
+                content: `Ошибка: ${err instanceof Error ? err.message : 'Не удалось получить ответ'}`,
+            };
+            setMessages(prev => [...prev, errorMsg]);
             haptic('error');
+        } finally {
+            setSending(false);
         }
-        setSending(false);
-    }
+    }, [sending]);
 
-    function handleKeyDown(e: React.KeyboardEvent) {
+    const handleSubmit = useCallback((e: React.FormEvent) => {
+        e.preventDefault();
+        sendMessage(input);
+    }, [input, sendMessage]);
+
+    const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            sendMessage();
+            sendMessage(input);
         }
-    }
+    }, [input, sendMessage]);
 
-    // Convert Telegram HTML to safe renderable content
-    function renderHtml(html: string) {
-        // The AI returns Telegram HTML (<b>, <i>, <blockquote>)
-        // Basic sanitization: only allow safe tags
-        const clean = html
-            .replace(/<(?!\/?(b|i|strong|em|blockquote|br|code|pre)\b)[^>]*>/gi, '')
-            .replace(/\n/g, '<br/>');
-        return { __html: clean };
-    }
+    const handleSuggestion = useCallback((text: string) => {
+        haptic('selection');
+        sendMessage(text);
+    }, [sendMessage]);
 
     return (
-        <div className="tma-chat">
-            <div className="tma-chat-messages" ref={messagesRef}>
+        <div className="tma-chat-container">
+            {/* Messages */}
+            <div className="tma-chat-messages">
                 {messages.length === 0 && (
-                    <div style={{
-                        display: 'flex',
-                        flexDirection: 'column',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        flex: 1,
-                        gap: 16,
-                        padding: '20px 0',
-                    }}>
-                        <div style={{ fontSize: 48 }}>🤖</div>
-                        <div style={{
-                            fontSize: 15,
-                            color: 'var(--tg-theme-hint-color, #86868b)',
-                            textAlign: 'center',
-                            lineHeight: 1.5,
-                        }}>
-                            AI-аналитик по вашим данным WB.<br/>
-                            Задайте вопрос или выберите:
-                        </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%', maxWidth: 280 }}>
-                            {SUGGESTIONS.map((s, i) => (
-                                <button
-                                    key={i}
-                                    className="tma-btn tma-btn-secondary"
-                                    style={{ fontSize: 13, padding: '10px 16px' }}
-                                    onClick={() => sendMessage(s)}
-                                >
-                                    {s}
-                                </button>
-                            ))}
+                    <div className="tma-empty" style={{ padding: '40px 0' }}>
+                        <div className="tma-empty-icon">🤖</div>
+                        <div className="tma-empty-text" style={{ fontSize: 14, color: 'var(--tma-hint)' }}>
+                            Задайте вопрос о финансах проекта
                         </div>
                     </div>
                 )}
 
                 {messages.map((msg, i) => (
-                    <div key={i} className={`tma-chat-bubble ${msg.role}`}>
-                        {msg.role === 'assistant' ? (
-                            <div dangerouslySetInnerHTML={renderHtml(msg.content)} />
-                        ) : (
-                            msg.content
-                        )}
+                    <div
+                        key={i}
+                        className={`tma-chat-bubble ${msg.role === 'user' ? 'tma-chat-user' : 'tma-chat-assistant'}`}
+                        dangerouslySetInnerHTML={
+                            msg.role === 'assistant'
+                                ? { __html: renderMessageSafe(msg.content) }
+                                : undefined
+                        }
+                    >
+                        {msg.role === 'user' ? msg.content : undefined}
                     </div>
                 ))}
 
                 {sending && (
-                    <div className="tma-chat-bubble assistant">
-                        <div className="tma-typing">
-                            <div className="tma-typing-dot" />
-                            <div className="tma-typing-dot" />
-                            <div className="tma-typing-dot" />
-                        </div>
+                    <div className="tma-chat-bubble tma-chat-assistant">
+                        <div className="tma-spinner tma-spinner-sm" />
                     </div>
                 )}
+
+                <div ref={messagesEndRef} />
             </div>
 
-            <div className="tma-chat-input-area">
+            {/* Suggestions (show only when no messages) */}
+            {messages.length === 0 && (
+                <div className="tma-chat-suggestions">
+                    {SUGGESTIONS.map((s, i) => (
+                        <button
+                            key={i}
+                            className="tma-chat-suggestion"
+                            onClick={() => handleSuggestion(s)}
+                        >
+                            {s}
+                        </button>
+                    ))}
+                </div>
+            )}
+
+            {/* Input Area */}
+            <form className="tma-chat-input-area" onSubmit={handleSubmit}>
                 <textarea
-                    ref={inputRef}
-                    className="tma-chat-input"
-                    placeholder="Спросите что-нибудь..."
+                    ref={textareaRef}
+                    className="tma-chat-textarea"
+                    placeholder="Введите сообщение..."
                     value={input}
-                    onChange={e => setInput(e.target.value)}
+                    onChange={handleInputChange}
                     onKeyDown={handleKeyDown}
                     rows={1}
                     disabled={sending}
                 />
                 <button
+                    type="submit"
                     className="tma-chat-send"
-                    onClick={() => sendMessage()}
                     disabled={!input.trim() || sending}
+                    aria-label="Отправить"
                 >
                     ↑
                 </button>
-            </div>
+            </form>
         </div>
     );
 }

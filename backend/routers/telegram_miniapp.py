@@ -1,193 +1,131 @@
 """
-Telegram Mini App endpoints:
-- Auth via initData → JWT
-- AI chat via REST (reuses existing AI agent)
-- User projects list for project picker
+Router: /tma — Telegram Mini App authentication and API.
+
+Flow:
+1. TMA sends initData → POST /tma/auth
+2. Backend validates HMAC, finds user by telegram_id or username
+3. Returns JWT tokens for subsequent API calls
+4. POST /tma/chat — AI chat (requires JWT)
+5. GET /tma/projects — user projects (requires JWT)
 """
 
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.auth import create_access_token, create_refresh_token, get_current_user
+from backend.auth import get_current_user
 from backend.config import settings
 from backend.database import get_db
-from backend.models import User
-from backend.models.telegram import TelegramBotUser
-from backend.services.telegram_service import get_user_projects
-from backend.utils.telegram_auth import validate_telegram_webapp_data
+from backend.models.auth import User
+from backend.services.telegram_service import (
+    authenticate_tma_user,
+    get_user_projects,
+    verify_project_access,
+)
 
-logger = logging.getLogger("dds.tma")
+logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/tma", tags=["Telegram Mini App"])
-
-
-# ─── Schemas ─────────────────────────────────────────────────────────────────
+router = APIRouter(prefix="/tma", tags=["TMA"])
 
 
-class TmaAuthRequest(BaseModel):
+# ─── Schemas ──────────────────────────────────────────────────────────────────
+
+
+class TMAAuthRequest(BaseModel):
     init_data: str
 
 
-class TmaAuthResponse(BaseModel):
-    access_token: str
-    refresh_token: str | None = None
-    token_type: str = "bearer"
-    user: dict  # {id, username, first_name, projects: [...]}
-
-
-class TmaChatRequest(BaseModel):
-    project_id: int
-    brand: str | None = None
-    message: str
-
-
-class TmaChatResponse(BaseModel):
-    reply: str
-
-
-class TmaProjectItem(BaseModel):
+class TMAProjectResponse(BaseModel):
     id: int
     name: str
     slug: str
 
 
-# ─── Auth ────────────────────────────────────────────────────────────────────
+class TMAAuthResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    user: dict
+    projects: list[TMAProjectResponse]
 
 
-@router.post("/auth", response_model=TmaAuthResponse)
-async def tma_auth(body: TmaAuthRequest, db: AsyncSession = Depends(get_db)):
-    """Authenticate Telegram Mini App user via initData.
-
-    Validates the Telegram WebApp initData signature, looks up the linked
-    DDS user, and returns JWT tokens.
-    """
-    bot_token = settings.TELEGRAM_BOT_TOKEN_ANALYTICS
-    if not bot_token:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Telegram bot not configured",
-        )
-
-    user_data = validate_telegram_webapp_data(body.init_data, bot_token)
-    if user_data is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="invalid_init_data",
-        )
-
-    telegram_id = user_data.get("id")
-    if not telegram_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="invalid_init_data",
-        )
-
-    # Find linked DDS user
-    result = await db.execute(
-        select(TelegramBotUser).where(TelegramBotUser.telegram_id == telegram_id)
-    )
-    tg_user = result.scalar_one_or_none()
-
-    if tg_user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="account_not_linked",
-        )
-
-    # Get DDS user
-    result = await db.execute(
-        select(User).where(User.id == tg_user.user_id, User.is_active == True)
-    )
-    user = result.scalar_one_or_none()
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="user_inactive",
-        )
-
-    # Get user projects
-    projects = await get_user_projects(db, user.id)
-    project_list = [
-        {"id": p.id, "name": p.name, "slug": p.slug}
-        for p in projects
-    ]
-
-    # Issue tokens
-    access = create_access_token(user.id, user.username)
-    refresh = await create_refresh_token(user.id)
-
-    logger.info(
-        "TMA auth: telegram_id=%s → user_id=%s (%s), projects=%d",
-        telegram_id, user.id, user.username, len(project_list),
-    )
-
-    return TmaAuthResponse(
-        access_token=access,
-        refresh_token=refresh,
-        user={
-            "id": user.id,
-            "username": user.username,
-            "first_name": user.first_name or user.username,
-            "projects": project_list,
-        },
-    )
+class TMAChatRequest(BaseModel):
+    project_id: int
+    brand: str | None = None
+    message: str
 
 
-# ─── AI Chat ────────────────────────────────────────────────────────────────
+class TMAChatResponse(BaseModel):
+    answer: str
 
 
-@router.post("/chat", response_model=TmaChatResponse)
-async def tma_chat(
-    body: TmaChatRequest,
-    current_user: User = Depends(get_current_user),
+# ─── POST /tma/auth ──────────────────────────────────────────────────────────
+
+
+@router.post("/auth", response_model=TMAAuthResponse)
+async def tma_auth(
+    body: TMAAuthRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """AI chat for Telegram Mini App. Reuses the existing AI agent."""
-    from backend.models.auth import ProjectMember
+    """Authenticate Telegram Mini App user."""
+    bot_token = settings.TELEGRAM_BOT_TOKEN_ANALYTICS
+    if not bot_token:
+        logger.error("TMA auth: TELEGRAM_BOT_TOKEN_ANALYTICS not configured")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="telegram_bot_not_configured",
+        )
+
+    dds_user, projects, access_token, refresh_token = await authenticate_tma_user(db, body.init_data, bot_token)
+
+    return TMAAuthResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        user={
+            "id": dds_user.id,
+            "username": dds_user.username,
+            "first_name": dds_user.first_name,
+            "last_name": dds_user.last_name,
+        },
+        projects=[TMAProjectResponse(id=p.id, name=p.name, slug=p.slug) for p in projects],
+    )
+
+
+# ─── POST /tma/chat ──────────────────────────────────────────────────────────
+
+
+@router.post("/chat", response_model=TMAChatResponse)
+async def tma_chat(
+    body: TMAChatRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """AI chat endpoint for TMA. Requires JWT auth."""
+    project = await verify_project_access(db, user.id, body.project_id)
+
     from backend.services.ai.agent import ask
 
-    # Verify user has access to project
-    result = await db.execute(
-        select(ProjectMember).where(
-            ProjectMember.project_id == body.project_id,
-            ProjectMember.user_id == current_user.id,
-        )
-    )
-    if result.scalar_one_or_none() is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No access to this project",
-        )
-
-    # Use user_id as chat_id for TMA (separate from Telegram chat rate limits)
-    chat_id = current_user.id * -1  # Negative to avoid collision with Telegram chat IDs
-
-    reply = await ask(
+    answer = await ask(
         db=db,
         project_id=body.project_id,
         brand=body.brand,
-        chat_id=chat_id,
+        chat_id=user.id,
         question=body.message,
+        tax_rate=float(project.tax_rate or 6),
     )
 
-    return TmaChatResponse(reply=reply)
+    return TMAChatResponse(answer=answer)
 
 
-# ─── Projects (for project picker in TMA) ───────────────────────────────────
+# ─── GET /tma/projects ────────────────────────────────────────────────────────
 
 
-@router.get("/projects", response_model=list[TmaProjectItem])
+@router.get("/projects", response_model=list[TMAProjectResponse])
 async def tma_projects(
-    current_user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List projects available to the current user."""
-    projects = await get_user_projects(db, current_user.id)
-    return [
-        TmaProjectItem(id=p.id, name=p.name, slug=p.slug)
-        for p in projects
-    ]
+    """List projects for authenticated TMA user."""
+    projects = await get_user_projects(db, user.id)
+    return [TMAProjectResponse(id=p.id, name=p.name, slug=p.slug) for p in projects]

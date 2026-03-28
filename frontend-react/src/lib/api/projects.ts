@@ -53,5 +53,10 @@ export function addProjectMethods(api: ApiClient) {
         updateMemberRole(slug: string, userId: number, role: string, pages: string[]) {
             return api.request<MessageResponse>('PUT', `/api/v1/projects/${slug}/members/${userId}/role`, { role, pages });
         },
+        updateTelegramUsername(slug: string, userId: number, username: string | null) {
+            return api.request<void>('PUT', `/api/v1/projects/${slug}/members/${userId}/telegram-username`, {
+                telegram_username: username,
+            });
+        },
     };
 }

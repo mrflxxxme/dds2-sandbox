@@ -23,6 +23,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(200), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     role: Mapped[str] = mapped_column(String(20), default="member", server_default="member", nullable=False)
+    telegram_username: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     memberships: Mapped[list["ProjectMember"]] = relationship(back_populates="user")

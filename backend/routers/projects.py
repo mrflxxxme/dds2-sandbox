@@ -4,6 +4,7 @@ Router: /projects — CRUD for projects + team management + RBAC.
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
 
@@ -46,6 +47,7 @@ class ProjectMemberResponse(BaseModel):
     email: str | None = None
     first_name: str | None = None
     last_name: str | None = None
+    telegram_username: str | None = None
     role: str = "editor"
     pages: list[str] = []
     joined_at: datetime
@@ -210,6 +212,7 @@ async def list_members(
             "email": u.email,
             "first_name": u.first_name,
             "last_name": u.last_name,
+            "telegram_username": u.telegram_username,
             "role": m.role,
             "pages": get_effective_pages(m.role, m.pages),
             "joined_at": m.joined_at,
@@ -342,6 +345,90 @@ async def update_member_role(
         "role": body.role,
         "pages": get_effective_pages(body.role, target_member.pages),
     }
+
+
+# ─── Telegram username ────────────────────────────────────────────────────────
+
+
+class UpdateTelegramUsernameRequest(BaseModel):
+    telegram_username: str | None = None
+
+
+_TG_USERNAME_RE = re.compile(r"^[a-zA-Z0-9_]{5,32}$")
+
+
+@router.put("/{slug}/members/{user_id}/telegram-username")
+async def update_telegram_username(
+    slug: str,
+    user_id: int,
+    body: UpdateTelegramUsernameRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update telegram_username for a project member. Only owner or admin can do this."""
+    project = await _get_project_with_access(slug, user, db)
+
+    # Check actor is owner or admin
+    actor_result = await db.execute(
+        select(ProjectMember).where(
+            ProjectMember.project_id == project.id,
+            ProjectMember.user_id == user.id,
+        )
+    )
+    actor_member = actor_result.scalar_one_or_none()
+    if not actor_member or actor_member.role not in ("owner", "admin"):
+        raise HTTPException(403, "Только владелец или админ может менять telegram_username")
+
+    # Check target is a project member
+    target_result = await db.execute(
+        select(ProjectMember).where(
+            ProjectMember.project_id == project.id,
+            ProjectMember.user_id == user_id,
+        )
+    )
+    target_member = target_result.scalar_one_or_none()
+    if not target_member:
+        raise HTTPException(404, "Участник не найден")
+
+    # Get the User object
+    user_result = await db.execute(select(User).where(User.id == user_id))
+    target_user = user_result.scalar_one_or_none()
+    if not target_user:
+        raise HTTPException(404, "Пользователь не найден")
+
+    # Normalize or clear
+    raw = body.telegram_username
+    if not raw or not raw.strip():
+        target_user.telegram_username = None
+        await db.commit()
+        return {"updated": True, "user_id": user_id, "telegram_username": None}
+
+    normalized = raw.strip().lstrip("@").lower()
+
+    # Validate format
+    if not _TG_USERNAME_RE.match(normalized):
+        raise HTTPException(400, "Некорректный Telegram username (5-32 символа, a-z, 0-9, _)")
+
+    # Check uniqueness
+    existing = await db.execute(
+        select(User).where(
+            func.lower(User.telegram_username) == normalized,
+            User.id != user_id,
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(409, "Этот Telegram username уже привязан к другому пользователю")
+
+    target_user.telegram_username = normalized
+    await db.commit()
+
+    logger.info(
+        "Telegram username updated: project_id=%d, user_id=%d, username=%s",
+        project.id,
+        user_id,
+        normalized,
+    )
+    return {"updated": True, "user_id": user_id, "telegram_username": normalized}
 
 
 # ─── My permissions ──────────────────────────────────────────────────────────

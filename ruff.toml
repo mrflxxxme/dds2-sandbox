@@ -47,6 +47,9 @@ ignore = [
 "backend/utils/telegram.py" = ["RUF001", "RUF006", "S110", "F841"]  # Cyrillic, background task, pass-on-error, unused loop var
 "backend/etl/cost_parser_helpers.py" = ["RUF001", "S110", "SIM105", "UP038"]  # Cyrillic size patterns, try-except-pass, isinstance style (from cost_parsers.py)
 "backend/routers/planning.py" = ["RUF001"]  # Cyrillic strings (ЗАКАЗ direction default)
+"backend/routers/projects.py" = ["RUF001"]  # Cyrillic strings in slug generation
+"backend/routers/telegram_miniapp.py" = ["RUF001"]  # Cyrillic strings in TMA responses
+"backend/services/telegram_service.py" = ["RUF001"]  # Cyrillic strings in Telegram messages
 "backend/services/planning/brand_plan.py" = ["RUF001", "S608"]  # Cyrillic strings, SQL with brand clause (parameterized)
 "backend/routers/reports_wb.py" = ["B904", "RUF001", "RUF002", "RUF006", "S110", "SIM105"]  # Redis graceful degradation, Cyrillic strings, background tasks
 "backend/etl/service.py" = ["E402", "E712", "RUF006"]  # late imports, SQLAlchemy == False, background task ref

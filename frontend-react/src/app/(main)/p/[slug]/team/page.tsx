@@ -220,6 +220,8 @@ export default function TeamPage() {
     const [editMember, setEditMember] = useState<ProjectMember | null>(null);
     const { canManage, loading: permLoading } = usePermissions();
     const [currentUserId, setCurrentUserId] = useState<number | null>(null);
+    const [editingTelegramId, setEditingTelegramId] = useState<number | null>(null);
+    const [telegramInput, setTelegramInput] = useState('');
 
     useEffect(() => {
         loadData();
@@ -282,6 +284,34 @@ export default function TeamPage() {
         invalidatePermissionsCache(slug);
         setMsg('Роль обновлена');
         loadData();
+    };
+
+    const startTelegramEdit = (member: ProjectMember) => {
+        setEditingTelegramId(member.user_id);
+        setTelegramInput(member.telegram_username || '');
+    };
+
+    const saveTelegram = async (userId: number) => {
+        const value = telegramInput.trim().replace(/^@/, '') || null;
+        try {
+            await api.updateTelegramUsername(slug, userId, value);
+            setMembers(prev => prev.map(m =>
+                m.user_id === userId ? { ...m, telegram_username: value } : m
+            ));
+            setMsg('Telegram обновлён');
+        } catch (e: any) {
+            setMsg(e.message || 'Ошибка сохранения');
+        }
+        setEditingTelegramId(null);
+    };
+
+    const handleTelegramKeyDown = (e: React.KeyboardEvent, userId: number) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            saveTelegram(userId);
+        } else if (e.key === 'Escape') {
+            setEditingTelegramId(null);
+        }
     };
 
     if (loading) return <div style={{ padding: 40, color: 'var(--color-text-muted)' }}>Загрузка...</div>;
@@ -355,6 +385,7 @@ export default function TeamPage() {
                             <th>Пользователь</th>
                             <th>Роль</th>
                             <th>Email</th>
+                            <th>Telegram</th>
                             <th>Присоединился</th>
                             {canManage() && <th></th>}
                         </tr>
@@ -370,6 +401,28 @@ export default function TeamPage() {
                                 </td>
                                 <td><RoleBadge role={m.role} /></td>
                                 <td style={{ color: 'var(--color-text-muted)' }}>{m.email || '—'}</td>
+                                <td style={{ color: 'var(--color-text-muted)' }}>
+                                    {editingTelegramId === m.user_id ? (
+                                        <input
+                                            className="form-input"
+                                            value={telegramInput}
+                                            onChange={e => setTelegramInput(e.target.value)}
+                                            onBlur={() => saveTelegram(m.user_id)}
+                                            onKeyDown={e => handleTelegramKeyDown(e, m.user_id)}
+                                            placeholder="@username"
+                                            autoFocus
+                                            style={{ padding: '2px 8px', fontSize: 13, width: 150 }}
+                                        />
+                                    ) : (
+                                        <span
+                                            onClick={() => canManage() && startTelegramEdit(m)}
+                                            style={{ cursor: canManage() ? 'pointer' : 'default' }}
+                                            title={canManage() ? 'Нажмите для редактирования' : undefined}
+                                        >
+                                            {m.telegram_username ? `@${m.telegram_username}` : '—'}
+                                        </span>
+                                    )}
+                                </td>
                                 <td style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>{formatDateTime(m.joined_at)}</td>
                                 {canManage() && (
                                     <td>

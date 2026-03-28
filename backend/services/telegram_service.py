@@ -1,17 +1,20 @@
 """
-Telegram bot service — deep link auth, chat binding, brand notes.
+Telegram bot service — deep link auth, chat binding, brand notes, TMA auth.
 """
 
 import logging
 import secrets
 
-from sqlalchemy import select
+from fastapi import HTTPException, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.auth import create_access_token, create_refresh_token
 from backend.cache import get_redis
-from backend.models.auth import Project, ProjectMember
+from backend.models.auth import Project, ProjectMember, User
 from backend.models.integrations import WbFunnelDaily
 from backend.models.telegram import BrandNote, TelegramBotUser, TelegramChatBinding
+from backend.utils.telegram_auth import validate_telegram_webapp_data
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
@@ -65,6 +68,18 @@ async def link_telegram_user(db: AsyncSession, telegram_id: int, user_id: int) -
 async def get_dds_user_by_telegram(db: AsyncSession, telegram_id: int) -> TelegramBotUser | None:
     """Lookup DDS user by Telegram ID."""
     result = await db.execute(select(TelegramBotUser).where(TelegramBotUser.telegram_id == telegram_id))
+    return result.scalar_one_or_none()
+
+
+async def get_user_by_telegram_username(db: AsyncSession, username: str) -> User | None:
+    """Find DDS User by telegram_username (case-insensitive)."""
+    normalized = username.lower().lstrip("@")
+    result = await db.execute(
+        select(User).where(
+            func.lower(User.telegram_username) == normalized,
+            User.is_active.is_(True),
+        )
+    )
     return result.scalar_one_or_none()
 
 
@@ -141,6 +156,97 @@ async def toggle_notify(db: AsyncSession, binding_id: int, project_id: int, enab
     binding.notify_enabled = enabled
     await db.commit()
     return True
+
+
+# ─── TMA Authentication ─────────────────────────────────────────────────────
+
+
+async def authenticate_tma_user(
+    db: AsyncSession, init_data: str, bot_token: str
+) -> tuple[User, list[Project], str, str]:
+    """Authenticate TMA user via initData.
+
+    Returns (user, projects, access_token, refresh_token) or raises HTTPException.
+    """
+    # 1. Validate initData HMAC
+    tg_user_data = validate_telegram_webapp_data(init_data, bot_token)
+    if tg_user_data is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid_init_data",
+        )
+
+    telegram_id = tg_user_data.get("id")
+    if not telegram_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid_init_data",
+        )
+
+    # 2. Lookup by telegram_id (existing link)
+    tg_bot_user = await get_dds_user_by_telegram(db, telegram_id)
+    dds_user: User | None = None
+
+    if tg_bot_user:
+        result = await db.execute(select(User).where(User.id == tg_bot_user.user_id, User.is_active.is_(True)))
+        dds_user = result.scalar_one_or_none()
+
+    # 3. Fallback: lookup by telegram_username
+    if dds_user is None:
+        tg_username = tg_user_data.get("username")
+        if tg_username:
+            dds_user = await get_user_by_telegram_username(db, tg_username)
+            if dds_user:
+                # Auto-create TelegramBotUser link
+                await link_telegram_user(db, telegram_id, dds_user.id)
+                logger.info(
+                    "TMA auto-link: telegram_id=%d username=%s -> user_id=%d",
+                    telegram_id,
+                    tg_username,
+                    dds_user.id,
+                )
+
+    # 4. Not found
+    if dds_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="account_not_linked",
+        )
+
+    # Generate tokens
+    access_token = create_access_token(dds_user.id, dds_user.username)
+    refresh_token = await create_refresh_token(dds_user.id)
+
+    # Get user projects
+    projects = await get_user_projects(db, dds_user.id)
+
+    return dds_user, projects, access_token, refresh_token
+
+
+async def verify_project_access(db: AsyncSession, user_id: int, project_id: int) -> Project:
+    """Verify user has access to a project. Returns Project or raises HTTPException."""
+    result = await db.execute(
+        select(ProjectMember).where(
+            ProjectMember.project_id == project_id,
+            ProjectMember.user_id == user_id,
+        )
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="no_project_access",
+        )
+
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="project_not_found",
+        )
+
+    return project
 
 
 # ─── User Projects / Brands ─────────────────────────────────────────────────

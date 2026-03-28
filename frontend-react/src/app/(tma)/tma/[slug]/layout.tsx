@@ -1,83 +1,95 @@
 'use client';
-import { useEffect, useState } from 'react';
-import { useParams, usePathname, useRouter } from 'next/navigation';
-import { api } from '@/lib/api';
-import { getTelegramWebApp } from '@/lib/telegram';
-import Link from 'next/link';
 
-const navItems = [
-    { href: '', icon: '📊', label: 'Главная' },
-    { href: '/pnl', icon: '📋', label: 'P&L' },
-    { href: '/chat', icon: '💬', label: 'AI' },
-];
+import { useEffect, useCallback, useRef } from 'react';
+import { usePathname, useRouter, useParams } from 'next/navigation';
+import { getTelegramWebApp, haptic } from '@/lib/telegram';
 
-export default function TmaProjectLayout({ children }: { children: React.ReactNode }) {
-    const params = useParams();
+/**
+ * Slug layout — bottom navigation + Telegram BackButton handling.
+ *
+ * FIX #6: BackButton cleanup with abort flag for async operations.
+ */
+
+interface NavItem {
+    label: string;
+    icon: string;
+    path: string;
+}
+
+export default function TmaSlugLayout({ children }: { children: React.ReactNode }) {
     const pathname = usePathname();
     const router = useRouter();
+    const params = useParams();
     const slug = params.slug as string;
-    const [ready, setReady] = useState(false);
+    const abortedRef = useRef(false);
 
+    const navItems: NavItem[] = [
+        { label: 'Главная', icon: '📊', path: `/tma/${slug}` },
+        { label: 'P&L', icon: '📈', path: `/tma/${slug}/pnl` },
+        { label: 'AI', icon: '💬', path: `/tma/${slug}/chat` },
+    ];
+
+    const isSubPage = pathname !== `/tma/${slug}`;
+
+    // BackButton handling with proper cleanup (FIX #6)
     useEffect(() => {
-        // Sync project
-        if (!api.isAuthenticated()) {
-            router.replace('/tma');
-            return;
+        abortedRef.current = false;
+        const twa = getTelegramWebApp();
+        if (!twa) return;
+
+        const handleBack = () => {
+            if (abortedRef.current) return;
+            haptic('light');
+            router.back();
+        };
+
+        if (isSubPage) {
+            twa.BackButton.show();
+            twa.BackButton.onClick(handleBack);
+        } else {
+            twa.BackButton.hide();
         }
 
-        api.getProject(slug).then(p => {
-            api.setProjectId(p.id);
-            setReady(true);
-        }).catch(() => {
-            router.replace('/tma');
-        });
+        return () => {
+            abortedRef.current = true;
+            twa.BackButton.offClick(handleBack);
+            twa.BackButton.hide();
+        };
+    }, [isSubPage, router]);
 
-        // Telegram BackButton
-        const tg = getTelegramWebApp();
-        if (tg) {
-            tg.BackButton.show();
-            const handleBack = () => {
-                const base = `/tma/${slug}`;
-                if (pathname === base || pathname === base + '/') {
-                    tg.BackButton.hide();
-                    router.replace('/tma');
-                } else {
-                    router.back();
-                }
-            };
-            tg.BackButton.onClick(handleBack);
-            return () => tg.BackButton.offClick(handleBack);
+    // Signal ready to Telegram
+    useEffect(() => {
+        const twa = getTelegramWebApp();
+        if (twa) {
+            twa.ready();
         }
-    }, [slug, pathname]);
+    }, []);
 
-    if (!ready) {
-        return (
-            <div className="tma-center">
-                <div className="tma-spinner" />
-            </div>
-        );
-    }
-
-    const isActive = (href: string) => {
-        const full = `/tma/${slug}${href}`;
-        if (href === '') return pathname === full || pathname === full + '/';
-        return pathname.startsWith(full);
-    };
+    const handleNavClick = useCallback((path: string) => {
+        haptic('selection');
+        router.push(path);
+    }, [router]);
 
     return (
         <>
-            {children}
-            <nav className="tma-nav">
-                {navItems.map(item => (
-                    <Link
-                        key={item.href}
-                        href={`/tma/${slug}${item.href}`}
-                        className={`tma-nav-item ${isActive(item.href) ? 'active' : ''}`}
-                    >
-                        <span className="tma-nav-icon">{item.icon}</span>
-                        <span>{item.label}</span>
-                    </Link>
-                ))}
+            <div style={{ paddingBottom: 72 }}>
+                {children}
+            </div>
+            <nav className="tma-bottom-nav">
+                {navItems.map((item) => {
+                    const isActive = pathname === item.path;
+                    return (
+                        <button
+                            key={item.path}
+                            className={`tma-nav-item${isActive ? ' active' : ''}`}
+                            onClick={() => handleNavClick(item.path)}
+                            style={{ border: 'none', background: 'none', cursor: 'pointer' }}
+                        >
+                            <span className="tma-nav-icon">{item.icon}</span>
+                            <span>{item.label}</span>
+                        </button>
+                    );
+                })}
             </nav>
         </>
     );

@@ -39,6 +39,7 @@ export interface ProjectMember {
   email?: string;
   first_name?: string;
   last_name?: string;
+  telegram_username?: string;
   role: 'owner' | 'admin' | 'editor' | 'viewer';
   pages: string[];
   joined_at: string;
