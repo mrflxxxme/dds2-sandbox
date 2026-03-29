@@ -349,59 +349,54 @@ def _decide_illiquid_action(
     """Apply decision tree for illiquid product recommendation.
 
     Returns (recommendation_code, reason_text).
+
+    Thresholds adjusted for China sourcing cycle:
+    Order: 25d + Delivery: 15d + WB shipment: 14d + Min stock: 20d = 74 days.
+    So turnover < 75 days is NORMAL for this business.
     """
     # Decision tree: что лучше — снизить цену или увеличить рекламу?
-    # Вывоз невозможен — только распродажа.
 
     if margin > 20 and drr < 5:
-        # Высокая маржа, рекламы мало → можно увеличить рекламу
         return (
             "increase_ads",
             f"Маржа {margin:.0f}%, ДРР всего {drr:.0f}% — увеличь рекламу, маржа позволяет",
         )
     if margin > 15 and drr < 10:
-        # Хорошая маржа, реклама умеренная → ещё можно добавить
         return (
             "increase_ads",
             f"Маржа {margin:.0f}% позволяет увеличить рекламу (ДРР {drr:.0f}%)",
         )
     if drr > 15 and margin > 5:
-        # Реклама дорогая, но маржа есть → убери рекламу, снизь цену
         return (
             "cut_ads_reduce_price",
             f"ДРР {drr:.0f}% слишком высокий — убери рекламу, снизь цену на 10%",
         )
     if drr > 15 and margin <= 5:
-        # Реклама дорогая, маржи нет → только снизить цену без рекламы
         return (
             "cut_ads_reduce_price",
             f"ДРР {drr:.0f}%, маржа {margin:.0f}% — убери рекламу, снизь цену на 15-20%",
         )
     if margin < 0:
-        # Убыточный товар → агрессивная распродажа
         return (
             "deep_sale",
             f"Убыточный товар (маржа {margin:.0f}%) — поставь максимальную скидку, распродавай",
         )
-    if turnover_days > 90:
-        # Очень медленный → агрессивная скидка
+    if turnover_days > 150:
+        # Более 2x полного цикла — критично
         return (
             "deep_sale",
-            f"Оборачиваемость {turnover_days:.0f} дней — снизь цену на 20-30%, запусти акцию",
+            f"Оборачиваемость {turnover_days:.0f} дней (2+ цикла закупки) — агрессивная распродажа",
         )
-    if turnover_days > 60:
-        # Медленный → снизь цену
+    if turnover_days > 100:
         return (
             "reduce_price_20",
             f"Оборачиваемость {turnover_days:.0f} дней — снизь цену на 15-20%",
         )
     if margin > 5:
-        # Переходный неликвид, маржа есть → мягкое снижение
         return (
             "reduce_price_10",
-            f"Начинает залёживаться ({turnover_days:.0f} дн) — снизь цену на 10%",
+            f"Замедляется ({turnover_days:.0f} дн) — снизь цену на 10%",
         )
-    # Fallback
     return (
         "reduce_price_10",
         f"Оборачиваемость {turnover_days:.0f} дн, маржа {margin:.0f}% — снизь цену на 10%",
@@ -430,7 +425,9 @@ async def _check_illiquid_actions(
     result: list[dict] = []
     for group in groups:
         turnover_days = group.get("turnover_days", 0.0)
-        if turnover_days <= 30:
+        # Skip normal turnover: China sourcing cycle = 74 days
+        # (order 25d + delivery 15d + WB shipment 14d + min stock 20d)
+        if turnover_days <= 75:
             continue
 
         margin = group.get("margin", 0.0)
