@@ -145,4 +145,18 @@ LOGISTICS_TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "get_logistics_history",
+        "description": (
+            "Get shipping history: all assembly requests with pickup costs, pallets, weights, "
+            "delivery dates, warehouses. Shows average shipping cost per destination warehouse. "
+            "Use for: shipping costs, pallet prices, delivery history, logistics expenses, "
+            "how much does it cost to ship to Электросталь/Тула/etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
 ]

@@ -80,6 +80,8 @@ async def execute_tool(
             return await _get_plan_fact(db, project_id, brand, tool_input)
         elif tool_name == "get_ad_campaigns":
             return await _get_ad_campaigns(db, project_id, brand, tool_input)
+        elif tool_name == "get_logistics_history":
+            return await _get_logistics_history(db, project_id, tool_input)
         elif tool_name == "get_daily_health":
             return await _get_daily_health(db, project_id, tax_rate, brand, tool_input)
         else:
@@ -600,3 +602,96 @@ async def _get_daily_health(db, project_id, tax_rate, brand, inp):
         brand=brand,
     )
     return _json(result)
+
+
+async def _get_logistics_history(db, project_id, inp):
+    """Get shipping history: assembly requests with costs, pallets, dates, warehouses."""
+    from backend.models.assembly import AssemblyRequest, AssemblyStatus
+    from backend.models.warehouse import Warehouse
+
+    statuses = inp.get("statuses", None)
+    if statuses:
+        status_filter = [AssemblyStatus(s) for s in statuses if hasattr(AssemblyStatus, s)]
+    else:
+        status_filter = [
+            AssemblyStatus.SHIPPED,
+            AssemblyStatus.DELIVERED,
+            AssemblyStatus.VEHICLE_ASSIGNED,
+            AssemblyStatus.READY,
+            AssemblyStatus.IN_PROGRESS,
+            AssemblyStatus.PENDING,
+        ]
+
+    from sqlalchemy import select, func
+    from sqlalchemy.orm import selectinload
+
+    result = await db.execute(
+        select(AssemblyRequest)
+        .options(selectinload(AssemblyRequest.items), selectinload(AssemblyRequest.warehouse))
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted.is_(False),
+            AssemblyRequest.status.in_(status_filter),
+        )
+        .order_by(AssemblyRequest.created_at.desc())
+        .limit(100)
+    )
+    requests = result.scalars().all()
+
+    # Also get avg pickup_cost per destination
+    cost_stats_result = await db.execute(
+        select(
+            Warehouse.name.label("warehouse_name"),
+            func.count(AssemblyRequest.id).label("shipments"),
+            func.avg(AssemblyRequest.pickup_cost).label("avg_cost"),
+            func.sum(AssemblyRequest.pallets_count).label("total_pallets"),
+        )
+        .join(Warehouse, Warehouse.id == AssemblyRequest.warehouse_id)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted.is_(False),
+            AssemblyRequest.pickup_cost.isnot(None),
+            AssemblyRequest.pickup_cost > 0,
+        )
+        .group_by(Warehouse.name)
+    )
+    cost_stats = [
+        {
+            "warehouse": row.warehouse_name,
+            "shipments": row.shipments,
+            "avg_pickup_cost": round(float(row.avg_cost or 0), 0),
+            "total_pallets": int(row.total_pallets or 0),
+        }
+        for row in cost_stats_result
+    ]
+
+    shipments = []
+    for req in requests:
+        total_qty = sum(item.quantity for item in req.items) if req.items else 0
+        wh_name = req.warehouse.name if req.warehouse else ""
+        # Get destination from linked FBO supply
+        destination = ""
+        if hasattr(req, 'wb_fbo_supply') and req.wb_fbo_supply:
+            destination = req.wb_fbo_supply.warehouse_name or ""
+
+        shipments.append({
+            "id": req.id,
+            "number": req.number,
+            "status": req.status.value if hasattr(req.status, 'value') else str(req.status),
+            "warehouse": wh_name,
+            "destination": destination,
+            "pallets_count": req.pallets_count or 0,
+            "pallet_weight_kg": float(req.pallet_weight_kg or 0),
+            "pickup_cost": float(req.pickup_cost or 0),
+            "delivery_date": req.delivery_date.isoformat() if req.delivery_date else None,
+            "shipped_at": req.shipped_at.isoformat() if hasattr(req, 'shipped_at') and req.shipped_at else None,
+            "created_at": req.created_at.isoformat() if req.created_at else None,
+            "items_count": len(req.items) if req.items else 0,
+            "total_qty": total_qty,
+        })
+
+    return _json({
+        "total_shipments": len(shipments),
+        "shipments": shipments,
+        "cost_stats_by_warehouse": cost_stats,
+    })
