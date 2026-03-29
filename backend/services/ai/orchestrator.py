@@ -255,7 +255,7 @@ def _parse_synthesis_insights(text: str) -> list[str]:
 def _build_history_summary(history: list[dict]) -> str:
     """Build a brief summary of recent conversation for intent classification.
 
-    Takes last 4 messages (2 turns) and truncates each to 100 chars.
+    Takes last 4 messages (2 turns) and truncates each to 300 chars.
     """
     recent = history[-4:]
     parts: list[str] = []
