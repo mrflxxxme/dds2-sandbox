@@ -267,6 +267,8 @@ export default function TmaCapitalPage() {
     const [brands, setBrands] = useState<string[]>([]);
     const [groupBy, setGroupBy] = useState<GroupBy>('brand');
 
+    const [includeRf, setIncludeRf] = useState(false);
+
     const [data, setData] = useState<CapitalResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -292,6 +294,7 @@ export default function TmaCapitalPage() {
                 period_days: Number(period),
                 brand: brand || undefined,
                 group_by: groupBy,
+                include_rf_stocks: includeRf,
             });
             setData(res);
         } catch (err) {
@@ -299,7 +302,7 @@ export default function TmaCapitalPage() {
         } finally {
             setLoading(false);
         }
-    }, [period, brand, groupBy]);
+    }, [period, brand, groupBy, includeRf]);
 
     useEffect(() => { loadData(); }, [loadData]);
 
@@ -394,6 +397,14 @@ export default function TmaCapitalPage() {
                     </button>
                 ))}
             </div>
+
+            {/* RF stocks toggle */}
+            <label className="tma-capital-rf-toggle" onClick={() => { haptic('selection'); setIncludeRf(!includeRf); }}>
+                <span className={`tma-capital-rf-check ${includeRf ? 'active' : ''}`}>
+                    {includeRf ? '✓' : ''}
+                </span>
+                <span>Учитывать остатки на складах в РФ</span>
+            </label>
 
             {loading ? (
                 <div className="tma-loading"><div className="tma-spinner" /><div className="tma-loading-text">Загрузка...</div></div>
