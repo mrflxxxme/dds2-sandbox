@@ -24,22 +24,32 @@ const SUGGESTIONS = [
 ];
 
 /**
- * FIX #4: Safe text rendering — escape HTML first, then apply markdown-like formatting.
+ * Render AI response safely — allow Telegram HTML tags but escape everything else.
  */
 function renderMessageSafe(text: string): string {
-    // 1. Escape HTML entities first to prevent XSS
+    // 1. Allow known Telegram HTML tags, escape the rest
+    // First escape all HTML
     let safe = text
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
 
-    // 2. Apply markdown-like formatting on the escaped text
+    // 2. Restore allowed Telegram HTML tags
+    const allowedTags = ['b', 'i', 'u', 's', 'code', 'pre', 'blockquote'];
+    for (const tag of allowedTags) {
+        // Opening tags (with optional attributes like expandable)
+        safe = safe.replace(new RegExp(`&lt;(${tag}(?:\\s[^&]*)?)&gt;`, 'gi'), '<$1>');
+        // Closing tags
+        safe = safe.replace(new RegExp(`&lt;/${tag}&gt;`, 'gi'), `</${tag}>`);
+    }
+
+    // 3. Also support markdown-like formatting as fallback
     safe = safe.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
     safe = safe.replace(/\*(.*?)\*/g, '<i>$1</i>');
-    safe = safe.replace(/`(.*?)`/g, '<code>$1</code>');
+    safe = safe.replace(/`([^`]+)`/g, '<code>$1</code>');
 
-    // 3. Convert newlines to <br>
+    // 4. Convert newlines to <br>
     safe = safe.replace(/\n/g, '<br>');
 
     return safe;
