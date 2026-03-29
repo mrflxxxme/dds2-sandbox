@@ -11,11 +11,12 @@ LOGISTICS_TOOLS = [
     {
         "name": "get_stock_info",
         "description": (
-            "Get stock levels and restock forecast including RF (Russian) warehouses. "
-            "Returns per-product: stocks on WB + RF warehouses, average daily sales, days left, "
-            "traffic light (red/orange/yellow/green). "
-            "By default includes RF warehouse stocks (Натали, Газпром и др.). "
-            "Use for questions about inventory, restocking, stock-outs."
+            "Get stock levels and restock forecast including RF warehouses AND in-transit shipments. "
+            "Returns per-product: stocks_wb (on WB), stocks_rf (RF warehouses like Натали, Газпром), "
+            "in_transit (shipped but not yet received by WB), total_stock = wb + rf + transit, "
+            "average daily sales, days left, traffic light (red/orange/yellow/green). "
+            "Smart forecast accounts for delivery dates of in-transit shipments. "
+            "Use for questions about inventory, restocking, stock-outs, what's available."
         ),
         "input_schema": {
             "type": "object",

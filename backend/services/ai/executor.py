@@ -244,7 +244,7 @@ async def _get_product_info(db, project_id, tax_rate, brand, inp):
 async def _get_stock_info(db, project_id, brand, inp):
     from backend.services.stock_forecast_service import get_stock_analytics
 
-    mode = "wb_rf" if inp.get("include_rf_stocks", True) else "wb"
+    mode = "wb_rf_transit" if inp.get("include_rf_stocks", True) else "wb"
     result = await get_stock_analytics(
         db,
         project_id,
