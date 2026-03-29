@@ -27,9 +27,15 @@ const SUGGESTIONS = [
  * Render AI response safely — allow Telegram HTML tags but escape everything else.
  */
 function renderMessageSafe(text: string): string {
+    // 0. Remove hidden blocks (insights for memory, not for user)
+    let cleaned = text
+        .replace(/<!--[\s\S]*?-->/g, '')        // HTML comments (synthesizer insights)
+        .replace(/^\[INSIGHT\].*$/gm, '')        // [INSIGHT] lines (agent insights)
+        .replace(/\n{3,}/g, '\n\n')              // collapse extra newlines
+        .trim();
+
     // 1. Allow known Telegram HTML tags, escape the rest
-    // First escape all HTML
-    let safe = text
+    let safe = cleaned
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')

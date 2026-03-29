@@ -42,6 +42,9 @@ async def execute_tool(
     tool_input: dict,
 ) -> str:
     """Execute a tool call and return the result as a JSON string."""
+    # Normalize brand: "все бренды" or empty → None (no filter)
+    if brand and brand.lower().strip() in ("все бренды", "all brands", "all", ""):
+        brand = None
     try:
         if tool_name == "get_funnel_data":
             return await _get_funnel_data(db, project_id, tax_rate, brand, tool_input)
