@@ -19,13 +19,19 @@ interface PnlSection {
     total?: { label: string; value: number };
 }
 
+interface OpiuRow {
+    key: string;
+    label: string;
+    total: number;
+    level: number;
+    bold: boolean;
+}
+
 interface OpiuResponse {
-    rows: Array<{
-        article: string;
-        [key: string]: unknown;
-    }>;
-    totals: Record<string, number>;
-    status?: string;
+    rows: OpiuRow[];
+    months: string[];
+    computing?: boolean;
+    message?: string;
 }
 
 const MAX_RETRIES = 10;
@@ -83,8 +89,8 @@ export default function TmaPnlPage() {
                 `/api/v1/reports/opiu?date_from=${dateFrom}&date_to=${dateTo}`
             );
 
-            // If status is "computing", poll until ready (with max retries)
-            if (data.status === 'computing') {
+            // If computing, poll until ready (with max retries)
+            if (data.computing) {
                 if (retryCountRef.current < MAX_RETRIES) {
                     retryCountRef.current++;
                     timeoutRef.current = setTimeout(() => {
@@ -97,53 +103,50 @@ export default function TmaPnlPage() {
                 return;
             }
 
-            // Parse OPIU totals into display sections
-            const t = data.totals || {};
+            // Parse OPIU rows by key into display sections
+            const rowMap = new Map<string, OpiuRow>();
+            for (const r of data.rows || []) {
+                rowMap.set(r.key, r);
+            }
+            const val = (key: string) => rowMap.get(key)?.total ?? 0;
+
             const parsed: PnlSection[] = [];
 
             // Revenue section
             parsed.push({
-                label: 'Выручка',
+                label: 'ВЫРУЧКА',
                 rows: [
-                    { label: 'Продажи (WB)', value: t.revenue_wb || 0 },
-                    { label: 'Прочие продажи', value: t.revenue_other || 0 },
+                    { label: 'Реализация', value: val('realization') },
+                    { label: 'Скидка за счёт МП', value: val('spp_discount') },
                 ],
-                total: { label: 'Итого выручка', value: t.revenue_total || 0 },
+                total: { label: 'Фактические продажи', value: val('sales_amount') },
             });
 
-            // Cost of goods
+            // Direct costs
             parsed.push({
-                label: 'Себестоимость',
+                label: 'ПРЯМЫЕ РАСХОДЫ',
                 rows: [
-                    { label: 'Себестоимость товара', value: t.cogs || 0 },
-                    { label: 'Логистика', value: t.logistics || 0 },
-                    { label: 'Комиссия WB', value: t.wb_commission || 0 },
-                ],
-                total: { label: 'Валовая прибыль', value: t.gross_profit || 0 },
-            });
-
-            // Operating expenses
-            parsed.push({
-                label: 'Операционные расходы',
-                rows: [
-                    { label: 'Реклама', value: t.ads || t.ad_deduction || 0 },
-                    { label: 'Хранение', value: t.storage || 0 },
-                    { label: 'Штрафы', value: t.penalties || 0 },
-                    { label: 'Прочие удержания', value: t.other_deduction || 0 },
+                    { label: 'Себестоимость', value: val('cost_price') },
+                    { label: 'Логистика', value: val('logistics') },
+                    { label: 'Комиссия', value: val('commission') },
+                    { label: 'Штрафы', value: val('penalties') },
+                    { label: 'Хранение', value: val('storage') },
+                    { label: 'Реклама', value: val('advertising') },
+                    { label: 'Прочие удержания', value: val('deductions') },
+                    { label: 'Платная приёмка', value: val('acceptance') },
                 ].filter(r => r.value !== 0),
-                total: { label: 'Операционная прибыль', value: t.operating_profit || 0 },
+                total: { label: 'Валовая маржа', value: val('gross_margin') },
             });
 
-            // Net profit
-            if (t.net_profit !== undefined) {
-                parsed.push({
-                    label: 'Итог',
-                    rows: [
-                        { label: 'Налоги', value: t.tax || 0 },
-                    ].filter(r => r.value !== 0),
-                    total: { label: 'Чистая прибыль', value: t.net_profit || 0 },
-                });
-            }
+            // Profit
+            parsed.push({
+                label: 'РЕЗУЛЬТАТ',
+                rows: [
+                    { label: 'EBITDA', value: val('ebitda') },
+                    { label: 'Налоги', value: val('taxes') },
+                ],
+                total: { label: 'Чистая прибыль', value: val('net_profit') },
+            });
 
             setSections(parsed);
         } catch (err) {

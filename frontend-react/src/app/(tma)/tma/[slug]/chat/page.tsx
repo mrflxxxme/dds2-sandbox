@@ -84,15 +84,16 @@ export default function TmaChatPage() {
         }
 
         try {
-            const response = await api.request<{ reply: string }>(
+            const projectId = api.getProjectId();
+            const response = await api.request<{ answer: string }>(
                 'POST',
                 '/api/v1/tma/chat',
-                { message: trimmed }
+                { project_id: projectId, message: trimmed }
             );
 
             const assistantMsg: ChatMessage = {
                 role: 'assistant',
-                content: response.reply || 'Нет ответа',
+                content: response.answer || 'Нет ответа',
             };
             setMessages(prev => [...prev, assistantMsg]);
             haptic('success');
