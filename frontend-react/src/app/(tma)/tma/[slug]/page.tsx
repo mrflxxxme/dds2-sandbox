@@ -245,6 +245,8 @@ const REC_STYLES: Record<string, { icon: string; color: string; bg: string }> = 
 function HealthCheckSection({ data }: { data: HealthCheckData }) {
     const [tab, setTab] = useState<'urgent' | 'overdue' | 'catA' | 'illiquid'>('urgent');
     const s = data.summary;
+    const [showAll, setShowAll] = useState(false);
+    const VISIBLE_COUNT = 10;
 
     const scoreColor = s.health_score >= 80 ? '#10b981' : s.health_score >= 50 ? '#d97706' : '#e02424';
 
@@ -270,7 +272,7 @@ function HealthCheckSection({ data }: { data: HealthCheckData }) {
                     <button
                         key={t.key}
                         className={`tma-hc-tab ${tab === t.key ? 'active' : ''}`}
-                        onClick={() => { haptic('selection'); setTab(t.key); }}
+                        onClick={() => { haptic('selection'); setTab(t.key); setShowAll(false); }}
                     >
                         {t.label}
                         {t.count > 0 && <span className="tma-hc-tab-badge">{t.count}</span>}
@@ -284,7 +286,7 @@ function HealthCheckSection({ data }: { data: HealthCheckData }) {
                     <div className="tma-hc-empty">Все товары отправлены ✅</div>
                 ) : (
                     <div className="tma-hc-list">
-                        {data.urgent_shipments.map((item, i) => (
+                        {(showAll ? data.urgent_shipments : data.urgent_shipments.slice(0, VISIBLE_COUNT)).map((item, i) => (
                             <div key={i} className="tma-hc-row">
                                 <div className="tma-hc-row-left">
                                     <div className="tma-hc-row-name">{item.vendor_code || `#${item.nm_id}`}</div>
@@ -302,6 +304,16 @@ function HealthCheckSection({ data }: { data: HealthCheckData }) {
                                 </div>
                             </div>
                         ))}
+                        {!showAll && data.urgent_shipments.length > VISIBLE_COUNT && (
+                            <button className="tma-anomaly-toggle" onClick={() => { haptic('light'); setShowAll(true); }}>
+                                Ещё {data.urgent_shipments.length - VISIBLE_COUNT}
+                            </button>
+                        )}
+                        {showAll && data.urgent_shipments.length > VISIBLE_COUNT && (
+                            <button className="tma-anomaly-toggle" onClick={() => { haptic('light'); setShowAll(false); }}>
+                                Свернуть
+                            </button>
+                        )}
                     </div>
                 )
             )}
@@ -311,7 +323,7 @@ function HealthCheckSection({ data }: { data: HealthCheckData }) {
                     <div className="tma-hc-empty">Нет просроченных заявок ✅</div>
                 ) : (
                     <div className="tma-hc-list">
-                        {data.overdue_assemblies.map((item, i) => (
+                        {(showAll ? data.overdue_assemblies : data.overdue_assemblies.slice(0, VISIBLE_COUNT)).map((item, i) => (
                             <div key={i} className="tma-hc-row">
                                 <div className="tma-hc-row-left">
                                     <div className="tma-hc-row-name">#{item.number}</div>
@@ -325,6 +337,11 @@ function HealthCheckSection({ data }: { data: HealthCheckData }) {
                                 </div>
                             </div>
                         ))}
+                        {!showAll && data.overdue_assemblies.length > VISIBLE_COUNT && (
+                            <button className="tma-anomaly-toggle" onClick={() => { haptic('light'); setShowAll(true); }}>
+                                Ещё {data.overdue_assemblies.length - VISIBLE_COUNT}
+                            </button>
+                        )}
                     </div>
                 )
             )}
@@ -334,7 +351,7 @@ function HealthCheckSection({ data }: { data: HealthCheckData }) {
                     <div className="tma-hc-empty">Топ-товары в порядке ✅</div>
                 ) : (
                     <div className="tma-hc-list">
-                        {data.category_a_health.map((item, i) => (
+                        {(showAll ? data.category_a_health : data.category_a_health.slice(0, VISIBLE_COUNT)).map((item, i) => (
                             <div key={i} className="tma-hc-row">
                                 <div className="tma-hc-row-left">
                                     <div className="tma-hc-row-name">{item.vendor_code || `#${item.nm_id}`}</div>
@@ -353,6 +370,11 @@ function HealthCheckSection({ data }: { data: HealthCheckData }) {
                                 </div>
                             </div>
                         ))}
+                        {!showAll && data.category_a_health.length > VISIBLE_COUNT && (
+                            <button className="tma-anomaly-toggle" onClick={() => { haptic('light'); setShowAll(true); }}>
+                                Ещё {data.category_a_health.length - VISIBLE_COUNT}
+                            </button>
+                        )}
                     </div>
                 )
             )}
@@ -368,7 +390,7 @@ function HealthCheckSection({ data }: { data: HealthCheckData }) {
                             </div>
                         )}
                         <div className="tma-hc-list">
-                            {data.illiquid_actions.map((item, i) => {
+                            {(showAll ? data.illiquid_actions : data.illiquid_actions.slice(0, VISIBLE_COUNT)).map((item, i) => {
                                 const rs = REC_STYLES[item.recommendation] || REC_STYLES.reduce_price_10;
                                 return (
                                     <div key={i} className="tma-hc-row">
@@ -388,6 +410,11 @@ function HealthCheckSection({ data }: { data: HealthCheckData }) {
                                     </div>
                                 );
                             })}
+                            {!showAll && data.illiquid_actions.length > VISIBLE_COUNT && (
+                                <button className="tma-anomaly-toggle" onClick={() => { haptic('light'); setShowAll(true); }}>
+                                    Ещё {data.illiquid_actions.length - VISIBLE_COUNT}
+                                </button>
+                            )}
                         </div>
                     </>
                 )
