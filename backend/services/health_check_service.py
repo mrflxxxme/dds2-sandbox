@@ -136,8 +136,11 @@ async def _check_urgent_shipments(
     need_data = await get_warehouse_need(db, project_id)
     articles = need_data.get("articles", [])
 
-    # Filter to articles with deficit > 0
-    deficit_articles = [a for a in articles if a.get("deficit", 0) > 0]
+    # Filter to articles with deficit AND available RF stock to send
+    deficit_articles = [
+        a for a in articles
+        if a.get("deficit", 0) > 0 and a.get("can_send", 0) > 0
+    ]
     if not deficit_articles:
         return []
 

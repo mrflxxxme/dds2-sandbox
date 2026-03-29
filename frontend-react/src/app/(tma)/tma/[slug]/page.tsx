@@ -295,6 +295,7 @@ function HealthCheckSection({ data }: { data: HealthCheckData }) {
                                 <div className="tma-hc-row-right">
                                     <div className="tma-hc-row-value">−{item.deficit} шт</div>
                                     <div className="tma-hc-row-meta">
+                                        На РФ: {item.can_send} шт ·{' '}
                                         {item.has_assembly ? '📋 заявка есть' : '❌ нет заявки'}
                                         {item.days_left_wb > 0 && ` · ${Math.round(item.days_left_wb)}дн`}
                                     </div>
