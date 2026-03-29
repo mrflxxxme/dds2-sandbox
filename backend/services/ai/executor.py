@@ -332,14 +332,50 @@ async def _get_warehouse_need(db, project_id, inp):
 
     # Enriched articles with RF stock breakdown
     enriched = result.get("articles", [])
+
+    # Load cost_price and barcode per nm_id
+    cost_barcode_map: dict[int, dict] = {}
+    try:
+        from backend.models.cost import Nomenclature
+        from backend.models.warehouse import WarehouseStock
+        from sqlalchemy import select, func
+        nm_ids = [a.get("nm_id") for a in enriched if a.get("nm_id")]
+        if nm_ids:
+            cb_result = await db.execute(
+                select(
+                    Nomenclature.article_wb,
+                    func.max(WarehouseStock.barcode).label("barcode"),
+                    func.avg(WarehouseStock.cost_price).label("cost_price"),
+                )
+                .join(Nomenclature, Nomenclature.id == WarehouseStock.nomenclature_id)
+                .where(
+                    WarehouseStock.project_id == project_id,
+                    Nomenclature.article_wb.in_(nm_ids),
+                    WarehouseStock.quantity > 0,
+                )
+                .group_by(Nomenclature.article_wb)
+            )
+            for row in cb_result:
+                if row.article_wb:
+                    cost_barcode_map[int(row.article_wb)] = {
+                        "barcode": row.barcode or "",
+                        "cost_price": round(float(row.cost_price or 0), 2),
+                    }
+    except Exception:
+        pass  # graceful: cost/barcode optional
+
     articles_with_rf = []
     for art in enriched:
         if art.get("can_send", 0) > 0 or art.get("deficit", 0) > 0:
+            nm_id = art.get("nm_id")
+            cb = cost_barcode_map.get(nm_id, {})
             articles_with_rf.append({
-                "nm_id": art.get("nm_id"),
+                "nm_id": nm_id,
                 "vendor_code": art.get("vendor_code", ""),
                 "brand": art.get("brand", ""),
                 "subject": art.get("subject", ""),
+                "barcode": cb.get("barcode", ""),
+                "cost_price": cb.get("cost_price", 0),
                 "total_need": art.get("total_need", 0),
                 "stocks_wb": art.get("stocks_wb", 0),
                 "rf_stocks": art.get("rf_stocks", {}),
