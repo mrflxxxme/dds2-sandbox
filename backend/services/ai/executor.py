@@ -312,13 +312,13 @@ async def _get_warehouse_need(db, project_id, inp):
         mode="actual",
     )
     warehouses = result.get("warehouses", [])
-    # Summarize: warehouse name, total need, top articles
-    summary = []
+    # WB warehouses: what needs to be sent
+    wb_summary = []
     for wh in warehouses:
         articles = wh.get("articles", [])
         need_articles = [a for a in articles if a.get("need", 0) > 0]
         if need_articles:
-            summary.append(
+            wb_summary.append(
                 {
                     "warehouse": wh.get("name", ""),
                     "total_need_units": sum(a.get("need", 0) for a in need_articles),
@@ -326,7 +326,39 @@ async def _get_warehouse_need(db, project_id, inp):
                     "top_articles": sorted(need_articles, key=lambda a: a.get("need", 0), reverse=True)[:5],
                 }
             )
-    return _json({"supply_days": inp.get("supply_days", 14), "warehouses": summary})
+
+    # RF warehouses: what's available to send
+    rf_warehouses = result.get("rf_warehouses", [])
+
+    # Enriched articles with RF stock breakdown
+    enriched = result.get("articles", [])
+    articles_with_rf = []
+    for art in enriched:
+        if art.get("can_send", 0) > 0 or art.get("deficit", 0) > 0:
+            articles_with_rf.append({
+                "nm_id": art.get("nm_id"),
+                "vendor_code": art.get("vendor_code", ""),
+                "brand": art.get("brand", ""),
+                "subject": art.get("subject", ""),
+                "total_need": art.get("total_need", 0),
+                "stocks_wb": art.get("stocks_wb", 0),
+                "rf_stocks": art.get("rf_stocks", {}),
+                "in_assembly": art.get("in_assembly", 0),
+                "in_transit": art.get("in_transit", 0),
+                "can_send": art.get("can_send", 0),
+                "deficit": art.get("deficit", 0),
+            })
+
+    # Summary
+    summary = result.get("summary", {})
+
+    return _json({
+        "supply_days": inp.get("supply_days", 14),
+        "wb_warehouses": wb_summary,
+        "rf_warehouses": rf_warehouses,
+        "articles": articles_with_rf,
+        "summary": summary,
+    })
 
 
 async def _get_day_analysis(db, project_id, tax_rate, brand, inp):
