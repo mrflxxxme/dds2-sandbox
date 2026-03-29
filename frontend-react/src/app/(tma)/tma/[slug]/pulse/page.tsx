@@ -59,6 +59,7 @@ interface BdrResponse {
 interface PulseCard {
     id: string;
     name: string;
+    subtitle?: string;     // e.g. nm_id for articles
     pct: number;           // plan% or Δ% vs prev month
     revenue: number;       // current period revenue
     prevRevenue?: number;  // previous period revenue
@@ -135,6 +136,7 @@ function PulseCardView({ card, expanded, onTap, onDrillDown, canDrillDown }: {
             onClick={() => { haptic('light'); onTap(); }}
         >
             <div className="tma-pulse-card-name">{card.name}</div>
+            {card.subtitle && <div className="tma-pulse-card-sub">{card.subtitle}</div>}
             <div className="tma-pulse-card-pct">{Math.round(card.pct)}%</div>
             <div className="tma-pulse-card-footer">
                 <span className="tma-pulse-card-trend">
@@ -453,7 +455,8 @@ export default function TmaPulsePage() {
 
             for (const a of curFiltered) {
                 const key = a.vendor_code || String(a.nm_id);
-                const name = a.vendor_code || `#${a.nm_id}`;
+                const name = a.vendor_code ? a.vendor_code : `#${a.nm_id}`;
+                const subtitle = a.vendor_code && a.nm_id ? `#${a.nm_id}` : undefined;
                 const revenue = a.realization || 0;
                 const prevData = prevMap.get(key);
                 const prevRev = prevData?.realization || 0;
@@ -463,6 +466,7 @@ export default function TmaPulsePage() {
                 result.push({
                     id: key,
                     name,
+                    subtitle,
                     pct: Math.min(pct, 999),
                     revenue,
                     prevRevenue: prevRev,

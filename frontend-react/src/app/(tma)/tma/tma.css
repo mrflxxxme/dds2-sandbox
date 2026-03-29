@@ -1274,6 +1274,14 @@
     white-space: nowrap;
 }
 
+.tma-pulse-card-sub {
+    font-size: 10px;
+    opacity: 0.65;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .tma-pulse-card-pct {
     font-size: 32px;
     font-weight: 800;
