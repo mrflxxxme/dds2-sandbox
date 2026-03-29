@@ -1545,6 +1545,13 @@
     padding-right: 32px;
 }
 
+.tma-funnel-filters {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 12px 0 14px;
+}
+
 /* ─── Loading overlay ──────────────────────────────────────────────────────── */
 
 .tma-loading {
