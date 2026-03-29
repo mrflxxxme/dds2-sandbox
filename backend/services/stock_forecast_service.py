@@ -102,11 +102,10 @@ async def _load_in_transit(db: AsyncSession, project_id: int) -> dict[int, list[
     )
     from backend.models.cost import Nomenclature
 
+    # Only SHIPPED — stock already deducted from RF warehouse but not yet on WB.
+    # PENDING/IN_PROGRESS/READY/VEHICLE_ASSIGNED are still physically on RF warehouse
+    # and already counted in stocks_rf, so including them would cause double counting.
     active_statuses = [
-        AssemblyStatus.PENDING,
-        AssemblyStatus.IN_PROGRESS,
-        AssemblyStatus.READY,
-        AssemblyStatus.VEHICLE_ASSIGNED,
         AssemblyStatus.SHIPPED,
     ]
 
