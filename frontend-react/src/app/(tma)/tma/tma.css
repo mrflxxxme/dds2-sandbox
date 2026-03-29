@@ -1575,3 +1575,272 @@
     font-size: 14px;
     color: var(--tma-hint);
 }
+
+/* ─── Capital page ──────────────────────────────────────────────────────────── */
+
+.tma-capital-group-switch {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 14px;
+}
+
+/* Distribution bar */
+.tma-capital-dist-bar {
+    display: flex;
+    height: 20px;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 12px;
+    gap: 2px;
+}
+
+.tma-capital-dist-segment {
+    min-width: 6px;
+    transition: width 0.3s;
+}
+
+.tma-capital-dist-legend {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.tma-capital-dist-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    flex: 1;
+}
+
+.tma-capital-dist-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    margin-top: 3px;
+    flex-shrink: 0;
+}
+
+.tma-capital-dist-label {
+    font-size: 10px;
+    color: var(--tma-hint);
+}
+
+.tma-capital-dist-value {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--tma-text);
+}
+
+/* Trend chart */
+.tma-capital-trend {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 80px;
+    margin-bottom: 8px;
+}
+
+.tma-capital-trend-col {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 0;
+}
+
+.tma-capital-trend-stack {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    border-radius: 2px 2px 0 0;
+    overflow: hidden;
+}
+
+.tma-capital-trend-seg {
+    width: 100%;
+    min-height: 0;
+    transition: height 0.3s;
+}
+
+.tma-capital-trend-label {
+    font-size: 8px;
+    color: var(--tma-hint);
+    margin-top: 2px;
+}
+
+.tma-capital-trend-legend {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    font-size: 10px;
+    color: var(--tma-hint);
+}
+
+.tma-capital-trend-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    margin-right: 3px;
+    vertical-align: middle;
+}
+
+/* Group rows */
+.tma-capital-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.tma-capital-group {
+    border-radius: 8px;
+    overflow: hidden;
+    transition: background 0.15s;
+}
+
+.tma-capital-group-expanded {
+    background: rgba(139, 92, 246, 0.04);
+}
+
+.tma-capital-group-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 4px;
+    cursor: pointer;
+    gap: 8px;
+}
+
+.tma-capital-group-left {
+    flex: 1;
+    min-width: 0;
+}
+
+.tma-capital-group-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--tma-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tma-capital-group-nm {
+    font-size: 10px;
+    font-weight: 400;
+    opacity: 0.5;
+    margin-left: 4px;
+}
+
+.tma-capital-group-meta {
+    font-size: 11px;
+    color: var(--tma-hint);
+    margin-top: 1px;
+}
+
+.tma-capital-group-right {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+/* Liquidity mini bar */
+.tma-capital-group-liq {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.tma-capital-liq-bar {
+    width: 40px;
+    height: 5px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.1);
+    overflow: hidden;
+}
+
+.tma-capital-liq-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.3s;
+}
+
+.tma-capital-liq-text {
+    font-size: 11px;
+    font-weight: 600;
+    min-width: 28px;
+    text-align: right;
+}
+
+/* Recommendation badge */
+.tma-capital-rec-badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+}
+
+/* Expanded details */
+.tma-capital-group-details {
+    padding: 0 4px 10px;
+}
+
+.tma-capital-detail-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.tma-capital-detail-item {
+    text-align: center;
+}
+
+.tma-capital-detail-label {
+    font-size: 10px;
+    color: var(--tma-hint);
+}
+
+.tma-capital-detail-value {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--tma-text);
+}
+
+/* Drill-down children */
+.tma-capital-drill-loading {
+    display: flex;
+    justify-content: center;
+    padding: 12px;
+}
+
+.tma-capital-drill-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 4px 0 0 12px;
+    border-left: 2px solid rgba(139, 92, 246, 0.2);
+    margin-top: 4px;
+}
+
+.tma-capital-drill-row {
+    padding: 4px 0;
+}
+
+.tma-capital-drill-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--tma-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tma-capital-drill-meta {
+    font-size: 11px;
+    color: var(--tma-hint);
+}
