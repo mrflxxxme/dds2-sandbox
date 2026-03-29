@@ -635,7 +635,11 @@ async def _get_logistics_history(db, project_id, inp):
 
     result = await db.execute(
         select(AssemblyRequest)
-        .options(selectinload(AssemblyRequest.items), selectinload(AssemblyRequest.warehouse))
+        .options(
+            selectinload(AssemblyRequest.items),
+            selectinload(AssemblyRequest.warehouse),
+            selectinload(AssemblyRequest.wb_fbo_supply),
+        )
         .where(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.is_deleted.is_(False),
@@ -678,10 +682,13 @@ async def _get_logistics_history(db, project_id, inp):
     for req in requests:
         total_qty = sum(item.quantity for item in req.items) if req.items else 0
         wh_name = req.warehouse.name if req.warehouse else ""
-        # Get destination from linked FBO supply
+        # Get destination from linked FBO supply (eagerly loaded)
         destination = ""
-        if hasattr(req, 'wb_fbo_supply') and req.wb_fbo_supply:
-            destination = req.wb_fbo_supply.warehouse_name or ""
+        try:
+            if req.wb_fbo_supply:
+                destination = req.wb_fbo_supply.warehouse_name or ""
+        except Exception:
+            pass
 
         shipments.append({
             "id": req.id,
