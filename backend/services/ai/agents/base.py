@@ -80,30 +80,48 @@ class BaseAgent(ABC):
         tax_rate: float,
         question: str,
         memory_context: str = "",
+        history: list[dict] | None = None,
     ) -> AgentResult:
         """Execute the agent's tool-calling loop and return a result.
 
         The loop sends messages to Claude, executes any requested tools via
         ``executor.execute_tool``, and feeds results back until Claude
         produces a final text answer or the round limit is reached.
+
+        ``history`` — prior chat messages for multi-turn context.
         """
         today = utcnow().strftime("%Y-%m-%d")
         system = self.get_system_prompt(brand=brand, today=today, memory_context=memory_context)
         tools = self.get_tools()
 
-        messages: list[dict] = [{"role": "user", "content": question}]
+        # Build messages: history + current question
+        if history:
+            messages: list[dict] = list(history)
+            # Ensure last message is the current question
+            if not messages or messages[-1].get("content") != question:
+                messages.append({"role": "user", "content": question})
+        else:
+            messages = [{"role": "user", "content": question}]
+
         tools_used: list[str] = []
         total_tokens = 0
 
         for _round in range(self.max_rounds):
-            response = await chat(
-                messages=messages,
-                tools=tools or None,
-                system=system,
-                model=self.model,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-            )
+            # First round: force tool use so agent doesn't answer from memory
+            tool_choice = {"type": "any"} if _round == 0 and tools else None
+
+            kwargs: dict = {
+                "messages": messages,
+                "tools": tools or None,
+                "system": system,
+                "model": self.model,
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature,
+            }
+            if tool_choice:
+                kwargs["tool_choice"] = tool_choice
+
+            response = await chat(**kwargs)
 
             total_tokens += _count_tokens(response)
 
@@ -174,12 +192,36 @@ class BaseAgent(ABC):
                 )
             break
 
-        # Loop exhausted without a final answer
+        # Loop exhausted — force a final text answer without tools
         logger.warning(
-            "Agent '%s' exhausted %d rounds without final answer",
+            "Agent '%s' exhausted %d rounds, forcing final answer",
             self.name,
             self.max_rounds,
         )
+        try:
+            messages.append({
+                "role": "user",
+                "content": "Суммируй все полученные данные и дай финальный ответ. Не вызывай инструменты.",
+            })
+            final_response = await chat(
+                messages=messages,
+                system=system,
+                model=self.model,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+            )
+            total_tokens += _count_tokens(final_response)
+            answer = _extract_text(final_response)
+            if answer:
+                return AgentResult(
+                    answer=answer,
+                    tools_used=tools_used,
+                    insights=_extract_insights(answer),
+                    tokens_used=total_tokens,
+                )
+        except Exception:
+            logger.exception("Agent '%s' failed to produce final answer", self.name)
+
         return AgentResult(
             answer="Не удалось получить ответ. Попробуйте переформулировать вопрос.",
             tools_used=tools_used,

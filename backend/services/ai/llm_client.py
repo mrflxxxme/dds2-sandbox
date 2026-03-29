@@ -36,10 +36,12 @@ async def chat(
     model: str = "claude-sonnet-4-20250514",
     max_tokens: int = 2048,
     temperature: float = 0.3,
+    tool_choice: dict | None = None,
 ) -> anthropic.types.Message:
     """Send a chat request to Claude with optional tools.
 
     Returns the raw Message object for tool_use handling.
+    ``tool_choice`` — e.g. {"type": "any"} to force tool use.
     """
     client = get_client()
 
@@ -53,5 +55,7 @@ async def chat(
         kwargs["system"] = system
     if tools:
         kwargs["tools"] = tools
+    if tool_choice and tools:
+        kwargs["tool_choice"] = tool_choice
 
     return await client.messages.create(**kwargs)

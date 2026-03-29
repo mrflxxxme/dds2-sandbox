@@ -67,8 +67,18 @@ async def ask(
     # Build a short summary of recent history for intent classification
     history_summary = _build_history_summary(history)
 
-    # 3. Load memory context
+    # 3. Load memory context + brand notes from DB
     memory_context = await get_memory_context(project_id, brand)
+    # Restore brand notes (lost during refactoring from agent.py)
+    try:
+        from backend.services.telegram_service import list_brand_notes
+        if brand:
+            note_objs = await list_brand_notes(db, project_id, brand)
+            if note_objs:
+                notes_text = "\n".join(f"- {n.note}" for n in note_objs)
+                memory_context += f"\n\n## Заметки о бренде\n{notes_text}"
+    except Exception:
+        pass  # graceful: brand notes optional
 
     # 4. Classify intent
     classification = await _classify_intent(question, history_summary)
@@ -89,6 +99,9 @@ async def ask(
     # 5. Run selected agents (parallel if multiple)
     brand_name = brand or "все бренды"
 
+    # Build history for agents (exclude the last user message — it's in question)
+    agent_history = history[:-1] if len(history) > 1 else []
+
     async def _run_agent(name: str, session: AsyncSession) -> AgentResult:
         agent = AGENTS[name]
         logger.info("Running agent '%s' for project=%s brand=%s", name, project_id, brand_name)
@@ -99,6 +112,7 @@ async def ask(
             tax_rate=tax_rate,
             question=question,
             memory_context=memory_context,
+            history=agent_history,
         )
 
     async def _run_agent_with_own_session(name: str) -> AgentResult:
@@ -249,6 +263,6 @@ def _build_history_summary(history: list[dict]) -> str:
         role = msg.get("role", "?")
         content = msg.get("content", "")
         if isinstance(content, str):
-            truncated = content[:100] + ("..." if len(content) > 100 else "")
+            truncated = content[:300] + ("..." if len(content) > 300 else "")
             parts.append(f"{role}: {truncated}")
     return " | ".join(parts)
