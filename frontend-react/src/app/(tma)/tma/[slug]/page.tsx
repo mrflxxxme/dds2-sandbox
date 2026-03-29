@@ -142,6 +142,19 @@ export default function TmaDashboardPage() {
                 <span className="tma-pulse-link-arrow">→</span>
             </div>
 
+            {/* Funnel link */}
+            <div
+                className="tma-pulse-link"
+                style={{ background: 'linear-gradient(135deg, #0c4a6e, #0369a1)' }}
+                onClick={() => { haptic('light'); router.push(`/tma/${slug}/funnel`); }}
+            >
+                <div>
+                    <div className="tma-pulse-link-text">Воронка продаж</div>
+                    <div className="tma-pulse-link-sub">Конверсии &middot; Реклама &middot; Товары</div>
+                </div>
+                <span className="tma-pulse-link-arrow">→</span>
+            </div>
+
             {/* Stats Grid */}
             <div className="tma-stat-grid">
                 <div className="tma-stat-cell">
