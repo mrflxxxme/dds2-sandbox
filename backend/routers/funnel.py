@@ -577,7 +577,7 @@ async def get_health_check(
     """Daily health check: urgent shipments, overdue assemblies, category A health, illiquid actions."""
     from backend.services.health_check_service import get_daily_health
 
-    tax_info = await _build_tax_info(db, project)
+    tax_info = await _load_tax_info(db, project)
     return await get_daily_health(
         db,
         project_id=project.id,
