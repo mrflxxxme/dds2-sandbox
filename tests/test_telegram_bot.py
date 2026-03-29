@@ -662,7 +662,7 @@ class TestHandleText:
             session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
             svc.get_chat_binding = AsyncMock(return_value=binding)
 
-            with patch("backend.services.ai.agent.ask", new_callable=AsyncMock) as mock_ask:
+            with patch("backend.services.ai.orchestrator.ask", new_callable=AsyncMock) as mock_ask:
                 mock_ask.return_value = "Продажи за сегодня: 100K"
                 await handle_text(msg)
                 mock_ask.assert_called_once()
@@ -713,7 +713,7 @@ class TestHandleText:
             session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
             svc.get_chat_binding = AsyncMock(return_value=binding)
 
-            with patch("backend.services.ai.agent.ask", new_callable=AsyncMock) as mock_ask:
+            with patch("backend.services.ai.orchestrator.ask", new_callable=AsyncMock) as mock_ask:
                 mock_ask.side_effect = RuntimeError("LLM timeout")
                 await handle_text(msg)
                 msg.reply.assert_called()
