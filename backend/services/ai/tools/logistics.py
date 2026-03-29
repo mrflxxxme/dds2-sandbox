@@ -128,4 +128,21 @@ LOGISTICS_TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "get_daily_health",
+        "description": (
+            "Comprehensive daily health check: "
+            "1) Urgent shipments — products that need to be sent to WB but have no assembly request. "
+            "2) Overdue assembly requests — past delivery date. "
+            "3) Category A products health — are top sellers ok? (stock, ads, margin). "
+            "4) Illiquid products action plan — specific recommendations: increase ads, reduce price, or liquidate. "
+            "Returns health_score (0-100) and actionable items. "
+            "Use for: daily review, morning briefing, what needs attention, health status."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
 ]

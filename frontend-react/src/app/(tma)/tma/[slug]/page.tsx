@@ -11,7 +11,7 @@ import type {
 } from '@/types/api';
 
 /**
- * TMA Dashboard — balance, plan-fact progress, anomalies, stats.
+ * TMA Dashboard — balance, health check, plan-fact, anomalies, stats.
  */
 
 interface DashboardData {
@@ -202,6 +202,199 @@ function AnomalyRow({ item }: { item: AnomalyItem }) {
     );
 }
 
+// ─── Health Check Types ──────────────────────────────────────────────────────
+
+interface HealthCheckData {
+    urgent_shipments: Array<{
+        nm_id: number; vendor_code: string; subject: string;
+        deficit: number; can_send: number; has_assembly: boolean;
+        days_left_wb: number; warehouse: string;
+    }>;
+    overdue_assemblies: Array<{
+        id: number; number: string; status: string; warehouse_name: string;
+        delivery_date: string; days_overdue: number; items_count: number; total_qty: number;
+    }>;
+    category_a_health: Array<{
+        nm_id: number; vendor_code: string; subject: string;
+        revenue_30d: number; margin_pct: number; drr: number;
+        days_left: number; stocks_total: number; issues: string[];
+    }>;
+    illiquid_actions: Array<{
+        nm_id: number; vendor_code: string; subject: string;
+        turnover_days: number; margin_pct: number; drr: number;
+        frozen_value: number; stocks_total: number;
+        recommendation: string; reason: string;
+    }>;
+    summary: {
+        urgent_count: number; overdue_count: number;
+        category_a_issues: number; illiquid_count: number;
+        frozen_capital: number; health_score: number;
+    };
+}
+
+// ─── Health Check Section ────────────────────────────────────────────────────
+
+const REC_STYLES: Record<string, { icon: string; color: string; bg: string }> = {
+    increase_ads:        { icon: '📢', color: '#065F46', bg: '#D1FAE5' },
+    cut_ads_reduce_price:{ icon: '✂️', color: '#9A3412', bg: '#FED7AA' },
+    reduce_price_10:     { icon: '🏷️', color: '#1E40AF', bg: '#DBEAFE' },
+    reduce_price_20:     { icon: '🏷️', color: '#92400E', bg: '#FEF3C7' },
+    deep_sale:           { icon: '🔥', color: '#991B1B', bg: '#FEE2E2' },
+};
+
+function HealthCheckSection({ data }: { data: HealthCheckData }) {
+    const [tab, setTab] = useState<'urgent' | 'overdue' | 'catA' | 'illiquid'>('urgent');
+    const s = data.summary;
+
+    const scoreColor = s.health_score >= 80 ? '#10b981' : s.health_score >= 50 ? '#d97706' : '#e02424';
+
+    const tabs = [
+        { key: 'urgent' as const, label: '🚨 Отправки', count: s.urgent_count },
+        { key: 'overdue' as const, label: '⏰ Просрочены', count: s.overdue_count },
+        { key: 'catA' as const, label: '⭐ Кат. A', count: s.category_a_issues },
+        { key: 'illiquid' as const, label: '🧊 Неликвид', count: s.illiquid_count },
+    ];
+
+    return (
+        <div className="tma-card">
+            <div className="tma-hc-header">
+                <div className="tma-card-title">Health Check</div>
+                <div className="tma-hc-score" style={{ color: scoreColor }}>
+                    {s.health_score}
+                </div>
+            </div>
+
+            {/* Tab switcher */}
+            <div className="tma-hc-tabs">
+                {tabs.map(t => (
+                    <button
+                        key={t.key}
+                        className={`tma-hc-tab ${tab === t.key ? 'active' : ''}`}
+                        onClick={() => { haptic('selection'); setTab(t.key); }}
+                    >
+                        {t.label}
+                        {t.count > 0 && <span className="tma-hc-tab-badge">{t.count}</span>}
+                    </button>
+                ))}
+            </div>
+
+            {/* Tab content */}
+            {tab === 'urgent' && (
+                data.urgent_shipments.length === 0 ? (
+                    <div className="tma-hc-empty">Все товары отправлены ✅</div>
+                ) : (
+                    <div className="tma-hc-list">
+                        {data.urgent_shipments.map((item, i) => (
+                            <div key={i} className="tma-hc-row">
+                                <div className="tma-hc-row-left">
+                                    <div className="tma-hc-row-name">{item.vendor_code || `#${item.nm_id}`}</div>
+                                    <div className="tma-hc-row-sub">
+                                        {item.subject} · {item.warehouse}
+                                    </div>
+                                </div>
+                                <div className="tma-hc-row-right">
+                                    <div className="tma-hc-row-value">−{item.deficit} шт</div>
+                                    <div className="tma-hc-row-meta">
+                                        {item.has_assembly ? '📋 заявка есть' : '❌ нет заявки'}
+                                        {item.days_left_wb > 0 && ` · ${Math.round(item.days_left_wb)}дн`}
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )
+            )}
+
+            {tab === 'overdue' && (
+                data.overdue_assemblies.length === 0 ? (
+                    <div className="tma-hc-empty">Нет просроченных заявок ✅</div>
+                ) : (
+                    <div className="tma-hc-list">
+                        {data.overdue_assemblies.map((item, i) => (
+                            <div key={i} className="tma-hc-row">
+                                <div className="tma-hc-row-left">
+                                    <div className="tma-hc-row-name">#{item.number}</div>
+                                    <div className="tma-hc-row-sub">
+                                        {item.warehouse_name} · {item.total_qty} шт
+                                    </div>
+                                </div>
+                                <div className="tma-hc-row-right">
+                                    <div className="tma-hc-row-value tma-stat-negative">+{item.days_overdue} дн</div>
+                                    <div className="tma-hc-row-meta">{item.status}</div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )
+            )}
+
+            {tab === 'catA' && (
+                data.category_a_health.length === 0 ? (
+                    <div className="tma-hc-empty">Топ-товары в порядке ✅</div>
+                ) : (
+                    <div className="tma-hc-list">
+                        {data.category_a_health.map((item, i) => (
+                            <div key={i} className="tma-hc-row">
+                                <div className="tma-hc-row-left">
+                                    <div className="tma-hc-row-name">{item.vendor_code || `#${item.nm_id}`}</div>
+                                    <div className="tma-hc-row-sub">{item.subject}</div>
+                                    <div className="tma-hc-issues">
+                                        {item.issues.map((issue, j) => (
+                                            <span key={j} className="tma-hc-issue-tag">{issue}</span>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="tma-hc-row-right">
+                                    <div className="tma-hc-row-value">{compactNumber(item.revenue_30d)}</div>
+                                    <div className="tma-hc-row-meta">
+                                        {formatNumber(item.margin_pct, 0)}% · {Math.round(item.days_left)}дн
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )
+            )}
+
+            {tab === 'illiquid' && (
+                data.illiquid_actions.length === 0 ? (
+                    <div className="tma-hc-empty">Нет неликвида ✅</div>
+                ) : (
+                    <>
+                        {s.frozen_capital > 0 && (
+                            <div className="tma-hc-frozen">
+                                Заморожено: <b>{compactNumber(s.frozen_capital)} ₽</b>
+                            </div>
+                        )}
+                        <div className="tma-hc-list">
+                            {data.illiquid_actions.map((item, i) => {
+                                const rs = REC_STYLES[item.recommendation] || REC_STYLES.reduce_price_10;
+                                return (
+                                    <div key={i} className="tma-hc-row">
+                                        <div className="tma-hc-row-left">
+                                            <div className="tma-hc-row-name">{item.vendor_code || `#${item.nm_id}`}</div>
+                                            <div className="tma-hc-row-sub">{item.subject} · {Math.round(item.turnover_days)}дн</div>
+                                            <span className="tma-hc-rec-badge" style={{ color: rs.color, backgroundColor: rs.bg }}>
+                                                {rs.icon} {item.reason}
+                                            </span>
+                                        </div>
+                                        <div className="tma-hc-row-right">
+                                            <div className="tma-hc-row-value">{compactNumber(item.frozen_value)} ₽</div>
+                                            <div className="tma-hc-row-meta">
+                                                {formatNumber(item.margin_pct, 0)}% маржа
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </>
+                )
+            )}
+        </div>
+    );
+}
+
 // ─── Main Page ───────────────────────────────────────────────────────────────
 
 export default function TmaDashboardPage() {
@@ -211,6 +404,7 @@ export default function TmaDashboardPage() {
     const [data, setData] = useState<DashboardData | null>(null);
     const [anomalies, setAnomalies] = useState<AnomaliesResponse | null>(null);
     const [planFact, setPlanFact] = useState<PlanFactBrandRow[]>([]);
+    const [healthCheck, setHealthCheck] = useState<HealthCheckData | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [projectName, setProjectName] = useState('');
@@ -223,10 +417,11 @@ export default function TmaDashboardPage() {
             const year = now.getFullYear();
             const month = now.getMonth() + 1;
 
-            const [dashboard, anomalyData, pfData] = await Promise.allSettled([
+            const [dashboard, anomalyData, pfData, hcData] = await Promise.allSettled([
                 api.request<DashboardData>('GET', '/api/v1/reports/dashboard_summary'),
                 api.getAnomalies({ period_days: 7 }),
                 api.getPlanFactBrands(year, month),
+                api.request<HealthCheckData>('GET', '/api/v1/funnel/health_check'),
             ]);
 
             if (dashboard.status === 'fulfilled') setData(dashboard.value);
@@ -234,6 +429,7 @@ export default function TmaDashboardPage() {
 
             if (anomalyData.status === 'fulfilled') setAnomalies(anomalyData.value);
             if (pfData.status === 'fulfilled') setPlanFact(pfData.value);
+            if (hcData.status === 'fulfilled') setHealthCheck(hcData.value);
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Ошибка загрузки');
         } finally {
@@ -301,6 +497,9 @@ export default function TmaDashboardPage() {
                     <div className="tma-big-label">+ {formatNumber(data.balance_cny, 0)} ¥</div>
                 )}
             </div>
+
+            {/* Health Check */}
+            {healthCheck && <HealthCheckSection data={healthCheck} />}
 
             {/* Plan-Fact */}
             <PlanFactSection brands={planFact} />

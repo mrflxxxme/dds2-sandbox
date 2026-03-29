@@ -80,6 +80,8 @@ async def execute_tool(
             return await _get_plan_fact(db, project_id, brand, tool_input)
         elif tool_name == "get_ad_campaigns":
             return await _get_ad_campaigns(db, project_id, brand, tool_input)
+        elif tool_name == "get_daily_health":
+            return await _get_daily_health(db, project_id, tax_rate, brand, tool_input)
         else:
             return json.dumps({"error": "Unknown tool: " + tool_name})
     except Exception as e:
@@ -585,3 +587,16 @@ async def _get_ad_campaigns(db, project_id, brand, inp):
         },
         "products": products,
     })
+
+
+async def _get_daily_health(db, project_id, tax_rate, brand, inp):
+    from backend.services.health_check_service import get_daily_health
+
+    tax_info = {"tax_regime": "usn_income", "usn_rate": tax_rate, "nds_rate": 0, "cost_as_expense": False}
+    result = await get_daily_health(
+        db,
+        project_id,
+        tax_info,
+        brand=brand,
+    )
+    return _json(result)

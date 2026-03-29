@@ -565,6 +565,27 @@ async def get_capital_report(
     )
 
 
+# ─── Daily Health Check ───────────────────────────────────────────────────
+
+
+@router.get("/health_check")
+async def get_health_check(
+    brand: str | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Daily health check: urgent shipments, overdue assemblies, category A health, illiquid actions."""
+    from backend.services.health_check_service import get_daily_health
+
+    tax_info = await _build_tax_info(db, project)
+    return await get_daily_health(
+        db,
+        project_id=project.id,
+        tax_info=tax_info,
+        brand=brand,
+    )
+
+
 # ─── Tariffs (WB commission rates) ──────────────────────────────────────────
 
 
