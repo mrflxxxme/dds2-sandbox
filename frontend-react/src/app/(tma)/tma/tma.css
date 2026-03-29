@@ -580,6 +580,592 @@
     flex-shrink: 0;
 }
 
+/* ─── Warehouse ───────────────────────────────────────────────────────────── */
+
+.tma-traffic-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr;
+    gap: 8px;
+    text-align: center;
+}
+
+.tma-traffic-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 8px 4px;
+    border-radius: var(--tma-radius-sm);
+    background: var(--tma-secondary-bg);
+}
+
+.tma-traffic-icon {
+    font-size: 16px;
+    line-height: 1;
+}
+
+.tma-traffic-count {
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.tma-traffic-label {
+    font-size: 10px;
+    color: var(--tma-hint);
+    white-space: nowrap;
+}
+
+.tma-traffic-red-text { color: #ff3b30; }
+.tma-traffic-orange-text { color: #ff9500; }
+.tma-traffic-yellow-text { color: #ffcc00; }
+.tma-traffic-green-text { color: #34c759; }
+
+.tma-wh-alert-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 0;
+}
+
+.tma-wh-alert-row + .tma-wh-alert-row {
+    border-top: 1px solid var(--tma-secondary-bg);
+}
+
+.tma-wh-alert-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+}
+
+.tma-wh-alert-icon {
+    font-size: 14px;
+    flex-shrink: 0;
+}
+
+.tma-wh-alert-info {
+    min-width: 0;
+}
+
+.tma-wh-alert-name {
+    font-size: 14px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tma-wh-alert-sub {
+    font-size: 12px;
+    color: var(--tma-hint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tma-wh-alert-right {
+    text-align: right;
+    flex-shrink: 0;
+    margin-left: 8px;
+}
+
+.tma-wh-alert-days {
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.tma-wh-alert-stock {
+    font-size: 12px;
+    color: var(--tma-hint);
+}
+
+.tma-wh-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 0;
+}
+
+.tma-wh-row + .tma-wh-row {
+    border-top: 1px solid var(--tma-secondary-bg);
+}
+
+.tma-wh-row-left {
+    flex: 1;
+    min-width: 0;
+}
+
+.tma-wh-row-name {
+    font-size: 14px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tma-wh-row-sub {
+    font-size: 12px;
+    color: var(--tma-hint);
+}
+
+.tma-wh-row-right {
+    text-align: right;
+    flex-shrink: 0;
+    margin-left: 8px;
+}
+
+.tma-wh-row-qty {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.tma-wh-row-change {
+    font-size: 12px;
+}
+
+.tma-wh-more {
+    text-align: center;
+    padding: 10px 0 2px;
+    font-size: 13px;
+    color: var(--tma-hint);
+}
+
+.tma-status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+.tma-status-badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    color: #fff;
+    padding: 2px 7px;
+    border-radius: 6px;
+    margin-left: 6px;
+    vertical-align: middle;
+    letter-spacing: 0.02em;
+}
+
+/* ─── Tab Bar (warehouse) ─────────────────────────────────────────────────── */
+
+.tma-tab-bar {
+    display: flex;
+    background: var(--tma-secondary-bg);
+    border-radius: var(--tma-radius-sm);
+    padding: 3px;
+    margin-bottom: 16px;
+    gap: 2px;
+}
+
+.tma-tab-item {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1px;
+    padding: 6px 2px;
+    border: none;
+    background: transparent;
+    color: var(--tma-hint);
+    font-size: 11px;
+    font-weight: 500;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: inherit;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.tma-tab-item.active {
+    background: var(--tma-section-bg);
+    color: var(--tma-text);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.tma-tab-icon {
+    font-size: 16px;
+    line-height: 1;
+}
+
+.tma-tab-label {
+    font-size: 10px;
+    line-height: 1;
+}
+
+/* ─── Assembly Cards ──────────────────────────────────────────────────────── */
+
+.tma-asm-group {
+    margin-bottom: 16px;
+}
+
+.tma-asm-group-header {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--tma-hint);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 4px 0 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.tma-asm-card {
+    background: var(--tma-section-bg);
+    border-radius: var(--tma-radius);
+    margin-bottom: 8px;
+    overflow: hidden;
+    transition: box-shadow 0.2s;
+}
+
+.tma-asm-card.tma-asm-expanded {
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+}
+
+.tma-asm-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 14px 4px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.tma-asm-header-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.tma-asm-number {
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.tma-asm-header-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.tma-asm-qty {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--tma-hint);
+}
+
+.tma-asm-chevron {
+    font-size: 12px;
+    color: var(--tma-hint);
+    transition: transform 0.2s;
+    display: inline-block;
+}
+
+.tma-asm-chevron-up {
+    transform: rotate(90deg);
+}
+
+.tma-asm-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 4px 14px 10px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.tma-asm-tag {
+    font-size: 11px;
+    font-weight: 600;
+    background: var(--tma-secondary-bg);
+    padding: 2px 8px;
+    border-radius: 6px;
+    color: var(--tma-link);
+}
+
+.tma-asm-meta {
+    font-size: 11px;
+    color: var(--tma-hint);
+}
+
+.tma-asm-details {
+    padding: 0 14px 14px;
+    animation: tmaFadeIn 0.2s ease-out;
+}
+
+.tma-asm-section {
+    padding: 8px 0;
+    border-top: 1px solid var(--tma-secondary-bg);
+}
+
+.tma-asm-section-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--tma-hint);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 6px;
+}
+
+.tma-asm-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding: 4px 0;
+    font-size: 13px;
+}
+
+.tma-asm-item-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding-right: 8px;
+}
+
+.tma-asm-item-brand {
+    font-size: 11px;
+    color: var(--tma-hint);
+    margin-left: 4px;
+}
+
+.tma-asm-item-qty {
+    font-weight: 600;
+    flex-shrink: 0;
+    text-align: right;
+}
+
+.tma-asm-item-stock {
+    font-weight: 400;
+    font-size: 11px;
+    color: var(--tma-hint);
+    margin-left: 4px;
+}
+
+.tma-asm-meta-line {
+    font-size: 13px;
+    color: var(--tma-text);
+    padding: 2px 0;
+}
+
+.tma-asm-actions {
+    padding-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+/* ─── Pallets editor ──────────────────────────────────────────────────────── */
+
+.tma-pallets-display {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+    cursor: pointer;
+    padding: 4px 0;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.tma-pallets-edit-icon {
+    font-size: 12px;
+    opacity: 0.5;
+}
+
+.tma-pallets-edit {
+    padding: 4px 0;
+}
+
+.tma-pallets-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 6px;
+}
+
+/* ─── Modal / Bottom Sheet ────────────────────────────────────────────────── */
+
+.tma-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 200;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    animation: tmaFadeIn 0.15s ease-out;
+}
+
+.tma-modal {
+    background: var(--tma-section-bg);
+    border-radius: 16px 16px 0 0;
+    width: 100%;
+    max-width: 480px;
+    max-height: 85vh;
+    overflow-y: auto;
+    animation: tmaSlideUp 0.25s ease-out;
+    -webkit-overflow-scrolling: touch;
+}
+
+@keyframes tmaSlideUp {
+    from { transform: translateY(100%); }
+    to { transform: translateY(0); }
+}
+
+.tma-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 16px 8px;
+    position: sticky;
+    top: 0;
+    background: var(--tma-section-bg);
+    z-index: 1;
+}
+
+.tma-modal-title {
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.tma-modal-close {
+    font-size: 24px;
+    background: none;
+    border: none;
+    color: var(--tma-hint);
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+}
+
+.tma-modal-body {
+    padding: 8px 16px 16px;
+}
+
+.tma-modal-footer {
+    display: flex;
+    gap: 10px;
+    padding: 12px 16px calc(12px + var(--tma-safe-bottom));
+    border-top: 1px solid var(--tma-secondary-bg);
+}
+
+.tma-modal-footer .tma-btn {
+    flex: 1;
+}
+
+/* ─── Form fields ─────────────────────────────────────────────────────────── */
+
+.tma-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 12px;
+}
+
+.tma-field-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--tma-hint);
+}
+
+.tma-input {
+    padding: 10px 12px;
+    border: 1px solid var(--tma-secondary-bg);
+    border-radius: 10px;
+    font-size: 15px;
+    font-family: inherit;
+    background: var(--tma-bg);
+    color: var(--tma-text);
+    outline: none;
+    width: 100%;
+    box-sizing: border-box;
+    transition: border-color 0.2s;
+}
+
+.tma-input:focus {
+    border-color: var(--tma-btn);
+}
+
+.tma-input-sm {
+    padding: 6px 10px;
+    font-size: 14px;
+}
+
+.tma-field-row {
+    display: flex;
+    gap: 10px;
+}
+
+.tma-field-half {
+    flex: 1;
+}
+
+/* ─── Button variants ─────────────────────────────────────────────────────── */
+
+.tma-btn-block {
+    width: 100%;
+}
+
+.tma-btn-secondary {
+    background: var(--tma-secondary-bg);
+    color: var(--tma-text);
+}
+
+.tma-btn-danger {
+    background: none;
+    color: var(--tma-destructive);
+    font-size: 13px;
+    padding: 8px;
+}
+
+.tma-btn-sm-text {
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.tma-btn-sm {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 14px;
+    border: none;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.2s;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.tma-btn-sm.tma-btn-primary {
+    background: var(--tma-btn);
+    color: var(--tma-btn-text);
+}
+
+.tma-btn-sm.tma-btn-secondary {
+    background: var(--tma-secondary-bg);
+    color: var(--tma-text);
+}
+
+/* ─── Utils ───────────────────────────────────────────────────────────────── */
+
+.tma-text-purple {
+    color: #5856d6;
+}
+
+.tma-wh-meta {
+    display: flex;
+    gap: 2px;
+    flex-wrap: wrap;
+}
+
 /* ─── Loading overlay ──────────────────────────────────────────────────────── */
 
 .tma-loading {

@@ -25,6 +25,7 @@ export default function TmaSlugLayout({ children }: { children: React.ReactNode 
 
     const navItems: NavItem[] = [
         { label: 'Главная', icon: '📊', path: `/tma/${slug}` },
+        { label: 'Склад', icon: '📦', path: `/tma/${slug}/warehouse` },
         { label: 'P&L', icon: '📈', path: `/tma/${slug}/pnl` },
         { label: 'AI', icon: '💬', path: `/tma/${slug}/chat` },
     ];
