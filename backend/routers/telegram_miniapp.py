@@ -104,7 +104,7 @@ async def tma_chat(
     """AI chat endpoint for TMA. Requires JWT auth."""
     project = await verify_project_access(db, user.id, body.project_id)
 
-    from backend.services.ai.agent import ask
+    from backend.services.ai.orchestrator import ask
 
     answer = await ask(
         db=db,

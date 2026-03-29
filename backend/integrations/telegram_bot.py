@@ -481,7 +481,7 @@ async def handle_text(message: Message):
                 logger.debug("Failed to strip bot mention")
 
         try:
-            from backend.services.ai.agent import ask
+            from backend.services.ai.orchestrator import ask
 
             logger.info(
                 "AI ask: chat=%s project=%s brand=%s q=%s",
