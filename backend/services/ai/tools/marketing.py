@@ -90,4 +90,28 @@ MARKETING_TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "get_ad_campaigns",
+        "description": (
+            "Get detailed advertising data: per-product ad spend, campaigns, DRR, CPC, CTR. "
+            "Returns each product with linked WB ad campaigns (name, type, status, budget). "
+            "Shows which campaigns target which products, budget changes, spend efficiency. "
+            "Use for: ad optimization, which campaigns to stop/increase, ad spend analysis, "
+            "toxic campaigns (high DRR), budget allocation, campaign ROI."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date_from": {
+                    "type": "string",
+                    "description": "Start date YYYY-MM-DD (default: 7 days ago)",
+                },
+                "date_to": {
+                    "type": "string",
+                    "description": "End date YYYY-MM-DD (default: today)",
+                },
+            },
+            "required": [],
+        },
+    },
 ]

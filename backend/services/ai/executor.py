@@ -75,6 +75,8 @@ async def execute_tool(
             return await _get_capital_analysis(db, project_id, tax_rate, brand, tool_input)
         elif tool_name == "get_plan_fact":
             return await _get_plan_fact(db, project_id, brand, tool_input)
+        elif tool_name == "get_ad_campaigns":
+            return await _get_ad_campaigns(db, project_id, brand, tool_input)
         else:
             return json.dumps({"error": "Unknown tool: " + tool_name})
     except Exception as e:
@@ -518,4 +520,65 @@ async def _get_plan_fact(db, project_id, brand, inp):
         "year": year,
         "month": month,
         "brands": brands_data,
+    })
+
+
+async def _get_ad_campaigns(db, project_id, brand, inp):
+    from backend.services.funnel.ad_campaigns_service import get_ad_tab_data
+
+    date_from = inp.get("date_from", "")
+    date_to = inp.get("date_to", "")
+    if not date_from or not date_to:
+        from backend.utils.time import utcnow
+        now = utcnow()
+        date_to = now.strftime("%Y-%m-%d")
+        from datetime import timedelta
+        date_from = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    data = await get_ad_tab_data(
+        db,
+        project_id,
+        date_from=date_from,
+        date_to=date_to,
+        brand=brand or "",
+    )
+    # Enrich with summary
+    total_spend = sum(float(p.get("adv_sum", 0) or 0) for p in data)
+    total_orders = sum(float(p.get("orders_sum_rub", 0) or 0) for p in data)
+    avg_drr = round(total_spend / total_orders * 100, 1) if total_orders else 0
+
+    # Per-product: include campaigns info
+    products = []
+    for p in data:
+        item = {
+            "nm_id": p.get("nm_id"),
+            "vendor_code": p.get("vendor_code", ""),
+            "subject": p.get("subject", ""),
+            "adv_sum": p.get("adv_sum", 0),
+            "adv_views": p.get("adv_views", 0),
+            "adv_clicks": p.get("adv_clicks", 0),
+            "orders_sum_rub": p.get("orders_sum_rub", 0),
+            "orders_count": p.get("orders_count", 0),
+            "drr": p.get("drr", 0),
+            "cpc": p.get("cpc", 0),
+            "ctr": p.get("ctr", 0),
+            "profit": p.get("profit", 0),
+            "margin": p.get("margin", 0),
+            "abc_revenue": p.get("abc_revenue", ""),
+            "campaigns": p.get("campaigns", []),
+        }
+        products.append(item)
+
+    # Sort by spend descending
+    products.sort(key=lambda x: float(x.get("adv_sum", 0) or 0), reverse=True)
+
+    return _json({
+        "period": {"date_from": date_from, "date_to": date_to},
+        "summary": {
+            "total_spend": total_spend,
+            "total_orders_rub": total_orders,
+            "avg_drr": avg_drr,
+            "products_with_ads": len([p for p in products if float(p.get("adv_sum", 0) or 0) > 0]),
+        },
+        "products": products,
     })
