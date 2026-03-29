@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
@@ -35,6 +35,7 @@ function compactNumber(n: number): string {
 
 export default function TmaDashboardPage() {
     const params = useParams();
+    const router = useRouter();
     const slug = params.slug as string;
     const [data, setData] = useState<DashboardData | null>(null);
     const [loading, setLoading] = useState(true);
@@ -127,6 +128,18 @@ export default function TmaDashboardPage() {
                         + {formatNumber(data.balance_cny, 0)} ¥
                     </div>
                 )}
+            </div>
+
+            {/* Pulse link */}
+            <div
+                className="tma-pulse-link"
+                onClick={() => { haptic('light'); router.push(`/tma/${slug}/pulse`); }}
+            >
+                <div>
+                    <div className="tma-pulse-link-text">Пульс-монитор</div>
+                    <div className="tma-pulse-link-sub">Бренды &middot; Категории &middot; Артикулы</div>
+                </div>
+                <span className="tma-pulse-link-arrow">→</span>
             </div>
 
             {/* Stats Grid */}
