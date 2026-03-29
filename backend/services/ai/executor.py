@@ -520,7 +520,7 @@ async def _get_plan_fact(db, project_id, brand, inp):
 
     brands_data = await get_plan_fact_brands(db, project_id, year, month)
     # Filter by brand if specified
-    if brand and brand != "все бренды":
+    if brand:
         brands_data = [b for b in brands_data if b.get("brand") == brand]
 
     return _json({
@@ -611,8 +611,16 @@ async def _get_logistics_history(db, project_id, inp):
 
     statuses = inp.get("statuses", None)
     if statuses:
-        status_filter = [AssemblyStatus(s) for s in statuses if hasattr(AssemblyStatus, s)]
+        valid = []
+        for s in statuses:
+            try:
+                valid.append(AssemblyStatus(s.upper() if isinstance(s, str) else s))
+            except (ValueError, AttributeError):
+                pass
+        status_filter = valid if valid else None
     else:
+        status_filter = None
+    if not status_filter:
         status_filter = [
             AssemblyStatus.SHIPPED,
             AssemblyStatus.DELIVERED,
@@ -650,6 +658,7 @@ async def _get_logistics_history(db, project_id, inp):
         .where(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.is_deleted.is_(False),
+            Warehouse.is_deleted.is_(False),
             AssemblyRequest.pickup_cost.isnot(None),
             AssemblyRequest.pickup_cost > 0,
         )

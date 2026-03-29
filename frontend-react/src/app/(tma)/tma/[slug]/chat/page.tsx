@@ -41,14 +41,14 @@ function renderMessageSafe(text: string): string {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
 
-    // 2. Restore allowed Telegram HTML tags
+    // 2. Restore allowed Telegram HTML tags (NO attributes — prevents XSS)
     const allowedTags = ['b', 'i', 'u', 's', 'code', 'pre', 'blockquote'];
     for (const tag of allowedTags) {
-        // Opening tags (with optional attributes like expandable)
-        safe = safe.replace(new RegExp(`&lt;(${tag}(?:\\s[^&]*)?)&gt;`, 'gi'), '<$1>');
-        // Closing tags
+        safe = safe.replace(new RegExp(`&lt;${tag}&gt;`, 'gi'), `<${tag}>`);
         safe = safe.replace(new RegExp(`&lt;/${tag}&gt;`, 'gi'), `</${tag}>`);
     }
+    // Allow <blockquote expandable> specifically (Telegram feature)
+    safe = safe.replace(/&lt;blockquote expandable&gt;/gi, '<blockquote>');
 
     // 3. Also support markdown-like formatting as fallback
     safe = safe.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');

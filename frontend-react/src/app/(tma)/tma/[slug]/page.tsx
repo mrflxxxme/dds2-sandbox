@@ -262,7 +262,7 @@ function HealthCheckSection({ data }: { data: HealthCheckData }) {
             <div className="tma-hc-header">
                 <div className="tma-card-title">Health Check</div>
                 <div className="tma-hc-score" style={{ color: scoreColor }}>
-                    {s.health_score}
+                    {s.health_score}/100
                 </div>
             </div>
 
@@ -363,7 +363,7 @@ function HealthCheckSection({ data }: { data: HealthCheckData }) {
                                     </div>
                                 </div>
                                 <div className="tma-hc-row-right">
-                                    <div className="tma-hc-row-value">{compactNumber(item.revenue_30d)}</div>
+                                    <div className="tma-hc-row-value">{compactNumber(item.revenue_30d)} ₽</div>
                                     <div className="tma-hc-row-meta">
                                         {formatNumber(item.margin_pct, 0)}% · {Math.round(item.days_left)}дн
                                     </div>
@@ -512,7 +512,7 @@ export default function TmaDashboardPage() {
                 <div className="tma-page-title">{projectName || slug}</div>
                 <div className="tma-page-subtitle">
                     {data.date_from && data.date_to
-                        ? `${data.date_from} — ${data.date_to}`
+                        ? `${new Date(data.date_from).toLocaleDateString('ru-RU')} — ${new Date(data.date_to).toLocaleDateString('ru-RU')}`
                         : 'Текущий месяц'}
                 </div>
             </div>

@@ -62,14 +62,14 @@ async def get_daily_health(
         urgent_shipments = await _check_urgent_shipments(db, project_id)
     except Exception:
         logger.exception("Health check: urgent_shipments failed for project %s", project_id)
-        await db.rollback()
+        pass  # graceful: continue with other checks
 
     # --- Check 2: Overdue assemblies ---
     try:
         overdue_assemblies = await _check_overdue_assemblies(db, project_id)
     except Exception:
         logger.exception("Health check: overdue_assemblies failed for project %s", project_id)
-        await db.rollback()
+        pass  # graceful: continue with other checks
 
     # --- Check 3: Category-A health ---
     try:
@@ -78,7 +78,7 @@ async def get_daily_health(
         )
     except Exception:
         logger.exception("Health check: category_a_health failed for project %s", project_id)
-        await db.rollback()
+        pass  # graceful: continue with other checks
 
     # --- Check 4: Illiquid actions ---
     try:
@@ -87,7 +87,7 @@ async def get_daily_health(
         )
     except Exception:
         logger.exception("Health check: illiquid_actions failed for project %s", project_id)
-        await db.rollback()
+        pass  # graceful: continue with other checks
 
     # --- Summary ---
     urgent_without_assembly = sum(
@@ -220,7 +220,7 @@ async def _check_overdue_assemblies(
     project_id: int,
 ) -> list[dict]:
     """Find assembly requests past their delivery date."""
-    today = date.today()
+    today = utcnow().date()
 
     stmt = (
         select(AssemblyRequest)
@@ -282,7 +282,7 @@ async def _check_category_a_health(
     # Get funnel data with ABC classification (last 30 days)
     from backend.services.funnel.queries import get_funnel_by_sku
 
-    today = date.today()
+    today = utcnow().date()
     date_from = (today - timedelta(days=30)).isoformat()
     date_to = today.isoformat()
 
