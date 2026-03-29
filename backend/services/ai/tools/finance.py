@@ -88,4 +88,51 @@ FINANCE_TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "get_capital_analysis",
+        "description": (
+            "Analyze working capital: liquidity classification (liquid <30d, transition 30-60d, "
+            "illiquid >60d), ROI per product/brand, frozen capital, price recommendations. "
+            "Includes WB + RF warehouse stocks. "
+            "Use for: capital efficiency, frozen money, ROI, liquidity, price optimization."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "period_days": {
+                    "type": "integer",
+                    "description": "Analysis period in days (default: 7)",
+                    "default": 7,
+                },
+                "group_by": {
+                    "type": "string",
+                    "description": "Group by: brand, category, or article (default: brand)",
+                    "default": "brand",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_plan_fact",
+        "description": (
+            "Get plan-fact analysis: actual revenue vs planned for current month by brand. "
+            "Returns: fact_mtd, plan_adjusted, completion %, forecast to month end. "
+            "Use for: plan execution, are we on track, forecast, brand performance vs plan."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year": {
+                    "type": "integer",
+                    "description": "Year (default: current year)",
+                },
+                "month": {
+                    "type": "integer",
+                    "description": "Month 1-12 (default: current month)",
+                },
+            },
+            "required": [],
+        },
+    },
 ]

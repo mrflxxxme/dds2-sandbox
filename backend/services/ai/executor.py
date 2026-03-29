@@ -69,6 +69,12 @@ async def execute_tool(
             return await _get_warehouse_stocks(db, project_id, tool_input)
         elif tool_name == "get_bdr_data":
             return await _get_bdr_data(db, project_id, brand, tool_input)
+        elif tool_name == "get_anomalies":
+            return await _get_anomalies(db, project_id, tax_rate, brand, tool_input)
+        elif tool_name == "get_capital_analysis":
+            return await _get_capital_analysis(db, project_id, tax_rate, brand, tool_input)
+        elif tool_name == "get_plan_fact":
+            return await _get_plan_fact(db, project_id, brand, tool_input)
         else:
             return json.dumps({"error": "Unknown tool: " + tool_name})
     except Exception as e:
@@ -239,11 +245,13 @@ async def _get_product_info(db, project_id, tax_rate, brand, inp):
 async def _get_stock_info(db, project_id, brand, inp):
     from backend.services.stock_forecast_service import get_stock_analytics
 
+    mode = "wb_rf" if inp.get("include_rf_stocks", True) else "wb"
     result = await get_stock_analytics(
         db,
         project_id,
         brand_filter=brand,
         article_filter=inp.get("search"),
+        mode=mode,
     )
     articles = result.get("articles", [])
     traffic = result.get("traffic_light_counts", {})
@@ -429,3 +437,89 @@ async def _get_bdr_data(db, project_id, brand, inp):
             "top_articles": simplified,
         }
     )
+
+
+async def _get_anomalies(db, project_id, tax_rate, brand, inp):
+    from backend.services.funnel.anomalies import get_anomalies
+
+    tax_info = {"tax_regime": "usn_income", "usn_rate": tax_rate, "nds_rate": 0, "cost_as_expense": False}
+    result = await get_anomalies(
+        db,
+        project_id,
+        tax_info,
+        period_days=inp.get("period_days", 7),
+        brand=brand,
+        include_rf_stocks=True,
+        min_orders=inp.get("min_orders", 5),
+    )
+    anomalies = result.get("anomalies", [])
+    summary = result.get("summary", {})
+    # Return top 15 anomalies by severity + loss
+    priority = {"critical": 0, "warning": 1}
+    sorted_anomalies = sorted(
+        anomalies,
+        key=lambda a: (priority.get(a.get("severity", "warning"), 1), -(a.get("loss_amount") or 0)),
+    )[:15]
+    return _json({
+        "summary": summary,
+        "anomalies": sorted_anomalies,
+        "total_products": result.get("total_products", 0),
+        "period_days": result.get("period_days", 7),
+    })
+
+
+async def _get_capital_analysis(db, project_id, tax_rate, brand, inp):
+    from backend.services.funnel.capital import get_capital_analysis
+
+    tax_info = {"tax_regime": "usn_income", "usn_rate": tax_rate, "nds_rate": 0, "cost_as_expense": False}
+    result = await get_capital_analysis(
+        db,
+        project_id,
+        tax_info,
+        period_days=inp.get("period_days", 7),
+        brand=brand,
+        group_by=inp.get("group_by", "brand"),
+        include_rf_stocks=True,
+        elasticity=inp.get("elasticity", 1.8),
+    )
+    summary = result.get("summary", {})
+    groups = result.get("groups", [])
+    # Top 15 groups by capital
+    top_groups = sorted(groups, key=lambda g: g.get("capital", 0), reverse=True)[:15]
+    simplified_groups = []
+    for g in top_groups:
+        simplified_groups.append({
+            "name": g.get("group_key", ""),
+            "capital": g.get("capital", 0),
+            "liquid_pct": g.get("liquid_pct", 0),
+            "illiquid_pct": g.get("illiquid_pct", 0),
+            "frozen_amount": g.get("frozen_amount", 0),
+            "roi_monthly": g.get("roi_monthly", 0),
+            "turnover_days": g.get("turnover_days", 0),
+            "recommendation": g.get("recommendation", {}),
+        })
+    return _json({
+        "summary": summary,
+        "groups": simplified_groups,
+        "total_products": result.get("total_products", 0),
+    })
+
+
+async def _get_plan_fact(db, project_id, brand, inp):
+    from backend.services.planning.brand_plan import get_plan_fact_brands
+
+    from backend.utils.time import utcnow
+    now = utcnow()
+    year = inp.get("year", now.year)
+    month = inp.get("month", now.month)
+
+    brands_data = await get_plan_fact_brands(db, project_id, year, month)
+    # Filter by brand if specified
+    if brand and brand != "все бренды":
+        brands_data = [b for b in brands_data if b.get("brand") == brand]
+
+    return _json({
+        "year": year,
+        "month": month,
+        "brands": brands_data,
+    })

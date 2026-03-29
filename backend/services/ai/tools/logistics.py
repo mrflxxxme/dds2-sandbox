@@ -11,9 +11,10 @@ LOGISTICS_TOOLS = [
     {
         "name": "get_stock_info",
         "description": (
-            "Get stock levels and restock forecast. "
-            "Returns per-product: stocks on WB, average daily sales, days left, "
+            "Get stock levels and restock forecast including RF (Russian) warehouses. "
+            "Returns per-product: stocks on WB + RF warehouses, average daily sales, days left, "
             "traffic light (red/orange/yellow/green). "
+            "By default includes RF warehouse stocks (Натали, Газпром и др.). "
             "Use for questions about inventory, restocking, stock-outs."
         ),
         "input_schema": {
@@ -22,6 +23,11 @@ LOGISTICS_TOOLS = [
                 "search": {
                     "type": "string",
                     "description": "Filter by vendor code or subject (optional)",
+                },
+                "include_rf_stocks": {
+                    "type": "boolean",
+                    "description": "Include RF warehouse stocks (default: true)",
+                    "default": True,
                 },
             },
             "required": [],
@@ -98,6 +104,27 @@ LOGISTICS_TOOLS = [
                 },
             },
             "required": ["search"],
+        },
+    },
+    {
+        "name": "get_anomalies",
+        "description": (
+            "Detect product anomalies: loss-making hits (margin<10%), stock-outs, "
+            "toxic ads (DRR>30%), dead stock (frozen capital), low buyout. "
+            "Returns prioritized list with severity, loss amount, and action plan. "
+            "Includes WB + RF warehouse stocks. "
+            "Use for: problems, anomalies, what's wrong, losses, risks."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "period_days": {
+                    "type": "integer",
+                    "description": "Analysis period in days (default: 7)",
+                    "default": 7,
+                },
+            },
+            "required": [],
         },
     },
 ]
