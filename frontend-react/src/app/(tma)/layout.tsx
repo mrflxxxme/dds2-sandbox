@@ -1,9 +1,8 @@
 import type { Metadata, Viewport } from 'next';
-import Script from 'next/script';
 import './tma/tma.css';
 
 /* FIX #1: Route group (tma) gets its own root layout — no conflict with main app layout */
-/* FIX #2: next/script with beforeInteractive for Telegram SDK */
+/* FIX #2: Regular <script> for Telegram SDK — next/script beforeInteractive doesn't work in route group layouts */
 /* FIX #7: viewport meta with maximum-scale=1, viewport-fit=cover */
 
 export const metadata: Metadata = {
@@ -23,10 +22,8 @@ export default function TmaRootLayout({ children }: { children: React.ReactNode 
     return (
         <html lang="ru">
             <head>
-                <Script
-                    src="https://telegram.org/js/telegram-web-app.js"
-                    strategy="beforeInteractive"
-                />
+                {/* eslint-disable-next-line @next/next/no-sync-scripts */}
+                <script src="https://telegram.org/js/telegram-web-app.js" />
                 <link rel="preconnect" href="https://fonts.googleapis.com" />
                 <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
                 <link

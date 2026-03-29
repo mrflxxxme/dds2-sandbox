@@ -22,6 +22,23 @@ type PageState = 'loading' | 'not_linked' | 'pick_project' | 'error';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
+/** Wait for Telegram WebApp SDK to initialize (up to 3s) */
+function waitForTelegramSdk(timeout = 3000): Promise<ReturnType<typeof getTelegramWebApp>> {
+    return new Promise((resolve) => {
+        const twa = getTelegramWebApp();
+        if (twa) { resolve(twa); return; }
+
+        const start = Date.now();
+        const interval = setInterval(() => {
+            const twa = getTelegramWebApp();
+            if (twa || Date.now() - start > timeout) {
+                clearInterval(interval);
+                resolve(twa);
+            }
+        }, 50);
+    });
+}
+
 export default function TmaEntryPage() {
     const router = useRouter();
     const [state, setState] = useState<PageState>('loading');
@@ -30,7 +47,8 @@ export default function TmaEntryPage() {
     const [userName, setUserName] = useState('');
 
     const authenticate = useCallback(async () => {
-        const twa = getTelegramWebApp();
+        // Wait for Telegram SDK to load (beforeInteractive doesn't work in route group layouts)
+        const twa = await waitForTelegramSdk();
         if (!twa) {
             setError('Откройте приложение через Telegram');
             setState('error');
