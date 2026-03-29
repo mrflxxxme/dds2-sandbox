@@ -28,8 +28,8 @@ class DecimalEncoder(json.JSONEncoder):
 def _json(data) -> str:
     """Serialize to JSON string, truncating if too large."""
     result = json.dumps(data, cls=DecimalEncoder, ensure_ascii=False)
-    if len(result) > 15000:
-        result = result[:15000] + "... (truncated)"
+    if len(result) > 30000:
+        result = result[:30000] + "... (truncated)"
     return result
 
 
@@ -130,7 +130,7 @@ async def _get_top_products(db, project_id, tax_rate, brand, inp):
     )
     products = result.get("products", [])
     # Return top 15 by revenue
-    top = sorted(products, key=lambda p: p.get("revenue", 0), reverse=True)[:15]
+    top = sorted(products, key=lambda p: p.get("revenue", 0), reverse=True)[:50]
     return _json(
         {
             "total_products": result.get("total_products", len(products)),
@@ -150,9 +150,9 @@ async def _get_cost_data(db, project_id, inp):
     return _json(
         {
             "cost_overrides_count": len(overrides_list),
-            "cost_overrides": overrides_list[:30],
+            "cost_overrides": overrides_list[:50],
             "missing_costs_count": len(missing),
-            "missing_costs": missing[:20],
+            "missing_costs": missing[:50],
         }
     )
 
@@ -267,7 +267,7 @@ async def _get_stock_info(db, project_id, brand, inp):
             "data_date": result.get("data_date"),
             "total_articles": len(articles),
             "traffic_light_counts": traffic,
-            "articles": sorted_articles[:20],
+            "articles": sorted_articles[:50],
         }
     )
 
@@ -284,7 +284,7 @@ async def _get_order_geography(db, project_id, brand, inp):
     )
     cities = result.get("cities", [])
     # Top 20 cities by order count
-    top_cities = sorted(cities, key=lambda c: c.get("order_count", 0), reverse=True)[:20]
+    top_cities = sorted(cities, key=lambda c: c.get("order_count", 0), reverse=True)[:50]
     return _json(
         {
             "total_orders": result.get("total_orders", 0),
@@ -366,7 +366,7 @@ async def _get_warehouse_stocks(db, project_id, inp):
         {
             "total_warehouses": len(sorted_wh),
             "total_qty": sum(w.get("total_qty", 0) for w in sorted_wh),
-            "warehouses": sorted_wh[:20],
+            "warehouses": sorted_wh[:50],
         }
     )
 
@@ -393,7 +393,7 @@ async def _get_bdr_data(db, project_id, brand, inp):
     articles = result.get("articles", [])
 
     # Top 15 by realization
-    top_articles = sorted(articles, key=lambda a: float(a.get("realization", 0)), reverse=True)[:15]
+    top_articles = sorted(articles, key=lambda a: float(a.get("realization", 0)), reverse=True)[:50]
     # Simplify article data for LLM
     simplified = []
     for a in top_articles:
@@ -459,7 +459,7 @@ async def _get_anomalies(db, project_id, tax_rate, brand, inp):
     sorted_anomalies = sorted(
         anomalies,
         key=lambda a: (priority.get(a.get("severity", "warning"), 1), -(a.get("loss_amount") or 0)),
-    )[:15]
+    )[:50]
     return _json({
         "summary": summary,
         "anomalies": sorted_anomalies,
@@ -485,7 +485,7 @@ async def _get_capital_analysis(db, project_id, tax_rate, brand, inp):
     summary = result.get("summary", {})
     groups = result.get("groups", [])
     # Top 15 groups by capital
-    top_groups = sorted(groups, key=lambda g: g.get("capital", 0), reverse=True)[:15]
+    top_groups = sorted(groups, key=lambda g: g.get("capital", 0), reverse=True)[:50]
     simplified_groups = []
     for g in top_groups:
         simplified_groups.append({
