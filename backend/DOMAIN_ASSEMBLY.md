@@ -80,14 +80,48 @@ CANCELLED ← (любой статус)                         READY
 4. assembly_request.outbound_shipment_id = NULL, shipped_at = NULL
 5. Status → READY
 
+## Аналитика логистики
+
+Endpoint: `GET /warehouse/assembly/shipments/analytics`
+- Сервис: `get_logistics_analytics(db, project_id, date_from, date_to, warehouse_ids, brands)`
+- Кэш: `@cached(prefix="reports:logistics_analytics", ttl=300)`
+- Возвращает: summary (total_cost, avg_cost_per_pallet, total_pallets, total_shipments), by_destination, by_route
+- avg_cost = средняя стоимость за палету: `avg(pickup_cost / pallets_count)`
+- Фильтры: период (shipped_at), склады, бренды
+- date_to: `shipped_at < date_to + 1 day` (включает весь день)
+
+## Редактирование полей
+
+### До READY (PENDING, IN_PROGRESS):
+- Items (позиции), FBO поставка, все scalar поля
+
+### В любом статусе (кроме CANCELLED):
+- pickup_cost, vehicle_info, vehicle_brand, driver_phone, pallets_count, pallet_weight_kg
+- Inline edit на detail page через EditableInfoField
+
+### Страница редактирования: `/assembly/[id]/edit`
+- Полная форма: FBO, дата, палеты, комментарий, items
+- Ctrl+V paste в таблицу items (как в приёмке)
+- Кнопка обновления FBO из WB (sync + reload items)
+
 ## Файлы модуля
 
 | Файл | Назначение |
 |------|-----------|
-| models/assembly.py | ORM: AssemblyRequest + Item |
-| schemas/assembly.py | Pydantic Request/Response |
-| services/assembly_service.py | Бизнес-логика |
-| routers/assembly.py | 12 HTTP endpoints |
+| models/assembly.py | ORM: AssemblyRequest + Item + StatusHistory |
+| schemas/assembly.py | Pydantic: CRUD + LogisticsAnalytics DTOs |
+| services/assembly_service.py | Бизнес-логика + аналитика |
+| routers/assembly.py | 14 HTTP endpoints (CRUD + workflow + analytics) |
+
+## Frontend
+
+| Файл | Назначение |
+|------|-----------|
+| warehouse/assembly/page.tsx | Список заявок |
+| warehouse/assembly/new/page.tsx | Создание (Ctrl+V paste) |
+| warehouse/assembly/[id]/page.tsx | Детали + inline edit |
+| warehouse/assembly/[id]/edit/page.tsx | Форма редактирования |
+| warehouse/logistics/page.tsx | Лист логиста + аналитика (KPI, график, матрица) |
 
 ## Полное ТЗ и UX
 
