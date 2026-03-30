@@ -1006,14 +1006,15 @@ async def get_logistics_analytics(
         AssemblyRequest.project_id == project_id,
         AssemblyRequest.is_deleted == False,  # noqa: E712
         AssemblyRequest.status.in_([AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED]),
-        AssemblyRequest.pickup_cost.isnot(None),
     ]
 
     # Optional filters
     if date_from is not None:
         base_filters.append(AssemblyRequest.shipped_at >= date_from)
     if date_to is not None:
-        base_filters.append(AssemblyRequest.shipped_at <= date_to)
+        from datetime import timedelta
+
+        base_filters.append(AssemblyRequest.shipped_at < date_to + timedelta(days=1))
     if warehouse_ids:
         base_filters.append(AssemblyRequest.warehouse_id.in_(warehouse_ids))
     if brands:

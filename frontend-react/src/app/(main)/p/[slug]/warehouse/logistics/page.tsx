@@ -54,6 +54,15 @@ export default function LogisticsPage() {
     const [analyticsLoading, setAnalyticsLoading] = useState(false);
     const [analyticsView, setAnalyticsView] = useState<'chart' | 'heatmap'>('chart');
 
+    // Analytics filters
+    const [analyticsDateFrom, setAnalyticsDateFrom] = useState(() => {
+        const d = new Date(); d.setDate(d.getDate() - 30);
+        return d.toISOString().slice(0, 10);
+    });
+    const [analyticsDateTo, setAnalyticsDateTo] = useState(() => new Date().toISOString().slice(0, 10));
+    const [analyticsBrand, setAnalyticsBrand] = useState('');
+    const [analyticsDestFilter, setAnalyticsDestFilter] = useState('');
+
     // Filters
     const [groupBy, setGroupBy] = useState<GroupBy>('wb_warehouse');
     const [showSoonReady, setShowSoonReady] = useState(false);
@@ -169,11 +178,17 @@ export default function LogisticsPage() {
     const loadAnalytics = useCallback(async () => {
         setAnalyticsLoading(true);
         try {
-            const resp = await api.getShipmentAnalytics();
+            const resp = await api.getShipmentAnalytics({
+                date_from: analyticsDateFrom || undefined,
+                date_to: analyticsDateTo || undefined,
+                brands: analyticsBrand || undefined,
+            });
             setAnalyticsData(resp);
-        } catch { /* ignore */ }
+        } catch (e) {
+            console.error('Analytics load error:', e);
+        }
         setAnalyticsLoading(false);
-    }, []);
+    }, [analyticsDateFrom, analyticsDateTo, analyticsBrand]);
 
     useEffect(() => { if (activeTab === 'history') loadAnalytics(); }, [activeTab, loadAnalytics]);
 
@@ -712,6 +727,38 @@ export default function LogisticsPage() {
             ) : (
                 /* History tab */
                 <>
+                    {/* Analytics filters */}
+                    <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
+                        <div style={{ display: 'flex', gap: 12, alignItems: 'end', flexWrap: 'wrap' }}>
+                            <div className="form-group" style={{ margin: 0 }}>
+                                <label className="form-label" style={{ fontSize: 12 }}>Период от</label>
+                                <input className="form-input" type="date" value={analyticsDateFrom} onChange={e => setAnalyticsDateFrom(e.target.value)} style={{ fontSize: 13 }} />
+                            </div>
+                            <div className="form-group" style={{ margin: 0 }}>
+                                <label className="form-label" style={{ fontSize: 12 }}>до</label>
+                                <input className="form-input" type="date" value={analyticsDateTo} onChange={e => setAnalyticsDateTo(e.target.value)} style={{ fontSize: 13 }} />
+                            </div>
+                            <div className="form-group" style={{ margin: 0 }}>
+                                <label className="form-label" style={{ fontSize: 12 }}>Бренд</label>
+                                <select className="form-input" value={analyticsBrand} onChange={e => setAnalyticsBrand(e.target.value)} style={{ fontSize: 13, minWidth: 140 }}>
+                                    <option value="">Все бренды</option>
+                                    {[...new Set(historyItems.map(i => i.brands).filter(Boolean))].map(b => (
+                                        <option key={b} value={b}>{b}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div className="form-group" style={{ margin: 0 }}>
+                                <label className="form-label" style={{ fontSize: 12 }}>Склад сдачи</label>
+                                <select className="form-input" value={analyticsDestFilter} onChange={e => setAnalyticsDestFilter(e.target.value)} style={{ fontSize: 13, minWidth: 160 }}>
+                                    <option value="">Все склады</option>
+                                    {analyticsData?.by_destination.map(d => (
+                                        <option key={d.dest_warehouse} value={d.dest_warehouse}>{d.dest_warehouse}</option>
+                                    ))}
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
                     {/* Analytics section */}
                     {analyticsLoading ? (
                         <div className="glass-card" style={{ padding: 32, textAlign: 'center', marginBottom: 16 }}>Загрузка аналитики...</div>
