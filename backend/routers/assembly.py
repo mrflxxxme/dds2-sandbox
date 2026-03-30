@@ -159,6 +159,20 @@ async def assign_vehicle(
         raise HTTPException(400, str(e)) from None
 
 
+@router.post("/{request_id}/unassign-vehicle", response_model=AssemblyRequestResponse)
+async def unassign_vehicle(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """VEHICLE_ASSIGNED -> READY. Cancel vehicle assignment."""
+    try:
+        req = await assembly_service.unassign_vehicle(db, project.id, request_id)
+        return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
 @router.post("/{request_id}/ship", response_model=AssemblyRequestResponse)
 async def ship_request(
     request_id: int,

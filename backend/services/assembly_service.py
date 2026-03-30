@@ -548,6 +548,29 @@ async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, pay
     return req
 
 
+async def unassign_vehicle(db: AsyncSession, project_id: int, request_id: int) -> AssemblyRequest:
+    """VEHICLE_ASSIGNED -> READY. Clear vehicle info, return to ready for shipping."""
+    req = await get_assembly_request(db, project_id, request_id)
+    if not req:
+        raise ValueError("Assembly request not found")
+
+    _check_transition(AssemblyStatus(req.status), AssemblyStatus.READY)
+    old = req.status
+    req.status = AssemblyStatus.READY
+    req.vehicle_info = None
+    req.vehicle_brand = None
+    req.driver_phone = None
+    req.pickup_date = None
+    req.pickup_time_slot = None
+    req.pickup_cost = None
+    req.delivery_date = None
+    req.vehicle_assigned_at = None
+    await _log_status_change(db, req.id, old, AssemblyStatus.READY, comment="Отмена назначения машины")
+    await db.commit()
+    await db.refresh(req)
+    return req
+
+
 async def ship_request(db: AsyncSession, project_id: int, request_id: int) -> AssemblyRequest:
     """
     VEHICLE_ASSIGNED -> SHIPPED.

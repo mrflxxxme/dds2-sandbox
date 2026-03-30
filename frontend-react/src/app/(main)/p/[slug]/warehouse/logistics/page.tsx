@@ -280,6 +280,19 @@ export default function LogisticsPage() {
         setActionLoading(false);
     };
 
+    const handleUnassignVehicle = async (id: number) => {
+        if (!confirm('Отменить назначение машины? Заявка вернётся в статус "Готово".')) return;
+        setActionLoading(true);
+        setError('');
+        try {
+            await api.unassignVehicle(id);
+            await load();
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка отмены');
+        }
+        setActionLoading(false);
+    };
+
     // ─── Export ───────────────────────────────────────────────────────────
 
     const handleExport = () => {
@@ -447,6 +460,7 @@ export default function LogisticsPage() {
                                         <th>Бренд</th>
                                         <th>Забор</th>
                                         <th>Сдача WB</th>
+                                        <th>Поставка</th>
                                         <th style={{ textAlign: 'right' }}>Палет</th>
                                         <th style={{ textAlign: 'right' }}>Вес</th>
                                         <th style={{ textAlign: 'right' }}>Позиции</th>
@@ -457,7 +471,7 @@ export default function LogisticsPage() {
                                     {grouped.map(group => (
                                         <React.Fragment key={group.key}>
                                             <tr>
-                                                <td colSpan={9} style={{ background: 'var(--color-bg-secondary)', fontWeight: 600, fontSize: 13, padding: '8px 12px' }}>
+                                                <td colSpan={10} style={{ background: 'var(--color-bg-secondary)', fontWeight: 600, fontSize: 13, padding: '8px 12px' }}>
                                                     {group.label || 'Без склада'}
                                                     <span style={{ fontWeight: 400, color: 'var(--color-text-muted)', marginLeft: 8 }}>
                                                         {group.items.length} заявок, {group.items.reduce((s, i) => s + i.pallets_count, 0)} палет
@@ -498,6 +512,7 @@ export default function LogisticsPage() {
                                                         <td style={{ fontSize: 12 }}>{item.brands || '\u2014'}</td>
                                                         <td style={{ color: 'var(--color-text-muted)' }}>{item.warehouse_name || '\u2014'}</td>
                                                         <td>{item.wb_warehouse_name || '\u2014'}</td>
+                                                        <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{item.wb_supply_id_wb || '\u2014'}</td>
                                                         <td style={{ textAlign: 'right' }}>{item.pallets_count}</td>
                                                         <td style={{ textAlign: 'right' }}>{item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014'}</td>
                                                         <td style={{ textAlign: 'right' }}>{item.items?.length || 0}</td>
@@ -601,8 +616,15 @@ export default function LogisticsPage() {
                                                                         {item.vehicle_info}
                                                                     </div>
                                                                     <button
+                                                                        className="btn btn-secondary btn-sm"
+                                                                        onClick={(e) => { e.stopPropagation(); handleUnassignVehicle(item.id); }}
+                                                                        disabled={actionLoading}
+                                                                    >
+                                                                        Отменить
+                                                                    </button>
+                                                                    <button
                                                                         className="btn btn-primary btn-sm"
-                                                                        onClick={() => handleShip(item.id)}
+                                                                        onClick={(e) => { e.stopPropagation(); handleShip(item.id); }}
                                                                         disabled={actionLoading}
                                                                     >
                                                                         Отгрузить
