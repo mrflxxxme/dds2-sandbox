@@ -24,6 +24,15 @@ repos:
         args: [--maxkb=500]
       - id: check-merge-conflict
 
+  # ─── Gitleaks — secrets detection ─────────────────────────────────
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: Gitleaks (secrets detection)
+        entry: gitleaks protect --staged --config .gitleaks.toml
+        language: system
+        pass_filenames: false
+
   # ─── DDS convention checks (local) ─────────────────────────────────
   - repo: local
     hooks:
