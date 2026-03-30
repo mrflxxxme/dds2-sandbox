@@ -3,7 +3,7 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /build
 COPY requirements-backend.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements-backend.txt
+RUN pip install --no-cache-dir --prefix=/install --timeout=120 --retries=5 -r requirements-backend.txt
 
 # ─── Runtime stage ────────────────────────────────────────────────────────────
 FROM python:3.11-slim
@@ -31,4 +31,3 @@ HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
 
 ENTRYPOINT ["./entrypoint.sh"]
 CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "120", "--limit-max-requests", "10000"]
-
