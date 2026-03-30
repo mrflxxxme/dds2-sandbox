@@ -24,7 +24,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.cache import invalidate_cache
+from backend.cache import cached, invalidate_cache
 from backend.models.assembly import (
     ASSEMBLY_TRANSITIONS,
     AssemblyRequest,
@@ -38,6 +38,7 @@ from backend.models.warehouse import (
     OutboundShipment,
     OutboundShipmentItem,
     OutboundStatus,
+    Warehouse,
     WarehouseStock,
     WarehouseType,
 )
@@ -972,3 +973,133 @@ async def refresh_from_fbo(
             for item in req.items
         ],
     )
+
+
+# --- Logistics Analytics ---------------------------------------------------
+
+
+@cached(prefix="reports:logistics_analytics", ttl=300)
+async def get_logistics_analytics(
+    db: AsyncSession,
+    project_id: int,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    warehouse_ids: list[int] | None = None,
+    brands: list[str] | None = None,
+) -> dict:
+    """
+    Logistics cost analytics for shipped/delivered assembly requests.
+
+    Returns summary, by_destination, and by_route breakdowns.
+    """
+    # Destination warehouse name: prefer manual, fallback to FBO supply
+    dest_warehouse = func.coalesce(
+        AssemblyRequest.wb_warehouse_name_manual,
+        WbFboSupply.warehouse_name,
+    ).label("dest_warehouse")
+
+    src_warehouse = Warehouse.name.label("src_warehouse")
+
+    # Base filters — always applied
+    base_filters = [
+        AssemblyRequest.project_id == project_id,
+        AssemblyRequest.is_deleted == False,  # noqa: E712
+        AssemblyRequest.status.in_([AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED]),
+        AssemblyRequest.pickup_cost.isnot(None),
+    ]
+
+    # Optional filters
+    if date_from is not None:
+        base_filters.append(AssemblyRequest.shipped_at >= date_from)
+    if date_to is not None:
+        base_filters.append(AssemblyRequest.shipped_at <= date_to)
+    if warehouse_ids:
+        base_filters.append(AssemblyRequest.warehouse_id.in_(warehouse_ids))
+    if brands:
+        # Filter by brand via items -> nomenclature join
+        brand_subq = (
+            select(AssemblyRequestItem.assembly_request_id)
+            .join(Nomenclature, Nomenclature.id == AssemblyRequestItem.nomenclature_id)
+            .where(Nomenclature.brand.in_(brands))
+            .distinct()
+            .correlate(AssemblyRequest)
+            .scalar_subquery()
+        )
+        base_filters.append(AssemblyRequest.id.in_(brand_subq))
+
+    # --- Summary ---
+    summary_q = select(
+        func.coalesce(func.sum(AssemblyRequest.pickup_cost), Decimal("0")).label("total_cost"),
+        func.coalesce(func.sum(AssemblyRequest.pallets_count), 0).label("total_pallets"),
+        func.count().label("total_shipments"),
+    ).where(*base_filters)
+    summary_row = (await db.execute(summary_q)).one()
+
+    total_pallets = int(summary_row.total_pallets)
+    total_cost = summary_row.total_cost or Decimal("0")
+    avg_cost_per_pallet = (total_cost / Decimal(str(total_pallets))) if total_pallets > 0 else Decimal("0")
+
+    summary = {
+        "total_cost": total_cost,
+        "avg_cost_per_pallet": avg_cost_per_pallet.quantize(Decimal("0.01")),
+        "total_pallets": total_pallets,
+        "total_shipments": int(summary_row.total_shipments),
+    }
+
+    # --- By destination ---
+    dest_q = (
+        select(
+            dest_warehouse,
+            func.avg(AssemblyRequest.pickup_cost).label("avg_cost"),
+            func.sum(AssemblyRequest.pickup_cost).label("total_cost"),
+            func.count().label("shipments_count"),
+        )
+        .outerjoin(WbFboSupply, AssemblyRequest.wb_fbo_supply_id == WbFboSupply.id)
+        .where(*base_filters)
+        .group_by(dest_warehouse)
+        .order_by(func.sum(AssemblyRequest.pickup_cost).desc())
+    )
+    dest_rows = (await db.execute(dest_q)).all()
+
+    by_destination = [
+        {
+            "dest_warehouse": row.dest_warehouse or "N/A",
+            "avg_cost": (row.avg_cost or Decimal("0")).quantize(Decimal("0.01")),
+            "total_cost": row.total_cost or Decimal("0"),
+            "shipments_count": int(row.shipments_count),
+        }
+        for row in dest_rows
+    ]
+
+    # --- By route (src -> dest) ---
+    route_q = (
+        select(
+            src_warehouse,
+            dest_warehouse,
+            func.avg(AssemblyRequest.pickup_cost).label("avg_cost"),
+            func.count().label("shipments_count"),
+        )
+        .join(Warehouse, AssemblyRequest.warehouse_id == Warehouse.id)
+        .outerjoin(WbFboSupply, AssemblyRequest.wb_fbo_supply_id == WbFboSupply.id)
+        .where(*base_filters)
+        .group_by(src_warehouse, dest_warehouse)
+        .order_by(func.count().desc())
+    )
+    route_rows = (await db.execute(route_q)).all()
+
+    by_route = [
+        {
+            "src_warehouse": row.src_warehouse or "N/A",
+            "dest_warehouse": row.dest_warehouse or "N/A",
+            "avg_cost": (row.avg_cost or Decimal("0")).quantize(Decimal("0.01")),
+            "shipments_count": int(row.shipments_count),
+        }
+        for row in route_rows
+    ]
+
+    return {
+        "summary": summary,
+        "by_destination": by_destination,
+        "by_route": by_route,
+    }

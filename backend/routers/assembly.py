@@ -18,6 +18,7 @@ from backend.schemas.assembly import (
     AssemblyRequestUpdate,
     AssignVehicle,
     AssignVehicleBulk,
+    LogisticsAnalyticsResponse,
     RefreshFromFboResponse,
     ShipBulk,
 )
@@ -72,6 +73,31 @@ async def list_wb_warehouses(
 ):
     """Get distinct WB warehouse names from assembly history and FBO supplies."""
     return await assembly_service.list_wb_warehouses(db, project.id)
+
+
+# --- Shipment analytics ----------------------------------------------------
+
+
+@router.get("/shipments/analytics", response_model=LogisticsAnalyticsResponse)
+async def get_logistics_analytics(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    warehouse_ids: str | None = Query(None, description="Comma-separated warehouse IDs"),
+    brands: str | None = Query(None, description="Comma-separated brand names"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Logistics cost analytics: summary, by destination, by route."""
+    wh_ids = [int(x) for x in warehouse_ids.split(",") if x.strip()] if warehouse_ids else None
+    brand_list = [x.strip() for x in brands.split(",") if x.strip()] if brands else None
+    return await assembly_service.get_logistics_analytics(
+        db,
+        project.id,
+        date_from=date_from,
+        date_to=date_to,
+        warehouse_ids=wh_ids,
+        brands=brand_list,
+    )
 
 
 # --- Create -----------------------------------------------------------------

@@ -147,3 +147,33 @@ class StockDeficit(BaseModel):
     barcode: str
     need: int
     have: int
+
+
+# ─── Logistics analytics ───────────────────────────────────────────────────
+
+
+class LogisticsCostSummary(BaseModel):
+    total_cost: Decimal
+    avg_cost_per_pallet: Decimal
+    total_pallets: int
+    total_shipments: int
+
+
+class LogisticsRouteStat(BaseModel):
+    src_warehouse: str
+    dest_warehouse: str
+    avg_cost: Decimal
+    shipments_count: int
+
+
+class LogisticsDestStat(BaseModel):
+    dest_warehouse: str
+    avg_cost: Decimal
+    total_cost: Decimal
+    shipments_count: int
+
+
+class LogisticsAnalyticsResponse(BaseModel):
+    summary: LogisticsCostSummary
+    by_destination: list[LogisticsDestStat]
+    by_route: list[LogisticsRouteStat]

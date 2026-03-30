@@ -10,6 +10,7 @@ import type {
     DeliveryTimesUpdate,
     FboSyncResult,
     InboundReceipt,
+    LogisticsAnalyticsResponse,
     OutboundShipment,
     RefreshFromFboResponse,
     StockAdjustment,
@@ -194,6 +195,16 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         getAssemblyHistory(id: number) {
             return api.request<AssemblyHistoryEntry[]>('GET', `/api/v1/warehouse/assembly/${id}/history`);
+        },
+        getShipmentAnalytics(params?: { date_from?: string; date_to?: string; warehouse_ids?: string; brands?: string }) {
+            const query = new URLSearchParams();
+            if (params) {
+                Object.entries(params).forEach(([k, v]) => {
+                    if (v !== undefined && v !== null && v !== '') query.set(k, String(v));
+                });
+            }
+            const qs = query.toString();
+            return api.request<LogisticsAnalyticsResponse>('GET', `/api/v1/warehouse/assembly/shipments/analytics${qs ? `?${qs}` : ''}`);
         },
     };
 }

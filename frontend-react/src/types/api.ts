@@ -1217,6 +1217,35 @@ export interface RefreshFromFboResponse {
   items: AssemblyRequestItem[];
 }
 
+// ─── Logistics Analytics ───────────────────────────────────────────────────
+
+export interface LogisticsCostSummary {
+  total_cost: number;
+  avg_cost_per_pallet: number;
+  total_pallets: number;
+  total_shipments: number;
+}
+
+export interface LogisticsDestStat {
+  dest_warehouse: string;
+  avg_cost: number;
+  total_cost: number;
+  shipments_count: number;
+}
+
+export interface LogisticsRouteStat {
+  src_warehouse: string;
+  dest_warehouse: string;
+  avg_cost: number;
+  shipments_count: number;
+}
+
+export interface LogisticsAnalyticsResponse {
+  summary: LogisticsCostSummary;
+  by_destination: LogisticsDestStat[];
+  by_route: LogisticsRouteStat[];
+}
+
 // ─── Anomalies ──────────────────────────────────────────────────────────────
 
 export interface AnomalyMetrics {
