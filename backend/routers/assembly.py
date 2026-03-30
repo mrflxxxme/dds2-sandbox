@@ -62,6 +62,18 @@ async def list_assembly_requests(
     return AssemblyListResponse(items=response_items, total=total)
 
 
+# --- WB warehouses ----------------------------------------------------------
+
+
+@router.get("/wb-warehouses", response_model=list[str])
+async def list_wb_warehouses(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get distinct WB warehouse names from assembly history and FBO supplies."""
+    return await assembly_service.list_wb_warehouses(db, project.id)
+
+
 # --- Create -----------------------------------------------------------------
 
 

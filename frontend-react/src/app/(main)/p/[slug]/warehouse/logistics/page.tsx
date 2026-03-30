@@ -465,13 +465,14 @@ export default function LogisticsPage() {
                                         <th style={{ textAlign: 'right' }}>Вес</th>
                                         <th style={{ textAlign: 'right' }}>Позиции</th>
                                         <th>Статус</th>
+                                        <th></th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     {grouped.map(group => (
                                         <React.Fragment key={group.key}>
                                             <tr>
-                                                <td colSpan={10} style={{ background: 'var(--color-bg-secondary)', fontWeight: 600, fontSize: 13, padding: '8px 12px' }}>
+                                                <td colSpan={11} style={{ background: 'var(--color-bg-secondary)', fontWeight: 600, fontSize: 13, padding: '8px 12px' }}>
                                                     {group.label || 'Без склада'}
                                                     <span style={{ fontWeight: 400, color: 'var(--color-text-muted)', marginLeft: 8 }}>
                                                         {group.items.length} заявок, {group.items.reduce((s, i) => s + i.pallets_count, 0)} палет
@@ -517,6 +518,35 @@ export default function LogisticsPage() {
                                                         <td style={{ textAlign: 'right' }}>{item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014'}</td>
                                                         <td style={{ textAlign: 'right' }}>{item.items?.length || 0}</td>
                                                         <td><span className={`badge ${statusCfg.className}`}>{statusCfg.label}</span></td>
+                                                        <td onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
+                                                            {item.status === 'READY' && (
+                                                                <button
+                                                                    className="btn btn-primary btn-sm"
+                                                                    onClick={() => openVehicleModal([item.id])}
+                                                                    disabled={actionLoading}
+                                                                >
+                                                                    Назначить машину
+                                                                </button>
+                                                            )}
+                                                            {item.status === 'VEHICLE_ASSIGNED' && (
+                                                                <div style={{ display: 'flex', gap: 4 }}>
+                                                                    <button
+                                                                        className="btn btn-secondary btn-sm"
+                                                                        onClick={() => handleUnassignVehicle(item.id)}
+                                                                        disabled={actionLoading}
+                                                                    >
+                                                                        Отменить
+                                                                    </button>
+                                                                    <button
+                                                                        className="btn btn-primary btn-sm"
+                                                                        onClick={() => handleShip(item.id)}
+                                                                        disabled={actionLoading}
+                                                                    >
+                                                                        Отгрузить
+                                                                    </button>
+                                                                </div>
+                                                            )}
+                                                        </td>
                                                     </tr>
                                                 );
                                             })}

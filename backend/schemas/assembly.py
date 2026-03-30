@@ -23,6 +23,7 @@ class AssemblyRequestCreate(BaseModel):
     pallets_count: int
     pallet_weight_kg: Decimal
     comment: str | None = None
+    wb_warehouse_name_manual: str | None = None
     items: list[AssemblyItemCreate]
 
 
@@ -32,6 +33,7 @@ class AssemblyRequestUpdate(BaseModel):
     pallets_count: int | None = None
     pallet_weight_kg: Decimal | None = None
     comment: str | None = None
+    wb_warehouse_name_manual: str | None = None
     items: list[AssemblyItemCreate] | None = None  # only PENDING
 
 
@@ -110,6 +112,8 @@ class AssemblyRequestResponse(BaseModel):
     vehicle_assigned_at: datetime | None = None
     shipped_at: datetime | None = None
     comment: str | None = None
+    wb_warehouse_name_manual: str | None = None
+    effective_wb_warehouse: str | None = None  # FBO warehouse_name or manual, whichever is set
     brands: str | None = None  # comma-separated unique brands from items
     items: list[AssemblyItemResponse] = []
     created_at: datetime

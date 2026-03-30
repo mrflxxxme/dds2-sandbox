@@ -1148,6 +1148,7 @@ export interface AssemblyRequest {
   wb_fbo_supply_id: number | null;
   wb_supply_name?: string;
   wb_warehouse_name?: string;
+  wb_warehouse_name_manual?: string | null;
   wb_supply_id_wb?: string;
   wb_fbo_status?: string;
   wb_fbo_planned_date?: string;
@@ -1191,6 +1192,7 @@ export interface AssemblyHistoryEntry {
 export interface AssemblyRequestCreate {
   warehouse_id: number;
   wb_fbo_supply_id?: number | null;
+  wb_warehouse_name_manual?: string | null;
   estimated_ready_date?: string;
   pallets_count: number;
   pallet_weight_kg: number;
@@ -1204,6 +1206,7 @@ export interface AssemblyRequestUpdate {
   pallet_weight_kg?: number;
   comment?: string | null;
   wb_fbo_supply_id?: number | null;
+  wb_warehouse_name_manual?: string | null;
   items?: { barcode: string; quantity: number }[];
 }
 

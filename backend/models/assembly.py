@@ -101,6 +101,9 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
 
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Manual WB warehouse name (used when no FBO supply is linked)
+    wb_warehouse_name_manual: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
     # ─── Relationships ──────────────────────────────────────────────────
 
     warehouse: Mapped["Warehouse"] = relationship()  # noqa: F821

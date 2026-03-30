@@ -27,12 +27,14 @@ export default function AssemblyNewPage() {
     const [palletsCount, setPalletsCount] = useState<number>(1);
     const [palletWeightKg, setPalletWeightKg] = useState<number>(0);
     const [comment, setComment] = useState('');
+    const [wbWarehouseName, setWbWarehouseName] = useState('');
     const [formItems, setFormItems] = useState<FormItem[]>([]);
 
     // Reference data
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
     const [fboSupplies, setFboSupplies] = useState<WbFboSupply[]>([]);
     const [fboSearchInput, setFboSearchInput] = useState('');
+    const [wbWarehouses, setWbWarehouses] = useState<string[]>([]);
 
     // State
     const [loading, setLoading] = useState(false);
@@ -66,6 +68,9 @@ export default function AssemblyNewPage() {
     useEffect(() => {
         api.getWarehouses()
             .then(whs => setWarehouses(whs.filter(w => w.warehouse_type === 'FULFILLMENT')))
+            .catch(() => {});
+        api.getWbWarehouseNames()
+            .then(setWbWarehouses)
             .catch(() => {});
     }, []);
 
@@ -222,6 +227,7 @@ export default function AssemblyNewPage() {
             const result = await api.createAssemblyRequest({
                 warehouse_id: Number(warehouseId),
                 wb_fbo_supply_id: fboSupplyId ? Number(fboSupplyId) : null,
+                wb_warehouse_name_manual: fboSupplyId ? undefined : (wbWarehouseName || null),
                 estimated_ready_date: estimatedReadyDate || undefined,
                 pallets_count: palletsCount,
                 pallet_weight_kg: palletWeightKg,
@@ -388,6 +394,23 @@ export default function AssemblyNewPage() {
                             </div>
                         )}
                     </div>
+
+                    {/* WB Warehouse — only when no FBO selected */}
+                    {!fboSupplyId && (
+                        <div className="form-group">
+                            <label className="form-label">Склад сдачи WB</label>
+                            <input
+                                className="form-input"
+                                list="wb-warehouse-list"
+                                value={wbWarehouseName}
+                                onChange={e => setWbWarehouseName(e.target.value)}
+                                placeholder="Выберите или введите склад WB..."
+                            />
+                            <datalist id="wb-warehouse-list">
+                                {wbWarehouses.map(name => <option key={name} value={name} />)}
+                            </datalist>
+                        </div>
+                    )}
 
                     {/* Ready date */}
                     <div className="form-group">

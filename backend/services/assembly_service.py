@@ -228,11 +228,61 @@ async def _build_response(
         "vehicle_assigned_at": request.vehicle_assigned_at,
         "shipped_at": request.shipped_at,
         "comment": request.comment,
+        "wb_warehouse_name_manual": request.wb_warehouse_name_manual,
+        "effective_wb_warehouse": (
+            request.wb_fbo_supply.warehouse_name if request.wb_fbo_supply else request.wb_warehouse_name_manual
+        ),
         "items": (items := await _build_items_with_stock(db, request)),
         "brands": ", ".join(sorted({i["brand"] for i in items if i.get("brand")})) or None,
         "created_at": request.created_at,
         "updated_at": request.updated_at,
     }
+
+
+# --- WB warehouses ----------------------------------------------------------
+
+
+async def list_wb_warehouses(
+    db: AsyncSession,
+    project_id: int,
+) -> list[str]:
+    """
+    Get distinct WB warehouse names from assembly requests and FBO supplies.
+    Returns sorted list of unique non-null warehouse names.
+    """
+    # From assembly_requests.wb_warehouse_name_manual
+    manual_q = (
+        select(AssemblyRequest.wb_warehouse_name_manual)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted == False,  # noqa: E712
+            AssemblyRequest.wb_warehouse_name_manual.isnot(None),
+        )
+        .distinct()
+    )
+
+    # From wb_fbo_supplies.warehouse_name
+    fbo_q = (
+        select(WbFboSupply.warehouse_name)
+        .where(
+            WbFboSupply.project_id == project_id,
+            WbFboSupply.warehouse_name.isnot(None),
+        )
+        .distinct()
+    )
+
+    manual_result = await db.execute(manual_q)
+    fbo_result = await db.execute(fbo_q)
+
+    names: set[str] = set()
+    for row in manual_result.scalars().all():
+        if row:
+            names.add(row)
+    for row in fbo_result.scalars().all():
+        if row:
+            names.add(row)
+
+    return sorted(names)
 
 
 # --- CRUD -------------------------------------------------------------------
@@ -364,6 +414,7 @@ async def create_assembly_request(
         raise ValueError("Assembly requests can only be created for FULFILLMENT warehouses")
 
     # 2. Validate FBO supply exists, is ACTIVE, has no active assembly request
+    fbo_supply = None
     if payload.wb_fbo_supply_id is not None:
         fbo_result = await db.execute(
             select(WbFboSupply).where(
@@ -395,6 +446,11 @@ async def create_assembly_request(
     number = await _next_number(db, project_id, "ASM", AssemblyRequest)
 
     # 4. Create request
+    # Auto-set wb_warehouse_name_manual from FBO supply if linked
+    wb_wh_manual = payload.wb_warehouse_name_manual
+    if payload.wb_fbo_supply_id is not None and fbo_supply and not wb_wh_manual:
+        wb_wh_manual = fbo_supply.warehouse_name
+
     assembly_req = AssemblyRequest(
         project_id=project_id,
         warehouse_id=payload.warehouse_id,
@@ -405,6 +461,7 @@ async def create_assembly_request(
         pallets_count=payload.pallets_count,
         pallet_weight_kg=payload.pallet_weight_kg,
         comment=payload.comment,
+        wb_warehouse_name_manual=wb_wh_manual,
     )
     db.add(assembly_req)
     await db.flush()
@@ -483,6 +540,8 @@ async def update_assembly_request(
             raise ValueError("FBO supply already has an active assembly request")
 
         req.wb_fbo_supply_id = payload.wb_fbo_supply_id
+        # Auto-set wb_warehouse_name_manual from FBO supply
+        req.wb_warehouse_name_manual = fbo_supply.warehouse_name
 
     # Update scalar fields (allowed until SHIPPED)
     if payload.pallets_count is not None:
@@ -493,6 +552,8 @@ async def update_assembly_request(
         req.comment = payload.comment
     if payload.estimated_ready_date is not None:
         req.estimated_ready_date = payload.estimated_ready_date
+    if payload.wb_warehouse_name_manual is not None:
+        req.wb_warehouse_name_manual = payload.wb_warehouse_name_manual
 
     # Update items: only in PENDING status
     if payload.items is not None:

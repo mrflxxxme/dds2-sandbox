@@ -463,7 +463,28 @@ export default function AssemblyDetailPage() {
                             </div>
                         </div>
                     )}
-                    <InfoField label="Склад WB" value={assembly.wb_warehouse_name || '\u2014'} />
+                    {assembly.wb_fbo_supply_id ? (
+                        <InfoField label="Склад WB" value={assembly.wb_warehouse_name || '\u2014'} />
+                    ) : (
+                        <EditableInfoField
+                            label="Склад WB"
+                            value={assembly.wb_warehouse_name_manual || ''}
+                            displayValue={assembly.wb_warehouse_name_manual || assembly.wb_warehouse_name || '\u2014'}
+                            type="text"
+                            editable={!!canEditFields}
+                            onSave={async (v) => {
+                                if (!assembly) return;
+                                const old = assembly.wb_warehouse_name_manual;
+                                try {
+                                    setAssembly({ ...assembly, wb_warehouse_name_manual: v || null });
+                                    await api.updateAssemblyRequest(id, { wb_warehouse_name_manual: v || null });
+                                } catch (e: unknown) {
+                                    setAssembly({ ...assembly, wb_warehouse_name_manual: old });
+                                    setError(e instanceof Error ? e.message : 'Ошибка сохранения');
+                                }
+                            }}
+                        />
+                    )}
                     <InfoField label="Создана" value={formatDateTime(assembly.created_at)} />
                     <EditableInfoField
                         label="Дата готовности (план)"
@@ -714,7 +735,7 @@ function EditableInfoField({
     label, value, displayValue, type, editable, onSave,
 }: {
     label: string; value: string; displayValue: string;
-    type: 'date' | 'number'; editable: boolean;
+    type: 'date' | 'number' | 'text'; editable: boolean;
     onSave: (val: string) => void;
 }) {
     const [editing, setEditing] = useState(false);

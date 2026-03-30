@@ -117,6 +117,11 @@ export function addWarehouseMethods(api: ApiClient) {
             return api.request<WbFboSupply>('DELETE', `/api/v1/warehouse/fbo-supplies/${supplyId}/link`);
         },
 
+        // ─── WB Warehouse Names ─────────────────────────────────────────
+        getWbWarehouseNames() {
+            return api.request<string[]>('GET', '/api/v1/warehouse/assembly/wb-warehouses');
+        },
+
         // ─── Assembly Requests ──────────────────────────────────────────
         getAssemblyRequests(params?: {
             warehouse_id?: number; status?: string; search?: string;
