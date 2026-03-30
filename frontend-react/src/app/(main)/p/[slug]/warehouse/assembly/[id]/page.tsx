@@ -273,7 +273,7 @@ export default function AssemblyDetailPage() {
                     <button key="start" className="btn btn-primary" onClick={handleStart} disabled={actionLoading}>
                         Начать сборку
                     </button>,
-                    <Link key="edit" href={`/p/${slug}/warehouse/assembly/new${assembly.wb_fbo_supply_id ? `?fbo_supply_id=${assembly.wb_fbo_supply_id}` : ''}`}>
+                    <Link key="edit" href={`/p/${slug}/warehouse/assembly/${assembly.id}/edit`}>
                         <button className="btn btn-secondary">Редактировать</button>
                     </Link>,
                     <button key="fbo" className="btn btn-secondary" onClick={handleRefreshFromFbo} disabled={actionLoading}>
@@ -290,6 +290,9 @@ export default function AssemblyDetailPage() {
                     <button key="ready" className="btn btn-primary" onClick={handleReady} disabled={actionLoading}>
                         Сборка готова
                     </button>,
+                    <Link key="edit" href={`/p/${slug}/warehouse/assembly/${assembly.id}/edit`}>
+                        <button className="btn btn-secondary">Редактировать</button>
+                    </Link>,
                     <button key="fbo" className="btn btn-secondary" onClick={handleRefreshFromFbo} disabled={actionLoading}>
                         Из FBO
                     </button>,
@@ -549,7 +552,7 @@ export default function AssemblyDetailPage() {
                     <TanStackDataTable
                         columns={itemCols}
                         data={assembly.items || []}
-                        title={`Позиции (${assembly.items?.length || 0})`}
+                        title="Позиции"
                         enableSorting
                         enablePagination={false}
                         emptyText="Нет позиций"

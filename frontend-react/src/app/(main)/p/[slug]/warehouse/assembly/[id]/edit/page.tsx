@@ -1,10 +1,10 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams, useRouter, useSearchParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
-import type { Warehouse, WarehouseStockRow, WbFboSupply, WbFboSupplyItem } from '@/types/api';
+import type { AssemblyRequest, Warehouse, WarehouseStockRow, WbFboSupply, WbFboSupplyItem } from '@/types/api';
 
 interface FormItem {
     barcode: string;
@@ -12,13 +12,14 @@ interface FormItem {
     product_name?: string;
 }
 
-export default function AssemblyNewPage() {
+export default function AssemblyEditPage() {
     const params = useParams();
     const router = useRouter();
-    const searchParams = useSearchParams();
     const slug = params.slug as string;
+    const id = Number(params.id);
 
-    const preselectedFboId = searchParams.get('fbo_supply_id');
+    // Original assembly data
+    const [assembly, setAssembly] = useState<AssemblyRequest | null>(null);
 
     // Form state
     const [warehouseId, setWarehouseId] = useState<number | ''>('');
@@ -37,17 +38,16 @@ export default function AssemblyNewPage() {
     const [wbWarehouses, setWbWarehouses] = useState<string[]>([]);
 
     // State
-    const [loading, setLoading] = useState(false);
+    const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [submitting, setSubmitting] = useState(false);
-    const [loadingFboItems, setLoadingFboItems] = useState(false);
     const [fboDropdownOpen, setFboDropdownOpen] = useState(false);
     const fboDropdownRef = useRef<HTMLDivElement>(null);
 
     // Stock data by barcode
     const [stockMap, setStockMap] = useState<Map<string, number>>(new Map());
 
-    // Bulk paste result feedback
+    // Paste feedback
     const [pasteResult, setPasteResult] = useState<string | null>(null);
 
     // Close dropdown on outside click
@@ -61,38 +61,106 @@ export default function AssemblyNewPage() {
         return () => document.removeEventListener('mousedown', handler);
     }, []);
 
-    // ─── Load reference data ──────────────────────────────────────────────
+    // ─── Load existing assembly + reference data ─────────────────────────
 
     useEffect(() => {
-        api.getWarehouses()
-            .then(whs => setWarehouses(whs.filter(w => w.warehouse_type === 'FULFILLMENT')))
-            .catch(() => {});
-        api.getWbWarehouseNames()
-            .then(setWbWarehouses)
-            .catch(() => {});
-    }, []);
+        const loadAll = async () => {
+            setLoading(true);
+            try {
+                const [data, whs, wbNames] = await Promise.all([
+                    api.getAssemblyRequest(id),
+                    api.getWarehouses(),
+                    api.getWbWarehouseNames(),
+                ]);
+                setAssembly(data);
+                setWarehouses(whs.filter(w => w.warehouse_type === 'FULFILLMENT'));
+                setWbWarehouses(wbNames);
 
+                // Pre-fill form
+                setWarehouseId(data.warehouse_id);
+                setFboSupplyId(data.wb_fbo_supply_id || '');
+                setEstimatedReadyDate(data.estimated_ready_date || '');
+                setPalletsCount(data.pallets_count);
+                setPalletWeightKg(data.pallet_weight_kg);
+                setComment(data.comment || '');
+                setWbWarehouseName(data.wb_warehouse_name_manual || '');
+
+                // Pre-fill items
+                if (data.items.length > 0) {
+                    setFormItems([
+                        ...data.items.map(i => ({
+                            barcode: i.barcode,
+                            quantity: i.quantity,
+                            product_name: i.product_name || undefined,
+                        })),
+                        { barcode: '', quantity: 1 },
+                    ]);
+                }
+            } catch (e: unknown) {
+                setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+            }
+            setLoading(false);
+        };
+        loadAll();
+    }, [id]);
+
+    // Load FBO supplies for dropdown
     const loadFboSupplies = useCallback(async () => {
-        setLoading(true);
         try {
             const resp = await api.getFboSupplies({
                 status: 'ACTIVE,ON_DELIVERY,IN_PROGRESS',
                 search: fboSearchInput || undefined,
                 limit: 100,
-                exclude_with_assembly: true,
             });
             setFboSupplies(resp.items);
         } catch {
             setFboSupplies([]);
         }
-        setLoading(false);
-    }, [fboSearchInput]);
+    }, [fboSearchInput, assembly?.wb_fbo_supply_id]);
 
-    // Debounced search for FBO supplies
     useEffect(() => {
-        const timer = setTimeout(() => { loadFboSupplies(); }, 300);
-        return () => clearTimeout(timer);
-    }, [loadFboSupplies]);
+        if (!loading) {
+            const timer = setTimeout(() => { loadFboSupplies(); }, 300);
+            return () => clearTimeout(timer);
+        }
+    }, [loading, loadFboSupplies]);
+
+    // Load items when FBO supply changes (only for new selections, not initial load)
+    const initialFboRef = useRef<number | null>(null);
+    useEffect(() => {
+        if (!assembly) return;
+        // Remember initial FBO supply id
+        if (initialFboRef.current === null) {
+            initialFboRef.current = assembly.wb_fbo_supply_id || 0;
+        }
+    }, [assembly]);
+
+    useEffect(() => {
+        if (!fboSupplyId || initialFboRef.current === null) return;
+        // Skip on initial load — items are already pre-filled from assembly
+        if (Number(fboSupplyId) === initialFboRef.current) return;
+
+        const loadItems = async () => {
+            try {
+                const items: WbFboSupplyItem[] = await api.getFboSupplyItems(Number(fboSupplyId));
+                const grouped = new Map<string, FormItem>();
+                for (const item of items) {
+                    const existing = grouped.get(item.barcode);
+                    if (existing) {
+                        existing.quantity += item.quantity;
+                    } else {
+                        grouped.set(item.barcode, {
+                            barcode: item.barcode,
+                            quantity: item.quantity,
+                            product_name: item.product_name || item.article_seller || undefined,
+                        });
+                    }
+                }
+                setFormItems([...Array.from(grouped.values()), { barcode: '', quantity: 1 }]);
+            } catch { /* ignore */ }
+        };
+        loadItems();
+    }, [fboSupplyId]);
 
     // Load stock when warehouse changes
     useEffect(() => {
@@ -111,59 +179,11 @@ export default function AssemblyNewPage() {
             .catch(() => setStockMap(new Map()));
     }, [warehouseId]);
 
-    // ─── Pre-select FBO supply from URL ───────────────────────────────────
-
-    useEffect(() => {
-        if (preselectedFboId && fboSupplies.length > 0) {
-            const id = Number(preselectedFboId);
-            const found = fboSupplies.find(s => s.id === id);
-            if (found) {
-                setFboSupplyId(id);
-            } else {
-                // Supply might not be in ACTIVE list, try loading it anyway
-                setFboSupplyId(id);
-            }
-        }
-    }, [preselectedFboId, fboSupplies]);
-
-    // ─── Load items when FBO supply changes ──────────────────────────────
-
-    useEffect(() => {
-        if (!fboSupplyId) {
-            // Don't clear items when FBO is deselected — user may have added items manually
-            return;
-        }
-        const loadItems = async () => {
-            setLoadingFboItems(true);
-            try {
-                const items: WbFboSupplyItem[] = await api.getFboSupplyItems(Number(fboSupplyId));
-                // Group by barcode and sum quantities
-                const grouped = new Map<string, FormItem>();
-                for (const item of items) {
-                    const existing = grouped.get(item.barcode);
-                    if (existing) {
-                        existing.quantity += item.quantity;
-                    } else {
-                        grouped.set(item.barcode, {
-                            barcode: item.barcode,
-                            quantity: item.quantity,
-                            product_name: item.product_name || item.article_seller || undefined,
-                        });
-                    }
-                }
-                setFormItems(Array.from(grouped.values()));
-            } catch {
-                setFormItems([]);
-            }
-            setLoadingFboItems(false);
-        };
-        loadItems();
-    }, [fboSupplyId]);
-
     // ─── Computed ─────────────────────────────────────────────────────────
 
     const selectedWarehouse = warehouses.find(w => w.id === warehouseId) || null;
     const totalWeight = palletsCount * palletWeightKg;
+    const canEditItems = assembly && ['PENDING', 'IN_PROGRESS'].includes(assembly.status);
 
     // ─── Item management ──────────────────────────────────────────────────
 
@@ -185,7 +205,6 @@ export default function AssemblyNewPage() {
         const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
         const parsed: FormItem[] = [];
         for (const line of lines) {
-            // Support tab or multiple spaces as delimiter
             const parts = line.split(/\t+|\s{2,}/);
             if (parts.length >= 2) {
                 const barcode = parts[0].trim();
@@ -194,7 +213,6 @@ export default function AssemblyNewPage() {
                     parsed.push({ barcode, quantity: qty });
                 }
             } else if (parts.length === 1) {
-                // Single barcode without quantity — default to 1
                 const barcode = parts[0].trim();
                 if (barcode) {
                     parsed.push({ barcode, quantity: 1 });
@@ -202,7 +220,6 @@ export default function AssemblyNewPage() {
             }
         }
         if (parsed.length > 0) {
-            // Replace empty rows with parsed data + one empty row at the end
             setFormItems(prev => {
                 const filled = prev.filter(i => i.barcode.trim());
                 return [...filled, ...parsed, { barcode: '', quantity: 1 }];
@@ -216,39 +233,52 @@ export default function AssemblyNewPage() {
 
     const handleSubmit = async () => {
         const filledItems = formItems.filter(i => i.barcode.trim());
-        if (!warehouseId || filledItems.length === 0) return;
 
         setSubmitting(true);
         setError('');
         try {
-            const result = await api.createAssemblyRequest({
-                warehouse_id: Number(warehouseId),
+            await api.updateAssemblyRequest(id, {
                 wb_fbo_supply_id: fboSupplyId ? Number(fboSupplyId) : null,
                 wb_warehouse_name_manual: fboSupplyId ? undefined : (wbWarehouseName || null),
-                estimated_ready_date: estimatedReadyDate || undefined,
+                estimated_ready_date: estimatedReadyDate || null,
                 pallets_count: palletsCount,
                 pallet_weight_kg: palletWeightKg,
-                comment: comment || undefined,
-                items: filledItems.map(i => ({ barcode: i.barcode, quantity: i.quantity })),
+                comment: comment || null,
+                ...(canEditItems ? { items: filledItems.map(i => ({ barcode: i.barcode, quantity: i.quantity })) } : {}),
             });
-            router.push(`/p/${slug}/warehouse/assembly/${result.id}`);
+            router.push(`/p/${slug}/warehouse/assembly/${id}`);
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка создания заявки');
+            setError(e instanceof Error ? e.message : 'Ошибка сохранения');
         }
         setSubmitting(false);
     };
 
     // ─── Render ───────────────────────────────────────────────────────────
 
+    if (loading) {
+        return <div className="animate-in" style={{ textAlign: 'center', padding: 48 }}>Загрузка...</div>;
+    }
+
+    if (!assembly) {
+        return (
+            <div className="animate-in" style={{ textAlign: 'center', padding: 48 }}>
+                <p style={{ color: 'var(--color-danger)' }}>{error || 'Заявка не найдена'}</p>
+                <Link href={`/p/${slug}/warehouse/assembly`}>
+                    <button className="btn btn-secondary" style={{ marginTop: 16 }}>Назад</button>
+                </Link>
+            </div>
+        );
+    }
+
     return (
         <div className="animate-in">
             {/* Header */}
             <div className="page-header">
                 <div>
-                    <Link href={`/p/${slug}/warehouse/assembly`} style={{ color: 'var(--color-text-muted)', textDecoration: 'none', fontSize: 14 }}>
-                        &larr; Заявки на сборку
+                    <Link href={`/p/${slug}/warehouse/assembly/${id}`} style={{ color: 'var(--color-text-muted)', textDecoration: 'none', fontSize: 14 }}>
+                        &larr; {assembly.number}
                     </Link>
-                    <h1 className="page-title">Новая заявка на сборку</h1>
+                    <h1 className="page-title">Редактирование {assembly.number}</h1>
                 </div>
             </div>
 
@@ -265,19 +295,12 @@ export default function AssemblyNewPage() {
             {/* Form */}
             <div className="glass-card" style={{ padding: 24, marginBottom: 16 }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                    {/* Warehouse */}
+                    {/* Warehouse — read-only */}
                     <div className="form-group">
                         <label className="form-label">Склад</label>
-                        <select
-                            className="form-input"
-                            value={warehouseId}
-                            onChange={e => setWarehouseId(e.target.value ? Number(e.target.value) : '')}
-                        >
-                            <option value="">Выберите склад...</option>
-                            {warehouses.map(w => (
-                                <option key={w.id} value={w.id}>{w.name}</option>
-                            ))}
-                        </select>
+                        <div style={{ padding: '8px 12px', background: 'var(--color-bg-secondary)', borderRadius: 8 }}>
+                            {assembly.warehouse_name || 'Склад #' + assembly.warehouse_id}
+                        </div>
                     </div>
 
                     {/* FBO Supply — searchable dropdown */}
@@ -298,9 +321,7 @@ export default function AssemblyNewPage() {
                             onChange={e => {
                                 setFboSearchInput(e.target.value);
                                 if (!fboDropdownOpen) setFboDropdownOpen(true);
-                                if (!e.target.value) {
-                                    setFboSupplyId('');
-                                }
+                                if (!e.target.value) setFboSupplyId('');
                             }}
                             onFocus={() => setFboDropdownOpen(true)}
                         />
@@ -308,12 +329,11 @@ export default function AssemblyNewPage() {
                             <div style={{ position: 'absolute', right: 8, top: 30, display: 'flex', gap: 4 }}>
                                 <button
                                     type="button"
-                                    title="Обновить данные из WB"
+                                    title="Обновить поставку из WB"
                                     onClick={async () => {
                                         try {
-                                            setLoadingFboItems(true);
+                                            setSubmitting(true);
                                             await api.syncFboSupplies();
-                                            // Reload items
                                             const items: WbFboSupplyItem[] = await api.getFboSupplyItems(Number(fboSupplyId), true);
                                             const grouped = new Map<string, FormItem>();
                                             for (const item of items) {
@@ -328,21 +348,16 @@ export default function AssemblyNewPage() {
                                                     });
                                                 }
                                             }
-                                            setFormItems(Array.from(grouped.values()));
-                                            // Update total_qty in fboSupplies list from actual items
-                                            const actualQty = Array.from(grouped.values()).reduce((s, i) => s + i.quantity, 0);
-                                            setFboSupplies(prev => prev.map(s =>
-                                                s.id === Number(fboSupplyId) ? { ...s, total_qty: actualQty } : s
-                                            ));
+                                            setFormItems([...Array.from(grouped.values()), { barcode: '', quantity: 1 }]);
                                         } catch { /* ignore */ }
-                                        setLoadingFboItems(false);
+                                        setSubmitting(false);
                                     }}
                                     style={{
                                         background: 'none', border: 'none', cursor: 'pointer',
                                         color: 'var(--color-primary)', fontSize: 14,
                                     }}
                                 >
-                                    🔄
+                                    &#x1f504;
                                 </button>
                                 <button
                                     type="button"
@@ -363,9 +378,7 @@ export default function AssemblyNewPage() {
                                 borderRadius: 8, maxHeight: 240, overflowY: 'auto',
                                 boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
                             }}>
-                                {loading ? (
-                                    <div style={{ padding: 12, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка...</div>
-                                ) : fboSupplies.length === 0 ? (
+                                {fboSupplies.length === 0 ? (
                                     <div style={{ padding: 12, textAlign: 'center', color: 'var(--color-text-muted)' }}>Поставки не найдены</div>
                                 ) : (
                                     fboSupplies.map(s => (
@@ -454,7 +467,7 @@ export default function AssemblyNewPage() {
                     {/* WB Warehouse — only when no FBO selected */}
                     {!fboSupplyId && (
                         <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-                            <label className="form-label">Склад сдачи WB <span style={{ color: 'var(--color-text-muted)', fontWeight: 400 }}>(если поставка ещё не создана)</span></label>
+                            <label className="form-label">Склад сдачи WB</label>
                             <input
                                 className="form-input"
                                 list="wb-warehouse-list"
@@ -484,7 +497,7 @@ export default function AssemblyNewPage() {
 
             {/* Items */}
             <div className="glass-card" style={{ padding: 24 }} onPaste={e => {
-                // Direct paste on table container (like in receipt page)
+                if (!canEditItems) return;
                 const text = e.clipboardData.getData('text/plain');
                 if (!text.includes('\t') && !text.includes('\n')) return;
                 e.preventDefault();
@@ -494,39 +507,36 @@ export default function AssemblyNewPage() {
                     <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>
                         Позиции ({formItems.filter(i => i.barcode).length})
                     </h2>
-                    <div style={{ display: 'flex', gap: 8 }}>
+                    {canEditItems && (
                         <button className="btn btn-secondary btn-sm" onClick={addItem}>
                             + Добавить позицию
                         </button>
-                    </div>
+                    )}
                 </div>
 
-                {loadingFboItems ? (
-                    <div style={{ textAlign: 'center', padding: 24 }}>Загрузка позиций из FBO...</div>
-                ) : (
-                    /* TODO: migrate to TanStackDataTable — has inline form inputs (barcode input, quantity input, remove button) */
-                    <table className="data-table" style={{ fontSize: 13 }}>
-                        <thead>
-                            <tr>
-                                <th style={{ width: 40 }}>#</th>
-                                <th>Товар</th>
-                                <th style={{ width: 200 }}>ШК</th>
-                                <th style={{ width: 100, textAlign: 'right' }}>В поставке</th>
-                                <th style={{ width: 100, textAlign: 'right' }}>На складе</th>
-                                <th style={{ width: 40 }}></th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {formItems.map((item, idx) => {
-                                const stockQty = stockMap.get(item.barcode) || 0;
-                                const deficit = item.barcode && stockQty < item.quantity;
-                                return (
-                                    <tr key={idx}>
-                                        <td style={{ color: 'var(--color-text-muted)' }}>{idx + 1}</td>
-                                        <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                                            {item.product_name || '\u2014'}
-                                        </td>
-                                        <td>
+                <table className="data-table" style={{ fontSize: 13 }}>
+                    <thead>
+                        <tr>
+                            <th style={{ width: 40 }}>#</th>
+                            <th>Товар</th>
+                            <th style={{ width: 200 }}>ШК</th>
+                            <th style={{ width: 100, textAlign: 'right' }}>Кол-во</th>
+                            <th style={{ width: 100, textAlign: 'right' }}>На складе</th>
+                            {canEditItems && <th style={{ width: 40 }}></th>}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {formItems.map((item, idx) => {
+                            const stockQty = stockMap.get(item.barcode) || 0;
+                            const deficit = item.barcode && stockQty < item.quantity;
+                            return (
+                                <tr key={idx}>
+                                    <td style={{ color: 'var(--color-text-muted)' }}>{idx + 1}</td>
+                                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                        {item.product_name || '\u2014'}
+                                    </td>
+                                    <td>
+                                        {canEditItems ? (
                                             <input
                                                 className="form-input"
                                                 value={item.barcode}
@@ -534,8 +544,12 @@ export default function AssemblyNewPage() {
                                                 placeholder="Штрихкод"
                                                 style={{ fontSize: 13, fontFamily: 'monospace' }}
                                             />
-                                        </td>
-                                        <td>
+                                        ) : (
+                                            <span style={{ fontFamily: 'monospace' }}>{item.barcode}</span>
+                                        )}
+                                    </td>
+                                    <td>
+                                        {canEditItems ? (
                                             <input
                                                 className="form-input"
                                                 type="number"
@@ -544,10 +558,14 @@ export default function AssemblyNewPage() {
                                                 onChange={e => updateItem(idx, 'quantity', Number(e.target.value) || 0)}
                                                 style={{ fontSize: 13, textAlign: 'right' }}
                                             />
-                                        </td>
-                                        <td style={{ textAlign: 'right', fontWeight: 500, color: deficit ? 'var(--color-danger)' : warehouseId ? 'var(--color-success)' : 'var(--color-text-muted)' }}>
-                                            {warehouseId ? stockQty : '\u2014'}
-                                        </td>
+                                        ) : (
+                                            <span style={{ textAlign: 'right', display: 'block' }}>{item.quantity}</span>
+                                        )}
+                                    </td>
+                                    <td style={{ textAlign: 'right', fontWeight: 500, color: deficit ? 'var(--color-danger)' : warehouseId ? 'var(--color-success)' : 'var(--color-text-muted)' }}>
+                                        {warehouseId ? stockQty : '\u2014'}
+                                    </td>
+                                    {canEditItems && (
                                         <td>
                                             <button
                                                 className="btn btn-secondary btn-sm"
@@ -558,30 +576,38 @@ export default function AssemblyNewPage() {
                                                 &times;
                                             </button>
                                         </td>
-                                    </tr>
-                                );
-                            })}
-                        </tbody>
-                    </table>
+                                    )}
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+
+                {canEditItems && (
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 8 }}>
+                        {pasteResult
+                            ? <span style={{ color: 'var(--color-success)' }}>{pasteResult}</span>
+                            : 'Ctrl+V — вставить из Excel (штрихкод ⇥ кол-во)'}
+                    </div>
                 )}
 
-                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 8 }}>
-                    {pasteResult
-                        ? <span style={{ color: 'var(--color-success)' }}>{pasteResult}</span>
-                        : 'Ctrl+V — вставить из Excel (штрихкод ⇥ кол-во)'}
-                </div>
+                {!canEditItems && (
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 8 }}>
+                        Позиции нельзя редактировать в статусе {assembly.status}
+                    </div>
+                )}
 
                 {/* Submit */}
                 <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end', marginTop: 24 }}>
-                    <Link href={`/p/${slug}/warehouse/assembly`}>
+                    <Link href={`/p/${slug}/warehouse/assembly/${id}`}>
                         <button className="btn btn-secondary">Отмена</button>
                     </Link>
                     <button
                         className="btn btn-primary"
                         onClick={handleSubmit}
-                        disabled={submitting || !warehouseId || !formItems.some(i => i.barcode.trim())}
+                        disabled={submitting}
                     >
-                        {submitting ? 'Создание...' : 'Создать заявку'}
+                        {submitting ? 'Сохранение...' : 'Сохранить'}
                     </button>
                 </div>
             </div>

@@ -555,10 +555,10 @@ async def update_assembly_request(
     if payload.wb_warehouse_name_manual is not None:
         req.wb_warehouse_name_manual = payload.wb_warehouse_name_manual
 
-    # Update items: only in PENDING status
+    # Update items: allowed until READY (PENDING and IN_PROGRESS)
     if payload.items is not None:
-        if req.status != AssemblyStatus.PENDING:
-            raise ValueError("Items can only be edited in PENDING status")
+        if req.status not in (AssemblyStatus.PENDING, AssemblyStatus.IN_PROGRESS):
+            raise ValueError("Items can only be edited before READY status")
         # Delete existing items
         await db.execute(delete(AssemblyRequestItem).where(AssemblyRequestItem.assembly_request_id == req.id))
         # Create new items
@@ -573,8 +573,9 @@ async def update_assembly_request(
             db.add(item)
 
     await db.commit()
-    await db.refresh(req)
-    return req
+    # Expunge all cached objects so selectinload re-fetches fresh data from DB
+    db.expunge_all()
+    return await get_assembly_request(db, project_id, req.id)
 
 
 # --- Status transitions ----------------------------------------------------

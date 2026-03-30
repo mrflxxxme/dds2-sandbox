@@ -352,15 +352,28 @@ class TestListAssemblyRequests:
 class TestUpdateAssemblyRequest:
     """Test 7: Edit items in non-PENDING status."""
 
-    async def test_edit_items_in_progress_raises(self, db_session):
-        """7. Edit items in IN_PROGRESS status -> ValueError."""
+    async def test_edit_items_in_progress_allowed(self, db_session):
+        """7. Edit items in IN_PROGRESS status -> allowed (until READY)."""
         req = await _create_test_request(db_session)
         await start_assembly(db_session, PROJECT_ID, req.id)
 
         payload = AssemblyRequestUpdate(
             items=[AssemblyItemCreate(barcode=TEST_BARCODE_2, quantity=3)],
         )
-        with pytest.raises(ValueError, match="PENDING"):
+        updated = await update_assembly_request(db_session, PROJECT_ID, req.id, payload)
+        assert len(updated.items) == 1
+        assert updated.items[0].barcode == TEST_BARCODE_2
+
+    async def test_edit_items_in_ready_raises(self, db_session):
+        """7b. Edit items in READY status -> ValueError."""
+        req = await _create_test_request(db_session)
+        await start_assembly(db_session, PROJECT_ID, req.id)
+        await mark_ready(db_session, PROJECT_ID, req.id)
+
+        payload = AssemblyRequestUpdate(
+            items=[AssemblyItemCreate(barcode=TEST_BARCODE_2, quantity=3)],
+        )
+        with pytest.raises(ValueError, match="READY"):
             await update_assembly_request(db_session, PROJECT_ID, req.id, payload)
 
 
