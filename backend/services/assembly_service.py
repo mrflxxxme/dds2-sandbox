@@ -20,7 +20,7 @@ Implementation notes:
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -1049,10 +1049,15 @@ async def get_logistics_analytics(
     }
 
     # --- By destination ---
+    # avg_cost = average cost PER PALLET (not per shipment)
+    cost_per_pallet = case(
+        (AssemblyRequest.pallets_count > 0, AssemblyRequest.pickup_cost / AssemblyRequest.pallets_count),
+        else_=AssemblyRequest.pickup_cost,
+    )
     dest_q = (
         select(
             dest_warehouse,
-            func.avg(AssemblyRequest.pickup_cost).label("avg_cost"),
+            func.avg(cost_per_pallet).label("avg_cost"),
             func.sum(AssemblyRequest.pickup_cost).label("total_cost"),
             func.count().label("shipments_count"),
         )
@@ -1078,7 +1083,7 @@ async def get_logistics_analytics(
         select(
             src_warehouse,
             dest_warehouse,
-            func.avg(AssemblyRequest.pickup_cost).label("avg_cost"),
+            func.avg(cost_per_pallet).label("avg_cost"),
             func.count().label("shipments_count"),
         )
         .join(Warehouse, AssemblyRequest.warehouse_id == Warehouse.id)
