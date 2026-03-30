@@ -73,7 +73,7 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
     status: Mapped[str] = mapped_column(String(20), default=AssemblyStatus.PENDING, nullable=False)
 
     # FBO supply link (1:1, unique per active project)
-    wb_fbo_supply_id: Mapped[int] = mapped_column(Integer, ForeignKey("wb_fbo_supplies.id"), nullable=False)
+    wb_fbo_supply_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("wb_fbo_supplies.id"), nullable=True)
 
     # Created on SHIPPED, cleared on rollback
     outbound_shipment_id: Mapped[int | None] = mapped_column(
@@ -104,7 +104,7 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
     # ─── Relationships ──────────────────────────────────────────────────
 
     warehouse: Mapped["Warehouse"] = relationship()  # noqa: F821
-    wb_fbo_supply: Mapped["WbFboSupply"] = relationship()  # noqa: F821
+    wb_fbo_supply: Mapped["WbFboSupply | None"] = relationship()  # noqa: F821
     items: Mapped[list["AssemblyRequestItem"]] = relationship(
         back_populates="assembly_request",
         cascade="all, delete-orphan",
@@ -122,7 +122,7 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
             "project_id",
             "wb_fbo_supply_id",
             unique=True,
-            postgresql_where="is_deleted = false AND status != 'CANCELLED'",
+            postgresql_where="is_deleted = false AND status != 'CANCELLED' AND wb_fbo_supply_id IS NOT NULL",
         ),
     )
 

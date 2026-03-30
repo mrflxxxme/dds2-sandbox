@@ -596,6 +596,67 @@ class TestBulkOperations:
 class TestInsufficientStock:
     """Test 13: Ship with insufficient stock."""
 
+    async def test_create_without_fbo_supply(self, db_session):
+        """14. Create assembly without wb_fbo_supply_id -> should succeed, status PENDING."""
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        payload = AssemblyRequestCreate(
+            warehouse_id=wh_id,
+            wb_fbo_supply_id=None,
+            pallets_count=1,
+            pallet_weight_kg=Decimal("100.00"),
+            items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=5)],
+        )
+        req = await create_assembly_request(db_session, PROJECT_ID, payload)
+        assert req.status == AssemblyStatus.PENDING
+        assert req.wb_fbo_supply_id is None
+
+        loaded = await get_assembly_request(db_session, PROJECT_ID, req.id)
+        assert loaded is not None
+        assert loaded.wb_fbo_supply_id is None
+        assert len(loaded.items) == 1
+
+    async def test_mark_ready_without_fbo_raises(self, db_session):
+        """15. Create without FBO, try mark_ready -> should raise ValueError."""
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        payload = AssemblyRequestCreate(
+            warehouse_id=wh_id,
+            wb_fbo_supply_id=None,
+            pallets_count=2,
+            pallet_weight_kg=Decimal("150.00"),
+            items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=5)],
+        )
+        req = await create_assembly_request(db_session, PROJECT_ID, payload)
+        await start_assembly(db_session, PROJECT_ID, req.id)
+
+        with pytest.raises(ValueError, match="без привязанной поставки WB"):
+            await mark_ready(db_session, PROJECT_ID, req.id)
+
+    async def test_update_attach_fbo_then_ready(self, db_session):
+        """16. Create without FBO -> update with FBO -> mark_ready -> should succeed."""
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        fbo_id = await _get_fbo_supply_id(db_session)
+
+        # Create without FBO
+        payload = AssemblyRequestCreate(
+            warehouse_id=wh_id,
+            wb_fbo_supply_id=None,
+            pallets_count=2,
+            pallet_weight_kg=Decimal("150.00"),
+            items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=5)],
+        )
+        req = await create_assembly_request(db_session, PROJECT_ID, payload)
+        assert req.wb_fbo_supply_id is None
+
+        # Attach FBO supply via update
+        update_payload = AssemblyRequestUpdate(wb_fbo_supply_id=fbo_id)
+        req = await update_assembly_request(db_session, PROJECT_ID, req.id, update_payload)
+        assert req.wb_fbo_supply_id == fbo_id
+
+        # Now progress through lifecycle
+        await start_assembly(db_session, PROJECT_ID, req.id)
+        req = await mark_ready(db_session, PROJECT_ID, req.id)
+        assert req.status == AssemblyStatus.READY
+
     async def test_ship_insufficient_stock(self, db_session):
         """13. Ship with insufficient stock -> ValueError with deficit details."""
         wh_id = await _get_fulfillment_wh_id(db_session)

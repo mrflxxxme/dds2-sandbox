@@ -364,31 +364,32 @@ async def create_assembly_request(
         raise ValueError("Assembly requests can only be created for FULFILLMENT warehouses")
 
     # 2. Validate FBO supply exists, is ACTIVE, has no active assembly request
-    fbo_result = await db.execute(
-        select(WbFboSupply).where(
-            WbFboSupply.id == payload.wb_fbo_supply_id,
-            WbFboSupply.project_id == project_id,
+    if payload.wb_fbo_supply_id is not None:
+        fbo_result = await db.execute(
+            select(WbFboSupply).where(
+                WbFboSupply.id == payload.wb_fbo_supply_id,
+                WbFboSupply.project_id == project_id,
+            )
         )
-    )
-    fbo_supply = fbo_result.scalar_one_or_none()
-    if not fbo_supply:
-        raise ValueError("FBO supply not found")
-    if fbo_supply.wb_status not in ("ACTIVE", "ON_DELIVERY", "IN_PROGRESS"):
-        raise ValueError("FBO supply must be ACTIVE, ON_DELIVERY or IN_PROGRESS")
+        fbo_supply = fbo_result.scalar_one_or_none()
+        if not fbo_supply:
+            raise ValueError("FBO supply not found")
+        if fbo_supply.wb_status not in ("ACTIVE", "ON_DELIVERY", "IN_PROGRESS"):
+            raise ValueError("FBO supply must be ACTIVE, ON_DELIVERY or IN_PROGRESS")
 
-    # Check no active assembly request for this FBO supply
-    existing_result = await db.execute(
-        select(AssemblyRequest)
-        .where(
-            AssemblyRequest.wb_fbo_supply_id == payload.wb_fbo_supply_id,
-            AssemblyRequest.project_id == project_id,
-            AssemblyRequest.is_deleted == False,  # noqa: E712
-            AssemblyRequest.status != AssemblyStatus.CANCELLED,
+        # Check no active assembly request for this FBO supply
+        existing_result = await db.execute(
+            select(AssemblyRequest)
+            .where(
+                AssemblyRequest.wb_fbo_supply_id == payload.wb_fbo_supply_id,
+                AssemblyRequest.project_id == project_id,
+                AssemblyRequest.is_deleted == False,  # noqa: E712
+                AssemblyRequest.status != AssemblyStatus.CANCELLED,
+            )
+            .limit(1)
         )
-        .limit(1)
-    )
-    if existing_result.scalar_one_or_none():
-        raise ValueError("FBO supply already has an active assembly request")
+        if existing_result.scalar_one_or_none():
+            raise ValueError("FBO supply already has an active assembly request")
 
     # 3. Generate number
     number = await _next_number(db, project_id, "ASM", AssemblyRequest)
@@ -451,6 +452,38 @@ async def update_assembly_request(
     if req.status in (AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED, AssemblyStatus.CANCELLED):
         raise ValueError(f"Cannot edit in status {req.status}")
 
+    # Update FBO supply link
+    if payload.wb_fbo_supply_id is not None:
+        # Validate the FBO supply
+        fbo_result = await db.execute(
+            select(WbFboSupply).where(
+                WbFboSupply.id == payload.wb_fbo_supply_id,
+                WbFboSupply.project_id == project_id,
+            )
+        )
+        fbo_supply = fbo_result.scalar_one_or_none()
+        if not fbo_supply:
+            raise ValueError("FBO supply not found")
+        if fbo_supply.wb_status not in ("ACTIVE", "ON_DELIVERY", "IN_PROGRESS"):
+            raise ValueError("FBO supply must be ACTIVE, ON_DELIVERY or IN_PROGRESS")
+
+        # Check no other active assembly request for this FBO supply (except current)
+        existing_result = await db.execute(
+            select(AssemblyRequest)
+            .where(
+                AssemblyRequest.wb_fbo_supply_id == payload.wb_fbo_supply_id,
+                AssemblyRequest.project_id == project_id,
+                AssemblyRequest.is_deleted == False,  # noqa: E712
+                AssemblyRequest.status != AssemblyStatus.CANCELLED,
+                AssemblyRequest.id != req.id,
+            )
+            .limit(1)
+        )
+        if existing_result.scalar_one_or_none():
+            raise ValueError("FBO supply already has an active assembly request")
+
+        req.wb_fbo_supply_id = payload.wb_fbo_supply_id
+
     # Update scalar fields (allowed until SHIPPED)
     if payload.pallets_count is not None:
         req.pallets_count = payload.pallets_count
@@ -510,6 +543,8 @@ async def mark_ready(db: AsyncSession, project_id: int, request_id: int) -> Asse
     if not req:
         raise ValueError("Assembly request not found")
 
+    if not req.wb_fbo_supply_id:
+        raise ValueError("Нельзя перевести заявку в статус ГОТОВО без привязанной поставки WB")
     if not req.pallets_count or req.pallets_count <= 0:
         raise ValueError("Укажите количество палет перед завершением сборки")
     if not req.pallet_weight_kg or req.pallet_weight_kg <= 0:
@@ -813,6 +848,9 @@ async def refresh_from_fbo(
 
     if req.status in (AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED, AssemblyStatus.CANCELLED):
         raise ValueError(f"Cannot refresh in status {req.status}")
+
+    if not req.wb_fbo_supply_id:
+        raise ValueError("Cannot refresh items: no FBO supply linked")
 
     # Load FBO supply items
     fbo_items_result = await db.execute(

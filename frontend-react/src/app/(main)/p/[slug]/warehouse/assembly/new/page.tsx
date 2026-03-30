@@ -45,6 +45,11 @@ export default function AssemblyNewPage() {
     // Stock data by barcode
     const [stockMap, setStockMap] = useState<Map<string, number>>(new Map());
 
+    // Bulk paste
+    const [showPasteArea, setShowPasteArea] = useState(false);
+    const [pasteText, setPasteText] = useState('');
+    const [pasteResult, setPasteResult] = useState<string | null>(null);
+
     // Close dropdown on outside click
     useEffect(() => {
         const handler = (e: MouseEvent) => {
@@ -122,7 +127,7 @@ export default function AssemblyNewPage() {
 
     useEffect(() => {
         if (!fboSupplyId) {
-            setFormItems([]);
+            // Don't clear items when FBO is deselected — user may have added items manually
             return;
         }
         const loadItems = async () => {
@@ -173,17 +178,50 @@ export default function AssemblyNewPage() {
         setFormItems(prev => prev.filter((_, i) => i !== index));
     };
 
+    const handleBulkPaste = (text: string) => {
+        const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+        const parsed: FormItem[] = [];
+        for (const line of lines) {
+            // Support tab or multiple spaces as delimiter
+            const parts = line.split(/\t+|\s{2,}/);
+            if (parts.length >= 2) {
+                const barcode = parts[0].trim();
+                const qty = parseInt(parts[1].trim(), 10);
+                if (barcode && qty > 0) {
+                    parsed.push({ barcode, quantity: qty });
+                }
+            } else if (parts.length === 1) {
+                // Single barcode without quantity — default to 1
+                const barcode = parts[0].trim();
+                if (barcode) {
+                    parsed.push({ barcode, quantity: 1 });
+                }
+            }
+        }
+        if (parsed.length > 0) {
+            setFormItems(prev => [...prev, ...parsed]);
+            setPasteResult(`Добавлено ${parsed.length} позиций`);
+            setPasteText('');
+            setTimeout(() => {
+                setShowPasteArea(false);
+                setPasteResult(null);
+            }, 1500);
+        } else {
+            setPasteResult('Не удалось распознать данные. Формат: штрихкод<Tab>количество');
+        }
+    };
+
     // ─── Submit ───────────────────────────────────────────────────────────
 
     const handleSubmit = async () => {
-        if (!warehouseId || !fboSupplyId || formItems.length === 0) return;
+        if (!warehouseId || formItems.length === 0) return;
 
         setSubmitting(true);
         setError('');
         try {
             const result = await api.createAssemblyRequest({
                 warehouse_id: Number(warehouseId),
-                wb_fbo_supply_id: Number(fboSupplyId),
+                wb_fbo_supply_id: fboSupplyId ? Number(fboSupplyId) : null,
                 estimated_ready_date: estimatedReadyDate || undefined,
                 pallets_count: palletsCount,
                 pallet_weight_kg: palletWeightKg,
@@ -430,10 +468,60 @@ export default function AssemblyNewPage() {
                     <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>
                         Позиции ({formItems.length})
                     </h2>
-                    <button className="btn btn-secondary btn-sm" onClick={addItem}>
-                        + Добавить позицию
-                    </button>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                        <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => { setShowPasteArea(!showPasteArea); setPasteResult(null); }}
+                        >
+                            Вставить из буфера
+                        </button>
+                        <button className="btn btn-secondary btn-sm" onClick={addItem}>
+                            + Добавить позицию
+                        </button>
+                    </div>
                 </div>
+
+                {showPasteArea && (
+                    <div style={{ marginBottom: 16, padding: 16, background: 'var(--color-bg-secondary)', borderRadius: 8 }}>
+                        <textarea
+                            className="form-input"
+                            rows={5}
+                            placeholder={'Вставьте данные: штрихкод <Tab> количество (по строкам)\nПример:\n2000000001234\t10\n2000000005678\t25'}
+                            value={pasteText}
+                            onChange={e => setPasteText(e.target.value)}
+                            onPaste={e => {
+                                // Handle paste directly for immediate processing
+                                const pasted = e.clipboardData.getData('text');
+                                if (pasted.trim()) {
+                                    e.preventDefault();
+                                    handleBulkPaste(pasted);
+                                }
+                            }}
+                            style={{ fontFamily: 'monospace', fontSize: 13 }}
+                            autoFocus
+                        />
+                        <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center' }}>
+                            <button
+                                className="btn btn-primary btn-sm"
+                                onClick={() => handleBulkPaste(pasteText)}
+                                disabled={!pasteText.trim()}
+                            >
+                                Добавить
+                            </button>
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => { setShowPasteArea(false); setPasteText(''); setPasteResult(null); }}
+                            >
+                                Закрыть
+                            </button>
+                            {pasteResult && (
+                                <span style={{ fontSize: 13, color: pasteResult.startsWith('Добавлено') ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                                    {pasteResult}
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                )}
 
                 {loadingFboItems ? (
                     <div style={{ textAlign: 'center', padding: 24 }}>Загрузка позиций из FBO...</div>
@@ -441,7 +529,7 @@ export default function AssemblyNewPage() {
                     <div style={{ textAlign: 'center', padding: 32, color: 'var(--color-text-muted)' }}>
                         {fboSupplyId
                             ? 'Нет позиций в выбранной поставке'
-                            : 'Выберите поставку FBO для автозаполнения или добавьте позиции вручную'}
+                            : 'Добавьте позиции вручную, вставьте из буфера или выберите поставку FBO'}
                     </div>
                 ) : (
                     /* TODO: migrate to TanStackDataTable — has inline form inputs (barcode input, quantity input, remove button) */
@@ -513,7 +601,7 @@ export default function AssemblyNewPage() {
                     <button
                         className="btn btn-primary"
                         onClick={handleSubmit}
-                        disabled={submitting || !warehouseId || !fboSupplyId || formItems.length === 0}
+                        disabled={submitting || !warehouseId || formItems.length === 0}
                     >
                         {submitting ? 'Создание...' : 'Создать заявку'}
                     </button>

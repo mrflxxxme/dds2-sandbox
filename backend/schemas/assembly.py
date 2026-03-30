@@ -18,7 +18,7 @@ class AssemblyItemCreate(BaseModel):
 
 class AssemblyRequestCreate(BaseModel):
     warehouse_id: int
-    wb_fbo_supply_id: int
+    wb_fbo_supply_id: int | None = None
     estimated_ready_date: date | None = None
     pallets_count: int
     pallet_weight_kg: Decimal
@@ -27,6 +27,7 @@ class AssemblyRequestCreate(BaseModel):
 
 
 class AssemblyRequestUpdate(BaseModel):
+    wb_fbo_supply_id: int | None = None
     estimated_ready_date: date | None = None
     pallets_count: int | None = None
     pallet_weight_kg: Decimal | None = None
@@ -86,7 +87,7 @@ class AssemblyRequestResponse(BaseModel):
     warehouse_name: str | None = None
     number: str
     status: str
-    wb_fbo_supply_id: int
+    wb_fbo_supply_id: int | None = None
     wb_supply_name: str | None = None  # wb_fbo_supplies.name
     wb_warehouse_name: str | None = None  # wb_fbo_supplies.warehouse_name (WB destination)
     wb_supply_id_wb: str | None = None  # wb_fbo_supplies.wb_supply_id (WB-I-xxxx)

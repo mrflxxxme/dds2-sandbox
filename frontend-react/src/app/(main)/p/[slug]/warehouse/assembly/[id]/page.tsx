@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, RefreshFromFboResponse } from '@/types/api';
+import type { AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, RefreshFromFboResponse, WbFboSupply } from '@/types/api';
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -51,6 +51,14 @@ export default function AssemblyDetailPage() {
     // History
     const [history, setHistory] = useState<AssemblyHistoryEntry[]>([]);
 
+    // FBO supply editing
+    const [editingFbo, setEditingFbo] = useState(false);
+    const [fboSupplies, setFboSupplies] = useState<WbFboSupply[]>([]);
+    const [fboSearchInput, setFboSearchInput] = useState('');
+    const [fboDropdownOpen, setFboDropdownOpen] = useState(false);
+    const [loadingFboList, setLoadingFboList] = useState(false);
+    const fboDropdownRef = useRef<HTMLDivElement>(null);
+
     // ─── Load ─────────────────────────────────────────────────────────────
 
     const load = useCallback(async () => {
@@ -67,6 +75,57 @@ export default function AssemblyDetailPage() {
     }, [id]);
 
     useEffect(() => { load(); }, [load]);
+
+    // Close FBO dropdown on outside click
+    useEffect(() => {
+        const handler = (e: MouseEvent) => {
+            if (fboDropdownRef.current && !fboDropdownRef.current.contains(e.target as Node)) {
+                setFboDropdownOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, []);
+
+    // Load FBO supplies when editing
+    const loadFboSupplies = useCallback(async () => {
+        setLoadingFboList(true);
+        try {
+            const resp = await api.getFboSupplies({
+                status: 'ACTIVE,ON_DELIVERY,IN_PROGRESS',
+                search: fboSearchInput || undefined,
+                limit: 100,
+                exclude_with_assembly: true,
+            });
+            setFboSupplies(resp.items);
+        } catch {
+            setFboSupplies([]);
+        }
+        setLoadingFboList(false);
+    }, [fboSearchInput]);
+
+    useEffect(() => {
+        if (!editingFbo) return;
+        const timer = setTimeout(() => { loadFboSupplies(); }, 300);
+        return () => clearTimeout(timer);
+    }, [editingFbo, loadFboSupplies]);
+
+    const handleFboSave = async (fboId: number | null) => {
+        if (!assembly) return;
+        const oldFboId = assembly.wb_fbo_supply_id;
+        const oldName = assembly.wb_supply_name;
+        try {
+            setAssembly({ ...assembly, wb_fbo_supply_id: fboId, wb_supply_name: fboId ? (fboSupplies.find(s => s.id === fboId)?.wb_supply_id || String(fboId)) : undefined });
+            await api.updateAssemblyRequest(id, { wb_fbo_supply_id: fboId });
+            setEditingFbo(false);
+            setFboSearchInput('');
+            // Reload to get fresh data
+            await load();
+        } catch (e: unknown) {
+            setAssembly({ ...assembly, wb_fbo_supply_id: oldFboId, wb_supply_name: oldName });
+            setError(e instanceof Error ? e.message : 'Ошибка сохранения');
+        }
+    };
 
     // ─── Actions ──────────────────────────────────────────────────────────
 
@@ -152,6 +211,7 @@ export default function AssemblyDetailPage() {
     };
 
     const canEditFields = assembly && !['SHIPPED', 'DELIVERED', 'CANCELLED'].includes(assembly.status);
+    const canEditFbo = assembly && ['PENDING', 'IN_PROGRESS'].includes(assembly.status);
 
     const handleFieldSave = async (field: 'pallets_count' | 'estimated_ready_date', value: number | string) => {
         if (!assembly) return;
@@ -213,7 +273,7 @@ export default function AssemblyDetailPage() {
                     <button key="start" className="btn btn-primary" onClick={handleStart} disabled={actionLoading}>
                         Начать сборку
                     </button>,
-                    <Link key="edit" href={`/p/${slug}/warehouse/assembly/new?fbo_supply_id=${assembly.wb_fbo_supply_id}`}>
+                    <Link key="edit" href={`/p/${slug}/warehouse/assembly/new${assembly.wb_fbo_supply_id ? `?fbo_supply_id=${assembly.wb_fbo_supply_id}` : ''}`}>
                         <button className="btn btn-secondary">Редактировать</button>
                     </Link>,
                     <button key="fbo" className="btn btn-secondary" onClick={handleRefreshFromFbo} disabled={actionLoading}>
@@ -328,7 +388,81 @@ export default function AssemblyDetailPage() {
             <div className="glass-card" style={{ padding: 24, marginBottom: 16 }}>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 16 }}>
                     <InfoField label="Склад" value={assembly.warehouse_name || '\u2014'} />
-                    <InfoField label="FBO поставка" value={assembly.wb_supply_name || String(assembly.wb_fbo_supply_id)} />
+                    {/* FBO supply — editable in PENDING/IN_PROGRESS */}
+                    {canEditFbo && editingFbo ? (
+                        <div ref={fboDropdownRef} style={{ position: 'relative' }}>
+                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>FBO поставка</div>
+                            <input
+                                className="form-input"
+                                type="text"
+                                placeholder="Поиск поставки..."
+                                value={fboDropdownOpen ? fboSearchInput : ''}
+                                onChange={e => {
+                                    setFboSearchInput(e.target.value);
+                                    if (!fboDropdownOpen) setFboDropdownOpen(true);
+                                }}
+                                onFocus={() => setFboDropdownOpen(true)}
+                                autoFocus
+                                style={{ fontSize: 13 }}
+                            />
+                            {fboDropdownOpen && (
+                                <div style={{
+                                    position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 50,
+                                    background: 'var(--color-bg)', border: '1px solid var(--color-border)',
+                                    borderRadius: 8, maxHeight: 200, overflowY: 'auto',
+                                    boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+                                }}>
+                                    {/* Option to clear FBO */}
+                                    <div
+                                        onClick={() => { handleFboSave(null); setFboDropdownOpen(false); }}
+                                        style={{ padding: '8px 12px', cursor: 'pointer', fontSize: 13, color: 'var(--color-text-muted)', fontStyle: 'italic' }}
+                                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-secondary)')}
+                                        onMouseLeave={e => (e.currentTarget.style.background = '')}
+                                    >
+                                        Без поставки
+                                    </div>
+                                    {loadingFboList ? (
+                                        <div style={{ padding: 12, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка...</div>
+                                    ) : fboSupplies.length === 0 ? (
+                                        <div style={{ padding: 12, textAlign: 'center', color: 'var(--color-text-muted)' }}>Поставки не найдены</div>
+                                    ) : (
+                                        fboSupplies.map(s => (
+                                            <div
+                                                key={s.id}
+                                                onClick={() => { handleFboSave(s.id); setFboDropdownOpen(false); }}
+                                                style={{ padding: '8px 12px', cursor: 'pointer', fontSize: 13 }}
+                                                onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-secondary)')}
+                                                onMouseLeave={e => (e.currentTarget.style.background = '')}
+                                            >
+                                                <strong>{s.wb_supply_id}</strong> — {s.warehouse_name || 'Без склада'} ({s.total_qty} шт.)
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                            )}
+                            <div style={{ marginTop: 4 }}>
+                                <button className="btn btn-secondary btn-sm" onClick={() => { setEditingFbo(false); setFboSearchInput(''); }}>
+                                    Отмена
+                                </button>
+                            </div>
+                        </div>
+                    ) : (
+                        <div
+                            onClick={canEditFbo ? () => { setEditingFbo(true); } : undefined}
+                            style={{ cursor: canEditFbo ? 'pointer' : undefined }}
+                            title={canEditFbo ? 'Нажмите для изменения' : undefined}
+                            onMouseEnter={canEditFbo ? (e) => { e.currentTarget.style.background = 'rgba(59,130,246,0.08)'; } : undefined}
+                            onMouseLeave={canEditFbo ? (e) => { e.currentTarget.style.background = ''; } : undefined}
+                        >
+                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>FBO поставка</div>
+                            <div style={{ fontSize: 14, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                                {assembly.wb_fbo_supply_id ? (assembly.wb_supply_name || String(assembly.wb_fbo_supply_id)) : 'Без поставки'}
+                                {canEditFbo && (
+                                    <span style={{ color: 'var(--color-primary, #3b82f6)', fontSize: 13, opacity: 0.6 }}>&#x270E;</span>
+                                )}
+                            </div>
+                        </div>
+                    )}
                     <InfoField label="Склад WB" value={assembly.wb_warehouse_name || '\u2014'} />
                     <InfoField label="Создана" value={formatDateTime(assembly.created_at)} />
                     <EditableInfoField
