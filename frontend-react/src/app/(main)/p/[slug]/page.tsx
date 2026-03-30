@@ -319,6 +319,7 @@ export default function DashboardPage() {
             </div>
 
             {/* ─── Income counterparties (1-level: click → txn list) ── */}
+            {/* TODO: migrate to TanStackDataTable — interactive drill-down table with click-to-expand transaction list */}
             {incomeCounterparties.length>0&&(
                 <div className="glass-card" style={{marginTop:20}}>
                     <div className="table-toolbar">
@@ -348,6 +349,7 @@ export default function DashboardPage() {
             )}
 
             {/* ─── Expense categories (2-level: cat → counterparties → txns) ── */}
+            {/* TODO: migrate to TanStackDataTable — interactive 2-level drill-down table */}
             {expensePie.length>0&&(
                 <div className="glass-card" style={{marginTop:20}}>
                     <div className="table-toolbar">
@@ -417,6 +419,7 @@ export default function DashboardPage() {
             )}
 
             {/* Balance */}
+            {/* TODO: migrate to TanStackDataTable — balance table with conditional coloring */}
             <div className="glass-card" style={{marginTop:20}}>
                 <div className="table-toolbar">
                     <h3 style={{fontSize:16,fontWeight:600}}>Остатки на счетах</h3>

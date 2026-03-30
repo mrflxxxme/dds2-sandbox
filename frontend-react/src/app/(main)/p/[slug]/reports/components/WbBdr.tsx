@@ -384,6 +384,7 @@ export function WbBdr() {
                             {/* ABC Summary row */}
                             <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
                                 <div style={{ overflow: 'auto' }}>
+                                    {/* TODO: migrate to TanStackDataTable */}
                                     <table className="data-table" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
                                         <thead>
                                             <tr>
@@ -469,6 +470,7 @@ export function WbBdr() {
                                         {/* Expanded table */}
                                         {isExpanded && (
                                             <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 400px)' }}>
+                                                {/* TODO: migrate to TanStackDataTable */}
                                                 <table className="data-table" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
                                                     <thead>
                                                         <tr>
@@ -588,6 +590,7 @@ export function WbBdr() {
                     ) : (
                     <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                         <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
+                            {/* TODO: migrate to TanStackDataTable */}
                             <table className="data-table" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
                                 <thead>
                                     <tr>

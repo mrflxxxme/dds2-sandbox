@@ -1,8 +1,10 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, exportToExcel } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
 
@@ -34,6 +36,15 @@ export function Nomenclature() {
 
     const formatSyncTime = (iso: string) => new Date(iso).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 
+    const autoColumns: Column[] = useMemo(() => {
+        if (data.length === 0) return [];
+        return Object.keys(data[0]).map(k => ({
+            key: k,
+            label: k,
+            render: (v: any) => typeof v === 'number' ? formatNumber(v) : v ?? '—',
+        }));
+    }, [data]);
+
     if (loading) return <div style={{ padding: 20, color: 'var(--color-text-muted)' }}>Загрузка...</div>;
 
     return (
@@ -47,17 +58,19 @@ export function Nomenclature() {
                     <button className="btn btn-primary btn-sm" onClick={handleSync} disabled={syncing} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         {syncing ? (<><span className="spinner" style={{ width: 14, height: 14, border: '2px solid rgba(255,255,255,0.3)', borderTop: '2px solid #fff', borderRadius: '50%', animation: 'spin 0.8s linear infinite', display: 'inline-block' }} /> Синхронизация...</>) : '🔄 Синхронизация WB'}
                     </button>
-                    {data.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'nomenclature')}>📥 Excel</button>}
                 </div>
             </div>
             {syncMsg && <div style={{ fontSize: 13, marginBottom: 12, padding: '8px 12px', borderRadius: 6, background: syncMsg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', color: syncMsg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)' }}>{syncMsg}</div>}
             {data.length > 0 ? (
-                <div style={{ overflowX: 'auto', maxHeight: 500, overflowY: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr>{Object.keys(data[0]).map(k => <th key={k} style={{ fontSize: 11 }}>{k}</th>)}</tr></thead>
-                        <tbody>{data.map((r, i) => <tr key={i}>{Object.values(r).map((v: any, j) => <td key={j} style={{ fontSize: 12 }}>{typeof v === 'number' ? formatNumber(v) : v ?? '—'}</td>)}</tr>)}</tbody>
-                    </table>
-                </div>
+                <TanStackDataTable
+                    columns={autoColumns}
+                    data={data}
+                    enableSorting
+                    enablePagination
+                    pageSize={50}
+                    exportName="nomenclature"
+                    maxHeight={500}
+                />
             ) : <div className="empty-state"><div className="empty-state-text">Номенклатура пуста. Нажмите «🔄 Синхронизация WB» для загрузки из WB</div></div>}
         </div>
     );
@@ -77,12 +90,20 @@ export function LeadTimes() {
         try { await api.upsertLeadTime({ ...form, days: parseInt(String(form.days)) }); setMsg('✅ Сохранено!'); setShowForm(false); load(); } catch (e: any) { setMsg(e.message); }
     };
 
+    const autoColumns: Column[] = useMemo(() => {
+        if (data.length === 0) return [];
+        return Object.keys(data[0]).map(k => ({
+            key: k,
+            label: k,
+            render: (v: any) => typeof v === 'number' ? formatNumber(v) : v ?? '—',
+        }));
+    }, [data]);
+
     return (
         <div className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                 <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Lead Times</h3>
                 <div style={{ display: 'flex', gap: 8 }}>
-                    <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'lead_times')}>📥 Excel</button>
                     <button className="btn btn-primary btn-sm" onClick={() => setShowForm(!showForm)}>+ Добавить</button>
                 </div>
             </div>
@@ -100,12 +121,13 @@ export function LeadTimes() {
                 </div>
             )}
             {data.length > 0 ? (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr>{Object.keys(data[0]).map(k => <th key={k}>{k}</th>)}</tr></thead>
-                        <tbody>{data.map((r, i) => <tr key={i}>{Object.values(r).map((v: any, j) => <td key={j}>{typeof v === 'number' ? formatNumber(v) : v ?? '—'}</td>)}</tr>)}</tbody>
-                    </table>
-                </div>
+                <TanStackDataTable
+                    columns={autoColumns}
+                    data={data}
+                    enableSorting
+                    enablePagination={false}
+                    exportName="lead_times"
+                />
             ) : <div className="empty-state"><div className="empty-state-text">Нет данных</div></div>}
         </div>
     );
@@ -160,6 +182,7 @@ export function FunnelCosts() {
             {costs.missing?.length > 0 && (
                 <div className="glass-card" style={{ marginBottom: 16 }}>
                     <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 8, padding: '12px 16px 0' }}>⚠️ Без себестоимости ({costs.missing.length})</h3>
+                    {/* TODO: migrate to TanStackDataTable */}
                     <table className="data-table">
                         <thead><tr><th>nmId</th><th>Артикул</th><th>Предмет</th><th>Бренд</th><th>Себестоимость ₽</th><th></th></tr></thead>
                         <tbody>{costs.missing.map((m: any) => renderRow(m, false))}</tbody>
@@ -169,6 +192,7 @@ export function FunnelCosts() {
             {costs.overrides?.length > 0 && (
                 <div className="glass-card">
                     <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 8, padding: '12px 16px 0' }}>✅ Установленные ({costs.overrides.length})</h3>
+                    {/* TODO: migrate to TanStackDataTable */}
                     <table className="data-table">
                         <thead><tr><th>nmId</th><th>Себестоимость ₽</th><th></th></tr></thead>
                         <tbody>{costs.overrides.map((o: any) => renderRow(o, true))}</tbody>

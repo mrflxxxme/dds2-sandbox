@@ -1,7 +1,9 @@
 'use client';
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 export function BalanceDaily() {
     const [accounts, setAccounts] = useState<any[]>([]);
@@ -31,6 +33,22 @@ export function BalanceDaily() {
         setLoaded(true);
     };
 
+    const columns: Column[] = useMemo(() => [
+        { key: 'date', label: 'Дата', format: 'date' },
+        {
+            key: 'daily_net', label: 'Нетто за день', align: 'right',
+            render: (v: any) => (
+                <span style={{ color: (v || 0) >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                    {formatNumber(v)}
+                </span>
+            ),
+        },
+        {
+            key: 'balance', label: 'Баланс', align: 'right',
+            render: (v: any) => <span style={{ fontWeight: 600 }}>{formatNumber(v)}</span>,
+        },
+    ], []);
+
     return (
         <div className="glass-card">
             <div style={{ display: 'flex', gap: 12, alignItems: 'end', marginBottom: 16, flexWrap: 'wrap' }}>
@@ -43,24 +61,17 @@ export function BalanceDaily() {
                 <div className="form-group"><label className="form-label">С</label><input className="form-input" type="date" value={start} onChange={e => setStart(e.target.value)} /></div>
                 <div className="form-group"><label className="form-label">По</label><input className="form-input" type="date" value={end} onChange={e => setEnd(e.target.value)} /></div>
                 <button className="btn btn-primary btn-sm" onClick={load} disabled={loading}>{loading ? '...' : 'Показать'}</button>
-                {data.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'balance_daily')}>📥 Excel</button>}
             </div>
 
             {data.length > 0 ? (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr><th>Дата</th><th style={{ textAlign: 'right' }}>Нетто за день</th><th style={{ textAlign: 'right' }}>Баланс</th></tr></thead>
-                        <tbody>
-                            {data.map((r, i) => (
-                                <tr key={i}>
-                                    <td>{formatDate(r.date)}</td>
-                                    <td style={{ textAlign: 'right', color: (r.daily_net || 0) >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>{formatNumber(r.daily_net)}</td>
-                                    <td style={{ textAlign: 'right', fontWeight: 600 }}>{formatNumber(r.balance)}</td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
+                <TanStackDataTable
+                    columns={columns}
+                    data={data}
+                    enableSorting
+                    enablePagination
+                    pageSize={50}
+                    exportName="balance_daily"
+                />
             ) : loaded ? (
                 <div className="empty-state"><div className="empty-state-text">Нет данных за период</div></div>
             ) : (
@@ -82,13 +93,21 @@ export function FxControl() {
         setLoading(false);
     };
 
+    const autoColumns: Column[] = useMemo(() => {
+        if (data.length === 0) return [];
+        return Object.keys(data[0]).map(k => ({
+            key: k,
+            label: k,
+            render: (v: any) => typeof v === 'number' ? formatNumber(v) : v ?? '—',
+        }));
+    }, [data]);
+
     return (
         <div className="glass-card">
             <div style={{ display: 'flex', gap: 12, alignItems: 'end', marginBottom: 16 }}>
                 <div className="form-group"><label className="form-label">С</label><input className="form-input" type="date" value={start} onChange={e => setStart(e.target.value)} /></div>
                 <div className="form-group"><label className="form-label">По</label><input className="form-input" type="date" value={end} onChange={e => setEnd(e.target.value)} /></div>
                 <button className="btn btn-primary btn-sm" onClick={load} disabled={loading}>{loading ? '...' : 'Загрузить FX'}</button>
-                {data.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'fx_control')}>📥 Excel</button>}
             </div>
 
             {data.length > 0 ? (
@@ -97,12 +116,14 @@ export function FxControl() {
                         <div className="stat-card-label">Всего FX операций</div>
                         <div className="stat-card-value">{data.length}</div>
                     </div>
-                    <div style={{ overflowX: 'auto' }}>
-                        <table className="data-table">
-                            <thead><tr>{Object.keys(data[0]).map(k => <th key={k}>{k}</th>)}</tr></thead>
-                            <tbody>{data.map((r, i) => <tr key={i}>{Object.values(r).map((v: any, j) => <td key={j}>{typeof v === 'number' ? formatNumber(v) : v ?? '—'}</td>)}</tr>)}</tbody>
-                        </table>
-                    </div>
+                    <TanStackDataTable
+                        columns={autoColumns}
+                        data={data}
+                        enableSorting
+                        enablePagination
+                        pageSize={50}
+                        exportName="fx_control"
+                    />
                 </>
             ) : <div className="empty-state"><div className="empty-state-text">Нажмите «Загрузить FX»</div></div>}
         </div>
@@ -123,13 +144,21 @@ export function CustomsControl() {
 
     const totalExpense = data.reduce((s, r) => s + (parseFloat(r.expense) || 0), 0);
 
+    const autoColumns: Column[] = useMemo(() => {
+        if (data.length === 0) return [];
+        return Object.keys(data[0]).map(k => ({
+            key: k,
+            label: k,
+            render: (v: any) => typeof v === 'number' ? formatNumber(v) : v ?? '—',
+        }));
+    }, [data]);
+
     return (
         <div className="glass-card">
             <div style={{ display: 'flex', gap: 12, alignItems: 'end', marginBottom: 16 }}>
                 <div className="form-group"><label className="form-label">С</label><input className="form-input" type="date" value={start} onChange={e => setStart(e.target.value)} /></div>
                 <div className="form-group"><label className="form-label">По</label><input className="form-input" type="date" value={end} onChange={e => setEnd(e.target.value)} /></div>
                 <button className="btn btn-primary btn-sm" onClick={load} disabled={loading}>{loading ? '...' : 'Загрузить'}</button>
-                {data.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'customs_control')}>📥 Excel</button>}
             </div>
 
             {data.length > 0 ? (
@@ -138,12 +167,14 @@ export function CustomsControl() {
                         <div className="stat-card-label">Итого оплачено таможне</div>
                         <div className="stat-card-value" style={{ color: 'var(--color-danger)' }}>{formatNumber(totalExpense)} ₽</div>
                     </div>
-                    <div style={{ overflowX: 'auto' }}>
-                        <table className="data-table">
-                            <thead><tr>{Object.keys(data[0]).map(k => <th key={k}>{k}</th>)}</tr></thead>
-                            <tbody>{data.map((r, i) => <tr key={i}>{Object.values(r).map((v: any, j) => <td key={j}>{typeof v === 'number' ? formatNumber(v) : v ?? '—'}</td>)}</tr>)}</tbody>
-                        </table>
-                    </div>
+                    <TanStackDataTable
+                        columns={autoColumns}
+                        data={data}
+                        enableSorting
+                        enablePagination
+                        pageSize={50}
+                        exportName="customs_control"
+                    />
                 </>
             ) : <div className="empty-state"><div className="empty-state-text">Нажмите «Загрузить»</div></div>}
         </div>

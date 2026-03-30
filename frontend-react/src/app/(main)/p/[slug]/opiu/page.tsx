@@ -198,6 +198,7 @@ export default function OpiuPage() {
             )}
 
             {/* Table */}
+            {/* TODO: migrate to TanStackDataTable — hierarchical P&L layout with expandable rows, colSpan, sticky columns */}
             {!loading && !error && data && (
                 <div className="glass-card" style={{ overflow: 'auto', padding: 0 }}>
                     <table className="data-table" style={{ marginBottom: 0, borderCollapse: 'collapse', width: '100%' }}>

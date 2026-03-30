@@ -4,6 +4,8 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 import type { WbFboSupply, WbFboSupplyItem, OutboundShipment } from '@/types/api';
 
 // ─── Status config ──────────────────────────────────────────────────────────
@@ -325,6 +327,7 @@ export default function FboSuppliesPage() {
                 </div>
             ) : (
                 <div className="glass-card" style={{ overflow: 'auto' }}>
+                    {/* TODO: migrate to TanStackDataTable — has expandable rows with React.Fragment and inline action buttons */}
                     <table className="data-table">
                         <thead>
                             <tr>
@@ -587,38 +590,23 @@ function SupplyItemsPanel({
                     Нет позиций
                 </div>
             ) : (
-                <table className="data-table" style={{ fontSize: 13 }}>
-                    <thead>
-                        <tr>
-                            <th>Товар</th>
-                            <th>Артикул</th>
-                            <th>ШК</th>
-                            <th style={{ textAlign: 'right' }}>Кол-во</th>
-                            <th style={{ textAlign: 'right' }}>Принято</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {items.map(item => (
-                            <tr key={item.id}>
-                                <td>
-                                    <div style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                        {item.product_name || '\u2014'}
-                                    </div>
-                                </td>
-                                <td style={{ color: 'var(--color-text-muted)' }}>
-                                    {item.article_seller || '\u2014'}
-                                </td>
-                                <td>
-                                    <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                                        {item.barcode}
-                                    </span>
-                                </td>
-                                <td style={{ textAlign: 'right' }}>{item.quantity}</td>
-                                <td style={{ textAlign: 'right', fontWeight: 500 }}>{item.accepted_qty}</td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
+                (() => {
+                    const itemsCols: Column[] = [
+                        { key: 'product_name', label: 'Товар', render: (v: string) => <div style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v || '\u2014'}</div> },
+                        { key: 'article_seller', label: 'Артикул', render: (v: string) => <span style={{ color: 'var(--color-text-muted)' }}>{v || '\u2014'}</span> },
+                        { key: 'barcode', label: 'ШК', render: (v: string) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</span> },
+                        { key: 'quantity', label: 'Кол-во', align: 'right', format: 'number' },
+                        { key: 'accepted_qty', label: 'Принято', align: 'right', render: (v: number) => <span style={{ fontWeight: 500 }}>{v}</span> },
+                    ];
+                    return (
+                        <TanStackDataTable
+                            columns={itemsCols}
+                            data={items}
+                            enableSorting
+                            enablePagination={false}
+                        />
+                    );
+                })()
             )}
         </div>
     );

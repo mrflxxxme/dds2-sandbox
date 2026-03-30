@@ -8,6 +8,8 @@ import {
     ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip,
     ResponsiveContainer, Cell,
 } from 'recharts';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 
 export default function PlanFactPage() {
@@ -290,46 +292,20 @@ function DailyTab({ data, pctColor, statusIcon }: {
             )}
 
             {/* Table */}
-            <div className="glass-card">
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead>
-                            <tr>
-                                <th>Дата</th>
-                                <th style={{ textAlign: 'right' }}>Факт/день</th>
-                                <th style={{ textAlign: 'right' }}>План/день</th>
-                                <th style={{ textAlign: 'right' }}>Факт накоп.</th>
-                                <th style={{ textAlign: 'right' }}>План накоп.</th>
-                                <th style={{ textAlign: 'right' }}>%</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {data.rows.map(r => (
-                                <tr key={r.dt} style={r.is_future ? { opacity: 0.45 } : undefined}>
-                                    <td style={{ fontSize: 13, whiteSpace: 'nowrap' }}>
-                                        {r.dt.slice(5).replace('-', '.')}
-                                    </td>
-                                    <td style={{ textAlign: 'right', fontFamily: 'monospace', fontWeight: 600 }}>
-                                        {r.is_future ? '\u2014' : (r.fact_day ? formatNumber(r.fact_day, 0) : '\u2014')}
-                                    </td>
-                                    <td style={{ textAlign: 'right', fontFamily: 'monospace', fontWeight: 500, color: 'var(--color-text-muted)' }}>
-                                        {r.plan_day ? formatNumber(r.plan_day, 0) : '\u2014'}
-                                    </td>
-                                    <td style={{ textAlign: 'right', fontFamily: 'monospace', fontWeight: 600 }}>
-                                        {r.fact_cumulative ? formatNumber(r.fact_cumulative, 0) : '\u2014'}
-                                    </td>
-                                    <td style={{ textAlign: 'right', fontFamily: 'monospace', fontWeight: 500, color: 'var(--color-text-muted)' }}>
-                                        {r.plan_cumulative ? formatNumber(r.plan_cumulative, 0) : '\u2014'}
-                                    </td>
-                                    <td style={{ textAlign: 'right', fontWeight: 600, color: pctColor(r.pct) }}>
-                                        {r.pct !== null ? `${r.pct}%` : '\u2014'}
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
+            <TanStackDataTable
+                columns={[
+                    { key: 'dt', label: 'Дата', render: (v: any) => <span style={{ fontSize: 13, whiteSpace: 'nowrap' }}>{v.slice(5).replace('-', '.')}</span> },
+                    { key: 'fact_day', label: 'Факт/день', align: 'right', render: (_v: any, row: any) => <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{row.is_future ? '\u2014' : (row.fact_day ? formatNumber(row.fact_day, 0) : '\u2014')}</span> },
+                    { key: 'plan_day', label: 'План/день', align: 'right', render: (v: any) => <span style={{ fontFamily: 'monospace', fontWeight: 500, color: 'var(--color-text-muted)' }}>{v ? formatNumber(v, 0) : '\u2014'}</span> },
+                    { key: 'fact_cumulative', label: 'Факт накоп.', align: 'right', render: (v: any) => <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{v ? formatNumber(v, 0) : '\u2014'}</span> },
+                    { key: 'plan_cumulative', label: 'План накоп.', align: 'right', render: (v: any) => <span style={{ fontFamily: 'monospace', fontWeight: 500, color: 'var(--color-text-muted)' }}>{v ? formatNumber(v, 0) : '\u2014'}</span> },
+                    { key: 'pct', label: '%', align: 'right', render: (v: any) => <span style={{ fontWeight: 600, color: pctColor(v) }}>{v !== null ? `${v}%` : '\u2014'}</span> },
+                ]}
+                data={data.rows}
+                enableSorting
+                enablePagination={false}
+                rowClassName={(row: any) => row.is_future ? 'opacity-45' : ''}
+            />
         </>
     );
 }

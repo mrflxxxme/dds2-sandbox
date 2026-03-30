@@ -74,6 +74,7 @@ export function CostHistory() {
             </div>
 
             <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 220px)' }}>
+                {/* TODO: migrate to TanStackDataTable */}
                 <table className="data-table" style={{ fontSize: 13, whiteSpace: 'nowrap' }}>
                     <thead>
                         <tr>

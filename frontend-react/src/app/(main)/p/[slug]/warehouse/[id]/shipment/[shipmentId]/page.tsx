@@ -3,6 +3,8 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 import type { OutboundShipment, Nomenclature } from '@/types/api';
 
 /* ─── Nomenclature lookup ─────────────────────────────────────────────────── */
@@ -176,57 +178,36 @@ export default function ShipmentDetailPage() {
             </div>
 
             {/* Items */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Позиции отгрузки</h2>
-                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-                    {shipment.items.length} поз., {formatNumber(totalQty)} шт.
-                </span>
-            </div>
-
-            <div className="glass-card" style={{ padding: 0, overflow: 'auto' }}>
-                <table className="data-table" style={{ marginBottom: 0 }}>
-                    <thead>
-                        <tr>
-                            <th style={{ width: 40, textAlign: 'center' }}>#</th>
-                            <th style={{ minWidth: 220 }}>ТОВАР</th>
-                            <th style={{ minWidth: 150 }}>ШК</th>
-                            <th style={{ width: 100, textAlign: 'right' }}>КОЛ-ВО</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {shipment.items.map((item, i) => {
-                            const n = nom.resolve(item.barcode);
-                            return (
-                                <tr key={item.id}>
-                                    <td style={{ textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 12 }}>{i + 1}</td>
-                                    <td style={{ fontSize: 13 }}>
-                                        {n ? (
-                                            <div>
-                                                <div style={{ fontWeight: 500 }}>{nom.label(n)}</div>
-                                                {n.article_seller && n.name && n.article_seller !== n.name && (
-                                                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{n.name}</div>
-                                                )}
-                                            </div>
-                                        ) : (
-                                            <span style={{ color: 'var(--color-text-muted)' }}>—</span>
-                                        )}
-                                    </td>
-                                    <td style={{ fontSize: 13, fontFamily: 'monospace' }}>{item.barcode}</td>
-                                    <td style={{ textAlign: 'right', fontWeight: 500 }}>{formatNumber(item.quantity)}</td>
-                                </tr>
-                            );
-                        })}
-                    </tbody>
-                    <tfoot>
-                        <tr style={{ fontWeight: 700, borderTop: '2px solid var(--color-border)' }}>
-                            <td></td>
-                            <td>Итого</td>
-                            <td></td>
-                            <td style={{ textAlign: 'right' }}>{formatNumber(totalQty)}</td>
-                        </tr>
-                    </tfoot>
-                </table>
-            </div>
+            {(() => {
+                const shipmentItemsData = shipment.items.map((item, i) => ({ ...item, _index: i + 1 }));
+                const totalRow = { _index: '', barcode: '', quantity: totalQty, _isTotal: true, id: '_total' };
+                const shipmentCols: Column[] = [
+                    { key: '_index', label: '#', align: 'center' as const, width: '40', render: (v: number, row: any) => row._isTotal ? '' : <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>{v}</span> },
+                    { key: '_product', label: 'ТОВАР', render: (_v: any, row: any) => {
+                        if (row._isTotal) return <strong>Итого</strong>;
+                        const n = nom.resolve(row.barcode);
+                        return n ? (
+                            <div>
+                                <div style={{ fontWeight: 500 }}>{nom.label(n)}</div>
+                                {n.article_seller && n.name && n.article_seller !== n.name && (
+                                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{n.name}</div>
+                                )}
+                            </div>
+                        ) : <span style={{ color: 'var(--color-text-muted)' }}>—</span>;
+                    }},
+                    { key: 'barcode', label: 'ШК', render: (v: string, row: any) => row._isTotal ? '' : <span style={{ fontSize: 13, fontFamily: 'monospace' }}>{v}</span> },
+                    { key: 'quantity', label: 'КОЛ-ВО', align: 'right' as const, render: (v: number, row: any) => <span style={{ fontWeight: row._isTotal ? 700 : 500 }}>{formatNumber(v)}</span> },
+                ];
+                return (
+                    <TanStackDataTable
+                        columns={shipmentCols}
+                        data={[...shipmentItemsData, totalRow]}
+                        title="Позиции отгрузки"
+                        enableSorting={false}
+                        enablePagination={false}
+                    />
+                );
+            })()}
         </div>
     );
 }

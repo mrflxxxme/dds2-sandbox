@@ -444,6 +444,7 @@ export default function AssemblyNewPage() {
                             : 'Выберите поставку FBO для автозаполнения или добавьте позиции вручную'}
                     </div>
                 ) : (
+                    /* TODO: migrate to TanStackDataTable — has inline form inputs (barcode input, quantity input, remove button) */
                     <table className="data-table" style={{ fontSize: 13 }}>
                         <thead>
                             <tr>

@@ -1,7 +1,9 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { api } from '@/lib/api';
 import { exportToExcel } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 export function DutyRules() {
     const [rules, setRules] = useState<any[]>([]);
@@ -38,6 +40,28 @@ export function DutyRules() {
     const basisLabels: Record<string, string> = { INVOICE: 'От инвойса (%)', WEIGHT_EUR_KG: 'От веса (€/кг)', SQUARE_METER: 'За м² (€/м²)' };
     const ruledSubjects = new Set(rules.map(r => r.subject));
     const unruled = categories.filter(c => !ruledSubjects.has(c));
+
+    const columns: Column[] = useMemo(() => [
+        { key: 'id', label: 'ID', render: (v: any) => <span style={{ fontSize: 12 }}>{v}</span> },
+        { key: 'subject', label: 'Категория', render: (v: any) => <span style={{ fontWeight: 500 }}>{v}</span> },
+        {
+            key: 'basis', label: 'Базис',
+            render: (v: any) => <span className="badge badge-info" style={{ fontSize: 10 }}>{basisLabels[v] || v}</span>,
+        },
+        { key: 'rate', label: 'Ставка', render: (v: any) => <span style={{ fontFamily: 'monospace' }}>{v}</span> },
+        { key: 'util_collect_rub', label: 'Утиль ₽', render: (v: any) => <span style={{ fontFamily: 'monospace' }}>{v}</span> },
+        { key: 'note', label: 'Примечание', render: (v: any) => <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>{v || '—'}</span> },
+        {
+            key: '_actions', label: '',
+            sortable: false,
+            render: (_v: any, row: any) => (
+                <div style={{ display: 'flex', gap: 4 }}>
+                    <button className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => editRule(row)}>✎</button>
+                    <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(row.id)}>✕</button>
+                </div>
+            ),
+        },
+    ], []);
 
     return (
         <div className="glass-card">
@@ -78,25 +102,13 @@ export function DutyRules() {
                 </div>
             )}
 
-            {rules.length > 0 ? (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr><th>ID</th><th>Категория</th><th>Базис</th><th>Ставка</th><th>Утиль ₽</th><th>Примечание</th><th></th></tr></thead>
-                        <tbody>{rules.map(r => (
-                            <tr key={r.id}>
-                                <td style={{ fontSize: 12 }}>{r.id}</td><td style={{ fontWeight: 500 }}>{r.subject}</td>
-                                <td><span className="badge badge-info" style={{ fontSize: 10 }}>{basisLabels[r.basis] || r.basis}</span></td>
-                                <td style={{ fontFamily: 'monospace' }}>{r.rate}</td><td style={{ fontFamily: 'monospace' }}>{r.util_collect_rub}</td>
-                                <td style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>{r.note || '—'}</td>
-                                <td style={{ display: 'flex', gap: 4 }}>
-                                    <button className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => editRule(r)}>✎</button>
-                                    <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(r.id)}>✕</button>
-                                </td>
-                            </tr>
-                        ))}</tbody>
-                    </table>
-                </div>
-            ) : <div className="empty-state"><div className="empty-state-text">Нет правил. Добавьте правила для категорий из Номенклатуры.</div></div>}
+            <TanStackDataTable
+                columns={columns}
+                data={rules}
+                emptyText="Нет правил. Добавьте правила для категорий из Номенклатуры."
+                enableSorting
+                enablePagination={false}
+            />
 
             {unruled.length > 0 && (
                 <div style={{ marginTop: 16, padding: 12, background: 'rgba(245,158,11,0.08)', borderRadius: 8, border: '1px solid rgba(245,158,11,0.2)' }}>

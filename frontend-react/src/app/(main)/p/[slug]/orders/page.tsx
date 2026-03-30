@@ -1,7 +1,9 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { api } from '@/lib/api';
-import { formatNumber, exportToExcel } from '@/lib/utils';
+import { formatNumber } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 export default function OrdersPage() {
     const [orders, setOrders] = useState<any[]>([]);
@@ -13,6 +15,22 @@ export default function OrdersPage() {
         }).catch(() => { }).finally(() => setLoading(false));
     }, []);
 
+    const columns: Column[] = useMemo(() => {
+        if (orders.length === 0) return [];
+        return Object.keys(orders[0]).slice(0, 8).map(key => ({
+            key,
+            label: key,
+            align: (typeof orders[0][key] === 'number' ? 'right' : 'left') as 'right' | 'left',
+            render: (val: any) => (
+                <span style={{
+                    fontWeight: typeof val === 'number' ? 600 : 400,
+                }}>
+                    {typeof val === 'number' ? formatNumber(val) : (val ?? '—')}
+                </span>
+            ),
+        }));
+    }, [orders]);
+
     return (
         <div className="animate-in">
             <div className="page-header">
@@ -20,48 +38,19 @@ export default function OrdersPage() {
                     <h1 className="page-title">Заказы</h1>
                     <p className="page-subtitle">Заказы и себестоимость</p>
                 </div>
-                <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(orders, 'orders')}
-                    disabled={orders.length === 0}>
-                    📥 Экспорт Excel
-                </button>
             </div>
 
-            <div className="glass-card">
-                {loading ? (
-                    <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка...</div>
-                ) : orders.length === 0 ? (
-                    <div className="empty-state">
-                        <div className="empty-state-icon">📦</div>
-                        <div className="empty-state-text">Заказов пока нет</div>
-                    </div>
-                ) : (
-                    <div style={{ overflowX: 'auto' }}>
-                        <table className="data-table">
-                            <thead>
-                                <tr>
-                                    {Object.keys(orders[0] || {}).slice(0, 8).map(key => (
-                                        <th key={key}>{key}</th>
-                                    ))}
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {orders.slice(0, 100).map((row: any, i: number) => (
-                                    <tr key={i}>
-                                        {Object.values(row).slice(0, 8).map((val: any, j: number) => (
-                                            <td key={j} style={{
-                                                textAlign: typeof val === 'number' ? 'right' : 'left',
-                                                fontWeight: typeof val === 'number' ? 600 : 400,
-                                            }}>
-                                                {typeof val === 'number' ? formatNumber(val) : (val ?? '—')}
-                                            </td>
-                                        ))}
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                )}
-            </div>
+            <TanStackDataTable
+                columns={columns}
+                data={orders}
+                loading={loading}
+                emptyIcon="📦"
+                emptyText="Заказов пока нет"
+                exportName="orders"
+                enableSorting
+                enablePagination
+                pageSize={50}
+            />
         </div>
     );
 }

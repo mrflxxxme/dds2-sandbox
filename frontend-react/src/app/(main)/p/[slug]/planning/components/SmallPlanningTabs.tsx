@@ -1,7 +1,9 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, exportToExcel } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 export function PlanIncomes() {
     const [data, setData] = useState<any[]>([]);
@@ -25,6 +27,23 @@ export function PlanIncomes() {
         setRefreshing(false);
     };
 
+    const autoColumns: Column[] = useMemo(() => {
+        if (data.length === 0) return [];
+        return Object.keys(data[0]).map(k => ({
+            key: k,
+            label: k,
+            render: (v: any, row: any) => {
+                if (k === 'id') return (
+                    <>
+                        <span>{v}</span>
+                        <button className="btn btn-danger btn-sm" style={{ padding: '1px 6px', fontSize: 10, marginLeft: 4 }} onClick={() => del(v)}>✕</button>
+                    </>
+                );
+                return typeof v === 'number' ? formatNumber(v) : v ?? '—';
+            },
+        }));
+    }, [data]);
+
     return (
         <div className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
@@ -37,19 +56,18 @@ export function PlanIncomes() {
                             {refreshing && d === trendDays ? '⏳' : `${d}д`}
                         </button>
                     ))}
-                    <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'plan_incomes')}>📥 Excel</button>
                 </div>
             </div>
             {msg && <div style={{ color: msg.startsWith('✅') ? 'var(--color-success, #4ade80)' : 'var(--color-danger)', fontSize: 13, marginBottom: 8 }}>{msg}</div>}
             {data.length > 0 ? (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr>{Object.keys(data[0]).map(k => <th key={k}>{k}</th>)}</tr></thead>
-                        <tbody>{data.map((r, i) => <tr key={i}>{Object.entries(r).map(([k, v]: any, j) => (
-                            <td key={j}>{k === 'id' ? <><span>{v}</span> <button className="btn btn-danger btn-sm" style={{ padding: '1px 6px', fontSize: 10, marginLeft: 4 }} onClick={() => del(v)}>✕</button></> : typeof v === 'number' ? formatNumber(v) : v ?? '—'}</td>
-                        ))}</tr>)}</tbody>
-                    </table>
-                </div>
+                <TanStackDataTable
+                    columns={autoColumns}
+                    data={data}
+                    enableSorting
+                    enablePagination
+                    pageSize={50}
+                    exportName="plan_incomes"
+                />
             ) : <div className="empty-state"><div className="empty-state-text">Нет поступлений</div></div>}
         </div>
     );
@@ -65,22 +83,38 @@ export function WbPayouts() {
         try { await api.deleteWbPayout(id); load(); } catch (e: any) { setMsg(e.message); }
     };
 
+    const autoColumns: Column[] = useMemo(() => {
+        if (data.length === 0) return [];
+        return Object.keys(data[0]).map(k => ({
+            key: k,
+            label: k,
+            render: (v: any) => {
+                if (k === 'id') return (
+                    <>
+                        <span>{v}</span>
+                        <button className="btn btn-danger btn-sm" style={{ padding: '1px 6px', fontSize: 10, marginLeft: 4 }} onClick={() => del(v)}>✕</button>
+                    </>
+                );
+                return typeof v === 'number' ? formatNumber(v) : v ?? '—';
+            },
+        }));
+    }, [data]);
+
     return (
         <div className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                 <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>WB Payouts</h3>
-                <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'wb_payouts')}>📥 Excel</button>
             </div>
             {msg && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 8 }}>{msg}</div>}
             {data.length > 0 ? (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr>{Object.keys(data[0]).map(k => <th key={k}>{k}</th>)}</tr></thead>
-                        <tbody>{data.map((r, i) => <tr key={i}>{Object.entries(r).map(([k, v]: any, j) => (
-                            <td key={j}>{k === 'id' ? <><span>{v}</span> <button className="btn btn-danger btn-sm" style={{ padding: '1px 6px', fontSize: 10, marginLeft: 4 }} onClick={() => del(v)}>✕</button></> : typeof v === 'number' ? formatNumber(v) : v ?? '—'}</td>
-                        ))}</tr>)}</tbody>
-                    </table>
-                </div>
+                <TanStackDataTable
+                    columns={autoColumns}
+                    data={data}
+                    enableSorting
+                    enablePagination
+                    pageSize={50}
+                    exportName="wb_payouts"
+                />
             ) : <div className="empty-state"><div className="empty-state-text">Нет WB payouts</div></div>}
         </div>
     );
@@ -91,20 +125,31 @@ export function Cashflow() {
     const [loading, setLoading] = useState(true);
     useEffect(() => { (async () => { try { setData(await api.getCashflowDaily()); } catch { } setLoading(false); })(); }, []);
 
+    const autoColumns: Column[] = useMemo(() => {
+        if (data.length === 0) return [];
+        return Object.keys(data[0]).map(k => ({
+            key: k,
+            label: k,
+            render: (v: any) => typeof v === 'number' ? formatNumber(v) : v ?? '—',
+        }));
+    }, [data]);
+
     if (loading) return <div style={{ padding: 20, color: 'var(--color-text-muted)' }}>Загрузка...</div>;
     return (
         <div className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                 <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Кэшфлоу (план по дням)</h3>
-                {data.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'cashflow_daily')}>📥 Excel</button>}
             </div>
             {data.length > 0 ? (
-                <div style={{ overflowX: 'auto', maxHeight: 600, overflowY: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr>{Object.keys(data[0]).map(k => <th key={k} style={{ fontSize: 11 }}>{k}</th>)}</tr></thead>
-                        <tbody>{data.map((r, i) => <tr key={i}>{Object.values(r).map((v: any, j) => <td key={j} style={{ fontSize: 12 }}>{typeof v === 'number' ? formatNumber(v) : v ?? '—'}</td>)}</tr>)}</tbody>
-                    </table>
-                </div>
+                <TanStackDataTable
+                    columns={autoColumns}
+                    data={data}
+                    enableSorting
+                    enablePagination
+                    pageSize={50}
+                    exportName="cashflow_daily"
+                    maxHeight={600}
+                />
             ) : <div className="empty-state"><div className="empty-state-text">Нет данных кэшфлоу</div></div>}
         </div>
     );
@@ -153,6 +198,27 @@ export function CustomsDt() {
         { label: 'Остаток на счёте', value: balance, icon: '🏦', color: balance >= 0 ? '#10b981' : '#ef4444' },
     ];
 
+    const columns: Column[] = [
+        { key: 'dt_number', label: '№ ДТ', render: (v: any) => <span style={{ fontSize: 12, fontFamily: 'monospace' }}>{v}</span> },
+        { key: 'dt_date', label: 'Дата', render: (v: any) => <span style={{ fontSize: 12 }}>{v}</span> },
+        { key: 'amount_rub', label: 'Сумма ₽', render: (v: any) => <span style={{ fontSize: 12, fontWeight: 600 }}>{formatNumber(v)}</span> },
+        {
+            key: 'order_no', label: 'Заказ',
+            sortable: false,
+            render: (_v: any, row: any) => (
+                <span style={{ fontSize: 12 }}>
+                    <select value={row.order_no ?? ''} onChange={e => handleBindOrder(row.id, e.target.value)} disabled={saving === row.id}
+                        style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', fontSize: 12, minWidth: 100, cursor: 'pointer' }}>
+                        <option value="">—</option>
+                        {orders.map((o: any) => <option key={o.order_no} value={orderNoToInt(String(o.order_no))}>#{o.order_no}{o.invoice_no ? ` (${o.invoice_no})` : ''}</option>)}
+                    </select>
+                    {saving === row.id && <span style={{ marginLeft: 4 }}>⏳</span>}
+                </span>
+            ),
+        },
+        { key: 'note', label: 'Примечание', render: (v: any) => <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{v ?? '—'}</span> },
+    ];
+
     return (
         <div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
@@ -166,31 +232,15 @@ export function CustomsDt() {
             <div className="glass-card">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                     <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Таможенные ДТ</h3>
-                    {data.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'customs_dt')}>📥 Excel</button>}
                 </div>
-                {data.length > 0 ? (
-                    <div style={{ overflowX: 'auto' }}>
-                        <table className="data-table">
-                            <thead><tr><th style={{ fontSize: 11 }}>№ ДТ</th><th style={{ fontSize: 11 }}>Дата</th><th style={{ fontSize: 11 }}>Сумма ₽</th><th style={{ fontSize: 11 }}>Заказ</th><th style={{ fontSize: 11 }}>Примечание</th></tr></thead>
-                            <tbody>{data.map((r: any) => (
-                                <tr key={r.id}>
-                                    <td style={{ fontSize: 12, fontFamily: 'monospace' }}>{r.dt_number}</td>
-                                    <td style={{ fontSize: 12 }}>{r.dt_date}</td>
-                                    <td style={{ fontSize: 12, fontWeight: 600 }}>{formatNumber(r.amount_rub)}</td>
-                                    <td style={{ fontSize: 12 }}>
-                                        <select value={r.order_no ?? ''} onChange={e => handleBindOrder(r.id, e.target.value)} disabled={saving === r.id}
-                                            style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', fontSize: 12, minWidth: 100, cursor: 'pointer' }}>
-                                            <option value="">—</option>
-                                            {orders.map((o: any) => <option key={o.order_no} value={orderNoToInt(String(o.order_no))}>#{o.order_no}{o.invoice_no ? ` (${o.invoice_no})` : ''}</option>)}
-                                        </select>
-                                        {saving === r.id && <span style={{ marginLeft: 4 }}>⏳</span>}
-                                    </td>
-                                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{r.note ?? '—'}</td>
-                                </tr>
-                            ))}</tbody>
-                        </table>
-                    </div>
-                ) : <div className="empty-state"><div className="empty-state-text">Нет таможенных ДТ. Загрузите PDF-отчёт ФТС через «Импорт документов».</div></div>}
+                <TanStackDataTable
+                    columns={columns}
+                    data={data}
+                    emptyText="Нет таможенных ДТ. Загрузите PDF-отчёт ФТС через «Импорт документов»."
+                    enableSorting
+                    enablePagination={false}
+                    exportName="customs_dt"
+                />
             </div>
         </div>
     );

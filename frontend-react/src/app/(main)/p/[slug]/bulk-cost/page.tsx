@@ -226,6 +226,7 @@ export default function BulkCostPage() {
                 style={{ overflow: 'auto', maxHeight: 'calc(100vh - 360px)', padding: 0 }}
                 onPaste={handlePaste}
             >
+                {/* TODO: migrate to TanStackDataTable — table with inline <input>/<select> for cost entry */}
                 <table className="data-table" style={{ marginBottom: 0 }}>
                     <thead>
                         <tr>

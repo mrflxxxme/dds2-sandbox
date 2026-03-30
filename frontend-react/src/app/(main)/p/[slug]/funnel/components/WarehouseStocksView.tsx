@@ -1,7 +1,9 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 export function WarehouseStocksView() {
     const [data, setData] = useState<any>(null);
@@ -28,6 +30,20 @@ export function WarehouseStocksView() {
 
     useEffect(() => { load(); }, []);
 
+    const columns: Column[] = useMemo(() => [
+        { key: 'name', label: 'Склад' },
+        { key: 'total_qty', label: 'Остаток (шт)', align: 'right', format: 'number' },
+        { key: 'articles_count', label: 'Артикулов', align: 'right' },
+    ], []);
+
+    const tableData = useMemo(() => {
+        if (!data?.warehouses?.length) return [];
+        return [
+            { name: 'ИТОГО', total_qty: data.total_qty, articles_count: data.total_warehouses, _isBold: true },
+            ...data.warehouses,
+        ];
+    }, [data]);
+
     if (loading && !data) return <div className="glass-card" style={{ textAlign: 'center', padding: 40 }}>Загрузка складов...</div>;
 
     return (
@@ -44,39 +60,14 @@ export function WarehouseStocksView() {
                 </button>
             </div>
 
-            {data && data.warehouses && data.warehouses.length > 0 ? (
-                <div className="glass-card" style={{ overflowX: 'auto' }}>
-                    <table className="data-table" style={{ width: '100%', fontSize: 13 }}>
-                        <thead>
-                            <tr>
-                                <th style={{ textAlign: 'left' }}>Склад</th>
-                                <th style={{ textAlign: 'right' }}>Остаток (шт)</th>
-                                <th style={{ textAlign: 'right' }}>Артикулов</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr style={{ fontWeight: 700, background: 'rgba(0,0,0,0.03)' }}>
-                                <td>ИТОГО</td>
-                                <td style={{ textAlign: 'right' }}>{formatNumber(data.total_qty)}</td>
-                                <td style={{ textAlign: 'right' }}>{data.total_warehouses}</td>
-                            </tr>
-                            {data.warehouses.map((wh: any) => (
-                                <tr key={wh.name}>
-                                    <td>{wh.name}</td>
-                                    <td style={{ textAlign: 'right' }}>{formatNumber(wh.total_qty)}</td>
-                                    <td style={{ textAlign: 'right' }}>{wh.articles_count}</td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            ) : (
-                <div className="glass-card">
-                    <div className="empty-state">
-                        <div className="empty-state-text">Нет данных по складам. Нажмите «Синхронизировать с WB».</div>
-                    </div>
-                </div>
-            )}
+            <TanStackDataTable
+                columns={columns}
+                data={tableData}
+                emptyText="Нет данных по складам. Нажмите «Синхронизировать с WB»."
+                enableSorting
+                enablePagination={false}
+                rowClassName={(row: any) => row._isBold ? 'font-bold' : ''}
+            />
         </div>
     );
 }

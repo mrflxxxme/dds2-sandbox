@@ -554,6 +554,7 @@ export function ProductClassification() {
 
                     {/* Table */}
                     <div style={{ overflowX: 'auto', maxHeight: 600 }}>
+                        {/* TODO: migrate to TanStackDataTable */}
                         <table className="data-table" style={{ fontSize: 13, whiteSpace: 'nowrap' }}>
                             <thead>
                                 <tr>

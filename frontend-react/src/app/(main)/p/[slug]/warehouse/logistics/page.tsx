@@ -4,6 +4,8 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber, exportToExcel } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 import type { AssemblyRequest, AssemblyStatus } from '@/types/api';
 
 // ─── Status config ──────────────────────────────────────────────────────────
@@ -435,6 +437,7 @@ export default function LogisticsPage() {
                         </div>
                     ) : viewMode === 'table' ? (
                         /* ─── Table view ─── */
+                        /* TODO: migrate to TanStackDataTable — has grouped rows with React.Fragment, checkboxes, inline buttons */
                         <div className="glass-card" style={{ overflow: 'auto' }}>
                             <table className="data-table" style={{ fontSize: 13 }}>
                                 <thead>
@@ -646,77 +649,29 @@ export default function LogisticsPage() {
                         </div>
                     </div>
                 ) : (
-                    <div className="glass-card" style={{ overflow: 'auto' }}>
-                        <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--color-border)', fontSize: 13, color: 'var(--color-text-muted)' }}>
-                            Всего: {historyTotal}
-                        </div>
-                        <table className="data-table" style={{ fontSize: 13 }}>
-                            <thead>
-                                <tr>
-                                    <th>Статус</th>
-                                    <th>№</th>
-                                    <th>Бренд</th>
-                                    <th>Поставка WB</th>
-                                    <th>Статус WB</th>
-                                    <th>Склад забора</th>
-                                    <th>Склад сдачи</th>
-                                    <th>Дата отгрузки</th>
-                                    <th>Дата сдачи</th>
-                                    <th>План сдачи</th>
-                                    <th style={{ textAlign: 'right' }}>Палеты</th>
-                                    <th style={{ textAlign: 'right' }}>Стоимость</th>
-                                    <th style={{ textAlign: 'right' }}>Вес</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {historyItems.map(item => {
-                                    const statusCfg = STATUS_MAP[item.status] || { label: item.status, className: '' };
-                                    const wbStatusCfg = item.wb_fbo_status ? WB_STATUS_MAP[item.wb_fbo_status] : null;
-                                    return (
-                                        <tr
-                                            key={item.id}
-                                            style={{ cursor: 'pointer' }}
-                                            onClick={() => window.location.href = `/p/${slug}/warehouse/assembly/${item.id}`}
-                                        >
-                                            <td>
-                                                <span className={`badge ${statusCfg.className}`}>{statusCfg.label}</span>
-                                            </td>
-                                            <td style={{ fontWeight: 500 }}>
-                                                {item.number}
-                                            </td>
-                                            <td style={{ fontSize: 12 }}>
-                                                {item.brands || '\u2014'}
-                                            </td>
-                                            <td style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                                                {item.wb_supply_id_wb || '\u2014'}
-                                            </td>
-                                            <td>
-                                                {wbStatusCfg ? (
-                                                    <span className={`badge ${wbStatusCfg.className}`}>{wbStatusCfg.label}</span>
-                                                ) : '\u2014'}
-                                            </td>
-                                            <td style={{ color: 'var(--color-text-muted)' }}>
-                                                {item.warehouse_name || '\u2014'}
-                                            </td>
-                                            <td style={{ color: 'var(--color-text-muted)' }}>
-                                                {item.wb_warehouse_name || '\u2014'}
-                                            </td>
-                                            <td>{formatDate(item.shipped_at)}</td>
-                                            <td>{item.wb_fbo_actual_date ? formatDate(item.wb_fbo_actual_date) : '\u2014'}</td>
-                                            <td>{item.wb_fbo_planned_date ? formatDate(item.wb_fbo_planned_date) : '\u2014'}</td>
-                                            <td style={{ textAlign: 'right' }}>{item.pallets_count}</td>
-                                            <td style={{ textAlign: 'right' }}>
-                                                {item.pickup_cost ? formatNumber(item.pickup_cost, 0) : '\u2014'}
-                                            </td>
-                                            <td style={{ textAlign: 'right' }}>
-                                                {item.total_weight_kg ? formatNumber(item.total_weight_kg, 1) + ' кг' : '\u2014'}
-                                            </td>
-                                        </tr>
-                                    );
-                                })}
-                            </tbody>
-                        </table>
-                    </div>
+                    <TanStackDataTable
+                        columns={[
+                            { key: 'status', label: 'Статус', render: (_v: string, row: any) => { const cfg = STATUS_MAP[row.status as AssemblyStatus] || { label: row.status, className: '' }; return <span className={`badge ${cfg.className}`}>{cfg.label}</span>; }},
+                            { key: 'number', label: '№', render: (v: string) => <span style={{ fontWeight: 500 }}>{v}</span> },
+                            { key: 'brands', label: 'Бренд', render: (v: string) => <span style={{ fontSize: 12 }}>{v || '\u2014'}</span> },
+                            { key: 'wb_supply_id_wb', label: 'Поставка WB', render: (v: string) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v || '\u2014'}</span> },
+                            { key: 'wb_fbo_status', label: 'Статус WB', render: (v: string) => { if (!v) return '\u2014'; const cfg = WB_STATUS_MAP[v]; return cfg ? <span className={`badge ${cfg.className}`}>{cfg.label}</span> : '\u2014'; }},
+                            { key: 'warehouse_name', label: 'Склад забора', render: (v: string) => <span style={{ color: 'var(--color-text-muted)' }}>{v || '\u2014'}</span> },
+                            { key: 'wb_warehouse_name', label: 'Склад сдачи', render: (v: string) => <span style={{ color: 'var(--color-text-muted)' }}>{v || '\u2014'}</span> },
+                            { key: 'shipped_at', label: 'Дата отгрузки', format: 'date' },
+                            { key: 'wb_fbo_actual_date', label: 'Дата сдачи', render: (v: string) => v ? formatDate(v) : '\u2014' },
+                            { key: 'wb_fbo_planned_date', label: 'План сдачи', render: (v: string) => v ? formatDate(v) : '\u2014' },
+                            { key: 'pallets_count', label: 'Палеты', align: 'right', format: 'number' },
+                            { key: 'pickup_cost', label: 'Стоимость', align: 'right', render: (v: number) => v ? formatNumber(v, 0) : '\u2014' },
+                            { key: 'total_weight_kg', label: 'Вес', align: 'right', render: (v: number) => v ? formatNumber(v, 1) + ' кг' : '\u2014' },
+                        ]}
+                        data={historyItems}
+                        title={`Всего: ${historyTotal}`}
+                        enableSorting
+                        enablePagination
+                        pageSize={50}
+                        onRowClick={(row: any) => { window.location.href = `/p/${slug}/warehouse/assembly/${row.id}`; }}
+                    />
                 )
             )}
 
@@ -777,6 +732,7 @@ export default function LogisticsPage() {
                         <div style={{ borderTop: '1px solid var(--color-border)', paddingTop: 12 }}>
                             <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 8 }}>Параметры по заявкам ({selectedIds.length})</div>
                             <div style={{ maxHeight: 300, overflow: 'auto' }}>
+                                {/* TODO: migrate to TanStackDataTable — has inline form inputs per row */}
                                 <table className="data-table" style={{ fontSize: 13, marginBottom: 0 }}>
                                     <thead>
                                         <tr>

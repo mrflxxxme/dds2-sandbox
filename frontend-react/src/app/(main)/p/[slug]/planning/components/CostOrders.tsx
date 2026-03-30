@@ -1,9 +1,11 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 import { usePermissions } from '@/lib/hooks/usePermissions';
 import { OrderItemsDetail } from './OrderItemsDetail';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 export function CostOrders() {
     const { canEdit } = usePermissions();
@@ -120,6 +122,34 @@ export function CostOrders() {
         </div>
     );
 
+    const columns: Column[] = useMemo(() => [
+        { key: 'order_no', label: 'Заказ', render: (v: any) => <span style={{ fontWeight: 600 }}>{v}</span> },
+        { key: 'invoice_no', label: 'Инвойс', render: (v: any) => <span className="badge badge-info" style={{ fontSize: 11 }}>{v || '—'}</span> },
+        { key: 'dt_number', label: 'ДТ', render: (v: any) => <span style={{ fontSize: 11, fontFamily: 'monospace', color: 'var(--color-text-dim)' }}>{v || '—'}</span> },
+        { key: 'ship_date', label: 'Отправка', render: (v: any) => <span style={{ fontSize: 12 }}>{v ? formatDate(v) : '—'}</span> },
+        { key: 'transport_type', label: 'Транспорт', render: (v: any) => <span className="badge badge-warning">{v || 'AUTO'}</span> },
+        { key: 'items_count', label: 'Позиций', render: (v: any) => v ?? '—' },
+        { key: 'total_qty', label: 'Кол-во', format: 'number' as const },
+        { key: 'total_cost_rub', label: 'Товар ₽', render: (v: any) => <span style={{ color: 'var(--color-success)', fontWeight: 500 }}>{v != null ? formatNumber(v) : '—'}</span> },
+        { key: 'total_delivery_rub', label: 'Доставка ₽', render: (v: any) => v != null ? formatNumber(v) : '—' },
+        { key: 'total_duty_rub', label: 'Пошлина ₽', render: (v: any) => v != null ? formatNumber(v) : '—' },
+        { key: 'total_vat_rub', label: 'НДС ₽', render: (v: any) => v != null ? formatNumber(v) : '—' },
+        { key: 'total_util_rub', label: 'Утиль ₽', render: (v: any) => v != null ? formatNumber(v) : '—' },
+        { key: 'total_rub', label: 'Итого ₽', render: (v: any) => <span style={{ fontWeight: 600 }}>{v != null ? formatNumber(v) : '—'}</span> },
+        { key: 'rate_cny', label: 'Курс ¥', render: (v: any) => <span style={{ fontSize: 12 }}>{v != null ? Number(v).toFixed(2) : '—'}</span> },
+        { key: 'has_plan', label: 'План', render: (v: any) => v ? <span className="badge badge-success">✓</span> : <span className="badge badge-secondary">—</span> },
+        {
+            key: '_actions', label: '', sortable: false,
+            render: (_v: any, row: any) => (
+                <div style={{ display: 'flex', gap: 4 }} onClick={e => e.stopPropagation()}>
+                    <button className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => openEdit(row)}>✎</button>
+                    <button className="btn btn-primary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => generatePlan(String(row.order_no))}>{row.has_plan ? '🔄' : '📋'}</button>
+                    <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(String(row.order_no))}>✕</button>
+                </div>
+            ),
+        },
+    ], []);
+
     return (
         <div className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
@@ -133,43 +163,16 @@ export function CostOrders() {
 
             {showCreate && renderForm('Новый заказ', create, () => setShowCreate(false))}
 
-            {orders.length > 0 ? (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr>
-                            <th>Заказ</th><th>Инвойс</th><th>ДТ</th><th>Отправка</th><th>Транспорт</th>
-                            <th>Позиций</th><th>Кол-во</th><th>Товар ₽</th><th>Доставка ₽</th>
-                            <th>Пошлина ₽</th><th>НДС ₽</th><th>Утиль ₽</th><th>Итого ₽</th>
-                            <th>Курс ¥</th><th>План</th><th></th>
-                        </tr></thead>
-                        <tbody>{orders.map(r => (
-                            <tr key={r.order_no} style={{ cursor: 'pointer', background: selected === String(r.order_no) ? 'rgba(139,92,246,0.1)' : editOrder === String(r.order_no) ? 'rgba(59,130,246,0.08)' : undefined }}
-                                onClick={() => loadItems(String(r.order_no))}>
-                                <td style={{ fontWeight: 600 }}>{r.order_no}</td>
-                                <td><span className="badge badge-info" style={{ fontSize: 11 }}>{r.invoice_no || '—'}</span></td>
-                                <td style={{ fontSize: 11, fontFamily: 'monospace', color: 'var(--color-text-dim)' }}>{r.dt_number || '—'}</td>
-                                <td style={{ fontSize: 12 }}>{r.ship_date ? formatDate(r.ship_date) : '—'}</td>
-                                <td><span className="badge badge-warning">{r.transport_type || 'AUTO'}</span></td>
-                                <td>{r.items_count ?? '—'}</td>
-                                <td>{r.total_qty != null ? formatNumber(r.total_qty) : '—'}</td>
-                                <td style={{ color: 'var(--color-success)', fontWeight: 500 }}>{r.total_cost_rub != null ? formatNumber(r.total_cost_rub) : '—'}</td>
-                                <td>{r.total_delivery_rub != null ? formatNumber(r.total_delivery_rub) : '—'}</td>
-                                <td>{r.total_duty_rub != null ? formatNumber(r.total_duty_rub) : '—'}</td>
-                                <td>{r.total_vat_rub != null ? formatNumber(r.total_vat_rub) : '—'}</td>
-                                <td>{r.total_util_rub != null ? formatNumber(r.total_util_rub) : '—'}</td>
-                                <td style={{ fontWeight: 600 }}>{r.total_rub != null ? formatNumber(r.total_rub) : '—'}</td>
-                                <td style={{ fontSize: 12 }}>{r.rate_cny != null ? Number(r.rate_cny).toFixed(2) : '—'}</td>
-                                <td>{r.has_plan ? <span className="badge badge-success">✓</span> : <span className="badge badge-secondary">—</span>}</td>
-                                <td style={{ display: 'flex', gap: 4 }} onClick={e => e.stopPropagation()}>
-                                    <button className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => openEdit(r)}>✎</button>
-                                    <button className="btn btn-primary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => generatePlan(String(r.order_no))}>{r.has_plan ? '🔄' : '📋'}</button>
-                                    <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(String(r.order_no))}>✕</button>
-                                </td>
-                            </tr>
-                        ))}</tbody>
-                    </table>
-                </div>
-            ) : <div className="empty-state"><div className="empty-state-text">Нет заказов. Нажмите «+ Создать заказ».</div></div>}
+            <TanStackDataTable
+                columns={columns}
+                data={orders}
+                emptyText="Нет заказов. Нажмите «+ Создать заказ»."
+                enableSorting
+                enablePagination={false}
+                onRowClick={(row) => loadItems(String(row.order_no))}
+                selectedIndex={orders.findIndex(o => String(o.order_no) === selected)}
+                rowClassName={(row) => editOrder === String(row.order_no) ? 'edit-highlight' : ''}
+            />
 
             {editOrder && renderForm(`Редактирование заказа #${editOrder}`, saveEdit, () => setEditOrder(null))}
 

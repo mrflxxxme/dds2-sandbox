@@ -352,6 +352,7 @@ export function StockAnalytics() {
 
             {/* Table */}
             <div className="glass-card" style={{ overflow: 'auto', padding: 0 }}>
+                {/* TODO: migrate to TanStackDataTable — has sticky columns, dynamic forecast columns, custom pagination, TOTAL row */}
                 <table className="data-table" style={{ fontSize: 12, width: '100%' }}>
                     <thead>
                         <tr>

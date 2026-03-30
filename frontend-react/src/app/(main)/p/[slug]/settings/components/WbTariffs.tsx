@@ -1,8 +1,10 @@
 'use client';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { api } from '@/lib/api';
-import { exportToExcel, formatNumber } from '@/lib/utils';
+import { formatNumber } from '@/lib/utils';
 import type { WbTariff } from '@/types/api';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 export function WbTariffs() {
     const [tariffs, setTariffs] = useState<WbTariff[]>([]);
@@ -51,6 +53,22 @@ export function WbTariffs() {
         }
     };
 
+    const columns: Column[] = useMemo(() => [
+        { key: 'subject_name', label: 'Предмет' },
+        {
+            key: 'commission_rate', label: 'Комиссия %', align: 'right' as const,
+            render: (v: any) => `${formatNumber(v, 2)}%`,
+        },
+        {
+            key: '_actions', label: '', width: '50',
+            sortable: false,
+            render: (_v: any, row: any) => (
+                <button className="btn btn-danger btn-sm" style={{ fontSize: 11, padding: '2px 6px' }}
+                    onClick={() => handleDelete(row.id)}>✕</button>
+            ),
+        },
+    ], []);
+
     return (
         <div className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
@@ -61,11 +79,6 @@ export function WbTariffs() {
                     </div>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
-                    <button className="btn btn-secondary btn-sm"
-                        onClick={() => exportToExcel(tariffs.map(t => ({ subject_name: t.subject_name, commission_rate: t.commission_rate })), 'wb_tariffs')}
-                        disabled={tariffs.length === 0}>
-                        📥 Excel
-                    </button>
                     <label className={`btn btn-primary btn-sm ${uploading ? 'opacity-50' : ''}`}
                         style={{ cursor: uploading ? 'wait' : 'pointer' }}>
                         {uploading ? '⏳ Загрузка...' : '📤 Загрузить .xlsx'}
@@ -94,37 +107,16 @@ export function WbTariffs() {
                 При загрузке нового файла все старые тарифы заменяются.
             </div>
 
-            {loading ? (
-                <div style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-dim)' }}>⏳ Загрузка...</div>
-            ) : tariffs.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-dim)' }}>
-                    Нет загруженных тарифов. Загрузите xlsx-файл.
-                </div>
-            ) : (
-                <div style={{ maxHeight: 500, overflowY: 'auto' }}>
-                    <table className="data-table" style={{ width: '100%', fontSize: 13 }}>
-                        <thead>
-                            <tr>
-                                <th style={{ textAlign: 'left' }}>Предмет</th>
-                                <th style={{ textAlign: 'right' }}>Комиссия %</th>
-                                <th style={{ width: 50 }}></th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {tariffs.map(t => (
-                                <tr key={t.id}>
-                                    <td>{t.subject_name}</td>
-                                    <td style={{ textAlign: 'right' }}>{formatNumber(t.commission_rate, 2)}%</td>
-                                    <td style={{ textAlign: 'center' }}>
-                                        <button className="btn btn-danger btn-sm" style={{ fontSize: 11, padding: '2px 6px' }}
-                                            onClick={() => handleDelete(t.id)}>✕</button>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            )}
+            <TanStackDataTable
+                columns={columns}
+                data={tariffs}
+                loading={loading}
+                emptyText="Нет загруженных тарифов. Загрузите xlsx-файл."
+                enableSorting
+                enablePagination={false}
+                exportName="wb_tariffs"
+                maxHeight={500}
+            />
         </div>
     );
 }

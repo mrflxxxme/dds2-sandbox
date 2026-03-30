@@ -2,6 +2,8 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 import type {
     WbStocksResponse, WbWarehouseRow,
     WbStocksArticlesResponse, WbArticleRow,
@@ -82,6 +84,7 @@ function WarehousesTab({ data }: { data: WbStocksResponse }) {
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
                 <button className="btn btn-sm" onClick={handleExport}>📥 Excel</button>
             </div>
+            {/* TODO: migrate to TanStackDataTable — has custom TOTAL summary row at top */}
             <div className="glass-card" style={{ overflowX: 'auto' }}>
                 <table className="data-table" style={{ width: '100%', fontSize: 13 }}>
                     <thead>
@@ -217,6 +220,7 @@ function ArticlesTab() {
                 </span>
                 <button className="btn btn-sm" onClick={handleExport}>📥 Excel</button>
             </div>
+            {/* TODO: migrate to TanStackDataTable — has expandable rows with sub-rows per warehouse */}
             <div className="glass-card" style={{ overflowX: 'auto' }}>
                 <table className="data-table" style={{ width: '100%', fontSize: 13 }}>
                     <thead>
@@ -382,40 +386,30 @@ function HistoryTab() {
                     </div>
 
                     {/* Table */}
-                    <div className="glass-card" style={{ overflowX: 'auto' }}>
-                        <table className="data-table" style={{ width: '100%', fontSize: 13 }}>
-                            <thead>
-                                <tr>
-                                    <th style={{ textAlign: 'left' }}>Дата</th>
-                                    <th style={{ textAlign: 'right' }}>Всего</th>
-                                    <th style={{ textAlign: 'right' }}>На складе</th>
-                                    <th style={{ textAlign: 'right' }}>К клиенту</th>
-                                    <th style={{ textAlign: 'right' }}>От клиента</th>
-                                    <th style={{ textAlign: 'right' }}>Артикулов</th>
-                                    <th style={{ textAlign: 'right' }}>Изм.</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {data.days.map((d, i) => {
-                                    const prevTotal = i > 0 ? data.days[i - 1].total : 0;
-                                    const change = i > 0 ? d.total - prevTotal : 0;
-                                    return (
-                                        <tr key={d.date}>
-                                            <td>{formatDate(d.date)}</td>
-                                            <td style={{ textAlign: 'right', fontWeight: 600 }}>{formatNumber(d.total, 0)}</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(d.total_qty, 0)}</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(d.in_way_to_client, 0)}</td>
-                                            <td style={{ textAlign: 'right' }}>{formatNumber(d.in_way_from_client, 0)}</td>
-                                            <td style={{ textAlign: 'right' }}>{d.articles_count}</td>
-                                            <td style={{ textAlign: 'right' }}>
-                                                {i > 0 ? <ChangeBadge value={change} /> : '—'}
-                                            </td>
-                                        </tr>
-                                    );
-                                })}
-                            </tbody>
-                        </table>
-                    </div>
+                    {(() => {
+                        const historyTableData = data.days.map((d, i) => ({
+                            ...d,
+                            _change: i > 0 ? d.total - data.days[i - 1].total : null,
+                            _index: i,
+                        }));
+                        const historyColumns: Column[] = [
+                            { key: 'date', label: 'Дата', format: 'date' },
+                            { key: 'total', label: 'Всего', align: 'right', render: (v: number) => <span style={{ fontWeight: 600 }}>{formatNumber(v, 0)}</span> },
+                            { key: 'total_qty', label: 'На складе', align: 'right', format: 'number' },
+                            { key: 'in_way_to_client', label: 'К клиенту', align: 'right', format: 'number' },
+                            { key: 'in_way_from_client', label: 'От клиента', align: 'right', format: 'number' },
+                            { key: 'articles_count', label: 'Артикулов', align: 'right', format: 'number' },
+                            { key: '_change', label: 'Изм.', align: 'right', render: (_v: number | null, row: any) => row._index > 0 ? <ChangeBadge value={row._change} /> : '—' },
+                        ];
+                        return (
+                            <TanStackDataTable
+                                columns={historyColumns}
+                                data={historyTableData}
+                                enableSorting
+                                enablePagination={false}
+                            />
+                        );
+                    })()}
                 </>
             )}
         </>

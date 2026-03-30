@@ -2,6 +2,8 @@
 import { useState, useEffect } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 export function WarehouseStocksView() {
     const [data, setData] = useState<any>(null);
@@ -45,31 +47,24 @@ export function WarehouseStocksView() {
             </div>
 
             {data && data.warehouses && data.warehouses.length > 0 ? (
-                <div className="glass-card" style={{ overflowX: 'auto' }}>
-                    <table className="data-table" style={{ width: '100%', fontSize: 13 }}>
-                        <thead>
-                            <tr>
-                                <th style={{ textAlign: 'left' }}>Склад</th>
-                                <th style={{ textAlign: 'right' }}>Остаток (шт)</th>
-                                <th style={{ textAlign: 'right' }}>Артикулов</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr style={{ fontWeight: 700, background: 'rgba(0,0,0,0.03)' }}>
-                                <td>ИТОГО</td>
-                                <td style={{ textAlign: 'right' }}>{formatNumber(data.total_qty)}</td>
-                                <td style={{ textAlign: 'right' }}>{data.total_warehouses}</td>
-                            </tr>
-                            {data.warehouses.map((wh: any) => (
-                                <tr key={wh.name}>
-                                    <td>{wh.name}</td>
-                                    <td style={{ textAlign: 'right' }}>{formatNumber(wh.total_qty)}</td>
-                                    <td style={{ textAlign: 'right' }}>{wh.articles_count}</td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
+                (() => {
+                    const totalRow = { name: 'ИТОГО', total_qty: data.total_qty, articles_count: data.total_warehouses, _isTotal: true };
+                    const tableData = [totalRow, ...data.warehouses];
+                    const cols: Column[] = [
+                        { key: 'name', label: 'Склад', render: (v: string, row: any) => row._isTotal ? <strong>{v}</strong> : v },
+                        { key: 'total_qty', label: 'Остаток (шт)', align: 'right', render: (v: number, row: any) => row._isTotal ? <strong>{formatNumber(v)}</strong> : formatNumber(v) },
+                        { key: 'articles_count', label: 'Артикулов', align: 'right', render: (v: number, row: any) => row._isTotal ? <strong>{v}</strong> : v },
+                    ];
+                    return (
+                        <TanStackDataTable
+                            columns={cols}
+                            data={tableData}
+                            enableSorting
+                            enablePagination={false}
+                            rowClassName={(row: any) => row._isTotal ? 'font-bold' : ''}
+                        />
+                    );
+                })()
             ) : (
                 <div className="glass-card">
                     <div className="empty-state">

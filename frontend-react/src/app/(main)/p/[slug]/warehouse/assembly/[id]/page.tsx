@@ -4,6 +4,8 @@ import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 import type { AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, RefreshFromFboResponse } from '@/types/api';
 
 // ─── Status config ──────────────────────────────────────────────────────────
@@ -381,47 +383,24 @@ export default function AssemblyDetailPage() {
             </div>
 
             {/* Items table */}
-            <div className="glass-card" style={{ padding: 24 }}>
-                <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>
-                    Позиции ({assembly.items?.length || 0})
-                </h2>
-
-                {!assembly.items || assembly.items.length === 0 ? (
-                    <div style={{ textAlign: 'center', padding: 32, color: 'var(--color-text-muted)' }}>
-                        Нет позиций
-                    </div>
-                ) : (
-                    <table className="data-table" style={{ fontSize: 13 }}>
-                        <thead>
-                            <tr>
-                                <th>ШК</th>
-                                <th>Товар</th>
-                                <th style={{ textAlign: 'right' }}>В поставке</th>
-                                <th style={{ textAlign: 'right' }}>На складе</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {assembly.items.map(item => {
-                                const deficit = item.stock_quantity < item.quantity;
-                                return (
-                                    <tr key={item.id}>
-                                        <td>
-                                            <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{item.barcode}</span>
-                                        </td>
-                                        <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                            {item.product_name || '\u2014'}
-                                        </td>
-                                        <td style={{ textAlign: 'right', fontWeight: 500 }}>{item.quantity}</td>
-                                        <td style={{ textAlign: 'right', fontWeight: 500, color: deficit ? 'var(--color-danger)' : 'var(--color-success)' }}>
-                                            {item.stock_quantity}
-                                        </td>
-                                    </tr>
-                                );
-                            })}
-                        </tbody>
-                    </table>
-                )}
-            </div>
+            {(() => {
+                const itemCols: Column[] = [
+                    { key: 'barcode', label: 'ШК', render: (v: string) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</span> },
+                    { key: 'product_name', label: 'Товар', render: (v: string) => <span style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block' }}>{v || '\u2014'}</span> },
+                    { key: 'quantity', label: 'В поставке', align: 'right', render: (v: number) => <span style={{ fontWeight: 500 }}>{v}</span> },
+                    { key: 'stock_quantity', label: 'На складе', align: 'right', render: (v: number, row: any) => <span style={{ fontWeight: 500, color: v < row.quantity ? 'var(--color-danger)' : 'var(--color-success)' }}>{v}</span> },
+                ];
+                return (
+                    <TanStackDataTable
+                        columns={itemCols}
+                        data={assembly.items || []}
+                        title={`Позиции (${assembly.items?.length || 0})`}
+                        enableSorting
+                        enablePagination={false}
+                        emptyText="Нет позиций"
+                    />
+                );
+            })()}
 
             {/* History timeline */}
             {history.length > 0 && (

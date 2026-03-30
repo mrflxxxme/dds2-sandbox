@@ -351,6 +351,7 @@ export default function FunnelPage() {
                     )}
 
                     {/* SKU Table */}
+                    {/* TODO: migrate to TanStackDataTable — complex table with rowSpan, colSpan, sticky columns, multi-row headers */}
                     {groupBy === 'sku' && (
                         <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                             <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 320px)' }}>
@@ -440,6 +441,7 @@ export default function FunnelPage() {
                     )}
 
                     {/* Brand / Subject Group Table */}
+                    {/* TODO: migrate to TanStackDataTable — complex table with rowSpan, colSpan, sticky columns, multi-row headers */}
                     {(groupBy === 'brand' || groupBy === 'subject' || groupBy === 'tag' || groupBy === 'imt') && (
                         <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                             <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 320px)' }}>
@@ -532,6 +534,7 @@ export default function FunnelPage() {
                     )}
 
                     {/* ABC Analysis — 3 grouped rows A/B/C with expand to show SKU items */}
+                    {/* TODO: migrate to TanStackDataTable — complex ABC analysis table with expandable category rows */}
                     {groupBy === 'abc' && (() => {
                         const ABC_COLORS: Record<string, string> = { A: '#22c55e', B: '#f59e0b', C: '#ef4444' };
                         const ABC_LABELS: Record<string, string> = { A: 'Категория A (80% выручки)', B: 'Категория B (15% выручки)', C: 'Категория C (5% выручки)' };
@@ -668,6 +671,7 @@ export default function FunnelPage() {
                     })()}
 
                     {/* Day Table with sticky header — both rows pinned */}
+                    {/* TODO: migrate to TanStackDataTable — complex day table with multi-row sticky headers, colSpan */}
                     {groupBy === 'day' && <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                         <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
                             {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> : (

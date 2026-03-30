@@ -165,6 +165,7 @@ export function DayAnalysisTab({ brand, subject, filters }: {
                         )}
 
                         {/* Top products table */}
+                        {/* TODO: migrate to TanStackDataTable — complex table with sticky header rows, alternating row backgrounds, external links */}
                         <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                             <h3 style={{ margin: '16px 20px 12px', fontSize: 14 }}>🏆 Топ товаров за {dayDate}</h3>
                             <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 380px)' }}>

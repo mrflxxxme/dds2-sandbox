@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 import { formatDateTime } from '@/lib/utils';
 import { usePermissions, invalidatePermissionsCache } from '@/lib/hooks/usePermissions';
 import type { ProjectMember } from '@/types/api';
+import TanStackDataTable from '@/components/TanStackDataTable';
 
 // ─── Section/page structure for role editing ────────────────────────────────
 
@@ -377,6 +378,7 @@ export default function TeamPage() {
             )}
 
             {/* Members */}
+            {/* TODO: migrate to TanStackDataTable — table with inline Telegram edit input and action buttons */}
             <div className="glass-card" style={{ marginBottom: 24 }}>
                 <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>Участники ({members.length})</h3>
                 <table className="data-table">
@@ -448,33 +450,25 @@ export default function TeamPage() {
 
             {/* Invites History */}
             {invites.length > 0 && (
-                <div className="glass-card">
-                    <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>История приглашений</h3>
-                    <table className="data-table">
-                        <thead>
-                            <tr>
-                                <th>Email</th>
-                                <th>Статус</th>
-                                <th>Создано</th>
-                                <th>Принято</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {invites.map(inv => (
-                                <tr key={inv.id}>
-                                    <td>{inv.email || 'Ссылка-приглашение'}</td>
-                                    <td>
-                                        <span className={`badge ${inv.status === 'accepted' ? 'badge-success' : inv.status === 'pending' ? 'badge-warning' : 'badge-danger'}`}>
-                                            {inv.status === 'accepted' ? 'Принято' : inv.status === 'pending' ? 'Ожидание' : 'Истекло'}
-                                        </span>
-                                    </td>
-                                    <td style={{ fontSize: 13 }}>{formatDateTime(inv.created_at)}</td>
-                                    <td style={{ fontSize: 13 }}>{formatDateTime(inv.accepted_at)}</td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
+                <TanStackDataTable
+                    title="История приглашений"
+                    columns={[
+                        { key: 'email', label: 'Email', render: (v: any) => <>{v || 'Ссылка-приглашение'}</> },
+                        {
+                            key: 'status', label: 'Статус',
+                            render: (v: any) => (
+                                <span className={`badge ${v === 'accepted' ? 'badge-success' : v === 'pending' ? 'badge-warning' : 'badge-danger'}`}>
+                                    {v === 'accepted' ? 'Принято' : v === 'pending' ? 'Ожидание' : 'Истекло'}
+                                </span>
+                            ),
+                        },
+                        { key: 'created_at', label: 'Создано', render: (v: any) => <span style={{ fontSize: 13 }}>{formatDateTime(v)}</span> },
+                        { key: 'accepted_at', label: 'Принято', render: (v: any) => <span style={{ fontSize: 13 }}>{formatDateTime(v)}</span> },
+                    ]}
+                    data={invites}
+                    enableSorting
+                    enablePagination={false}
+                />
             )}
 
             {/* Role Edit Modal */}

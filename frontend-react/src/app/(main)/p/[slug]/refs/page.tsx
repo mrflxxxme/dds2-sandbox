@@ -1,8 +1,10 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { api } from '@/lib/api';
 import { exportToExcel } from '@/lib/utils';
 import { usePermissions } from '@/lib/hooks/usePermissions';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 export default function RefsPage() {
     const [tab, setTab] = useState<'accounts' | 'cp' | 'overrides' | 'balances' | 'categories'>('accounts');
@@ -97,22 +99,23 @@ function AccountsTab() {
                 </div>
             )}
 
-            {data.length > 0 ? (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr><th>ID</th><th>Счёт</th><th>Банк</th><th>Валюта</th><th>Тип</th><th>Название</th><th>Наш</th><th>Таможня</th><th></th></tr></thead>
-                        <tbody>{data.map(r => (
-                            <tr key={r.id}>
-                                <td>{r.id}</td><td style={{ fontFamily: 'monospace', fontSize: 12 }}>{r.account}</td><td>{r.bank}</td>
-                                <td><span className={`badge badge-${r.currency === 'RUB' ? 'success' : 'warning'}`}>{r.currency}</span></td>
-                                <td>{r.account_type}</td><td>{r.account_name}</td>
-                                <td>{r.is_our_account ? '✓' : ''}</td><td>{r.is_customs_payee ? '✓' : ''}</td>
-                                <td><button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(r.id)}>✕</button></td>
-                            </tr>
-                        ))}</tbody>
-                    </table>
-                </div>
-            ) : <div className="empty-state"><div className="empty-state-text">Нет счетов</div></div>}
+            <TanStackDataTable
+                columns={[
+                    { key: 'id', label: 'ID' },
+                    { key: 'account', label: 'Счёт', render: (v: any) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</span> },
+                    { key: 'bank', label: 'Банк' },
+                    { key: 'currency', label: 'Валюта', render: (v: any) => <span className={`badge badge-${v === 'RUB' ? 'success' : 'warning'}`}>{v}</span> },
+                    { key: 'account_type', label: 'Тип' },
+                    { key: 'account_name', label: 'Название' },
+                    { key: 'is_our_account', label: 'Наш', render: (v: any) => <>{v ? '✓' : ''}</> },
+                    { key: 'is_customs_payee', label: 'Таможня', render: (v: any) => <>{v ? '✓' : ''}</> },
+                    { key: '_actions', label: '', render: (_v: any, row: any) => <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(row.id)}>✕</button>, sortable: false },
+                ]}
+                data={data}
+                emptyText="Нет счетов"
+                enableSorting
+                enablePagination={false}
+            />
         </div>
     );
 }
@@ -157,20 +160,21 @@ function CpCategoriesTab() {
                 </div>
             )}
 
-            {data.length > 0 ? (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr><th>ID</th><th>CP Key</th><th>Имя</th><th>Категория 1</th><th>Категория 2</th><th>Примечание</th><th></th></tr></thead>
-                        <tbody>{data.map(r => (
-                            <tr key={r.id}>
-                                <td>{r.id}</td><td style={{ fontFamily: 'monospace', fontSize: 12 }}>{r.cp_key}</td><td>{r.cp_name}</td>
-                                <td>{r.cat_lvl1}</td><td>{r.cat_lvl2}</td><td style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>{r.note}</td>
-                                <td><button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(r.id)}>✕</button></td>
-                            </tr>
-                        ))}</tbody>
-                    </table>
-                </div>
-            ) : <div className="empty-state"><div className="empty-state-text">Нет категорий</div></div>}
+            <TanStackDataTable
+                columns={[
+                    { key: 'id', label: 'ID' },
+                    { key: 'cp_key', label: 'CP Key', render: (v: any) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</span> },
+                    { key: 'cp_name', label: 'Имя' },
+                    { key: 'cat_lvl1', label: 'Категория 1' },
+                    { key: 'cat_lvl2', label: 'Категория 2' },
+                    { key: 'note', label: 'Примечание', render: (v: any) => <span style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>{v}</span> },
+                    { key: '_actions', label: '', render: (_v: any, row: any) => <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(row.id)}>✕</button>, sortable: false },
+                ]}
+                data={data}
+                emptyText="Нет категорий"
+                enableSorting
+                enablePagination={false}
+            />
         </div>
     );
 }
@@ -194,22 +198,21 @@ function OverridesTab() {
             </div>
             {msg && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 8 }}>{msg}</div>}
 
-            {data.length > 0 ? (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr><th>ID</th><th>TXN ID</th><th>Категория 1</th><th>Категория 2</th><th>Комментарий</th><th>Изменено</th><th></th></tr></thead>
-                        <tbody>{data.map(r => (
-                            <tr key={r.id}>
-                                <td>{r.id}</td><td style={{ fontFamily: 'monospace', fontSize: 12 }}>{r.txn_id}</td>
-                                <td>{r.cat_lvl1}</td><td>{r.cat_lvl2}</td>
-                                <td style={{ fontSize: 12 }}>{r.comment}</td>
-                                <td style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>{r.updated_at ? new Date(r.updated_at).toLocaleString('ru') : ''}</td>
-                                <td><button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(r.id)}>✕</button></td>
-                            </tr>
-                        ))}</tbody>
-                    </table>
-                </div>
-            ) : <div className="empty-state"><div className="empty-state-text">Переопределений нет</div></div>}
+            <TanStackDataTable
+                columns={[
+                    { key: 'id', label: 'ID' },
+                    { key: 'txn_id', label: 'TXN ID', render: (v: any) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</span> },
+                    { key: 'cat_lvl1', label: 'Категория 1' },
+                    { key: 'cat_lvl2', label: 'Категория 2' },
+                    { key: 'comment', label: 'Комментарий', render: (v: any) => <span style={{ fontSize: 12 }}>{v}</span> },
+                    { key: 'updated_at', label: 'Изменено', render: (v: any) => <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>{v ? new Date(v).toLocaleString('ru') : ''}</span> },
+                    { key: '_actions', label: '', render: (_v: any, row: any) => <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(row.id)}>✕</button>, sortable: false },
+                ]}
+                data={data}
+                emptyText="Переопределений нет"
+                enableSorting
+                enablePagination={false}
+            />
         </div>
     );
 }
@@ -253,14 +256,13 @@ function BalancesTab() {
                 </div>
             )}
 
-            {data.length > 0 ? (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr>{Object.keys(data[0]).map(k => <th key={k}>{k}</th>)}</tr></thead>
-                        <tbody>{data.map((r, i) => <tr key={i}>{Object.values(r).map((v: any, j) => <td key={j}>{v ?? '—'}</td>)}</tr>)}</tbody>
-                    </table>
-                </div>
-            ) : <div className="empty-state"><div className="empty-state-text">Нет начальных остатков</div></div>}
+            <TanStackDataTable
+                columns={data.length > 0 ? Object.keys(data[0]).map(k => ({ key: k, label: k })) : []}
+                data={data}
+                emptyText="Нет начальных остатков"
+                enableSorting
+                enablePagination={false}
+            />
         </div>
     );
 }
@@ -315,19 +317,18 @@ function CategoriesTab() {
                 <button className={`btn ${dir === 'expense' ? 'btn-primary' : 'btn-secondary'} btn-sm`} onClick={() => setDir('expense')}>📤 Расход ({data.filter(c => c.direction === 'expense').length})</button>
             </div>
 
-            {filtered.length > 0 ? (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr><th>ID</th><th>Категория</th><th>Подкатегория</th><th></th></tr></thead>
-                        <tbody>{filtered.map(r => (
-                            <tr key={r.id}>
-                                <td>{r.id}</td><td style={{ fontWeight: 500 }}>{r.cat_lvl1}</td><td>{r.cat_lvl2}</td>
-                                <td><button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(r.id)}>✕</button></td>
-                            </tr>
-                        ))}</tbody>
-                    </table>
-                </div>
-            ) : <div className="empty-state"><div className="empty-state-text">Нет категорий {dir === 'income' ? 'прихода' : 'расхода'}</div></div>}
+            <TanStackDataTable
+                columns={[
+                    { key: 'id', label: 'ID' },
+                    { key: 'cat_lvl1', label: 'Категория', render: (v: any) => <span style={{ fontWeight: 500 }}>{v}</span> },
+                    { key: 'cat_lvl2', label: 'Подкатегория' },
+                    { key: '_actions', label: '', render: (_v: any, row: any) => <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(row.id)}>✕</button>, sortable: false },
+                ]}
+                data={filtered}
+                emptyText={`Нет категорий ${dir === 'income' ? 'прихода' : 'расхода'}`}
+                enableSorting
+                enablePagination={false}
+            />
         </div>
     );
 }

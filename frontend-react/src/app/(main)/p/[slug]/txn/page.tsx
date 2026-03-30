@@ -1,7 +1,9 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { api } from '@/lib/api';
-import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
+import { formatNumber, formatDate } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 export default function TransactionsPage() {
     const [data, setData] = useState<any[]>([]);
@@ -23,6 +25,25 @@ export default function TransactionsPage() {
         setLoading(false);
     };
 
+    const columns: Column[] = useMemo(() => [
+        { key: 'date', label: 'Дата', render: (v: any) => <span style={{ fontSize: 13, whiteSpace: 'nowrap' }}>{formatDate(v)}</span> },
+        { key: 'account', label: 'Счёт', render: (v: any) => <span style={{ fontSize: 13 }}>{v}</span> },
+        { key: 'counterparty', label: 'Контрагент', render: (v: any) => <span style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block' }}>{v || '—'}</span> },
+        { key: 'cat_lvl1', label: 'Категория', render: (_v: any, row: any) => <>{row.cat_lvl1 || row.event_type || '—'}</> },
+        {
+            key: 'income', label: 'Сумма', align: 'right' as const,
+            render: (_v: any, row: any) => {
+                const isIncome = parseFloat(row.income) > 0;
+                return (
+                    <span style={{ fontWeight: 600, fontFamily: 'monospace', color: isIncome ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                        {formatNumber(isIncome ? row.income : row.expense)}
+                    </span>
+                );
+            },
+        },
+        { key: 'currency', label: 'Валюта', render: (v: any) => <span className="badge badge-info">{v || 'RUB'}</span> },
+    ], []);
+
     return (
         <div className="animate-in">
             <div className="page-header">
@@ -30,10 +51,6 @@ export default function TransactionsPage() {
                     <h1 className="page-title">Операции</h1>
                     <p className="page-subtitle">Все движения денежных средств</p>
                 </div>
-                <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'transactions')}
-                    disabled={data.length === 0}>
-                    📥 Экспорт Excel
-                </button>
             </div>
 
             <div className="glass-card" style={{ marginBottom: 16, padding: 16 }}>
@@ -50,55 +67,17 @@ export default function TransactionsPage() {
                 </div>
             </div>
 
-            <div className="glass-card">
-                {loading ? (
-                    <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка...</div>
-                ) : data.length === 0 ? (
-                    <div className="empty-state">
-                        <div className="empty-state-icon">💳</div>
-                        <div className="empty-state-text">Нет транзакций за выбранный период</div>
-                    </div>
-                ) : (
-                    <div style={{ overflowX: 'auto' }}>
-                        <table className="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Дата</th>
-                                    <th>Счёт</th>
-                                    <th>Контрагент</th>
-                                    <th>Категория</th>
-                                    <th style={{ textAlign: 'right' }}>Сумма</th>
-                                    <th>Валюта</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {data.slice(0, 200).map((t: any, i: number) => (
-                                    <tr key={i}>
-                                        <td style={{ fontSize: 13, whiteSpace: 'nowrap' }}>{formatDate(t.date)}</td>
-                                        <td style={{ fontSize: 13 }}>{t.account}</td>
-                                        <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                            {t.counterparty || '—'}
-                                        </td>
-                                        <td>{t.cat_lvl1 || t.event_type || '—'}</td>
-                                        <td style={{
-                                            textAlign: 'right', fontWeight: 600, fontFamily: 'monospace',
-                                            color: parseFloat(t.income) > 0 ? 'var(--color-success)' : 'var(--color-danger)'
-                                        }}>
-                                            {formatNumber(parseFloat(t.income) > 0 ? t.income : t.expense)}
-                                        </td>
-                                        <td><span className="badge badge-info">{t.currency || 'RUB'}</span></td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                        {data.length > 200 && (
-                            <div style={{ padding: 12, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>
-                                Показано 200 из {data.length}. Используйте фильтр для уточнения.
-                            </div>
-                        )}
-                    </div>
-                )}
-            </div>
+            <TanStackDataTable
+                columns={columns}
+                data={data}
+                loading={loading}
+                emptyIcon="💳"
+                emptyText="Нет транзакций за выбранный период"
+                exportName="transactions"
+                enableSorting
+                enablePagination
+                pageSize={50}
+            />
         </div>
     );
 }

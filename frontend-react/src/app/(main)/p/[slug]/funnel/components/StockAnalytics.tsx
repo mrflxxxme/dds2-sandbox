@@ -204,6 +204,7 @@ export function StockAnalytics() {
             </div>
 
             {/* Table */}
+            {/* TODO: migrate to TanStackDataTable — complex table with sticky columns, custom pagination, hover effects, ИТОГО row */}
             <div className="glass-card" style={{ overflow: 'auto', padding: 0 }}>
                 <table className="data-table" style={{ fontSize: 12, width: '100%' }}>
                     <thead>

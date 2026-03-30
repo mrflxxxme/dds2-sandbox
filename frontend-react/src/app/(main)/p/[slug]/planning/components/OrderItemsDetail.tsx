@@ -1,7 +1,9 @@
 'use client';
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, exportToExcel } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 interface Props {
     selected: string;
@@ -69,6 +71,21 @@ export function OrderItemsDetail({ selected, orders, items, onItemsReload, onOrd
     const hiddenCols = new Set(['volume_m3', ...(hasCarpets ? [] : ['area_m2'])]);
     const itemKeys = items.length > 0 ? Object.keys(items[0]).filter(k => !hiddenCols.has(k)) : [];
 
+    const itemColumns: Column[] = useMemo(() => {
+        return itemKeys.map(k => ({
+            key: k,
+            label: tr(k),
+            render: (v: any) => <span style={{ fontSize: 12 }}>{renderCell(k, v)}</span>,
+        }));
+    }, [itemKeys]);
+
+    const factPaymentColumns: Column[] = useMemo(() => [
+        { key: 'date', label: 'Дата', render: (v: any) => <span style={{ fontSize: 12 }}>{v}</span> },
+        { key: 'counterparty', label: 'Контрагент', render: (v: any) => <span style={{ fontSize: 12 }}>{v}</span> },
+        { key: 'expense', label: 'Сумма', format: 'number' as const },
+        { key: 'currency', label: 'Валюта', render: (v: any) => <span style={{ fontSize: 12 }}>{v}</span> },
+    ], []);
+
     return (
         <>
             <div style={{ marginTop: 16, borderTop: '1px solid var(--color-border)', paddingTop: 16 }}>
@@ -117,16 +134,18 @@ export function OrderItemsDetail({ selected, orders, items, onItemsReload, onOrd
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                         <input type="file" accept=".xlsx,.xls,.csv" onChange={e => setFile(e.target.files?.[0] || null)} style={{ fontSize: 12 }} />
                         <button className="btn btn-primary btn-sm" onClick={uploadFile} disabled={!file}>📤 Загрузить</button>
-                        {items.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(items, `order_${selected}_items`)}>📥 Excel</button>}
                     </div>
                 </div>
                 {items.length > 0 ? (
-                    <div style={{ overflowX: 'auto', maxHeight: 400, overflowY: 'auto' }}>
-                        <table className="data-table">
-                            <thead><tr>{itemKeys.map(k => <th key={k} style={{ fontSize: 11 }}>{tr(k)}</th>)}</tr></thead>
-                            <tbody>{items.map((r: any, i: number) => <tr key={i}>{itemKeys.map((k, j) => <td key={j} style={{ fontSize: 12 }}>{renderCell(k, r[k])}</td>)}</tr>)}</tbody>
-                        </table>
-                    </div>
+                    <TanStackDataTable
+                        columns={itemColumns}
+                        data={items}
+                        enableSorting
+                        enablePagination
+                        pageSize={50}
+                        exportName={`order_${selected}_items`}
+                        maxHeight={400}
+                    />
                 ) : <div style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>Нет позиций. Загрузите файл Excel.</div>}
             </div>
 
@@ -157,10 +176,12 @@ export function OrderItemsDetail({ selected, orders, items, onItemsReload, onOrd
                         {summary.fact_order_payments?.length > 0 && (
                             <div style={{ marginTop: 12 }}>
                                 <h5 style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Факт оплаты заказа:</h5>
-                                <table className="data-table"><thead><tr><th>Дата</th><th>Контрагент</th><th>Сумма</th><th>Валюта</th></tr></thead>
-                                    <tbody>{summary.fact_order_payments.map((p: any, i: number) => (
-                                        <tr key={i}><td style={{ fontSize: 12 }}>{p.date}</td><td style={{ fontSize: 12 }}>{p.counterparty}</td><td style={{ fontSize: 12 }}>{formatNumber(p.expense)}</td><td style={{ fontSize: 12 }}>{p.currency}</td></tr>
-                                    ))}</tbody></table>
+                                <TanStackDataTable
+                                    columns={factPaymentColumns}
+                                    data={summary.fact_order_payments}
+                                    enableSorting
+                                    enablePagination={false}
+                                />
                             </div>
                         )}
                     </div>

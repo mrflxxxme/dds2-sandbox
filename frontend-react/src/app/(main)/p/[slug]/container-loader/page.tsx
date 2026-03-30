@@ -1,8 +1,10 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import dynamic from 'next/dynamic';
 import { formatNumber } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 import {
     CONTAINERS, BOX_COLORS,
     calculatePack,
@@ -283,42 +285,31 @@ export default function ContainerLoaderPage() {
                         </div>
 
                         {/* Top free spaces table */}
-                        {result.freeSpaces.length > 0 && (
-                            <div style={{ marginTop: 14 }}>
-                                <div style={{ fontSize: 10, color: 'var(--color-text-dim)', textTransform: 'uppercase', marginBottom: 6 }}>
-                                    Топ пустых зон
+                        {result.freeSpaces.length > 0 && (() => {
+                            const freeSpaceSorted = [...result.freeSpaces]
+                                .sort((a, b) => (b.l * b.w * b.h) - (a.l * a.w * a.h))
+                                .slice(0, 5)
+                                .map((s, i) => ({ ...s, _idx: i + 1, _dims: `${cm(s.l)} × ${cm(s.w)} × ${cm(s.h)}`, _vol: (s.l * s.w * s.h).toFixed(3), _pos: `X:${cm(s.x)} Y:${cm(s.y)} Z:${cm(s.z)}` }));
+                            const freeSpaceCols: Column[] = [
+                                { key: '_idx', label: '#', render: (v: any) => <span style={{ color: 'var(--color-danger)', fontWeight: 600 }}>{v}</span> },
+                                { key: '_dims', label: 'Размеры (Д×Ш×В), см', align: 'center' },
+                                { key: '_vol', label: 'Объём, м³', align: 'center', render: (v: any) => <span style={{ color: 'var(--color-danger)', fontWeight: 600 }}>{v}</span> },
+                                { key: '_pos', label: 'Позиция, см', align: 'center', render: (v: any) => <span style={{ color: 'var(--color-text-dim)' }}>{v}</span> },
+                            ];
+                            return (
+                                <div style={{ marginTop: 14 }}>
+                                    <div style={{ fontSize: 10, color: 'var(--color-text-dim)', textTransform: 'uppercase', marginBottom: 6 }}>
+                                        Топ пустых зон
+                                    </div>
+                                    <TanStackDataTable
+                                        columns={freeSpaceCols}
+                                        data={freeSpaceSorted}
+                                        enableSorting
+                                        enablePagination={false}
+                                    />
                                 </div>
-                                <div style={{ overflowX: 'auto' }}>
-                                    <table className="data-table">
-                                        <thead>
-                                            <tr>
-                                                <th>#</th>
-                                                <th style={{ textAlign: 'center' }}>Размеры (Д×Ш×В), см</th>
-                                                <th style={{ textAlign: 'center' }}>Объём, м³</th>
-                                                <th style={{ textAlign: 'center' }}>Позиция, см</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {[...result.freeSpaces]
-                                                .sort((a, b) => (b.l * b.w * b.h) - (a.l * a.w * a.h))
-                                                .slice(0, 5)
-                                                .map((s, i) => (
-                                                    <tr key={i}>
-                                                        <td style={{ color: 'var(--color-danger)', fontWeight: 600 }}>{i + 1}</td>
-                                                        <td style={{ textAlign: 'center' }}>{cm(s.l)} × {cm(s.w)} × {cm(s.h)}</td>
-                                                        <td style={{ textAlign: 'center', color: 'var(--color-danger)', fontWeight: 600 }}>
-                                                            {(s.l * s.w * s.h).toFixed(3)}
-                                                        </td>
-                                                        <td style={{ textAlign: 'center', color: 'var(--color-text-dim)' }}>
-                                                            X:{cm(s.x)} Y:{cm(s.y)} Z:{cm(s.z)}
-                                                        </td>
-                                                    </tr>
-                                                ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        )}
+                            );
+                        })()}
                     </div>
 
                     {/* Cost table */}
@@ -327,67 +318,52 @@ export default function ContainerLoaderPage() {
                             <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>
                                 💰 Себестоимость доставки за 1 коробку
                             </h3>
-                            <div style={{ overflowX: 'auto' }}>
-                                <table className="data-table">
-                                    <thead>
-                                        <tr>
-                                            <th>Тип</th>
-                                            <th style={{ textAlign: 'center' }}>Шт</th>
-                                            <th style={{ textAlign: 'center', color: 'var(--color-warning)' }}>
-                                                Цена/кор<br /><span style={{ fontSize: 9, fontWeight: 400 }}>(текущая)</span>
-                                            </th>
-                                            <th style={{ textAlign: 'center' }}>
-                                                Макс<br /><span style={{ fontSize: 9 }}>(полная)</span>
-                                            </th>
-                                            <th style={{ textAlign: 'center', color: 'var(--color-success)' }}>
-                                                Цена/кор<br /><span style={{ fontSize: 9, fontWeight: 400 }}>(полная)</span>
-                                            </th>
-                                            <th style={{ textAlign: 'center' }}>Экономия</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {boxes.map((b, i) => {
-                                            const pc = result.placedPerType[i] || 0;
-                                            const mc = result.maxPerType[i] || 0;
-                                            const bvs = (b.l * b.w * b.h) / 1e6;
-                                            const tv = result.boxVol;
-                                            const tVol = pc * bvs;
-                                            const tShare = tv > 0 ? tVol / tv : 0;
-                                            const tCost = cost * tShare;
-                                            const cpb = pc > 0 ? tCost / pc : 0;
-                                            const cpbf = mc > 0 ? cost / mc : 0;
-                                            const sav = cpb > 0 && cpbf > 0 ? ((1 - cpbf / cpb) * 100).toFixed(0) : '0';
-
-                                            return (
-                                                <tr key={i}>
-                                                    <td>
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                                            <div className="box-color-dot" style={{ background: BOX_COLORS[i % BOX_COLORS.length] }} />
-                                                            <span>{b.label}</span>
-                                                            <span style={{ color: 'var(--color-text-dim)', fontSize: 10 }}>{b.l}×{b.w}×{b.h}</span>
-                                                        </div>
-                                                    </td>
-                                                    <td style={{ textAlign: 'center' }}>{pc}</td>
-                                                    <td style={{ textAlign: 'center', color: 'var(--color-warning)', fontWeight: 700 }}>
-                                                        {formatNumber(cpb)} {curr}
-                                                    </td>
-                                                    <td style={{ textAlign: 'center', color: 'var(--color-text-dim)' }}>{mc}</td>
-                                                    <td style={{ textAlign: 'center', color: 'var(--color-success)', fontWeight: 700 }}>
-                                                        {formatNumber(cpbf)} {curr}
-                                                    </td>
-                                                    <td style={{ textAlign: 'center' }}>
-                                                        {Number(sav) > 0 ? (
-                                                            <span className="badge badge-success">−{sav}%</span>
-                                                        ) : (
-                                                            <span style={{ color: 'var(--color-text-dim)' }}>—</span>
-                                                        )}
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })}
-                                    </tbody>
-                                </table>
-                            </div>
+                            <TanStackDataTable
+                                columns={(() => {
+                                    const cols: Column[] = [
+                                        {
+                                            key: 'label', label: 'Тип',
+                                            render: (_v: any, row: any) => (
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                    <div className="box-color-dot" style={{ background: BOX_COLORS[row._idx % BOX_COLORS.length] }} />
+                                                    <span>{row.label}</span>
+                                                    <span style={{ color: 'var(--color-text-dim)', fontSize: 10 }}>{row.dims}</span>
+                                                </div>
+                                            ),
+                                        },
+                                        { key: 'pc', label: 'Шт', align: 'center' },
+                                        {
+                                            key: 'cpb', label: 'Цена/кор (текущая)', align: 'center',
+                                            render: (v: any) => <span style={{ color: 'var(--color-warning)', fontWeight: 700 }}>{formatNumber(v)} {curr}</span>,
+                                        },
+                                        { key: 'mc', label: 'Макс (полная)', align: 'center', render: (v: any) => <span style={{ color: 'var(--color-text-dim)' }}>{v}</span> },
+                                        {
+                                            key: 'cpbf', label: 'Цена/кор (полная)', align: 'center',
+                                            render: (v: any) => <span style={{ color: 'var(--color-success)', fontWeight: 700 }}>{formatNumber(v)} {curr}</span>,
+                                        },
+                                        {
+                                            key: 'sav', label: 'Экономия', align: 'center',
+                                            render: (v: any) => Number(v) > 0 ? <span className="badge badge-success">{'\u2212'}{v}%</span> : <span style={{ color: 'var(--color-text-dim)' }}>{'\u2014'}</span>,
+                                        },
+                                    ];
+                                    return cols;
+                                })()}
+                                data={boxes.map((b, i) => {
+                                    const pc = result.placedPerType[i] || 0;
+                                    const mc = result.maxPerType[i] || 0;
+                                    const bvs = (b.l * b.w * b.h) / 1e6;
+                                    const tv = result.boxVol;
+                                    const tVol = pc * bvs;
+                                    const tShare = tv > 0 ? tVol / tv : 0;
+                                    const tCost = cost * tShare;
+                                    const cpb = pc > 0 ? tCost / pc : 0;
+                                    const cpbf = mc > 0 ? cost / mc : 0;
+                                    const sav = cpb > 0 && cpbf > 0 ? ((1 - cpbf / cpb) * 100).toFixed(0) : '0';
+                                    return { _idx: i, label: b.label, dims: `${b.l}×${b.w}×${b.h}`, pc, cpb, mc, cpbf, sav };
+                                })}
+                                enableSorting
+                                enablePagination={false}
+                            />
                             <div style={{
                                 marginTop: 12, padding: '10px 14px', borderRadius: 8,
                                 background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)',

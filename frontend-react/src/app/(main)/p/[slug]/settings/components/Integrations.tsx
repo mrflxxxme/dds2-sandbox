@@ -1,8 +1,10 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { api } from '@/lib/api';
 import { formatDateTime } from '@/lib/utils';
 import { usePermissions } from '@/lib/hooks/usePermissions';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 export function Integrations() {
     const { canEdit } = usePermissions();
@@ -30,6 +32,30 @@ export function Integrations() {
         try { const d = new Date(); d.setDate(d.getDate() - 7); await api.syncFunnel(d.toISOString().slice(0, 10), new Date().toISOString().slice(0, 10)); setMsg('Синхронизация завершена'); loadData(); } catch (e: any) { setMsg(e.message); }
         setSyncing(null);
     };
+
+    const syncLogColumns: Column[] = useMemo(() => [
+        {
+            key: 'service', label: 'Сервис',
+            render: (v: any) => <span className="badge badge-info">{v}</span>,
+        },
+        { key: 'sync_type', label: 'Тип' },
+        {
+            key: 'status', label: 'Статус',
+            render: (v: any) => (
+                <span className={`badge ${v === 'OK' ? 'badge-success' : v === 'RUNNING' ? 'badge-warning' : v === 'ERROR' || v === 'TIMEOUT' ? 'badge-danger' : 'badge-secondary'}`}>{v}</span>
+            ),
+        },
+        {
+            key: 'started_at', label: 'Начало',
+            render: (v: any) => <span style={{ fontSize: 13 }}>{formatDateTime(v)}</span>,
+        },
+        { key: 'rows_fetched', label: 'Строк получено', format: 'number' as const },
+        { key: 'rows_inserted', label: 'Вставлено', format: 'number' as const },
+        {
+            key: 'error_msg', label: 'Ошибка',
+            render: (v: any) => <span style={{ color: 'var(--color-danger)', fontSize: 13 }}>{v || '—'}</span>,
+        },
+    ], []);
 
     if (loading) return <div style={{ padding: 40, color: 'var(--color-text-muted)' }}>Загрузка...</div>;
 
@@ -73,23 +99,13 @@ export function Integrations() {
             </div>
             <div className="glass-card">
                 <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>📋 Логи синхронизации</h3>
-                {syncLog.length === 0 ? (
-                    <div className="empty-state"><div className="empty-state-text">Синхронизаций пока не было</div></div>
-                ) : (
-                    <table className="data-table">
-                        <thead><tr><th>Сервис</th><th>Тип</th><th>Статус</th><th>Начало</th><th>Строк получено</th><th>Вставлено</th><th>Ошибка</th></tr></thead>
-                        <tbody>{syncLog.map(s => (
-                            <tr key={s.id}>
-                                <td><span className="badge badge-info">{s.service}</span></td>
-                                <td>{s.sync_type}</td>
-                                <td><span className={`badge ${s.status === 'OK' ? 'badge-success' : s.status === 'RUNNING' ? 'badge-warning' : s.status === 'ERROR' || s.status === 'TIMEOUT' ? 'badge-danger' : 'badge-secondary'}`}>{s.status}</span></td>
-                                <td style={{ fontSize: 13 }}>{formatDateTime(s.started_at)}</td>
-                                <td>{s.rows_fetched}</td><td>{s.rows_inserted}</td>
-                                <td style={{ color: 'var(--color-danger)', fontSize: 13 }}>{s.error_msg || '—'}</td>
-                            </tr>
-                        ))}</tbody>
-                    </table>
-                )}
+                <TanStackDataTable
+                    columns={syncLogColumns}
+                    data={syncLog}
+                    emptyText="Синхронизаций пока не было"
+                    enableSorting
+                    enablePagination={false}
+                />
             </div>
         </>
     );

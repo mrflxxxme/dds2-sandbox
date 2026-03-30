@@ -1,7 +1,9 @@
 'use client';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { api } from '@/lib/api';
 import type { TelegramChatBinding } from '@/types/api';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 export function TelegramBot() {
     const [chats, setChats] = useState<TelegramChatBinding[]>([]);
@@ -49,6 +51,35 @@ export function TelegramBot() {
             setMsg(e.message);
         }
     };
+
+    const columns: Column[] = useMemo(() => [
+        {
+            key: 'chat_id', label: 'Chat ID',
+            render: (v: any) => <span style={{ fontFamily: 'monospace', fontSize: 13 }}>{v}</span>,
+        },
+        {
+            key: 'brand', label: 'Бренд',
+            render: (v: any) => v || <span style={{ color: 'var(--color-text-dim)' }}>—</span>,
+        },
+        {
+            key: 'notify_enabled', label: 'Уведомления',
+            render: (_v: any, row: any) => (
+                <button
+                    className={`btn btn-sm ${row.notify_enabled ? 'btn-success' : 'btn-secondary'}`}
+                    onClick={() => handleToggle(row.id, row.notify_enabled)}
+                >
+                    {row.notify_enabled ? '🔔 Вкл' : '🔕 Выкл'}
+                </button>
+            ),
+        },
+        {
+            key: '_actions', label: '', width: '100',
+            sortable: false,
+            render: (_v: any, row: any) => (
+                <button className="btn btn-danger btn-sm" onClick={() => handleDelete(row.id)}>✕</button>
+            ),
+        },
+    ], []);
 
     if (loading) return <div style={{ padding: 40, color: 'var(--color-text-muted)' }}>Загрузка...</div>;
 
@@ -102,35 +133,12 @@ export function TelegramBot() {
                         <div className="empty-state-text">Нет привязанных чатов</div>
                     </div>
                 ) : (
-                    <table className="data-table">
-                        <thead>
-                            <tr>
-                                <th>Chat ID</th>
-                                <th>Бренд</th>
-                                <th>Уведомления</th>
-                                <th style={{ width: 100 }}></th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {chats.map(c => (
-                                <tr key={c.id}>
-                                    <td style={{ fontFamily: 'monospace', fontSize: 13 }}>{c.chat_id}</td>
-                                    <td>{c.brand || <span style={{ color: 'var(--color-text-dim)' }}>—</span>}</td>
-                                    <td>
-                                        <button
-                                            className={`btn btn-sm ${c.notify_enabled ? 'btn-success' : 'btn-secondary'}`}
-                                            onClick={() => handleToggle(c.id, c.notify_enabled)}
-                                        >
-                                            {c.notify_enabled ? '🔔 Вкл' : '🔕 Выкл'}
-                                        </button>
-                                    </td>
-                                    <td>
-                                        <button className="btn btn-danger btn-sm" onClick={() => handleDelete(c.id)}>✕</button>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
+                    <TanStackDataTable
+                        columns={columns}
+                        data={chats}
+                        enableSorting
+                        enablePagination={false}
+                    />
                 )}
             </div>
         </>

@@ -297,6 +297,7 @@ export default function TrendsPage() {
                     </div>
 
                     {/* Table */}
+                    {/* TODO: migrate to TanStackDataTable — complex table with custom SortTh, TurnoverCell, MetricCell components, sticky columns */}
                     <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                         {loading ? (
                             <div style={{ padding: 60, textAlign: 'center', color: 'var(--color-text-dim)' }}>

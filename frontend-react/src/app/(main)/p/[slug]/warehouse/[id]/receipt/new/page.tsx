@@ -281,6 +281,7 @@ export default function NewReceiptPage() {
                 style={{ overflow: 'auto', padding: 0 }}
                 onPaste={handlePaste}
             >
+                {/* TODO: migrate to TanStackDataTable — has inline form inputs (barcode input, quantity input, mode-dependent columns, paste handler) */}
                 <table className="data-table" style={{ marginBottom: 0 }}>
                     <thead>
                         <tr>

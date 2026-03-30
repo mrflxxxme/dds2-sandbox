@@ -3,6 +3,8 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 import type { InboundReceipt, Nomenclature } from '@/types/api';
 
 /* ─── Nomenclature lookup ─────────────────────────────────────────────────── */
@@ -189,66 +191,42 @@ export default function ReceiptDetailPage() {
             </div>
 
             {/* Items */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Позиции приёмки</h2>
-                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-                    {receipt.items.length} поз., {formatNumber(totalExpected)} шт.
-                </span>
-            </div>
-
-            <div className="glass-card" style={{ padding: 0, overflow: 'auto' }}>
-                <table className="data-table" style={{ marginBottom: 0 }}>
-                    <thead>
-                        <tr>
-                            <th style={{ width: 40, textAlign: 'center' }}>#</th>
-                            <th style={{ minWidth: 220 }}>ТОВАР</th>
-                            <th style={{ minWidth: 150 }}>ШК</th>
-                            <th style={{ width: 100, textAlign: 'right' }}>ОЖИД.</th>
-                            <th style={{ width: 100, textAlign: 'right' }}>ФАКТ</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {receipt.items.map((item, i) => {
-                            const n = nom.resolve(item.barcode);
-                            const mismatch = item.expected_qty !== item.actual_qty;
-                            return (
-                                <tr key={item.id} style={{ background: mismatch ? 'rgba(245,158,11,0.04)' : undefined }}>
-                                    <td style={{ textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 12 }}>{i + 1}</td>
-                                    <td style={{ fontSize: 13 }}>
-                                        {n ? (
-                                            <div>
-                                                <div style={{ fontWeight: 500 }}>{nom.label(n)}</div>
-                                                {n.article_seller && n.name && n.article_seller !== n.name && (
-                                                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{n.name}</div>
-                                                )}
-                                            </div>
-                                        ) : (
-                                            <span style={{ color: 'var(--color-text-muted)' }}>—</span>
-                                        )}
-                                    </td>
-                                    <td style={{ fontSize: 13, fontFamily: 'monospace' }}>{item.barcode}</td>
-                                    <td style={{ textAlign: 'right', fontWeight: 500 }}>{formatNumber(item.expected_qty)}</td>
-                                    <td style={{
-                                        textAlign: 'right', fontWeight: 500,
-                                        color: mismatch ? '#b45309' : 'var(--color-text)',
-                                    }}>
-                                        {formatNumber(item.actual_qty)}
-                                    </td>
-                                </tr>
-                            );
-                        })}
-                    </tbody>
-                    <tfoot>
-                        <tr style={{ fontWeight: 700, borderTop: '2px solid var(--color-border)' }}>
-                            <td></td>
-                            <td>Итого</td>
-                            <td></td>
-                            <td style={{ textAlign: 'right' }}>{formatNumber(totalExpected)}</td>
-                            <td style={{ textAlign: 'right' }}>{formatNumber(totalActual)}</td>
-                        </tr>
-                    </tfoot>
-                </table>
-            </div>
+            {(() => {
+                const receiptItemsData = receipt.items.map((item, i) => ({ ...item, _index: i + 1 }));
+                const totalRow = { _index: '', barcode: '', expected_qty: totalExpected, actual_qty: totalActual, _isTotal: true, id: '_total' };
+                const receiptCols: Column[] = [
+                    { key: '_index', label: '#', align: 'center' as const, width: '40', render: (v: number, row: any) => row._isTotal ? '' : <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>{v}</span> },
+                    { key: '_product', label: 'ТОВАР', render: (_v: any, row: any) => {
+                        if (row._isTotal) return <strong>Итого</strong>;
+                        const n = nom.resolve(row.barcode);
+                        return n ? (
+                            <div>
+                                <div style={{ fontWeight: 500 }}>{nom.label(n)}</div>
+                                {n.article_seller && n.name && n.article_seller !== n.name && (
+                                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{n.name}</div>
+                                )}
+                            </div>
+                        ) : <span style={{ color: 'var(--color-text-muted)' }}>—</span>;
+                    }},
+                    { key: 'barcode', label: 'ШК', render: (v: string, row: any) => row._isTotal ? '' : <span style={{ fontSize: 13, fontFamily: 'monospace' }}>{v}</span> },
+                    { key: 'expected_qty', label: 'ОЖИД.', align: 'right' as const, render: (v: number, row: any) => <span style={{ fontWeight: row._isTotal ? 700 : 500 }}>{formatNumber(v)}</span> },
+                    { key: 'actual_qty', label: 'ФАКТ', align: 'right' as const, render: (v: number, row: any) => {
+                        if (row._isTotal) return <span style={{ fontWeight: 700 }}>{formatNumber(v)}</span>;
+                        const mismatch = row.expected_qty !== row.actual_qty;
+                        return <span style={{ fontWeight: 500, color: mismatch ? '#b45309' : 'var(--color-text)' }}>{formatNumber(v)}</span>;
+                    }},
+                ];
+                return (
+                    <TanStackDataTable
+                        columns={receiptCols}
+                        data={[...receiptItemsData, totalRow]}
+                        title="Позиции приёмки"
+                        enableSorting={false}
+                        enablePagination={false}
+                        rowClassName={(row: any) => row.expected_qty !== row.actual_qty && !row._isTotal ? 'mismatch-row' : ''}
+                    />
+                );
+            })()}
         </div>
     );
 }

@@ -107,6 +107,7 @@ function CostHistory() {
                 <span style={{ opacity: 0.5, fontSize: 13 }}>{articles.length} артикулов × {orders.length} заказов</span>
             </div>
 
+            {/* TODO: migrate to TanStackDataTable — complex table with dynamic order columns and sticky first column */}
             <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
                 <table className="data-table" style={{ fontSize: 13, whiteSpace: 'nowrap' }}>
                     <thead>
@@ -386,6 +387,7 @@ function BulkCost() {
                         </div>
                     </div>
 
+                    {/* TODO: migrate to TanStackDataTable — table with inline <input> for cost entry */}
                     <div className="glass-card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 520px)', padding: 0 }}>
                         <table className="data-table" style={{ marginBottom: 0, fontSize: 13 }}>
                             <thead>
@@ -474,6 +476,7 @@ function BulkCost() {
                 </div>
             )}
 
+            {/* TODO: migrate to TanStackDataTable — paste-from-spreadsheet table with inline <input>/<select> */}
             <div
                 className="glass-card"
                 style={{ overflow: 'auto', maxHeight: 320, padding: 0 }}

@@ -75,6 +75,7 @@ export function DDSPnL() {
             </div>
 
             <div style={{ overflowX: 'auto' }}>
+                {/* TODO: migrate to TanStackDataTable */}
                 <table className="data-table" style={{ fontSize: 13, minWidth: 800, borderCollapse: 'collapse' }}>
                     <thead>
                         <tr style={{ borderBottom: '2px solid var(--color-border)' }}>

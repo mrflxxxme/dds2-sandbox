@@ -563,6 +563,7 @@ export default function AssemblyListPage() {
                 </div>
             ) : (
                 <div className="glass-card" style={{ overflow: 'auto' }}>
+                    {/* TODO: migrate to TanStackDataTable — has inline editing (EditableCell, EditableDateCell, StatusBadge select) */}
                     <table className="data-table">
                         <thead>
                             <tr>

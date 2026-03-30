@@ -170,6 +170,7 @@ export function BrandPlans() {
             ) : (
                 <div className="glass-card">
                     <div style={{ overflowX: 'auto' }}>
+                        {/* TODO: migrate to TanStackDataTable */}
                         <table className="data-table">
                             <thead>
                                 <tr>

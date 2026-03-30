@@ -296,6 +296,7 @@ export default function EditReceiptPage() {
 
             {/* Items table */}
             <div className="glass-card" style={{ overflow: 'auto', padding: 0 }} onPaste={isAccepted ? undefined : handlePaste}>
+                {/* TODO: migrate to TanStackDataTable — has inline form inputs (barcode, expected_qty, actual_qty, disabled states, paste handler) */}
                 <table className="data-table" style={{ marginBottom: 0 }}>
                     <thead>
                         <tr>

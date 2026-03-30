@@ -4,6 +4,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { api } from '@/lib/api';
 import { formatDateTime, formatNumber } from '@/lib/utils';
 import type { MonitoringOverview, MonitoringSyncLogEntry, SyncTypeStatus, SchedulerJobInfo } from '@/types/api';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 const SYNC_TYPE_LABELS: Record<string, string> = {
     funnel_auto: 'Воронка (авто)',
@@ -110,48 +112,23 @@ function SyncTypesTable({ syncTypes }: { syncTypes: SyncTypeStatus[] }) {
     }
 
     return (
-        <div className="glass-card" style={{ marginBottom: 24 }}>
-            <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>Статус синхронизаций</h3>
-            <div style={{ overflowX: 'auto' }}>
-                <table className="data-table">
-                    <thead>
-                        <tr>
-                            <th>Сервис</th>
-                            <th>Тип</th>
-                            <th>Статус</th>
-                            <th>Последний OK</th>
-                            <th>За 24ч</th>
-                            <th>Успешность</th>
-                            <th>Ср. время</th>
-                            <th>Ошибка</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {syncTypes.map((s, i) => (
-                            <tr key={i} style={s.is_running ? { background: 'rgba(245, 158, 11, 0.05)' } : undefined}>
-                                <td><span className="badge badge-info">{s.service}</span></td>
-                                <td style={{ fontWeight: 500 }}>{getSyncTypeLabel(s.sync_type)}</td>
-                                <td>
-                                    {s.is_running ? (
-                                        <span className="badge badge-warning" style={{ animation: 'pulse 2s infinite' }}>RUNNING</span>
-                                    ) : (
-                                        <StatusBadge status={s.last_status} />
-                                    )}
-                                </td>
-                                <td><TimeAgo dateStr={s.last_ok_at} /></td>
-                                <td>{s.total_24h}</td>
-                                <td><SuccessRate ok={s.ok_24h} total={s.total_24h} /></td>
-                                <td style={{ fontSize: 13 }}>
-                                    {s.avg_duration_sec ? `${s.avg_duration_sec}с` : '—'}
-                                </td>
-                                <td style={{ color: 'var(--color-danger)', fontSize: 12, maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                    {s.last_error_msg || '—'}
-                                </td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
-            </div>
+        <div style={{ marginBottom: 24 }}>
+            <TanStackDataTable
+                title="Статус синхронизаций"
+                columns={[
+                    { key: 'service', label: 'Сервис', render: (v: any) => <span className="badge badge-info">{v}</span> },
+                    { key: 'sync_type', label: 'Тип', render: (v: any) => <span style={{ fontWeight: 500 }}>{getSyncTypeLabel(v)}</span> },
+                    { key: 'last_status', label: 'Статус', render: (_v: any, row: any) => row.is_running ? <span className="badge badge-warning" style={{ animation: 'pulse 2s infinite' }}>RUNNING</span> : <StatusBadge status={row.last_status} /> },
+                    { key: 'last_ok_at', label: 'Последний OK', render: (v: any) => <TimeAgo dateStr={v} /> },
+                    { key: 'total_24h', label: 'За 24ч' },
+                    { key: 'ok_24h', label: 'Успешность', render: (_v: any, row: any) => <SuccessRate ok={row.ok_24h} total={row.total_24h} /> },
+                    { key: 'avg_duration_sec', label: 'Ср. время', render: (v: any) => <span style={{ fontSize: 13 }}>{v ? `${v}с` : '—'}</span> },
+                    { key: 'last_error_msg', label: 'Ошибка', render: (v: any) => <span style={{ color: 'var(--color-danger)', fontSize: 12, maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block' }}>{v || '—'}</span> },
+                ]}
+                data={syncTypes}
+                enableSorting
+                enablePagination={false}
+            />
         </div>
     );
 }
@@ -160,35 +137,20 @@ function SyncTypesTable({ syncTypes }: { syncTypes: SyncTypeStatus[] }) {
 
 function SchedulerTable({ jobs, running }: { jobs: SchedulerJobInfo[]; running: boolean }) {
     return (
-        <div className="glass-card" style={{ marginBottom: 24 }}>
-            <div className="table-toolbar">
-                <h3 style={{ fontSize: 16, fontWeight: 600 }}>Планировщик задач</h3>
-                <StatusBadge status={running ? 'OK' : 'ERROR'} />
-            </div>
-            {jobs.length === 0 ? (
-                <div className="empty-state"><div className="empty-state-text">Планировщик не запущен или нет задач</div></div>
-            ) : (
-                <table className="data-table">
-                    <thead>
-                        <tr>
-                            <th>ID задачи</th>
-                            <th>Название</th>
-                            <th>Следующий запуск</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {jobs.map(j => (
-                            <tr key={j.id}>
-                                <td><code style={{ fontSize: 12 }}>{j.id}</code></td>
-                                <td style={{ fontWeight: 500 }}>{j.name}</td>
-                                <td style={{ fontSize: 13 }}>
-                                    {j.next_run ? formatDateTime(j.next_run) : <span style={{ color: 'var(--color-text-dim)' }}>завершена</span>}
-                                </td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
-            )}
+        <div style={{ marginBottom: 24 }}>
+            <TanStackDataTable
+                title="Планировщик задач"
+                actions={<StatusBadge status={running ? 'OK' : 'ERROR'} />}
+                columns={[
+                    { key: 'id', label: 'ID задачи', render: (v: any) => <code style={{ fontSize: 12 }}>{v}</code> },
+                    { key: 'name', label: 'Название', render: (v: any) => <span style={{ fontWeight: 500 }}>{v}</span> },
+                    { key: 'next_run', label: 'Следующий запуск', render: (v: any) => <span style={{ fontSize: 13 }}>{v ? formatDateTime(v) : <span style={{ color: 'var(--color-text-dim)' }}>завершена</span>}</span> },
+                ]}
+                data={jobs}
+                emptyText="Планировщик не запущен или нет задач"
+                enableSorting
+                enablePagination={false}
+            />
         </div>
     );
 }
@@ -211,80 +173,62 @@ function SyncHistoryTable({
     const services = [...new Set(syncTypes.map(s => s.service))];
     const types = [...new Set(syncTypes.map(s => s.sync_type))];
 
-    return (
-        <div className="glass-card">
-            <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>История синхронизаций</h3>
-            <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
-                <select
-                    className="form-input"
-                    style={{ width: 'auto', minWidth: 140 }}
-                    value={filters.service || ''}
-                    onChange={e => onFilterChange({ ...filters, service: e.target.value || undefined })}
-                >
-                    <option value="">Все сервисы</option>
-                    {services.map(s => <option key={s} value={s}>{s}</option>)}
-                </select>
-                <select
-                    className="form-input"
-                    style={{ width: 'auto', minWidth: 160 }}
-                    value={filters.sync_type || ''}
-                    onChange={e => onFilterChange({ ...filters, sync_type: e.target.value || undefined })}
-                >
-                    <option value="">Все типы</option>
-                    {types.map(t => <option key={t} value={t}>{getSyncTypeLabel(t)}</option>)}
-                </select>
-                <select
-                    className="form-input"
-                    style={{ width: 'auto', minWidth: 120 }}
-                    value={filters.status || ''}
-                    onChange={e => onFilterChange({ ...filters, status: e.target.value || undefined })}
-                >
-                    <option value="">Все статусы</option>
-                    <option value="OK">OK</option>
-                    <option value="ERROR">ERROR</option>
-                    <option value="RUNNING">RUNNING</option>
-                    <option value="STALE">STALE</option>
-                </select>
-            </div>
+    const filterActions = (
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+            <select
+                className="form-input"
+                style={{ width: 'auto', minWidth: 140 }}
+                value={filters.service || ''}
+                onChange={e => onFilterChange({ ...filters, service: e.target.value || undefined })}
+            >
+                <option value="">Все сервисы</option>
+                {services.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <select
+                className="form-input"
+                style={{ width: 'auto', minWidth: 160 }}
+                value={filters.sync_type || ''}
+                onChange={e => onFilterChange({ ...filters, sync_type: e.target.value || undefined })}
+            >
+                <option value="">Все типы</option>
+                {types.map(t => <option key={t} value={t}>{getSyncTypeLabel(t)}</option>)}
+            </select>
+            <select
+                className="form-input"
+                style={{ width: 'auto', minWidth: 120 }}
+                value={filters.status || ''}
+                onChange={e => onFilterChange({ ...filters, status: e.target.value || undefined })}
+            >
+                <option value="">Все статусы</option>
+                <option value="OK">OK</option>
+                <option value="ERROR">ERROR</option>
+                <option value="RUNNING">RUNNING</option>
+                <option value="STALE">STALE</option>
+            </select>
+        </div>
+    );
 
-            {loading ? (
-                <div style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка...</div>
-            ) : logs.length === 0 ? (
-                <div className="empty-state"><div className="empty-state-text">Нет записей</div></div>
-            ) : (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead>
-                            <tr>
-                                <th>Время</th>
-                                <th>Сервис</th>
-                                <th>Тип</th>
-                                <th>Статус</th>
-                                <th>Длительность</th>
-                                <th>Получено</th>
-                                <th>Вставлено</th>
-                                <th>Ошибка</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {logs.map(l => (
-                                <tr key={l.id}>
-                                    <td style={{ fontSize: 13, whiteSpace: 'nowrap' }}>{formatDateTime(l.started_at)}</td>
-                                    <td><span className="badge badge-info">{l.service}</span></td>
-                                    <td>{getSyncTypeLabel(l.sync_type)}</td>
-                                    <td><StatusBadge status={l.status} /></td>
-                                    <td style={{ fontSize: 13 }}>{l.duration_sec ? `${l.duration_sec}с` : '—'}</td>
-                                    <td>{formatNumber(l.rows_fetched)}</td>
-                                    <td>{formatNumber(l.rows_inserted)}</td>
-                                    <td style={{ color: 'var(--color-danger)', fontSize: 12, maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.error_msg || undefined}>
-                                        {l.error_msg || '—'}
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            )}
+    return (
+        <div>
+            <TanStackDataTable
+                title="История синхронизаций"
+                actions={filterActions}
+                columns={[
+                    { key: 'started_at', label: 'Время', render: (v: any) => <span style={{ fontSize: 13, whiteSpace: 'nowrap' }}>{formatDateTime(v)}</span> },
+                    { key: 'service', label: 'Сервис', render: (v: any) => <span className="badge badge-info">{v}</span> },
+                    { key: 'sync_type', label: 'Тип', render: (v: any) => <>{getSyncTypeLabel(v)}</> },
+                    { key: 'status', label: 'Статус', render: (v: any) => <StatusBadge status={v} /> },
+                    { key: 'duration_sec', label: 'Длительность', render: (v: any) => <span style={{ fontSize: 13 }}>{v ? `${v}с` : '—'}</span> },
+                    { key: 'rows_fetched', label: 'Получено', format: 'number' as const },
+                    { key: 'rows_inserted', label: 'Вставлено', format: 'number' as const },
+                    { key: 'error_msg', label: 'Ошибка', render: (v: any) => <span style={{ color: 'var(--color-danger)', fontSize: 12, maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block' }} title={v || undefined}>{v || '—'}</span> },
+                ]}
+                data={logs}
+                loading={loading}
+                emptyText="Нет записей"
+                enableSorting
+                enablePagination={false}
+            />
         </div>
     );
 }

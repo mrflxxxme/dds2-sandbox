@@ -1,7 +1,9 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 
 export function PlanPayments() {
     const [data, setData] = useState<any[]>([]);
@@ -95,6 +97,40 @@ export function PlanPayments() {
     });
     const dirFilters = [{ key: '', label: 'Все' }, { key: 'ЗАКАЗ', label: '📦 Заказ' }, { key: 'ТАМОЖНЯ', label: '🛃 Таможня' }, { key: 'ДОСТАВКА', label: '🚛 Доставка' }];
 
+    const columns: Column[] = useMemo(() => {
+        const baseCols: Column[] = [
+            { key: 'id', label: 'ID' },
+            { key: 'pay_date', label: 'Дата', render: (v: any) => <span style={{ fontSize: 12 }}>{v ? formatDate(v) : '—'}</span> },
+            { key: 'order_no', label: 'Заказ', render: (v: any) => v || '—' },
+            { key: 'direction', label: 'Направление', render: (v: any) => <span className="badge badge-info">{v || '—'}</span> },
+        ];
+        if (filterDir === 'ДОСТАВКА') {
+            baseCols.push({ key: '_invoice', label: 'Инвойс', render: (_v: any, row: any) => <span style={{ fontSize: 11, fontFamily: 'monospace' }}>{orderMeta[String(row.order_no)]?.invoice_no || '—'}</span> });
+        }
+        if (filterDir === 'ТАМОЖНЯ') {
+            baseCols.push({ key: '_dt', label: 'ДТ', render: (_v: any, row: any) => <span style={{ fontSize: 11, fontFamily: 'monospace' }}>{orderMeta[String(row.order_no)]?.dt_number || '—'}</span> });
+        }
+        baseCols.push(
+            { key: 'amount', label: 'План вал.', render: (v: any) => <span style={{ fontWeight: 500 }}>{formatNumber(parseFloat(v || 0))}</span> },
+            { key: 'currency', label: 'Вал.', render: (v: any) => <span className={`badge badge-${v === 'RUB' ? 'success' : 'warning'}`}>{v}</span> },
+            { key: 'paid_amount', label: 'Факт вал.', render: (v: any, row: any) => { const paidAmt = parseFloat(row.paid_amount || 0); return <span style={{ color: paidAmt > 0 ? 'var(--color-success)' : undefined }}>{paidAmt > 0 ? formatNumber(paidAmt) : '—'}</span>; } },
+            { key: '_remain', label: 'Остаток вал.', render: (_v: any, row: any) => { const amt = parseFloat(row.amount || 0); const paidAmt = parseFloat(row.paid_amount || 0); const remain = amt - paidAmt; return <span style={{ color: remain > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{remain > 0 ? formatNumber(remain) : '✓'}</span>; } },
+            { key: 'amount_rub', label: 'План ₽', render: (v: any) => <span style={{ fontSize: 12, opacity: 0.7 }}>{formatNumber(parseFloat(v || 0))} ₽</span> },
+            { key: 'paid_rub', label: 'Факт ₽', render: (v: any) => { const paidRub = parseFloat(v || 0); return <span style={{ fontSize: 12, opacity: 0.7 }}>{paidRub > 0 ? `${formatNumber(paidRub)} ₽` : '—'}</span>; } },
+            { key: '_status', label: 'Статус', render: (_v: any, row: any) => { const st = _status(row); return <span className={`badge badge-${st.cls}`}>{st.label}</span>; } },
+            {
+                key: '_actions', label: '', sortable: false,
+                render: (_v: any, row: any) => (
+                    <div style={{ display: 'flex', gap: 4 }}>
+                        {!row.is_paid && <button className="btn btn-primary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => markPaid(row.id)}>✓</button>}
+                        <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(row.id)}>✕</button>
+                    </div>
+                ),
+            },
+        );
+        return baseCols;
+    }, [filterDir, orderMeta]);
+
     return (
         <div className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
@@ -136,41 +172,14 @@ export function PlanPayments() {
                 );
             })()}
 
-            {filtered.length > 0 ? (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead><tr>
-                            <th>ID</th><th>Дата</th><th>Заказ</th><th>Направление</th>
-                            {filterDir === 'ДОСТАВКА' && <th>Инвойс</th>}
-                            {filterDir === 'ТАМОЖНЯ' && <th>ДТ</th>}
-                            <th>План вал.</th><th>Вал.</th><th>Факт вал.</th><th>Остаток вал.</th><th>План ₽</th><th>Факт ₽</th><th>Статус</th><th></th>
-                        </tr></thead>
-                        <tbody>{filtered.map(r => {
-                            const st = _status(r); const amt = parseFloat(r.amount || 0); const paidAmt = parseFloat(r.paid_amount || 0); const remain = amt - paidAmt;
-                            const amtRub = parseFloat(r.amount_rub || 0); const paidRub = parseFloat(r.paid_rub || 0);
-                            return (
-                                <tr key={r.id}>
-                                    <td>{r.id}</td><td style={{ fontSize: 12 }}>{r.pay_date ? formatDate(r.pay_date) : '—'}</td>
-                                    <td>{r.order_no || '—'}</td><td><span className="badge badge-info">{r.direction || '—'}</span></td>
-                                    {filterDir === 'ДОСТАВКА' && <td style={{ fontSize: 11, fontFamily: 'monospace' }}>{orderMeta[String(r.order_no)]?.invoice_no || '—'}</td>}
-                                    {filterDir === 'ТАМОЖНЯ' && <td style={{ fontSize: 11, fontFamily: 'monospace' }}>{orderMeta[String(r.order_no)]?.dt_number || '—'}</td>}
-                                    <td style={{ fontWeight: 500 }}>{formatNumber(amt)}</td>
-                                    <td><span className={`badge badge-${r.currency === 'RUB' ? 'success' : 'warning'}`}>{r.currency}</span></td>
-                                    <td style={{ color: paidAmt > 0 ? 'var(--color-success)' : undefined }}>{paidAmt > 0 ? formatNumber(paidAmt) : '—'}</td>
-                                    <td style={{ color: remain > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{remain > 0 ? formatNumber(remain) : '✓'}</td>
-                                    <td style={{ fontSize: 12, opacity: 0.7 }}>{formatNumber(amtRub)} ₽</td>
-                                    <td style={{ fontSize: 12, opacity: 0.7 }}>{paidRub > 0 ? `${formatNumber(paidRub)} ₽` : '—'}</td>
-                                    <td><span className={`badge badge-${st.cls}`}>{st.label}</span></td>
-                                    <td style={{ display: 'flex', gap: 4 }}>
-                                        {!r.is_paid && <button className="btn btn-primary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => markPaid(r.id)}>✓</button>}
-                                        <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(r.id)}>✕</button>
-                                    </td>
-                                </tr>
-                            );
-                        })}</tbody>
-                    </table>
-                </div>
-            ) : <div className="empty-state"><div className="empty-state-text">Нет платежей</div></div>}
+            <TanStackDataTable
+                columns={columns}
+                data={filtered}
+                emptyText="Нет платежей"
+                enableSorting
+                enablePagination
+                pageSize={50}
+            />
 
             <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 <button className="btn btn-secondary btn-sm" onClick={() => setShowAddForm(!showAddForm)}>➕ Добавить платёж</button>

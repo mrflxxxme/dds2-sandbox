@@ -599,6 +599,7 @@ export default function CapitalTab({ trendDays, brand, onTrendDaysChange, onBran
                 </div>
             )}
 
+            {/* TODO: migrate to TanStackDataTable — complex capital table with expandable rows, custom recommendation badges, color-coded cells */}
             {!loading && !error && data && data.groups.length > 0 && (
                 <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
                     <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 400px)' }}>

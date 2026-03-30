@@ -3,6 +3,8 @@ import { useEffect, useState, ChangeEvent } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 import { usePermissions } from '@/lib/hooks/usePermissions';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 import type {
     UnassignedGroupRow, Transaction, CategoryRef,
     AutoCategorizeRule, AutoCategorizePreview,
@@ -156,33 +158,21 @@ export default function InboxPage() {
                         </div>
                     ) : (
                         <>
-                            <div style={{ maxHeight: 400, overflowY: 'auto', marginBottom: 12 }}>
-                                <table className="data-table">
-                                    <thead>
-                                        <tr>
-                                            <th>Дата</th>
-                                            <th>Контрагент</th>
-                                            <th>Сумма</th>
-                                            <th>Ключевое слово</th>
-                                            <th>→ Категория</th>
-                                            <th>Назначение</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {preview.map((p: AutoCategorizePreview, i: number) => (
-                                            <tr key={i}>
-                                                <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{formatDate(p.date)}</td>
-                                                <td style={{ fontSize: 12 }}>{(p.counterparty || '—').slice(0, 30)}</td>
-                                                <td style={{ fontWeight: 600, whiteSpace: 'nowrap', color: p.expense > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
-                                                    {formatNumber(p.expense > 0 ? p.expense : p.income)}
-                                                </td>
-                                                <td><span style={{ background: 'rgba(245,158,11,0.15)', color: '#f59e0b', padding: '2px 8px', borderRadius: 4, fontSize: 12, fontWeight: 600 }}>{p.matched_keyword}</span></td>
-                                                <td style={{ fontSize: 12, fontWeight: 600 }}>{p.suggested_cat_lvl1}{p.suggested_cat_lvl2 ? ` / ${p.suggested_cat_lvl2}` : ''}</td>
-                                                <td style={{ fontSize: 11, color: 'var(--color-text-dim)', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.purpose}</td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
+                            <div style={{ marginBottom: 12 }}>
+                                <TanStackDataTable
+                                    columns={[
+                                        { key: 'date', label: 'Дата', render: (v: any) => <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{formatDate(v)}</span> },
+                                        { key: 'counterparty', label: 'Контрагент', render: (v: any) => <span style={{ fontSize: 12 }}>{(v || '—').slice(0, 30)}</span> },
+                                        { key: 'expense', label: 'Сумма', render: (_v: any, row: any) => <span style={{ fontWeight: 600, whiteSpace: 'nowrap', color: row.expense > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{formatNumber(row.expense > 0 ? row.expense : row.income)}</span> },
+                                        { key: 'matched_keyword', label: 'Ключевое слово', render: (v: any) => <span style={{ background: 'rgba(245,158,11,0.15)', color: '#f59e0b', padding: '2px 8px', borderRadius: 4, fontSize: 12, fontWeight: 600 }}>{v}</span> },
+                                        { key: 'suggested_cat_lvl1', label: '→ Категория', render: (_v: any, row: any) => <span style={{ fontSize: 12, fontWeight: 600 }}>{row.suggested_cat_lvl1}{row.suggested_cat_lvl2 ? ` / ${row.suggested_cat_lvl2}` : ''}</span> },
+                                        { key: 'purpose', label: 'Назначение', render: (v: any) => <span style={{ fontSize: 11, color: 'var(--color-text-dim)', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block' }}>{v}</span> },
+                                    ]}
+                                    data={preview}
+                                    enableSorting
+                                    maxHeight={400}
+                                    enablePagination={false}
+                                />
                             </div>
                             {canEdit() && (
                                 <button className="btn btn-primary" style={{ width: '100%' }} disabled={autoLoading}
@@ -207,28 +197,20 @@ export default function InboxPage() {
                     </p>
                     {/* Existing rules */}
                     {rules.length > 0 && (
-                        <table className="data-table" style={{ marginBottom: 16 }}>
-                            <thead>
-                                <tr>
-                                    <th>Ключевое слово</th>
-                                    <th>Направление</th>
-                                    <th>Категория</th>
-                                    <th>Подкатегория</th>
-                                    <th style={{ width: 50 }}></th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {rules.map((r: AutoCategorizeRule) => (
-                                    <tr key={r.id}>
-                                        <td><strong>{r.keyword}</strong></td>
-                                        <td style={{ fontSize: 12 }}>{r.direction === 'income' ? '📥 Доход' : '📤 Расход'}</td>
-                                        <td>{r.cat_lvl1}</td>
-                                        <td>{r.cat_lvl2 || '—'}</td>
-                                        <td><button className="btn btn-sm" style={{ color: 'var(--color-danger)', background: 'none', padding: '2px 6px' }} onClick={() => delRule(r.id)}>🗑</button></td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
+                        <div style={{ marginBottom: 16 }}>
+                            <TanStackDataTable
+                                columns={[
+                                    { key: 'keyword', label: 'Ключевое слово', render: (v: any) => <strong>{v}</strong> },
+                                    { key: 'direction', label: 'Направление', render: (v: any) => <span style={{ fontSize: 12 }}>{v === 'income' ? '📥 Доход' : '📤 Расход'}</span> },
+                                    { key: 'cat_lvl1', label: 'Категория' },
+                                    { key: 'cat_lvl2', label: 'Подкатегория', render: (v: any) => <>{v || '—'}</> },
+                                    { key: '_actions', label: '', width: '50', render: (_v: any, row: any) => <button className="btn btn-sm" style={{ color: 'var(--color-danger)', background: 'none', padding: '2px 6px' }} onClick={() => delRule(row.id)}>🗑</button>, sortable: false },
+                                ]}
+                                data={rules}
+                                enableSorting
+                                enablePagination={false}
+                            />
+                        </div>
                     )}
                     {/* Add new rule */}
                     <div style={{ display: 'flex', gap: 8, alignItems: 'end', flexWrap: 'wrap', borderTop: '1px solid var(--color-border)', paddingTop: 12 }}>
@@ -376,6 +358,7 @@ function CpBlock({ group, total, cats, isOpen, onToggle, allTxns, onAssign, onAs
 
             {isOpen && (
                 <div style={{ marginTop: 12 }}>
+                    {/* TODO: migrate to TanStackDataTable — table with checkbox selection per row */}
                     {allTxns.length > 0 && (
                         <div style={{ maxHeight: 300, overflowY: 'auto', marginBottom: 12 }}>
                             <table className="data-table">
