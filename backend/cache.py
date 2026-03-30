@@ -151,6 +151,7 @@ async def invalidate_project_reports(project_id: int):
         "reports:stock_history",
         "funnel:tariff_map",
         "funnel:avg_buyout",
+        "reports:logistics_analytics",
     ):
         await invalidate_cache(f"{prefix}:project_id={project_id}")
 
