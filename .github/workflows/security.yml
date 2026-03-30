@@ -1,0 +1,56 @@
+# CI — Security audit (pip-audit + gitleaks)
+# Runs on push/PR and can be triggered manually
+
+name: Security Audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'requirements*.txt'
+      - 'backend/**'
+      - '.github/workflows/security.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'requirements*.txt'
+
+jobs:
+  pip-audit:
+    name: pip-audit (dependency vulnerabilities)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit backend dependencies
+        run: pip-audit --strict -r requirements-backend.txt
+
+      - name: Audit worker/other dependencies (if exists)
+        run: |
+          for f in requirements*.txt; do
+            if [ "$f" != "requirements-backend.txt" ]; then
+              echo "=== Auditing $f ==="
+              pip-audit --strict -r "$f" || true
+            fi
+          done
+
+  gitleaks:
+    name: gitleaks (secrets in git history)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history for gitleaks
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

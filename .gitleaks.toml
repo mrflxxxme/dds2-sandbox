@@ -1,0 +1,30 @@
+# Gitleaks configuration for DDS project
+# Docs: https://github.com/gitleaks/gitleaks#configuration
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "DDS project allowlist — false positives"
+regexes = [
+  # Obvious test/placeholder values in tests
+  "test_api_key_1234567890_long_enough_to_mask",
+  # CI placeholder secrets in workflow env sections
+  "dds_ci_secret",
+  "dds_ci_redis",
+  "ci-test-secret-key-minimum-32-chars-long",
+  # Staging template placeholders
+  "staging_secret_change_me",
+  "staging_redis_secret",
+  "staging_minio_secret",
+]
+
+paths = [
+  # Claude agent worktree artifacts — not real commits
+  ".claude/worktrees",
+]
+
+# Known findings — acknowledged, rotation in progress
+# ⚠️  ДЕЙСТВИЕ ТРЕБУЕТСЯ: Обновить SECRET_KEY на staging-сервере!
+# Fingerprint: a8aeeee65554540a7903ddd60ec7fd3cbae20fc9:.env.staging:generic-api-key:25
+commits = ["a8aeeee65554540a7903ddd60ec7fd3cbae20fc9"]
