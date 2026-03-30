@@ -507,11 +507,16 @@ async def update_assembly_request(
     if not req:
         raise ValueError("Assembly request not found")
 
-    if req.status in (AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED, AssemblyStatus.CANCELLED):
+    if req.status == AssemblyStatus.CANCELLED:
         raise ValueError(f"Cannot edit in status {req.status}")
 
-    # Update FBO supply link
+    # SHIPPED / DELIVERED — allow only cost, pallets and vehicle fields
+    _is_closed = req.status in (AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED)
+
+    # Update FBO supply link — not allowed in closed statuses
     if payload.wb_fbo_supply_id is not None:
+        if _is_closed:
+            raise ValueError("Cannot change FBO supply in status " + req.status)
         # Validate the FBO supply
         fbo_result = await db.execute(
             select(WbFboSupply).where(
@@ -544,19 +549,20 @@ async def update_assembly_request(
         # Auto-set wb_warehouse_name_manual from FBO supply
         req.wb_warehouse_name_manual = fbo_supply.warehouse_name
 
-    # Update scalar fields (allowed until SHIPPED)
-    if payload.pallets_count is not None:
-        req.pallets_count = payload.pallets_count
-    if payload.pallet_weight_kg is not None:
-        req.pallet_weight_kg = payload.pallet_weight_kg
-    if payload.comment is not None:
-        req.comment = payload.comment
-    if payload.estimated_ready_date is not None:
-        req.estimated_ready_date = payload.estimated_ready_date
-    if payload.wb_warehouse_name_manual is not None:
-        req.wb_warehouse_name_manual = payload.wb_warehouse_name_manual
+    # Update scalar fields — not allowed in closed statuses
+    if not _is_closed:
+        if payload.pallets_count is not None:
+            req.pallets_count = payload.pallets_count
+        if payload.pallet_weight_kg is not None:
+            req.pallet_weight_kg = payload.pallet_weight_kg
+        if payload.comment is not None:
+            req.comment = payload.comment
+        if payload.estimated_ready_date is not None:
+            req.estimated_ready_date = payload.estimated_ready_date
+        if payload.wb_warehouse_name_manual is not None:
+            req.wb_warehouse_name_manual = payload.wb_warehouse_name_manual
 
-    # Vehicle & cost fields — editable in any non-cancelled status
+    # Vehicle & cost fields — editable in any non-cancelled status (including SHIPPED/DELIVERED)
     if payload.pickup_cost is not None:
         req.pickup_cost = payload.pickup_cost
     if payload.vehicle_info is not None:

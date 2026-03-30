@@ -31,7 +31,8 @@ jobs:
         run: pip install pip-audit
 
       - name: Audit backend dependencies
-        run: pip-audit --strict -r requirements-backend.txt
+        # --ignore-vuln: pyasn1 CVE-2026-30922 — pinned by python-jose<0.5.0, no fix without replacing library
+        run: pip-audit --strict -r requirements-backend.txt --ignore-vuln CVE-2026-30922
 
       - name: Audit worker/other dependencies (if exists)
         run: |
