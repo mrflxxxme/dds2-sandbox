@@ -82,9 +82,23 @@ Model → Alembic migration → Schema → Service → Router → Test
 - Только `other_deduction` → операционные расходы
 - Изменение типов удержаний → обновить ОБА: wb_bdr_service.py И opiu_service.py
 
+### AI Multi-Agent система
+```
+services/ai/orchestrator.py — классификация интента (Haiku), маршрутизация к 1-2 агентам
+services/ai/agents/ — 7 специализированных агентов (analyst, financier, marketer, advertiser, supply_manager, logistics, logistician)
+services/ai/agents/base.py — базовый класс с tool execution loop (до 5 раундов)
+services/ai/synthesizer.py — объединение ответов нескольких агентов
+services/ai/memory.py — Obsidian-style память (авто-инсайты в BrandNote)
+services/ai/tools/ — 19 инструментов (finance 6, marketing 5, logistics 8)
+services/ai/prompts/ — системные промпты для каждого агента + orchestrator + synthesizer
+services/ai/llm_client.py — клиент Anthropic API (Sonnet для чата, Haiku для классификации/дайджестов)
+```
+- Подробнее: `backend/DOMAIN_AI.md`
+
 ## Архитектура frontend
 ```
-src/app/p/[slug]/ — страницы (dds, import, txn, inbox, reports, planning, cost, funnel, trends, refs, settings, opiu, orders, plan-fact, team, monitoring, bulk-cost, container-loader, order-geography, warehouse/*)
+src/app/(main)/p/[slug]/ — основное приложение (22+ страниц: dds, import, txn, inbox, reports, planning, cost, funnel, trends, refs, settings, opiu, orders, plan-fact, team, monitoring, bulk-cost, container-loader, order-geography, warehouse/*)
+src/app/(tma)/tma/[slug]/ — Telegram Mini App (dashboard, capital, chat, funnel, pnl, pulse, warehouse)
 src/lib/api/ — модульный API клиент (client.ts + 13 доменных файлов, JWT auth + auto-refresh)
 src/lib/utils.ts — formatNumber, formatDate, exportToExcel
 src/components/ — DataTable, FormModal, PageHeader, PageGuard, TabLayout, Toast
@@ -109,8 +123,9 @@ src/types/api.ts — TypeScript интерфейсы
 | Склад | `backend/DOMAIN_WAREHOUSE.md` | services/warehouse_*, services/fbo_supply_service.py |
 | WB Интеграция | `backend/DOMAIN_WB.md` | integrations/, services/funnel/, scheduler/jobs/ |
 | Сборка/Логистика | `backend/DOMAIN_ASSEMBLY.md` | services/assembly_service.py, routers/assembly.py |
-| Telegram/AI | `backend/DOMAIN_TELEGRAM.md` | integrations/telegram_bot.py, services/ai/, services/telegram_service.py |
-| Фронтенд | `frontend-react/DOMAIN_FRONTEND.md` | src/app/, src/lib/api.ts |
+| AI Агенты | `backend/DOMAIN_AI.md` | services/ai/orchestrator.py, services/ai/agents/, services/ai/memory.py |
+| Telegram | `backend/DOMAIN_TELEGRAM.md` | integrations/telegram_bot.py, services/telegram_service.py, routers/telegram_webhook.py |
+| Фронтенд | `frontend-react/DOMAIN_FRONTEND.md` | src/app/(main)/, src/app/(tma)/, src/lib/api.ts |
 
 ## Перед началом задачи
 Следуй процессу Agent TDD из `docs/AGENT_DEVELOPMENT.md`:

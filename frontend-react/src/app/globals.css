@@ -794,3 +794,79 @@ input[type="number"] {
     color: var(--color-text);
     text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
 }
+
+/* ─── Tremor Overrides ─────────────────────────────────────────────────────── */
+
+/* Match DDS palette: green=#22c55e, red=#ef4444, purple=#a78bfa, orange=#f59e0b, blue=#3b82f6 */
+/* Inherit font from the glass-morphism system, match 20px border-radius of cards */
+
+.tremor-spark-dds {
+    font-family: inherit;
+    height: 32px !important;
+}
+
+/* Tremor internal SVG container — round corners */
+.tremor-spark-dds svg {
+    border-radius: 8px;
+}
+
+/* Override Tremor default fill colors to DDS palette */
+[data-tremor-id] {
+    font-family: var(--font-sans), inherit;
+}
+
+/* Ensure Tremor charts pick up correct colors */
+:root {
+    --tremor-content-emphasis: var(--color-text);
+    --tremor-content-default: var(--color-text-muted);
+    --tremor-content-subtle: var(--color-text-dim);
+    --tremor-border-default: var(--color-border);
+    --tremor-background-default: transparent;
+    --tremor-background-emphasis: var(--color-bg-card);
+    --tremor-brand-faint: rgba(0, 113, 227, 0.05);
+    --tremor-brand-muted: rgba(0, 113, 227, 0.15);
+    --tremor-brand-subtle: rgba(0, 113, 227, 0.3);
+    --tremor-brand-default: #3b82f6;
+    --tremor-brand-emphasis: #0071e3;
+}
+
+/* --- TanStack Table Enhancements --- */
+.ts-sort-indicator {
+    opacity: 0.4;
+    font-size: 12px;
+    transition: opacity 0.15s;
+}
+th:hover .ts-sort-indicator { opacity: 0.8; }
+
+.ts-filter-input {
+    width: 100%;
+    padding: 4px 8px;
+    font-size: 12px;
+    border: 1px solid rgba(0,0,0,0.1);
+    border-radius: 6px;
+    background: rgba(255,255,255,0.6);
+    outline: none;
+    transition: border-color 0.15s;
+}
+.ts-filter-input:focus {
+    border-color: var(--color-accent);
+}
+
+.ts-pagination {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 0 0;
+    font-size: 13px;
+    color: var(--color-text-muted);
+}
+.ts-pagination-buttons {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.ts-pagination-current {
+    font-weight: 500;
+    min-width: 60px;
+    text-align: center;
+}

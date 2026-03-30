@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
-import { DataTable } from '@/components';
+import TanStackDataTable from '@/components/TanStackDataTable';
 import { usePermissions } from '@/lib/hooks/usePermissions';
 import type { Warehouse, StockTransfer } from '@/types/api';
 import type { Column } from '@/components/DataTable';
@@ -138,11 +138,13 @@ export default function WarehousePage() {
             )}
 
             {/* Таблица складов */}
-            <DataTable
+            <TanStackDataTable
                 columns={warehouseCols}
                 data={warehouses}
                 emptyText="Нет складов"
                 emptyIcon="🏢"
+                enableSorting
+                enablePagination={false}
                 onRowClick={(row) => router.push(`/p/${slug}/warehouse/${row.id}`)}
             />
 

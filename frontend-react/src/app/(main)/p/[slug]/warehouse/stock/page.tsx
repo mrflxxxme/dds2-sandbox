@@ -2,7 +2,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
-import { DataTable } from '@/components';
+import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Warehouse, StockSummaryRow } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 
@@ -142,10 +142,13 @@ export default function StockSummaryPage() {
                     <div>{filter === 'reserved' ? 'Нет зарезервированных позиций' : 'Нет данных по остаткам'}</div>
                 </div>
             ) : (
-                <DataTable
+                <TanStackDataTable
                     columns={cols}
                     data={filtered}
                     exportName="stock_summary"
+                    enableSorting
+                    enablePagination
+                    pageSize={50}
                     actions={
                         <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
                             {filtered.length} позиций

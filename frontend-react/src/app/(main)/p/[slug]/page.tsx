@@ -13,6 +13,7 @@ import {
     ResponsiveContainer, PieChart, Pie, Cell,
     AreaChart, Area,
 } from 'recharts';
+import KpiCard from '@/components/KpiCard';
 
 /* ─── Цвета ────────────────────────────────────────────────────── */
 const C = { income: '#22c55e', expense: '#ef4444', accent: '#a78bfa', warning: '#f59e0b', info: '#3b82f6', muted: '#64748b' };
@@ -50,13 +51,7 @@ function renderPieLabel({cx,cy,midAngle,outerRadius,name,percent,index}:PieLabel
     if(percent<0.03) return null;
     return <text x={x} y={y} fill={PIE_COLORS[index%PIE_COLORS.length]} textAnchor={x>cx?'start':'end'} dominantBaseline="central" fontSize={11} fontWeight={600}>{truncate(name,12)} {(percent*100).toFixed(0)}%</text>;
 }
-function KpiCard({icon,label,value,sub,color,borderColor}:{icon:string;label:string;value:string;sub?:string;color:string;borderColor:string}) {
-    return (<div className="stat-card" style={{borderLeft:`3px solid ${borderColor}`}}>
-        <div className="stat-card-label" style={{display:'flex',alignItems:'center',gap:6}}><span style={{fontSize:16}}>{icon}</span> {label}</div>
-        <div className="stat-card-value" style={{color,fontSize:22}}>{value}</div>
-        {sub && <div className="stat-card-sub" style={{fontSize:11,opacity:0.6}}>{sub}</div>}
-    </div>);
-}
+/* KpiCard imported from @/components/KpiCard */
 
 /* ─── Inline transaction mini-table ────────────────────────────── */
 function InlineTxnRows({txnList,txnTotal,txnFlow,onFlowChange,filterLoading,colSpan}:{
@@ -260,18 +255,18 @@ export default function DashboardPage() {
 
             {/* KPI Row 1 */}
             <div className="stats-grid" style={{gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))'}}>
-                <KpiCard icon="💰" label="Баланс RUB" value={`${formatNumber(data.balance_rub)} ₽`} color={C.income} borderColor={C.income}/>
-                <KpiCard icon="💴" label="Баланс CNY" value={`${formatNumber(data.balance_cny)} ¥`} color={C.warning} borderColor={C.warning}/>
-                <KpiCard icon={netCashflow>=0?'📈':'📉'} label="Cashflow" value={`${netCashflow>=0?'+':''}${formatNumber(netCashflow)} ₽`} sub={`Приход ${fmtK(data.month_income)} / Расход ${fmtK(data.month_expense)}`} color={netCashflow>=0?C.income:C.expense} borderColor={netCashflow>=0?C.income:C.expense}/>
-                <KpiCard icon="📊" label="ДРР" value={funnel?`${funnelDRR.toFixed(1)}%`:'—'} sub={funnel?`${fmtK(funnel.adv_sum)} / ${fmtK(funnel.orders_sum_rub)} ₽`:''} color={funnelDRR>15?C.expense:C.income} borderColor={C.accent}/>
+                <KpiCard icon="💰" label="Баланс RUB" value={`${formatNumber(data.balance_rub)} ₽`} color={C.income}/>
+                <KpiCard icon="💴" label="Баланс CNY" value={`${formatNumber(data.balance_cny)} ¥`} color={C.warning}/>
+                <KpiCard icon={netCashflow>=0?'📈':'📉'} label="Cashflow" value={`${netCashflow>=0?'+':''}${formatNumber(netCashflow)} ₽`} sub={`Приход ${fmtK(data.month_income)} / Расход ${fmtK(data.month_expense)}`} color={netCashflow>=0?C.income:C.expense} sparkData={(data.daily_cashflow||[]).map((d:DailyCashflowRow)=>d.income-d.expense)}/>
+                <KpiCard icon="📊" label="ДРР" value={funnel?`${funnelDRR.toFixed(1)}%`:'—'} sub={funnel?`${fmtK(funnel.adv_sum)} / ${fmtK(funnel.orders_sum_rub)} ₽`:''} color={funnelDRR>15?C.expense:C.income}/>
             </div>
 
             {/* KPI Row 2 */}
             <div className="stats-grid" style={{gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',marginTop:0}}>
-                <KpiCard icon="📦" label="Заказы" value={`${data.orders_count}`} sub={`¥ ${formatNumber(data.orders_total_cny,0)}`} color={C.info} borderColor={C.info}/>
-                <KpiCard icon="💳" label="Долг" value={data.debt_cny>0?`${formatNumber(data.debt_cny,0)} ¥`:(data.debt_rub>0?`${formatNumber(data.debt_rub,0)} ₽`:'0')} sub={data.debt_cny>0&&data.debt_rub>0?`+ ${formatNumber(data.debt_rub,0)} ₽`:'неоплаченные'} color={data.debt_rub>0||data.debt_cny>0?C.expense:C.income} borderColor={C.expense}/>
-                <KpiCard icon="📥" label="INBOX" value={`${data.inbox_count}`} sub="нераспределённых" color={data.inbox_count>0?C.warning:C.income} borderColor={data.inbox_count>0?C.warning:C.income}/>
-                {funnel?(<KpiCard icon="🛒" label="Заказы WB" value={funnel.orders_count?.toLocaleString('ru-RU')||'—'} sub={`${formatNumber(funnel.orders_sum_rub,0)} ₽`} color={C.info} borderColor={C.info}/>):(<KpiCard icon="📊" label="Счета" value={`${data.accounts_count}`} sub="активных" color={C.accent} borderColor={C.accent}/>)}
+                <KpiCard icon="📦" label="Заказы" value={`${data.orders_count}`} sub={`¥ ${formatNumber(data.orders_total_cny,0)}`} color={C.info}/>
+                <KpiCard icon="💳" label="Долг" value={data.debt_cny>0?`${formatNumber(data.debt_cny,0)} ¥`:(data.debt_rub>0?`${formatNumber(data.debt_rub,0)} ₽`:'0')} sub={data.debt_cny>0&&data.debt_rub>0?`+ ${formatNumber(data.debt_rub,0)} ₽`:'неоплаченные'} color={data.debt_rub>0||data.debt_cny>0?C.expense:C.income}/>
+                <KpiCard icon="📥" label="INBOX" value={`${data.inbox_count}`} sub="нераспределённых" color={data.inbox_count>0?C.warning:C.income}/>
+                {funnel?(<KpiCard icon="🛒" label="Заказы WB" value={funnel.orders_count?.toLocaleString('ru-RU')||'—'} sub={`${formatNumber(funnel.orders_sum_rub,0)} ₽`} color={C.info}/>):(<KpiCard icon="📊" label="Счета" value={`${data.accounts_count}`} sub="активных" color={C.accent}/>)}
             </div>
 
             {/* Charts */}

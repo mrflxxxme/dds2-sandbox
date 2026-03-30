@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
-import { DataTable } from '@/components';
+import TanStackDataTable from '@/components/TanStackDataTable';
 import type {
     Warehouse, InboundReceipt, OutboundShipment,
     WarehouseStockRow, StockMovement, DeliveryTimesResponse,
@@ -183,7 +183,7 @@ function AllTab({ warehouseId }: { warehouseId: number }) {
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
 
     return (
-        <DataTable
+        <TanStackDataTable
             columns={cols}
             data={movements}
             emptyText="Нет движений"
@@ -253,7 +253,7 @@ function ReceiptsTab({ warehouseId, onCountChange }: {
         <>
             {error && <div style={{ color: 'var(--color-danger)', marginBottom: 12 }}>{error}</div>}
 
-            <DataTable
+            <TanStackDataTable
                 columns={cols}
                 data={receipts}
                 emptyText="Нет приёмок"
@@ -328,7 +328,7 @@ function ShipmentsTab({ warehouseId, warehouseType, onCountChange }: {
         <>
             {error && <div style={{ color: 'var(--color-danger)', marginBottom: 12 }}>{error}</div>}
 
-            <DataTable columns={cols} data={shipments} emptyText="Нет отгрузок" emptyIcon="📤" onRowClick={(row) => router.push(`/p/${slug}/warehouse/${warehouseId}/shipment/${row.id}`)} />
+            <TanStackDataTable columns={cols} data={shipments} emptyText="Нет отгрузок" emptyIcon="📤" onRowClick={(row) => router.push(`/p/${slug}/warehouse/${warehouseId}/shipment/${row.id}`)} />
         </>
     );
 }
@@ -414,7 +414,7 @@ function StockTab({ warehouseId }: { warehouseId: number }) {
                 <button className="btn btn-secondary btn-sm" onClick={() => setShowAdj(true)}>Корректировка</button>
             </div>
 
-            <DataTable columns={cols} data={stock} emptyText="Нет остатков" emptyIcon="📦" exportName="warehouse_stock" />
+            <TanStackDataTable columns={cols} data={stock} emptyText="Нет остатков" emptyIcon="📦" exportName="warehouse_stock" />
 
             {showAdj && (
                 <div className="modal-overlay" onClick={() => setShowAdj(false)}>

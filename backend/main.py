@@ -227,6 +227,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Session middleware (required for sqladmin auth)
+from starlette.middleware.sessions import SessionMiddleware
+
+app.add_middleware(SessionMiddleware, secret_key=settings.SECRET_KEY)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in settings.CORS_ORIGINS.split(",")],
@@ -270,6 +275,9 @@ _AUDIT_SKIP_PATHS = {
     "/api/v1/auth/register",
     "/api/v1/auth/refresh",
     "/api/v1/bot/webhook",
+    "/admin",
+    "/admin/login",
+    "/admin/logout",
 }
 
 
@@ -376,6 +384,12 @@ app.add_middleware(AuditLogMiddleware)
 from backend.exceptions import register_exception_handlers
 
 register_exception_handlers(app)
+
+# ─── Admin Panel (sqladmin) ────────────────────────────────────────────────
+
+from backend.admin import setup_admin
+
+setup_admin(app)
 
 # ─── Prometheus Metrics ─────────────────────────────────────────────────────
 

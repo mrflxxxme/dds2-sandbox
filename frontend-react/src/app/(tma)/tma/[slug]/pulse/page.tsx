@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
+import KpiCard from '@/components/KpiCard';
 
 /**
  * TMA Pulse Monitor — drill-down: Brands → Categories → Articles.
@@ -592,29 +593,30 @@ export default function TmaPulsePage() {
                 </div>
             )}
 
-            {/* Summary bar */}
+            {/* Summary KPI cards */}
             {!loading && !error && cards.length > 0 && (
-                <div className="tma-pulse-summary">
-                    <div className="tma-pulse-summary-item">
-                        <div className="tma-pulse-summary-label">ВЫРУЧ</div>
-                        <div className="tma-pulse-summary-value">{compactNum(totalRevenue)}</div>
-                    </div>
-                    <div className="tma-pulse-summary-item">
-                        <div className="tma-pulse-summary-label">{level === 'brands' ? 'ПЛАН' : 'Δ СР'}</div>
-                        <div className={`tma-pulse-summary-value ${avgPct < 80 ? 'tma-stat-negative' : avgPct >= 100 ? 'tma-stat-positive' : ''}`}>
-                            {Math.round(avgPct)}%
-                        </div>
-                    </div>
-                    <div className="tma-pulse-summary-item">
-                        <div className="tma-pulse-summary-label">МАРЖА</div>
-                        <div className="tma-pulse-summary-value">{formatNumber(avgMargin, 1)}%</div>
-                    </div>
-                    <div className="tma-pulse-summary-item">
-                        <div className="tma-pulse-summary-label">АЛЕРТ</div>
-                        <div className={`tma-pulse-summary-value ${alertCount > 0 ? 'tma-stat-negative' : ''}`}>
-                            {alertCount}
-                        </div>
-                    </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, margin: '12px 0' }}>
+                    <KpiCard
+                        label="Выручка"
+                        value={compactNum(totalRevenue)}
+                        color="#3b82f6"
+                        sparkData={cards.map(c => c.revenue)}
+                    />
+                    <KpiCard
+                        label={level === 'brands' ? 'План' : '\u0394 ср'}
+                        value={`${Math.round(avgPct)}%`}
+                        color={avgPct < 80 ? '#ef4444' : avgPct >= 100 ? '#22c55e' : '#f59e0b'}
+                    />
+                    <KpiCard
+                        label="Маржа"
+                        value={`${formatNumber(avgMargin, 1)}%`}
+                        color="#a78bfa"
+                    />
+                    <KpiCard
+                        label="Алерт"
+                        value={`${alertCount}`}
+                        color={alertCount > 0 ? '#ef4444' : '#22c55e'}
+                    />
                 </div>
             )}
 

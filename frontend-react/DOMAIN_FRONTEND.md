@@ -1,13 +1,27 @@
 # Domain: Frontend (Next.js 15 + React 19)
 
 ## Ownership
-- `src/app/p/[slug]/` — все страницы (dds, import, txn, inbox, reports, planning, orders, cost, funnel, trends, refs, settings, team, opiu, plan-fact, monitoring, warehouse/*, order-geography, bulk-cost, container-loader)
+- `src/app/(main)/p/[slug]/` — основное приложение (22+ страниц: dds, import, txn, inbox, reports, planning, orders, cost, funnel, trends, refs, settings, team, opiu, plan-fact, monitoring, warehouse/*, order-geography, bulk-cost, container-loader)
+- `src/app/(tma)/tma/[slug]/` — Telegram Mini App (7 страниц: dashboard, capital, chat, funnel, pnl, pulse, warehouse)
+- `src/app/(tma)/tma/tma.css` — стили TMA (отдельный CSS, не globals.css)
 - `src/lib/api/` — модульный API клиент (client.ts — HTTP layer + JWT auth + refresh, 13 доменных файлов: auth, projects, reports, transactions, refs, integrations, cost, planning, funnel, imports, telegram, warehouse, monitoring)
-- `src/lib/api.ts` — re-export всех методов (42 строки)
+- `src/lib/api.ts` — re-export всех методов
 - `src/lib/utils.ts` — formatNumber, formatDate, exportToExcel
 - `src/lib/hooks/usePermissions.ts` — RBAC (owner, admin, editor, viewer)
 - `src/components/` — DataTable, FormModal, PageHeader, PageGuard, TabLayout, Toast
-- `src/types/api.ts` — TypeScript интерфейсы (1351 строка)
+- `src/types/api.ts` — TypeScript интерфейсы
+
+## TMA (Telegram Mini App)
+Мобильный дашборд внутри Telegram. Route Group `(tma)` с отдельным layout (без sidebar).
+- `tma/[slug]/page.tsx` — Dashboard (health check 4 таба, аномалии, план-факт)
+- `tma/[slug]/capital/` — Капитал (ликвидность, ROI, тренд, drill-down)
+- `tma/[slug]/chat/` — AI-чат с агентами
+- `tma/[slug]/funnel/` — Воронка продаж (фильтры по периодам)
+- `tma/[slug]/pnl/` — P&L (вкладки БДР + ОПИУ)
+- `tma/[slug]/pulse/` — Пульс (быстрые KPI, топ товаров)
+- `tma/[slug]/warehouse/` — Склад (остатки, сборка, логистика, история — 4 таба)
+
+TMA auth: initData от Telegram → `POST /tma/auth` → JWT tokens.
 
 ## Rules
 1. **Типы:** ВСЕГДА в `types/api.ts` (НИКОГДА inline)

@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     # Scheduler
     SCHEDULER_ENABLED: bool = True  # False = no background sync (for dev when server is also running)
 
+    # Admin panel IP whitelist (comma-separated, empty = no restriction)
+    ADMIN_ALLOWED_IPS: str = ""  # e.g. "1.2.3.4,2a01:e5c0:6dac::2"
+
     # Container role: api = HTTP serving, worker = scheduler + background tasks
     DDS_ROLE: str = "api"  # api | worker
 
@@ -94,7 +97,7 @@ class Settings(BaseSettings):
             if env == "production":
                 raise ValueError(
                     "SECRET_KEY MUST be set in production! "
-                    "Generate with: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+                    'Generate with: python -c "import secrets; print(secrets.token_urlsafe(48))"'
                 )
             generated = secrets.token_urlsafe(48)
             warnings.warn(

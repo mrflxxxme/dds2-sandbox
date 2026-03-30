@@ -21,7 +21,8 @@
 - `DOMAIN_WB.md` — WB API, funnel, sync
 - `DOMAIN_WAREHOUSE.md` — warehouse, stock, receipts, shipments, transfers, FBO
 - `DOMAIN_ASSEMBLY.md` — assembly requests, logistics
-- `DOMAIN_TELEGRAM.md` — telegram bot, AI digest, notifications
+- `DOMAIN_TELEGRAM.md` — telegram bot, TMA, digest, notifications
+- `DOMAIN_AI.md` — AI multi-agent system (7 agents, orchestrator, memory, 19 tools)
 
 ## Undomain files (shared/infra)
 - `services/refs_service.py` — CRUD для справочников (Account, Override, CounterpartyCategory)
