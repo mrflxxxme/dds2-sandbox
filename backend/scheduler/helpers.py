@@ -11,6 +11,7 @@ from backend.models import IntegrationKey, Project, SyncLog, WbFunnelDaily
 logger = logging.getLogger("dds.scheduler")
 
 BACKFILL_DAYS = 90
+AD_ANOMALY_LOOKBACK_DAYS = 14  # ad resync: only recent days (old data is finalized)
 MISSING_BATCH_SIZE = 10
 MAX_DATE_FAILURES = 3
 
@@ -121,8 +122,12 @@ async def get_missing_dates(project_id: int, lookback_days: int = BACKFILL_DAYS)
     return [d.isoformat() for d in missing if d.isoformat() not in poisoned]
 
 
-async def get_days_with_incomplete_ads(project_id: int, lookback_days: int = BACKFILL_DAYS) -> list[str]:
-    """Find dates that have funnel data but ZERO ad data."""
+async def get_days_with_incomplete_ads(project_id: int, lookback_days: int = AD_ANOMALY_LOOKBACK_DAYS) -> list[str]:
+    """Find dates that have funnel data but ZERO ad data.
+
+    Only checks recent days (default 14) — older data is finalized.
+    Skips dates that have been retried too many times (poisoned).
+    """
     from sqlalchemy import func, select
 
     today = date.today()
@@ -148,6 +153,18 @@ async def get_days_with_incomplete_ads(project_id: int, lookback_days: int = BAC
         return []
 
     zero_days = [r.date.isoformat() for r in rows if float(r.total_adv or 0) == 0]
+    if not zero_days:
+        return []
+
+    # Filter out dates that have been retried too many times
+    poisoned = await get_failed_dates(project_id)
+    if poisoned:
+        before = len(zero_days)
+        zero_days = [d for d in zero_days if d not in poisoned]
+        skipped = before - len(zero_days)
+        if skipped:
+            logger.info(f"Ad completeness: project {project_id}, skipped {skipped} poisoned dates")
+
     if zero_days:
         logger.info(f"Ad completeness check: project {project_id}, zero ad days: {len(zero_days)}")
     return zero_days[:30]

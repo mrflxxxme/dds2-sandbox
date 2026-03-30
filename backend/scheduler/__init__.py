@@ -222,6 +222,34 @@ def start_scheduler():
         misfire_grace_time=3600,
     )
 
+    # Cleanup stale sync_log records left by previous crashes
+    import asyncio
+
+    async def _cleanup_stale_syncs():
+        try:
+            from sqlalchemy import text
+
+            from backend.database import AsyncSessionLocal
+
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    text("""
+                        UPDATE sync_log
+                        SET status = 'ERROR',
+                            error_msg = COALESCE(error_msg, '') || ' [auto-fix: stale after worker restart]',
+                            finished_at = COALESCE(finished_at, NOW())
+                        WHERE status IN ('STALE', 'RUNNING')
+                          AND started_at < NOW() - interval '30 minutes'
+                    """)
+                )
+                await db.commit()
+                if result.rowcount:
+                    logger.info("🧹 Cleaned up %d stale/stuck sync_log records", result.rowcount)
+        except Exception as e:
+            logger.warning("Stale sync cleanup failed: %s", e)
+
+    asyncio.get_running_loop().create_task(_cleanup_stale_syncs())
+
     # Startup catch-up: run finance daily sync 30s after start
     # to recover from missed jobs (e.g. worker restart during scheduled time)
     from datetime import datetime, timedelta

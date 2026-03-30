@@ -64,7 +64,7 @@ async def sync_wb_finance(
     logger.info("wb_finance_sync: fetching %s — %s (period=%s) for project %s", date_from, date_to, period, project_id)
 
     rrdid_cursor = 0
-    page_limit = 100000
+    page_limit = 20000
     page_num = 0
     total_synced = 0
     errors: list[str] = []
@@ -122,6 +122,7 @@ async def sync_wb_finance(
 
             # Move cursor to last rrd_id
             last_rrdid = max(r.get("rrd_id", 0) for r in page)
+            del page  # Free API response memory before next page
             if last_rrdid <= rrdid_cursor:
                 break  # Safety: no progress
             rrdid_cursor = last_rrdid
