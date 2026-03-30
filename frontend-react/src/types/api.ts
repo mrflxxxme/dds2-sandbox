@@ -1208,6 +1208,10 @@ export interface AssemblyRequestUpdate {
   wb_fbo_supply_id?: number | null;
   wb_warehouse_name_manual?: string | null;
   items?: { barcode: string; quantity: number }[];
+  pickup_cost?: number;
+  vehicle_info?: string;
+  vehicle_brand?: string;
+  driver_phone?: string;
 }
 
 export interface RefreshFromFboResponse {

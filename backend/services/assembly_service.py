@@ -556,6 +556,16 @@ async def update_assembly_request(
     if payload.wb_warehouse_name_manual is not None:
         req.wb_warehouse_name_manual = payload.wb_warehouse_name_manual
 
+    # Vehicle & cost fields — editable in any non-cancelled status
+    if payload.pickup_cost is not None:
+        req.pickup_cost = payload.pickup_cost
+    if payload.vehicle_info is not None:
+        req.vehicle_info = payload.vehicle_info
+    if payload.vehicle_brand is not None:
+        req.vehicle_brand = payload.vehicle_brand
+    if payload.driver_phone is not None:
+        req.driver_phone = payload.driver_phone
+
     # Update items: allowed until READY (PENDING and IN_PROGRESS)
     if payload.items is not None:
         if req.status not in (AssemblyStatus.PENDING, AssemblyStatus.IN_PROGRESS):

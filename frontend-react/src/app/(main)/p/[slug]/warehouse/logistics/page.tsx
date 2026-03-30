@@ -676,25 +676,30 @@ export default function LogisticsPage() {
                                                                 </button>
                                                             )}
                                                             {item.status === 'VEHICLE_ASSIGNED' && (
-                                                                <>
-                                                                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', flex: 1 }}>
-                                                                        {item.vehicle_info}
+                                                                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
+                                                                    {(item.vehicle_info || item.driver_phone) && (
+                                                                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.4 }}>
+                                                                            {item.vehicle_info}
+                                                                            {item.driver_phone && <div>{item.driver_phone}</div>}
+                                                                        </div>
+                                                                    )}
+                                                                    <div style={{ display: 'flex', gap: 8 }}>
+                                                                        <button
+                                                                            className="btn btn-secondary btn-sm"
+                                                                            onClick={(e) => { e.stopPropagation(); handleUnassignVehicle(item.id); }}
+                                                                            disabled={actionLoading}
+                                                                        >
+                                                                            Отменить
+                                                                        </button>
+                                                                        <button
+                                                                            className="btn btn-primary btn-sm"
+                                                                            onClick={(e) => { e.stopPropagation(); handleShip(item.id); }}
+                                                                            disabled={actionLoading}
+                                                                        >
+                                                                            Отгрузить
+                                                                        </button>
                                                                     </div>
-                                                                    <button
-                                                                        className="btn btn-secondary btn-sm"
-                                                                        onClick={(e) => { e.stopPropagation(); handleUnassignVehicle(item.id); }}
-                                                                        disabled={actionLoading}
-                                                                    >
-                                                                        Отменить
-                                                                    </button>
-                                                                    <button
-                                                                        className="btn btn-primary btn-sm"
-                                                                        onClick={(e) => { e.stopPropagation(); handleShip(item.id); }}
-                                                                        disabled={actionLoading}
-                                                                    >
-                                                                        Отгрузить
-                                                                    </button>
-                                                                </>
+                                                                </div>
                                                             )}
                                                         </div>
                                                     )}

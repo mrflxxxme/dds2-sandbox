@@ -211,24 +211,40 @@ export default function AssemblyDetailPage() {
     };
 
     const canEditFields = assembly && !['SHIPPED', 'DELIVERED', 'CANCELLED'].includes(assembly.status);
+    const canEditAlways = assembly && assembly.status !== 'CANCELLED';
     const canEditFbo = assembly && ['PENDING', 'IN_PROGRESS'].includes(assembly.status);
 
-    const handleFieldSave = async (field: 'pallets_count' | 'estimated_ready_date', value: number | string) => {
+    const handleFieldSave = async (field: string, value: number | string) => {
         if (!assembly) return;
-        const old = { pallets_count: assembly.pallets_count, estimated_ready_date: assembly.estimated_ready_date };
+        const oldAssembly = { ...assembly };
         try {
+            const update: Record<string, unknown> = {};
             if (field === 'pallets_count') {
                 const newPallets = Number(value);
                 const weight = assembly.pallet_weight_kg || 0;
-                const newTotal = newPallets * weight;
-                setAssembly({ ...assembly, pallets_count: newPallets, total_weight_kg: newTotal });
-                await api.updateAssemblyRequest(id, { pallets_count: newPallets, pallet_weight_kg: weight });
+                setAssembly({ ...assembly, pallets_count: newPallets, total_weight_kg: newPallets * weight });
+                update.pallets_count = newPallets;
+                update.pallet_weight_kg = weight;
+            } else if (field === 'pickup_cost') {
+                const cost = Number(value);
+                setAssembly({ ...assembly, pickup_cost: cost });
+                update.pickup_cost = cost;
+            } else if (field === 'vehicle_info') {
+                setAssembly({ ...assembly, vehicle_info: String(value) });
+                update.vehicle_info = String(value);
+            } else if (field === 'vehicle_brand') {
+                setAssembly({ ...assembly, vehicle_brand: String(value) });
+                update.vehicle_brand = String(value);
+            } else if (field === 'driver_phone') {
+                setAssembly({ ...assembly, driver_phone: String(value) });
+                update.driver_phone = String(value);
             } else {
-                setAssembly({ ...assembly, estimated_ready_date: value as string });
-                await api.updateAssemblyRequest(id, { estimated_ready_date: value as string || undefined });
+                setAssembly({ ...assembly, [field]: value });
+                update[field] = value || undefined;
             }
+            await api.updateAssemblyRequest(id, update);
         } catch (e: unknown) {
-            setAssembly({ ...assembly, ...old });
+            setAssembly(oldAssembly);
             setError(e instanceof Error ? e.message : 'Ошибка сохранения');
         }
     };
@@ -503,26 +519,52 @@ export default function AssemblyDetailPage() {
                         value={String(assembly.pallets_count || '')}
                         displayValue={String(assembly.pallets_count)}
                         type="number"
-                        editable={!!canEditFields}
+                        editable={!!canEditAlways}
                         onSave={(v) => handleFieldSave('pallets_count', Number(v))}
                     />
                     <InfoField label="Вес 1 палеты" value={assembly.pallet_weight_kg ? formatNumber(assembly.pallet_weight_kg, 1) + ' кг' : '\u2014'} />
                     <InfoField label="Общий вес" value={assembly.total_weight_kg ? formatNumber(assembly.total_weight_kg, 1) + ' кг' : '\u2014'} />
-                    {assembly.vehicle_info && (
-                        <InfoField label="Машина" value={assembly.vehicle_info} />
+                    {(assembly.vehicle_info || canEditAlways) && (
+                        <EditableInfoField
+                            label="Машина"
+                            value={assembly.vehicle_info || ''}
+                            displayValue={assembly.vehicle_info || '\u2014'}
+                            type="text"
+                            editable={!!canEditAlways}
+                            onSave={(v) => handleFieldSave('vehicle_info', v)}
+                        />
                     )}
-                    {assembly.vehicle_brand && (
-                        <InfoField label="Марка" value={assembly.vehicle_brand} />
+                    {(assembly.vehicle_brand || canEditAlways) && (
+                        <EditableInfoField
+                            label="Марка"
+                            value={assembly.vehicle_brand || ''}
+                            displayValue={assembly.vehicle_brand || '\u2014'}
+                            type="text"
+                            editable={!!canEditAlways}
+                            onSave={(v) => handleFieldSave('vehicle_brand', v)}
+                        />
                     )}
-                    {assembly.driver_phone && (
-                        <InfoField label="Телефон" value={assembly.driver_phone} />
+                    {(assembly.driver_phone || canEditAlways) && (
+                        <EditableInfoField
+                            label="Телефон"
+                            value={assembly.driver_phone || ''}
+                            displayValue={assembly.driver_phone || '\u2014'}
+                            type="text"
+                            editable={!!canEditAlways}
+                            onSave={(v) => handleFieldSave('driver_phone', v)}
+                        />
                     )}
                     {assembly.pickup_date && (
                         <InfoField label="Забор" value={`${formatDate(assembly.pickup_date)}${assembly.pickup_time_slot ? ', ' + assembly.pickup_time_slot : ''}`} />
                     )}
-                    {assembly.pickup_cost != null && (
-                        <InfoField label="Стоимость" value={formatNumber(assembly.pickup_cost) + ' \u20BD'} />
-                    )}
+                    <EditableInfoField
+                        label="Стоимость"
+                        value={String(assembly.pickup_cost ?? '')}
+                        displayValue={assembly.pickup_cost != null ? formatNumber(assembly.pickup_cost) + ' \u20BD' : '\u2014'}
+                        type="number"
+                        editable={!!canEditAlways}
+                        onSave={(v) => handleFieldSave('pickup_cost', Number(v))}
+                    />
                     {assembly.delivery_date && (
                         <InfoField label="Сдача на WB" value={formatDate(assembly.delivery_date)} />
                     )}

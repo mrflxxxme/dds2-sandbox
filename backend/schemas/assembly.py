@@ -34,7 +34,12 @@ class AssemblyRequestUpdate(BaseModel):
     pallet_weight_kg: Decimal | None = None
     comment: str | None = None
     wb_warehouse_name_manual: str | None = None
-    items: list[AssemblyItemCreate] | None = None  # only PENDING
+    items: list[AssemblyItemCreate] | None = None  # only PENDING/IN_PROGRESS
+    # Vehicle & cost — editable even after shipping
+    pickup_cost: Decimal | None = None
+    vehicle_info: str | None = None
+    vehicle_brand: str | None = None
+    driver_phone: str | None = None
 
 
 class AssignVehicle(BaseModel):
