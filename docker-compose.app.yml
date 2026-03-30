@@ -63,7 +63,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768M
+          memory: 1024M
     healthcheck:
       test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" ]
       interval: 15s
