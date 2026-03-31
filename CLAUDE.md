@@ -165,3 +165,4 @@ src/types/api.ts — TypeScript интерфейсы
 - Сервис > 500 строк без разбиения
 - `asyncio.get_event_loop()` вместо `asyncio.get_running_loop()`
 - `print()` в backend коде вместо `logging.getLogger()`
+- `except Exception` без `except asyncio.CancelledError` в scheduler jobs (CancelledError — BaseException, не Exception)
