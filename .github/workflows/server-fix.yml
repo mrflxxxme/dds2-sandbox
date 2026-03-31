@@ -1,0 +1,99 @@
+name: Server Fix
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - enable-scheduler
+          - fix-minio-permissions
+          - restart-worker
+          - show-env
+
+jobs:
+  fix:
+    name: Fix Server Issue
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Execute fix on App Server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd /opt/dds_app
+            ACTION="${{ github.event.inputs.action }}"
+
+            case "$ACTION" in
+              enable-scheduler)
+                echo "Enabling scheduler..."
+                if grep -q "SCHEDULER_ENABLED=false" .env 2>/dev/null; then
+                  sed -i 's/SCHEDULER_ENABLED=false/SCHEDULER_ENABLED=true/' .env
+                  echo "✅ SCHEDULER_ENABLED=true set in .env"
+                  echo "Restarting worker..."
+                  docker compose -f docker-compose.app.yml restart worker
+                  sleep 10
+                  docker compose -f docker-compose.app.yml logs worker --tail=5 --no-color
+                elif grep -q "SCHEDULER_ENABLED=true" .env 2>/dev/null; then
+                  echo "ℹ️ Scheduler already enabled"
+                else
+                  echo "SCHEDULER_ENABLED=true" >> .env
+                  echo "✅ SCHEDULER_ENABLED=true added to .env"
+                  docker compose -f docker-compose.app.yml restart worker
+                  sleep 10
+                  docker compose -f docker-compose.app.yml logs worker --tail=5 --no-color
+                fi
+                ;;
+
+              fix-minio-permissions)
+                echo "Fixing MinIO permissions..."
+                if [ -d "volumes/minio" ]; then
+                  chown -R 1000:1000 volumes/minio/
+                  echo "✅ MinIO permissions fixed"
+                  docker compose -f docker-compose.app.yml restart minio 2>/dev/null || echo "MinIO not in app compose"
+                else
+                  echo "ℹ️ MinIO volumes not on this server"
+                fi
+                ;;
+
+              restart-worker)
+                echo "Restarting worker..."
+                docker compose -f docker-compose.app.yml restart worker
+                sleep 10
+                docker compose -f docker-compose.app.yml logs worker --tail=10 --no-color
+                ;;
+
+              show-env)
+                echo "=== Scheduler/MinIO settings ==="
+                grep -E "(SCHEDULER|MINIO)" .env 2>/dev/null || echo "No SCHEDULER/MINIO vars in .env"
+                echo ""
+                echo "=== Container status ==="
+                docker compose -f docker-compose.app.yml ps --format "table {{.Name}}\t{{.Status}}" 2>/dev/null
+                ;;
+            esac
+
+      - name: Execute fix on Data Server (MinIO only)
+        if: ${{ github.event.inputs.action == 'fix-minio-permissions' }}
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DATA_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd /opt/dds_data
+            echo "Fixing MinIO permissions on Data server..."
+            if [ -d "volumes/minio" ]; then
+              chown -R 1000:1000 volumes/minio/
+              echo "✅ MinIO permissions fixed on Data server"
+              docker compose restart minio
+              sleep 5
+              docker compose ps minio
+            else
+              echo "ℹ️ No MinIO volumes on Data server"
+            fi
