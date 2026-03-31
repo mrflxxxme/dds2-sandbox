@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+vendor/
+
+# Build output
+.next/
+dist/
+build/
+*.egg-info/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+
+# Docker volumes
+volumes/
+
+# Monitoring data
+monitoring/data/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+
+# Large binary files
+*.woff2
+*.woff
+*.ttf
+*.eot
+*.ico
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.mp4
+*.webm

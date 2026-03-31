@@ -6,6 +6,7 @@ import io
 
 import pandas as pd
 import pytest
+import pytest_asyncio
 
 # Load API test fixtures (client, auth_headers, db_session)
 pytest_plugins = ["tests.conftest_api"]
@@ -255,6 +256,81 @@ def vtb_multi_excel() -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+# === Universal project fixtures for AI agents ===
+# These reduce test setup boilerplate — use them instead of creating projects from scratch
+
+
+@pytest_asyncio.fixture
+async def project(db_session):
+    """Ready project for any test. Creates a minimal user+project via raw SQL."""
+    import uuid
+
+    from sqlalchemy import text
+
+    suffix = uuid.uuid4().hex[:8]
+    username = f"proj_user_{suffix}"
+    email = f"{username}@test.com"
+    slug = f"test-project-{suffix}"
+
+    # Create owner user if not exists
+    result = await db_session.execute(
+        text(
+            "INSERT INTO users (username, email, password_hash, is_active, created_at) "
+            "VALUES (:u, :e, :p, true, NOW()) RETURNING id"
+        ),
+        {"u": username, "e": email, "p": "nohash"},
+    )
+    user_id = result.scalar()
+
+    # Create project
+    result = await db_session.execute(
+        text("INSERT INTO projects (name, slug, owner_id, created_at) " "VALUES (:n, :s, :o, NOW()) RETURNING id"),
+        {"n": "Test Project", "s": slug, "o": user_id},
+    )
+    project_id = result.scalar()
+    await db_session.commit()
+
+    # Return a simple namespace that mimics what tests expect
+    from types import SimpleNamespace
+
+    return SimpleNamespace(id=project_id, name="Test Project", slug=slug, owner_id=user_id)
+
+
+@pytest_asyncio.fixture
+async def other_project(db_session):
+    """Another project for multi-tenancy isolation tests."""
+    import uuid
+
+    from sqlalchemy import text
+
+    suffix = uuid.uuid4().hex[:8]
+    username = f"other_user_{suffix}"
+    email = f"{username}@test.com"
+    slug = f"other-project-{suffix}"
+
+    # Create owner user
+    result = await db_session.execute(
+        text(
+            "INSERT INTO users (username, email, password_hash, is_active, created_at) "
+            "VALUES (:u, :e, :p, true, NOW()) RETURNING id"
+        ),
+        {"u": username, "e": email, "p": "nohash"},
+    )
+    user_id = result.scalar()
+
+    # Create project
+    result = await db_session.execute(
+        text("INSERT INTO projects (name, slug, owner_id, created_at) " "VALUES (:n, :s, :o, NOW()) RETURNING id"),
+        {"n": "Other Project", "s": slug, "o": user_id},
+    )
+    project_id = result.scalar()
+    await db_session.commit()
+
+    from types import SimpleNamespace
+
+    return SimpleNamespace(id=project_id, name="Other Project", slug=slug, owner_id=user_id)
 
 
 @pytest.fixture

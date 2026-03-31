@@ -49,3 +49,11 @@ models/ (ORM, без логики)
 
 ## Порядок создания модуля
 Model → Alembic migration → Schema → Service → Router → Test
+
+## Документация — ОБЯЗАТЕЛЬНО обновить при изменениях
+При создании/изменении backend файлов — обнови соответствующие docs:
+- Новая модель → DOMAIN_*.md + SOFT_MODELS в check_conventions.sh + models/__init__.py
+- Новый сервис/роутер → DOMAIN_*.md + backend/MAP.md
+- Новый кэш → invalidate_project_reports() в cache.py
+- Новый антипаттерн найден → docs/KNOWN_PITFALLS.md + check_conventions.sh
+- Изменение бизнес-логики → DOMAIN_*.md (описание поведения)

@@ -1,0 +1,81 @@
+# TEMPLATE: Copy this file, rename, and adapt. Remove this comment.
+"""
+Xxx schemas — Pydantic request/response models for the Xxx domain.
+
+Naming convention:
+  XxxCreate   — input for POST (create)
+  XxxUpdate   — input for PATCH (partial update, all fields optional)
+  XxxResponse — output for GET / POST response (from ORM object)
+
+Add to backend/schemas/__init__.py imports if used across multiple routers.
+"""
+
+from datetime import datetime
+from decimal import Decimal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# ─── Response (read) ──────────────────────────────────────────────────────────
+
+
+class XxxResponse(BaseModel):
+    """Serialized Xxx returned by API endpoints."""
+
+    model_config = ConfigDict(from_attributes=True)  # enables ORM mode
+
+    id: int
+    project_id: int
+    name: str
+    description: str | None = None
+    amount: Decimal | None = None              # RULE: Decimal for money (never float)
+    created_at: datetime
+    updated_at: datetime
+
+
+# ─── Create ───────────────────────────────────────────────────────────────────
+
+
+class XxxCreate(BaseModel):
+    """Input payload for creating a new Xxx."""
+
+    name: str = Field(..., min_length=1, max_length=200)
+    description: str | None = None
+    amount: Decimal | None = Field(default=None, ge=0)  # RULE: Decimal for money
+
+    # Optional id: present → upsert; absent → create
+    id: int | None = None
+
+
+# ─── Update ───────────────────────────────────────────────────────────────────
+
+
+class XxxUpdate(BaseModel):
+    """Input payload for partial update of Xxx (all fields optional)."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = None
+    amount: Decimal | None = Field(default=None, ge=0)
+
+
+# ─── Nested / embedded schemas (add as needed) ────────────────────────────────
+
+
+# class XxxSummary(BaseModel):
+#     """Lightweight version for lists / dropdowns."""
+#     model_config = ConfigDict(from_attributes=True)
+#     id: int
+#     name: str
+
+
+# ─── Validation helpers ───────────────────────────────────────────────────────
+
+
+# VALID_XXX_TYPES = {"type_a", "type_b"}
+#
+# class XxxCreate(BaseModel):
+#     xxx_type: str
+#
+#     def model_post_init(self, __context: object) -> None:
+#         if self.xxx_type not in VALID_XXX_TYPES:
+#             raise ValueError(f"xxx_type must be one of {VALID_XXX_TYPES}")

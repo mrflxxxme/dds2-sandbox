@@ -43,7 +43,14 @@ grep -rn "db.delete\|session.delete" --include="*.py" backend/ || echo "OK"
 grep -rn "Float" --include="*.py" backend/models/ || echo "OK"
 ```
 
-### 5. Git Status
+### 5. Автообновление документации
+Если изменены backend файлы (models/, services/, routers/, migrations/) — автоматически обнови документацию:
+- Проверь, нужно ли обновить DOMAIN_*.md (новые модели, сервисы, эндпоинты)
+- Проверь, нужно ли обновить backend/MAP.md (новые файлы/паттерны)
+- Проверь, нужно ли добавить в docs/KNOWN_PITFALLS.md (если при разработке наткнулся на грабли)
+- Проверь, нужно ли обновить CLAUDE.md (новый домен, новый антипаттерн)
+
+### 6. Git Status
 ```bash
 git diff --stat
 git status

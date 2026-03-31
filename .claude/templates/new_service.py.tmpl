@@ -1,0 +1,146 @@
+# TEMPLATE: Copy this file, rename, and adapt. Remove this comment.
+"""
+XxxService — CRUD and business logic for Xxx domain.
+
+Порядок создания модуля: Model → Alembic migration → Schema → Service → Router → Test
+"""
+
+import logging
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.cache import cached, invalidate_cache
+from backend.models.xxx import Xxx  # TODO: replace with real model import
+from backend.utils.time import utcnow
+
+logger = logging.getLogger(__name__)
+
+# Cache prefix — must contain project_id at call time (see @cached usage below)
+_CACHE_PREFIX = "xxx"  # TODO: replace with real domain prefix
+
+
+# ─── Read ─────────────────────────────────────────────────────────────────────
+
+
+@cached(prefix=_CACHE_PREFIX, ttl=300)
+async def list_xxx(
+    db: AsyncSession,
+    project_id: int,
+) -> list:
+    """List all active Xxx records for the project.
+
+    project_id is REQUIRED — enforced by @cached key + WHERE clause.
+    """
+    result = await db.execute(
+        select(Xxx)
+        .where(
+            Xxx.project_id == project_id,   # RULE: always filter by project_id
+            Xxx.is_deleted == False,         # RULE: always filter soft-deleted
+        )
+        .order_by(Xxx.id)
+        .limit(1000)                        # RULE: always use .limit()
+    )
+    return result.scalars().all()
+
+
+async def get_xxx(db: AsyncSession, project_id: int, xxx_id: int) -> Xxx | None:
+    """Get a single Xxx by id, scoped to project."""
+    result = await db.execute(
+        select(Xxx).where(
+            Xxx.id == xxx_id,
+            Xxx.project_id == project_id,   # RULE: project_id on every query
+            Xxx.is_deleted == False,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+# ─── Create ───────────────────────────────────────────────────────────────────
+
+
+async def create_xxx(db: AsyncSession, project_id: int, payload: dict) -> Xxx:
+    """Create a new Xxx record."""
+    obj = Xxx(
+        project_id=project_id,
+        # TODO: map payload fields
+        # name=payload["name"],
+        # amount=payload.get("amount"),        # Decimal — Numeric(18,2) in model
+        created_at=utcnow(),                  # RULE: use utcnow(), never datetime.utcnow()
+    )
+    db.add(obj)
+    await db.commit()
+    await db.refresh(obj)
+    await invalidate_cache(f"{_CACHE_PREFIX}:project_id={project_id}")  # RULE: invalidate after mutation
+    logger.info("created Xxx id=%s project_id=%s", obj.id, project_id)
+    return obj
+
+
+# ─── Update ───────────────────────────────────────────────────────────────────
+
+
+async def update_xxx(db: AsyncSession, project_id: int, xxx_id: int, payload: dict) -> Xxx | None:
+    """Update an existing Xxx. Returns None if not found."""
+    obj = await get_xxx(db, project_id, xxx_id)
+    if not obj:
+        return None
+
+    for key, value in payload.items():
+        if key not in ("id", "project_id"):   # guard: never overwrite immutable fields
+            setattr(obj, key, value)
+
+    obj.updated_at = utcnow()                 # RULE: utcnow() for timestamps
+    await db.commit()
+    await db.refresh(obj)
+    await invalidate_cache(f"{_CACHE_PREFIX}:project_id={project_id}")
+    logger.info("updated Xxx id=%s project_id=%s", obj.id, project_id)
+    return obj
+
+
+# ─── Upsert (create-or-update pattern) ───────────────────────────────────────
+
+
+async def upsert_xxx(db: AsyncSession, project_id: int, payload: dict) -> Xxx:
+    """Create or update Xxx (id in payload → update; no id → create)."""
+    if payload.get("id"):
+        result = await db.execute(
+            select(Xxx).where(
+                Xxx.id == payload["id"],
+                Xxx.project_id == project_id,
+                Xxx.is_deleted == False,
+            )
+        )
+        obj = result.scalar_one_or_none()
+        if obj:
+            for k, v in payload.items():
+                if k not in ("id", "project_id"):
+                    setattr(obj, k, v)
+            obj.updated_at = utcnow()
+            await db.commit()
+            await db.refresh(obj)
+            await invalidate_cache(f"{_CACHE_PREFIX}:project_id={project_id}")
+            return obj
+
+    # Create new
+    obj = Xxx(project_id=project_id, **{k: v for k, v in payload.items() if k != "id"})
+    db.add(obj)
+    await db.commit()
+    await db.refresh(obj)
+    await invalidate_cache(f"{_CACHE_PREFIX}:project_id={project_id}")
+    return obj
+
+
+# ─── Delete ───────────────────────────────────────────────────────────────────
+
+
+async def delete_xxx(db: AsyncSession, project_id: int, xxx_id: int) -> bool:
+    """Soft-delete an Xxx record. Returns True if deleted, False if not found."""
+    obj = await get_xxx(db, project_id, xxx_id)
+    if not obj:
+        return False
+
+    obj.soft_delete()                         # RULE: soft_delete(), NEVER db.delete()
+    await db.commit()
+    await invalidate_cache(f"{_CACHE_PREFIX}:project_id={project_id}")
+    logger.info("soft-deleted Xxx id=%s project_id=%s", xxx_id, project_id)
+    return True
