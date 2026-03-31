@@ -10,6 +10,7 @@ Refactored: scheduler package with job modules.
 This module: scheduler lifecycle (start, stop, status, restart).
 """
 
+import contextlib
 import logging
 
 import pytz
@@ -272,11 +273,20 @@ def start_scheduler():
 
 
 def stop_scheduler():
-    """Stop the background scheduler."""
+    """Stop the background scheduler gracefully.
+
+    wait=True gives running jobs time to finish (up to stop_grace_period).
+    This prevents SIGKILL from docker when jobs are mid-flight.
+    """
     global _scheduler
     if _scheduler:
-        _scheduler.shutdown(wait=False)
-        logger.info("Scheduler stopped")
+        try:
+            _scheduler.shutdown(wait=True)
+            logger.info("Scheduler stopped gracefully (all jobs finished)")
+        except Exception as e:
+            logger.warning("Scheduler shutdown error (forcing): %s", e)
+            with contextlib.suppress(Exception):
+                _scheduler.shutdown(wait=False)
         _scheduler = None
 
 

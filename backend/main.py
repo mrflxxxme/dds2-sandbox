@@ -497,7 +497,7 @@ app.include_router(ws.router, prefix="/api/v1", tags=["WebSocket"])
 
 @app.get("/health")
 async def health():
-    """Extended health check — verify DB, Redis, MinIO connectivity."""
+    """Extended health check — verify DB, Redis, MinIO, scheduler connectivity."""
     checks = {}
 
     # DB check
@@ -534,8 +534,20 @@ async def health():
     except Exception as e:
         checks["minio"] = f"error: {e}"
 
+    # Scheduler check (worker only)
+    scheduler_ok = True
+    if settings.DDS_ROLE == "worker":
+        from backend.scheduler import get_scheduler_instance
+
+        sched = get_scheduler_instance()
+        if sched and sched.running:
+            checks["scheduler"] = "ok"
+        else:
+            checks["scheduler"] = "error: scheduler not running"
+            scheduler_ok = False
+
     all_ok = all(v == "ok" for v in checks.values() if v != "not configured")
-    return {"status": "ok" if all_ok else "degraded", "checks": checks}
+    return {"status": "ok" if all_ok else "degraded", "checks": checks, "scheduler_ok": scheduler_ok}
 
 
 @app.post("/api/v1/seed", dependencies=[Depends(require_admin)])
