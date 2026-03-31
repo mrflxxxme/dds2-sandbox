@@ -58,6 +58,7 @@ services:
       DB_MAX_OVERFLOW: 10
     entrypoint: ["./entrypoint-worker.sh"]
     command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "120"]
+    stop_grace_period: 60s
     ports:
       - "10.0.0.2:8001:8000"
     deploy:
@@ -65,10 +66,11 @@ services:
         limits:
           memory: 1024M
     healthcheck:
-      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" ]
+      test: [ "CMD", "python", "-c", "import urllib.request,json; r=urllib.request.urlopen('http://localhost:8000/health'); d=json.loads(r.read()); exit(0 if d.get('scheduler_ok',True) else 1)" ]
       interval: 15s
-      timeout: 5s
-      retries: 5
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
     networks:
       - app
