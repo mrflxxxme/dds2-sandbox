@@ -66,6 +66,14 @@
 - sync_log: ВСЕГДА обновлять в finally (НИКОГДА не оставлять RUNNING)
 - При старте: stale cleanup — RUNNING > 10 min → STALE
 - Partial data: при ошибке сохранять уже загруженные дни
+- **CancelledError:** все sync jobs MUST ловить `asyncio.CancelledError` (не наследуется от Exception) — иначе error_msg = null в sync_log
+- **Monitoring:** endpoint `/monitoring/overview` работает в api-контейнере, scheduler статус определяется по sync_log (не in-memory)
+
+### Worker Lifecycle
+- `stop_grace_period: 60s` — worker получает 60 секунд на graceful shutdown при деплое
+- `stop_scheduler(wait=True)` — APScheduler ждёт завершения текущих задач
+- Healthcheck проверяет scheduler (не только HTTP) — docker рестартит если scheduler завис
+- При SIGKILL (exit 137) sync_log остаётся RUNNING → stale cleanup при следующем старте
 
 ### Funnel Metrics
 - Воронка: transitions → add_to_cart → orders_count → orders_sum → buyout_count
@@ -78,6 +86,8 @@
 - **TOCTOU в scheduler locks:** _backfill_locks проверка locked() + acquire не атомарны
 - **wb_finance_sync:** partial commit — если sync fails mid-page, часть данных committed
 - **Float в cost_price:** funnel/sync.py использует float division вместо Decimal
+- ~~**CancelledError не ловился:**~~ исправлено — все sync jobs теперь ловят asyncio.CancelledError (df39300)
+- ~~**Scheduler healthcheck:**~~ исправлено — worker healthcheck проверяет scheduler, не только HTTP (df39300)
 
 ## Dependencies
 - `nomenclature` — для себестоимости в воронке
