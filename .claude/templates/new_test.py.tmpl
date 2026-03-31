@@ -1,0 +1,180 @@
+# TEMPLATE: Copy this file, rename, and adapt. Remove this comment.
+"""
+API tests — Xxx endpoints.
+
+Uses shared fixtures from tests/conftest_api.py:
+  client       — async httpx test client (FastAPI ASGITransport)
+  auth_headers — {"Authorization": "Bearer <token>"} for a fresh test user
+  db_session   — direct AsyncSession for DB assertions (avoid if possible)
+
+TDD workflow: write tests FIRST (RED), then implement (GREEN), then refactor.
+Run: docker compose exec backend pytest tests/test_api_xxx.py -x --tb=short
+"""
+
+import uuid
+
+import pytest
+
+
+# ─── Helper ───────────────────────────────────────────────────────────────────
+
+
+async def _project_headers(client, auth_headers) -> dict:
+    """Create a fresh project and return headers with X-Project-Id."""
+    resp = await client.post(
+        "/api/v1/projects",
+        json={"name": f"Xxx Test {uuid.uuid4().hex[:6]}"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, f"Project creation failed: {resp.text}"
+    project = resp.json()
+    return {**auth_headers, "X-Project-Id": str(project["id"])}
+
+
+def _xxx_payload(**overrides) -> dict:
+    """Build a valid XxxCreate payload with unique values."""
+    uid = uuid.uuid4().hex[:8]
+    base = {
+        "name": f"Test Xxx {uid}",
+        "description": "Template test record",
+        "amount": "1234.56",
+    }
+    base.update(overrides)
+    return base
+
+
+# ─── Happy path ───────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_create_and_list_xxx(client, auth_headers):
+    """Create an Xxx, verify it appears in the list."""
+    headers = await _project_headers(client, auth_headers)
+    payload = _xxx_payload()
+
+    # Create
+    resp = await client.post("/api/v1/xxx", json=payload, headers=headers)
+    assert resp.status_code == 200, f"Create failed: {resp.text}"
+    data = resp.json()
+    assert data["name"] == payload["name"]
+    xxx_id = data["id"]
+
+    # List
+    resp = await client.get("/api/v1/xxx", headers=headers)
+    assert resp.status_code == 200
+    items = resp.json()
+    assert any(x["id"] == xxx_id for x in items), "Created record not found in list"
+
+
+@pytest.mark.asyncio
+async def test_get_xxx_by_id(client, auth_headers):
+    """Fetch a single Xxx by id."""
+    headers = await _project_headers(client, auth_headers)
+
+    resp = await client.post("/api/v1/xxx", json=_xxx_payload(), headers=headers)
+    assert resp.status_code == 200
+    xxx_id = resp.json()["id"]
+
+    resp = await client.get(f"/api/v1/xxx/{xxx_id}", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["id"] == xxx_id
+
+
+@pytest.mark.asyncio
+async def test_update_xxx(client, auth_headers):
+    """Partial update of an Xxx record."""
+    headers = await _project_headers(client, auth_headers)
+
+    resp = await client.post("/api/v1/xxx", json=_xxx_payload(), headers=headers)
+    xxx_id = resp.json()["id"]
+
+    resp = await client.patch(f"/api/v1/xxx/{xxx_id}", json={"name": "Updated Name"}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Updated Name"
+
+
+# ─── Delete / Soft delete ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_delete_xxx(client, auth_headers):
+    """Soft-delete an Xxx; it must disappear from list."""
+    headers = await _project_headers(client, auth_headers)
+
+    resp = await client.post("/api/v1/xxx", json=_xxx_payload(), headers=headers)
+    xxx_id = resp.json()["id"]
+
+    # Delete
+    resp = await client.delete(f"/api/v1/xxx/{xxx_id}", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json().get("ok") is True
+
+    # Verify not in list (soft-deleted records must be hidden)
+    resp = await client.get("/api/v1/xxx", headers=headers)
+    assert all(x["id"] != xxx_id for x in resp.json()), "Soft-deleted record still visible"
+
+    # Verify 404 on direct fetch
+    resp = await client.get(f"/api/v1/xxx/{xxx_id}", headers=headers)
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_nonexistent_xxx(client, auth_headers):
+    """Deleting a non-existent id should return 404."""
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.delete("/api/v1/xxx/999999999", headers=headers)
+    assert resp.status_code == 404
+
+
+# ─── Multi-tenancy isolation ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_xxx_project_isolation(client, auth_headers):
+    """Records from project A must NOT be visible in project B."""
+    headers_a = await _project_headers(client, auth_headers)
+    headers_b = await _project_headers(client, auth_headers)
+
+    # Create in project A
+    resp = await client.post("/api/v1/xxx", json=_xxx_payload(), headers=headers_a)
+    assert resp.status_code == 200
+    xxx_id = resp.json()["id"]
+
+    # Project B must not see it
+    resp = await client.get("/api/v1/xxx", headers=headers_b)
+    assert all(x["id"] != xxx_id for x in resp.json()), "Cross-project data leak detected"
+
+    # Project B must get 404 on direct fetch
+    resp = await client.get(f"/api/v1/xxx/{xxx_id}", headers=headers_b)
+    assert resp.status_code == 404
+
+
+# ─── Auth / access control ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_xxx_requires_auth(client):
+    """Unauthenticated requests must be rejected."""
+    resp = await client.get("/api/v1/xxx")
+    assert resp.status_code in (401, 403, 422)
+
+
+# ─── Validation / edge cases ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_create_xxx_missing_required_field(client, auth_headers):
+    """Omitting a required field should return 422."""
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.post("/api/v1/xxx", json={}, headers=headers)
+    assert resp.status_code == 422
+
+
+# @pytest.mark.asyncio
+# async def test_create_xxx_duplicate(client, auth_headers):
+#     """Duplicate name within project should fail (if unique constraint exists)."""
+#     headers = await _project_headers(client, auth_headers)
+#     payload = _xxx_payload()
+#     await client.post("/api/v1/xxx", json=payload, headers=headers)
+#     resp = await client.post("/api/v1/xxx", json=payload, headers=headers)
+#     assert resp.status_code in (400, 409, 422)

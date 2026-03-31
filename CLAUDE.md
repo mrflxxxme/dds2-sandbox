@@ -12,13 +12,14 @@ bash scripts/check_conventions.sh                 # Проверка конве�
 ```
 
 ## Железные правила (нарушение = баг)
-1. **project_id** — КАЖДЫЙ запрос к БД MUST фильтровать по `project_id`
-2. **is_deleted** — КАЖДЫЙ запрос к SoftDeleteMixin моделям MUST `.where(Model.is_deleted == False)`
-3. **soft_delete** — удаление моделей с SoftDeleteMixin: `model.soft_delete()` (НИКОГДА `db.delete()` для них)
-4. **datetime** — ТОЛЬКО `from backend.utils.time import utcnow` (НИКОГДА `datetime.utcnow()`)
-5. **деньги** — ТОЛЬКО `Numeric(18, 2)` (НИКОГДА Float)
-6. **SQL** — ТОЛЬКО параметризованный `:param` binding (НИКОГДА f-string в `text()`)
-7. **кэш** — `invalidate_cache(prefix)` после мутаций, ключ MUST содержать project_id
+Подробности в `.claude/rules/` — здесь краткая сводка:
+1. **project_id** — КАЖДЫЙ запрос к БД фильтрует по `project_id`
+2. **is_deleted** — `.where(Model.is_deleted == False)` для SoftDeleteMixin
+3. **soft_delete** — `model.soft_delete()` (НИКОГДА `db.delete()`)
+4. **datetime** — `from backend.utils.time import utcnow`
+5. **деньги** — `Numeric(18, 2)` (НИКОГДА Float)
+6. **SQL** — параметризованный `:param` (НИКОГДА f-string)
+7. **кэш** — `invalidate_cache(prefix)` после мутаций
 8. **логика** — бизнес-логика в `services/` (НИКОГДА в `routers/`)
 
 ## Архитектура backend
@@ -55,45 +56,12 @@ Model → Alembic migration → Schema → Service → Router → Test
 #### Баги и мелкие изменения (быстрый цикл)
 Без ТЗ — сразу анализ → фикс → тесты → коммит
 
-### PgBouncer
-- `prepared_statement_cache_size=0` ОБЯЗАТЕЛЕН в DATABASE_URL
-- `DATABASE_URL_SYNC` → напрямую к PostgreSQL (для Alembic/ETL)
-- Statement timeout через event listener (НЕ server_settings)
-
-### Кэш (Redis)
-- `@cached(prefix="...", ttl=300)` для отчётов
-- `invalidate_cache(prefix)` сам добавляет `:*` — НЕ передавать wildcard
-- При ошибке Redis → graceful degradation (warning, не crash)
-- НИКОГДА не сбрасывать все ключи разом (worker starvation)
-
-### Crypto (API-ключи WB)
-- Шифрование: `backend/utils/crypto.py` (encrypt/decrypt)
-- Есть legacy_fallback — НЕ менять без data-migration
-
-### WB API
-- Rate limits: asyncio.Semaphore, respect Retry-After
-- Circuit Breaker: ТОЛЬКО для 500-504 (НЕ для 429)
-- Partial data: сохранять уже загруженные дни при ошибках
-- sync_log: ВСЕГДА обновлять в finally (НИКОГДА не оставлять RUNNING)
-
-### WB Finance deductions (БДР/ОПИУ)
-- `ad_deduction` — отдельная статья, НЕ включать в to_pay
-- `loan_deduction` — финансовая операция, НЕ включать в операционную прибыль
-- Только `other_deduction` → операционные расходы
-- Изменение типов удержаний → обновить ОБА: wb_bdr_service.py И opiu_service.py
-
-### AI Multi-Agent система
-```
-services/ai/orchestrator.py — классификация интента (Haiku), маршрутизация к 1-2 агентам
-services/ai/agents/ — 7 специализированных агентов (analyst, financier, marketer, advertiser, supply_manager, logistics, logistician)
-services/ai/agents/base.py — базовый класс с tool execution loop (до 5 раундов)
-services/ai/synthesizer.py — объединение ответов нескольких агентов
-services/ai/memory.py — Obsidian-style память (авто-инсайты в BrandNote)
-services/ai/tools/ — 19 инструментов (finance 6, marketing 5, logistics 8)
-services/ai/prompts/ — системные промпты для каждого агента + orchestrator + synthesizer
-services/ai/llm_client.py — клиент Anthropic API (Sonnet для чата, Haiku для классификации/дайджестов)
-```
-- Подробнее: `backend/DOMAIN_AI.md`
+### Технические детали
+Подробности в `.claude/rules/` и DOMAIN файлах. Ключевое:
+- **PgBouncer**: `prepared_statement_cache_size=0`, `DATABASE_URL_SYNC` для Alembic/ETL
+- **Кэш**: `invalidate_cache(prefix)` добавляет `:*` сам — НЕ передавать wildcard
+- **Crypto**: `backend/utils/crypto.py`, legacy_fallback — НЕ менять без data-migration
+- **WB API**: sync_log ВСЕГДА обновлять в finally, deductions → см. `DOMAIN_WB.md`
 
 ## Архитектура frontend
 ```
@@ -113,19 +81,25 @@ src/types/api.ts — TypeScript интерфейсы
 - ОБЯЗАТЕЛЬНО: loading, error, empty states
 - Новый endpoint → тип в api.ts + метод в api.ts
 
-## Домены — читай DOMAIN_*.md перед работой с модулем
-| Домен | Контекст | Ключевые файлы |
-|-------|----------|----------------|
-| Транзакции | `backend/DOMAIN_TRANSACTIONS.md` | etl/, services/transactions_service.py |
-| Отчёты | `backend/DOMAIN_REPORTS.md` | services/reports/, opiu_service.py, wb_bdr_service.py |
-| Планирование | `backend/DOMAIN_PLANNING.md` | services/planning/, routers/planning.py |
-| Себестоимость | `backend/DOMAIN_COST.md` | services/cost/, etl/cost_parsers.py, etl/cost_parser_helpers.py |
-| Склад | `backend/DOMAIN_WAREHOUSE.md` | services/warehouse_*, services/fbo_supply_service.py |
-| WB Интеграция | `backend/DOMAIN_WB.md` | integrations/, services/funnel/, scheduler/jobs/ |
-| Сборка/Логистика | `backend/DOMAIN_ASSEMBLY.md` | services/assembly_service.py, routers/assembly.py |
-| AI Агенты | `backend/DOMAIN_AI.md` | services/ai/orchestrator.py, services/ai/agents/, services/ai/memory.py |
-| Telegram | `backend/DOMAIN_TELEGRAM.md` | integrations/telegram_bot.py, services/telegram_service.py, routers/telegram_webhook.py |
-| Фронтенд | `frontend-react/DOMAIN_FRONTEND.md` | src/app/(main)/, src/app/(tma)/, src/lib/api.ts |
+## Домены — DOMAIN_*.md для сложных задач, gotchas ниже для быстрых
+| Домен | Gotchas | Ключевые файлы |
+|-------|---------|----------------|
+| Транзакции | deduplicate by txn_id; VTB/WB парсеры | etl/, transactions_service |
+| Отчёты | кэш 300s; invalidate_project_reports(); ОПИУ+БДР синхронизировать | reports/, opiu_service, wb_bdr_service |
+| Планирование | plan_items привязаны к category; cashflow = txn+plan | planning/, routers/planning |
+| Себестоимость | FIFO; duty per container; cost_price = себест + пошлина + логистика | cost/, cost_parsers, cost_parser_helpers |
+| Склад | FBO vs FBS; stock_date ≠ report_date; остатки WB daily sync | warehouse_*, fbo_supply_service |
+| WB API | Semaphore; Retry-After; partial save; sync_log в finally | integrations/, funnel/, scheduler/jobs/ |
+| Сборка | assembly_service 1121 строк — нужен рефакторинг | assembly_service, routers/assembly |
+| AI Агенты | orchestrator→agents→synthesizer; 19 tools; memory=BrandNote | services/ai/ |
+| Telegram | polling с прокси на проде; HMAC auth для TMA | telegram_bot, telegram_service |
+| Фронтенд | types/api.ts; formatNumber(); loading+error+empty states | src/app/, src/lib/api/ |
+
+## Быстрая навигация (для агентов)
+- **Карта backend** → `backend/MAP.md` (типовые паттерны, импорты, где что лежит)
+- **Шаблоны** → `.claude/templates/` (скелеты service, router, test, model, schema, page)
+- **Грабли** → `docs/KNOWN_PITFALLS.md` (ошибки которые агенты повторяют)
+- **Worktrees** → `scripts/worktree-start.sh` / `worktree-finish.sh` (параллельная работа)
 
 ## Перед началом задачи
 Следуй процессу Agent TDD из `docs/AGENT_DEVELOPMENT.md`:
@@ -153,16 +127,9 @@ src/types/api.ts — TypeScript интерфейсы
 6. **Исправлен баг из known_bugs** → обнови `memory/project_known_bugs.md` — перенеси в «Исправленные» с номером коммита
 
 ## Антипаттерны (НЕ ДЕЛАТЬ)
-- Запрос без `project_id` или `is_deleted` фильтра
-- `db.delete()` на моделях с SoftDeleteMixin (вместо `soft_delete()`)
-- f-string в SQL `text()`
-- Float для денег
-- `datetime.utcnow()` / `datetime.now()`
-- Бизнес-логика в роутере
-- `.scalars().all()` без `.limit()`
-- `ilike(f"%{input}%")` без экранирования `%`/`_` и без `escape="\\"`
-- Мутация без `invalidate_cache()`
-- Сервис > 500 строк без разбиения
-- `asyncio.get_event_loop()` вместо `asyncio.get_running_loop()`
-- `print()` в backend коде вместо `logging.getLogger()`
-- `except Exception` без `except asyncio.CancelledError` в scheduler jobs (CancelledError — BaseException, не Exception)
+Полный список в `.claude/rules/` и `docs/KNOWN_PITFALLS.md`. Критичные:
+- Запрос без `project_id` / `is_deleted` фильтра
+- `db.delete()` вместо `soft_delete()`
+- f-string в SQL, Float для денег, `datetime.utcnow()`
+- Бизнес-логика в роутере, `.scalars().all()` без `.limit()`
+- `except Exception` без `asyncio.CancelledError` в scheduler jobs

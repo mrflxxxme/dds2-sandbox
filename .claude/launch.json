@@ -4,8 +4,14 @@
     {
       "name": "frontend",
       "runtimeExecutable": "docker",
-      "runtimeArgs": ["compose", "logs", "-f", "frontend-react"],
+      "runtimeArgs": ["compose", "up", "frontend-react"],
       "port": 3000
+    },
+    {
+      "name": "backend",
+      "runtimeExecutable": "docker",
+      "runtimeArgs": ["compose", "up", "backend"],
+      "port": 8000
     }
   ]
 }

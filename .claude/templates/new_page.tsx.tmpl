@@ -1,0 +1,270 @@
+// TEMPLATE: Copy this file, rename, and adapt. Remove this comment.
+'use client';
+/**
+ * XxxPage — TODO: describe the domain
+ *
+ * Checklist before committing:
+ * [ ] Add TypeScript type for response in src/types/api.ts
+ * [ ] Add API method in src/lib/api.ts  (NEVER raw fetch)
+ * [ ] Replace all TODO / Xxx / xxx placeholders
+ * [ ] Verify loading, error, empty states all render correctly
+ * [ ] Verify Excel export button is present
+ */
+
+import { useCallback, useEffect, useState } from 'react';
+import { api } from '@/lib/api';
+import { exportToExcel, formatDate, formatNumber } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+// TODO: import type from src/types/api.ts — NEVER use inline types or `any`
+// import type { XxxItem } from '@/types/api';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+// TODO: move to src/types/api.ts and import from there
+
+interface XxxItem {
+    id: number;
+    name: string;
+    amount: number;        // Decimal from backend — comes as string/number
+    created_at: string;
+    // TODO: add all fields
+}
+
+interface XxxFormState {
+    name: string;
+    amount: string;
+    // TODO: add all form fields
+}
+
+const EMPTY_FORM: XxxFormState = {
+    name: '',
+    amount: '',
+};
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
+
+export default function XxxPage() {
+    const [data, setData] = useState<XxxItem[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [showForm, setShowForm] = useState(false);
+    const [form, setForm] = useState<XxxFormState>(EMPTY_FORM);
+    const [saving, setSaving] = useState(false);
+    const [msg, setMsg] = useState('');
+
+    // ─── Data loading ─────────────────────────────────────────────────────────
+
+    const load = useCallback(async () => {
+        try {
+            setLoading(true);
+            setError(null);
+            // TODO: replace api.getXxx with real API method from src/lib/api.ts
+            const result = await api.getXxx();
+            setData(result);
+        } catch (e: unknown) {
+            const message = e instanceof Error ? e.message : 'Ошибка загрузки';
+            setError(message);
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        load();
+    }, [load]);
+
+    // ─── CRUD handlers ────────────────────────────────────────────────────────
+
+    const handleSave = async () => {
+        setSaving(true);
+        setMsg('');
+        try {
+            // TODO: replace with real API method
+            await api.createXxx(form);
+            setMsg('Сохранено');
+            setShowForm(false);
+            setForm(EMPTY_FORM);
+            await load();
+        } catch (e: unknown) {
+            const message = e instanceof Error ? e.message : 'Ошибка сохранения';
+            setMsg(message);
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const handleDelete = async (id: number) => {
+        if (!confirm('Удалить запись?')) return;
+        try {
+            // TODO: replace with real API method
+            await api.deleteXxx(id);
+            await load();
+        } catch (e: unknown) {
+            const message = e instanceof Error ? e.message : 'Ошибка удаления';
+            setMsg(message);
+        }
+    };
+
+    // ─── Render ───────────────────────────────────────────────────────────────
+
+    return (
+        <div className="animate-in">
+            {/* Page header */}
+            <div className="page-header">
+                <div>
+                    <h1 className="page-title">TODO: Page Title</h1>
+                    <p className="page-subtitle">TODO: short description</p>
+                </div>
+            </div>
+
+            <div className="glass-card">
+                {/* Card header with actions */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>
+                        TODO: Section title ({data.length})
+                    </h3>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                        {/* RULE: always provide Excel export */}
+                        <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => exportToExcel(data, 'xxx_export')}
+                            disabled={data.length === 0}
+                        >
+                            📥 Excel
+                        </button>
+                        <button
+                            className="btn btn-primary btn-sm"
+                            onClick={() => setShowForm(!showForm)}
+                        >
+                            + Добавить
+                        </button>
+                    </div>
+                </div>
+
+                {/* Feedback message */}
+                {msg && (
+                    <div style={{ fontSize: 13, marginBottom: 8, color: msg.startsWith('Ошибка') ? 'var(--color-danger)' : 'var(--color-success)' }}>
+                        {msg}
+                    </div>
+                )}
+
+                {/* Create form */}
+                {showForm && (
+                    <div style={{
+                        background: 'var(--color-bg-input)',
+                        padding: 16,
+                        borderRadius: 8,
+                        marginBottom: 16,
+                        display: 'grid',
+                        gridTemplateColumns: '1fr 1fr',
+                        gap: 12,
+                    }}>
+                        <div className="form-group">
+                            <label className="form-label">Название *</label>
+                            <input
+                                className="form-input"
+                                value={form.name}
+                                onChange={e => setForm({ ...form, name: e.target.value })}
+                                placeholder="Введите название"
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label className="form-label">Сумма</label>
+                            <input
+                                className="form-input"
+                                type="number"
+                                value={form.amount}
+                                onChange={e => setForm({ ...form, amount: e.target.value })}
+                                placeholder="0.00"
+                            />
+                        </div>
+                        {/* TODO: add more form fields here */}
+                        <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 8 }}>
+                            <button
+                                className="btn btn-primary btn-sm"
+                                onClick={handleSave}
+                                disabled={saving || !form.name.trim()}
+                            >
+                                {saving ? 'Сохраняю...' : '💾 Сохранить'}
+                            </button>
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => { setShowForm(false); setForm(EMPTY_FORM); }}
+                            >
+                                Отмена
+                            </button>
+                        </div>
+                    </div>
+                )}
+
+                {/* Loading state — REQUIRED */}
+                {loading && (
+                    <div style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-dim)' }}>
+                        Загрузка...
+                    </div>
+                )}
+
+                {/* Error state — REQUIRED */}
+                {!loading && error && (
+                    <div style={{ textAlign: 'center', padding: 40, color: 'var(--color-danger)' }}>
+                        {error}
+                        <br />
+                        <button className="btn btn-secondary btn-sm" style={{ marginTop: 12 }} onClick={load}>
+                            Повторить
+                        </button>
+                    </div>
+                )}
+
+                {/* Data table */}
+                {!loading && !error && (
+                    <TanStackDataTable
+                        columns={[
+                            { key: 'id', label: 'ID' },
+                            { key: 'name', label: 'Название' },
+                            {
+                                key: 'amount',
+                                label: 'Сумма',
+                                // RULE: formatNumber() for all numeric display
+                                render: (v: unknown) => (
+                                    <span>{formatNumber(Number(v))}</span>
+                                ),
+                            },
+                            {
+                                key: 'created_at',
+                                label: 'Создано',
+                                // RULE: formatDate() for all date display
+                                render: (v: unknown) => (
+                                    <span style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>
+                                        {formatDate(String(v))}
+                                    </span>
+                                ),
+                            },
+                            // TODO: add more columns
+                            {
+                                key: '_actions',
+                                label: '',
+                                sortable: false,
+                                render: (_v: unknown, row: XxxItem) => (
+                                    <button
+                                        className="btn btn-danger btn-sm"
+                                        style={{ padding: '2px 8px', fontSize: 11 }}
+                                        onClick={() => handleDelete(row.id)}
+                                    >
+                                        ✕
+                                    </button>
+                                ),
+                            },
+                        ]}
+                        data={data}
+                        emptyText="Нет записей"   // RULE: always provide empty state
+                        enableSorting
+                        enablePagination
+                    />
+                )}
+            </div>
+        </div>
+    );
+}
+
+// TODO: Register page route:
+// File lives at: src/app/(main)/p/[slug]/xxx/page.tsx
+// (Next.js App Router — no explicit registration needed, just place the file)

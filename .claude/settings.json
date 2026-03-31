@@ -2,25 +2,15 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|Read|Edit|Write",
         "hooks": [
           {
             "type": "command",
-            "command": "input=$(cat); cmd=$(echo \"$input\" | grep -o '\"command\":\"[^\"]*\"' | head -1 | sed 's/\"command\":\"//;s/\"$//'); if echo \"$cmd\" | grep -qE '(--no-verify|--no-gpg-sign)'; then echo 'BLOCKED: --no-verify и --no-gpg-sign запрещены.' >&2; exit 2; fi; if echo \"$cmd\" | grep -qE 'rm\\s+(-[a-zA-Z]*r[a-zA-Z]*f|--force).*/' ; then echo 'BLOCKED: rm -rf запрещён. Удаляй файлы по одному.' >&2; exit 2; fi; if echo \"$cmd\" | grep -qiE '(DROP\\s+TABLE|DROP\\s+DATABASE|TRUNCATE)'; then echo 'BLOCKED: DROP/TRUNCATE запрещены. Используй миграции.' >&2; exit 2; fi; if echo \"$cmd\" | grep -qE 'git\\s+push\\s+.*--force'; then echo 'BLOCKED: git push --force запрещён.' >&2; exit 2; fi; if echo \"$cmd\" | grep -qE 'git\\s+reset\\s+--hard'; then echo 'BLOCKED: git reset --hard запрещён. Используй git stash.' >&2; exit 2; fi; exit 0"
-          }
-        ],
-        "description": "Блокировать опасные команды: --no-verify, rm -rf, DROP TABLE, push --force, reset --hard"
-      },
-      {
-        "matcher": "Read|Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "input=$(cat); file=$(echo \"$input\" | grep -oE '\"file_path\":\"[^\"]*\"' | head -1 | sed 's/\"file_path\":\"//;s/\"$//'); if [ -z \"$file\" ]; then exit 0; fi; base=$(basename \"$file\"); if echo \"$base\" | grep -qE '^\\.env($|\\.)'; then echo 'BLOCKED: Доступ к .env файлам запрещён. Секреты только через переменные окружения.' >&2; exit 2; fi; if echo \"$base\" | grep -qiE '(credentials|secrets|private.key)'; then echo 'BLOCKED: Доступ к файлам с секретами запрещён.' >&2; exit 2; fi; exit 0",
+            "command": "bash scripts/hooks/pre_tool_check.sh",
             "timeout": 3
           }
         ],
-        "description": "Блокировать доступ к .env и файлам с секретами"
+        "description": "Блокировать опасные команды + доступ к .env/credentials"
       }
     ],
     "PostToolUse": [
@@ -29,33 +19,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "input=$(cat); file=$(echo \"$input\" | grep -oE '\"file_path\":\"[^\"]*\"' | head -1 | sed 's/\"file_path\":\"//;s/\"$//'); if [ -z \"$file\" ]; then exit 0; fi; case \"$file\" in *.py) if grep -qn 'datetime.utcnow\\|datetime.now()' \"$file\" 2>/dev/null; then echo '[DDS2 WARN] datetime.utcnow()/datetime.now() — используй from backend.utils.time import utcnow' >&2; fi; if grep -qn 'text(f\"\\|text(f'\\''' \"$file\" 2>/dev/null; then echo '[DDS2 WARN] f-string в text() — SQL injection! Используй :param' >&2; fi; if grep -qn 'db\\.delete\\|session\\.delete' \"$file\" 2>/dev/null; then echo '[DDS2 WARN] db.delete() — используй soft_delete()' >&2; fi ;; esac; exit 0",
+            "command": "bash scripts/hooks/post_edit_check.sh",
             "timeout": 5
           }
         ],
-        "description": "Проверка iron rules после редактирования Python файлов"
-      },
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "input=$(cat); file=$(echo \"$input\" | grep -oE '\"file_path\":\"[^\"]*\"' | head -1 | sed 's/\"file_path\":\"//;s/\"$//'); if [ -z \"$file\" ]; then exit 0; fi; case \"$file\" in */services/*.py|*/routers/*.py) if grep -qn 'select\\|insert\\|update\\|delete\\|text(' \"$file\" 2>/dev/null; then if ! grep -qn 'project_id' \"$file\" 2>/dev/null; then echo '[DDS2 WARN] SQL без project_id в '$file' — каждый запрос MUST фильтровать по project_id' >&2; fi; fi ;; esac; exit 0",
-            "timeout": 5
-          }
-        ],
-        "description": "Проверка project_id в файлах с SQL запросами"
-      },
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "input=$(cat); file=$(echo \"$input\" | grep -oE '\"file_path\":\"[^\"]*\"' | head -1 | sed 's/\"file_path\":\"//;s/\"$//'); if [ -z \"$file\" ]; then exit 0; fi; case \"$file\" in */routers/*.py) if grep -qnE '(select|insert|update|delete|execute)' \"$file\" 2>/dev/null; then if grep -qnE '(await db\\.|async_session)' \"$file\" 2>/dev/null; then echo '[DDS2 WARN] Бизнес-логика в роутере '$file' — вынеси в services/' >&2; fi; fi ;; esac; exit 0",
-            "timeout": 5
-          }
-        ],
-        "description": "Детект бизнес-логики в роутерах"
+        "description": "Iron rules + project_id + бизнес-логика в роутерах"
       }
     ],
     "Stop": [
@@ -64,22 +32,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "changed=$(git diff --name-only 2>/dev/null); if [ -z \"$changed\" ]; then exit 0; fi; issues=0; for f in $changed; do case \"$f\" in */models/*.py) if [ -f \"$f\" ]; then if grep -qn 'Float' \"$f\" 2>/dev/null; then echo \"[DDS2] Float в модели $f — используй Numeric(18,2)\" >&2; issues=$((issues+1)); fi; fi ;; esac; done; if [ $issues -gt 0 ]; then echo \"[DDS2] $issues проблем найдено\" >&2; fi; exit 0",
+            "command": "bash scripts/hooks/post_stop_check.sh",
             "timeout": 10
           }
         ],
-        "description": "Проверка Float в моделях после каждого ответа"
-      },
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "new_files=$(git diff --name-only --diff-filter=A HEAD 2>/dev/null); if [ -z \"$new_files\" ]; then exit 0; fi; hints=''; for f in $new_files; do case \"$f\" in backend/models/*.py) hints=\"$hints\n[DOCS] Новая модель $f — обнови DOMAIN_*.md и проверь SOFT_MODELS в check_conventions.sh\" ;; backend/services/*.py) hints=\"$hints\n[DOCS] Новый сервис $f — обнови DOMAIN_*.md\" ;; backend/routers/*.py) hints=\"$hints\n[DOCS] Новый роутер $f — обнови DOMAIN_*.md\" ;; migrations/versions/*.py) hints=\"$hints\n[DOCS] Новая миграция $f — обнови DOMAIN_*.md\" ;; esac; done; if [ -n \"$hints\" ]; then echo \"$hints\" >&2; echo '[DOCS] Запусти /docs для автообновления документации' >&2; fi; exit 0",
-            "timeout": 10
-          }
-        ],
-        "description": "Напоминание обновить документацию при создании новых моделей/сервисов/роутеров/миграций"
+        "description": "Float в моделях + напоминание обновить документацию"
       }
     ],
     "UserPromptSubmit": [
