@@ -33,10 +33,17 @@ async def get_overview(
     """Get monitoring overview: sync health + scheduler status."""
     overview = await monitoring_service.get_sync_overview(db, project.id)
 
-    # Get scheduler info
+    # Get scheduler info — try in-memory first (works in worker),
+    # fall back to DB-based detection (works in api container)
     from backend.scheduler import get_scheduler_info
 
     sched_info = get_scheduler_info()
+
+    # If in-memory scheduler is not available (api container),
+    # infer status from recent sync_log activity
+    if not sched_info["running"] and overview["total_syncs_24h"] > 0:
+        sched_info = {"running": True, "jobs": []}
+        logger.debug("Scheduler detected as running via sync_log activity (api container)")
 
     return MonitoringOverview(
         sync_types=[SyncTypeStatus(**st) for st in overview["sync_types"]],
