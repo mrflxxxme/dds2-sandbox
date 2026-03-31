@@ -58,6 +58,7 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
     for pid in project_ids:
         sync_log = None
         log_status = "ERROR"
+        log_error_msg = None
         rows_synced = 0
 
         try:
@@ -238,12 +239,18 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
 
         except TimeoutError:
             log_status = "TIMEOUT"
+            log_error_msg = "Timeout 600s exceeded"
             logger.error("💰 WB Finance %s: project %s — TIMEOUT (600s)", job_label, pid)
             await send_alert(
                 f"WB Finance Sync ({job_label}) *TIMEOUT*\nProject: {pid}",
             )
+        except asyncio.CancelledError:
+            log_status = "ERROR"
+            log_error_msg = "Task cancelled (worker shutdown or restart)"
+            logger.warning("💰 WB Finance %s: project %s — CANCELLED", job_label, pid)
         except Exception as e:
             log_status = "ERROR"
+            log_error_msg = str(e)[:500]
             logger.error(
                 "💰 WB Finance %s sync failed for project %s: %s",
                 job_label,
@@ -268,6 +275,7 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                                 status=log_status,
                                 rows_inserted=rows_synced,
                                 finished_at=utcnow(),
+                                error_msg=log_error_msg,
                             )
                         )
                         await db.commit()

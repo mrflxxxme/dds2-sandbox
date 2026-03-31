@@ -38,6 +38,7 @@ async def sync_all_projects_fbo_supplies():
         sync_log = None
         log_id = None
         log_status = "ERROR"
+        log_error_msg = None
         rows_synced = 0
 
         try:
@@ -91,14 +92,21 @@ async def sync_all_projects_fbo_supplies():
 
         except TimeoutError:
             log_status = "TIMEOUT"
+            log_error_msg = "Timeout 600s exceeded"
             logger.error("FBO supplies sync: project %d — TIMEOUT (600s)", project_id)
             errors += 1
             try:
                 await send_alert(f"FBO sync TIMEOUT for project {project_id}")
             except Exception:
                 logger.warning("FBO supplies sync: failed to send alert for project %d", project_id)
+        except asyncio.CancelledError:
+            log_status = "ERROR"
+            log_error_msg = "Task cancelled (worker shutdown or restart)"
+            logger.warning("FBO supplies sync: project %d — CANCELLED", project_id)
+            errors += 1
         except Exception as e:
             log_status = "ERROR"
+            log_error_msg = str(e)[:500]
             logger.error(
                 "FBO supplies sync: project %d failed — %s",
                 project_id,
@@ -124,6 +132,7 @@ async def sync_all_projects_fbo_supplies():
                                 status=log_status,
                                 rows_inserted=rows_synced,
                                 finished_at=utcnow(),
+                                error_msg=log_error_msg,
                             )
                         )
                         await db.commit()
