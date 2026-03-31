@@ -25,7 +25,13 @@ except Exception as e:
 
 ## P4: ilike без экранирования
 **НЕПРАВИЛЬНО:** `.ilike(f"%{search}%")` — пользователь вводит `%` или `_` → сломанный запрос
-**ПРАВИЛЬНО:** `.ilike(f"%{escape_like(search)}%", escape="\\")` + `from backend.utils.helpers import escape_like`
+**ПРАВИЛЬНО:** Определи helper локально или скопируй из transactions_service.py:
+```python
+def _escape_like(s: str) -> str:
+    return s.replace("%", r"\%").replace("_", r"\_")
+
+query = select(Model).where(Model.name.ilike(f"%{_escape_like(search)}%", escape="\\"))
+```
 
 ## P5: sync_log остаётся RUNNING
 **НЕПРАВИЛЬНО:** обновлять sync_log только в try блоке
