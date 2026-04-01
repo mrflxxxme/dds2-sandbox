@@ -38,6 +38,7 @@ const navGroups = [
         section: 'orders',
         items: [
             { href: '/planning', label: 'Планирование', icon: '📦', pageKey: 'planning' },
+            { href: '/supply-chain', label: 'Поставки', icon: '🚚', pageKey: 'supply-chain' },
             { href: '/container-loader', label: 'Загрузка контейнера', icon: '🚛', pageKey: 'container' },
         ],
     },

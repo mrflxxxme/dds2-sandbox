@@ -51,6 +51,7 @@ class CostOrderItemSchema(BaseModel):
     total_rub: Decimal | None = None
     total_cny: Decimal | None = None
     unrecognized: bool = False
+    factory_order_item_id: int | None = None
 
 
 class CostOrderSchema(BaseModel):
@@ -69,6 +70,9 @@ class CostOrderSchema(BaseModel):
     note: str | None = None
     dt_number: str | None = None
     created_at: datetime | None = None
+    status: str | None = None
+    target_warehouse_id: int | None = None
+    inbound_receipt_id: int | None = None
     items: list[CostOrderItemSchema] | None = None
 
 
@@ -100,3 +104,5 @@ class CostOrderCreate(BaseModel):
     rate_usd: Decimal = Decimal("1")
     note: str | None = None
     dt_number: str | None = None
+    status: str | None = None
+    target_warehouse_id: int | None = None

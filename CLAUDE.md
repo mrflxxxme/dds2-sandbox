@@ -65,7 +65,7 @@ Model → Alembic migration → Schema → Service → Router → Test
 
 ## Архитектура frontend
 ```
-src/app/(main)/p/[slug]/ — основное приложение (22+ страниц: dds, import, txn, inbox, reports, planning, cost, funnel, trends, refs, settings, opiu, orders, plan-fact, team, monitoring, bulk-cost, container-loader, order-geography, warehouse/*)
+src/app/(main)/p/[slug]/ — основное приложение (23+ страниц: dds, import, txn, inbox, reports, planning, cost, funnel, trends, refs, settings, opiu, orders, plan-fact, team, monitoring, bulk-cost, container-loader, order-geography, warehouse/*, supply-chain)
 src/app/(tma)/tma/[slug]/ — Telegram Mini App (dashboard, capital, chat, funnel, pnl, pulse, warehouse)
 src/lib/api/ — модульный API клиент (client.ts + 13 доменных файлов, JWT auth + auto-refresh)
 src/lib/utils.ts — formatNumber, formatDate, exportToExcel
@@ -93,6 +93,7 @@ src/types/api.ts — TypeScript интерфейсы
 | Сборка | assembly_service 1121 строк — нужен рефакторинг | assembly_service, routers/assembly |
 | AI Агенты | orchestrator→agents→synthesizer; 19 tools; memory=BrandNote | services/ai/ |
 | Telegram | polling с прокси на проде; HMAC auth для TMA | telegram_bot, telegram_service |
+| Поставки | FactoryOrder→CostOrder→Warehouse; VehicleStatus; split_to_vehicles | supply_chain/, cost.py |
 | Фронтенд | types/api.ts; formatNumber(); loading+error+empty states | src/app/, src/lib/api/ |
 
 ## Быстрая навигация (для агентов)

@@ -32,6 +32,7 @@ from backend.routers import (
     projects,
     refs,
     reports,
+    supply_chain,
     telegram,
     telegram_miniapp,
     telegram_webhook,
@@ -474,6 +475,12 @@ app.include_router(
     warehouse.router,
     prefix="/api/v1",
     tags=["Warehouse"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    supply_chain.router,
+    prefix="/api/v1",
+    tags=["Supply Chain"],
     dependencies=[Depends(get_current_user)],
 )
 

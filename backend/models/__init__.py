@@ -44,6 +44,7 @@ from backend.models.enums import (
     EventType2,
     PurposeTag,
     TransactionStatus,
+    VehicleStatus,
 )
 
 # FX Rates
@@ -91,6 +92,12 @@ from backend.models.refs import (
     ProductTag,  # noqa: F401
     ProductTagMap,  # noqa: F401
     ProjectSetting,
+)
+
+# Supply Chain
+from backend.models.supply_chain import (
+    FactoryOrder,
+    FactoryOrderItem,
 )
 
 # Tax
@@ -164,6 +171,7 @@ __all__ = [
     "TransactionStatus",
     "PurposeTag",
     "DutyBasis",
+    "VehicleStatus",
     # Auth
     "User",
     "Project",
@@ -250,4 +258,7 @@ __all__ = [
     "WbFboSupply",
     "WbFboSupplyItem",
     "WbSupplyStatus",
+    # Supply Chain
+    "FactoryOrder",
+    "FactoryOrderItem",
 ]
