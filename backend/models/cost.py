@@ -21,7 +21,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
-from backend.models.enums import DutyBasis
+from backend.models.enums import DutyBasis, VehicleStatus
 from backend.models.mixins import SoftDeleteMixin
 from backend.utils.time import utcnow
 
@@ -71,7 +71,13 @@ class CostOrder(Base, SoftDeleteMixin):
     rate_usd: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=1)
     note: Mapped[str | None] = mapped_column(Text)
     dt_number: Mapped[str | None] = mapped_column(String(100))
+    container_type: Mapped[str | None] = mapped_column(String(20))
+    actual_ship_date: Mapped[date | None] = mapped_column(Date)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # Supply chain fields
+    status: Mapped[str | None] = mapped_column(SAEnum(VehicleStatus), default=VehicleStatus.FORMING)
+    target_warehouse_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("warehouses.id"))
+    inbound_receipt_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("inbound_receipts.id"))
     items: Mapped[list["CostOrderItem"]] = relationship(back_populates="order", cascade="all, delete-orphan")
 
     __table_args__ = (Index("ix_cost_orders_project_id", "project_id"),)
@@ -98,5 +104,6 @@ class CostOrderItem(Base):
     total_rub: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
     total_cny: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
     unrecognized: Mapped[bool] = mapped_column(Boolean, default=False)
+    factory_order_item_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("factory_order_items.id"))
     order: Mapped["CostOrder"] = relationship(back_populates="items")
     __table_args__ = (Index("ix_cost_item_order", "order_no"),)

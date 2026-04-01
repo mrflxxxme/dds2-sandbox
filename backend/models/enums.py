@@ -26,6 +26,13 @@ class PurposeTag(str, enum.Enum):
 
 
 class DutyBasis(str, enum.Enum):
-    WEIGHT = "WEIGHT"       # евро за кг
-    AREA = "AREA"           # евро за м²
-    INVOICE = "INVOICE"     # % от инвойса
+    WEIGHT = "WEIGHT"  # евро за кг
+    AREA = "AREA"  # евро за м²
+    INVOICE = "INVOICE"  # % от инвойса
+
+
+class VehicleStatus(str, enum.Enum):
+    FORMING = "FORMING"  # наполняется товаром
+    SHIPPED = "SHIPPED"  # отгружен с фабрики  # noqa: RUF003
+    CUSTOMS = "CUSTOMS"  # на таможне
+    DELIVERED = "DELIVERED"  # доставлено на склад

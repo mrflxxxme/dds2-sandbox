@@ -301,6 +301,9 @@ export interface CostOrder {
   created_at: string;
   items_count?: number;
   total_rub?: number;
+  status?: VehicleStatus;
+  target_warehouse_id?: number;
+  inbound_receipt_id?: number;
 }
 
 export interface CostOrderItem {
@@ -1423,4 +1426,176 @@ export interface AdTabProduct {
   bdr_profit: number;
   stock_qty: number;
   campaigns: AdCampaign[];
+}
+
+// ─── Supply Chain ─────────────────────────────────────────────────────────────
+
+export interface FactoryOrderItem {
+  id: number;
+  factory_order_id: number;
+  barcode: string;
+  subject?: string;
+  article_seller?: string;
+  qty: number;
+  assigned_qty: number;
+  price_cny: number;
+  box_size?: string;
+  pcs_per_box?: number;
+  weight_kg?: number;
+  note?: string;
+  remaining_qty?: number;
+}
+
+export interface FactoryOrder {
+  id: number;
+  project_id: number;
+  order_number: string;
+  factory_name?: string;
+  order_date?: string;
+  expected_ready_date?: string;
+  total_cny?: number;
+  note?: string;
+  created_at?: string;
+  updated_at?: string;
+  items?: FactoryOrderItem[];
+}
+
+export interface FactoryOrderCreate {
+  order_number: string;
+  factory_name?: string;
+  order_date?: string;
+  expected_ready_date?: string;
+  total_cny?: number;
+  note?: string;
+  items?: { barcode: string; subject?: string; article_seller?: string; qty: number; price_cny: number; note?: string }[];
+}
+
+export type VehicleStatus = 'FORMING' | 'SHIPPED' | 'CUSTOMS' | 'DELIVERED';
+
+export interface VehicleStatusUpdate {
+  status: VehicleStatus;
+  target_warehouse_id?: number;
+  dt_number?: string;
+}
+
+export interface VehicleCostSummary {
+  total_cost_rub: number;
+  total_delivery_rub: number;
+  total_duty_rub: number;
+  total_vat_rub: number;
+  total_rub: number;
+}
+
+export interface SupplyChainOverview {
+  total_factory_orders: number;
+  total_vehicles: number;
+  vehicles_by_status: Record<string, number>;
+  total_items: number;
+  total_amount_cny: number;
+}
+
+export interface SplitItem {
+  factory_order_item_id: number;
+  qty: number;
+  vehicle_order_no: string;
+}
+
+export interface VehicleCreate {
+  order_no: string;
+  container_type?: string;
+  delivery_cost_cny?: number;
+  delivery_cost_usd?: number;
+  rate_cny?: number;
+  rate_usd?: number;
+  rate_eur?: number;
+  ship_date?: string;
+  invoice_no?: string;
+  target_warehouse_id?: number;
+  note?: string;
+}
+
+export interface VehicleUpdateData {
+  container_type?: string;
+  delivery_cost_cny?: number;
+  delivery_cost_usd?: number;
+  rate_cny?: number;
+  rate_usd?: number;
+  rate_eur?: number;
+  ship_date?: string;
+  invoice_no?: string;
+  dt_number?: string;
+  target_warehouse_id?: number;
+  note?: string;
+}
+
+export interface VehicleItemSchema {
+  id: number;
+  order_no: string;
+  barcode: string;
+  subject?: string;
+  article_seller?: string;
+  qty: number;
+  price_cny: number;
+  weight_kg?: number;
+  volume_m3?: number;
+  cost_rub?: number;
+  delivery_rub?: number;
+  duty_rub?: number;
+  vat_rub?: number;
+  total_rub?: number;
+  factory_order_item_id?: number;
+  box_size?: string;
+  pcs_per_box?: number;
+  factory_order_number?: string;
+}
+
+export interface VehicleSchema {
+  id: number;
+  order_no: string;
+  status?: VehicleStatus;
+  transport_type?: string;
+  container_type?: string;
+  ship_date?: string;
+  actual_ship_date?: string;
+  actual_arrival_date?: string;
+  estimated_arrival_date?: string;
+  delivery_cost_cny: number;
+  delivery_cost_usd: number;
+  rate_cny: number;
+  rate_usd: number;
+  rate_eur: number;
+  invoice_no?: string;
+  note?: string;
+  dt_number?: string;
+  target_warehouse_id?: number;
+  inbound_receipt_id?: number;
+  created_at?: string;
+  items: VehicleItemSchema[];
+  items_count: number;
+  total_qty: number;
+  total_cny: number;
+  total_weight_kg?: number;
+  total_volume_m3?: number;
+  cost_summary?: VehicleCostSummary;
+}
+
+export interface AvailableItemGroup {
+  order_id: number;
+  order_number: string;
+  factory_name?: string;
+  items: AvailableItem[];
+}
+
+export interface AvailableItem {
+  id: number;
+  barcode: string;
+  subject?: string;
+  article_seller?: string;
+  qty: number;
+  assigned_qty: number;
+  remaining_qty: number;
+  price_cny: string;
+  box_size?: string;
+  pcs_per_box?: number;
+  weight_kg?: string;
 }

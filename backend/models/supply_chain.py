@@ -1,0 +1,75 @@
+"""
+Supply Chain models: FactoryOrder, FactoryOrderItem.
+
+Represents factory orders (1 order = 1 factory) that get split
+into vehicles (CostOrder) for delivery.
+"""
+
+from datetime import date
+from decimal import Decimal
+
+from sqlalchemy import (
+    Date,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from backend.database import Base
+from backend.models.mixins import SoftDeleteMixin, TimestampMixin
+
+
+class FactoryOrder(Base, TimestampMixin, SoftDeleteMixin):
+    """
+    Factory order — one order placed to one factory.
+    Items from a factory order get distributed across vehicles (CostOrder).
+    """
+
+    __tablename__ = "factory_orders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    order_number: Mapped[str] = mapped_column(String(50), nullable=False)
+    factory_name: Mapped[str | None] = mapped_column(String(200))
+    order_date: Mapped[date | None] = mapped_column(Date)
+    expected_ready_date: Mapped[date | None] = mapped_column(Date)
+    total_cny: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    note: Mapped[str | None] = mapped_column(Text)
+
+    items: Mapped[list["FactoryOrderItem"]] = relationship(back_populates="factory_order", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "order_number", name="uq_factory_order_project_number"),
+        Index("ix_factory_orders_project_id", "project_id"),
+    )
+
+
+class FactoryOrderItem(Base):
+    """
+    Line item in a factory order.
+    Tracks ordered qty and how much has been assigned to vehicles.
+    """
+
+    __tablename__ = "factory_order_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    factory_order_id: Mapped[int] = mapped_column(Integer, ForeignKey("factory_orders.id"), nullable=False)
+    barcode: Mapped[str] = mapped_column(String(50), nullable=False)
+    subject: Mapped[str | None] = mapped_column(String(100))
+    article_seller: Mapped[str | None] = mapped_column(String(100))
+    qty: Mapped[int] = mapped_column(Integer, default=0)
+    assigned_qty: Mapped[int] = mapped_column(Integer, default=0)
+    price_cny: Mapped[Decimal] = mapped_column(Numeric(12, 4), default=0)
+    box_size: Mapped[str | None] = mapped_column(String(50))  # e.g. "40x30x25"
+    pcs_per_box: Mapped[int | None] = mapped_column(Integer)
+    weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    note: Mapped[str | None] = mapped_column(Text)
+
+    factory_order: Mapped["FactoryOrder"] = relationship(back_populates="items")
+
+    __table_args__ = (Index("ix_factory_order_items_order_id", "factory_order_id"),)
