@@ -644,12 +644,15 @@ async def get_ad_tab(
     date_to: str = Query(...),
     brand: str = Query(""),
     subject: str = Query(""),
+    group_by: str = Query("sku"),
     db: AsyncSession = Depends(get_db),
     project: Project = Depends(get_current_project),
 ):
-    """Get advertising data grouped by product with linked campaigns."""
-    from backend.services.funnel.ad_campaigns_service import get_ad_tab_data
+    """Get advertising data, optionally grouped by brand/subject/tag/imt."""
+    from backend.services.funnel.ad_campaigns_service import get_ad_tab_data, get_ad_tab_grouped
 
+    if group_by in ("brand", "subject", "tag", "imt"):
+        return await get_ad_tab_grouped(db, project.id, date_from, date_to, brand, subject, group_by)
     return await get_ad_tab_data(db, project.id, date_from, date_to, brand, subject)
 
 

@@ -449,6 +449,7 @@ export interface FunnelGroupRow extends Omit<FunnelSkuRow, 'nm_id' | 'vendor_cod
     subject?: string;
     tag?: string;
     imt_group?: string;
+    children?: FunnelSkuRow[];
 }
 
 export interface FunnelSummary {
@@ -1425,7 +1426,29 @@ export interface AdTabProduct {
   bdr_revenue: number;
   bdr_profit: number;
   stock_qty: number;
+  active_campaigns: number;
   campaigns: AdCampaign[];
+}
+
+export interface AdTabGroupRow {
+  group_name: string;
+  adv_views: number;
+  adv_clicks: number;
+  adv_sum: number;
+  orders_sum_rub: number;
+  orders_count: number;
+  ctr: number;
+  cpc: number;
+  cpm: number;
+  drr: number;
+  bdr_revenue: number;
+  bdr_profit: number;
+  abc_revenue: string;
+  abc_profit: string;
+  stock_qty: number;
+  product_count: number;
+  active_campaigns: number;
+  children: AdTabProduct[];
 }
 
 // ─── Supply Chain ─────────────────────────────────────────────────────────────

@@ -94,10 +94,11 @@ export function addFunnelMethods(api: ApiClient) {
             if (params?.illiquid_threshold != null) q.set('illiquid_threshold', String(params.illiquid_threshold));
             return api.request<CapitalResponse>('GET', `/api/v1/funnel/capital?${q.toString()}`);
         },
-        getAdTab(params: { date_from: string; date_to: string; brand?: string; subject?: string }) {
+        getAdTab(params: { date_from: string; date_to: string; brand?: string; subject?: string; group_by?: string }) {
             const q = new URLSearchParams({ date_from: params.date_from, date_to: params.date_to });
             if (params.brand) q.set('brand', params.brand);
             if (params.subject) q.set('subject', params.subject);
+            if (params.group_by) q.set('group_by', params.group_by);
             return api.request<AdTabProduct[]>('GET', `/api/v1/funnel/ad_tab?${q.toString()}`);
         },
         syncAdCampaigns() {

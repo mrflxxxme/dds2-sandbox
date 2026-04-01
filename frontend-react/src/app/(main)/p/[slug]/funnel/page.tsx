@@ -33,6 +33,7 @@ export default function FunnelPage() {
     const [groupData, setGroupData] = useState<FunnelGroupRow[]>([]);
     const [abcData, setAbcData] = useState<FunnelAbcRow[]>([]);
     const [expandedAbc, setExpandedAbc] = useState<Set<string>>(new Set());
+    const [expandedImts, setExpandedImts] = useState<Set<string>>(new Set());
 
     // Filters
     const [dateFrom, setDateFrom] = useState('');
@@ -493,10 +494,18 @@ export default function FunnelPage() {
                                         }).map((r, i) => {
                                             const grpLabel = groupBy === 'brand' ? (r.brand || '\u2014') : groupBy === 'tag' ? (r.tag || '\u2014') : groupBy === 'imt' ? (r.imt_group || '\u2014') : (r.subject || '\u2014');
                                             const rowBg = i % 2 === 0 ? '#ffffff' : '#f9fafb';
+                                            const isImtMode = groupBy === 'imt';
+                                            const isExpanded = isImtMode && expandedImts.has(grpLabel);
+                                            const children = isImtMode ? (r.children || []) : [];
                                             return (
-                                                <tr key={grpLabel} style={{ background: rowBg, color: '#111827' }}>
+                                                <React.Fragment key={grpLabel}>
+                                                <tr style={{ background: rowBg, color: '#111827', cursor: isImtMode ? 'pointer' : undefined }} onClick={isImtMode ? () => setExpandedImts(prev => { const n = new Set(prev); n.has(grpLabel) ? n.delete(grpLabel) : n.add(grpLabel); return n; }) : undefined}>
                                                     <td style={{ position: 'sticky', left: 0, background: rowBg, zIndex: 2, padding: '8px 12px', borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #f3f4f6', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.05)', minWidth: 200 }}>
-                                                        <div style={{ fontWeight: 600, fontSize: 13 }}>{grpLabel}</div>
+                                                        <div style={{ fontWeight: 600, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                            {isImtMode && <span style={{ fontSize: 10, color: '#9ca3af', width: 14 }}>{isExpanded ? '\u25BC' : '\u25B6'}</span>}
+                                                            {grpLabel}
+                                                            {isImtMode && children.length > 0 && <span style={{ fontSize: 11, color: '#9ca3af', fontWeight: 400 }}>({children.length})</span>}
+                                                        </div>
                                                     </td>
                                                     <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.open_card)}</td>
                                                     <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.add_to_cart)}</td>
@@ -521,6 +530,40 @@ export default function FunnelPage() {
                                                     <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6' }}>{fmtPct(r.add_to_cart_pct)}</td>
                                                     <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmtPct(r.cart_to_order_pct)}</td>
                                                 </tr>
+                                                {isExpanded && children.map((c, ci) => {
+                                                    const cBg = ci % 2 === 0 ? '#fafafa' : '#ffffff';
+                                                    return (
+                                                        <tr key={c.nm_id} style={{ background: cBg, fontSize: 12, color: '#374151' }}>
+                                                            <td style={{ position: 'sticky', left: 0, background: cBg, zIndex: 2, padding: '6px 12px 6px 32px', borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #f3f4f6', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.05)', minWidth: 200 }}>
+                                                                <div style={{ fontWeight: 500 }}>{c.vendor_code || c.nm_id}</div>
+                                                                <div style={{ fontSize: 11, color: '#9ca3af' }}>{c.subject} · {c.brand}</div>
+                                                            </td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(c.open_card)}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(c.add_to_cart)}</td>
+                                                            <td style={{ textAlign: 'right', fontWeight: 600, borderBottom: '1px solid #f3f4f6' }}>{fmt(c.orders_count)}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(c.orders_sum_rub)}</td>
+                                                            <td style={{ textAlign: 'right', fontWeight: 500, borderBottom: '1px solid #f3f4f6', color: c.revenue > 0 ? '#111827' : '#ef4444' }}>{fmt(c.revenue)}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6', color: c.adv_sum > 0 ? '#f97316' : '#9ca3af' }}>{fmt(c.adv_sum)}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(c.adv_views)}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(c.adv_clicks)}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: c.ctr > 5 ? '#10b981' : c.ctr > 2 ? '#374151' : '#f59e0b' }}>{fmtPct(c.ctr)}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(c.cpc)}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(c.cpm)}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: c.drr > 30 ? '#ef4444' : c.drr > 15 ? '#f59e0b' : c.drr > 0 ? '#10b981' : '#9ca3af' }}>{fmtPct(c.drr)}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6', color: (c.spp_rate || 0) > 40 ? '#ef4444' : (c.spp_rate || 0) > 20 ? '#f59e0b' : '#10b981', fontSize: 11 }}>{c.spp_rate ? fmtPct(c.spp_rate) : '\u2014'}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', fontSize: 11 }}>{c.buyout_percent ? fmtPct(c.buyout_percent) : '\u2014'}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: '#6b7280' }}>{fmt(c.tax)}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: c.commission_rate > 0 ? '#6366f1' : '#9ca3af', fontSize: 11 }}>{c.commission_rate > 0 ? fmtPct(c.commission_rate) : '\u2014'}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: c.commission > 0 ? '#6366f1' : '#9ca3af' }}>{c.commission > 0 ? fmt(c.commission) : '\u2014'}</td>
+                                                            <td style={{ textAlign: 'right', fontWeight: 600, borderBottom: '1px solid #f3f4f6', color: c.profit > 0 ? '#10b981' : '#ef4444', background: c.profit > 0 ? '#f0fdf4' : c.profit < 0 ? '#fef2f2' : undefined }}>{fmt(c.profit)}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: c.margin > 20 ? '#10b981' : c.margin > 0 ? '#65a30d' : '#ef4444' }}>{fmtPct(c.margin)}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(c.avg_price)}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6' }}>{fmtPct(c.add_to_cart_pct)}</td>
+                                                            <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmtPct(c.cart_to_order_pct)}</td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                                </React.Fragment>
                                             );
                                         })}
                                     </tbody>

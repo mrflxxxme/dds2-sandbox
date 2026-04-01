@@ -506,6 +506,7 @@ async def get_ad_tab_data(
                 "bdr_revenue": round(bdr["revenue"], 2),
                 "bdr_profit": round(bdr["profit"], 2),
                 "stock_qty": stock_qty,
+                "active_campaigns": sum(1 for c in product_campaigns if c.get("status") == 9),
                 "campaigns": product_campaigns,
             }
         )
@@ -514,4 +515,113 @@ async def get_ad_tab_data(
     _assign_abc(result, "bdr_revenue", "abc_revenue")
     _assign_abc(result, "bdr_profit", "abc_profit")
 
+    return result
+
+
+async def get_ad_tab_grouped(
+    db: AsyncSession,
+    project_id: int,
+    date_from: str,
+    date_to: str,
+    brand: str = "",
+    subject: str = "",
+    group_by: str = "brand",
+) -> list[dict]:
+    """Get ad tab data grouped by brand/subject/tag/imt with children (SKU rows)."""
+    from collections import defaultdict
+
+    from backend.models.cost import Nomenclature
+    from backend.models.refs import ImtAlias, ProductTag, ProductTagMap
+
+    # Reuse existing per-SKU data (includes campaigns, ABC, BDR, stock)
+    sku_data = await get_ad_tab_data(db, project_id, date_from, date_to, brand, subject)
+
+    # Build grouping key function
+    nm_to_group: dict[int, list[str]] = {}
+
+    if group_by == "brand":
+        for item in sku_data:
+            nm_to_group[item["nm_id"]] = [item.get("brand") or "Без бренда"]
+    elif group_by == "subject":
+        for item in sku_data:
+            nm_to_group[item["nm_id"]] = [item.get("subject") or "Без категории"]
+    elif group_by == "imt":
+        # Load nm_id → imt_id mapping
+        nom_result = await db.execute(
+            select(Nomenclature.article_wb, Nomenclature.imt_id).where(
+                Nomenclature.project_id == project_id,
+                Nomenclature.imt_id.isnot(None),
+            )
+        )
+        nm_to_imt: dict[int, int] = {}
+        for article_wb, imt_id in nom_result:
+            if article_wb and imt_id:
+                nm_to_imt[article_wb] = imt_id
+
+        # Load imt_id → alias
+        alias_result = await db.execute(select(ImtAlias.imt_id, ImtAlias.name).where(ImtAlias.project_id == project_id))
+        imt_aliases: dict[int, str] = {r.imt_id: r.name for r in alias_result}
+
+        for item in sku_data:
+            imt_id = nm_to_imt.get(item["nm_id"])
+            label = imt_aliases.get(imt_id, f"#{imt_id}") if imt_id else "Без склейки"
+            nm_to_group[item["nm_id"]] = [label]
+    elif group_by == "tag":
+        # Load nm_id → tag names
+        tag_result = await db.execute(
+            select(ProductTagMap.nm_id, ProductTag.name)
+            .join(ProductTag, ProductTag.id == ProductTagMap.tag_id)
+            .where(ProductTagMap.project_id == project_id, ProductTag.is_deleted.is_(False))
+        )
+        nm_tags: dict[int, list[str]] = defaultdict(list)
+        for nm_id, tag_name in tag_result:
+            nm_tags[nm_id].append(tag_name)
+
+        for item in sku_data:
+            nm_to_group[item["nm_id"]] = nm_tags.get(item["nm_id"], ["Без ярлыка"])
+
+    # Group items
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for item in sku_data:
+        for grp_name in nm_to_group.get(item["nm_id"], ["—"]):
+            groups[grp_name].append(item)
+
+    # Aggregate per group
+    result = []
+    for grp_name, children in groups.items():
+        views = sum(c["adv_views"] for c in children)
+        clicks = sum(c["adv_clicks"] for c in children)
+        adv_sum = sum(c["adv_sum"] for c in children)
+        orders_sum = sum(c["orders_sum_rub"] for c in children)
+        orders_count = sum(c["orders_count"] for c in children)
+        bdr_revenue = sum(c.get("bdr_revenue", 0) for c in children)
+        bdr_profit = sum(c.get("bdr_profit", 0) for c in children)
+        stock_qty = sum(c.get("stock_qty", 0) for c in children)
+
+        result.append(
+            {
+                "group_name": grp_name,
+                "adv_views": views,
+                "adv_clicks": clicks,
+                "adv_sum": round(adv_sum, 2),
+                "orders_sum_rub": round(orders_sum, 2),
+                "orders_count": orders_count,
+                "ctr": round((clicks / views * 100) if views else 0, 2),
+                "cpc": round((adv_sum / clicks) if clicks else 0, 2),
+                "cpm": round((adv_sum / views * 1000) if views else 0, 2),
+                "drr": round((adv_sum / orders_sum * 100) if orders_sum else 0, 2),
+                "bdr_revenue": round(bdr_revenue, 2),
+                "bdr_profit": round(bdr_profit, 2),
+                "stock_qty": stock_qty,
+                "product_count": len(children),
+                "active_campaigns": sum(c.get("active_campaigns", 0) for c in children),
+                "children": sorted(children, key=lambda x: x["adv_sum"], reverse=True),
+            }
+        )
+
+    # ABC on grouped rows
+    _assign_abc(result, "bdr_revenue", "abc_revenue")
+    _assign_abc(result, "bdr_profit", "abc_profit")
+
+    result.sort(key=lambda x: x["adv_sum"], reverse=True)
     return result
