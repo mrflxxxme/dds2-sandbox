@@ -14,7 +14,7 @@ falling back to tariff-based calculation when BDR data is missing.
 """
 
 import logging
-from datetime import date, timedelta
+from datetime import date
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1172,13 +1172,8 @@ async def get_filters(db: AsyncSession, pid: int) -> dict:
     )
     d = dates.one()
 
-    # Cap max_date at yesterday — today's data is incomplete until day ends
-    from datetime import date as date_type
-
+    # Allow today's date — ads data is available intraday
     max_dt = d.max_date
-    yesterday = date_type.today() - timedelta(days=1)
-    if max_dt and max_dt >= date_type.today():
-        max_dt = yesterday
 
     return {
         "brands": sorted([r[0] for r in brands if r[0]]),

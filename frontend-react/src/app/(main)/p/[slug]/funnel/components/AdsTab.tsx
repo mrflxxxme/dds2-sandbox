@@ -2,7 +2,7 @@
 import { Fragment, useEffect, useState, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
 import { exportToExcel } from '@/lib/utils';
-import type { AdTabProduct, UnifiedSyncProgress } from '@/types/api';
+import type { AdTabProduct, AdTabGroupRow, UnifiedSyncProgress } from '@/types/api';
 
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
 const fmtPct = (n: number) => (n || 0).toFixed(2) + '%';
@@ -56,29 +56,47 @@ interface AdsTabProps {
     subject: string;
 }
 
+type AdGroupBy = 'sku' | 'brand' | 'subject' | 'tag' | 'imt' | 'abc';
+const GROUP_LABELS: Record<AdGroupBy, string> = {
+    sku: 'По артикулам', brand: 'По брендам', subject: 'По категориям',
+    tag: 'По ярлыкам', imt: 'По склейкам', abc: 'ABC анализ',
+};
+
 export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
     const [data, setData] = useState<AdTabProduct[]>([]);
+    const [groupData, setGroupData] = useState<AdTabGroupRow[]>([]);
+    const [groupBy, setGroupBy] = useState<AdGroupBy>('sku');
     const [loading, setLoading] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [progress, setProgress] = useState('');
     const [error, setError] = useState('');
     const [expandedNm, setExpandedNm] = useState<Set<number>>(new Set());
+    const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
     const [expandedCamp, setExpandedCamp] = useState<Set<string>>(new Set());
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-    const loadData = useCallback(async () => {
+    const loadData = useCallback(async (gb?: AdGroupBy) => {
         if (!dateFrom || !dateTo) return;
+        const mode = gb ?? groupBy;
         setLoading(true);
         setError('');
         try {
-            const res = await api.getAdTab({ date_from: dateFrom, date_to: dateTo, brand, subject });
-            setData(res);
+            if (mode === 'sku' || mode === 'abc') {
+                const res = await api.getAdTab({ date_from: dateFrom, date_to: dateTo, brand, subject });
+                setData(res);
+                setGroupData([]);
+            } else {
+                const res = await api.getAdTab({ date_from: dateFrom, date_to: dateTo, brand, subject, group_by: mode });
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                setGroupData(res as any as AdTabGroupRow[]);
+                setData([]);
+            }
         } catch (e: unknown) {
             setError((e as Error).message || 'Ошибка загрузки');
         } finally {
             setLoading(false);
         }
-    }, [dateFrom, dateTo, brand, subject]);
+    }, [dateFrom, dateTo, brand, subject, groupBy]);
 
     useEffect(() => { loadData(); }, [loadData]);
 
@@ -195,12 +213,14 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
         exportToExcel(rows, 'advertising');
     };
 
-    // Summary calculations
-    const totalSpend = data.reduce((s, p) => s + p.adv_sum, 0);
-    const totalViews = data.reduce((s, p) => s + p.adv_views, 0);
-    const totalClicks = data.reduce((s, p) => s + p.adv_clicks, 0);
-    const totalOrdersSum = data.reduce((s, p) => s + p.orders_sum_rub, 0);
+    // Summary calculations — from either data source
+    const allItems = groupBy === 'sku' || groupBy === 'abc' ? data : groupData;
+    const totalSpend = allItems.reduce((s, p) => s + p.adv_sum, 0);
+    const totalViews = allItems.reduce((s, p) => s + p.adv_views, 0);
+    const totalClicks = allItems.reduce((s, p) => s + p.adv_clicks, 0);
+    const totalOrdersSum = allItems.reduce((s, p) => s + p.orders_sum_rub, 0);
     const avgDrr = totalOrdersSum ? (totalSpend / totalOrdersSum * 100) : 0;
+    const hasData = (groupBy === 'sku' || groupBy === 'abc') ? data.length > 0 : groupData.length > 0;
 
     // Period length check
     const periodDays = dateFrom && dateTo
@@ -234,8 +254,24 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
                 </div>
             </div>
 
+            {/* Group tabs */}
+            <div style={{ display: 'flex', gap: 0, marginBottom: 16, flexWrap: 'wrap' }}>
+                {(['sku', 'brand', 'subject', 'tag', 'imt', 'abc'] as const).map(mode => (
+                    <button
+                        key={mode}
+                        onClick={() => { setGroupBy(mode); setExpandedGroups(new Set()); setExpandedNm(new Set()); setExpandedCamp(new Set()); loadData(mode); }}
+                        style={{
+                            padding: '8px 16px', fontSize: 13, fontWeight: groupBy === mode ? 600 : 400, cursor: 'pointer',
+                            background: groupBy === mode ? 'var(--color-primary, #3b82f6)' : '#f3f4f6',
+                            color: groupBy === mode ? '#fff' : '#374151',
+                            border: 'none', borderRadius: 8, whiteSpace: 'nowrap',
+                        }}
+                    >{GROUP_LABELS[mode]}</button>
+                ))}
+            </div>
+
             {/* Summary cards */}
-            {data.length > 0 && (
+            {hasData && (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12, marginBottom: 20 }}>
                     {[
                         { label: 'Расход рекл. ₽', value: fmt(totalSpend) },
@@ -272,21 +308,139 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
             {loading && <div style={{ textAlign: 'center', padding: 40 }}>Загрузка...</div>}
 
             {/* Empty state */}
-            {!loading && !error && data.length === 0 && (
+            {!loading && !error && !hasData && (
                 <div className="glass-card" style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-muted)' }}>
                     Нет данных по рекламе за выбранный период
                 </div>
             )}
 
             {/* Hint: sync campaigns if no campaigns linked */}
-            {!loading && data.length > 0 && data.every(p => p.campaigns.length === 0) && (
+            {!loading && data.length > 0 && (groupBy === 'sku' || groupBy === 'abc') && data.every(p => p.campaigns.length === 0) && (
                 <div style={{ fontSize: 13, color: '#f59e0b', background: 'rgba(245,158,11,0.08)', padding: '8px 16px', borderRadius: 8, marginBottom: 12 }}>
                     ⚠️ Кампании не синхронизированы. Нажмите «Обновить» чтобы загрузить названия и бюджеты рекламных кампаний из WB.
                 </div>
             )}
 
-            {/* Data table */}
-            {!loading && data.length > 0 && (
+            {/* ABC Analysis — grouped by A/B/C categories */}
+            {!loading && data.length > 0 && groupBy === 'abc' && (() => {
+                const abcGroups = (['A', 'B', 'C'] as const).map(cat => {
+                    const items = data.filter(p => p.abc_revenue === cat);
+                    const views = items.reduce((s, p) => s + p.adv_views, 0);
+                    const clicks = items.reduce((s, p) => s + p.adv_clicks, 0);
+                    const advSum = items.reduce((s, p) => s + p.adv_sum, 0);
+                    const ordersSum = items.reduce((s, p) => s + p.orders_sum_rub, 0);
+                    const activeCamp = items.reduce((s, p) => s + (p.active_campaigns || 0), 0);
+                    return {
+                        cat, items, views, clicks, advSum, ordersSum, activeCamp,
+                        ctr: views ? (clicks / views * 100) : 0,
+                        cpc: clicks ? (advSum / clicks) : 0,
+                        cpm: views ? (advSum / views * 1000) : 0,
+                        drr: ordersSum ? (advSum / ordersSum * 100) : 0,
+                    };
+                });
+                const ABC_COLORS: Record<string, string> = { A: '#22c55e', B: '#f59e0b', C: '#ef4444' };
+                const ABC_LABELS: Record<string, string> = { A: 'Категория A (80% выручки)', B: 'Категория B (15% выручки)', C: 'Категория C (5% выручки)' };
+                return (
+                    <div style={{ overflowX: 'auto', borderRadius: 12, border: '1px solid #e5e7eb' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 1200 }}>
+                            <thead>
+                                <tr>
+                                    <th style={{ ...thStyle, textAlign: 'left', minWidth: 250 }}>КАТЕГОРИЯ</th>
+                                    <th style={thStyle}>Товаров</th>
+                                    <th style={{ ...thStyle, borderLeft: '1px solid #e5e7eb' }}>Просмотры</th>
+                                    <th style={thStyle}>Клики</th>
+                                    <th style={thStyle}>Расход ₽</th>
+                                    <th style={thStyle}>CTR %</th>
+                                    <th style={thStyle}>CPC ₽</th>
+                                    <th style={thStyle}>CPM ₽</th>
+                                    <th style={thStyle}>ДРР %</th>
+                                    <th style={{ ...thStyle, borderLeft: '1px solid #e5e7eb' }}>Акт. РК</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {abcGroups.map(g => {
+                                    const isExp = expandedGroups.has(g.cat);
+                                    return (
+                                        <Fragment key={g.cat}>
+                                            <tr
+                                                style={{ cursor: 'pointer', background: ABC_COLORS[g.cat] + '08', fontWeight: 600 }}
+                                                onClick={() => setExpandedGroups(prev => { const n = new Set(prev); n.has(g.cat) ? n.delete(g.cat) : n.add(g.cat); return n; })}
+                                            >
+                                                <td style={{ padding: '10px 12px', borderBottom: '1px solid #e5e7eb' }}>
+                                                    <span style={{ fontSize: 10, color: '#9ca3af', marginRight: 6 }}>{isExp ? '▼' : '▶'}</span>
+                                                    <span style={{ display: 'inline-block', width: 28, height: 22, lineHeight: '22px', textAlign: 'center', borderRadius: 6, fontWeight: 700, fontSize: 13, color: '#fff', background: ABC_COLORS[g.cat], marginRight: 8 }}>{g.cat}</span>
+                                                    {ABC_LABELS[g.cat]}
+                                                </td>
+                                                <td style={tdNum}>{g.items.length}</td>
+                                                <td style={{ ...tdNum, borderLeft: '1px solid #f3f4f6' }}>{fmt(g.views)}</td>
+                                                <td style={tdNum}>{fmt(g.clicks)}</td>
+                                                <td style={{ ...tdNum, fontWeight: 600 }}>{fmt(g.advSum)}</td>
+                                                <td style={tdNum}>{fmtPct(g.ctr)}</td>
+                                                <td style={tdNum}>{fmt(g.cpc)}</td>
+                                                <td style={tdNum}>{fmt(g.cpm)}</td>
+                                                <td style={{ ...tdNum, color: g.drr > 30 ? '#ef4444' : g.drr > 15 ? '#f59e0b' : '#22c55e', fontWeight: 600 }}>{fmtPct(g.drr)}</td>
+                                                <td style={{ ...tdNum, borderLeft: '1px solid #f3f4f6', color: g.activeCamp > 0 ? '#22c55e' : '#9ca3af', fontWeight: g.activeCamp > 0 ? 600 : 400 }}>{g.activeCamp}</td>
+                                            </tr>
+                                            {isExp && g.items.map((p, pi) => {
+                                                const cBg = pi % 2 === 0 ? '#fafafa' : '#ffffff';
+                                                const isNmExp = expandedNm.has(p.nm_id);
+                                                return (
+                                                    <Fragment key={`abc-${p.nm_id}`}>
+                                                        <tr style={{ background: cBg, fontSize: 12, cursor: p.campaigns.length > 0 ? 'pointer' : undefined }}
+                                                            onClick={() => p.campaigns.length > 0 && toggleExpand(p.nm_id)}>
+                                                            <td style={{ padding: '6px 12px 6px 48px', borderBottom: '1px solid #f3f4f6' }}>
+                                                                {p.campaigns.length > 0 && <span style={{ fontSize: 9, color: '#9ca3af', marginRight: 4 }}>{isNmExp ? '▼' : '▶'}</span>}
+                                                                <span style={{ fontWeight: 500 }}>{p.vendor_code || p.nm_id}</span>
+                                                                <div style={{ fontSize: 11, color: '#9ca3af' }}>{p.subject} · {p.brand}</div>
+                                                            </td>
+                                                            <td style={{ ...tdNum, color: '#9ca3af' }}>—</td>
+                                                            <td style={{ ...tdNum, borderLeft: '1px solid #f3f4f6' }}>{fmt(p.adv_views)}</td>
+                                                            <td style={tdNum}>{fmt(p.adv_clicks)}</td>
+                                                            <td style={{ ...tdNum, fontWeight: 500 }}>{fmt(p.adv_sum)}</td>
+                                                            <td style={tdNum}>{fmtPct(p.ctr)}</td>
+                                                            <td style={tdNum}>{fmt(p.cpc)}</td>
+                                                            <td style={tdNum}>{fmt(p.cpm)}</td>
+                                                            <td style={{ ...tdNum, color: p.drr > 30 ? '#ef4444' : p.drr > 15 ? '#f59e0b' : '#22c55e' }}>{fmtPct(p.drr)}</td>
+                                                            <td style={{ ...tdNum, borderLeft: '1px solid #f3f4f6', color: p.active_campaigns > 0 ? '#22c55e' : '#9ca3af' }}>{p.active_campaigns || 0}</td>
+                                                        </tr>
+                                                        {isNmExp && p.campaigns.map(c => {
+                                                            const st = STATUS_MAP[c.status] || { label: String(c.status), color: '#94a3b8' };
+                                                            return (
+                                                                <tr key={`abcc-${p.nm_id}-${c.campaign_id}`} style={{ background: '#f0f4ff', fontSize: 11 }}>
+                                                                    <td style={{ padding: '4px 12px 4px 68px', borderBottom: '1px solid #e8ecf4' }}>
+                                                                        <span style={{ marginRight: 4 }}>📢</span>
+                                                                        {c.name || c.campaign_id}
+                                                                        <span style={{ display: 'inline-block', padding: '1px 6px', borderRadius: 10, fontSize: 10, fontWeight: 600, background: st.color + '20', color: st.color, marginLeft: 6 }}>{st.label}</span>
+                                                                    </td>
+                                                                    <td style={campTd}></td>
+                                                                    <td style={campTdNum}>{c.views ? fmt(c.views) : '—'}</td>
+                                                                    <td style={campTdNum}>{c.clicks ? fmt(c.clicks) : '—'}</td>
+                                                                    <td style={{ ...campTdNum, fontWeight: c.spend ? 600 : 400 }}>{c.spend ? fmt(c.spend) : '—'}</td>
+                                                                    <td style={campTdNum}>{c.ctr ? fmtPct(c.ctr) : '—'}</td>
+                                                                    <td style={campTdNum}>{c.cpc ? fmt(c.cpc) : '—'}</td>
+                                                                    <td style={campTdNum}>{c.cpm ? fmt(c.cpm) : '—'}</td>
+                                                                    <td style={campTd}></td>
+                                                                    <td style={campTd}></td>
+                                                                </tr>
+                                                            );
+                                                        })}
+                                                    </Fragment>
+                                                );
+                                            })}
+                                        </Fragment>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                        <div style={{ padding: '12px 20px', borderTop: '1px solid #e5e7eb', fontSize: 12, color: '#9ca3af', background: '#f9fafb' }}>
+                            Всего товаров: {data.length} | A — {abcGroups[0]?.items.length || 0} шт, B — {abcGroups[1]?.items.length || 0} шт, C — {abcGroups[2]?.items.length || 0} шт
+                        </div>
+                    </div>
+                );
+            })()}
+
+            {/* Data table — SKU mode */}
+            {!loading && data.length > 0 && groupBy === 'sku' && (
                 <div style={{ overflowX: 'auto', borderRadius: 12, border: '1px solid #e5e7eb' }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 1200 }}>
                         <thead>
@@ -305,7 +459,8 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
                                 <th style={thStyle}>ДРР %</th>
                                 <th style={{ ...thStyle, textAlign: 'center', borderLeft: '1px solid #e5e7eb' }}>ABC выр.</th>
                                 <th style={{ ...thStyle, textAlign: 'center' }}>ABC приб.</th>
-                                <th style={{ ...thStyle, borderLeft: '1px solid #e5e7eb' }}>Остатки</th>
+                                <th style={{ ...thStyle, borderLeft: '1px solid #e5e7eb' }}>Акт. РК</th>
+                                <th style={thStyle}>Остатки</th>
                                 <th style={thStyle}>Бюджет ₽</th>
                             </tr>
                         </thead>
@@ -339,7 +494,8 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
                                             </td>
                                             <td style={{ ...tdStyle, textAlign: 'center', borderLeft: '1px solid #f3f4f6' }}>{abcBadge(p.abc_revenue)}</td>
                                             <td style={{ ...tdStyle, textAlign: 'center' }}>{abcBadge(p.abc_profit)}</td>
-                                            <td style={{ ...tdNum, borderLeft: '1px solid #f3f4f6' }}>{fmt(p.stock_qty || 0)}</td>
+                                            <td style={{ ...tdNum, borderLeft: '1px solid #f3f4f6', color: p.active_campaigns > 0 ? '#22c55e' : '#9ca3af', fontWeight: p.active_campaigns > 0 ? 600 : 400 }}>{p.active_campaigns || 0}</td>
+                                            <td style={tdNum}>{fmt(p.stock_qty || 0)}</td>
                                             <td style={{ ...tdNum, fontWeight: 600 }}>{fmt(totalBudget)}</td>
                                         </tr>
                                         {isExpanded && p.campaigns.map(c => {
@@ -381,11 +537,12 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
                                                         <td style={campTdNum}>{c.cpc ? fmt(c.cpc) : '—'}</td>
                                                         <td style={campTdNum}>{c.cpm ? fmt(c.cpm) : '—'}</td>
                                                         <td style={campTd}></td>
-                                                        {/* col 12-14: ABC rev, ABC profit, stock — empty */}
+                                                        {/* col 12-15: ABC rev, ABC profit, active campaigns, stock — empty */}
                                                         <td style={campTd}></td>
                                                         <td style={campTd}></td>
                                                         <td style={campTd}></td>
-                                                        {/* col 15: budget */}
+                                                        <td style={campTd}></td>
+                                                        {/* col 16: budget */}
                                                         <td style={{ ...campTdNum, fontWeight: 600 }}>{fmt(c.budget)}</td>
                                                     </tr>
                                                     {isCampExpanded && events.map((ev, i) => {
@@ -401,7 +558,7 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
                                                         return (
                                                             <tr key={`ev-${c.campaign_id}-${i}`} style={{ background: '#f8f9fc' }}>
                                                                 <td style={{ ...stickyCol, background: '#f8f9fc', borderRight: 'none', boxShadow: 'none' }}></td>
-                                                                <td colSpan={14} style={{ ...stickyCol, left: 24, background: '#f8f9fc', padding: '4px 12px 4px 40px', fontSize: 11, color: '#6b7280', borderBottom: '1px solid #eef0f4', boxShadow: 'none' }}>
+                                                                <td colSpan={15} style={{ ...stickyCol, left: 24, background: '#f8f9fc', padding: '4px 12px 4px 40px', fontSize: 11, color: '#6b7280', borderBottom: '1px solid #eef0f4', boxShadow: 'none' }}>
                                                                     <span style={{ color: '#9ca3af', marginRight: 8 }}>{dt}</span>
                                                                     {isBudget && (
                                                                         <span>💰 бюджет {fmt(Number(ev.old_value))} → <strong style={{ color: '#374151' }}>{fmt(Number(ev.new_value))}</strong></span>
@@ -421,6 +578,117 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
                             })}
                         </tbody>
                     </table>
+                </div>
+            )}
+            {/* Grouped table — brand/subject/tag/imt mode */}
+            {!loading && groupData.length > 0 && groupBy !== 'sku' && groupBy !== 'abc' && (
+                <div style={{ overflowX: 'auto', borderRadius: 12, border: '1px solid #e5e7eb' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 1200 }}>
+                        <thead>
+                            <tr>
+                                <th style={{ ...thStyle, textAlign: 'left', minWidth: 230, borderRight: '1px solid #e5e7eb' }}>
+                                    {groupBy === 'brand' ? 'БРЕНД' : groupBy === 'subject' ? 'КАТЕГОРИЯ' : groupBy === 'tag' ? 'ЯРЛЫК' : 'СКЛЕЙКА'}
+                                </th>
+                                <th style={thStyle}>Товаров</th>
+                                <th style={{ ...thStyle, borderLeft: '1px solid #e5e7eb' }}>Просмотры</th>
+                                <th style={thStyle}>Клики</th>
+                                <th style={thStyle}>Расход ₽</th>
+                                <th style={thStyle}>CTR %</th>
+                                <th style={thStyle}>CPC ₽</th>
+                                <th style={thStyle}>CPM ₽</th>
+                                <th style={thStyle}>ДРР %</th>
+                                <th style={{ ...thStyle, textAlign: 'center', borderLeft: '1px solid #e5e7eb' }}>ABC выр.</th>
+                                <th style={{ ...thStyle, textAlign: 'center' }}>ABC приб.</th>
+                                <th style={{ ...thStyle, borderLeft: '1px solid #e5e7eb' }}>Акт. РК</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {groupData.map((g, gi) => {
+                                const isGrpExp = expandedGroups.has(g.group_name);
+                                const rowBg = gi % 2 === 0 ? '#ffffff' : '#f9fafb';
+                                return (
+                                    <Fragment key={g.group_name}>
+                                        <tr
+                                            style={{ background: rowBg, cursor: 'pointer', fontWeight: 600 }}
+                                            onClick={() => setExpandedGroups(prev => { const n = new Set(prev); n.has(g.group_name) ? n.delete(g.group_name) : n.add(g.group_name); return n; })}
+                                        >
+                                            <td style={{ padding: '8px 12px', borderBottom: '1px solid #f3f4f6', borderRight: '1px solid #e5e7eb', minWidth: 230 }}>
+                                                <span style={{ fontSize: 10, color: '#9ca3af', marginRight: 6 }}>{isGrpExp ? '▼' : '▶'}</span>
+                                                {g.group_name}
+                                                <span style={{ fontSize: 11, color: '#9ca3af', fontWeight: 400, marginLeft: 6 }}>({g.product_count})</span>
+                                            </td>
+                                            <td style={tdNum}>{g.product_count}</td>
+                                            <td style={{ ...tdNum, borderLeft: '1px solid #f3f4f6' }}>{fmt(g.adv_views)}</td>
+                                            <td style={tdNum}>{fmt(g.adv_clicks)}</td>
+                                            <td style={{ ...tdNum, fontWeight: 600 }}>{fmt(g.adv_sum)}</td>
+                                            <td style={tdNum}>{fmtPct(g.ctr)}</td>
+                                            <td style={tdNum}>{fmt(g.cpc)}</td>
+                                            <td style={tdNum}>{fmt(g.cpm)}</td>
+                                            <td style={{ ...tdNum, color: g.drr > 30 ? '#ef4444' : g.drr > 15 ? '#f59e0b' : '#22c55e', fontWeight: 600 }}>{fmtPct(g.drr)}</td>
+                                            <td style={{ ...tdStyle, textAlign: 'center', borderLeft: '1px solid #f3f4f6' }}>{abcBadge(g.abc_revenue)}</td>
+                                            <td style={{ ...tdStyle, textAlign: 'center' }}>{abcBadge(g.abc_profit)}</td>
+                                            <td style={{ ...tdNum, borderLeft: '1px solid #f3f4f6', color: g.active_campaigns > 0 ? '#22c55e' : '#9ca3af', fontWeight: g.active_campaigns > 0 ? 600 : 400 }}>{g.active_campaigns || 0}</td>
+                                        </tr>
+                                        {isGrpExp && g.children.map((p, pi) => {
+                                            const isNmExp = expandedNm.has(p.nm_id);
+                                            const cBg = pi % 2 === 0 ? '#fafafa' : '#ffffff';
+                                            return (
+                                                <Fragment key={`child-${p.nm_id}`}>
+                                                    <tr
+                                                        style={{ background: cBg, fontSize: 12, cursor: p.campaigns.length > 0 ? 'pointer' : undefined }}
+                                                        onClick={() => p.campaigns.length > 0 && toggleExpand(p.nm_id)}
+                                                    >
+                                                        <td style={{ padding: '6px 12px 6px 32px', borderBottom: '1px solid #f3f4f6', borderRight: '1px solid #e5e7eb' }}>
+                                                            {p.campaigns.length > 0 && <span style={{ fontSize: 9, color: '#9ca3af', marginRight: 4 }}>{isNmExp ? '▼' : '▶'}</span>}
+                                                            <span style={{ fontWeight: 500 }}>{p.vendor_code || p.nm_id}</span>
+                                                            <div style={{ fontSize: 11, color: '#9ca3af' }}>{p.subject} · {p.brand}</div>
+                                                        </td>
+                                                        <td style={{ ...tdNum, color: '#9ca3af' }}>—</td>
+                                                        <td style={{ ...tdNum, borderLeft: '1px solid #f3f4f6' }}>{fmt(p.adv_views)}</td>
+                                                        <td style={tdNum}>{fmt(p.adv_clicks)}</td>
+                                                        <td style={{ ...tdNum, fontWeight: 500 }}>{fmt(p.adv_sum)}</td>
+                                                        <td style={tdNum}>{fmtPct(p.ctr)}</td>
+                                                        <td style={tdNum}>{fmt(p.cpc)}</td>
+                                                        <td style={tdNum}>{fmt(p.cpm)}</td>
+                                                        <td style={{ ...tdNum, color: p.drr > 30 ? '#ef4444' : p.drr > 15 ? '#f59e0b' : '#22c55e' }}>{fmtPct(p.drr)}</td>
+                                                        <td style={{ ...tdStyle, textAlign: 'center', borderLeft: '1px solid #f3f4f6' }}>{abcBadge(p.abc_revenue)}</td>
+                                                        <td style={{ ...tdStyle, textAlign: 'center' }}>{abcBadge(p.abc_profit)}</td>
+                                                        <td style={{ ...tdNum, borderLeft: '1px solid #f3f4f6', color: p.active_campaigns > 0 ? '#22c55e' : '#9ca3af', fontWeight: p.active_campaigns > 0 ? 600 : 400 }}>{p.active_campaigns || 0}</td>
+                                                    </tr>
+                                                    {isNmExp && p.campaigns.map(c => {
+                                                        const st = STATUS_MAP[c.status] || { label: String(c.status), color: '#94a3b8' };
+                                                        return (
+                                                            <tr key={`gc-${p.nm_id}-${c.campaign_id}`} style={{ background: '#f0f4ff', fontSize: 11 }}>
+                                                                <td style={{ padding: '4px 12px 4px 52px', borderBottom: '1px solid #e8ecf4', borderRight: '1px solid #e5e7eb' }}>
+                                                                    <span style={{ marginRight: 4 }}>📢</span>
+                                                                    {c.name || c.campaign_id}
+                                                                    <span style={{ display: 'inline-block', padding: '1px 6px', borderRadius: 10, fontSize: 10, fontWeight: 600, background: st.color + '20', color: st.color, marginLeft: 6 }}>{st.label}</span>
+                                                                </td>
+                                                                <td style={campTd}></td>
+                                                                <td style={campTdNum}>{c.views ? fmt(c.views) : '—'}</td>
+                                                                <td style={campTdNum}>{c.clicks ? fmt(c.clicks) : '—'}</td>
+                                                                <td style={{ ...campTdNum, fontWeight: c.spend ? 600 : 400 }}>{c.spend ? fmt(c.spend) : '—'}</td>
+                                                                <td style={campTdNum}>{c.ctr ? fmtPct(c.ctr) : '—'}</td>
+                                                                <td style={campTdNum}>{c.cpc ? fmt(c.cpc) : '—'}</td>
+                                                                <td style={campTdNum}>{c.cpm ? fmt(c.cpm) : '—'}</td>
+                                                                <td style={campTd}></td>
+                                                                <td style={campTd}></td>
+                                                                <td style={campTd}></td>
+                                                                <td style={campTd}></td>
+                                                            </tr>
+                                                        );
+                                                    })}
+                                                </Fragment>
+                                            );
+                                        })}
+                                    </Fragment>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                    <div style={{ padding: '12px 20px', borderTop: '1px solid #e5e7eb', fontSize: 12, color: '#9ca3af', background: '#f9fafb' }}>
+                        Всего {groupBy === 'brand' ? 'брендов' : groupBy === 'subject' ? 'категорий' : groupBy === 'tag' ? 'ярлыков' : 'склеек'}: {groupData.length}
+                    </div>
                 </div>
             )}
         </div>
