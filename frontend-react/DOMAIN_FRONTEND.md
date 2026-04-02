@@ -1,7 +1,7 @@
 # Domain: Frontend (Next.js 15 + React 19)
 
 ## Ownership
-- `src/app/(main)/p/[slug]/` — основное приложение (22+ страниц: dds, import, txn, inbox, reports, planning, orders, cost, funnel, trends, refs, settings, team, opiu, plan-fact, monitoring, warehouse/* (assembly/new, assembly/[id], assembly/[id]/edit, logistics), order-geography, bulk-cost, container-loader)
+- `src/app/(main)/p/[slug]/` — основное приложение (23+ страниц: dds, import, txn, inbox, reports, planning, orders, cost, funnel, trends, refs, settings, team, opiu, plan-fact, monitoring, warehouse/* (stock, assembly/new, assembly/[id], assembly/[id]/edit, logistics, [id]/receipt/*), order-geography, bulk-cost, container-loader, supply-chain)
 - `src/app/(tma)/tma/[slug]/` — Telegram Mini App (7 страниц: dashboard, capital, chat, funnel, pnl, pulse, warehouse)
 - `src/app/(tma)/tma/tma.css` — стили TMA (отдельный CSS, не globals.css)
 - `src/lib/api/` — модульный API клиент (client.ts — HTTP layer + JWT auth + refresh, 13 доменных файлов: auth, projects, reports, transactions, refs, integrations, cost, planning, funnel, imports, telegram, warehouse, monitoring)
