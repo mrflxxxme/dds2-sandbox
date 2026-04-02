@@ -4,6 +4,7 @@ Warehouse stock engine — stock balance updates, movements, adjustments, summar
 
 import logging
 from datetime import timedelta
+from decimal import Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -339,11 +340,11 @@ async def _load_bdr_metrics(
         if nom_id is None:
             continue
         days = max(row.days_count, 1)
-        revenue = float(row.total_revenue or 0)
-        to_pay = float(row.total_to_pay or 0)
+        revenue = Decimal(str(row.total_revenue or 0))
+        to_pay = Decimal(str(row.total_to_pay or 0))
         bdr_map[nom_id] = {
-            "avg_daily_revenue": round(revenue / days, 2),
-            "avg_daily_profit": round(to_pay / days, 2),
+            "avg_daily_revenue": float(round(revenue / days, 2)),
+            "avg_daily_profit": float(round(to_pay / days, 2)),
         }
     return bdr_map
 

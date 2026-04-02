@@ -3,21 +3,20 @@ Router: /cost — nomenclature, duty rules, cost orders & items, cost calculatio
 Thin HTTP layer — all business logic is in services/cost_service.py.
 """
 
-from typing import List, Optional
-
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
-from backend.schemas import DutyRuleSchema, CostOrderCreate, VatRateUpdate
+from backend.schemas import CostOrderCreate, DutyRuleSchema, VatRateUpdate
 from backend.services import cost as cost_service
 
 router = APIRouter(prefix="/cost")
 
 
 # ─── Nomenclature ─────────────────────────────────────────────────────────────
+
 
 @router.get("/nomenclature")
 async def get_nomenclature(
@@ -29,9 +28,13 @@ async def get_nomenclature(
     items = await cost_service.get_nomenclature(db, project.id, limit, offset)
     return [
         {
-            "id": n.id, "barcode": n.barcode, "brand": n.brand,
-            "subject": n.subject, "article_seller": n.article_seller,
-            "article_wb": n.article_wb, "volume_l": float(n.volume_l or 0),
+            "id": n.id,
+            "barcode": n.barcode,
+            "brand": n.brand,
+            "subject": n.subject,
+            "article_seller": n.article_seller,
+            "article_wb": n.article_wb,
+            "volume_l": float(n.volume_l or 0),
         }
         for n in items
     ]
@@ -45,7 +48,17 @@ async def upload_nomenclature(
 ):
     data = await file.read()
 
+    from backend.config import settings as app_settings
+
+    max_bytes = app_settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    if len(data) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Файл слишком большой. Максимум: {app_settings.MAX_UPLOAD_SIZE_MB} МБ",
+        )
+
     from backend.utils.file_validation import validate_file_content
+
     validate_file_content(data, file.filename or "upload.xlsx")
 
     inserted, updated = await cost_service.upload_nomenclature(db, project.id, data)
@@ -53,6 +66,7 @@ async def upload_nomenclature(
 
 
 # ─── Duty Rules ───────────────────────────────────────────────────────────────
+
 
 @router.get("/duty_rules")
 async def get_duty_rules(
@@ -64,8 +78,11 @@ async def get_duty_rules(
     rules = await cost_service.get_duty_rules(db, project.id, limit, offset)
     return [
         {
-            "id": r.id, "subject": r.subject, "basis": r.basis,
-            "rate": float(r.rate), "util_collect_rub": float(r.util_collect_rub),
+            "id": r.id,
+            "subject": r.subject,
+            "basis": r.basis,
+            "rate": float(r.rate),
+            "util_collect_rub": float(r.util_collect_rub),
             "note": r.note,
         }
         for r in rules
@@ -98,6 +115,7 @@ async def delete_duty_rule(
 
 # ─── Cost Orders ──────────────────────────────────────────────────────────────
 
+
 @router.get("/orders")
 async def get_cost_orders(
     limit: int = Query(500),
@@ -128,7 +146,9 @@ async def update_cost_order(
     db: AsyncSession = Depends(get_db),
 ):
     """Edit an existing cost order."""
-    result, error = await cost_service.update_cost_order(db, project.id, order_no, payload.model_dump(exclude_unset=True))
+    result, error = await cost_service.update_cost_order(
+        db, project.id, order_no, payload.model_dump(exclude_unset=True)
+    )
     if error:
         status = 404 if error == "Not found" else 400
         raise HTTPException(status, error)
@@ -148,6 +168,7 @@ async def delete_cost_order(
 
 
 # ─── Generate Payment Plan ───────────────────────────────────────────────────
+
 
 @router.post("/orders/{order_no:path}/generate_plan")
 async def generate_plan(
@@ -170,6 +191,7 @@ async def recalculate_order(
 ):
     """Recalculate cost/duty/vat for existing items using current project settings."""
     from decimal import Decimal
+
     vat_rate = Decimal(str(project.vat_rate)) if project.vat_rate else None
     updated, error = await cost_service.recalculate_order_items(db, project.id, order_no, vat_rate)
     if error:
@@ -178,6 +200,7 @@ async def recalculate_order(
 
 
 # ─── Cost Order Items ─────────────────────────────────────────────────────────
+
 
 @router.get("/orders/{order_no:path}/items")
 async def get_cost_order_items(
@@ -188,8 +211,11 @@ async def get_cost_order_items(
     items, nom_map = await cost_service.get_cost_order_items(db, project.id, order_no)
     return [
         {
-            "id": i.id, "barcode": i.barcode, "subject": i.subject,
-            "article_seller": i.article_seller, "qty": i.qty,
+            "id": i.id,
+            "barcode": i.barcode,
+            "subject": i.subject,
+            "article_seller": i.article_seller,
+            "qty": i.qty,
             "article_wb": nom_map.get(i.barcode),
             "price_cny": cost_service.safe_float(i.price_cny),
             "weight_kg": cost_service.safe_float(i.weight_kg),
@@ -217,12 +243,23 @@ async def upload_order_items(
 ):
     """Upload Excel file with order items, calculate cost per item."""
     import logging
+
     logger = logging.getLogger("dds.cost.upload")
 
     data = await file.read()
     logger.info("Upload file: %s, size: %d bytes, order: %s", file.filename, len(data), order_no)
 
+    from backend.config import settings as app_settings
+
+    max_bytes = app_settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    if len(data) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Файл слишком большой. Максимум: {app_settings.MAX_UPLOAD_SIZE_MB} МБ",
+        )
+
     from backend.utils.file_validation import validate_file_content
+
     try:
         validate_file_content(data, file.filename or "upload.xlsx")
     except Exception as e:
@@ -230,14 +267,13 @@ async def upload_order_items(
         raise
 
     from decimal import Decimal
+
     vat_rate = Decimal(str(project.vat_rate)) if project.vat_rate else None
     try:
-        inserted, unrecognized, error = await cost_service.upload_order_items(
-            db, project.id, order_no, data, vat_rate
-        )
+        inserted, unrecognized, error = await cost_service.upload_order_items(db, project.id, order_no, data, vat_rate)
     except Exception as e:
         logger.error("upload_order_items exception: %s", e, exc_info=True)
-        raise HTTPException(500, "Внутренняя ошибка сервера")
+        raise HTTPException(500, "Внутренняя ошибка сервера") from None
 
     if error:
         logger.warning("upload_order_items error: %s", error)
@@ -248,6 +284,7 @@ async def upload_order_items(
 
 
 # ─── VAT Rate ─────────────────────────────────────────────────────────────────
+
 
 @router.get("/vat_rate")
 async def get_vat_rate(
@@ -262,8 +299,7 @@ async def set_vat_rate(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    from decimal import Decimal
-    project.vat_rate = payload.vat_rate
-    db.add(project)
-    await db.commit()
-    return {"status": "ok", "vat_rate": float(project.vat_rate)}
+    from backend.services.project_settings_service import set_vat_rate as _set_vat_rate
+
+    new_rate = await _set_vat_rate(db, project, payload.vat_rate)
+    return {"status": "ok", "vat_rate": float(new_rate)}

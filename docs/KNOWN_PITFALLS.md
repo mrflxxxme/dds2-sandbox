@@ -109,3 +109,36 @@ from backend.models import WbApiKey  # это IntegrationKey
 ## P18: .scalars().all() без .limit()
 **НЕПРАВИЛЬНО:** `(await db.execute(select(Model).where(...))).scalars().all()` на больших таблицах
 **ПРАВИЛЬНО:** всегда добавлять `.limit(N)` при выборке коллекций
+
+## P19: Cross-tenant через дочерние сущности без project_id
+**НЕПРАВИЛЬНО:** `select(CostOrderItem).where(CostOrderItem.order_no == order_no)` — нет project_id у CostOrderItem
+**ПРАВИЛЬНО:** Сначала проверить `CostOrder.project_id == project_id`, потом выбирать items
+```python
+# Проверить что parent принадлежит проекту
+order = await db.execute(select(CostOrder).where(
+    CostOrder.order_no == order_no,
+    CostOrder.project_id == project_id,
+    CostOrder.is_deleted == False,
+))
+if not order.scalar_one_or_none():
+    return [], {}
+# Только после этого — items
+```
+
+## P20: Upload endpoint без проверки размера файла
+**НЕПРАВИЛЬНО:** `data = await file.read()` без лимита — OOM при большом файле
+**ПРАВИЛЬНО:**
+```python
+from backend.config import settings as app_settings
+data = await file.read()
+if len(data) > app_settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+    raise HTTPException(status_code=413, detail=f"File too large (max {app_settings.MAX_UPLOAD_SIZE_MB}MB)")
+```
+
+## P21: float() в финансовых расчётах
+**НЕПРАВИЛЬНО:** `total = sum(float(x.amount) for x in items)` — потеря точности на копейках
+**ПРАВИЛЬНО:** `total = sum((safe_decimal(x.amount) for x in items), Decimal('0'))` — float() только для JSON
+
+## P22: Мутация настроек проекта в роутере
+**НЕПРАВИЛЬНО:** `project.tax_rate = value; await db.commit()` в роутере — забудешь инвалидацию кэша
+**ПРАВИЛЬНО:** через `project_settings_service.set_tax_rate()` / `set_vat_rate()` — полная инвалидация внутри

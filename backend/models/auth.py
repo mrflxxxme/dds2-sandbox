@@ -9,6 +9,7 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, 
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
+from backend.models.mixins import SoftDeleteMixin
 from backend.utils.time import utcnow
 
 
@@ -29,7 +30,7 @@ class User(Base):
     memberships: Mapped[list["ProjectMember"]] = relationship(back_populates="user")
 
 
-class Project(Base):
+class Project(Base, SoftDeleteMixin):
     """A project groups all data (transactions, orders, accounts, etc.)."""
 
     __tablename__ = "projects"
@@ -46,7 +47,7 @@ class Project(Base):
     invites: Mapped[list["ProjectInvite"]] = relationship(back_populates="project")
 
 
-class ProjectMember(Base):
+class ProjectMember(Base, SoftDeleteMixin):
     """Link between users and projects."""
 
     __tablename__ = "project_members"

@@ -37,6 +37,8 @@ async def prewarm_project(project_id: int):
         logger.info(f"🔥 Prewarm: project {project_id} — OPIU + BDR cached ({d_from}→{d_to})")
     except TimeoutError:
         logger.warning(f"🔥 Prewarm: project {project_id} — timeout (>120s), skipping")
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.warning(f"🔥 Prewarm: project {project_id} failed: {e}")
 
@@ -69,6 +71,8 @@ async def prewarm_project(project_id: int):
         logger.info(f"🔥 Prewarm: project {project_id} — warehouse stocks cached")
     except TimeoutError:
         logger.warning(f"🔥 Prewarm: project {project_id} — stocks timeout (>60s), skipping")
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.warning(f"🔥 Prewarm: project {project_id} stocks failed: {e}")
 

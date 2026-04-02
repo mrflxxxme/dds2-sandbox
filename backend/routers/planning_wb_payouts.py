@@ -1,14 +1,12 @@
 """Router: /planning/wb_payouts — WB payouts upload, list, reconcile."""
 
-from typing import Optional
-
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models import Project
-from backend.schemas import WbPayoutSchema, WbReconcileRequest
 from backend.project_context import get_current_project
+from backend.schemas import WbPayoutSchema, WbReconcileRequest
 from backend.services import planning as planning_service
 
 router = APIRouter()
@@ -22,21 +20,32 @@ async def upload_wb_payouts(
 ):
     """Upload WB payout Excel from seller cabinet. Upserts by request_id."""
     from backend.etl.parsers import parse_wb_payout_cabinet
+
     data = await file.read()
+
+    from backend.config import settings as app_settings
+
+    max_bytes = app_settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    if len(data) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Файл слишком большой. Максимум: {app_settings.MAX_UPLOAD_SIZE_MB} МБ",
+        )
+
     from backend.utils.file_validation import validate_file_content
+
     validate_file_content(data, file.filename or "payouts.xlsx")
     parsed = parse_wb_payout_cabinet(data)
     if not parsed:
-        raise HTTPException(400, "Не удалось распознать записи в файле")
+        raise HTTPException(400, "Не удалось распознать записи в файле")  # noqa: RUF001
     created, updated, skipped = await planning_service.upload_wb_payouts(db, project.id, parsed)
     await planning_service.reconcile_wb_payouts(db, project.id)
-    return {"ok": True, "created": created, "updated": updated, "skipped": skipped,
-            "total_parsed": len(parsed)}
+    return {"ok": True, "created": created, "updated": updated, "skipped": skipped, "total_parsed": len(parsed)}
 
 
 @router.get("/wb_payouts")
 async def get_wb_payouts(
-    status: Optional[str] = Query(None),
+    status: str | None = Query(None),
     limit: int = Query(500),
     offset: int = Query(0),
     project: Project = Depends(get_current_project),

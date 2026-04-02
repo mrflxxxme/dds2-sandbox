@@ -134,6 +134,8 @@ async def sync_all_projects_funnel():
             d_to = date.today().isoformat()
             logger.info(f"Scheduler: project {pid} — sync today+yesterday {d_from} → {d_to}")
             await _run_and_log(pid, d_from, d_to, "funnel_auto")
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"Scheduler: project {pid} sync failed: {e}")
 
@@ -177,6 +179,8 @@ async def fast_backfill_tick():
         if all_filled:
             logger.info("🎉 Fast backfill complete — all projects fully covered! Stopping.")
             _stop_fast_backfill()
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.error(f"Fast backfill error: {e}\n{traceback.format_exc()}")
 
@@ -226,6 +230,8 @@ async def ad_anomaly_check():
             if all_ads_ok:
                 logger.info("🎉 Ad anomaly check complete — all projects have full ad data! Stopping.")
                 _stop_ad_anomaly_check()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"Ad anomaly check error: {e}\n{traceback.format_exc()}")
 
@@ -349,6 +355,8 @@ async def sync_nomenclature_all_projects():
                 )
         except TimeoutError:
             logger.error(f"Nomenclature sync TIMEOUT for project {pid}")
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"Nomenclature sync failed for project {pid}: {e}")
 
@@ -453,5 +461,7 @@ async def sync_funnel_hourly():
             d_to = date.today().isoformat()
             logger.info(f"Hourly funnel: project {pid} — {d_from} → {d_to}")
             await _run_and_log(pid, d_from, d_to, "funnel_hourly")
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"Hourly funnel sync failed for project {pid}: {e}")

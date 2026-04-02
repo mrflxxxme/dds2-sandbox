@@ -204,8 +204,15 @@ async def upload_order_cities(
         raise HTTPException(status_code=400, detail="Файл должен быть в формате .xlsx")
 
     data = await file.read()
-    if len(data) > 50 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Файл слишком большой (макс 50 МБ)")
+
+    from backend.config import settings as app_settings
+
+    max_bytes = app_settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    if len(data) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Файл слишком большой. Максимум: {app_settings.MAX_UPLOAD_SIZE_MB} МБ",
+        )
 
     from backend.utils.file_validation import validate_file_content
 

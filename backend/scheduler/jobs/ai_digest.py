@@ -6,6 +6,7 @@ Runs daily at 7:00 MSK. For each TelegramChatBinding with notify_enabled=True:
 2. Send to Telegram chat
 """
 
+import asyncio
 import logging
 
 from sqlalchemy import select
@@ -57,6 +58,8 @@ async def send_daily_digests():
 
             await bot.send_message(chat_id=binding.chat_id, text=digest_text)
             sent += 1
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.exception("Failed to send digest to chat %s", binding.chat_id)
             errors += 1

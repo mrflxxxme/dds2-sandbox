@@ -15,7 +15,7 @@ from backend.models import (
     Order,
     PlannedPayment,
 )
-from backend.services.cost.helpers import _order_no_to_int, safe_float
+from backend.services.cost.helpers import _order_no_to_int, safe_decimal
 
 
 async def generate_payment_plan(
@@ -53,14 +53,14 @@ async def generate_payment_plan(
     if not items:
         return {"error": "Нет позиций в заказе для генерации плана", "status": 400}
 
-    # 3. Calculate totals
-    order_cny = sum(safe_float(i.price_cny) * i.qty for i in items)
-    order_rub = order_cny * float(cost_order.rate_cny)
-    delivery_rub = float(cost_order.delivery_cost_cny) * float(cost_order.rate_cny) + float(
+    # 3. Calculate totals (Decimal for financial precision)
+    order_cny = sum((safe_decimal(i.price_cny) * i.qty for i in items), Decimal(0))
+    order_rub = order_cny * safe_decimal(cost_order.rate_cny)
+    delivery_rub = safe_decimal(cost_order.delivery_cost_cny) * safe_decimal(cost_order.rate_cny) + safe_decimal(
         cost_order.delivery_cost_usd
-    ) * float(cost_order.rate_usd)
-    duty_rub = sum(safe_float(i.duty_rub) * i.qty for i in items)
-    vat_rub = sum(safe_float(i.vat_rub) * i.qty for i in items)
+    ) * safe_decimal(cost_order.rate_usd)
+    duty_rub = sum((safe_decimal(i.duty_rub) * i.qty for i in items), Decimal(0))
+    vat_rub = sum((safe_decimal(i.vat_rub) * i.qty for i in items), Decimal(0))
     customs_rub = duty_rub + vat_rub
 
     # 4. Get lead times
@@ -172,10 +172,10 @@ async def generate_payment_plan(
         "order_no": order_no,
         "payments_created": len(payments),
         "plan": {
-            "order_cny": round(order_cny, 2),
-            "order_rub": round(order_rub, 2),
-            "delivery_rub": round(delivery_rub, 2),
-            "customs_rub": round(customs_rub, 2),
+            "order_cny": float(round(order_cny, 2)),
+            "order_rub": float(round(order_rub, 2)),
+            "delivery_rub": float(round(delivery_rub, 2)),
+            "customs_rub": float(round(customs_rub, 2)),
             "arrival_date": str(arrival_date),
             "pay_date_order": str(pay_date_order),
             "pay_date_delivery": str(pay_date_delivery),

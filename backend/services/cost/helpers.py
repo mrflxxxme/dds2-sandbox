@@ -10,7 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import CustomsDT
 
-
 DEFAULT_VAT_RATE = Decimal("0.22")
 
 
@@ -19,11 +18,11 @@ def _order_no_to_int(s: str) -> int:
     '41' -> 41, '41/2' -> 4102, '41/3' -> 4103.
     """
     s = str(s).strip()
-    if '/' in s:
-        parts = s.split('/')
+    if "/" in s:
+        parts = s.split("/")
         try:
             return int(parts[0]) * 100 + int(parts[1])
-        except (ValueError, IndexError):
+        except (ValueError, IndexError):  # noqa: S110
             pass
     try:
         return int(s)
@@ -42,8 +41,12 @@ def safe_float(val) -> float:
 
 def safe_decimal(val) -> Decimal:
     """Convert value to Decimal, treating NaN/None/invalid as 0."""
+    if val is None:
+        return Decimal(0)
+    if isinstance(val, Decimal):
+        return val
     try:
-        f = float(val) if val is not None else 0.0
+        f = float(val)
         if math.isnan(f) or math.isinf(f):
             return Decimal(0)
         return Decimal(str(f))
@@ -61,7 +64,7 @@ async def auto_link_customs_dt(order_no: str, dt_number: str, project_id: int, d
         select(CustomsDT).where(
             CustomsDT.dt_number == dt_number,
             CustomsDT.project_id == project_id,
-            CustomsDT.is_deleted == False,
+            CustomsDT.is_deleted == False,  # noqa: E712
         )
     )
     dts = result.scalars().all()

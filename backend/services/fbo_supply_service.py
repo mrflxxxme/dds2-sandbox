@@ -672,6 +672,7 @@ async def unlink_supply_from_shipment(
             select(OutboundShipment).where(
                 OutboundShipment.id == supply.outbound_shipment_id,
                 OutboundShipment.project_id == project_id,
+                OutboundShipment.is_deleted == False,  # noqa: E712
             )
         )
         shipment = result.scalar_one_or_none()

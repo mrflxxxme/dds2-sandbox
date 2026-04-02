@@ -6,16 +6,15 @@ All data-access endpoints use this to scope queries by project_id.
 from fastapi import Depends, Header, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional
 
 from backend.auth import get_current_user
 from backend.database import get_db
-from backend.models import User, Project, ProjectMember
+from backend.models import Project, ProjectMember, User
 
 
 async def get_current_project(
-    x_project_id: Optional[int] = Header(None, alias="X-Project-Id"),
-    project_id: Optional[int] = Query(None, alias="project_id"),
+    x_project_id: int | None = Header(None, alias="X-Project-Id"),
+    project_id: int | None = Query(None, alias="project_id"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Project:
@@ -30,7 +29,11 @@ async def get_current_project(
         result = await db.execute(
             select(Project)
             .join(ProjectMember, ProjectMember.project_id == Project.id)
-            .where(ProjectMember.user_id == user.id)
+            .where(
+                ProjectMember.user_id == user.id,
+                Project.is_deleted == False,  # noqa: E712
+                ProjectMember.is_deleted == False,  # noqa: E712
+            )
             .order_by(Project.id)
             .limit(1)
         )
@@ -38,7 +41,7 @@ async def get_current_project(
         if not project:
             raise HTTPException(
                 status_code=400,
-                detail="У вас нет проектов. Создайте проект через POST /api/v1/projects",
+                detail="У вас нет проектов. Создайте проект через POST /api/v1/projects",  # noqa: RUF001
             )
         return project
 
@@ -46,7 +49,12 @@ async def get_current_project(
     result = await db.execute(
         select(Project)
         .join(ProjectMember, ProjectMember.project_id == Project.id)
-        .where(Project.id == pid, ProjectMember.user_id == user.id)
+        .where(
+            Project.id == pid,
+            ProjectMember.user_id == user.id,
+            Project.is_deleted == False,  # noqa: E712
+            ProjectMember.is_deleted == False,  # noqa: E712
+        )
     )
     project = result.scalar_one_or_none()
     if not project:

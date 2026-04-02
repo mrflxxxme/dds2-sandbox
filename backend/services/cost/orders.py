@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import invalidate_project_reports
 from backend.models import CostOrder, CostOrderItem, PlannedPayment
-from backend.services.cost.helpers import _order_no_to_int, auto_link_customs_dt, safe_float
+from backend.services.cost.helpers import _order_no_to_int, auto_link_customs_dt, safe_decimal
 
 
 async def get_cost_orders(db: AsyncSession, project_id: int, limit: int = 500, offset: int = 0):
@@ -65,12 +65,12 @@ async def get_cost_orders(db: AsyncSession, project_id: int, limit: int = 500, o
         items = items_by_order.get(o.order_no, [])
 
         total_qty = sum(i.qty for i in items)
-        total = sum(safe_float(i.total_rub) * i.qty for i in items)
-        total_cost = sum(safe_float(i.cost_rub) * i.qty for i in items)
-        total_delivery = sum(safe_float(i.delivery_rub) * i.qty for i in items)
-        total_duty = sum(safe_float(i.duty_rub) * i.qty for i in items)
-        total_vat = sum(safe_float(i.vat_rub) * i.qty for i in items)
-        total_util = sum(safe_float(i.util_rub) * i.qty for i in items)
+        total = sum(safe_decimal(i.total_rub) * i.qty for i in items)
+        total_cost = sum(safe_decimal(i.cost_rub) * i.qty for i in items)
+        total_delivery = sum(safe_decimal(i.delivery_rub) * i.qty for i in items)
+        total_duty = sum(safe_decimal(i.duty_rub) * i.qty for i in items)
+        total_vat = sum(safe_decimal(i.vat_rub) * i.qty for i in items)
+        total_util = sum(safe_decimal(i.util_rub) * i.qty for i in items)
         unrecognized = sum(1 for i in items if i.unrecognized)
 
         oint = order_no_map.get(o.order_no)
@@ -92,12 +92,12 @@ async def get_cost_orders(db: AsyncSession, project_id: int, limit: int = 500, o
                 "dt_number": o.dt_number,
                 "transport_type": o.transport_type or "AUTO",
                 "total_qty": total_qty,
-                "total_rub": total,
-                "total_cost_rub": total_cost,
-                "total_delivery_rub": total_delivery,
-                "total_duty_rub": total_duty,
-                "total_vat_rub": total_vat,
-                "total_util_rub": total_util,
+                "total_rub": float(total),
+                "total_cost_rub": float(total_cost),
+                "total_delivery_rub": float(total_delivery),
+                "total_duty_rub": float(total_duty),
+                "total_vat_rub": float(total_vat),
+                "total_util_rub": float(total_util),
                 "items_count": len(items),
                 "unrecognized_count": unrecognized,
                 "has_plan": has_plan,

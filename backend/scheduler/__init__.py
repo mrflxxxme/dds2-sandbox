@@ -246,6 +246,8 @@ def start_scheduler():
                 await db.commit()
                 if result.rowcount:
                     logger.info("🧹 Cleaned up %d stale/stuck sync_log records", result.rowcount)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning("Stale sync cleanup failed: %s", e)
 

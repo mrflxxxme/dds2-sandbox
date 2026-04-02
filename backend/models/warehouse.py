@@ -134,7 +134,10 @@ class InboundReceiptItem(Base):
     # Relationships
     receipt: Mapped["InboundReceipt"] = relationship(back_populates="items")
 
-    __table_args__ = (Index("ix_inbound_receipt_items_receipt_id", "receipt_id"),)
+    __table_args__ = (
+        Index("ix_inbound_receipt_items_receipt_id", "receipt_id"),
+        Index("ix_inbound_receipt_items_nomenclature_id", "nomenclature_id"),
+    )
 
 
 # ─── Outbound Shipment (Отгрузка) ──────────────────────────────────────────
@@ -180,7 +183,10 @@ class OutboundShipmentItem(Base):
     # Relationships
     shipment: Mapped["OutboundShipment"] = relationship(back_populates="items")
 
-    __table_args__ = (Index("ix_outbound_shipment_items_shipment_id", "shipment_id"),)
+    __table_args__ = (
+        Index("ix_outbound_shipment_items_shipment_id", "shipment_id"),
+        Index("ix_outbound_shipment_items_nomenclature_id", "nomenclature_id"),
+    )
 
 
 # ─── Stock Transfer (Перемещение) ──────────────────────────────────────────
@@ -220,7 +226,10 @@ class StockTransferItem(Base):
     # Relationships
     transfer: Mapped["StockTransfer"] = relationship(back_populates="items")
 
-    __table_args__ = (Index("ix_stock_transfer_items_transfer_id", "transfer_id"),)
+    __table_args__ = (
+        Index("ix_stock_transfer_items_transfer_id", "transfer_id"),
+        Index("ix_stock_transfer_items_nomenclature_id", "nomenclature_id"),
+    )
 
 
 # ─── Stock Movements (Журнал движений — аудит) ────────────────────────────
@@ -244,6 +253,7 @@ class StockMovement(Base):
     __table_args__ = (
         Index("ix_stock_movements_project_id", "project_id"),
         Index("ix_stock_movements_warehouse_id", "warehouse_id"),
+        Index("ix_stock_movements_nomenclature_id", "nomenclature_id"),
         Index("ix_stock_movements_created_at", "created_at"),
     )
 
@@ -261,13 +271,14 @@ class WarehouseStock(Base):
     barcode: Mapped[str] = mapped_column(String(50), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, default=0)
     in_transit: Mapped[int] = mapped_column(Integer, default=0)
-    cost_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    cost_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
     __table_args__ = (
         UniqueConstraint("project_id", "warehouse_id", "nomenclature_id", name="uq_warehouse_stock"),
         Index("ix_warehouse_stock_project_id", "project_id"),
         Index("ix_warehouse_stock_warehouse_id", "warehouse_id"),
+        Index("ix_warehouse_stock_nomenclature_id", "nomenclature_id"),
     )
 
 
@@ -285,7 +296,10 @@ class StockAdjustment(Base, TimestampMixin):
     delta: Mapped[int] = mapped_column(Integer, nullable=False)  # +излишек / -недостача
     reason: Mapped[str] = mapped_column(Text, nullable=False)
 
-    __table_args__ = (Index("ix_stock_adjustments_project_id", "project_id"),)
+    __table_args__ = (
+        Index("ix_stock_adjustments_project_id", "project_id"),
+        Index("ix_stock_adjustments_nomenclature_id", "nomenclature_id"),
+    )
 
 
 # ─── Warehouse Delivery Times (Время доставки до WB) ─────────────────────
