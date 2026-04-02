@@ -119,8 +119,8 @@ src/types/api.ts — TypeScript интерфейсы
 
 ## Безопасность и CI
 ### Pre-commit (автоматически при коммите)
-- **Ruff** (E,W,F,S) — стиль + security rules (flake8-bandit)
-- **Bandit** — Python security linter (eval, injection, weak crypto)
+- **Ruff** — стиль + security (S-rules настроены в `ruff.toml`)
+- **Bandit** — Python security linter (eval, injection, weak crypto; конфиг в `bandit.yaml`)
 - **Gitleaks** — секреты в коде
 
 ### CI (автоматически при push/PR)
