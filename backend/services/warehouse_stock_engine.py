@@ -370,6 +370,93 @@ def _assign_abc(items: list[dict], value_key: str, abc_key: str) -> None:
             item[abc_key] = "C"
 
 
+def _group_abc(unified_list: list[dict]) -> list[dict]:
+    """Group ABC-classified items: brand → subject → articles (3-level hierarchy)."""
+
+    def _init_group(name: str) -> dict:
+        return {
+            "group_name": name,
+            "items_count": 0,
+            "total_own": 0,
+            "total_wb": 0,
+            "in_transit": 0,
+            "total": 0,
+            "avg_cost": 0.0,
+            "avg_daily_revenue": 0.0,
+            "avg_daily_profit": 0.0,
+            "warehouses": {},
+            "wb_stocks": {},
+            "_cost_sum": 0.0,
+            "_cost_weight": 0,
+        }
+
+    def _acc(g: dict, row: dict) -> None:
+        g["items_count"] += 1
+        g["total_own"] += row["total_own"]
+        g["total_wb"] += row["total_wb"]
+        g["in_transit"] += row["in_transit"]
+        g["total"] += row["total"]
+        g["avg_daily_revenue"] += row.get("avg_daily_revenue", 0)
+        g["avg_daily_profit"] += row.get("avg_daily_profit", 0)
+        t = row["total"]
+        if row.get("avg_cost") and t > 0:
+            g["_cost_sum"] += row["avg_cost"] * t
+            g["_cost_weight"] += t
+        for wh, qty in row.get("warehouses", {}).items():
+            g["warehouses"][wh] = g["warehouses"].get(wh, 0) + qty
+        for wh, qty in row.get("wb_stocks", {}).items():
+            g["wb_stocks"][wh] = g["wb_stocks"].get(wh, 0) + qty
+
+    def _fin(g: dict) -> None:
+        if g["_cost_weight"] > 0:
+            g["avg_cost"] = round(g["_cost_sum"] / g["_cost_weight"], 2)
+        g["avg_daily_revenue"] = round(g["avg_daily_revenue"], 2)
+        g["avg_daily_profit"] = round(g["avg_daily_profit"], 2)
+        del g["_cost_sum"]
+        del g["_cost_weight"]
+
+    # Build brand → subject → articles hierarchy
+    brands: dict[str, dict] = {}
+    for row in unified_list:
+        brand_key = row.get("brand") or "Без бренда"
+        subject_key = row.get("subject") or "Без категории"
+
+        if brand_key not in brands:
+            b = _init_group(brand_key)
+            b["_subjects"] = {}
+            brands[brand_key] = b
+
+        b = brands[brand_key]
+        _acc(b, row)
+
+        subj_map = b["_subjects"]
+        if subject_key not in subj_map:
+            s = _init_group(subject_key)
+            s["children"] = []
+            subj_map[subject_key] = s
+
+        s = subj_map[subject_key]
+        _acc(s, row)
+        s["children"].append(row)
+
+    result = []
+    for b in brands.values():
+        _fin(b)
+        subjects = []
+        for s in b.pop("_subjects").values():
+            _fin(s)
+            s["children"].sort(key=lambda r: r.get("avg_daily_revenue", 0), reverse=True)
+            subjects.append(s)
+        subjects.sort(key=lambda s: s.get("avg_daily_revenue", 0), reverse=True)
+        b["children"] = subjects
+        result.append(b)
+
+    # Sort brands by revenue, assign ABC to brands too
+    result.sort(key=lambda g: g.get("avg_daily_revenue", 0), reverse=True)
+    _assign_abc(result, "avg_daily_revenue", "abc_class")
+    return result
+
+
 async def _load_tag_map(db: AsyncSession, project_id: int) -> dict[int, str]:
     """Load nm_id → tag_name map. Returns first tag per nm_id."""
     result = await db.execute(
@@ -529,17 +616,25 @@ async def get_unified_stock_summary(
             if n.article_wb:
                 nm_id_to_nom_id[n.article_wb] = n.id
 
-    # 7. Load average costs per article_seller
-    from backend.services.bdr_loaders import load_avg_costs
+    # 7. Load average costs: CostOrderItem → WbCostOverride → WarehouseStock.cost_price
+    from backend.services.bdr_loaders import load_avg_costs, load_cost_overrides
 
     avg_costs_by_article = await load_avg_costs(db, project_id)
+    cost_overrides = await load_cost_overrides(db, project_id)  # nm_id → cost_price
+
     cost_map: dict[int, float] = {}
     for nom_id, info in nom_map.items():
+        # Priority 1: CostOrderItem weighted average by article_seller
         article = info.get("article_seller")
         if article and article in avg_costs_by_article:
             cost_map[nom_id] = avg_costs_by_article[article]
+            continue
+        # Priority 2: WbCostOverride manual override by nm_id
+        nm_id = info.get("article_wb")
+        if nm_id and nm_id in cost_overrides and cost_overrides[nm_id] > 0:
+            cost_map[nom_id] = cost_overrides[nm_id]
 
-    # 7a. Fallback: use WarehouseStock.cost_price for items without CostOrder data
+    # Priority 3: WarehouseStock.cost_price (manual per-warehouse)
     for row in own_rows:
         nom_id = row.nomenclature_id
         if nom_id not in cost_map and row.cost_price and float(row.cost_price) > 0:
@@ -611,9 +706,9 @@ async def get_unified_stock_summary(
 
     # 9. Grouping
     if group_by == "abc":
-        # ABC: keep per-SKU rows, just add abc_class badge
+        # ABC: three-level hierarchy brand → subject → articles, with ABC on each article
         _assign_abc(unified_list, "avg_daily_revenue", "abc_class")
-        return unified_list
+        return _group_abc(unified_list)
 
     if group_by == "sku":
         return unified_list
