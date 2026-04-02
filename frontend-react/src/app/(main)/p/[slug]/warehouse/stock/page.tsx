@@ -138,19 +138,27 @@ function SummaryTab({
 // ─── Unified tab ─────────────────────────────────────────────────────────
 
 function WbDetailRow({ row, wbWarehouses, mode }: { row: UnifiedStockRow; wbWarehouses: string[]; mode: string }) {
-    const cost = row.avg_cost || 0;
-    const total = row.total || 1;
     return (
-        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', padding: '8px 0' }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', padding: '8px 0' }}>
             {wbWarehouses.map(wh => {
                 const v = row.wb_stocks[wh] || 0;
                 if (v <= 0) return null;
                 let display = formatNumber(v);
-                if (mode === 'cost' && cost > 0) display = formatNumber(v * cost);
-                else if (mode === 'revenue' && row.avg_daily_revenue) display = formatNumber(row.avg_daily_revenue * v / total);
-                else if (mode === 'profit' && row.avg_daily_profit) display = formatNumber(row.avg_daily_profit * v / total);
+                let color = '#7c3aed';
+                let bg = 'rgba(175, 82, 222, 0.08)';
+                if (mode === 'cost' && row.avg_cost > 0) {
+                    display = formatNumber(v * row.avg_cost);
+                } else if (mode === 'revenue' && row.avg_price > 0) {
+                    display = formatNumber(v * row.avg_price);
+                } else if (mode === 'profit' && row.avg_profit) {
+                    const val = v * row.avg_profit;
+                    display = formatNumber(val);
+                    color = val >= 0 ? 'var(--color-success)' : 'var(--color-danger)';
+                    bg = val >= 0 ? 'rgba(52, 199, 89, 0.08)' : 'rgba(255, 59, 48, 0.08)';
+                }
+                if (mode !== 'qty') display += ' \u20BD';
                 return (
-                    <span key={wh} style={{ fontSize: 12, padding: '2px 8px', borderRadius: 6, background: 'rgba(175, 82, 222, 0.08)', color: '#7c3aed' }}>
+                    <span key={wh} style={{ fontSize: 12, padding: '2px 8px', borderRadius: 6, background: bg, color }}>
                         {wh}: {display}
                     </span>
                 );
@@ -358,7 +366,12 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                 if (v <= 0) return <strong>{'\u2014'}</strong>;
                 const val = fmtVal(v, row);
                 const suffix = mode !== 'qty' ? ' \u20BD' : '';
-                return <strong style={{ color: 'var(--color-accent)' }}>{val}{typeof val === 'string' && val !== '\u2014' ? suffix : ''}</strong>;
+                if (typeof val === 'string') {
+                    return <strong style={{ color: 'var(--color-accent)' }}>{val}{val !== '\u2014' ? suffix : ''}</strong>;
+                }
+                // JSX (profit with color) — wrap with suffix
+                const profitColor = val.props?.style?.color || 'var(--color-accent)';
+                return <strong style={{ color: profitColor }}>{val.props.children}{suffix}</strong>;
             },
         });
 
@@ -368,7 +381,11 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                 key: `own_${wh}`,
                 label: `${wh}`,
                 align: 'right',
-                render: (_: unknown, row: UnifiedStockRow) => fmtVal(row.warehouses[wh] || 0, row),
+                render: (_: unknown, row: UnifiedStockRow) => {
+                    const node = fmtVal(row.warehouses[wh] || 0, row);
+                    if (mode !== 'qty' && typeof node === 'string' && node !== '\u2014') return node + ' \u20BD';
+                    return node;
+                },
             });
         }
 
@@ -382,20 +399,22 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                 if (v <= 0) return <span style={{ color: 'var(--color-text-muted)' }}>{'\u2014'}</span>;
                 const isOpen = expanded.has(row.nomenclature_id);
                 const displayNode = fmtVal(v, row);
-                // fmtVal may return string or JSX — extract text for clickable span
                 let display: string;
+                let displayColor = 'var(--color-accent)';
                 if (typeof displayNode === 'string') {
                     display = displayNode;
                 } else if (displayNode && typeof displayNode === 'object' && 'props' in displayNode) {
                     display = String(displayNode.props.children ?? formatNumber(v));
+                    if (displayNode.props.style?.color) displayColor = displayNode.props.style.color;
                 } else {
                     display = formatNumber(v);
                 }
+                if (mode !== 'qty' && display !== '\u2014') display += ' \u20BD';
                 return (
                     <div>
                         <span
                             onClick={(e) => { e.stopPropagation(); toggleExpand(row.nomenclature_id); }}
-                            style={{ color: 'var(--color-accent)', fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
+                            style={{ color: displayColor, fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
                         >
                             {display} {isOpen ? '\u25BE' : '\u25B8'}
                         </span>
@@ -409,7 +428,11 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
             key: 'in_transit',
             label: 'В пути',
             align: 'right',
-            render: (_: unknown, row: UnifiedStockRow) => fmtVal(row.in_transit || 0, row),
+            render: (_: unknown, row: UnifiedStockRow) => {
+                const node = fmtVal(row.in_transit || 0, row);
+                if (mode !== 'qty' && typeof node === 'string' && node !== '\u2014') return node + ' \u20BD';
+                return node;
+            },
         });
 
         return c;
@@ -491,7 +514,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                                                 </span>
                                             )}
                                         </td>
-                                        <td style={{ textAlign: 'right' }}>{group.items_count != null ? formatNumber(group.items_count) : '\u2014'}</td>
+                                        <td style={{ textAlign: 'right' }}>{group.items_count != null ? formatNumber(group.items_count, 0) : '\u2014'}</td>
                                         {groupBy === 'abc' && (
                                             <td>
                                                 {group.abc_class && (
@@ -537,7 +560,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                                                                 </span>
                                                             )}
                                                         </td>
-                                                        <td style={{ textAlign: 'right' }}>{child.items_count != null ? formatNumber(child.items_count) : '\u2014'}</td>
+                                                        <td style={{ textAlign: 'right' }}>{child.items_count != null ? formatNumber(child.items_count, 0) : '\u2014'}</td>
                                                         {groupBy === 'abc' && <td>{'\u2014'}</td>}
                                                         <td style={{ textAlign: 'right' }}>
                                                             <strong style={{ color: 'var(--color-accent)' }}>
@@ -565,7 +588,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                     <tfoot>
                         <tr style={{ background: 'var(--color-bg)', fontWeight: 700, borderTop: '2px solid var(--color-border)' }}>
                             <td>Итого</td>
-                            <td style={{ textAlign: 'right' }}>{formatNumber(filtered.reduce((s, g) => s + (g.items_count || 0), 0))}</td>
+                            <td style={{ textAlign: 'right' }}>{formatNumber(filtered.reduce((s, g) => s + (g.items_count || 0), 0), 0)}</td>
                             {groupBy === 'abc' && <td />}
                             <td style={{ textAlign: 'right', color: 'var(--color-accent)' }}>
                                 {mode === 'qty' ? formatNumber(totals.total) : formatNumber(totals.totalMoney)} {mode !== 'qty' ? '\u20BD' : ''}
