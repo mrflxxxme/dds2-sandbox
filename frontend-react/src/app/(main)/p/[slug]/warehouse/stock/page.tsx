@@ -554,6 +554,25 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                             );
                         })}
                     </tbody>
+                    <tfoot>
+                        <tr style={{ background: 'var(--color-bg)', fontWeight: 700, borderTop: '2px solid var(--color-border)' }}>
+                            <td>Итого</td>
+                            <td style={{ textAlign: 'right' }}>{formatNumber(filtered.reduce((s, g) => s + (g.items_count || 0), 0))}</td>
+                            {groupBy === 'abc' && <td />}
+                            <td style={{ textAlign: 'right', color: 'var(--color-accent)' }}>
+                                {mode === 'qty' ? formatNumber(totals.total) : formatNumber(totals.totalMoney)} {mode !== 'qty' ? '\u20BD' : ''}
+                            </td>
+                            <td style={{ textAlign: 'right' }}>
+                                {mode === 'qty' ? formatNumber(totals.ownTotal) : formatNumber(totals.ownMoney)}
+                            </td>
+                            <td style={{ textAlign: 'right' }}>
+                                {mode === 'qty' ? formatNumber(totals.wbTotal) : formatNumber(totals.wbMoney)}
+                            </td>
+                            <td style={{ textAlign: 'right' }}>
+                                {mode === 'qty' ? formatNumber(totals.inTransit) : formatNumber(totals.transitMoney)}
+                            </td>
+                        </tr>
+                    </tfoot>
                 </table>
                 <div style={{ padding: '12px 16px', fontSize: 13, color: 'var(--color-text-muted)' }}>
                     {filtered.length} групп
