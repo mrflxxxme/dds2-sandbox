@@ -394,7 +394,7 @@ async def _load_bdr_metrics(
             WbFunnelDaily.nm_id,
             func.coalesce(func.sum(WbFunnelDaily.adv_sum), Decimal("0")).label("adv_sum"),
         )
-        .where(WbFunnelDaily.project_id == project_id, WbFunnelDaily.dt >= cutoff)
+        .where(WbFunnelDaily.project_id == project_id, WbFunnelDaily.date >= cutoff)
         .group_by(WbFunnelDaily.nm_id)
         .limit(10000)
     )
