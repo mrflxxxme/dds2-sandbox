@@ -320,34 +320,61 @@ async def _load_bdr_metrics(
 ) -> dict[int, dict]:
     """Load BDR-style metrics per nomenclature_id from WB finance (last 30 days).
 
-    Per nm_id aggregates (all doc types):
-    - avg_price = реализация / qty (средняя цена продажи, retail_price_withdisc_rub)
-    - avg_profit = (ppvz_net - logistics - storage - penalties - acceptance - cost) / qty
-    - avg_daily_revenue / avg_daily_profit for daily metrics
+    Profit formula (matches BDR):
+    profit = ppvz_net - logistics - storage - penalties - acceptance
+             - other_deductions - adv_sum - cost - tax
     """
+    from backend.models.integrations import WbFunnelDaily
+
     cutoff = utcnow().date() - timedelta(days=30)
     R = WbFinanceRow
+
+    # 1. Load finance aggregates per nm_id
     finance_result = await db.execute(
         select(
             R.nm_id,
-            # Реализация (Продажа - Возврат)
             func.coalesce(
                 func.sum(case((R.doc_type_name == "Продажа", R.retail_price_withdisc_rub), else_=Decimal("0")))
                 - func.sum(case((R.doc_type_name == "Возврат", R.retail_price_withdisc_rub), else_=Decimal("0"))),
                 Decimal("0"),
             ).label("realization"),
-            # ppvz_for_pay (net)
+            func.coalesce(
+                func.sum(case((R.doc_type_name == "Продажа", R.retail_amount), else_=Decimal("0")))
+                - func.sum(case((R.doc_type_name == "Возврат", R.retail_amount), else_=Decimal("0"))),
+                Decimal("0"),
+            ).label("sales_amount"),
             func.coalesce(
                 func.sum(case((R.doc_type_name == "Продажа", R.ppvz_for_pay), else_=Decimal("0")))
                 - func.sum(case((R.doc_type_name == "Возврат", R.ppvz_for_pay), else_=Decimal("0"))),
                 Decimal("0"),
             ).label("ppvz_net"),
-            # Логистика, хранение, штрафы, приёмка (все типы)
             func.coalesce(func.sum(R.delivery_rub), Decimal("0")).label("logistics"),
             func.coalesce(func.sum(R.storage_fee), Decimal("0")).label("storage"),
             func.coalesce(func.sum(R.penalty), Decimal("0")).label("penalties"),
             func.coalesce(func.sum(R.acceptance), Decimal("0")).label("acceptance"),
-            # Количество продаж (net)
+            # Deductions: total and ad/loan split
+            func.coalesce(func.sum(R.deduction), Decimal("0")).label("deductions_total"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (R.bonus_type_name.ilike("%продвижение%"), R.deduction),
+                        (R.bonus_type_name.ilike("%медиа%"), R.deduction),
+                        else_=Decimal("0"),
+                    )
+                ),
+                Decimal("0"),
+            ).label("ad_deduction"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (R.bonus_type_name.ilike("%кредит%"), R.deduction),
+                        (R.bonus_type_name.ilike("%заем%"), R.deduction),
+                        (R.bonus_type_name.ilike("%заём%"), R.deduction),
+                        else_=Decimal("0"),
+                    )
+                ),
+                Decimal("0"),
+            ).label("loan_deduction"),
             func.coalesce(
                 func.sum(case((R.doc_type_name == "Продажа", R.quantity), else_=0))
                 - func.sum(case((R.doc_type_name == "Возврат", R.quantity), else_=0)),
@@ -355,32 +382,59 @@ async def _load_bdr_metrics(
             ).label("sale_qty"),
             func.count(func.distinct(R.rr_dt)).label("days_count"),
         )
-        .where(
-            R.project_id == project_id,
-            R.rr_dt >= cutoff,
-        )
+        .where(R.project_id == project_id, R.rr_dt >= cutoff)
         .group_by(R.nm_id)
         .limit(10000)
     )
+    finance_rows = finance_result.all()
+
+    # 2. Load adv_sum per nm_id from WbFunnelDaily
+    adv_result = await db.execute(
+        select(
+            WbFunnelDaily.nm_id,
+            func.coalesce(func.sum(WbFunnelDaily.adv_sum), Decimal("0")).label("adv_sum"),
+        )
+        .where(WbFunnelDaily.project_id == project_id, WbFunnelDaily.dt >= cutoff)
+        .group_by(WbFunnelDaily.nm_id)
+        .limit(10000)
+    )
+    adv_map: dict[int, Decimal] = {r.nm_id: Decimal(str(r.adv_sum or 0)) for r in adv_result.all()}
+
+    # 3. Load tax rate
+    from backend.services.bdr_loaders import load_tax_settings
+
+    tax_settings = await load_tax_settings(db, project_id, cutoff, utcnow().date())
+    usn_rate = Decimal(str(tax_settings.get("usn_rate", 0)))
+
+    # 4. Build metrics per nomenclature_id
     bdr_map: dict[int, dict] = {}
-    for row in finance_result.all():
+    for row in finance_rows:
         nom_id = nm_id_to_nom_id.get(row.nm_id)
         if nom_id is None:
             continue
         days = max(row.days_count, 1)
         sale_qty = max(int(row.sale_qty or 0), 1)
         realization = Decimal(str(row.realization or 0))
+        sales_amount = Decimal(str(row.sales_amount or 0))
         ppvz_net = Decimal(str(row.ppvz_net or 0))
         logistics = Decimal(str(row.logistics or 0))
         storage = Decimal(str(row.storage or 0))
         penalties = Decimal(str(row.penalties or 0))
         acceptance = Decimal(str(row.acceptance or 0))
+        deductions_total = Decimal(str(row.deductions_total or 0))
+        ad_deduction = Decimal(str(row.ad_deduction or 0))
+        loan_deduction = Decimal(str(row.loan_deduction or 0))
+        other_deduction = deductions_total - ad_deduction - loan_deduction
+        adv_sum = adv_map.get(row.nm_id, Decimal("0"))
         cost_per_unit = Decimal(str(cost_map.get(nom_id, 0)))
+        cost_total = cost_per_unit * sale_qty
 
-        # to_pay: ppvz_net - logistics - storage - penalties - acceptance
-        to_pay = ppvz_net - logistics - storage - penalties - acceptance
-        # profit = to_pay - cost
-        total_profit = to_pay - cost_per_unit * sale_qty
+        # BDR profit formula:
+        # profit = ppvz_net - logistics - storage - penalties - acceptance
+        #          - other_deduction - adv_sum - cost_total - tax
+        pre_tax = ppvz_net - logistics - storage - penalties - acceptance - other_deduction - adv_sum - cost_total
+        tax = sales_amount * usn_rate if usn_rate > 0 else Decimal("0")
+        total_profit = pre_tax - tax
 
         avg_price = float(round(realization / sale_qty, 2))
         avg_profit = float(round(total_profit / sale_qty, 2))
