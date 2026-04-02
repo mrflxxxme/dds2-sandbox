@@ -317,13 +317,20 @@ async def _load_bdr_metrics(
     project_id: int,
     nm_id_to_nom_id: dict[int, int],
 ) -> dict[int, dict]:
-    """Load avg daily revenue/profit per nomenclature_id from WB finance (last 30 days)."""
+    """Load avg daily revenue/profit AND avg selling price per nomenclature_id.
+
+    From WB finance (last 30 days, doc_type=Продажа):
+    - avg_daily_revenue = total_retail_amount / days
+    - avg_daily_profit = total_ppvz_for_pay / days
+    - avg_price = total_retail_amount / total_quantity (avg selling price per unit)
+    """
     cutoff = utcnow().date() - timedelta(days=30)
     finance_result = await db.execute(
         select(
             WbFinanceRow.nm_id,
             func.sum(WbFinanceRow.retail_amount).label("total_revenue"),
             func.sum(WbFinanceRow.ppvz_for_pay).label("total_to_pay"),
+            func.sum(WbFinanceRow.quantity).label("total_qty"),
             func.count(func.distinct(WbFinanceRow.rr_dt)).label("days_count"),
         )
         .where(
@@ -342,9 +349,12 @@ async def _load_bdr_metrics(
         days = max(row.days_count, 1)
         revenue = Decimal(str(row.total_revenue or 0))
         to_pay = Decimal(str(row.total_to_pay or 0))
+        total_qty = int(row.total_qty or 0)
+        avg_price = float(round(revenue / max(total_qty, 1), 2)) if total_qty > 0 else 0
         bdr_map[nom_id] = {
             "avg_daily_revenue": float(round(revenue / days, 2)),
             "avg_daily_profit": float(round(to_pay / days, 2)),
+            "avg_price": avg_price,
         }
     return bdr_map
 
@@ -384,10 +394,13 @@ def _group_abc(unified_list: list[dict]) -> list[dict]:
             "avg_cost": 0.0,
             "avg_daily_revenue": 0.0,
             "avg_daily_profit": 0.0,
+            "avg_price": 0.0,
             "warehouses": {},
             "wb_stocks": {},
             "_cost_sum": 0.0,
             "_cost_weight": 0,
+            "_price_sum": 0.0,
+            "_price_weight": 0,
         }
 
     def _acc(g: dict, row: dict) -> None:
@@ -402,6 +415,9 @@ def _group_abc(unified_list: list[dict]) -> list[dict]:
         if row.get("avg_cost") and t > 0:
             g["_cost_sum"] += row["avg_cost"] * t
             g["_cost_weight"] += t
+        if row.get("avg_price") and t > 0:
+            g["_price_sum"] += row["avg_price"] * t
+            g["_price_weight"] += t
         for wh, qty in row.get("warehouses", {}).items():
             g["warehouses"][wh] = g["warehouses"].get(wh, 0) + qty
         for wh, qty in row.get("wb_stocks", {}).items():
@@ -410,10 +426,14 @@ def _group_abc(unified_list: list[dict]) -> list[dict]:
     def _fin(g: dict) -> None:
         if g["_cost_weight"] > 0:
             g["avg_cost"] = round(g["_cost_sum"] / g["_cost_weight"], 2)
+        if g["_price_weight"] > 0:
+            g["avg_price"] = round(g["_price_sum"] / g["_price_weight"], 2)
         g["avg_daily_revenue"] = round(g["avg_daily_revenue"], 2)
         g["avg_daily_profit"] = round(g["avg_daily_profit"], 2)
         del g["_cost_sum"]
         del g["_cost_weight"]
+        del g["_price_sum"]
+        del g["_price_weight"]
 
     # Build brand → subject → articles hierarchy
     brands: dict[str, dict] = {}
@@ -667,6 +687,7 @@ async def get_unified_stock_summary(
                 "avg_cost": cost_map.get(nom_id, 0),
                 "avg_daily_revenue": bdr.get("avg_daily_revenue", 0),
                 "avg_daily_profit": bdr.get("avg_daily_profit", 0),
+                "avg_price": bdr.get("avg_price", 0),
             }
         return unified[nom_id]
 
@@ -765,10 +786,13 @@ async def _group_unified(
             "avg_cost": 0.0,
             "avg_daily_revenue": 0.0,
             "avg_daily_profit": 0.0,
+            "avg_price": 0.0,
             "warehouses": {},
             "wb_stocks": {},
             "_cost_sum": 0.0,
             "_cost_weight": 0,
+            "_price_sum": 0.0,
+            "_price_weight": 0,
         }
 
     def _accumulate(g: dict, row: dict) -> None:
@@ -780,9 +804,12 @@ async def _group_unified(
         g["avg_daily_revenue"] += row.get("avg_daily_revenue", 0)
         g["avg_daily_profit"] += row.get("avg_daily_profit", 0)
         item_total = row["total"]
-        if row["avg_cost"] and item_total > 0:
+        if row.get("avg_cost") and item_total > 0:
             g["_cost_sum"] += row["avg_cost"] * item_total
             g["_cost_weight"] += item_total
+        if row.get("avg_price") and item_total > 0:
+            g["_price_sum"] += row["avg_price"] * item_total
+            g["_price_weight"] += item_total
         for wh_name, qty in row.get("warehouses", {}).items():
             g["warehouses"][wh_name] = g["warehouses"].get(wh_name, 0) + qty
         for wh_name, qty in row.get("wb_stocks", {}).items():
@@ -791,10 +818,14 @@ async def _group_unified(
     def _finalize(g: dict) -> None:
         if g["_cost_weight"] > 0:
             g["avg_cost"] = round(g["_cost_sum"] / g["_cost_weight"], 2)
+        if g["_price_weight"] > 0:
+            g["avg_price"] = round(g["_price_sum"] / g["_price_weight"], 2)
         g["avg_daily_revenue"] = round(g["avg_daily_revenue"], 2)
         g["avg_daily_profit"] = round(g["avg_daily_profit"], 2)
         del g["_cost_sum"]
         del g["_cost_weight"]
+        del g["_price_sum"]
+        del g["_price_weight"]
 
     grouped: dict[str, dict] = {}
 
