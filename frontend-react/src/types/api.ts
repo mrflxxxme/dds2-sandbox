@@ -959,6 +959,7 @@ export interface UnifiedStockRow {
   avg_daily_revenue: number;
   avg_daily_profit: number;
   avg_price: number;
+  avg_profit: number;
   group_name?: string;
   items_count?: number;
   abc_class?: string;
