@@ -209,12 +209,21 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
     const filtered = useMemo(() => {
         if (!search) return data;
         const q = search.toLowerCase();
+        if (isGrouped) {
+            return data.filter(r =>
+                (r.group_name || '').toLowerCase().includes(q) ||
+                (r.children || []).some(c =>
+                    (c.barcode || '').toLowerCase().includes(q) ||
+                    (c.article_seller || '').toLowerCase().includes(q)
+                )
+            );
+        }
         return data.filter(r =>
-            r.barcode.toLowerCase().includes(q) ||
+            (r.barcode || '').toLowerCase().includes(q) ||
             (r.article_seller || '').toLowerCase().includes(q) ||
             (r.group_name || '').toLowerCase().includes(q)
         );
-    }, [data, search]);
+    }, [data, search, isGrouped]);
 
     const { ownWarehouses, wbWarehouses } = useMemo(() => {
         const ownSet = new Set<string>();
@@ -280,8 +289,18 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
         if (qty <= 0) return '\u2014';
         if (mode === 'qty') return formatNumber(qty);
         if (mode === 'cost' && avgCost > 0) return formatNumber(qty * avgCost);
-        if (mode === 'revenue' && row) return (row.avg_daily_revenue || 0) > 0 ? formatNumber(row.avg_daily_revenue) : '\u2014';
-        if (mode === 'profit' && row) return row.avg_daily_profit ? formatNumber(row.avg_daily_profit) : '\u2014';
+        if (mode === 'revenue' && row) {
+            const rev = row.avg_daily_revenue || 0;
+            if (rev <= 0) return '\u2014';
+            const total = row.total || 1;
+            return formatNumber(rev * qty / total);
+        }
+        if (mode === 'profit' && row) {
+            const prof = row.avg_daily_profit || 0;
+            if (!prof) return '\u2014';
+            const total = row.total || 1;
+            return formatNumber(prof * qty / total);
+        }
         return formatNumber(qty);
     }, [mode]);
 
@@ -479,7 +498,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                                         )}
                                         <td style={{ textAlign: 'right' }}>
                                             <strong style={{ color: 'var(--color-accent)' }}>
-                                                {fmtGroupVal(group.total, cost)}{mode !== 'qty' && group.total > 0 && cost > 0 ? modeSuffix : ''}
+                                                {fmtGroupVal(group.total, cost, group as UnifiedStockRow)}{mode !== 'qty' && group.total > 0 ? modeSuffix : ''}
                                             </strong>
                                         </td>
                                         <td style={{ textAlign: 'right' }}>{fmtGroupVal(group.total_own || 0, cost, group as UnifiedStockRow)}</td>
@@ -516,7 +535,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                                                         {groupBy === 'abc' && <td>{'\u2014'}</td>}
                                                         <td style={{ textAlign: 'right' }}>
                                                             <strong style={{ color: 'var(--color-accent)' }}>
-                                                                {fmtGroupVal(child.total, childCost)}
+                                                                {fmtGroupVal(child.total, childCost, child as UnifiedStockRow)}
                                                             </strong>
                                                         </td>
                                                         <td style={{ textAlign: 'right' }}>{fmtGroupVal(child.total_own || 0, childCost, child as UnifiedStockRow)}</td>

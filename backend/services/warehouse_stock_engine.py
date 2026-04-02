@@ -539,6 +539,12 @@ async def get_unified_stock_summary(
         if article and article in avg_costs_by_article:
             cost_map[nom_id] = avg_costs_by_article[article]
 
+    # 7a. Fallback: use WarehouseStock.cost_price for items without CostOrder data
+    for row in own_rows:
+        nom_id = row.nomenclature_id
+        if nom_id not in cost_map and row.cost_price and float(row.cost_price) > 0:
+            cost_map[nom_id] = float(row.cost_price)
+
     # 7b. Load BDR daily metrics (avg_daily_revenue, avg_daily_profit)
     bdr_map = await _load_bdr_metrics(db, project_id, nm_id_to_nom_id)
 
