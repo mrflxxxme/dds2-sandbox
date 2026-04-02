@@ -54,6 +54,7 @@ from backend.services.warehouse_stock_engine import (  # noqa: F401
     create_adjustment,
     get_stock_movements,
     get_stock_summary,
+    get_unified_stock_summary,
     get_warehouse_stock,
     update_cost_price,
 )

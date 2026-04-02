@@ -3,17 +3,23 @@ Warehouse stock engine — stock balance updates, movements, adjustments, summar
 """
 
 import logging
+from datetime import timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.cost import Nomenclature
+from backend.models.integrations import WbWarehouseStock
+from backend.models.refs import ImtAlias, ProductTag, ProductTagMap
 from backend.models.warehouse import (
     MovementType,
     StockAdjustment,
     StockMovement,
+    Warehouse,
     WarehouseStock,
 )
+from backend.models.wb_finance import WbFinanceRow
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
@@ -123,8 +129,6 @@ async def _update_stock(
 
 async def _get_reserved_map(db: AsyncSession, project_id: int, warehouse_id: int) -> dict[int, int]:
     """Get reserved qty per nomenclature_id from active assembly requests."""
-    from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
-
     result = await db.execute(
         select(
             AssemblyRequestItem.nomenclature_id,
@@ -302,6 +306,457 @@ async def get_stock_summary(db: AsyncSession, project_id: int) -> list[dict]:
         entry["total_available"] = max(0, entry["total"] - entry["total_reserved"])
 
     return [v for v in summary.values() if v["total"] > 0 or v["total_in_transit"] > 0]
+
+
+# ─── Unified Stock (own + WB + in-transit) ────────────────────────────────
+
+
+async def _load_bdr_metrics(
+    db: AsyncSession,
+    project_id: int,
+    nm_id_to_nom_id: dict[int, int],
+) -> dict[int, dict]:
+    """Load avg daily revenue/profit per nomenclature_id from WB finance (last 30 days)."""
+    cutoff = utcnow().date() - timedelta(days=30)
+    finance_result = await db.execute(
+        select(
+            WbFinanceRow.nm_id,
+            func.sum(WbFinanceRow.retail_amount).label("total_revenue"),
+            func.sum(WbFinanceRow.ppvz_for_pay).label("total_to_pay"),
+            func.count(func.distinct(WbFinanceRow.rr_dt)).label("days_count"),
+        )
+        .where(
+            WbFinanceRow.project_id == project_id,
+            WbFinanceRow.rr_dt >= cutoff,
+            WbFinanceRow.doc_type_name == "Продажа",
+        )
+        .group_by(WbFinanceRow.nm_id)
+        .limit(10000)
+    )
+    bdr_map: dict[int, dict] = {}
+    for row in finance_result.all():
+        nom_id = nm_id_to_nom_id.get(row.nm_id)
+        if nom_id is None:
+            continue
+        days = max(row.days_count, 1)
+        revenue = float(row.total_revenue or 0)
+        to_pay = float(row.total_to_pay or 0)
+        bdr_map[nom_id] = {
+            "avg_daily_revenue": round(revenue / days, 2),
+            "avg_daily_profit": round(to_pay / days, 2),
+        }
+    return bdr_map
+
+
+def _assign_abc(items: list[dict], value_key: str, abc_key: str) -> None:
+    """Assign ABC category based on cumulative share (A=80%, B=95%, C=rest)."""
+    total = sum(max(item.get(value_key, 0), 0) for item in items)
+    if total <= 0:
+        for item in items:
+            item[abc_key] = "C"
+        return
+    sorted_items = sorted(items, key=lambda x: x.get(value_key, 0), reverse=True)
+    cumulative = 0.0
+    for item in sorted_items:
+        val = max(item.get(value_key, 0), 0)
+        cumulative += val
+        share = cumulative / total
+        if share <= 0.80:
+            item[abc_key] = "A"
+        elif share <= 0.95:
+            item[abc_key] = "B"
+        else:
+            item[abc_key] = "C"
+
+
+async def _load_tag_map(db: AsyncSession, project_id: int) -> dict[int, str]:
+    """Load nm_id → tag_name map. Returns first tag per nm_id."""
+    result = await db.execute(
+        select(ProductTagMap.nm_id, ProductTag.name)
+        .join(ProductTag, ProductTagMap.tag_id == ProductTag.id)
+        .where(
+            ProductTagMap.project_id == project_id,
+            ProductTag.project_id == project_id,
+            ProductTag.is_deleted.is_(False),
+        )
+        .limit(10000)
+    )
+    tag_map: dict[int, str] = {}
+    for row in result.all():
+        if row.nm_id not in tag_map:
+            tag_map[row.nm_id] = row.name
+    return tag_map
+
+
+async def _load_imt_map(
+    db: AsyncSession,
+    project_id: int,
+    nom_ids: set[int],
+) -> dict[int, int]:
+    """Load nomenclature_id → imt_id map."""
+    if not nom_ids:
+        return {}
+    result = await db.execute(
+        select(Nomenclature.id, Nomenclature.imt_id)
+        .where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.id.in_(nom_ids),
+            Nomenclature.imt_id.isnot(None),
+        )
+        .limit(10000)
+    )
+    return {row.id: row.imt_id for row in result.all()}
+
+
+async def _load_imt_aliases(db: AsyncSession, project_id: int) -> dict[int, str]:
+    """Load imt_id → alias name map."""
+    result = await db.execute(
+        select(ImtAlias.imt_id, ImtAlias.name).where(ImtAlias.project_id == project_id).limit(10000)
+    )
+    return {row.imt_id: row.name for row in result.all()}
+
+
+async def get_unified_stock_summary(
+    db: AsyncSession,
+    project_id: int,
+    group_by: str = "sku",
+) -> list[dict]:
+    """
+    Unified stock across own warehouses, WB marketplace, and in-transit.
+    Merges WarehouseStock + WbWarehouseStock + SHIPPED assembly items.
+
+    group_by: sku | brand | subject | imt | tag | abc
+    """
+    # 1. Own warehouse stock grouped by nomenclature_id
+    own_result = await db.execute(
+        select(WarehouseStock)
+        .where(
+            WarehouseStock.project_id == project_id,
+        )
+        .limit(10000)
+    )
+    own_rows = own_result.scalars().all()
+
+    # 2. Warehouse id->name map
+    wh_result = await db.execute(
+        select(Warehouse.id, Warehouse.name)
+        .where(
+            Warehouse.project_id == project_id,
+            Warehouse.is_deleted.is_(False),
+        )
+        .limit(10000)
+    )
+    wh_name_map: dict[int, str] = {row.id: row.name for row in wh_result.all()}
+
+    # 3. WB warehouse stock -- join with Nomenclature to get nomenclature_id
+    #    Use quantity_full (includes in_way_to_client + in_way_from_client)
+    wb_result = await db.execute(
+        select(
+            Nomenclature.id.label("nomenclature_id"),
+            WbWarehouseStock.warehouse_name,
+            func.sum(WbWarehouseStock.quantity_full).label("qty"),
+        )
+        .join(Nomenclature, Nomenclature.article_wb == WbWarehouseStock.nm_id)
+        .where(
+            WbWarehouseStock.project_id == project_id,
+            Nomenclature.project_id == project_id,
+        )
+        .group_by(Nomenclature.id, WbWarehouseStock.warehouse_name)
+        .limit(10000)
+    )
+    wb_rows = wb_result.all()
+
+    # 4. In-transit (SHIPPED assembly request items) grouped by nomenclature_id
+    shipped_result = await db.execute(
+        select(
+            AssemblyRequestItem.nomenclature_id,
+            func.sum(AssemblyRequestItem.quantity).label("qty"),
+        )
+        .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted.is_(False),
+            AssemblyRequest.status == AssemblyStatus.SHIPPED,
+        )
+        .group_by(AssemblyRequestItem.nomenclature_id)
+        .limit(10000)
+    )
+    in_transit_map: dict[int, int] = {row.nomenclature_id: int(row.qty or 0) for row in shipped_result.all()}
+
+    # 5. Reserved from active assembly requests (all warehouses)
+    wh_ids = {row.warehouse_id for row in own_rows}
+    all_reserved: dict[int, int] = {}  # nomenclature_id -> total reserved
+    for wh_id in wh_ids:
+        wh_reserved = await _get_reserved_map(db, project_id, wh_id)
+        for nom_id, qty in wh_reserved.items():
+            all_reserved[nom_id] = all_reserved.get(nom_id, 0) + qty
+
+    # 6. Nomenclature details (include article_wb for BDR nm_id mapping)
+    all_nom_ids: set[int] = set()
+    for row in own_rows:
+        all_nom_ids.add(row.nomenclature_id)
+    for row in wb_rows:
+        all_nom_ids.add(row.nomenclature_id)
+    all_nom_ids.update(in_transit_map.keys())
+
+    nom_map: dict[int, dict] = {}
+    nm_id_to_nom_id: dict[int, int] = {}  # article_wb -> nomenclature.id
+    if all_nom_ids:
+        nom_result = await db.execute(
+            select(
+                Nomenclature.id,
+                Nomenclature.barcode,
+                Nomenclature.article_seller,
+                Nomenclature.article_wb,
+                Nomenclature.subject,
+                Nomenclature.brand,
+            )
+            .where(
+                Nomenclature.project_id == project_id,
+                Nomenclature.id.in_(all_nom_ids),
+            )
+            .limit(10000)
+        )
+        for n in nom_result.all():
+            nom_map[n.id] = {
+                "barcode": n.barcode,
+                "article_seller": n.article_seller,
+                "article_wb": n.article_wb,
+                "subject": n.subject,
+                "brand": n.brand,
+            }
+            if n.article_wb:
+                nm_id_to_nom_id[n.article_wb] = n.id
+
+    # 7. Load average costs per article_seller
+    from backend.services.bdr_loaders import load_avg_costs
+
+    avg_costs_by_article = await load_avg_costs(db, project_id)
+    cost_map: dict[int, float] = {}
+    for nom_id, info in nom_map.items():
+        article = info.get("article_seller")
+        if article and article in avg_costs_by_article:
+            cost_map[nom_id] = avg_costs_by_article[article]
+
+    # 7b. Load BDR daily metrics (avg_daily_revenue, avg_daily_profit)
+    bdr_map = await _load_bdr_metrics(db, project_id, nm_id_to_nom_id)
+
+    # 8. Merge all by nomenclature_id
+    unified: dict[int, dict] = {}
+
+    def _ensure(nom_id: int) -> dict:
+        if nom_id not in unified:
+            info = nom_map.get(nom_id, {})
+            bdr = bdr_map.get(nom_id, {})
+            unified[nom_id] = {
+                "nomenclature_id": nom_id,
+                "barcode": info.get("barcode", ""),
+                "article_seller": info.get("article_seller"),
+                "article_wb": info.get("article_wb"),
+                "subject": info.get("subject"),
+                "brand": info.get("brand"),
+                "warehouses": {},
+                "wb_stocks": {},
+                "in_transit": 0,
+                "reserved": 0,
+                "total_own": 0,
+                "total_wb": 0,
+                "total": 0,
+                "avg_cost": cost_map.get(nom_id, 0),
+                "avg_daily_revenue": bdr.get("avg_daily_revenue", 0),
+                "avg_daily_profit": bdr.get("avg_daily_profit", 0),
+            }
+        return unified[nom_id]
+
+    # Own warehouse stock
+    for row in own_rows:
+        if row.quantity <= 0:
+            continue
+        entry = _ensure(row.nomenclature_id)
+        wh_name = wh_name_map.get(row.warehouse_id, str(row.warehouse_id))
+        entry["warehouses"][wh_name] = entry["warehouses"].get(wh_name, 0) + row.quantity
+        entry["total_own"] += row.quantity
+
+    # WB stock
+    for row in wb_rows:
+        qty = int(row.qty or 0)
+        if qty <= 0:
+            continue
+        entry = _ensure(row.nomenclature_id)
+        entry["wb_stocks"][row.warehouse_name] = entry["wb_stocks"].get(row.warehouse_name, 0) + qty
+        entry["total_wb"] += qty
+
+    # In-transit
+    for nom_id, qty in in_transit_map.items():
+        entry = _ensure(nom_id)
+        entry["in_transit"] = qty
+
+    # Reserved
+    for nom_id, qty in all_reserved.items():
+        if nom_id in unified:
+            unified[nom_id]["reserved"] = qty
+
+    # Compute totals
+    for entry in unified.values():
+        entry["total"] = entry["total_own"] + entry["total_wb"] + entry["in_transit"]
+
+    unified_list = [v for v in unified.values() if v["total"] > 0]
+
+    # 9. Grouping
+    if group_by == "abc":
+        # ABC: keep per-SKU rows, just add abc_class badge
+        _assign_abc(unified_list, "avg_daily_revenue", "abc_class")
+        return unified_list
+
+    if group_by == "sku":
+        return unified_list
+
+    return await _group_unified(db, project_id, unified_list, group_by)
+
+
+async def _group_unified(
+    db: AsyncSession,
+    project_id: int,
+    unified_list: list[dict],
+    group_by: str,
+) -> list[dict]:
+    """Aggregate unified stock rows by the requested dimension."""
+    # Pre-load lookup maps depending on group_by
+    tag_map: dict[int, str] = {}
+    imt_map: dict[int, int] = {}
+    imt_aliases: dict[int, str] = {}
+
+    if group_by == "tag":
+        tag_map = await _load_tag_map(db, project_id)
+    elif group_by == "imt":
+        nom_ids = {r["nomenclature_id"] for r in unified_list}
+        imt_map = await _load_imt_map(db, project_id, nom_ids)
+        imt_aliases = await _load_imt_aliases(db, project_id)
+
+    def _get_group_key(row: dict) -> str:
+        nm_id = row.get("article_wb")
+        nom_id = row["nomenclature_id"]
+        if group_by == "brand":
+            return row.get("brand") or "Без бренда"
+        if group_by == "subject":
+            return row.get("subject") or "Без категории"
+        if group_by == "imt":
+            imt_id = imt_map.get(nom_id)
+            if imt_id is None:
+                return "Без склейки"
+            alias = imt_aliases.get(imt_id)
+            return alias or f"IMT {imt_id}"
+        if group_by in ("tag", "abc"):
+            if nm_id and nm_id in tag_map:
+                return tag_map[nm_id]
+            return "Без ярлыка"
+        return str(nom_id)
+
+    def _init_group(name: str) -> dict:
+        return {
+            "group_name": name,
+            "items_count": 0,
+            "total_own": 0,
+            "total_wb": 0,
+            "in_transit": 0,
+            "total": 0,
+            "avg_cost": 0.0,
+            "avg_daily_revenue": 0.0,
+            "avg_daily_profit": 0.0,
+            "warehouses": {},
+            "wb_stocks": {},
+            "_cost_sum": 0.0,
+            "_cost_weight": 0,
+        }
+
+    def _accumulate(g: dict, row: dict) -> None:
+        g["items_count"] += 1
+        g["total_own"] += row["total_own"]
+        g["total_wb"] += row["total_wb"]
+        g["in_transit"] += row["in_transit"]
+        g["total"] += row["total"]
+        g["avg_daily_revenue"] += row.get("avg_daily_revenue", 0)
+        g["avg_daily_profit"] += row.get("avg_daily_profit", 0)
+        item_total = row["total"]
+        if row["avg_cost"] and item_total > 0:
+            g["_cost_sum"] += row["avg_cost"] * item_total
+            g["_cost_weight"] += item_total
+        for wh_name, qty in row.get("warehouses", {}).items():
+            g["warehouses"][wh_name] = g["warehouses"].get(wh_name, 0) + qty
+        for wh_name, qty in row.get("wb_stocks", {}).items():
+            g["wb_stocks"][wh_name] = g["wb_stocks"].get(wh_name, 0) + qty
+
+    def _finalize(g: dict) -> None:
+        if g["_cost_weight"] > 0:
+            g["avg_cost"] = round(g["_cost_sum"] / g["_cost_weight"], 2)
+        g["avg_daily_revenue"] = round(g["avg_daily_revenue"], 2)
+        g["avg_daily_profit"] = round(g["avg_daily_profit"], 2)
+        del g["_cost_sum"]
+        del g["_cost_weight"]
+
+    grouped: dict[str, dict] = {}
+
+    if group_by == "brand":
+        # Two-level hierarchy: brand → subjects → articles
+        for row in unified_list:
+            brand_key = row.get("brand") or "Без бренда"
+            subject_key = row.get("subject") or "Без категории"
+
+            if brand_key not in grouped:
+                g = _init_group(brand_key)
+                g["_subjects"] = {}
+                grouped[brand_key] = g
+
+            g = grouped[brand_key]
+            _accumulate(g, row)
+
+            # Track subjects within brand
+            subj_map = g["_subjects"]
+            if subject_key not in subj_map:
+                s = _init_group(subject_key)
+                s["children"] = []
+                subj_map[subject_key] = s
+
+            s = subj_map[subject_key]
+            _accumulate(s, row)
+            s["children"].append(row)
+
+        # Finalize brand groups and convert subjects
+        result_list = []
+        for g in grouped.values():
+            _finalize(g)
+            subjects = []
+            for s in g.pop("_subjects").values():
+                _finalize(s)
+                s["children"].sort(key=lambda r: r.get("total", 0), reverse=True)
+                subjects.append(s)
+            subjects.sort(key=lambda s: s.get("total", 0), reverse=True)
+            g["children"] = subjects
+            result_list.append(g)
+    else:
+        # Single-level children: group → article rows
+        for row in unified_list:
+            key = _get_group_key(row)
+            if key not in grouped:
+                g = _init_group(key)
+                g["children"] = []
+                grouped[key] = g
+
+            g = grouped[key]
+            _accumulate(g, row)
+            g["children"].append(row)
+
+        result_list = []
+        for g in grouped.values():
+            _finalize(g)
+            g["children"].sort(key=lambda r: r.get("total", 0), reverse=True)
+            result_list.append(g)
+
+    # ABC classification by avg_daily_revenue
+    if group_by == "abc":
+        _assign_abc(result_list, "avg_daily_revenue", "abc_class")
+
+    return result_list
 
 
 async def update_cost_price(db: AsyncSession, project_id: int, stock_id: int, cost_price) -> WarehouseStock | None:
