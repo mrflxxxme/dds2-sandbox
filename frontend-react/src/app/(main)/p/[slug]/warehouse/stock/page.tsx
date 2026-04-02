@@ -382,7 +382,15 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                 if (v <= 0) return <span style={{ color: 'var(--color-text-muted)' }}>{'\u2014'}</span>;
                 const isOpen = expanded.has(row.nomenclature_id);
                 const displayNode = fmtVal(v, row);
-                const display = typeof displayNode === 'string' ? displayNode : formatNumber(v);
+                // fmtVal may return string or JSX — extract text for clickable span
+                let display: string;
+                if (typeof displayNode === 'string') {
+                    display = displayNode;
+                } else if (displayNode && typeof displayNode === 'object' && 'props' in displayNode) {
+                    display = String(displayNode.props.children ?? formatNumber(v));
+                } else {
+                    display = formatNumber(v);
+                }
                 return (
                     <div>
                         <span
