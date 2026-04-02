@@ -447,6 +447,20 @@ async def get_stock_summary(
     return await warehouse_service.get_stock_summary(db, project.id)
 
 
+@router.get("/stock/unified")
+async def get_unified_stock(
+    group_by: str = Query("sku", regex="^(sku|brand|subject|imt|tag|abc)$"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Unified stock: own warehouses + WB + in-transit. Supports grouping."""
+    return await warehouse_service.get_unified_stock_summary(
+        db,
+        project.id,
+        group_by=group_by,
+    )
+
+
 @router.put("/stock/{stock_id}/cost-price")
 async def update_cost_price(
     stock_id: int,

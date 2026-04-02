@@ -101,6 +101,7 @@ src/types/api.ts — TypeScript интерфейсы
 - **Шаблоны** → `.claude/templates/` (скелеты service, router, test, model, schema, page)
 - **Грабли** → `docs/KNOWN_PITFALLS.md` (ошибки которые агенты повторяют)
 - **Worktrees** → `scripts/worktree-start.sh` / `worktree-finish.sh` (параллельная работа)
+- **Runbooks** → `.claude/runbooks/common-scenarios.md` (пошаговые сценарии: endpoint, страница, баг, миграция)
 
 ## Перед началом задачи
 Следуй процессу Agent TDD из `docs/AGENT_DEVELOPMENT.md`:

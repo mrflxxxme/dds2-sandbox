@@ -942,6 +942,28 @@ export interface StockSummaryRow {
   total_available: number;
 }
 
+export interface UnifiedStockRow {
+  nomenclature_id: number;
+  barcode: string;
+  article_seller: string | null;
+  subject: string | null;
+  brand: string | null;
+  warehouses: Record<string, number>;
+  wb_stocks: Record<string, number>;
+  in_transit: number;
+  reserved: number;
+  total_own: number;
+  total_wb: number;
+  total: number;
+  avg_cost: number;
+  avg_daily_revenue: number;
+  avg_daily_profit: number;
+  group_name?: string;
+  items_count?: number;
+  abc_class?: string;
+  children?: UnifiedStockRow[];
+}
+
 export interface StockAdjustment {
   id: number;
   project_id: number;
