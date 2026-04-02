@@ -6,7 +6,7 @@ import logging
 from datetime import timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
@@ -316,29 +316,50 @@ async def _load_bdr_metrics(
     db: AsyncSession,
     project_id: int,
     nm_id_to_nom_id: dict[int, int],
+    cost_map: dict[int, float],
 ) -> dict[int, dict]:
-    """Load avg daily revenue/profit AND avg selling price per nomenclature_id.
+    """Load BDR-style metrics per nomenclature_id from WB finance (last 30 days).
 
-    From WB finance (last 30 days, doc_type=Продажа):
-    - avg_daily_revenue = total_retail_amount / days
-    - avg_daily_profit = total_ppvz_for_pay / days
-    - avg_price = total_realization / total_quantity (avg selling price per unit, реализация)
+    Per nm_id aggregates (all doc types):
+    - avg_price = реализация / qty (средняя цена продажи, retail_price_withdisc_rub)
+    - avg_profit = (ppvz_net - logistics - storage - penalties - acceptance - cost) / qty
+    - avg_daily_revenue / avg_daily_profit for daily metrics
     """
     cutoff = utcnow().date() - timedelta(days=30)
+    R = WbFinanceRow
     finance_result = await db.execute(
         select(
-            WbFinanceRow.nm_id,
-            func.sum(WbFinanceRow.retail_price_withdisc_rub).label("total_revenue"),
-            func.sum(WbFinanceRow.ppvz_for_pay).label("total_to_pay"),
-            func.sum(WbFinanceRow.quantity).label("total_qty"),
-            func.count(func.distinct(WbFinanceRow.rr_dt)).label("days_count"),
+            R.nm_id,
+            # Реализация (Продажа - Возврат)
+            func.coalesce(
+                func.sum(case((R.doc_type_name == "Продажа", R.retail_price_withdisc_rub), else_=Decimal("0")))
+                - func.sum(case((R.doc_type_name == "Возврат", R.retail_price_withdisc_rub), else_=Decimal("0"))),
+                Decimal("0"),
+            ).label("realization"),
+            # ppvz_for_pay (net)
+            func.coalesce(
+                func.sum(case((R.doc_type_name == "Продажа", R.ppvz_for_pay), else_=Decimal("0")))
+                - func.sum(case((R.doc_type_name == "Возврат", R.ppvz_for_pay), else_=Decimal("0"))),
+                Decimal("0"),
+            ).label("ppvz_net"),
+            # Логистика, хранение, штрафы, приёмка (все типы)
+            func.coalesce(func.sum(R.delivery_rub), Decimal("0")).label("logistics"),
+            func.coalesce(func.sum(R.storage_fee), Decimal("0")).label("storage"),
+            func.coalesce(func.sum(R.penalty), Decimal("0")).label("penalties"),
+            func.coalesce(func.sum(R.acceptance), Decimal("0")).label("acceptance"),
+            # Количество продаж (net)
+            func.coalesce(
+                func.sum(case((R.doc_type_name == "Продажа", R.quantity), else_=0))
+                - func.sum(case((R.doc_type_name == "Возврат", R.quantity), else_=0)),
+                0,
+            ).label("sale_qty"),
+            func.count(func.distinct(R.rr_dt)).label("days_count"),
         )
         .where(
-            WbFinanceRow.project_id == project_id,
-            WbFinanceRow.rr_dt >= cutoff,
-            WbFinanceRow.doc_type_name == "Продажа",
+            R.project_id == project_id,
+            R.rr_dt >= cutoff,
         )
-        .group_by(WbFinanceRow.nm_id)
+        .group_by(R.nm_id)
         .limit(10000)
     )
     bdr_map: dict[int, dict] = {}
@@ -347,14 +368,28 @@ async def _load_bdr_metrics(
         if nom_id is None:
             continue
         days = max(row.days_count, 1)
-        revenue = Decimal(str(row.total_revenue or 0))
-        to_pay = Decimal(str(row.total_to_pay or 0))
-        total_qty = int(row.total_qty or 0)
-        avg_price = float(round(revenue / max(total_qty, 1), 2)) if total_qty > 0 else 0
+        sale_qty = max(int(row.sale_qty or 0), 1)
+        realization = Decimal(str(row.realization or 0))
+        ppvz_net = Decimal(str(row.ppvz_net or 0))
+        logistics = Decimal(str(row.logistics or 0))
+        storage = Decimal(str(row.storage or 0))
+        penalties = Decimal(str(row.penalties or 0))
+        acceptance = Decimal(str(row.acceptance or 0))
+        cost_per_unit = Decimal(str(cost_map.get(nom_id, 0)))
+
+        # to_pay: ppvz_net - logistics - storage - penalties - acceptance
+        to_pay = ppvz_net - logistics - storage - penalties - acceptance
+        # profit = to_pay - cost
+        total_profit = to_pay - cost_per_unit * sale_qty
+
+        avg_price = float(round(realization / sale_qty, 2))
+        avg_profit = float(round(total_profit / sale_qty, 2))
+
         bdr_map[nom_id] = {
-            "avg_daily_revenue": float(round(revenue / days, 2)),
-            "avg_daily_profit": float(round(to_pay / days, 2)),
+            "avg_daily_revenue": float(round(realization / days, 2)),
+            "avg_daily_profit": float(round(total_profit / days, 2)),
             "avg_price": avg_price,
+            "avg_profit": avg_profit,
         }
     return bdr_map
 
@@ -395,45 +430,48 @@ def _group_abc(unified_list: list[dict]) -> list[dict]:
             "avg_daily_revenue": 0.0,
             "avg_daily_profit": 0.0,
             "avg_price": 0.0,
+            "avg_profit": 0.0,
             "warehouses": {},
             "wb_stocks": {},
             "_cost_sum": 0.0,
             "_cost_weight": 0,
             "_price_sum": 0.0,
             "_price_weight": 0,
+            "_profit_sum": 0.0,
+            "_profit_weight": 0,
         }
 
     def _acc(g: dict, row: dict) -> None:
         g["items_count"] += 1
-        g["total_own"] += row["total_own"]
-        g["total_wb"] += row["total_wb"]
-        g["in_transit"] += row["in_transit"]
-        g["total"] += row["total"]
+        for k in ("total_own", "total_wb", "in_transit", "total"):
+            g[k] += row[k]
         g["avg_daily_revenue"] += row.get("avg_daily_revenue", 0)
         g["avg_daily_profit"] += row.get("avg_daily_profit", 0)
         t = row["total"]
-        if row.get("avg_cost") and t > 0:
-            g["_cost_sum"] += row["avg_cost"] * t
-            g["_cost_weight"] += t
-        if row.get("avg_price") and t > 0:
-            g["_price_sum"] += row["avg_price"] * t
-            g["_price_weight"] += t
+        for field, s, w in [
+            ("avg_cost", "_cost_sum", "_cost_weight"),
+            ("avg_price", "_price_sum", "_price_weight"),
+            ("avg_profit", "_profit_sum", "_profit_weight"),
+        ]:
+            if row.get(field) and t > 0:
+                g[s] += row[field] * t
+                g[w] += t
         for wh, qty in row.get("warehouses", {}).items():
             g["warehouses"][wh] = g["warehouses"].get(wh, 0) + qty
         for wh, qty in row.get("wb_stocks", {}).items():
             g["wb_stocks"][wh] = g["wb_stocks"].get(wh, 0) + qty
 
     def _fin(g: dict) -> None:
-        if g["_cost_weight"] > 0:
-            g["avg_cost"] = round(g["_cost_sum"] / g["_cost_weight"], 2)
-        if g["_price_weight"] > 0:
-            g["avg_price"] = round(g["_price_sum"] / g["_price_weight"], 2)
+        for field, s, w in [
+            ("avg_cost", "_cost_sum", "_cost_weight"),
+            ("avg_price", "_price_sum", "_price_weight"),
+            ("avg_profit", "_profit_sum", "_profit_weight"),
+        ]:
+            if g[w] > 0:
+                g[field] = round(g[s] / g[w], 2)
+            del g[s], g[w]
         g["avg_daily_revenue"] = round(g["avg_daily_revenue"], 2)
         g["avg_daily_profit"] = round(g["avg_daily_profit"], 2)
-        del g["_cost_sum"]
-        del g["_cost_weight"]
-        del g["_price_sum"]
-        del g["_price_weight"]
 
     # Build brand → subject → articles hierarchy
     brands: dict[str, dict] = {}
@@ -661,7 +699,7 @@ async def get_unified_stock_summary(
             cost_map[nom_id] = float(row.cost_price)
 
     # 7b. Load BDR daily metrics (avg_daily_revenue, avg_daily_profit)
-    bdr_map = await _load_bdr_metrics(db, project_id, nm_id_to_nom_id)
+    bdr_map = await _load_bdr_metrics(db, project_id, nm_id_to_nom_id, cost_map)
 
     # 8. Merge all by nomenclature_id
     unified: dict[int, dict] = {}
@@ -688,6 +726,7 @@ async def get_unified_stock_summary(
                 "avg_daily_revenue": bdr.get("avg_daily_revenue", 0),
                 "avg_daily_profit": bdr.get("avg_daily_profit", 0),
                 "avg_price": bdr.get("avg_price", 0),
+                "avg_profit": bdr.get("avg_profit", 0),
             }
         return unified[nom_id]
 
@@ -787,45 +826,48 @@ async def _group_unified(
             "avg_daily_revenue": 0.0,
             "avg_daily_profit": 0.0,
             "avg_price": 0.0,
+            "avg_profit": 0.0,
             "warehouses": {},
             "wb_stocks": {},
             "_cost_sum": 0.0,
             "_cost_weight": 0,
             "_price_sum": 0.0,
             "_price_weight": 0,
+            "_profit_sum": 0.0,
+            "_profit_weight": 0,
         }
 
     def _accumulate(g: dict, row: dict) -> None:
         g["items_count"] += 1
-        g["total_own"] += row["total_own"]
-        g["total_wb"] += row["total_wb"]
-        g["in_transit"] += row["in_transit"]
-        g["total"] += row["total"]
+        for k in ("total_own", "total_wb", "in_transit", "total"):
+            g[k] += row[k]
         g["avg_daily_revenue"] += row.get("avg_daily_revenue", 0)
         g["avg_daily_profit"] += row.get("avg_daily_profit", 0)
-        item_total = row["total"]
-        if row.get("avg_cost") and item_total > 0:
-            g["_cost_sum"] += row["avg_cost"] * item_total
-            g["_cost_weight"] += item_total
-        if row.get("avg_price") and item_total > 0:
-            g["_price_sum"] += row["avg_price"] * item_total
-            g["_price_weight"] += item_total
+        t = row["total"]
+        for field, s, w in [
+            ("avg_cost", "_cost_sum", "_cost_weight"),
+            ("avg_price", "_price_sum", "_price_weight"),
+            ("avg_profit", "_profit_sum", "_profit_weight"),
+        ]:
+            if row.get(field) and t > 0:
+                g[s] += row[field] * t
+                g[w] += t
         for wh_name, qty in row.get("warehouses", {}).items():
             g["warehouses"][wh_name] = g["warehouses"].get(wh_name, 0) + qty
         for wh_name, qty in row.get("wb_stocks", {}).items():
             g["wb_stocks"][wh_name] = g["wb_stocks"].get(wh_name, 0) + qty
 
     def _finalize(g: dict) -> None:
-        if g["_cost_weight"] > 0:
-            g["avg_cost"] = round(g["_cost_sum"] / g["_cost_weight"], 2)
-        if g["_price_weight"] > 0:
-            g["avg_price"] = round(g["_price_sum"] / g["_price_weight"], 2)
+        for field, s, w in [
+            ("avg_cost", "_cost_sum", "_cost_weight"),
+            ("avg_price", "_price_sum", "_price_weight"),
+            ("avg_profit", "_profit_sum", "_profit_weight"),
+        ]:
+            if g[w] > 0:
+                g[field] = round(g[s] / g[w], 2)
+            del g[s], g[w]
         g["avg_daily_revenue"] = round(g["avg_daily_revenue"], 2)
         g["avg_daily_profit"] = round(g["avg_daily_profit"], 2)
-        del g["_cost_sum"]
-        del g["_cost_weight"]
-        del g["_price_sum"]
-        del g["_price_weight"]
 
     grouped: dict[str, dict] = {}
 
