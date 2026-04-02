@@ -142,7 +142,7 @@ export default function NewReceiptPage() {
             const items = filledRows.map(r => ({
                 barcode: r.barcode.trim(),
                 expected_qty: parseInt(r.expected_qty) || 0,
-                actual_qty: parseInt(r.actual_qty) || 0,
+                actual_qty: parseInt(r.actual_qty) || parseInt(r.expected_qty) || 0,
             }));
             const result = await api.createReceipt(warehouseId, {
                 planned_date: formDate || undefined,

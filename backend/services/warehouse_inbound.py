@@ -194,6 +194,11 @@ async def accept_receipt(db: AsyncSession, project_id: int, receipt_id: int) -> 
     if not receipt.items:
         raise ValueError("Cannot accept receipt with no items")
 
+    # Auto-fill actual_qty from expected_qty if not set
+    for item in receipt.items:
+        if item.actual_qty <= 0 and item.expected_qty > 0:
+            item.actual_qty = item.expected_qty
+
     # Update stock for each item
     for item in receipt.items:
         if item.actual_qty <= 0:
