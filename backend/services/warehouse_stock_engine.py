@@ -404,7 +404,8 @@ async def _load_bdr_metrics(
     from backend.services.bdr_loaders import load_tax_settings
 
     tax_settings = await load_tax_settings(db, project_id, cutoff, utcnow().date())
-    usn_rate = Decimal(str(tax_settings.get("usn_rate", 0)))
+    usn_rate = Decimal(str(tax_settings.get("usn_rate", 0))) / Decimal("100")
+    nds_rate = Decimal(str(tax_settings.get("nds_rate", 0))) / Decimal("100")
 
     # 4. Build metrics per nomenclature_id
     bdr_map: dict[int, dict] = {}
@@ -424,17 +425,22 @@ async def _load_bdr_metrics(
         deductions_total = Decimal(str(row.deductions_total or 0))
         ad_deduction = Decimal(str(row.ad_deduction or 0))
         loan_deduction = Decimal(str(row.loan_deduction or 0))
-        other_deduction = deductions_total - ad_deduction - loan_deduction
         adv_sum = adv_map.get(row.nm_id, Decimal("0"))
         cost_per_unit = Decimal(str(cost_map.get(nom_id, 0)))
         cost_total = cost_per_unit * sale_qty
 
-        # BDR profit formula:
-        # profit = ppvz_net - logistics - storage - penalties - acceptance
-        #          - other_deduction - adv_sum - cost_total - tax
-        pre_tax = ppvz_net - logistics - storage - penalties - acceptance - other_deduction - adv_sum - cost_total
-        tax = sales_amount * usn_rate if usn_rate > 0 else Decimal("0")
-        total_profit = pre_tax - tax
+        # BDR profit formula (matches bdr_enrichment.py):
+        # to_pay = ppvz_net - logistics - storage - penalties - acceptance - deductions_total
+        # profit = to_pay + ad_deduction + loan_deduction - adv_sum - cost_total - tax
+        to_pay = ppvz_net - logistics - storage - penalties - acceptance - deductions_total
+
+        # Tax: NDS + USN (same logic as bdr_enrichment.apply_tax_article)
+        nds_sum = sales_amount * nds_rate / (1 + nds_rate) if nds_rate > 0 else Decimal("0")
+        tax_base = sales_amount - nds_sum
+        usn_sum = max(tax_base * usn_rate, Decimal("0")) if usn_rate > 0 else Decimal("0")
+        tax = nds_sum + usn_sum
+
+        total_profit = to_pay + ad_deduction + loan_deduction - adv_sum - cost_total - tax
 
         avg_price = float(round(realization / sale_qty, 2))
         avg_profit = float(round(total_profit / sale_qty, 2))
