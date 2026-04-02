@@ -766,9 +766,10 @@ async def get_unified_stock_summary(
 
     # 9. Grouping
     if group_by == "abc":
-        # ABC: three-level hierarchy brand → subject → articles, with ABC on each article
+        # ABC: flat list per article with abc_class badge, sorted by revenue desc
         _assign_abc(unified_list, "avg_daily_revenue", "abc_class")
-        return _group_abc(unified_list)
+        unified_list.sort(key=lambda r: r.get("avg_daily_revenue", 0), reverse=True)
+        return unified_list
 
     if group_by == "sku":
         return unified_list

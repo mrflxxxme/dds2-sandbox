@@ -171,7 +171,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
     const [expandedSubGroups, setExpandedSubGroups] = useState<Set<string>>(new Set());
     const [syncing, setSyncing] = useState(false);
     const [mode, setMode] = useState<'qty' | 'cost' | 'revenue' | 'profit'>('qty');
-    const isGrouped = groupBy !== 'sku';
+    const isGrouped = groupBy !== 'sku' && groupBy !== 'abc';
 
     const toggleExpand = (nomId: number) => {
         setExpanded(prev => {
