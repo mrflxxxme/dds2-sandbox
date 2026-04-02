@@ -245,7 +245,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
             const t = row.total || 1;
             let multiplier = 0;
             if (mode === 'cost') multiplier = row.avg_cost || 0;
-            else if (mode === 'revenue') multiplier = (row.avg_daily_revenue || 0) / t;
+            else if (mode === 'revenue') multiplier = row.avg_price || 0;
             else if (mode === 'profit') multiplier = (row.avg_daily_profit || 0) / t;
             ownTotal += row.total_own || 0;
             wbTotal += row.total_wb || 0;
@@ -261,7 +261,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
         return { ownTotal, wbTotal, inTransit, total, ownMoney, wbMoney, transitMoney, totalMoney };
     }, [filtered, mode]);
 
-    // Multiplier based on mode: qty=1, cost=avg_cost, revenue=avg_daily_revenue/total, profit=avg_daily_profit/total
+    // Multiplier: qty=1, cost=avg_cost, revenue=avg_price (revenue if sold all), profit=avg_daily_profit/total
     const fmtVal = useCallback((qty: number, row: UnifiedStockRow) => {
         if (qty <= 0) return '\u2014';
         if (mode === 'qty') return formatNumber(qty);
@@ -270,17 +270,17 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
             if (cost <= 0) return <span style={{ color: 'var(--color-text-dim)' }}>{formatNumber(qty)}</span>;
             return formatNumber(qty * cost);
         }
-        // revenue/profit: proportional to qty/total
-        const total = row.total || 1;
-        const share = qty / total;
         if (mode === 'revenue') {
-            const rev = row.avg_daily_revenue || 0;
-            return rev > 0 ? formatNumber(rev * share) : '\u2014';
+            // Revenue = qty × avg selling price (how much if we sell all stock)
+            const price = row.avg_price || 0;
+            if (price <= 0) return <span style={{ color: 'var(--color-text-dim)' }}>{formatNumber(qty)}</span>;
+            return formatNumber(qty * price);
         }
         if (mode === 'profit') {
             const prof = row.avg_daily_profit || 0;
             if (!prof) return '\u2014';
-            return formatNumber(prof * share);
+            const total = row.total || 1;
+            return formatNumber(prof * qty / total);
         }
         return formatNumber(qty);
     }, [mode]);
@@ -289,11 +289,11 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
         if (qty <= 0) return '\u2014';
         if (mode === 'qty') return formatNumber(qty);
         if (mode === 'cost' && avgCost > 0) return formatNumber(qty * avgCost);
-        if (mode === 'revenue' && row) {
-            const rev = row.avg_daily_revenue || 0;
-            if (rev <= 0) return '\u2014';
-            const total = row.total || 1;
-            return formatNumber(rev * qty / total);
+        if (mode === 'revenue') {
+            // Revenue = qty × avg_price (for groups, avg_price is weighted)
+            const price = row ? row.avg_price || 0 : 0;
+            if (price <= 0) return formatNumber(qty);
+            return formatNumber(qty * price);
         }
         if (mode === 'profit' && row) {
             const prof = row.avg_daily_profit || 0;
@@ -582,7 +582,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                         {totals.transitMoney > 0 && <span style={{ fontSize: 14, fontWeight: 500 }}>В пути: {formatNumber(totals.transitMoney)} {'\u20BD'}</span>}
                         <span style={{ fontSize: 14, fontWeight: 700 }}>Итого: {formatNumber(totals.totalMoney)} {'\u20BD'}</span>
                         <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                            ({mode === 'cost' ? 'себестоимость' : mode === 'revenue' ? 'реализация/день' : 'прибыль/день'})
+                            ({mode === 'cost' ? 'себестоимость' : mode === 'revenue' ? 'выручка при продаже' : 'прибыль/день'})
                         </span>
                     </>
                 )}
