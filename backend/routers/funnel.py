@@ -5,7 +5,6 @@ Thin HTTP layer — all business logic is in services/funnel/ package.
 
 import asyncio
 import logging
-from decimal import Decimal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
@@ -451,12 +450,10 @@ async def set_tax_rate(
     db: AsyncSession = Depends(get_db),
 ):
     """Set project tax rate."""
-    project.tax_rate = Decimal(str(body.tax_rate))
-    await db.commit()
-    from backend.cache import invalidate_cache
+    from backend.services.project_settings_service import set_tax_rate as _set_tax_rate
 
-    await invalidate_cache("reports:wb_bdr")
-    return {"status": "ok", "tax_rate": body.tax_rate}
+    new_rate = await _set_tax_rate(db, project, body.tax_rate)
+    return {"status": "ok", "tax_rate": float(new_rate)}
 
 
 # ─── Day Analysis ────────────────────────────────────────────────────────────
@@ -608,8 +605,15 @@ async def upload_tariffs_xlsx(
     if not file.filename or not file.filename.endswith((".xlsx", ".xls")):
         raise HTTPException(400, "Ожидается файл .xlsx")
     data = await file.read()
-    if len(data) > 10 * 1024 * 1024:
-        raise HTTPException(400, "Файл слишком большой (макс 10 МБ)")
+
+    from backend.config import settings as app_settings
+
+    max_bytes = app_settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    if len(data) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Файл слишком большой. Максимум: {app_settings.MAX_UPLOAD_SIZE_MB} МБ",
+        )
 
     from backend.utils.file_validation import validate_file_content
 

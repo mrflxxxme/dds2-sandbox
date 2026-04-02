@@ -98,6 +98,8 @@ async def sync_all_projects_wb_stocks():
                         sync_log.finished_at = utcnow()
                     await db.commit()
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(
                 "WB stocks sync: project %d failed — %s",

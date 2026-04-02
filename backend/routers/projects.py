@@ -132,7 +132,16 @@ async def list_projects(
             func.count(ProjectMember.id).label("members_count"),
         )
         .join(ProjectMember, ProjectMember.project_id == Project.id)
-        .where(Project.id.in_(select(ProjectMember.project_id).where(ProjectMember.user_id == user.id)))
+        .where(
+            Project.is_deleted == False,  # noqa: E712
+            ProjectMember.is_deleted == False,  # noqa: E712
+            Project.id.in_(
+                select(ProjectMember.project_id).where(
+                    ProjectMember.user_id == user.id,
+                    ProjectMember.is_deleted == False,  # noqa: E712
+                )
+            ),
+        )
         .group_by(Project.id)
         .order_by(Project.created_at.desc())
     )
@@ -150,7 +159,7 @@ async def get_project(
     result = await db.execute(
         select(Project, func.count(ProjectMember.id).label("cnt"))
         .join(ProjectMember, ProjectMember.project_id == Project.id)
-        .where(Project.slug == slug)
+        .where(Project.slug == slug, Project.is_deleted == False, ProjectMember.is_deleted == False)  # noqa: E712
         .group_by(Project.id)
     )
     row = result.first()
@@ -162,6 +171,7 @@ async def get_project(
         select(ProjectMember).where(
             ProjectMember.project_id == project.id,
             ProjectMember.user_id == user.id,
+            ProjectMember.is_deleted == False,  # noqa: E712
         )
     )
     if not mem.scalar_one_or_none():
@@ -176,13 +186,13 @@ async def delete_project(
     db: AsyncSession = Depends(get_db),
 ):
     """Delete project. Only owner can delete."""
-    result = await db.execute(select(Project).where(Project.slug == slug))
+    result = await db.execute(select(Project).where(Project.slug == slug, Project.is_deleted == False))  # noqa: E712
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(404, "Проект не найден")
     if project.owner_id != user.id:
         raise HTTPException(403, "Только владелец может удалить проект")
-    await db.delete(project)
+    project.soft_delete()
     await db.commit()
     return {"deleted": True, "slug": slug}
 
@@ -201,7 +211,7 @@ async def list_members(
     result = await db.execute(
         select(ProjectMember, User)
         .join(User, User.id == ProjectMember.user_id)
-        .where(ProjectMember.project_id == project.id)
+        .where(ProjectMember.project_id == project.id, ProjectMember.is_deleted == False)  # noqa: E712
         .order_by(ProjectMember.joined_at)
     )
     return [
@@ -239,6 +249,7 @@ async def remove_member(
         select(ProjectMember).where(
             ProjectMember.project_id == project.id,
             ProjectMember.user_id == user.id,
+            ProjectMember.is_deleted == False,  # noqa: E712
         )
     )
     actor_member = actor_result.scalar_one_or_none()
@@ -250,6 +261,7 @@ async def remove_member(
         select(ProjectMember).where(
             ProjectMember.project_id == project.id,
             ProjectMember.user_id == user_id,
+            ProjectMember.is_deleted == False,  # noqa: E712
         )
     )
     target_member = target_result.scalar_one_or_none()
@@ -266,7 +278,7 @@ async def remove_member(
     if actor_level <= target_level:
         raise HTTPException(403, "Недостаточно прав для удаления этого участника")
 
-    await db.delete(target_member)
+    target_member.soft_delete()
     await db.commit()
     logger.info(
         "Member removed: project_id=%d, actor_id=%d, target_user_id=%d",
@@ -625,7 +637,7 @@ async def accept_invite(
 
 async def _get_project_with_access(slug: str, user: User, db: AsyncSession) -> Project:
     """Get project and verify user has access."""
-    result = await db.execute(select(Project).where(Project.slug == slug))
+    result = await db.execute(select(Project).where(Project.slug == slug, Project.is_deleted == False))  # noqa: E712
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(404, "Проект не найден")
@@ -634,6 +646,7 @@ async def _get_project_with_access(slug: str, user: User, db: AsyncSession) -> P
         select(ProjectMember).where(
             ProjectMember.project_id == project.id,
             ProjectMember.user_id == user.id,
+            ProjectMember.is_deleted == False,  # noqa: E712
         )
     )
     if not mem.scalar_one_or_none():

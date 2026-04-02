@@ -46,6 +46,11 @@ models/ (ORM, без логики)
 - Функция > 50 строк
 - Вложенность > 4 уровней
 - Мутация без `invalidate_cache()`
+- `float()` в финансовых расчётах — только `Decimal(str(value))`
+- `except Exception` в scheduler без `except asyncio.CancelledError: raise` перед ним
+- Upload endpoint без проверки `MAX_UPLOAD_SIZE_MB`
+- Прямая мутация `project.*` в роутере — выноси в сервис
+- Запрос к дочерней сущности (без project_id в модели) без проверки parent.project_id
 
 ## Порядок создания модуля
 Model → Alembic migration → Schema → Service → Router → Test

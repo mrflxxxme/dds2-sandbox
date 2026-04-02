@@ -1,5 +1,6 @@
 """Health monitoring job — disk space, backup freshness, stuck syncs."""
 
+import asyncio
 import logging
 import os
 from datetime import timedelta
@@ -33,6 +34,8 @@ async def health_monitor():
             alerts.append(f"🔴 *DISK CRITICAL*: {free_pct:.1f}% free ({free_gb:.1f} GB)")
         elif free_pct < 15:
             alerts.append(f"🟡 *Disk low*: {free_pct:.1f}% free ({free_gb:.1f} GB)")
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.warning(f"Health: disk check failed: {e}")
 
@@ -51,6 +54,8 @@ async def health_monitor():
             stuck_count = result.scalar() or 0
             if stuck_count > 0:
                 alerts.append(f"🟡 *Stuck syncs*: {stuck_count} job(s) RUNNING > 30 min")
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.warning(f"Health: stuck sync check failed: {e}")
 
@@ -67,6 +72,8 @@ async def health_monitor():
                 age_hours = (utcnow().timestamp() - latest) / 3600
                 if age_hours > 24:
                     alerts.append(f"🟡 *Backup stale*: latest is {age_hours:.0f}h old " f"({sql_files[0]})")
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.warning(f"Health: backup check failed: {e}")
 

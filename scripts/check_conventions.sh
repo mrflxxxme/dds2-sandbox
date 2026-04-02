@@ -106,7 +106,7 @@ echo "── Check 6: Queries on SoftDelete models without is_deleted filter ─
 # Order, PlannedPayment, PlannedIncome, WbPayout, PaymentFactLink, CostOrder,
 # DutyRule, CustomsTopup, CustomsDT, IntegrationKey, Warehouse, InboundReceipt,
 # OutboundShipment, StockTransfer, AssemblyRequest
-SOFT_MODELS="Transaction\|Account\|CounterpartyCategory\|Override\|IntegrationKey\|PlannedPayment\|PlannedIncome\|WbPayout\|PaymentFactLink\|CostOrder\|DutyRule\|CustomsTopup\|CustomsDT\|Order\|CategoryRef\|CategoryRule\|WbTariff\|Warehouse\|InboundReceipt\|OutboundShipment\|StockTransfer\|AssemblyRequest\|ProductTag\|FactoryOrder"
+SOFT_MODELS="Transaction\|Account\|CounterpartyCategory\|Override\|IntegrationKey\|PlannedPayment\|PlannedIncome\|WbPayout\|PaymentFactLink\|CostOrder\|DutyRule\|CustomsTopup\|CustomsDT\|Order\|CategoryRef\|CategoryRule\|WbTariff\|Warehouse\|InboundReceipt\|OutboundShipment\|StockTransfer\|AssemblyRequest\|ProductTag\|FactoryOrder\|Project\|ProjectMember"
 FOUND=$(grep -rn "select($SOFT_MODELS)" backend/services/ backend/etl/ --include="*.py" \
     | grep -v "is_deleted" \
     | grep -v "__pycache__" \
@@ -200,6 +200,88 @@ if [ -n "$FOUND" ] || [ -n "$FOUND2" ]; then
     echo "$FOUND2"
 else
     ok "All ilike() calls have escape parameter"
+fi
+echo ""
+
+# ─── 12. float() in financial calculations (use Decimal) ────────────
+echo "── Check 12: float() in financial services (use Decimal) ──"
+FOUND=$(grep -rn "float(" backend/services/cost/ backend/services/planning/ --include="*.py" \
+    | grep -v "__pycache__" \
+    | grep -v "# allow-float" \
+    | grep -v "test_\|safe_float\|def .*float" \
+    | grep -v "isinstance.*float" \
+    2>/dev/null || true)
+if [ -n "$FOUND" ]; then
+    warn "float() in financial services — use Decimal(str(value)) for precision"
+    echo "$FOUND"
+else
+    ok "No float() in financial services"
+fi
+echo ""
+
+# ─── 13. asyncio.CancelledError not re-raised in scheduler ─────────
+echo "── Check 13: except Exception without CancelledError in scheduler ──"
+# Find files with 'except Exception' but no 'CancelledError' anywhere in the file
+FOUND=""
+for f in $(find backend/scheduler/ -name "*.py" -not -path "*__pycache__*" 2>/dev/null); do
+    if grep -q "except Exception" "$f" && ! grep -q "CancelledError" "$f"; then
+        FOUND="$FOUND\n$f"
+    fi
+done
+if [ -n "$FOUND" ]; then
+    error "scheduler files with 'except Exception' but no CancelledError handling"
+    echo -e "$FOUND"
+else
+    ok "All scheduler jobs handle CancelledError"
+fi
+echo ""
+
+# ─── 14. Upload endpoints without file size check ──────────────────
+echo "── Check 14: File upload without size check ──"
+# Find router functions that read uploaded files but don't check size
+FOUND=""
+for f in $(find backend/routers/ -name "*.py" -not -path "*__pycache__*" 2>/dev/null); do
+    if grep -q "file\.read()\|await file\.read()" "$f" && ! grep -q "MAX_UPLOAD_SIZE\|max_upload\|max_size\|file_size\|content_length" "$f"; then
+        LINES=$(grep -n "file\.read()\|await file\.read()" "$f" 2>/dev/null || true)
+        if [ -n "$LINES" ]; then
+            FOUND="$FOUND\n$LINES"
+        fi
+    fi
+done
+if [ -n "$FOUND" ]; then
+    error "Upload endpoints without file size check — add MAX_UPLOAD_SIZE_MB validation"
+    echo -e "$FOUND"
+else
+    ok "All upload endpoints check file size"
+fi
+echo ""
+
+# ─── 15. Cache invalidation after project settings mutation ─────────
+echo "── Check 15: Direct project mutation in routers (use service) ──"
+FOUND=$(grep -rn "project\.\(tax_rate\|vat_rate\|currency\|name\) =" backend/routers/ --include="*.py" \
+    | grep -v "__pycache__" \
+    | grep -v "# allow-direct-mutation" \
+    2>/dev/null || true)
+if [ -n "$FOUND" ]; then
+    error "Direct project field mutation in router — use project_settings_service"
+    echo "$FOUND"
+else
+    ok "No direct project mutations in routers"
+fi
+echo ""
+
+# ─── 16. Numeric precision mismatch in models ──────────────────────
+echo "── Check 16: Numeric precision not 18,2 for money columns ──"
+FOUND=$(grep -rn "Numeric(" backend/models/ --include="*.py" \
+    | grep -v "Numeric(18" \
+    | grep -v "__pycache__" \
+    | grep -v "# allow-precision" \
+    2>/dev/null || true)
+if [ -n "$FOUND" ]; then
+    warn "Numeric columns not using standard (18, 2) — verify intentional"
+    echo "$FOUND"
+else
+    ok "All Numeric columns use standard precision"
 fi
 echo ""
 

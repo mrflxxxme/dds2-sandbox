@@ -28,4 +28,5 @@
 ## Undomain files (shared/infra)
 - `services/refs_service.py` — CRUD для справочников (Account, Override, CounterpartyCategory)
 - `services/settings_service.py` — key-value настройки проекта (ProjectSetting)
+- `services/project_settings_service.py` — мутации настроек проекта (tax_rate, vat_rate) с инвалидацией кэша
 - `routers/refs.py`, `routers/auth.py`, `routers/projects.py` — базовые endpoints

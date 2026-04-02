@@ -177,6 +177,8 @@ async def enrich_all_projects_fbo_supplies():
                     result["errors"],
                 )
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(
                 "FBO enrich: project %d failed — %s",

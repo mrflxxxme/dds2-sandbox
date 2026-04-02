@@ -15,6 +15,17 @@ from backend.services.cost.helpers import DEFAULT_VAT_RATE, safe_decimal
 
 async def get_cost_order_items(db: AsyncSession, project_id: int, order_no: str):
     """Get items with nomenclature lookup for article_wb."""
+    # Verify order belongs to project_id (CostOrderItem has no project_id)
+    order_check = await db.execute(
+        select(CostOrder.id).where(
+            CostOrder.order_no == order_no,
+            CostOrder.project_id == project_id,
+            CostOrder.is_deleted == False,
+        )
+    )
+    if not order_check.scalar_one_or_none():
+        return [], {}
+
     result = await db.execute(
         select(CostOrderItem)
         .where(CostOrderItem.order_no == order_no)
