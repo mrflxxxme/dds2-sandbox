@@ -95,9 +95,9 @@ DRAFT → IN_TRANSIT → COMPLETED
 
 ## При Accept Receipt (DRAFT|EXPECTED → ACCEPTED)
 
-1. Для каждого item: `actual_qty = actual_qty or expected_qty`
-2. `_update_stock(delta=+actual_qty, movement_type=INBOUND, reference_type=RECEIPT)`
-3. `receipt.status = ACCEPTED`, `receipt.actual_date = utcnow()`
+1. **Автозаполнение:** если `actual_qty <= 0` и `expected_qty > 0`, ставит `actual_qty = expected_qty`
+2. Для каждого item с `actual_qty > 0`: `_update_stock(delta=+actual_qty, movement_type=INBOUND, reference_type=RECEIPT)`
+3. `receipt.status = ACCEPTED`, `receipt.actual_date = date.today()`
 
 ## При Cancel Accepted Receipt (ACCEPTED → CANCELLED)
 
@@ -166,11 +166,36 @@ DRAFT → IN_TRANSIT → COMPLETED
 - **Ручная статусов:** POST /sync-statuses — только статусы активных
 - Логируется в SyncLog (sync_type="fbo_supplies")
 
+## Единые остатки (Unified Stock)
+
+Объединённый вид: свои склады + WB + в пути (SHIPPED сборки).
+
+### Endpoint: `GET /warehouse/stock/unified?group_by={mode}`
+
+**Функция:** `warehouse_stock_engine.get_unified_stock_summary(db, project_id, group_by)`
+
+**group_by:** sku (default) | brand | subject | imt | tag | abc
+
+**Данные из:**
+1. `WarehouseStock` — свои склады (quantity)
+2. `WbWarehouseStock` — WB склады (quantity_full, включая к/от клиента)
+3. `AssemblyRequest` items status=SHIPPED — в пути к WB
+4. `AssemblyRequest` items PENDING→VEHICLE_ASSIGNED — зарезервировано (на нашем складе)
+5. `WbFinanceRow` — avg_daily_revenue/profit (средняя за 30 дней)
+6. `CostOrderItem` → `load_avg_costs()` — средняя себестоимость
+
+**Группировки:**
+- `brand` — двухуровневая: бренд → категории → артикулы (children)
+- `subject/imt/tag` — одноуровневая: группа → артикулы (children)
+- `abc` — per-SKU с A/B/C бейджем по avg_daily_revenue
+
+**Фронт:** 4 режима отображения — шт / себестоимость / реализация / прибыль.
+
 ## WB остатки (отдельная система)
 
 `WbWarehouseStock` — read-only данные из WB API.
 Не интегрирован с локальным WarehouseStock. Синхронизация: `warehouse_stock_service.sync_warehouse_stocks()`.
-Используется для аналитики (compute_need), НЕ для складских операций.
+Используется для аналитики (compute_need) и единых остатков.
 
 ## Файлы модуля
 
@@ -185,7 +210,7 @@ DRAFT → IN_TRANSIT → COMPLETED
 | services/warehouse_crud.py | CRUD складов (241 строка) |
 | services/warehouse_inbound.py | Приёмка (254 строки) |
 | services/warehouse_outbound.py | Отгрузка + перемещения (365 строк) |
-| services/warehouse_stock_engine.py | Движения + остатки (323 строки) |
+| services/warehouse_stock_engine.py | Движения + остатки + единые остатки (~760 строк) |
 | services/fbo_supply_service.py | FBO синхронизация + авто-доставка (882 строки — нужен рефакторинг) |
 | services/warehouse_stock_service.py | WB остатки sync + compute_need (852 строки — нужен рефакторинг) |
 | routers/warehouse.py | 21 endpoint: склады, stock, receipt, shipment, transfer, FBO |
