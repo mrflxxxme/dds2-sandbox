@@ -1,8 +1,4 @@
 # CI — Run backend tests on push/PR
-#
-# Uses docker-compose to spin up the full stack (db, redis, minio, backend)
-# and then runs pytest inside the backend container, mirroring local dev workflow.
-
 name: Tests
 
 on:
@@ -25,7 +21,6 @@ on:
       - 'requirements-backend.txt'
 
 env:
-  # Minimal secrets for CI — overrides from .env
   POSTGRES_USER: dds
   POSTGRES_PASSWORD: dds_ci_secret
   POSTGRES_DB: dds_db
@@ -43,11 +38,24 @@ env:
   REGISTER_ENABLED: "true"
 
 jobs:
+  conventions:
+    name: Convention Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run convention checks
+        run: bash scripts/check_conventions.sh
+
   test:
     name: Backend Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -88,7 +96,6 @@ jobs:
       - name: Build and start services
         run: |
           docker compose up -d db pgbouncer redis minio backend
-          # Wait for all services to be healthy
           echo "⏳ Waiting for services to be healthy..."
           docker compose exec -T backend python -c "print('Backend is up')" 2>/dev/null || sleep 10
           for i in {1..30}; do
@@ -109,18 +116,11 @@ jobs:
           done
 
       - name: Run Alembic migrations
-        run: |
-          docker compose exec -T backend alembic upgrade head
-
-      - name: Run convention checks
-        run: |
-          docker compose exec -T backend bash scripts/check_conventions.sh
+        run: docker compose exec -T backend alembic upgrade head
 
       - name: Run tests
-        run: |
-          docker compose exec -T backend pytest tests/ -x --tb=short -q
+        run: docker compose exec -T backend pytest tests/ -x --tb=short -q
 
       - name: Cleanup
         if: always()
-        run: |
-          docker compose down -v 2>/dev/null || true
+        run: docker compose down -v 2>/dev/null || true

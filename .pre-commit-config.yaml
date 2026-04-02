@@ -8,7 +8,7 @@ repos:
     rev: v0.4.4
     hooks:
       - id: ruff
-        args: [--fix, --exit-non-zero-on-fix]
+        args: [--fix, --exit-non-zero-on-fix, --select, "E,W,F,S"]
         types_or: [python]
       - id: ruff-format
         types_or: [python]
@@ -32,6 +32,15 @@ repos:
         entry: gitleaks protect --staged --config .gitleaks.toml
         language: system
         pass_filenames: false
+
+  # ─── Bandit — Python security linting ─────────────────────────────
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.8.3
+    hooks:
+      - id: bandit
+        args: ['-c', 'bandit.yaml', '-r']
+        files: ^backend/
+        types: [python]
 
   # ─── DDS convention checks (local) ─────────────────────────────────
   - repo: local

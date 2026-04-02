@@ -1,0 +1,18 @@
+# Bandit security linter configuration
+# https://bandit.readthedocs.io/
+
+# Skip tests directory
+exclude_dirs:
+  - tests
+  - .venv
+  - node_modules
+  - migrations
+
+# Only report medium+ severity
+severity: MEDIUM
+
+# Skip specific checks that cause false positives in our codebase
+skips:
+  - B101  # assert used (OK in tests and FastAPI)
+  - B104  # binding to 0.0.0.0 (OK in Docker)
+  - B108  # hardcoded tmp directory (OK in container)
