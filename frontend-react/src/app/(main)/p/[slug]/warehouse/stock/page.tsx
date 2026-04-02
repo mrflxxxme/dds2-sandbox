@@ -672,6 +672,7 @@ export default function StockSummaryPage() {
     const [unifiedGroupBy, setUnifiedGroupBy] = useState('sku');
 
     const handleGroupChange = useCallback(async (gb: string) => {
+        setUnified([]);          // clear stale data BEFORE switching mode
         setUnifiedGroupBy(gb);
         try {
             const un = await api.getUnifiedStock(gb);
