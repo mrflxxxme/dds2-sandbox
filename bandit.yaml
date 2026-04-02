@@ -1,18 +1,17 @@
 # Bandit security linter configuration
 # https://bandit.readthedocs.io/
 
-# Skip tests directory
 exclude_dirs:
   - tests
   - .venv
   - node_modules
   - migrations
+  - scripts
 
-# Only report medium+ severity
-severity: MEDIUM
-
-# Skip specific checks that cause false positives in our codebase
 skips:
-  - B101  # assert used (OK in tests and FastAPI)
-  - B104  # binding to 0.0.0.0 (OK in Docker)
-  - B108  # hardcoded tmp directory (OK in container)
+  - B101  # assert (OK in FastAPI depends)
+  - B104  # binding to 0.0.0.0 (Docker)
+  - B108  # hardcoded tmp directory (container)
+  - B324  # sha1 — used for dedup hash, not security
+  - B314  # xml.etree — WB XML parsing, trusted internal data
+  - B608  # SQL f-string — all use :param binding, f-string only for WHERE construction

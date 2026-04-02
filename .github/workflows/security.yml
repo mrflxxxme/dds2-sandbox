@@ -68,5 +68,5 @@ jobs:
           scan-type: fs
           scan-ref: .
           severity: HIGH,CRITICAL
-          exit-code: 0
+          exit-code: 0  # advisory-only, не блокирует CI (меняй на 1 для strict mode)
           format: table

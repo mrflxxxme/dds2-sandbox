@@ -20,23 +20,6 @@ on:
       - 'migrations/**'
       - 'requirements-backend.txt'
 
-env:
-  POSTGRES_USER: dds
-  POSTGRES_PASSWORD: dds_ci_secret
-  POSTGRES_DB: dds_db
-  DATABASE_URL: postgresql+asyncpg://dds:dds_ci_secret@db:5432/dds_db
-  DATABASE_URL_SYNC: postgresql://dds:dds_ci_secret@db:5432/dds_db
-  REDIS_URL: redis://:dds_ci_redis@redis:6379/0
-  REDIS_PASSWORD: dds_ci_redis
-  MINIO_ENDPOINT: minio:9000
-  MINIO_ACCESS_KEY: minioadmin
-  MINIO_SECRET_KEY: minioadmin
-  MINIO_BUCKET: dds-files
-  MINIO_SECURE: "false"
-  SECRET_KEY: ci-test-secret-key-minimum-32-chars-long
-  TESTING: "1"
-  REGISTER_ENABLED: "true"
-
 jobs:
   conventions:
     name: Convention Checks
@@ -45,10 +28,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       - name: Run convention checks
         run: bash scripts/check_conventions.sh
 
@@ -56,6 +35,22 @@ jobs:
     name: Backend Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      POSTGRES_USER: dds
+      POSTGRES_PASSWORD: dds_ci_secret
+      POSTGRES_DB: dds_db
+      DATABASE_URL: postgresql+asyncpg://dds:dds_ci_secret@db:5432/dds_db
+      DATABASE_URL_SYNC: postgresql://dds:dds_ci_secret@db:5432/dds_db
+      REDIS_URL: redis://:dds_ci_redis@redis:6379/0
+      REDIS_PASSWORD: dds_ci_redis
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: dds-files
+      MINIO_SECURE: "false"
+      SECRET_KEY: ci-test-secret-key-minimum-32-chars-long
+      TESTING: "1"
+      REGISTER_ENABLED: "true"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -96,7 +91,7 @@ jobs:
       - name: Build and start services
         run: |
           docker compose up -d db pgbouncer redis minio backend
-          echo "⏳ Waiting for services to be healthy..."
+          echo "Waiting for services to be healthy..."
           docker compose exec -T backend python -c "print('Backend is up')" 2>/dev/null || sleep 10
           for i in {1..30}; do
             if docker compose exec -T backend python -c "
@@ -108,7 +103,7 @@ jobs:
                       print('DB connected')
               asyncio.run(check())
             " 2>/dev/null; then
-              echo "✅ Database ready"
+              echo "Database ready"
               break
             fi
             echo "  Waiting for DB... ($i/30)"
