@@ -143,12 +143,15 @@ export default function FunnelPage() {
                 setImtOptions(imtEntries);
             } catch { /* optional filters */ }
             if (f?.min_date && f?.max_date) {
-                // Default to last 30 days for Ads tab, full range for others
+                // Default: last 30 days excluding today (funnel data for today is incomplete)
                 const today = new Date();
+                const yesterday = new Date(today);
+                yesterday.setDate(today.getDate() - 1);
                 const thirtyDaysAgo = new Date(today);
                 thirtyDaysAgo.setDate(today.getDate() - 30);
                 const defaultFrom = thirtyDaysAgo.toISOString().slice(0, 10);
-                const defaultTo = f.max_date;
+                const yesterdayStr = yesterday.toISOString().slice(0, 10);
+                const defaultTo = yesterdayStr < f.max_date ? yesterdayStr : f.max_date;
                 setDateFrom(defaultFrom);
                 setDateTo(defaultTo);
                 await loadData(defaultFrom, defaultTo);
@@ -193,11 +196,20 @@ export default function FunnelPage() {
 
             {/* Tabs */}
             <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-                <button className={`tab-btn ${tab === 'funnel' ? 'active' : ''}`} onClick={() => setTab('funnel')}>Воронка</button>
+                <button className={`tab-btn ${tab === 'funnel' ? 'active' : ''}`} onClick={() => {
+                    setTab('funnel');
+                    // Funnel: exclude today (incomplete data from WB API)
+                    const yesterday = new Date();
+                    yesterday.setDate(yesterday.getDate() - 1);
+                    const yesterdayStr = yesterday.toISOString().slice(0, 10);
+                    if (dateTo > yesterdayStr) {
+                        setDateTo(yesterdayStr);
+                    }
+                }}>Воронка</button>
                 <button className={`tab-btn ${tab === 'day-analysis' ? 'active' : ''}`} onClick={() => setTab('day-analysis')}>🔍 Анализ дня</button>
                 <button className={`tab-btn ${tab === 'ads' ? 'active' : ''}`} onClick={() => {
                     setTab('ads');
-                    // Default to last 30 days for ads tab
+                    // Ads: include today (ad budgets update every 10 min)
                     const today = new Date();
                     const d30 = new Date(today);
                     d30.setDate(today.getDate() - 30);
@@ -205,8 +217,8 @@ export default function FunnelPage() {
                     const toNow = filters.max_date || today.toISOString().slice(0, 10);
                     if (dateFrom < from30) {
                         setDateFrom(from30);
-                        setDateTo(toNow);
                     }
+                    setDateTo(toNow);
                 }}>📢 Реклама</button>
             </div>
 
