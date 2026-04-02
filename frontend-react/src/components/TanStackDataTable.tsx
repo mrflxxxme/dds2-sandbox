@@ -40,6 +40,8 @@ interface TanStackDataTableProps {
     enablePagination?: boolean;
     /** Rows per page (default: 50) */
     pageSize?: number;
+    /** Optional summary row rendered at the top of tbody (sticky) */
+    summaryRow?: React.ReactNode;
 }
 
 /* ------------------------------------------------------------------ */
@@ -76,21 +78,28 @@ function formatCell(value: any, format?: string): React.ReactNode {
 /* ------------------------------------------------------------------ */
 
 function adaptColumns(cols: Column[]): ColumnDef<any, any>[] {
-    return cols.map((col) => ({
-        id: col.key,
-        accessorKey: col.key,
-        header: col.label,
-        size: col.width ? parseInt(col.width) : undefined,
-        enableSorting: col.sortable !== false,
-        cell: (info: any) => {
-            const value = info.getValue();
-            const row = info.row.original;
-            const index = info.row.index;
-            if (col.render) return col.render(value, row, index);
-            return formatCell(value, col.format);
-        },
-        meta: { align: col.align || 'left' },
-    }));
+    return cols.map((col) => {
+        const def: ColumnDef<any, any> = {
+            id: col.key,
+            header: col.label,
+            size: col.width ? parseInt(col.width) : undefined,
+            enableSorting: col.sortable !== false,
+            cell: (info: any) => {
+                const value = info.getValue();
+                const row = info.row.original;
+                const index = info.row.index;
+                if (col.render) return col.render(value, row, index);
+                return formatCell(value, col.format);
+            },
+            meta: { align: col.align || 'left' },
+        };
+        if (col.getValue) {
+            def.accessorFn = col.getValue;
+        } else {
+            (def as any).accessorKey = col.key;
+        }
+        return def;
+    });
 }
 
 /* ------------------------------------------------------------------ */
@@ -114,6 +123,7 @@ export default function TanStackDataTable({
     enableFiltering = false,
     enablePagination = true,
     pageSize = 50,
+    summaryRow,
 }: TanStackDataTableProps) {
     const [sorting, setSorting] = useState<SortingState>([]);
     const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
@@ -223,6 +233,7 @@ export default function TanStackDataTable({
                                 )}
                             </thead>
                             <tbody>
+                                {summaryRow}
                                 {table.getRowModel().rows.map((row) => {
                                     const idx = row.index;
                                     const original = row.original;

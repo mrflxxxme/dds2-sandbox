@@ -17,6 +17,8 @@ export interface Column {
     align?: 'left' | 'right' | 'center';
     format?: 'number' | 'date' | 'badge' | 'money' | 'money-color';
     render?: (value: any, row: any, index: number) => React.ReactNode;
+    /** Custom accessor for sorting when key doesn't match data shape */
+    getValue?: (row: any) => any;
     width?: string;
     sortable?: boolean;
 }

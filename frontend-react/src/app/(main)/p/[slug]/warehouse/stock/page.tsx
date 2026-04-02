@@ -143,22 +143,21 @@ function WbDetailRow({ row, wbWarehouses, mode }: { row: UnifiedStockRow; wbWare
             {wbWarehouses.map(wh => {
                 const v = row.wb_stocks[wh] || 0;
                 if (v <= 0) return null;
-                let display = formatNumber(v);
+                let display = formatNumber(v, 0);
                 let color = '#7c3aed';
                 let bg = 'rgba(175, 82, 222, 0.08)';
                 if (mode === 'cost' && row.avg_cost > 0) {
-                    display = formatNumber(v * row.avg_cost);
+                    display = formatNumber(v * row.avg_cost) + '\u00A0\u20BD';
                 } else if (mode === 'revenue' && row.avg_price > 0) {
-                    display = formatNumber(v * row.avg_price);
+                    display = formatNumber(v * row.avg_price) + '\u00A0\u20BD';
                 } else if (mode === 'profit' && row.avg_profit) {
                     const val = v * row.avg_profit;
-                    display = formatNumber(val);
+                    display = formatNumber(val) + '\u00A0\u20BD';
                     color = val >= 0 ? 'var(--color-success)' : 'var(--color-danger)';
                     bg = val >= 0 ? 'rgba(52, 199, 89, 0.08)' : 'rgba(255, 59, 48, 0.08)';
                 }
-                if (mode !== 'qty') display += ' \u20BD';
                 return (
-                    <span key={wh} style={{ fontSize: 12, padding: '2px 8px', borderRadius: 6, background: bg, color }}>
+                    <span key={wh} style={{ fontSize: 12, padding: '2px 8px', borderRadius: 6, background: bg, color, whiteSpace: 'nowrap' }}>
                         {wh}: {display}
                     </span>
                 );
@@ -270,44 +269,54 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
     }, [filtered, mode]);
 
     // Multiplier: qty=1, cost=avg_cost, revenue=qty*avg_price, profit=qty*avg_profit
+    /** Get numeric sort value for a cell (used by TanStack sorting) */
+    const getSortVal = useCallback((qty: number, row: UnifiedStockRow): number => {
+        if (qty <= 0) return 0;
+        if (mode === 'qty') return qty;
+        if (mode === 'cost') return qty * (row.avg_cost || 0);
+        if (mode === 'revenue') return qty * (row.avg_price || 0);
+        if (mode === 'profit') return qty * (row.avg_profit || 0);
+        return qty;
+    }, [mode]);
+
     const fmtVal = useCallback((qty: number, row: UnifiedStockRow) => {
         if (qty <= 0) return '\u2014';
-        if (mode === 'qty') return formatNumber(qty);
+        if (mode === 'qty') return formatNumber(qty, 0);
         if (mode === 'cost') {
             const cost = row.avg_cost || 0;
-            if (cost <= 0) return <span style={{ color: 'var(--color-text-dim)' }}>{formatNumber(qty)}</span>;
-            return formatNumber(qty * cost);
+            if (cost <= 0) return <span style={{ color: 'var(--color-text-dim)' }}>{formatNumber(qty, 0)}</span>;
+            return <span style={{ whiteSpace: 'nowrap' }}>{formatNumber(qty * cost)}{'\u00A0\u20BD'}</span>;
         }
         if (mode === 'revenue') {
             const price = row.avg_price || 0;
-            if (price <= 0) return <span style={{ color: 'var(--color-text-dim)' }}>{formatNumber(qty)}</span>;
-            return formatNumber(qty * price);
+            if (price <= 0) return <span style={{ color: 'var(--color-text-dim)' }}>{formatNumber(qty, 0)}</span>;
+            return <span style={{ whiteSpace: 'nowrap' }}>{formatNumber(qty * price)}{'\u00A0\u20BD'}</span>;
         }
         if (mode === 'profit') {
             const prof = row.avg_profit || 0;
-            if (!prof) return <span style={{ color: 'var(--color-text-dim)' }}>{formatNumber(qty)}</span>;
+            if (!prof) return <span style={{ color: 'var(--color-text-dim)' }}>{formatNumber(qty, 0)}</span>;
             const val = qty * prof;
             const color = val >= 0 ? 'var(--color-success)' : 'var(--color-danger)';
-            return <span style={{ color }}>{formatNumber(val)}</span>;
+            return <span style={{ color, whiteSpace: 'nowrap' }}>{formatNumber(val)}{'\u00A0\u20BD'}</span>;
         }
-        return formatNumber(qty);
+        return formatNumber(qty, 0);
     }, [mode]);
 
     const fmtGroupVal = useCallback((qty: number, avgCost: number, row?: UnifiedStockRow): string => {
         if (qty <= 0) return '\u2014';
-        if (mode === 'qty') return formatNumber(qty);
-        if (mode === 'cost' && avgCost > 0) return formatNumber(qty * avgCost);
+        if (mode === 'qty') return formatNumber(qty, 0);
+        if (mode === 'cost' && avgCost > 0) return formatNumber(qty * avgCost) + '\u00A0\u20BD';
         if (mode === 'revenue') {
             const price = row ? row.avg_price || 0 : 0;
-            if (price <= 0) return formatNumber(qty);
-            return formatNumber(qty * price);
+            if (price <= 0) return formatNumber(qty, 0);
+            return formatNumber(qty * price) + '\u00A0\u20BD';
         }
         if (mode === 'profit') {
             const prof = row ? row.avg_profit || 0 : 0;
-            if (!prof) return formatNumber(qty);
-            return formatNumber(qty * prof);
+            if (!prof) return formatNumber(qty, 0);
+            return formatNumber(qty * prof) + '\u00A0\u20BD';
         }
-        return formatNumber(qty);
+        return formatNumber(qty, 0);
     }, [mode]);
 
     const cols: Column[] = useMemo(() => {
@@ -361,17 +370,15 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
             label: 'Итого',
             align: 'right',
             sortable: true,
+            getValue: (row: UnifiedStockRow) => getSortVal(row.total, row),
             render: (_: unknown, row: UnifiedStockRow) => {
                 const v = row.total;
                 if (v <= 0) return <strong>{'\u2014'}</strong>;
                 const val = fmtVal(v, row);
-                const suffix = mode !== 'qty' ? ' \u20BD' : '';
                 if (typeof val === 'string') {
-                    return <strong style={{ color: 'var(--color-accent)' }}>{val}{val !== '\u2014' ? suffix : ''}</strong>;
+                    return <strong style={{ color: 'var(--color-accent)' }}>{val}</strong>;
                 }
-                // JSX (profit with color) — wrap with suffix
-                const profitColor = val.props?.style?.color || 'var(--color-accent)';
-                return <strong style={{ color: profitColor }}>{val.props.children}{suffix}</strong>;
+                return <strong>{val}</strong>;
             },
         });
 
@@ -381,11 +388,8 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                 key: `own_${wh}`,
                 label: `${wh}`,
                 align: 'right',
-                render: (_: unknown, row: UnifiedStockRow) => {
-                    const node = fmtVal(row.warehouses[wh] || 0, row);
-                    if (mode !== 'qty' && typeof node === 'string' && node !== '\u2014') return node + ' \u20BD';
-                    return node;
-                },
+                getValue: (row: UnifiedStockRow) => getSortVal(row.warehouses[wh] || 0, row),
+                render: (_: unknown, row: UnifiedStockRow) => fmtVal(row.warehouses[wh] || 0, row),
             });
         }
 
@@ -394,29 +398,18 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
             key: 'total_wb',
             label: 'WB склады',
             align: 'right',
+            getValue: (row: UnifiedStockRow) => getSortVal(row.total_wb || 0, row),
             render: (_: unknown, row: UnifiedStockRow) => {
                 const v = row.total_wb || 0;
                 if (v <= 0) return <span style={{ color: 'var(--color-text-muted)' }}>{'\u2014'}</span>;
                 const isOpen = expanded.has(row.nomenclature_id);
-                const displayNode = fmtVal(v, row);
-                let display: string;
-                let displayColor = 'var(--color-accent)';
-                if (typeof displayNode === 'string') {
-                    display = displayNode;
-                } else if (displayNode && typeof displayNode === 'object' && 'props' in displayNode) {
-                    display = String(displayNode.props.children ?? formatNumber(v));
-                    if (displayNode.props.style?.color) displayColor = displayNode.props.style.color;
-                } else {
-                    display = formatNumber(v);
-                }
-                if (mode !== 'qty' && display !== '\u2014') display += ' \u20BD';
                 return (
                     <div>
                         <span
                             onClick={(e) => { e.stopPropagation(); toggleExpand(row.nomenclature_id); }}
-                            style={{ color: displayColor, fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
+                            style={{ color: 'var(--color-accent)', fontWeight: 500, cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
                         >
-                            {display} {isOpen ? '\u25BE' : '\u25B8'}
+                            {fmtVal(v, row)} {isOpen ? '\u25BE' : '\u25B8'}
                         </span>
                         {isOpen && <WbDetailRow row={row} wbWarehouses={wbWarehouses} mode={mode} />}
                     </div>
@@ -428,15 +421,12 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
             key: 'in_transit',
             label: 'В пути',
             align: 'right',
-            render: (_: unknown, row: UnifiedStockRow) => {
-                const node = fmtVal(row.in_transit || 0, row);
-                if (mode !== 'qty' && typeof node === 'string' && node !== '\u2014') return node + ' \u20BD';
-                return node;
-            },
+            getValue: (row: UnifiedStockRow) => getSortVal(row.in_transit || 0, row),
+            render: (_: unknown, row: UnifiedStockRow) => fmtVal(row.in_transit || 0, row),
         });
 
         return c;
-    }, [ownWarehouses, wbWarehouses, expanded, mode, fmtVal, isGrouped, groupBy]);
+    }, [ownWarehouses, wbWarehouses, expanded, mode, fmtVal, getSortVal, isGrouped, groupBy]);
 
     // Render a single article row for the grouped table
     const renderArticleRow = (row: UnifiedStockRow, indent: number) => {
@@ -461,21 +451,20 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                         )}
                     </td>
                 )}
-                <td style={{ textAlign: 'right' }}>
+                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                     <strong style={{ color: 'var(--color-accent)' }}>
                         {fmtGroupVal(row.total, cost, row)}
                     </strong>
                 </td>
-                <td style={{ textAlign: 'right' }}>{fmtGroupVal(row.total_own || 0, cost, row)}</td>
-                <td style={{ textAlign: 'right' }}>{fmtGroupVal(row.total_wb || 0, cost, row)}</td>
-                <td style={{ textAlign: 'right' }}>{fmtGroupVal(row.in_transit || 0, cost, row)}</td>
+                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(row.total_own || 0, cost, row)}</td>
+                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(row.total_wb || 0, cost, row)}</td>
+                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(row.in_transit || 0, cost, row)}</td>
             </tr>
         );
     };
 
     // Render the grouped expandable table
     const renderGroupedTable = () => {
-        const modeSuffix = mode !== 'qty' ? ' \u20BD' : '';
         return (
             <div className="glass-card" style={{ overflow: 'auto' }}>
                 <table className="data-table" style={{ width: '100%' }}>
@@ -491,12 +480,29 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                         </tr>
                     </thead>
                     <tbody>
+                        {/* Итого — первая строка */}
+                        <tr style={{ background: 'var(--color-bg)', fontWeight: 700, borderBottom: '2px solid var(--color-border)' }}>
+                            <td>Итого</td>
+                            <td style={{ textAlign: 'right' }}>{formatNumber(filtered.reduce((s, g) => s + (g.items_count || 0), 0), 0)}</td>
+                            {groupBy === 'abc' && <td />}
+                            <td style={{ textAlign: 'right', color: 'var(--color-accent)', whiteSpace: 'nowrap' }}>
+                                {mode === 'qty' ? formatNumber(totals.total, 0) : formatNumber(totals.totalMoney) + '\u00A0\u20BD'}
+                            </td>
+                            <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                {mode === 'qty' ? formatNumber(totals.ownTotal, 0) : formatNumber(totals.ownMoney) + '\u00A0\u20BD'}
+                            </td>
+                            <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                {mode === 'qty' ? formatNumber(totals.wbTotal, 0) : formatNumber(totals.wbMoney) + '\u00A0\u20BD'}
+                            </td>
+                            <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                {mode === 'qty' ? formatNumber(totals.inTransit, 0) : formatNumber(totals.transitMoney) + '\u00A0\u20BD'}
+                            </td>
+                        </tr>
                         {filtered.map(group => {
                             const groupKey = group.group_name || '';
                             const isExp = expandedGroups.has(groupKey);
                             const children = group.children || [];
                             const cost = group.avg_cost || 0;
-                            const profitColor = (group.avg_daily_profit || 0) > 0 ? 'var(--color-success)' : 'var(--color-danger)';
 
                             return (
                                 <React.Fragment key={groupKey}>
@@ -525,14 +531,14 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                                                 )}
                                             </td>
                                         )}
-                                        <td style={{ textAlign: 'right' }}>
+                                        <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                                             <strong style={{ color: 'var(--color-accent)' }}>
-                                                {fmtGroupVal(group.total, cost, group as UnifiedStockRow)}{mode !== 'qty' && group.total > 0 ? modeSuffix : ''}
+                                                {fmtGroupVal(group.total, cost, group as UnifiedStockRow)}
                                             </strong>
                                         </td>
-                                        <td style={{ textAlign: 'right' }}>{fmtGroupVal(group.total_own || 0, cost, group as UnifiedStockRow)}</td>
-                                        <td style={{ textAlign: 'right' }}>{fmtGroupVal(group.total_wb || 0, cost, group as UnifiedStockRow)}</td>
-                                        <td style={{ textAlign: 'right' }}>{fmtGroupVal(group.in_transit || 0, cost, group as UnifiedStockRow)}</td>
+                                        <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(group.total_own || 0, cost, group as UnifiedStockRow)}</td>
+                                        <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(group.total_wb || 0, cost, group as UnifiedStockRow)}</td>
+                                        <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(group.in_transit || 0, cost, group as UnifiedStockRow)}</td>
                                     </tr>
 
                                     {/* Expanded children */}
@@ -541,7 +547,6 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                                         const childKey = `${groupKey}:${child.group_name || child.barcode}`;
                                         const subExp = expandedSubGroups.has(childKey);
                                         const childCost = child.avg_cost || 0;
-                                        const childProfitColor = (child.avg_daily_profit || 0) > 0 ? 'var(--color-success)' : 'var(--color-danger)';
 
                                         if (hasSubChildren) {
                                             // Sub-group row (e.g., subject within brand)
@@ -562,14 +567,14 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                                                         </td>
                                                         <td style={{ textAlign: 'right' }}>{child.items_count != null ? formatNumber(child.items_count, 0) : '\u2014'}</td>
                                                         {groupBy === 'abc' && <td>{'\u2014'}</td>}
-                                                        <td style={{ textAlign: 'right' }}>
+                                                        <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                                                             <strong style={{ color: 'var(--color-accent)' }}>
                                                                 {fmtGroupVal(child.total, childCost, child as UnifiedStockRow)}
                                                             </strong>
                                                         </td>
-                                                        <td style={{ textAlign: 'right' }}>{fmtGroupVal(child.total_own || 0, childCost, child as UnifiedStockRow)}</td>
-                                                        <td style={{ textAlign: 'right' }}>{fmtGroupVal(child.total_wb || 0, childCost, child as UnifiedStockRow)}</td>
-                                                        <td style={{ textAlign: 'right' }}>{fmtGroupVal(child.in_transit || 0, childCost, child as UnifiedStockRow)}</td>
+                                                        <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(child.total_own || 0, childCost, child as UnifiedStockRow)}</td>
+                                                        <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(child.total_wb || 0, childCost, child as UnifiedStockRow)}</td>
+                                                        <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(child.in_transit || 0, childCost, child as UnifiedStockRow)}</td>
                                                     </tr>
 
                                                     {/* Level 2 articles */}
@@ -585,25 +590,6 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                             );
                         })}
                     </tbody>
-                    <tfoot>
-                        <tr style={{ background: 'var(--color-bg)', fontWeight: 700, borderTop: '2px solid var(--color-border)' }}>
-                            <td>Итого</td>
-                            <td style={{ textAlign: 'right' }}>{formatNumber(filtered.reduce((s, g) => s + (g.items_count || 0), 0), 0)}</td>
-                            {groupBy === 'abc' && <td />}
-                            <td style={{ textAlign: 'right', color: 'var(--color-accent)' }}>
-                                {mode === 'qty' ? formatNumber(totals.total) : formatNumber(totals.totalMoney)} {mode !== 'qty' ? '\u20BD' : ''}
-                            </td>
-                            <td style={{ textAlign: 'right' }}>
-                                {mode === 'qty' ? formatNumber(totals.ownTotal) : formatNumber(totals.ownMoney)}
-                            </td>
-                            <td style={{ textAlign: 'right' }}>
-                                {mode === 'qty' ? formatNumber(totals.wbTotal) : formatNumber(totals.wbMoney)}
-                            </td>
-                            <td style={{ textAlign: 'right' }}>
-                                {mode === 'qty' ? formatNumber(totals.inTransit) : formatNumber(totals.transitMoney)}
-                            </td>
-                        </tr>
-                    </tfoot>
                 </table>
                 <div style={{ padding: '12px 16px', fontSize: 13, color: 'var(--color-text-muted)' }}>
                     {filtered.length} групп
@@ -701,6 +687,35 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                         <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
                             {filtered.length} позиций
                         </span>
+                    }
+                    summaryRow={
+                        <tr style={{ background: 'var(--color-bg)', fontWeight: 700, borderBottom: '2px solid var(--color-border)' }}>
+                            <td>Итого</td>
+                            <td />
+                            {groupBy === 'abc' && <td />}
+                            <td style={{ textAlign: 'right', color: 'var(--color-accent)', whiteSpace: 'nowrap' }}>
+                                {mode === 'qty' ? formatNumber(totals.total, 0) : formatNumber(totals.totalMoney) + '\u00A0\u20BD'}
+                            </td>
+                            {ownWarehouses.map(wh => {
+                                const qty = filtered.reduce((s, r) => s + (r.warehouses[wh] || 0), 0);
+                                const money = filtered.reduce((s, r) => {
+                                    const q = r.warehouses[wh] || 0;
+                                    const m = mode === 'cost' ? r.avg_cost : mode === 'revenue' ? r.avg_price : mode === 'profit' ? r.avg_profit : 0;
+                                    return s + q * (m || 0);
+                                }, 0);
+                                return (
+                                    <td key={wh} style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                        {mode === 'qty' ? formatNumber(qty, 0) : formatNumber(money) + '\u00A0\u20BD'}
+                                    </td>
+                                );
+                            })}
+                            <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                {mode === 'qty' ? formatNumber(totals.wbTotal, 0) : formatNumber(totals.wbMoney) + '\u00A0\u20BD'}
+                            </td>
+                            <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                {mode === 'qty' ? formatNumber(totals.inTransit, 0) : formatNumber(totals.transitMoney) + '\u00A0\u20BD'}
+                            </td>
+                        </tr>
                     }
                 />
             )}
