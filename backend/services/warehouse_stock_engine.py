@@ -322,13 +322,13 @@ async def _load_bdr_metrics(
     From WB finance (last 30 days, doc_type=Продажа):
     - avg_daily_revenue = total_retail_amount / days
     - avg_daily_profit = total_ppvz_for_pay / days
-    - avg_price = total_retail_amount / total_quantity (avg selling price per unit)
+    - avg_price = total_realization / total_quantity (avg selling price per unit, реализация)
     """
     cutoff = utcnow().date() - timedelta(days=30)
     finance_result = await db.execute(
         select(
             WbFinanceRow.nm_id,
-            func.sum(WbFinanceRow.retail_amount).label("total_revenue"),
+            func.sum(WbFinanceRow.retail_price_withdisc_rub).label("total_revenue"),
             func.sum(WbFinanceRow.ppvz_for_pay).label("total_to_pay"),
             func.sum(WbFinanceRow.quantity).label("total_qty"),
             func.count(func.distinct(WbFinanceRow.rr_dt)).label("days_count"),
