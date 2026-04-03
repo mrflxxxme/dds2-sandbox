@@ -88,7 +88,33 @@ jobs:
           REGISTER_ENABLED=true
           EOF
 
-      - name: Build and start services
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ hashFiles('requirements-backend.txt', 'Dockerfile.backend') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Build backend image with cache
+        run: |
+          docker buildx build \
+            --file Dockerfile.backend \
+            --tag dds_app-backend:latest \
+            --cache-from type=local,src=/tmp/.buildx-cache \
+            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            --load \
+            .
+
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      - name: Start services
         run: |
           docker compose up -d db pgbouncer redis minio backend
           echo "Waiting for services to be healthy..."

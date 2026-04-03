@@ -125,6 +125,7 @@ src/types/api.ts — TypeScript интерфейсы
 
 ### CI (автоматически при push/PR)
 - **Conventions + Tests** — параллельные jobs
+- **BuildKit cache** — Docker layer cache через `actions/cache` (ключ: `requirements-backend.txt` + `Dockerfile.backend`)
 - **pip-audit** — CVE в Python-зависимостях
 - **Trivy** — filesystem scan (HIGH/CRITICAL)
 - **CodeRabbit** — AI code review на каждый PR (конфиг `.coderabbit.yaml` с iron rules DDS)
