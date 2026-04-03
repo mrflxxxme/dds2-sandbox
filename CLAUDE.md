@@ -127,7 +127,7 @@ src/types/api.ts — TypeScript интерфейсы
 - **Conventions + Tests** — параллельные jobs
 - **pip-audit** — CVE в Python-зависимостях
 - **Trivy** — filesystem scan (HIGH/CRITICAL)
-- **CodeRabbit** — AI code review на каждый PR
+- **CodeRabbit** — AI code review на каждый PR (конфиг `.coderabbit.yaml` с iron rules DDS)
 
 ### Dependabot (еженедельно)
 - Авто-PR для pip, npm, GitHub Actions зависимостей
