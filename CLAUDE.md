@@ -12,6 +12,7 @@ bash scripts/check_conventions.sh                 # Проверка конве�
 make test-fast                                    # Параллельные тесты (xdist)
 make test-changed                                 # Только изменённые тесты (testmon)
 make test-unit                                    # Только unit-тесты
+cd frontend-react && npx vitest run              # Frontend тесты (39)
 ```
 
 ## Железные правила (нарушение = баг)
