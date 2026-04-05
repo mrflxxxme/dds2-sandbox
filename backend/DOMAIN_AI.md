@@ -32,9 +32,9 @@ synthesizer.py — объединение ответов (если >1 агент
 - `services/ai/agents/logistics.py` — логист (отгрузки, стоимость, история)
 - `services/ai/agents/logistician.py` — legacy (deprecated, используй supply_manager/logistics)
 - `services/ai/synthesizer.py` — объединение ответов нескольких агентов
-- `services/ai/memory.py` — Obsidian-style авто-инсайты в BrandNote
+- `services/ai/memory.py` — Obsidian-style авто-инсайты в BrandNote (путь: `AI_MEMORY_DIR` env, fallback на tmpdir)
 - `services/ai/executor.py` — исполнитель tools (вызов сервисов, JSON сериализация)
-- `services/ai/llm_client.py` — клиент Anthropic API (Sonnet + Haiku)
+- `services/ai/llm_client.py` — клиент Anthropic API (Sonnet + Haiku), retry с exponential backoff для 429/5xx
 - `services/ai/tools/` — определения инструментов (JSON schema для Claude)
 - `services/ai/tools/finance.py` — 6 tools (BDR, OPIU, DDS, margins, cost)
 - `services/ai/tools/marketing.py` — 5 tools (funnel, top products, anomalies, periods)
@@ -96,6 +96,12 @@ synthesizer.py — объединение ответов (если >1 агент
 6. **Memory:** инсайты автоматически сохраняются в BrandNote после ответа
 7. **Models:** Haiku для классификации интента, Sonnet для ответов агентов
 8. **Digest:** утренний дайджест в 7:00 MSK (Haiku) через scheduler
+
+## Error Handling
+- `llm_client.py`: retry 3 раза с exponential backoff (2s→4s→8s) для 429, 5xx, connection errors
+- `base.py`: chat() обёрнут в try/except — агент возвращает "Ошибка при обращении к AI" вместо crash
+- `orchestrator.py`: single-agent и multi-agent пути оба защищены от необработанных исключений
+- `executor.py`: все tools обёрнуты в try/except, возвращают `{"error": "..."}` при ошибке
 
 ## Security
 - Все tools проверяют project_id ownership

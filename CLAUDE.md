@@ -59,6 +59,24 @@ Model → Alembic migration → Schema → Service → Router → Test
 #### Баги и мелкие изменения (быстрый цикл)
 Без ТЗ — сразу анализ → фикс → тесты → коммит
 
+### Agent Teams (координация параллельных агентов)
+Включено: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` в `.claude/settings.json`
+
+#### File Ownership Rules (0 конфликтов)
+| Зона | Файлы | Владелец |
+|------|-------|----------|
+| Backend | `backend/`, `migrations/`, `docker/`, `tests/` | Backend teammate |
+| Frontend | `src/`, `frontend-react/`, `next.config.*` | Frontend teammate |
+| Shared (sequential only) | `models/`, `schemas/`, `CLAUDE.md`, `.claude/` | Lead agent |
+| Infra | `docker-compose.yml`, `.github/`, `scripts/` | Lead agent |
+
+#### Правила координации
+- **Alembic миграции** — ТОЛЬКО lead agent, последовательно
+- **Один файл = один агент** — никогда двое в одном файле
+- **Backend ‖ Frontend** — всегда параллельно (0 пересечений)
+- **Model → Migration → Schema** — последовательно (lead), потом параллелятся
+- **Рефакторинг** — один teammate пишет тесты, другой рефакторит (разные файлы)
+
 ### Технические детали
 Подробности в `.claude/rules/` и DOMAIN файлах. Ключевое:
 - **PgBouncer**: `prepared_statement_cache_size=0`, `DATABASE_URL_SYNC` для Alembic/ETL
@@ -136,6 +154,9 @@ src/types/api.ts — TypeScript интерфейсы
 ### MCP-серверы (Claude Code)
 - **Context7** — актуальная документация библиотек в промпте
 - **Docker** — управление контейнерами без docker compose exec
+- **Playwright** — E2E-тестирование и browser automation (headless)
+- **PostgreSQL** — read-only доступ к БД через `readonly_agent` (порт 5434)
+- **GitHub** — PR, issues, code search без gh CLI
 
 ## Среды
 | Среда | Ветка | URL |

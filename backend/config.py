@@ -76,11 +76,10 @@ class Settings(BaseSettings):
     @classmethod
     def validate_minio_credentials(cls, v: str, info) -> str:
         if not v or v in ("", "minioadmin"):
-            warnings.warn(
-                f"\n⚠️  {info.field_name} не задан или использует дефолтное значение!\n"
-                f"   Укажите безопасное значение в .env для production.",
-                UserWarning,
-                stacklevel=2,
+            raise ValueError(
+                f"{info.field_name} не задан или использует дефолтное значение 'minioadmin'! "
+                f"Укажите безопасное значение в .env. "
+                f'Для генерации: python3 -c "import secrets; print(secrets.token_urlsafe(24))"'
             )
         return v
 

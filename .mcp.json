@@ -7,6 +7,18 @@
     "docker": {
       "command": "npx",
       "args": ["-y", "@ckreiling/mcp-server-docker"]
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest", "--headless"]
+    },
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://readonly_agent:readonly_dds_2026@localhost:5434/dds_db"]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"]
     }
   }
 }

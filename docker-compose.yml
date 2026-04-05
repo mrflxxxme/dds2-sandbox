@@ -7,11 +7,12 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dds_secret}
       POSTGRES_DB: ${POSTGRES_DB:-dds_db}
     command: postgres -c 'config_file=/etc/postgresql/postgresql.conf'
-    # ports: removed — DB only accessible within Docker network
-    # - "5432:5432"
+    ports:
+      - "127.0.0.1:5434:5432"  # localhost only, for MCP read-only access
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./postgres/init-readonly-user.sql:/docker-entrypoint-initdb.d/init-readonly-user.sql:ro
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dds} -d ${POSTGRES_DB:-dds_db}" ]
       interval: 5s
@@ -77,8 +78,8 @@ services:
     image: alpine/minio:RELEASE.2025-10-15T17-29-55Z
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
     # ports: removed — MinIO only accessible within Docker network
     # - "9000:9000"
     # - "9001:9001"
@@ -89,7 +90,7 @@ services:
         limits:
           memory: 256M
     healthcheck:
-      test: [ "CMD", "mc", "ready", "local" ]
+      test: [ "CMD-SHELL", "wget -q --spider http://localhost:9000/minio/health/live || exit 1" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -114,8 +115,8 @@ services:
       DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/dds_db
       REDIS_URL: ${REDIS_URL:-redis://:dds_redis_secret@redis:6379/0}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_BUCKET: ${MINIO_BUCKET:-dds-files}
       MINIO_SECURE: ${MINIO_SECURE:-false}
       DDS_ROLE: api
@@ -149,8 +150,8 @@ services:
       DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/dds_db
       REDIS_URL: ${REDIS_URL:-redis://:dds_redis_secret@redis:6379/0}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_BUCKET: ${MINIO_BUCKET:-dds-files}
       MINIO_SECURE: ${MINIO_SECURE:-false}
       DDS_ROLE: worker
