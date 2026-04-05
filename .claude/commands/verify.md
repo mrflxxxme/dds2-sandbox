@@ -4,69 +4,52 @@ description: "Полная верификация DDS2 — тесты, конв�
 
 # Verification — DDS2
 
-Комплексная проверка состояния проекта перед коммитом/PR.
+Комплексная проверка перед коммитом/PR. Запускает проверки ПАРАЛЛЕЛЬНО для скорости.
 
 ## Инструкции
 
-Выполнить проверки в этом порядке:
+### Шаг 1: Параллельные проверки
 
-### 1. Проверка конвенций
+Запустить **параллельно** 3 субагента (Agent tool, `run_in_background: true`):
+
+**Субагент 1 — Backend тесты:**
+```bash
+docker compose exec backend pytest tests/ -x --tb=short -q
+```
+Вернуть: пройдено / провалено / ошибки.
+
+**Субагент 2 — Конвенции + безопасность:**
 ```bash
 bash scripts/check_conventions.sh
 ```
-Если не проходит — СТОП, исправить.
-
-### 2. Backend тесты
+Плюс проверить:
 ```bash
-docker compose exec backend pytest tests/ -x --tb=short
-```
-Отчёт: пройдено / провалено / coverage.
-
-### 3. Frontend сборка (если менялся frontend)
-```bash
-cd frontend-react && npm run build
-```
-
-### 4. Аудит безопасности
-```bash
-# f-string в SQL
 grep -rn 'text(f"' --include="*.py" backend/ || echo "OK"
 grep -rn "text(f'" --include="*.py" backend/ || echo "OK"
-
-# datetime.utcnow()
 grep -rn "datetime.utcnow\|datetime.now" --include="*.py" backend/ || echo "OK"
-
-# db.delete()
 grep -rn "db.delete\|session.delete" --include="*.py" backend/ || echo "OK"
-
-# Float для денег
 grep -rn "Float" --include="*.py" backend/models/ || echo "OK"
 ```
+Вернуть: OK или список проблем.
 
-### 5. Автообновление документации
-Если изменены backend файлы (models/, services/, routers/, migrations/) — автоматически обнови документацию:
-- Проверь, нужно ли обновить DOMAIN_*.md (новые модели, сервисы, эндпоинты)
-- Проверь, нужно ли обновить backend/MAP.md (новые файлы/паттерны)
-- Проверь, нужно ли добавить в docs/KNOWN_PITFALLS.md (если при разработке наткнулся на грабли)
-- Проверь, нужно ли обновить CLAUDE.md (новый домен, новый антипаттерн)
+**Субагент 3 — Frontend сборка (если менялись frontend файлы):**
+Проверить `git diff --name-only HEAD | grep -q "frontend-react/"`.
+Если да: `cd frontend-react && npm run build`
+Если нет: SKIP.
+Вернуть: OK / FAIL / SKIP.
 
-### 6. Git Status
-```bash
-git diff --stat
-git status
-```
+### Шаг 2: Собрать результаты
 
-## Формат отчёта
+Дождаться всех 3 субагентов и сгенерировать отчёт:
 
 ```
 ВЕРИФИКАЦИЯ DDS2
 ================
 
-Конвенции:  [OK/FAIL]
-Тесты:     [OK/FAIL] (X/Y пройдено)
-Сборка:    [OK/FAIL/SKIP]
+Тесты:       [OK/FAIL] (X/Y пройдено)
+Конвенции:   [OK/FAIL]
 Безопасность: [OK/X проблем]
-Git:       [X файлов изменено]
+Сборка:      [OK/FAIL/SKIP]
 
 Готов к коммиту: [ДА/НЕТ]
 
@@ -74,9 +57,23 @@ Git:       [X файлов изменено]
 1. ...
 ```
 
+### Шаг 3: Автообновление документации
+
+Если все проверки прошли И изменены backend файлы (models/, services/, routers/, migrations/):
+- Проверь DOMAIN_*.md (новые модели, сервисы, эндпоинты)
+- Проверь backend/MAP.md (новые файлы)
+- Проверь docs/KNOWN_PITFALLS.md (если наткнулся на грабли)
+- Проверь CLAUDE.md (новый домен, антипаттерн)
+
+### Шаг 4: Git Status
+```bash
+git diff --stat
+git status
+```
+
 ## Аргументы
 
 $ARGUMENTS:
-- `quick` — только конвенции + тесты
-- `full` — все проверки (по умолчанию)
-- `pre-commit` — конвенции + безопасность
+- `quick` — только конвенции + тесты (без субагентов, последовательно)
+- `full` — все проверки параллельно (по умолчанию)
+- `pre-commit` — конвенции + безопасность (без тестов)
