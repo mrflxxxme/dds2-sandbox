@@ -34,6 +34,15 @@ test: ## Запустить все тесты
 test-v: ## Тесты с подробным выводом
 	docker compose exec -T backend pytest tests/ -v --tb=long
 
+test-fast: ## Параллельные тесты (pytest-xdist)
+	docker compose exec -T backend pytest tests/ -n auto --tb=short -q
+
+test-changed: ## Только изменённые тесты (testmon)
+	docker compose exec -T backend pytest --testmon --tb=short -q
+
+test-unit: ## Только unit-тесты
+	docker compose exec -T backend pytest tests/ -m unit --tb=short -q
+
 lint: ## Линтер + convention checks
 	ruff check backend/ --select E,W,F --ignore E501
 	bash scripts/check_conventions.sh

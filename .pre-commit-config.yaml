@@ -33,6 +33,15 @@ repos:
         language: system
         pass_filenames: false
 
+  # ─── Bandit — Python security linting ─────────────────────────────
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.8.3
+    hooks:
+      - id: bandit
+        args: ['-c', 'bandit.yaml', '-ll']
+        files: ^backend/
+        types: [python]
+
   # ─── DDS convention checks (local) ─────────────────────────────────
   - repo: local
     hooks:

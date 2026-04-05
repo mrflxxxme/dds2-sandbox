@@ -28,7 +28,6 @@ from backend.services.ai.llm_client import chat
 from backend.services.ai.memory import get_memory_context, save_insights
 from backend.services.ai.prompts.orchestrator import ORCHESTRATOR_PROMPT
 from backend.services.ai.synthesizer import synthesize
-from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.ai.orchestrator")
 
@@ -72,12 +71,13 @@ async def ask(
     # Restore brand notes (lost during refactoring from agent.py)
     try:
         from backend.services.telegram_service import list_brand_notes
+
         if brand:
             note_objs = await list_brand_notes(db, project_id, brand)
             if note_objs:
                 notes_text = "\n".join(f"- {n.note}" for n in note_objs)
                 memory_context += f"\n\n## Заметки о бренде\n{notes_text}"
-    except Exception:
+    except Exception:  # noqa: S110
         pass  # graceful: brand notes optional
 
     # 4. Classify intent
@@ -122,7 +122,11 @@ async def ask(
 
     if len(valid_names) == 1:
         # Single agent: reuse caller's DB session
-        results = [await _run_agent(valid_names[0], db)]
+        try:
+            results = [await _run_agent(valid_names[0], db)]
+        except Exception as exc:
+            logger.error("Single agent '%s' failed: %s", valid_names[0], exc, exc_info=exc)
+            results = [AgentResult(answer=f"Агент {valid_names[0]}: ошибка при обработке. Попробуйте позже.")]
     else:
         # Multiple agents: each gets its own DB session to avoid conflicts
         results = await asyncio.gather(
@@ -139,9 +143,7 @@ async def ask(
                     result,
                     exc_info=result,
                 )
-                clean_results.append(
-                    AgentResult(answer=f"Агент {valid_names[idx]}: ошибка при обработке.")
-                )
+                clean_results.append(AgentResult(answer=f"Агент {valid_names[idx]}: ошибка при обработке."))
             else:
                 clean_results.append(result)
         results = clean_results
@@ -216,10 +218,7 @@ async def _classify_intent(question: str, history_summary: str) -> dict:
         if text.startswith("```"):
             # Strip ```json ... ```
             lines = text.splitlines()
-            json_lines = [
-                ln for ln in lines
-                if not ln.strip().startswith("```")
-            ]
+            json_lines = [ln for ln in lines if not ln.strip().startswith("```")]
             text = "\n".join(json_lines).strip()
 
         result = json.loads(text)
@@ -241,6 +240,7 @@ async def _classify_intent(question: str, history_summary: str) -> dict:
 def _parse_synthesis_insights(text: str) -> list[str]:
     """Extract insights from synthesizer output (<!-- INSIGHTS: ... --> blocks)."""
     import re
+
     pattern = re.compile(r"<!--\s*INSIGHTS?:\s*(.*?)\s*-->", re.DOTALL | re.IGNORECASE)
     insights: list[str] = []
     for match in pattern.finditer(text):

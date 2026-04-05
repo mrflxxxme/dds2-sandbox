@@ -44,12 +44,21 @@ paths:
 
 ## Запуск
 ```bash
+make test            # все тесты
+make test-fast       # параллельные (pytest-xdist, ~3-4x быстрее)
+make test-changed    # только изменённые (pytest-testmon)
+make test-unit       # только unit (@pytest.mark.unit)
+```
+
+Прямой запуск (без make):
+```bash
 docker compose exec backend pytest tests/ -x --tb=short
 docker compose exec backend pytest tests/test_X.py -x  # Один файл
 ```
 
 ## Перед коммитом
 ```bash
-docker compose exec backend pytest tests/ -x
-bash scripts/check_conventions.sh
+make test            # или make test-fast
+make lint            # ruff + check_conventions.sh
 ```
+Bandit (security) и Gitleaks (секреты) запускаются автоматически через pre-commit hooks.

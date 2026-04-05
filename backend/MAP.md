@@ -108,5 +108,14 @@ from backend.models.mixins import SoftDeleteMixin
 | `Account`, `CategoryRef` | `models/refs.py` | Справочники |
 | `FxRate` | `models/fx_rates.py` | Курсы валют |
 
+## Тесты (make-команды)
+```bash
+make test            # Все тесты
+make test-fast       # Быстрые тесты (без медленных)
+make test-changed    # Только тесты затронутых файлов
+make test-unit       # Только unit-тесты
+make lint            # Линтер
+```
+
 ## Алиасы
 - `WbApiKey` = `IntegrationKey` (обратная совместимость, определён в `models/__init__.py`)

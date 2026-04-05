@@ -316,7 +316,7 @@ async def _get_warehouse_need(db, project_id, inp):
     wb_summary = []
     for wh in warehouses:
         articles = wh.get("articles", [])
-        need_articles = [a for a in articles if a.get("need", 0) > 0]
+        need_articles = [a for a in articles if isinstance(a, dict) and a.get("need", 0) > 0]
         if need_articles:
             wb_summary.append(
                 {
@@ -336,9 +336,11 @@ async def _get_warehouse_need(db, project_id, inp):
     # Load cost_price and barcode per nm_id
     cost_barcode_map: dict[int, dict] = {}
     try:
+        from sqlalchemy import func, select
+
         from backend.models.cost import Nomenclature
         from backend.models.warehouse import WarehouseStock
-        from sqlalchemy import select, func
+
         nm_ids = [a.get("nm_id") for a in enriched if a.get("nm_id")]
         if nm_ids:
             cb_result = await db.execute(
@@ -361,7 +363,7 @@ async def _get_warehouse_need(db, project_id, inp):
                         "barcode": row.barcode or "",
                         "cost_price": round(float(row.cost_price or 0), 2),
                     }
-    except Exception:
+    except Exception:  # noqa: S110
         pass  # graceful: cost/barcode optional
 
     articles_with_rf = []
@@ -369,32 +371,36 @@ async def _get_warehouse_need(db, project_id, inp):
         if art.get("can_send", 0) > 0 or art.get("deficit", 0) > 0:
             nm_id = art.get("nm_id")
             cb = cost_barcode_map.get(nm_id, {})
-            articles_with_rf.append({
-                "nm_id": nm_id,
-                "vendor_code": art.get("vendor_code", ""),
-                "brand": art.get("brand", ""),
-                "subject": art.get("subject", ""),
-                "barcode": cb.get("barcode", ""),
-                "cost_price": cb.get("cost_price", 0),
-                "total_need": art.get("total_need", 0),
-                "stocks_wb": art.get("stocks_wb", 0),
-                "rf_stocks": art.get("rf_stocks", {}),
-                "in_assembly": art.get("in_assembly", 0),
-                "in_transit": art.get("in_transit", 0),
-                "can_send": art.get("can_send", 0),
-                "deficit": art.get("deficit", 0),
-            })
+            articles_with_rf.append(
+                {
+                    "nm_id": nm_id,
+                    "vendor_code": art.get("vendor_code", ""),
+                    "brand": art.get("brand", ""),
+                    "subject": art.get("subject", ""),
+                    "barcode": cb.get("barcode", ""),
+                    "cost_price": cb.get("cost_price", 0),
+                    "total_need": art.get("total_need", 0),
+                    "stocks_wb": art.get("stocks_wb", 0),
+                    "rf_stocks": art.get("rf_stocks", {}),
+                    "in_assembly": art.get("in_assembly", 0),
+                    "in_transit": art.get("in_transit", 0),
+                    "can_send": art.get("can_send", 0),
+                    "deficit": art.get("deficit", 0),
+                }
+            )
 
     # Summary
     summary = result.get("summary", {})
 
-    return _json({
-        "supply_days": inp.get("supply_days", 14),
-        "wb_warehouses": wb_summary,
-        "rf_warehouses": rf_warehouses,
-        "articles": articles_with_rf,
-        "summary": summary,
-    })
+    return _json(
+        {
+            "supply_days": inp.get("supply_days", 14),
+            "wb_warehouses": wb_summary,
+            "rf_warehouses": rf_warehouses,
+            "articles": articles_with_rf,
+            "summary": summary,
+        }
+    )
 
 
 async def _get_day_analysis(db, project_id, tax_rate, brand, inp):
@@ -534,12 +540,14 @@ async def _get_anomalies(db, project_id, tax_rate, brand, inp):
         anomalies,
         key=lambda a: (priority.get(a.get("severity", "warning"), 1), -(a.get("loss_amount") or 0)),
     )
-    return _json({
-        "summary": summary,
-        "anomalies": sorted_anomalies,
-        "total_products": result.get("total_products", 0),
-        "period_days": result.get("period_days", 7),
-    })
+    return _json(
+        {
+            "summary": summary,
+            "anomalies": sorted_anomalies,
+            "total_products": result.get("total_products", 0),
+            "period_days": result.get("period_days", 7),
+        }
+    )
 
 
 async def _get_capital_analysis(db, project_id, tax_rate, brand, inp):
@@ -561,27 +569,31 @@ async def _get_capital_analysis(db, project_id, tax_rate, brand, inp):
     top_groups = sorted(groups, key=lambda g: g.get("capital", 0), reverse=True)
     simplified_groups = []
     for g in top_groups:
-        simplified_groups.append({
-            "name": g.get("group_key", ""),
-            "capital": g.get("capital", 0),
-            "liquid_pct": g.get("liquid_pct", 0),
-            "illiquid_pct": g.get("illiquid_pct", 0),
-            "frozen_amount": g.get("frozen_amount", 0),
-            "roi_monthly": g.get("roi_monthly", 0),
-            "turnover_days": g.get("turnover_days", 0),
-            "recommendation": g.get("recommendation", {}),
-        })
-    return _json({
-        "summary": summary,
-        "groups": simplified_groups,
-        "total_products": result.get("total_products", 0),
-    })
+        simplified_groups.append(
+            {
+                "name": g.get("group_key", ""),
+                "capital": g.get("capital", 0),
+                "liquid_pct": g.get("liquid_pct", 0),
+                "illiquid_pct": g.get("illiquid_pct", 0),
+                "frozen_amount": g.get("frozen_amount", 0),
+                "roi_monthly": g.get("roi_monthly", 0),
+                "turnover_days": g.get("turnover_days", 0),
+                "recommendation": g.get("recommendation", {}),
+            }
+        )
+    return _json(
+        {
+            "summary": summary,
+            "groups": simplified_groups,
+            "total_products": result.get("total_products", 0),
+        }
+    )
 
 
 async def _get_plan_fact(db, project_id, brand, inp):
     from backend.services.planning.brand_plan import get_plan_fact_brands
-
     from backend.utils.time import utcnow
+
     now = utcnow()
     year = inp.get("year", now.year)
     month = inp.get("month", now.month)
@@ -591,11 +603,13 @@ async def _get_plan_fact(db, project_id, brand, inp):
     if brand:
         brands_data = [b for b in brands_data if b.get("brand") == brand]
 
-    return _json({
-        "year": year,
-        "month": month,
-        "brands": brands_data,
-    })
+    return _json(
+        {
+            "year": year,
+            "month": month,
+            "brands": brands_data,
+        }
+    )
 
 
 async def _get_ad_campaigns(db, project_id, brand, inp):
@@ -605,9 +619,11 @@ async def _get_ad_campaigns(db, project_id, brand, inp):
     date_to = inp.get("date_to", "")
     if not date_from or not date_to:
         from backend.utils.time import utcnow
+
         now = utcnow()
         date_to = now.strftime("%Y-%m-%d")
         from datetime import timedelta
+
         date_from = (now - timedelta(days=7)).strftime("%Y-%m-%d")
 
     data = await get_ad_tab_data(
@@ -647,16 +663,18 @@ async def _get_ad_campaigns(db, project_id, brand, inp):
     # Sort by spend descending
     products.sort(key=lambda x: float(x.get("adv_sum", 0) or 0), reverse=True)
 
-    return _json({
-        "period": {"date_from": date_from, "date_to": date_to},
-        "summary": {
-            "total_spend": total_spend,
-            "total_orders_rub": total_orders,
-            "avg_drr": avg_drr,
-            "products_with_ads": len([p for p in products if float(p.get("adv_sum", 0) or 0) > 0]),
-        },
-        "products": products,
-    })
+    return _json(
+        {
+            "period": {"date_from": date_from, "date_to": date_to},
+            "summary": {
+                "total_spend": total_spend,
+                "total_orders_rub": total_orders,
+                "avg_drr": avg_drr,
+                "products_with_ads": len([p for p in products if float(p.get("adv_sum", 0) or 0) > 0]),
+            },
+            "products": products,
+        }
+    )
 
 
 async def _get_daily_health(db, project_id, tax_rate, brand, inp):
@@ -681,9 +699,9 @@ async def _get_logistics_history(db, project_id, inp):
     if statuses:
         valid = []
         for s in statuses:
-            try:
+            try:  # noqa: SIM105
                 valid.append(AssemblyStatus(s.upper() if isinstance(s, str) else s))
-            except (ValueError, AttributeError):
+            except (ValueError, AttributeError):  # noqa: S110
                 pass
         status_filter = valid if valid else None
     else:
@@ -698,7 +716,7 @@ async def _get_logistics_history(db, project_id, inp):
             AssemblyStatus.PENDING,
         ]
 
-    from sqlalchemy import select, func
+    from sqlalchemy import func, select
     from sqlalchemy.orm import selectinload
 
     result = await db.execute(
@@ -755,27 +773,31 @@ async def _get_logistics_history(db, project_id, inp):
         try:
             if req.wb_fbo_supply:
                 destination = req.wb_fbo_supply.warehouse_name or ""
-        except Exception:
+        except Exception:  # noqa: S110
             pass
 
-        shipments.append({
-            "id": req.id,
-            "number": req.number,
-            "status": req.status.value if hasattr(req.status, 'value') else str(req.status),
-            "warehouse": wh_name,
-            "destination": destination,
-            "pallets_count": req.pallets_count or 0,
-            "pallet_weight_kg": float(req.pallet_weight_kg or 0),
-            "pickup_cost": float(req.pickup_cost or 0),
-            "delivery_date": req.delivery_date.isoformat() if req.delivery_date else None,
-            "shipped_at": req.shipped_at.isoformat() if hasattr(req, 'shipped_at') and req.shipped_at else None,
-            "created_at": req.created_at.isoformat() if req.created_at else None,
-            "items_count": len(req.items) if req.items else 0,
-            "total_qty": total_qty,
-        })
+        shipments.append(
+            {
+                "id": req.id,
+                "number": req.number,
+                "status": req.status.value if hasattr(req.status, "value") else str(req.status),
+                "warehouse": wh_name,
+                "destination": destination,
+                "pallets_count": req.pallets_count or 0,
+                "pallet_weight_kg": float(req.pallet_weight_kg or 0),
+                "pickup_cost": float(req.pickup_cost or 0),
+                "delivery_date": req.delivery_date.isoformat() if req.delivery_date else None,
+                "shipped_at": req.shipped_at.isoformat() if hasattr(req, "shipped_at") and req.shipped_at else None,
+                "created_at": req.created_at.isoformat() if req.created_at else None,
+                "items_count": len(req.items) if req.items else 0,
+                "total_qty": total_qty,
+            }
+        )
 
-    return _json({
-        "total_shipments": len(shipments),
-        "shipments": shipments,
-        "cost_stats_by_warehouse": cost_stats,
-    })
+    return _json(
+        {
+            "total_shipments": len(shipments),
+            "shipments": shipments,
+            "cost_stats_by_warehouse": cost_stats,
+        }
+    )

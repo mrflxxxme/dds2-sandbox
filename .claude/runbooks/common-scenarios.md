@@ -32,16 +32,17 @@
 2. Найти корень проблемы (НЕ симптом)
 3. Написать тест который падает
 4. Минимальный фикс
-5. Тест проходит → /smoke → коммит fix:
+5. `make test-changed` — быстрая проверка затронутых тестов
+6. Тест проходит → /smoke → коммит fix:
 ```
 
 ## 4. Новая миграция БД
 
 ```
 1. Изменить Model
-2. docker compose exec backend alembic revision --autogenerate -m "описание"
+2. `make migrate-new MSG="описание"` (или `docker compose exec backend alembic revision --autogenerate -m "описание"`)
 3. Проверить сгенерированный файл (типы, индексы, defaults)
-4. docker compose exec backend alembic upgrade head
+4. `make migrate` (или `docker compose exec backend alembic upgrade head`)
 5. Обновить Schema если нужно
 6. /smoke
 ```

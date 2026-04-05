@@ -48,6 +48,13 @@ paths:
 - Изменение `vat_rate` → invalidate: `cost`, `reports:wb_bdr`, `reports:opiu`, `reports:dashboard`
 - **Правило:** мутации настроек проекта — через `project_settings_service`, НЕ напрямую в роутере
 
+## Автоматические проверки безопасности
+- **Bandit** — pre-commit hook, сканирует Python на injection, eval, weak crypto (конфиг: `bandit.yaml`)
+- **Ruff S-rules** — flake8-bandit правила в `ruff.toml`
+- **Gitleaks** — pre-commit hook, ищет секреты в коде
+- **pip-audit** — CI workflow, проверяет CVE в зависимостях
+- **Trivy** — CI workflow, filesystem scan (HIGH/CRITICAL)
+
 ## При обнаружении уязвимости
 1. СТОП — не продолжать
 2. Использовать агент `security-reviewer`

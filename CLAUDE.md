@@ -9,6 +9,9 @@ docker compose up -d                              # Запуск
 docker compose exec backend pytest tests/ -x      # Тесты
 docker compose logs backend --tail=50             # Логи
 bash scripts/check_conventions.sh                 # Проверка конвенций
+make test-fast                                    # Параллельные тесты (xdist)
+make test-changed                                 # Только изменённые тесты (testmon)
+make test-unit                                    # Только unit-тесты
 ```
 
 ## Железные правила (нарушение = баг)
@@ -113,6 +116,26 @@ src/types/api.ts — TypeScript интерфейсы
 - Ветки: `dev` → проверка → merge в `main` → production auto-deploy
 - НИКОГДА не деплоить через SSH — только CI/CD
 - Перед коммитом: тесты + check_conventions.sh
+
+## Безопасность и CI
+### Pre-commit (автоматически при коммите)
+- **Ruff** — стиль + security (S-rules настроены в `ruff.toml`)
+- **Bandit** — Python security linter (eval, injection, weak crypto; конфиг в `bandit.yaml`)
+- **Gitleaks** — секреты в коде
+
+### CI (автоматически при push/PR)
+- **Conventions + Tests** — параллельные jobs
+- **BuildKit cache** — Docker layer cache через `actions/cache` (ключ: `requirements-backend.txt` + `Dockerfile.backend`)
+- **pip-audit** — CVE в Python-зависимостях
+- **Trivy** — filesystem scan (HIGH/CRITICAL)
+- **CodeRabbit** — AI code review на каждый PR (конфиг `.coderabbit.yaml` с iron rules DDS)
+
+### Dependabot (еженедельно)
+- Авто-PR для pip, npm, GitHub Actions зависимостей
+
+### MCP-серверы (Claude Code)
+- **Context7** — актуальная документация библиотек в промпте
+- **Docker** — управление контейнерами без docker compose exec
 
 ## Среды
 | Среда | Ветка | URL |

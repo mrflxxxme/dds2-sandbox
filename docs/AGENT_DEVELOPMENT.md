@@ -151,6 +151,7 @@ API-методы в `api.ts` пишутся по контракту — когд
 
 ```
 1. Проверить что backend тесты зелёные:  docker compose exec backend pytest tests/ -x
+   (быстрая альтернатива: make test-fast — запускает только изменённые тесты)
 2. Проверить frontend тесты:             cd frontend-react && npm run test
 3. Проверить конвенции:                  bash scripts/check_conventions.sh
 4. Обновить CLAUDE.md (если новый домен/модель/кэш)
@@ -246,6 +247,10 @@ API-методы в `api.ts` пишутся по контракту — когд
 
 Конвенции:
   [ ] bash scripts/check_conventions.sh — проходит
+
+Автоматические проверки (не нужно запускать вручную):
+  - Bandit + Gitleaks — запускаются автоматически через pre-commit hooks
+  - CodeRabbit — автоматически ревьюит PR после push
 
 Документация:
   [ ] CLAUDE.md обновлён (новый домен/модель/кэш)

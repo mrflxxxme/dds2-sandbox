@@ -1,0 +1,55 @@
+# CodeRabbit — AI Code Review configuration for DDS
+# Docs: https://docs.coderabbit.ai/guides/configuration
+
+language: ru-RU
+
+reviews:
+  # Профиль ревью
+  profile: chill
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    drafts: false
+
+  path_instructions:
+    - path: "backend/routers/**"
+      instructions: |
+        Роутеры НЕ должны содержать бизнес-логику — только HTTP (валидация, вызов сервиса, формат ответа).
+        Вся логика должна быть в services/.
+    - path: "backend/services/**"
+      instructions: |
+        Проверь железные правила DDS:
+        1. Каждый запрос к БД фильтрует по project_id
+        2. SoftDeleteMixin модели используют .where(Model.is_deleted == False)
+        3. Удаление через model.soft_delete() (НИКОГДА db.delete())
+        4. Деньги — Numeric(18, 2) (НИКОГДА Float)
+        5. SQL — параметризованный :param (НИКОГДА f-string)
+        6. datetime — from backend.utils.time import utcnow (НИКОГДА datetime.utcnow())
+        7. Кэш — invalidate_cache(prefix) после мутаций
+    - path: "backend/models/**"
+      instructions: |
+        Модели с SoftDeleteMixin должны использовать soft_delete().
+        Денежные поля — Numeric(18, 2), никогда Float.
+    - path: "backend/etl/**"
+      instructions: |
+        ETL парсеры: проверь дедупликацию по txn_id, корректную обработку кодировок, graceful error handling.
+    - path: "frontend-react/src/**"
+      instructions: |
+        Фронтенд правила DDS:
+        - Типы только в types/api.ts (никогда inline / any)
+        - API вызовы только через методы api.ts (никогда прямой fetch)
+        - Числа через formatNumber(), даты через formatDate()
+        - Обязательно: loading, error, empty states
+
+  path_filters:
+    - "!**/migrations/**"
+    - "!**/node_modules/**"
+    - "!**/.next/**"
+    - "!**/package-lock.json"
+    - "!**/__pycache__/**"
+
+chat:
+  auto_reply: true

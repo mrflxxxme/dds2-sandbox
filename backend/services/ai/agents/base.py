@@ -121,7 +121,15 @@ class BaseAgent(ABC):
             if tool_choice:
                 kwargs["tool_choice"] = tool_choice
 
-            response = await chat(**kwargs)
+            try:
+                response = await chat(**kwargs)
+            except Exception as exc:
+                logger.error("Agent '%s' chat() failed (round %d): %s", self.name, _round + 1, exc)
+                return AgentResult(
+                    answer="Ошибка при обращении к AI. Попробуйте позже.",
+                    tools_used=tools_used,
+                    tokens_used=total_tokens,
+                )
 
             total_tokens += _count_tokens(response)
 
@@ -199,10 +207,12 @@ class BaseAgent(ABC):
             self.max_rounds,
         )
         try:
-            messages.append({
-                "role": "user",
-                "content": "Суммируй все полученные данные и дай финальный ответ. Не вызывай инструменты.",
-            })
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "Суммируй все полученные данные и дай финальный ответ. Не вызывай инструменты.",
+                }
+            )
             final_response = await chat(
                 messages=messages,
                 system=system,
@@ -259,7 +269,7 @@ def _extract_insights(text: str) -> list[str]:
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("[INSIGHT]"):
-            insight = stripped[len("[INSIGHT]"):].strip()
+            insight = stripped[len("[INSIGHT]") :].strip()
             if insight:
                 insights.append(insight)
     return insights
