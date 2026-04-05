@@ -25,6 +25,7 @@ class Settings(BaseSettings):
 
     # Anthropic (Claude AI)
     ANTHROPIC_API_KEY: str = ""  # Claude API key for AI agent
+    AI_MEMORY_DIR: str = "/data/ai_memory"  # persistent AI memory storage
 
     # Telegram analytics bot
     TELEGRAM_BOT_TOKEN_ANALYTICS: str = ""  # @dds_analytics_bot token

@@ -20,11 +20,33 @@ import asyncio
 import logging
 import os
 import re
+import tempfile
+
+from backend.config import settings
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.ai.memory")
 
-MEMORY_BASE = "/data/ai_memory"
+
+def _get_memory_base() -> str:
+    """Resolve memory base directory. Falls back to temp dir if configured path is not writable."""
+    base = settings.AI_MEMORY_DIR
+    try:
+        os.makedirs(base, exist_ok=True)
+        # Quick write test
+        test_file = os.path.join(base, ".write_test")
+        with open(test_file, "w") as f:
+            f.write("ok")
+        os.remove(test_file)
+        return base
+    except OSError:
+        fallback = os.path.join(tempfile.gettempdir(), "dds_ai_memory")
+        os.makedirs(fallback, exist_ok=True)
+        logger.warning("AI memory dir %s not writable, using fallback: %s", base, fallback)
+        return fallback
+
+
+MEMORY_BASE = _get_memory_base()
 MAX_INSIGHTS_PER_BRAND = 50
 MAX_INSIGHT_AGE_DAYS = 90
 
@@ -46,10 +68,7 @@ def _sanitize_brand(brand: str) -> str:
 
 async def _ensure_dirs(project_id: int, brand: str | None) -> str:
     """Create directory structure if needed. Return brand dir path."""
-    if brand is not None:
-        safe_brand = _sanitize_brand(brand)
-    else:
-        safe_brand = "_all"
+    safe_brand = _sanitize_brand(brand) if brand is not None else "_all"
 
     dir_path = os.path.join(MEMORY_BASE, str(project_id), safe_brand)
 
@@ -73,7 +92,7 @@ async def _read_file(path: str) -> str:
 
 
 def _read_file_sync(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return f.read()
 
 
@@ -130,9 +149,7 @@ async def _rotate_insights(path: str, max_count: int) -> None:
 
     trimmed = blocks[-max_count:]
     await _write_file(path, "\n\n".join(trimmed) + "\n")
-    logger.info(
-        "Rotated insights in %s: %d -> %d blocks", path, len(blocks), max_count
-    )
+    logger.info("Rotated insights in %s: %d -> %d blocks", path, len(blocks), max_count)
 
 
 async def get_memory_context(project_id: int, brand: str | None) -> str:
@@ -180,9 +197,7 @@ async def get_memory_context(project_id: int, brand: str | None) -> str:
         return ""
 
 
-async def save_insights(
-    project_id: int, brand: str | None, insights: list[str]
-) -> None:
+async def save_insights(project_id: int, brand: str | None, insights: list[str]) -> None:
     """Append new insights to insights.md with timestamp.
 
     Format per insight:
@@ -202,9 +217,7 @@ async def save_insights(
         # Read existing for dedup check
         existing = await _read_file(insights_path)
         existing_blocks = _split_insight_blocks(existing)
-        recent_texts = {
-            _extract_insight_text(b) for b in existing_blocks[-10:]
-        }
+        recent_texts = {_extract_insight_text(b) for b in existing_blocks[-10:]}
 
         now = utcnow()
         timestamp = now.strftime("%Y-%m-%d %H:%M")
@@ -254,11 +267,7 @@ async def save_anomaly(
 
         now = utcnow()
         timestamp = now.strftime("%Y-%m-%d %H:%M")
-        content = (
-            f"\n### {timestamp} [{severity}]\n"
-            f"- {anomaly.strip()}\n"
-            f"- **Status:** active\n"
-        )
+        content = f"\n### {timestamp} [{severity}]\n" f"- {anomaly.strip()}\n" f"- **Status:** active\n"
 
         await _append_file(anomalies_path, content)
 
@@ -271,9 +280,7 @@ async def save_anomaly(
         )
 
 
-async def update_brand_profile(
-    project_id: int, brand: str, profile_text: str
-) -> None:
+async def update_brand_profile(project_id: int, brand: str, profile_text: str) -> None:
     """Overwrite brand profile.md with new profile."""
     try:
         dir_path = await _ensure_dirs(project_id, brand)

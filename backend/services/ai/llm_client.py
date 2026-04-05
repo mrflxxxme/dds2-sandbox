@@ -4,6 +4,7 @@ Claude API wrapper for DDS AI agent.
 Thin client around anthropic SDK with retry and rate limit handling.
 """
 
+import asyncio
 import logging
 
 import anthropic
@@ -15,6 +16,10 @@ logger = logging.getLogger("dds.ai")
 
 # Lazy singleton
 _client: anthropic.AsyncAnthropic | None = None
+
+# Retry config
+_MAX_RETRIES = 3
+_BASE_DELAY = 2.0  # seconds
 
 
 def get_client() -> anthropic.AsyncAnthropic:
@@ -42,6 +47,7 @@ async def chat(
 
     Returns the raw Message object for tool_use handling.
     ``tool_choice`` — e.g. {"type": "any"} to force tool use.
+    Retries on transient errors (429, 5xx) with exponential backoff.
     """
     client = get_client()
 
@@ -58,4 +64,40 @@ async def chat(
     if tool_choice and tools:
         kwargs["tool_choice"] = tool_choice
 
-    return await client.messages.create(**kwargs)
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return await client.messages.create(**kwargs)
+        except anthropic.RateLimitError as exc:
+            last_exc = exc
+            delay = _BASE_DELAY * (2**attempt)
+            logger.warning(
+                "Anthropic rate limit (429), retry %d/%d in %.1fs",
+                attempt + 1,
+                _MAX_RETRIES,
+                delay,
+            )
+            await asyncio.sleep(delay)
+        except anthropic.InternalServerError as exc:
+            last_exc = exc
+            delay = _BASE_DELAY * (2**attempt)
+            logger.warning(
+                "Anthropic server error (%s), retry %d/%d in %.1fs",
+                exc.status_code,
+                attempt + 1,
+                _MAX_RETRIES,
+                delay,
+            )
+            await asyncio.sleep(delay)
+        except anthropic.APIConnectionError as exc:
+            last_exc = exc
+            delay = _BASE_DELAY * (2**attempt)
+            logger.warning(
+                "Anthropic connection error, retry %d/%d in %.1fs",
+                attempt + 1,
+                _MAX_RETRIES,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+    raise last_exc  # type: ignore[misc]
