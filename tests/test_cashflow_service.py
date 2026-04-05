@@ -236,7 +236,7 @@ class TestGetOrderSummary:
         """Existing order returns summary dict."""
         import random
 
-        ono = random.randint  # (100000, 999999)
+        ono = random.randint(100000, 999999)  # noqa: S311
         await _create_order(db_session, project.id, ono, order_amount=200000)
 
         result = await get_order_summary(db_session, project.id, ono)
@@ -248,7 +248,7 @@ class TestGetOrderSummary:
         """Order with linked planned payments."""
         import random
 
-        ono = random.randint  # (100000, 999999)
+        ono = random.randint(100000, 999999)  # noqa: S311
         await _create_order(db_session, project.id, ono, order_amount=300000)
         await _create_planned_payment(db_session, project.id, 150000, date.today(), order_no=ono)
         await _create_planned_payment(db_session, project.id, 150000, date.today() + timedelta(days=30), order_no=ono)
@@ -261,7 +261,7 @@ class TestGetOrderSummary:
         """Order from other project should not be visible."""
         import random
 
-        ono = random.randint  # (100000, 999999)
+        ono = random.randint(100000, 999999)  # noqa: S311
         await _create_order(db_session, other_project.id, ono, order_amount=500000)
 
         result = await get_order_summary(db_session, project.id, ono)
@@ -272,7 +272,7 @@ class TestGetOrderSummary:
         """Soft-deleted order -> None."""
         import random
 
-        ono = random.randint  # (100000, 999999)
+        ono = random.randint(100000, 999999)  # noqa: S311
         await db_session.execute(
             text(
                 "INSERT INTO orders (project_id, order_no, order_amount, is_deleted) "
