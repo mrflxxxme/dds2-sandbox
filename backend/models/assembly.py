@@ -8,6 +8,7 @@ TZ: see backend/DOMAIN_ASSEMBLY.md for full spec.
 import enum
 from datetime import date, datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Date,
@@ -24,6 +25,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from backend.database import Base
 from backend.models.mixins import SoftDeleteMixin, TimestampMixin
 from backend.utils.time import utcnow
+
+if TYPE_CHECKING:
+    from backend.models.warehouse import Warehouse
+    from backend.models.wb_fbo import WbFboSupply
 
 # ─── Enums ──────────────────────────────────────────────────────────────────
 
@@ -106,8 +111,8 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
 
     # ─── Relationships ──────────────────────────────────────────────────
 
-    warehouse: Mapped["Warehouse"] = relationship()  # noqa: F821
-    wb_fbo_supply: Mapped["WbFboSupply | None"] = relationship()  # noqa: F821
+    warehouse: Mapped["Warehouse"] = relationship()
+    wb_fbo_supply: Mapped["WbFboSupply | None"] = relationship()
     items: Mapped[list["AssemblyRequestItem"]] = relationship(
         back_populates="assembly_request",
         cascade="all, delete-orphan",
@@ -139,6 +144,7 @@ class AssemblyRequestItem(Base):
     __tablename__ = "assembly_request_items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     assembly_request_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey("assembly_requests.id", ondelete="CASCADE"),
@@ -151,7 +157,10 @@ class AssemblyRequestItem(Base):
     # Relationship
     assembly_request: Mapped["AssemblyRequest"] = relationship(back_populates="items")
 
-    __table_args__ = (Index("ix_assembly_request_items_request_id", "assembly_request_id"),)
+    __table_args__ = (
+        Index("ix_assembly_request_items_project_id", "project_id"),
+        Index("ix_assembly_request_items_request_id", "assembly_request_id"),
+    )
 
 
 # ─── Assembly Status History ─────────────────────────────────────────────────
@@ -163,6 +172,7 @@ class AssemblyStatusHistory(Base):
     __tablename__ = "assembly_status_history"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     assembly_request_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("assembly_requests.id", ondelete="CASCADE"), nullable=False
     )
@@ -172,4 +182,7 @@ class AssemblyStatusHistory(Base):
     changed_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    __table_args__ = (Index("ix_assembly_status_history_request_id", "assembly_request_id"),)
+    __table_args__ = (
+        Index("ix_assembly_status_history_project_id", "project_id"),
+        Index("ix_assembly_status_history_request_id", "assembly_request_id"),
+    )

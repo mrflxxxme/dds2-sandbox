@@ -69,6 +69,7 @@ def _check_transition(current: AssemblyStatus, target: AssemblyStatus) -> None:
 
 async def _log_status_change(
     db: AsyncSession,
+    project_id: int,
     request_id: int,
     old_status: str | None,
     new_status: str,
@@ -77,6 +78,7 @@ async def _log_status_change(
 ) -> None:
     """Record a status transition in assembly_status_history."""
     history = AssemblyStatusHistory(
+        project_id=project_id,
         assembly_request_id=request_id,
         old_status=old_status,
         new_status=new_status,
@@ -472,6 +474,7 @@ async def create_assembly_request(
     for item_data in payload.items:
         nom = await _resolve_barcode(db, project_id, item_data.barcode)
         item = AssemblyRequestItem(
+            project_id=project_id,
             assembly_request_id=assembly_req.id,
             nomenclature_id=nom.id,
             barcode=item_data.barcode,
@@ -487,7 +490,7 @@ async def create_assembly_request(
         lines = [f"  {d['name']} (ШК {d['barcode']}): нужно {d['need']}, на складе {d['have']}" for d in deficits]
         raise ValueError(f"Недостаточно остатков на складе ({len(deficits)} поз.):\n" + "\n".join(lines))
 
-    await _log_status_change(db, assembly_req.id, None, AssemblyStatus.PENDING, changed_by="user")
+    await _log_status_change(db, project_id, assembly_req.id, None, AssemblyStatus.PENDING, changed_by="user")
 
     await db.commit()
     await db.refresh(assembly_req)
@@ -582,6 +585,7 @@ async def update_assembly_request(
         for item_data in payload.items:
             nom = await _resolve_barcode(db, project_id, item_data.barcode)
             item = AssemblyRequestItem(
+                project_id=project_id,
                 assembly_request_id=req.id,
                 nomenclature_id=nom.id,
                 barcode=item_data.barcode,
@@ -607,7 +611,7 @@ async def start_assembly(db: AsyncSession, project_id: int, request_id: int) -> 
     _check_transition(AssemblyStatus(req.status), AssemblyStatus.IN_PROGRESS)
     old = req.status
     req.status = AssemblyStatus.IN_PROGRESS
-    await _log_status_change(db, req.id, old, AssemblyStatus.IN_PROGRESS)
+    await _log_status_change(db, project_id, req.id, old, AssemblyStatus.IN_PROGRESS)
     await db.commit()
     await db.refresh(req)
     return req
@@ -633,7 +637,7 @@ async def mark_ready(db: AsyncSession, project_id: int, request_id: int) -> Asse
     old = req.status
     req.status = AssemblyStatus.READY
     req.actual_ready_date = date.today()
-    await _log_status_change(db, req.id, old, AssemblyStatus.READY)
+    await _log_status_change(db, project_id, req.id, old, AssemblyStatus.READY)
     await db.commit()
     await db.refresh(req)
     return req
@@ -656,7 +660,7 @@ async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, pay
     req.pickup_cost = payload.pickup_cost
     req.delivery_date = payload.delivery_date
     req.vehicle_assigned_at = utcnow()
-    await _log_status_change(db, req.id, old, AssemblyStatus.VEHICLE_ASSIGNED, comment=payload.vehicle_info)
+    await _log_status_change(db, project_id, req.id, old, AssemblyStatus.VEHICLE_ASSIGNED, comment=payload.vehicle_info)
     await db.commit()
     await db.refresh(req)
     return req
@@ -679,7 +683,7 @@ async def unassign_vehicle(db: AsyncSession, project_id: int, request_id: int) -
     req.pickup_cost = None
     req.delivery_date = None
     req.vehicle_assigned_at = None
-    await _log_status_change(db, req.id, old, AssemblyStatus.READY, comment="Отмена назначения машины")
+    await _log_status_change(db, project_id, req.id, old, AssemblyStatus.READY, comment="Отмена назначения машины")
     await db.commit()
     await db.refresh(req)
     return req
@@ -741,6 +745,7 @@ async def ship_request(db: AsyncSession, project_id: int, request_id: int) -> As
     # 5. Create shipment items
     for item in req.items:
         ship_item = OutboundShipmentItem(
+            project_id=project_id,
             shipment_id=shipment.id,
             nomenclature_id=item.nomenclature_id,
             barcode=item.barcode,
@@ -757,7 +762,7 @@ async def ship_request(db: AsyncSession, project_id: int, request_id: int) -> As
     req.outbound_shipment_id = shipment.id
     req.shipped_at = utcnow()
     req.status = AssemblyStatus.SHIPPED
-    await _log_status_change(db, req.id, old, AssemblyStatus.SHIPPED)
+    await _log_status_change(db, project_id, req.id, old, AssemblyStatus.SHIPPED)
 
     await db.commit()
     await db.refresh(req)
@@ -823,7 +828,7 @@ async def cancel_request(db: AsyncSession, project_id: int, request_id: int) -> 
         req.shipped_at = None
 
     req.status = AssemblyStatus.CANCELLED
-    await _log_status_change(db, req.id, current, AssemblyStatus.CANCELLED)
+    await _log_status_change(db, project_id, req.id, current, AssemblyStatus.CANCELLED)
     await db.commit()
     await db.refresh(req)
 
@@ -883,7 +888,9 @@ async def deliver_request(
     _check_transition(AssemblyStatus(req.status), AssemblyStatus.DELIVERED)
     old = req.status
     req.status = AssemblyStatus.DELIVERED
-    await _log_status_change(db, req.id, old, AssemblyStatus.DELIVERED, changed_by=changed_by, comment=comment)
+    await _log_status_change(
+        db, project_id, req.id, old, AssemblyStatus.DELIVERED, changed_by=changed_by, comment=comment
+    )
     await db.commit()
     await db.refresh(req)
     return req
@@ -964,6 +971,7 @@ async def refresh_from_fbo(
             # New barcode - resolve nomenclature
             nom = await _resolve_barcode(db, project_id, barcode)
             new_item = AssemblyRequestItem(
+                project_id=project_id,
                 assembly_request_id=req.id,
                 nomenclature_id=nom.id,
                 barcode=barcode,

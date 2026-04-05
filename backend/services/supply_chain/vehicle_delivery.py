@@ -223,6 +223,7 @@ async def add_items_to_vehicle(
 
         # Create CostOrderItem
         cost_item = CostOrderItem(
+            project_id=project_id,
             order_no=vehicle.order_no,
             barcode=fo_item.barcode,
             subject=subject,
@@ -639,6 +640,7 @@ async def _create_inbound_from_vehicle(
         try:
             nom = await _resolve_barcode(db, project_id, cost_item.barcode)
             item = InboundReceiptItem(
+                project_id=project_id,
                 receipt_id=receipt.id,
                 nomenclature_id=nom.id,
                 barcode=cost_item.barcode,

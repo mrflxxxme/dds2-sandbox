@@ -89,6 +89,7 @@ async def create_factory_order(db: AsyncSession, project_id: int, data: FactoryO
     if data.items:
         for item_data in data.items:
             item = FactoryOrderItem(
+                project_id=project_id,
                 factory_order_id=order.id,
                 barcode=item_data.barcode,
                 subject=item_data.subject,
@@ -150,6 +151,7 @@ async def add_items(
     created = []
     for item_data in items:
         item = FactoryOrderItem(
+            project_id=project_id,
             factory_order_id=order.id,
             barcode=item_data.barcode,
             subject=item_data.subject,
@@ -231,6 +233,7 @@ async def split_to_vehicles(
 
         # Create CostOrderItem linked to factory_order_item
         cost_item = CostOrderItem(
+            project_id=project_id,
             order_no=vehicle.order_no,
             barcode=fo_item.barcode,
             subject=fo_item.subject,

@@ -42,6 +42,9 @@ repos:
         files: ^backend/
         types: [python]
 
+  # ─── Mypy — runs in CI only (host Python 3.14 incompatible with pydantic-core build) ───
+  # See .github/workflows/test.yml → mypy job (Python 3.11)
+
   # ─── DDS convention checks (local) ─────────────────────────────────
   - repo: local
     hooks:

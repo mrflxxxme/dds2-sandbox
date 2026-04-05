@@ -92,6 +92,7 @@ class WbFboSupplyItem(Base):
     __tablename__ = "wb_fbo_supply_items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     supply_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey("wb_fbo_supplies.id", ondelete="CASCADE"),
@@ -108,4 +109,7 @@ class WbFboSupplyItem(Base):
     # Relationships
     supply: Mapped["WbFboSupply"] = relationship(back_populates="items")
 
-    __table_args__ = (Index("ix_wb_fbo_supply_items_supply_id", "supply_id"),)
+    __table_args__ = (
+        Index("ix_wb_fbo_supply_items_project_id", "project_id"),
+        Index("ix_wb_fbo_supply_items_supply_id", "supply_id"),
+    )

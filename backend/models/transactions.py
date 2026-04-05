@@ -2,21 +2,30 @@
 Transaction models: Transaction, CategoryChangeLog, ImportLog.
 """
 
-from datetime import datetime, timezone
-
-from backend.utils.time import utcnow
+from datetime import datetime
 from decimal import Decimal
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import (
-    String, Integer, Boolean, DateTime, Numeric, Text,
-    ForeignKey, Index, Enum as SAEnum,
+    Boolean,
+    DateTime,
+    Enum as SAEnum,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
 from backend.models.enums import EventType2
 from backend.models.mixins import SoftDeleteMixin
+from backend.utils.time import utcnow
+
+if TYPE_CHECKING:
+    from backend.models.refs import Account
 
 
 class Transaction(Base, SoftDeleteMixin):
@@ -28,32 +37,32 @@ class Transaction(Base, SoftDeleteMixin):
     bank: Mapped[str] = mapped_column(String(20), nullable=False)
     account: Mapped[str] = mapped_column(String(50), ForeignKey("accounts.account"), nullable=False)
     currency: Mapped[str] = mapped_column(String(10), nullable=False)
-    counterparty: Mapped[Optional[str]] = mapped_column(String(300))
-    inn: Mapped[Optional[str]] = mapped_column(String(20))
-    counterparty_account: Mapped[Optional[str]] = mapped_column(String(50))
-    purpose: Mapped[Optional[str]] = mapped_column(Text)
+    counterparty: Mapped[str | None] = mapped_column(String(300))
+    inn: Mapped[str | None] = mapped_column(String(20))
+    counterparty_account: Mapped[str | None] = mapped_column(String(50))
+    purpose: Mapped[str | None] = mapped_column(Text)
     income: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
     expense: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
     txn_id: Mapped[str] = mapped_column(String(300), unique=True, nullable=False)
-    cp_key: Mapped[Optional[str]] = mapped_column(String(100))
-    net: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2))
+    cp_key: Mapped[str | None] = mapped_column(String(100))
+    net: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     is_internal: Mapped[bool] = mapped_column(Boolean, default=False)
-    event_type: Mapped[Optional[str]] = mapped_column(String(30))
-    is_cashflow: Mapped[Optional[int]] = mapped_column(Integer)
-    cat_lvl1: Mapped[Optional[str]] = mapped_column(String(100))
-    cat_lvl2: Mapped[Optional[str]] = mapped_column(String(100))
-    order_id: Mapped[Optional[str]] = mapped_column(String(100))
-    status: Mapped[Optional[str]] = mapped_column(String(20))
-    account_text: Mapped[Optional[str]] = mapped_column(String(50))
+    event_type: Mapped[str | None] = mapped_column(String(30))
+    is_cashflow: Mapped[int | None] = mapped_column(Integer)
+    cat_lvl1: Mapped[str | None] = mapped_column(String(100))
+    cat_lvl2: Mapped[str | None] = mapped_column(String(100))
+    order_id: Mapped[str | None] = mapped_column(String(100))
+    status: Mapped[str | None] = mapped_column(String(20))
+    account_text: Mapped[str | None] = mapped_column(String(50))
     is_fx: Mapped[bool] = mapped_column(Boolean, default=False)
-    event_type2: Mapped[Optional[str]] = mapped_column(SAEnum(EventType2))
+    event_type2: Mapped[str | None] = mapped_column(SAEnum(EventType2))
     is_cashflow2: Mapped[int] = mapped_column(Integer, default=1)
-    cat_lvl1_2: Mapped[Optional[str]] = mapped_column(String(100))
-    cat_lvl2_2: Mapped[Optional[str]] = mapped_column(String(100))
+    cat_lvl1_2: Mapped[str | None] = mapped_column(String(100))
+    cat_lvl2_2: Mapped[str | None] = mapped_column(String(100))
     # SRC_IMP enrichment
-    purpose_tag: Mapped[Optional[str]] = mapped_column(String(30))
-    invoice_id: Mapped[Optional[str]] = mapped_column(String(100))
-    annex_id: Mapped[Optional[str]] = mapped_column(String(50))
+    purpose_tag: Mapped[str | None] = mapped_column(String(30))
+    invoice_id: Mapped[str | None] = mapped_column(String(100))
+    annex_id: Mapped[str | None] = mapped_column(String(50))
 
     account_ref: Mapped[Optional["Account"]] = relationship(back_populates="transactions", foreign_keys=[account])
 
@@ -76,14 +85,17 @@ class CategoryChangeLog(Base):
     __tablename__ = "category_change_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
     txn_id: Mapped[str] = mapped_column(String(300), nullable=False)
     changed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
-    changed_by: Mapped[Optional[str]] = mapped_column(String(100))
-    old_cat_lvl1: Mapped[Optional[str]] = mapped_column(String(100))
-    old_cat_lvl2: Mapped[Optional[str]] = mapped_column(String(100))
-    new_cat_lvl1: Mapped[Optional[str]] = mapped_column(String(100))
-    new_cat_lvl2: Mapped[Optional[str]] = mapped_column(String(100))
+    changed_by: Mapped[str | None] = mapped_column(String(100))
+    old_cat_lvl1: Mapped[str | None] = mapped_column(String(100))
+    old_cat_lvl2: Mapped[str | None] = mapped_column(String(100))
+    new_cat_lvl1: Mapped[str | None] = mapped_column(String(100))
+    new_cat_lvl2: Mapped[str | None] = mapped_column(String(100))
     scope: Mapped[str] = mapped_column(String(20))  # 'txn' or 'cp'
+
+    __table_args__ = (Index("ix_category_change_log_project_id", "project_id"),)
 
 
 class ImportLog(Base):
@@ -98,5 +110,5 @@ class ImportLog(Base):
     rows_inserted: Mapped[int] = mapped_column(Integer, default=0)
     rows_skipped: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(20), default="OK")
-    error_msg: Mapped[Optional[str]] = mapped_column(Text)
-    file_url: Mapped[Optional[str]] = mapped_column(String(500))  # MinIO object path
+    error_msg: Mapped[str | None] = mapped_column(Text)
+    file_url: Mapped[str | None] = mapped_column(String(500))  # MinIO object path

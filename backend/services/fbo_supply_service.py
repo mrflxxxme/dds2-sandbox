@@ -572,7 +572,7 @@ async def get_fbo_supply_items(
                 offset=0,
             )
             if goods:
-                await _upsert_supply_items_fbw(db, supply.id, wb_id_int, goods)
+                await _upsert_supply_items_fbw(db, project_id, supply.id, wb_id_int, goods)
 
             # Also fetch detail (warehouse_name, qty) if missing
             if not supply.warehouse_name:
@@ -786,6 +786,7 @@ def _update_supply_from_fbw_detail(supply: WbFboSupply, detail: dict) -> None:
 
 async def _upsert_supply_items_fbw(
     db: AsyncSession,
+    project_id: int,
     supply_id: int,
     wb_supply_id_int: int,
     goods: list[dict],
@@ -809,6 +810,7 @@ async def _upsert_supply_items_fbw(
         vendor_code = good.get("vendorCode", "")
 
         item = WbFboSupplyItem(
+            project_id=project_id,
             supply_id=supply_id,
             # FBW has no order IDs — use composite key
             wb_order_id=f"{wb_supply_id_int}_{barcode}",

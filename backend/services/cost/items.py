@@ -143,6 +143,7 @@ async def upload_order_items(
         total_cny_unit = total_rub_unit / order.rate_cny if order.rate_cny > 0 else Decimal(0)
 
         item = CostOrderItem(
+            project_id=project_id,
             order_no=order_no,
             barcode=bc,
             subject=subject,

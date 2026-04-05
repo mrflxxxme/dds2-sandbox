@@ -173,6 +173,7 @@ async def setup_test_data(db_session):
     from backend.models.wb_fbo import WbFboSupplyItem
 
     fbo_item = WbFboSupplyItem(
+        project_id=PROJECT_ID,
         supply_id=fbo.id,
         wb_order_id="ORD-ASM-1",
         barcode=TEST_BARCODE_1,

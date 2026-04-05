@@ -1,0 +1,117 @@
+# pyproject.toml — DDS project (mypy configuration)
+# Other tools (ruff) configured in ruff.toml
+
+[tool.mypy]
+python_version = "3.11"
+plugins = ["pydantic.mypy", "sqlalchemy.ext.mypy.plugin"]
+
+# ── Global defaults (relaxed — strict per-module below) ──────────────
+warn_return_any = false
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = false               # some ignores only trigger in strict
+show_error_codes = true
+show_column_numbers = true
+pretty = true
+
+# Non-strict dirs: don't chase imports outside services/models
+follow_imports = "silent"
+
+# ── Strict overrides for core business logic ─────────────────────────
+# Phase 1: check_untyped_defs=true + disallow_untyped_defs=false
+# Phase 2 (gradual): enable disallow_untyped_defs per-file as annotations added
+[[tool.mypy.overrides]]
+module = [
+    "backend.services.*",
+    "backend.models.*",
+]
+disallow_untyped_defs = false              # Phase 2: flip to true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = false        # FastAPI decorators are untyped
+no_implicit_optional = true
+strict_equality = true
+warn_return_any = true
+
+# ── Legacy files with too many errors — suppress for now ─────────────
+# TODO: Remove overrides one-by-one as files get properly annotated.
+# Track progress: start with smallest files, add types, remove from list.
+[[tool.mypy.overrides]]
+module = [
+    # AI subsystem (41 errors originally)
+    "backend.services.ai.executor",
+    "backend.services.ai.agent",
+    "backend.services.ai.agents.base",
+    "backend.services.ai.orchestrator",
+    "backend.services.ai.llm_client",
+    # Planning (40+ errors)
+    "backend.services.planning.customs",
+    "backend.services.planning.crud",
+    "backend.services.planning.fact_links",
+    "backend.services.planning.wb",
+    "backend.services.planning.cashflow",
+    "backend.services.planning.brand_plan",
+    # Reports / BDR / OPIU
+    "backend.services.reports.dds",
+    "backend.services.reports.balance",
+    "backend.services.reports.queries",
+    "backend.services.opiu_service",
+    "backend.services.opiu_helpers",
+    "backend.services.wb_bdr_helpers",
+    "backend.services.bdr_enrichment",
+    # Warehouse / stock
+    "backend.services.warehouse_stock_service",
+    "backend.services.warehouse_stock_engine",
+    "backend.services.warehouse_outbound",
+    "backend.services.warehouse_inbound",
+    "backend.services.fbo_supply_service",
+    # Cost
+    "backend.services.cost.orders",
+    "backend.services.cost.items",
+    "backend.services.cost.helpers",
+    "backend.services.cost.duty",
+    "backend.services.cost.nomenclature",
+    # Funnel
+    "backend.services.funnel.queries_grouping",
+    "backend.services.funnel.cost_overrides",
+    "backend.services.funnel.wb_advertising_api",
+    "backend.services.funnel.capital",
+    "backend.services.funnel.bdr_rates",
+    "backend.services.funnel.anomalies",
+    "backend.services.funnel.product_trends",
+    "backend.services.funnel.backfill",
+    "backend.services.funnel.queries",
+    "backend.services.funnel.sync",
+    # Other services
+    "backend.services.refs_service",
+    "backend.services.assembly_service",
+    "backend.services.transactions_service",
+    "backend.services.supply_chain.factory_orders",
+    "backend.services.wb_finance_sync",
+    "backend.services.health_check_service",
+    "backend.services.settings_service",
+    "backend.services.integrations_service",
+    "backend.services.fx_service",
+    "backend.services.stock_forecast_service",
+    "backend.services.auto_categorize",
+    "backend.services.telegram_service",
+]
+ignore_errors = true
+
+# ── Third-party libraries without stubs ──────────────────────────────
+# Only libraries actually imported in checked files (services/, models/)
+[[tool.mypy.overrides]]
+module = [
+    "anthropic.*",
+    "jose.*",
+    "passlib.*",
+    "pandas.*",
+    "aiohttp.*",
+]
+ignore_missing_imports = true
+
+# ── Pydantic plugin settings ─────────────────────────────────────────
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true

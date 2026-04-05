@@ -86,6 +86,7 @@ class CostOrder(Base, SoftDeleteMixin):
 class CostOrderItem(Base):
     __tablename__ = "cost_order_items"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     order_no: Mapped[str] = mapped_column(String(50), ForeignKey("cost_orders.order_no"), nullable=False)
     barcode: Mapped[str] = mapped_column(String(50), nullable=False)
     subject: Mapped[str | None] = mapped_column(String(100))
@@ -106,4 +107,7 @@ class CostOrderItem(Base):
     unrecognized: Mapped[bool] = mapped_column(Boolean, default=False)
     factory_order_item_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("factory_order_items.id"))
     order: Mapped["CostOrder"] = relationship(back_populates="items")
-    __table_args__ = (Index("ix_cost_item_order", "order_no"),)
+    __table_args__ = (
+        Index("ix_cost_item_project_id", "project_id"),
+        Index("ix_cost_item_order", "order_no"),
+    )

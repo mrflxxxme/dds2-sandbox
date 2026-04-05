@@ -22,11 +22,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/post_edit_check.sh",
+            "command": "python3 scripts/hooks/post_edit_check.py",
             "timeout": 5
           }
         ],
-        "description": "Iron rules + project_id + бизнес-логика в роутерах"
+        "description": "Smart DDS conventions: is_deleted, project_id, soft_delete, Float, SQL injection, router logic"
       }
     ],
     "Stop": [
