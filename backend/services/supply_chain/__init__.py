@@ -20,6 +20,7 @@ from backend.services.supply_chain.vehicle_delivery import (
     get_available_items,
     get_supply_chain_overview,
     get_vehicle,
+    get_vehicle_history,
     list_vehicles,
     remove_item_from_vehicle,
     update_vehicle_status,
@@ -42,5 +43,6 @@ __all__ = [
     "remove_item_from_vehicle",
     "get_available_items",
     "update_vehicle_status",
+    "get_vehicle_history",
     "get_supply_chain_overview",
 ]

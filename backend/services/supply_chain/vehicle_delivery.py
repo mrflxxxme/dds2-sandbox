@@ -540,6 +540,9 @@ async def update_vehicle_status(
     if data.target_warehouse_id is not None:
         vehicle.target_warehouse_id = data.target_warehouse_id
 
+    # Capture old status BEFORE change for history
+    old_status = current
+
     result_data: dict = {"ok": True, "order_no": order_no, "status": data.status}
     receipt = None
 
@@ -569,6 +572,20 @@ async def update_vehicle_status(
         vehicle.inbound_receipt_id = receipt.id
 
     vehicle.status = data.status
+
+    # Record status history
+    from backend.models.supply_chain import VehicleStatusHistory
+
+    history = VehicleStatusHistory(
+        project_id=project_id,
+        order_no=order_no,
+        old_status=old_status,
+        new_status=data.status,
+        changed_at=utcnow(),
+        comment=None,
+    )
+    db.add(history)
+
     await db.commit()
 
     if receipt:
@@ -711,3 +728,23 @@ async def get_supply_chain_overview(db: AsyncSession, project_id: int) -> dict:
         "vehicles_by_status": vehicles_by_status,
         "total_items_in_transit": total_items_in_transit,
     }
+
+
+async def get_vehicle_history(
+    db: AsyncSession,
+    project_id: int,
+    order_no: str,
+) -> list:
+    """Get status history for a vehicle, ordered by changed_at."""
+    from backend.models.supply_chain import VehicleStatusHistory
+
+    result = await db.execute(
+        select(VehicleStatusHistory)
+        .where(
+            VehicleStatusHistory.project_id == project_id,
+            VehicleStatusHistory.order_no == order_no,
+        )
+        .order_by(VehicleStatusHistory.changed_at.desc())
+        .limit(200)
+    )
+    return list(result.scalars().all())

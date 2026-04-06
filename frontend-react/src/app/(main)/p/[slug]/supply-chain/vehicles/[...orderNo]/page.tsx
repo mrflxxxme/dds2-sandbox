@@ -3,8 +3,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
-import { formatNumber, formatDate } from '@/lib/utils';
+import { formatNumber, formatDate, formatDateTime } from '@/lib/utils';
 import PageHeader from '@/components/PageHeader';
+import TabLayout from '@/components/TabLayout';
 import type {
     VehicleSchema,
     VehicleStatus,
@@ -12,6 +13,8 @@ import type {
     VehicleItemSchema,
     AvailableItemGroup,
     AvailableItem,
+    VehicleDocument,
+    VehicleStatusHistoryEntry,
 } from '@/types/api';
 import { CONTAINERS } from '@/app/(main)/p/[slug]/container-loader/lib/packer';
 
@@ -36,6 +39,14 @@ const STATUSES: VehicleStatus[] = ['FORMING', 'SHIPPED', 'CUSTOMS', 'DELIVERED']
 const CONTAINER_LABELS: Record<string, string> = {
     truck1: 'Авто 13.5м', truck2: 'Авто 13.6м',
     '20ft': '20 фут', '40ft': '40 фут', '40ft_hc': '40 фут HC',
+};
+
+const DOC_TYPE_LABELS: Record<string, string> = {
+    invoice: 'Инвойс',
+    order: 'Заказ',
+    customs_declaration: 'ДТ',
+    contract: 'Контракт',
+    other: 'Прочее',
 };
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -114,6 +125,7 @@ function SummaryKpi({ label, value, accent }: { label: string; value: string; ac
 function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, onUpdated }: {
     vehicle: VehicleSchema; containerLabel: string; totalBoxes: number; isForming: boolean; onUpdated: () => void;
 }) {
+    const canEdit = vehicle.status === 'FORMING' || vehicle.status === 'SHIPPED';
     const [editing, setEditing] = useState(false);
     const [saving, setSaving] = useState(false);
     const [form, setForm] = useState({
@@ -177,7 +189,7 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, onUpd
                     {vehicle.status === 'CUSTOMS' && (
                         <StatusTransitionButton orderNo={vehicle.order_no} nextStatus="DELIVERED" label="Доставлена" icon="✓" onDone={onUpdated} />
                     )}
-                    {isForming && !editing && (
+                    {canEdit && !editing && (
                         <button className="btn btn-secondary btn-sm" onClick={() => setEditing(true)}>Редактировать</button>
                     )}
                     {editing && (
@@ -223,11 +235,13 @@ export default function VehicleDetailPage() {
     const params = useParams();
     const router = useRouter();
     const slug = params.slug as string;
-    const orderNo = decodeURIComponent(params.orderNo as string);
+    const segments = params.orderNo as string[];
+    const orderNo = segments.map(decodeURIComponent).join('/');
 
     const [vehicle, setVehicle] = useState<VehicleSchema | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    const [tab, setTab] = useState('main');
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -279,55 +293,81 @@ export default function VehicleDetailPage() {
             {/* Timeline */}
             <Timeline status={vehicle.status as VehicleStatus} />
 
-            {/* Info card — editable fields + action buttons */}
-            <VehicleInfoCard vehicle={vehicle} containerLabel={containerLabel} totalBoxes={totalBoxes} isForming={isForming} onUpdated={load} />
+            {/* Tabs */}
+            <TabLayout
+                tabs={[
+                    { key: 'main', label: 'Основное' },
+                    { key: 'documents', label: 'Документы' },
+                    { key: 'history', label: 'История' },
+                ]}
+                active={tab}
+                onChange={setTab}
+            />
 
-            {/* Cost summary */}
-            {cs && (
-                <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
-                        <div style={{ textAlign: 'center' }}>
-                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Товар</div>
-                            <div style={{ fontSize: 15, fontWeight: 600 }}>{formatNumber(Number(cs.total_cost_rub), 0)} ₽</div>
+            {/* Tab: Main */}
+            {tab === 'main' && (
+                <>
+                    {/* Info card — editable fields + action buttons */}
+                    <VehicleInfoCard vehicle={vehicle} containerLabel={containerLabel} totalBoxes={totalBoxes} isForming={isForming} onUpdated={load} />
+
+                    {/* Cost summary */}
+                    {cs && (
+                        <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
+                                <div style={{ textAlign: 'center' }}>
+                                    <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Товар</div>
+                                    <div style={{ fontSize: 15, fontWeight: 600 }}>{formatNumber(Number(cs.total_cost_rub), 0)} ₽</div>
+                                </div>
+                                <div style={{ textAlign: 'center' }}>
+                                    <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Доставка</div>
+                                    <div style={{ fontSize: 15, fontWeight: 600 }}>{formatNumber(Number(cs.total_delivery_rub), 0)} ₽</div>
+                                </div>
+                                <div style={{ textAlign: 'center' }}>
+                                    <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Пошлина</div>
+                                    <div style={{ fontSize: 15, fontWeight: 600 }}>{formatNumber(Number(cs.total_duty_rub), 0)} ₽</div>
+                                </div>
+                                <div style={{ textAlign: 'center' }}>
+                                    <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>НДС</div>
+                                    <div style={{ fontSize: 15, fontWeight: 600 }}>{formatNumber(Number(cs.total_vat_rub), 0)} ₽</div>
+                                </div>
+                                <div style={{ textAlign: 'center' }}>
+                                    <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Итого</div>
+                                    <div style={{ fontSize: 17, fontWeight: 700, color: 'var(--color-primary)' }}>{formatNumber(Number(cs.total_rub), 0)} ₽</div>
+                                </div>
+                            </div>
                         </div>
-                        <div style={{ textAlign: 'center' }}>
-                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Доставка</div>
-                            <div style={{ fontSize: 15, fontWeight: 600 }}>{formatNumber(Number(cs.total_delivery_rub), 0)} ₽</div>
-                        </div>
-                        <div style={{ textAlign: 'center' }}>
-                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Пошлина</div>
-                            <div style={{ fontSize: 15, fontWeight: 600 }}>{formatNumber(Number(cs.total_duty_rub), 0)} ₽</div>
-                        </div>
-                        <div style={{ textAlign: 'center' }}>
-                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>НДС</div>
-                            <div style={{ fontSize: 15, fontWeight: 600 }}>{formatNumber(Number(cs.total_vat_rub), 0)} ₽</div>
-                        </div>
-                        <div style={{ textAlign: 'center' }}>
-                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Итого</div>
-                            <div style={{ fontSize: 17, fontWeight: 700, color: 'var(--color-primary)' }}>{formatNumber(Number(cs.total_rub), 0)} ₽</div>
-                        </div>
+                    )}
+
+                    {/* Capacity bar */}
+                    <CapacityBar vehicle={vehicle} />
+
+                    {/* Items table (TOP) */}
+                    <div className="glass-card" style={{ padding: 16, overflow: 'auto' }}>
+                        <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>
+                            Позиции ({vehicle.items.length})
+                        </h3>
+                        {vehicle.items.length === 0 ? (
+                            <div style={{ textAlign: 'center', padding: 24, opacity: 0.5 }}>Нет позиций. Добавьте товары ниже.</div>
+                        ) : (
+                            <ItemsTable items={vehicle.items} isForming={isForming} vehicleOrderNo={vehicle.order_no} totalQty={vehicle.total_qty} totalCny={vehicle.total_cny} onRemoved={load} />
+                        )}
                     </div>
-                </div>
+
+                    {/* Add items (FORMING only) — collapsible */}
+                    {isForming && (
+                        <CollapsibleAddItems vehicleOrderNo={vehicle.order_no} onAdded={load} />
+                    )}
+                </>
             )}
 
-            {/* Capacity bar */}
-            <CapacityBar vehicle={vehicle} />
+            {/* Tab: Documents */}
+            {tab === 'documents' && (
+                <DocumentsTab orderNo={vehicle.order_no} />
+            )}
 
-            {/* Items table (TOP) */}
-            <div className="glass-card" style={{ padding: 16, overflow: 'auto' }}>
-                <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>
-                    Позиции ({vehicle.items.length})
-                </h3>
-                {vehicle.items.length === 0 ? (
-                    <div style={{ textAlign: 'center', padding: 24, opacity: 0.5 }}>Нет позиций. Добавьте товары ниже.</div>
-                ) : (
-                    <ItemsTable items={vehicle.items} isForming={isForming} vehicleOrderNo={vehicle.order_no} totalQty={vehicle.total_qty} totalCny={vehicle.total_cny} onRemoved={load} />
-                )}
-            </div>
-
-            {/* Add items (FORMING only) — collapsible */}
-            {isForming && (
-                <CollapsibleAddItems vehicleOrderNo={vehicle.order_no} onAdded={load} />
+            {/* Tab: History */}
+            {tab === 'history' && (
+                <HistoryTab orderNo={vehicle.order_no} />
             )}
         </div>
     );
@@ -915,6 +955,261 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
                     )}
                 </>
             )}
+        </div>
+    );
+}
+
+// ─── Documents Tab ────────────────────────────────────────────────────────
+
+function formatFileSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function DocumentsTab({ orderNo }: { orderNo: string }) {
+    const [docs, setDocs] = useState<VehicleDocument[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [uploading, setUploading] = useState(false);
+    const [docType, setDocType] = useState('invoice');
+    const [note, setNote] = useState('');
+    const [file, setFile] = useState<File | null>(null);
+    const [deletingId, setDeletingId] = useState<number | null>(null);
+
+    const loadDocs = useCallback(async () => {
+        setLoading(true);
+        setError('');
+        try {
+            setDocs(await api.getVehicleDocuments(orderNo));
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+        }
+        setLoading(false);
+    }, [orderNo]);
+
+    useEffect(() => { loadDocs(); }, [loadDocs]);
+
+    const handleUpload = async () => {
+        if (!file) return;
+        setUploading(true);
+        try {
+            await api.uploadVehicleDocument(orderNo, file, docType, note || undefined);
+            setFile(null);
+            setNote('');
+            setDocType('invoice');
+            loadDocs();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка загрузки');
+        }
+        setUploading(false);
+    };
+
+    const handleDownload = async (doc: VehicleDocument) => {
+        try {
+            const blob = await api.downloadVehicleDocument(orderNo, doc.id);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = doc.filename;
+            a.click();
+            URL.revokeObjectURL(url);
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка скачивания');
+        }
+    };
+
+    const handleDelete = async (docId: number) => {
+        if (!confirm('Удалить документ?')) return;
+        setDeletingId(docId);
+        try {
+            await api.deleteVehicleDocument(orderNo, docId);
+            loadDocs();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка удаления');
+        }
+        setDeletingId(null);
+    };
+
+    const inputStyle: React.CSSProperties = {
+        padding: '8px 12px', borderRadius: 8,
+        border: '1px solid var(--color-border)', background: 'var(--color-bg)',
+        color: 'var(--color-text)', fontSize: 13,
+    };
+
+    return (
+        <div>
+            {/* Upload area */}
+            <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+                <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 12 }}>
+                    Загрузить документ
+                </div>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                    <div>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Тип документа</div>
+                        <select value={docType} onChange={e => setDocType(e.target.value)} style={inputStyle}>
+                            {Object.entries(DOC_TYPE_LABELS).map(([k, v]) => (
+                                <option key={k} value={k}>{v}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <div style={{ flex: 1, minWidth: 200 }}>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Файл</div>
+                        <input type="file" onChange={e => setFile(e.target.files?.[0] || null)} style={{ fontSize: 13 }} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 150 }}>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Заметка</div>
+                        <input value={note} onChange={e => setNote(e.target.value)} placeholder="Необязательно" style={{ ...inputStyle, width: '100%' }} />
+                    </div>
+                    <button className="btn btn-primary btn-sm" onClick={handleUpload} disabled={!file || uploading}>
+                        {uploading ? 'Загрузка...' : 'Загрузить'}
+                    </button>
+                </div>
+            </div>
+
+            {/* Documents list */}
+            <div className="glass-card" style={{ padding: 20 }}>
+                {loading ? (
+                    <div style={{ textAlign: 'center', padding: 32 }}><div className="spinner" style={{ margin: '0 auto' }} /></div>
+                ) : error ? (
+                    <div style={{ color: 'var(--color-danger)', padding: 16 }}>{error}</div>
+                ) : docs.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: 32, color: 'var(--color-text-muted)' }}>Нет документов</div>
+                ) : (
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                        <thead>
+                            <tr style={{ borderBottom: '2px solid var(--color-border)' }}>
+                                <th style={{ textAlign: 'left', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Файл</th>
+                                <th style={{ textAlign: 'left', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Тип</th>
+                                <th style={{ textAlign: 'right', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Размер</th>
+                                <th style={{ textAlign: 'left', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Заметка</th>
+                                <th style={{ textAlign: 'left', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Дата</th>
+                                <th style={{ width: 100, padding: '8px 6px' }} />
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {docs.map(doc => (
+                                <tr key={doc.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                    <td style={{ padding: '8px 6px', fontWeight: 500 }}>{doc.filename}</td>
+                                    <td style={{ padding: '8px 6px' }}>
+                                        <span style={{
+                                            display: 'inline-block', padding: '2px 10px', borderRadius: 12,
+                                            fontSize: 11, fontWeight: 500, background: 'var(--color-bg-secondary)',
+                                            color: 'var(--color-text-muted)',
+                                        }}>
+                                            {DOC_TYPE_LABELS[doc.doc_type] || doc.doc_type}
+                                        </span>
+                                    </td>
+                                    <td style={{ padding: '8px 6px', textAlign: 'right', color: 'var(--color-text-muted)' }}>{formatFileSize(doc.file_size)}</td>
+                                    <td style={{ padding: '8px 6px', color: 'var(--color-text-muted)', fontSize: 12 }}>{doc.note || '—'}</td>
+                                    <td style={{ padding: '8px 6px', color: 'var(--color-text-muted)', fontSize: 12 }}>{formatDate(doc.created_at)}</td>
+                                    <td style={{ padding: '8px 6px', textAlign: 'right' }}>
+                                        <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
+                                            <button className="btn btn-secondary btn-sm" onClick={() => handleDownload(doc)} style={{ fontSize: 11, padding: '3px 8px' }}>
+                                                Скачать
+                                            </button>
+                                            <button className="btn btn-danger btn-sm" onClick={() => handleDelete(doc.id)} disabled={deletingId === doc.id}
+                                                style={{ fontSize: 11, padding: '3px 8px', opacity: deletingId === doc.id ? 0.4 : 1 }}>
+                                                {deletingId === doc.id ? '...' : 'Удалить'}
+                                            </button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                )}
+            </div>
+        </div>
+    );
+}
+
+// ─── History Tab ──────────────────────────────────────────────────────────
+
+function HistoryTab({ orderNo }: { orderNo: string }) {
+    const [entries, setEntries] = useState<VehicleStatusHistoryEntry[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+
+    const loadHistory = useCallback(async () => {
+        setLoading(true);
+        setError('');
+        try {
+            const data = await api.getVehicleHistory(orderNo);
+            // Most recent first
+            setEntries(data.sort((a, b) => new Date(b.changed_at).getTime() - new Date(a.changed_at).getTime()));
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+        }
+        setLoading(false);
+    }, [orderNo]);
+
+    useEffect(() => { loadHistory(); }, [loadHistory]);
+
+    if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}><div className="spinner" style={{ margin: '0 auto' }} /></div>;
+    if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error}</div>;
+    if (entries.length === 0) return <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)' }}>Нет записей</div>;
+
+    return (
+        <div className="glass-card" style={{ padding: 24 }}>
+            <div style={{ position: 'relative', paddingLeft: 28 }}>
+                {/* Vertical line */}
+                <div style={{
+                    position: 'absolute', left: 7, top: 8, bottom: 8, width: 2,
+                    background: 'var(--color-border)',
+                }} />
+
+                {entries.map((entry, i) => {
+                    const newStatus = entry.new_status as VehicleStatus;
+                    const oldStatus = entry.old_status as VehicleStatus | null;
+                    const color = STATUS_COLORS[newStatus] || 'var(--color-text-muted)';
+
+                    return (
+                        <div key={entry.id} style={{ position: 'relative', marginBottom: i < entries.length - 1 ? 24 : 0 }}>
+                            {/* Dot */}
+                            <div style={{
+                                position: 'absolute', left: -24, top: 4,
+                                width: 12, height: 12, borderRadius: '50%',
+                                background: color, border: '2px solid var(--color-bg-card)',
+                                boxShadow: `0 0 0 2px ${color}33`,
+                            }} />
+
+                            {/* Content */}
+                            <div>
+                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>
+                                    {formatDateTime(entry.changed_at)}
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: entry.comment ? 4 : 0 }}>
+                                    {oldStatus && (
+                                        <>
+                                            <span style={{
+                                                display: 'inline-block', padding: '2px 10px', borderRadius: 12,
+                                                fontSize: 11, fontWeight: 600, color: '#fff',
+                                                background: STATUS_COLORS[oldStatus] || '#6b7280',
+                                            }}>
+                                                {STATUS_LABELS[oldStatus] || entry.old_status}
+                                            </span>
+                                            <span style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>→</span>
+                                        </>
+                                    )}
+                                    <span style={{
+                                        display: 'inline-block', padding: '2px 10px', borderRadius: 12,
+                                        fontSize: 11, fontWeight: 600, color: '#fff',
+                                        background: STATUS_COLORS[newStatus] || '#6b7280',
+                                    }}>
+                                        {STATUS_LABELS[newStatus] || entry.new_status}
+                                    </span>
+                                </div>
+                                {entry.comment && (
+                                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                                        {entry.comment}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
         </div>
     );
 }

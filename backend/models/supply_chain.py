@@ -1,15 +1,16 @@
 """
-Supply Chain models: FactoryOrder, FactoryOrderItem.
+Supply Chain models: FactoryOrder, FactoryOrderItem, VehicleDocument, VehicleStatusHistory.
 
 Represents factory orders (1 order = 1 factory) that get split
 into vehicles (CostOrder) for delivery.
 """
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
     Date,
+    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -22,6 +23,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
 from backend.models.mixins import SoftDeleteMixin, TimestampMixin
+from backend.utils.time import utcnow
 
 
 class FactoryOrder(Base, TimestampMixin, SoftDeleteMixin):
@@ -76,4 +78,52 @@ class FactoryOrderItem(Base):
     __table_args__ = (
         Index("ix_factory_order_items_project_id", "project_id"),
         Index("ix_factory_order_items_order_id", "factory_order_id"),
+    )
+
+
+# ─── Vehicle Documents ──────────────────────────────────────────────────────
+
+
+class VehicleDocument(Base, TimestampMixin, SoftDeleteMixin):
+    """
+    Document attached to a vehicle (CostOrder).
+    Files stored in MinIO, metadata in DB.
+    """
+
+    __tablename__ = "vehicle_documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    order_no: Mapped[str] = mapped_column(String(50), nullable=False)
+    doc_type: Mapped[str] = mapped_column(String(30), nullable=False, default="other")
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    file_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    note: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("ix_vehicle_documents_project_id", "project_id"),
+        Index("ix_vehicle_documents_order_no", "order_no"),
+    )
+
+
+# ─── Vehicle Status History ─────────────────────────────────────────────────
+
+
+class VehicleStatusHistory(Base):
+    """Audit log for vehicle (CostOrder) status transitions."""
+
+    __tablename__ = "vehicle_status_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    order_no: Mapped[str] = mapped_column(String(50), nullable=False)
+    old_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    new_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_vehicle_status_history_project_id", "project_id"),
+        Index("ix_vehicle_status_history_order_no", "order_no"),
     )

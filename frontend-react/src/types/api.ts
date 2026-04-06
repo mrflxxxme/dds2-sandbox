@@ -1659,6 +1659,29 @@ export interface AvailableItem {
   weight_kg?: string;
 }
 
+// ─── Vehicle Documents & History ────────────────────────────────────────────
+
+export interface VehicleDocument {
+  id: number;
+  project_id: number;
+  order_no: string;
+  doc_type: string;
+  filename: string;
+  file_size: number;
+  note: string | null;
+  created_at: string;
+}
+
+export interface VehicleStatusHistoryEntry {
+  id: number;
+  project_id: number;
+  order_no: string;
+  old_status: string | null;
+  new_status: string;
+  changed_at: string;
+  comment: string | null;
+}
+
 // ─── AI Chat ──────────────────────────────────────────────────────────────────
 
 export interface AiConversation {

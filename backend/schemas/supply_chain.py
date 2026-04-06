@@ -243,3 +243,39 @@ class SplitToVehiclesRequest(BaseModel):
     """Request to split factory order items across vehicles."""
 
     assignments: list[SplitItem]
+
+
+# --- Vehicle Documents ---
+
+
+class VehicleDocumentSchema(BaseModel):
+    """Vehicle document metadata (file stored in MinIO)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    order_no: str
+    doc_type: str
+    filename: str
+    file_url: str
+    file_size: int = 0
+    note: str | None = None
+    created_at: datetime | None = None
+
+
+# --- Vehicle Status History ---
+
+
+class VehicleStatusHistorySchema(BaseModel):
+    """Audit log entry for vehicle status transition."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    order_no: str
+    old_status: str | None = None
+    new_status: str
+    changed_at: datetime
+    comment: str | None = None

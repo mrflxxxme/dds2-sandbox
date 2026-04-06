@@ -14,6 +14,8 @@ import type {
     SupplyChainOverview,
     SplitItem,
     MessageResponse,
+    VehicleDocument,
+    VehicleStatusHistoryEntry,
 } from '@/types/api';
 
 export function addSupplyChainMethods(api: ApiClient) {
@@ -79,6 +81,36 @@ export function addSupplyChainMethods(api: ApiClient) {
         },
         getAvailableItems() {
             return api.request<AvailableItemGroup[]>('GET', '/api/v1/supply-chain/vehicles/available-items');
+        },
+
+        // ─── Vehicle Documents ──────────────────────────────────────
+        getVehicleDocuments(orderNo: string) {
+            return api.request<VehicleDocument[]>('GET', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/documents`);
+        },
+        uploadVehicleDocument(orderNo: string, file: File, docType: string, note?: string) {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('doc_type', docType);
+            if (note) formData.append('note', note);
+            return api.uploadFormData<VehicleDocument>(`/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/documents`, formData);
+        },
+        async downloadVehicleDocument(orderNo: string, docId: number) {
+            const headers: Record<string, string> = {};
+            const token = api.getToken();
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+            const projectId = api.getProjectId();
+            if (projectId) headers['X-Project-Id'] = String(projectId);
+            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/documents/${docId}/download`, { headers });
+            if (!res.ok) throw new Error('Ошибка скачивания');
+            return res.blob();
+        },
+        deleteVehicleDocument(orderNo: string, docId: number) {
+            return api.request<{ ok: boolean }>('DELETE', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/documents/${docId}`);
+        },
+
+        // ─── Vehicle History ────────────────────────────────────────
+        getVehicleHistory(orderNo: string) {
+            return api.request<VehicleStatusHistoryEntry[]>('GET', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/history`);
         },
 
         // ─── Overview ───────────────────────────────────────────────
