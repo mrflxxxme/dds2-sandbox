@@ -10,14 +10,14 @@ on:
     paths:
       - 'requirements*.txt'
       - 'backend/**'
-      - 'frontend-react/src/**'
+      - 'frontend-react/**'
       - '.github/workflows/security.yml'
   pull_request:
     branches: [main]
     paths:
       - 'requirements*.txt'
       - 'backend/**'
-      - 'frontend-react/src/**'
+      - 'frontend-react/**'
 
 jobs:
   pip-audit:

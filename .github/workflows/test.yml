@@ -12,6 +12,7 @@ on:
       - 'requirements-backend.txt'
       - 'docker-compose.yml'
       - 'Dockerfile.backend'
+      - 'frontend-react/**'
   pull_request:
     branches: [main]
     paths:
@@ -19,6 +20,7 @@ on:
       - 'tests/**'
       - 'migrations/**'
       - 'requirements-backend.txt'
+      - 'frontend-react/**'
 
 jobs:
   conventions:
