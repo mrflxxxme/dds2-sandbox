@@ -35,6 +35,18 @@ class FactoryOrderItemCreate(BaseModel):
     note: str | None = None
 
 
+class FactoryOrderItemUpdate(BaseModel):
+    barcode: str | None = None
+    subject: str | None = None
+    article_seller: str | None = None
+    qty: int | None = None
+    price_cny: Decimal | None = None
+    box_size: str | None = None
+    pcs_per_box: int | None = None
+    weight_kg: Decimal | None = None
+    note: str | None = None
+
+
 class FactoryOrderItemSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

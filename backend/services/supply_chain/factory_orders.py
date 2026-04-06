@@ -13,6 +13,7 @@ from backend.models.supply_chain import FactoryOrder, FactoryOrderItem
 from backend.schemas.supply_chain import (
     FactoryOrderCreate,
     FactoryOrderItemCreate,
+    FactoryOrderItemUpdate,
     FactoryOrderUpdate,
     SplitToVehiclesRequest,
 )
@@ -250,3 +251,79 @@ async def split_to_vehicles(
 
     await db.commit()
     return {"ok": True, "created_cost_items": created_cost_items}
+
+
+async def update_item(
+    db: AsyncSession,
+    project_id: int,
+    order_id: int,
+    item_id: int,
+    data: FactoryOrderItemUpdate,
+) -> FactoryOrderItem | None:
+    """Update a single factory order item's fields.
+
+    Validates:
+    - Order belongs to project (P19 cross-tenant safety)
+    - Item belongs to order
+    - If qty changes: new qty >= assigned_qty
+    """
+    order = await get_factory_order(db, project_id, order_id)
+    if not order:
+        return None
+
+    # Find item in order
+    item: FactoryOrderItem | None = None
+    for i in order.items:
+        if i.id == item_id:
+            item = i
+            break
+    if not item:
+        return None
+
+    update_data = data.model_dump(exclude_unset=True)
+
+    # Validate qty change
+    if "qty" in update_data and update_data["qty"] is not None:
+        new_qty = update_data["qty"]
+        if new_qty < item.assigned_qty:
+            raise ValueError(f"Нельзя уменьшить кол-во ниже {item.assigned_qty} " f"(уже распределено по машинам)")
+
+    for field, value in update_data.items():
+        setattr(item, field, value)
+
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+
+async def delete_item(
+    db: AsyncSession,
+    project_id: int,
+    order_id: int,
+    item_id: int,
+) -> bool:
+    """Delete a factory order item (physical delete).
+
+    Validates:
+    - Order belongs to project (P19 cross-tenant safety)
+    - Item belongs to order
+    - assigned_qty == 0 (not distributed to vehicles)
+    """
+    order = await get_factory_order(db, project_id, order_id)
+    if not order:
+        raise ValueError("Factory order not found")
+
+    item: FactoryOrderItem | None = None
+    for i in order.items:
+        if i.id == item_id:
+            item = i
+            break
+    if not item:
+        raise ValueError("Item not found in this order")
+
+    if item.assigned_qty > 0:
+        raise ValueError(f"Нельзя удалить: позиция распределена по машинам " f"({item.assigned_qty} шт.)")
+
+    await db.delete(item)
+    await db.commit()
+    return True
