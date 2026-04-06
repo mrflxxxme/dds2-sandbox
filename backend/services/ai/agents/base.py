@@ -9,6 +9,7 @@ per agent.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -91,7 +92,10 @@ class BaseAgent(ABC):
         ``history`` — prior chat messages for multi-turn context.
         """
         today = utcnow().strftime("%Y-%m-%d")
-        system = self.get_system_prompt(brand=brand, today=today, memory_context=memory_context)
+        # Escape curly braces to prevent .format() injection in system prompts
+        safe_brand = brand.replace("{", "{{").replace("}", "}}") if brand else brand
+        safe_memory = memory_context.replace("{", "{{").replace("}", "}}") if memory_context else memory_context
+        system = self.get_system_prompt(brand=safe_brand, today=today, memory_context=safe_memory)
         tools = self.get_tools()
 
         # Build messages: history + current question
@@ -144,10 +148,10 @@ class BaseAgent(ABC):
                     tokens_used=total_tokens,
                 )
 
-            # ── Tool calls ────────────────────────────────────────
+            # ── Tool calls (parallel execution) ───────────────────
             if response.stop_reason == "tool_use":
                 assistant_content: list[dict] = []
-                tool_results: list[dict] = []
+                tool_calls: list[dict] = []
 
                 for block in response.content:
                     if block.type == "text":
@@ -168,22 +172,26 @@ class BaseAgent(ABC):
                             block.name,
                             _round + 1,
                         )
+                        tool_calls.append({"id": block.id, "name": block.name, "input": block.input})
 
-                        result = await execute_tool(
-                            db,
-                            project_id,
-                            brand,
-                            tax_rate,
-                            block.name,
-                            block.input,
-                        )
-                        tool_results.append(
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": block.id,
-                                "content": result,
-                            }
-                        )
+                # Execute all tool calls in parallel
+                raw_results = await asyncio.gather(
+                    *[execute_tool(db, project_id, brand, tax_rate, tc["name"], tc["input"]) for tc in tool_calls],
+                    return_exceptions=True,
+                )
+
+                tool_results: list[dict] = []
+                for tc, raw in zip(tool_calls, raw_results, strict=False):
+                    if isinstance(raw, Exception):
+                        logger.error("Tool '%s' failed: %s", tc["name"], raw)
+                        raw = f'{{"error": "{raw!s}"}}'
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tc["id"],
+                            "content": raw,
+                        }
+                    )
 
                 messages.append({"role": "assistant", "content": assistant_content})
                 messages.append({"role": "user", "content": tool_results})

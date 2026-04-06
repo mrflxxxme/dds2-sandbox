@@ -34,7 +34,10 @@ async def synthesize(
         parts.append(f"--- Ответ эксперта {idx} ---\n{result.answer}")
     combined = "\n\n".join(parts)
 
-    system = SYNTHESIZER_PROMPT.format(question=question, brand=brand)
+    # Escape curly braces in user input to prevent .format() injection / KeyError
+    safe_question = question.replace("{", "{{").replace("}", "}}")
+    safe_brand = brand.replace("{", "{{").replace("}", "}}") if brand else brand
+    system = SYNTHESIZER_PROMPT.format(question=safe_question, brand=safe_brand)
     messages = [{"role": "user", "content": combined}]
 
     try:
