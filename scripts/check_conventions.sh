@@ -285,6 +285,34 @@ else
 fi
 echo ""
 
+# ─── 17. New services not documented in MAP.md ───────────────────────
+echo "── Check 17: Services not documented in MAP.md ──"
+UNDOCUMENTED=""
+for f in $(find backend/services/ -maxdepth 1 -name "*_service.py" -not -path "*__pycache__*" 2>/dev/null | sort); do
+    basename=$(basename "$f")
+    # Skip backward-compat shims (< 50 lines, just re-exports from package)
+    lines=$(wc -l < "$f" 2>/dev/null || echo 999)
+    if [ "$lines" -lt 50 ]; then continue; fi
+    if ! grep -q "$basename" backend/MAP.md 2>/dev/null; then
+        UNDOCUMENTED="$UNDOCUMENTED\n  $basename"
+    fi
+done
+# Also check service packages (directories with __init__.py)
+for d in $(find backend/services/ -maxdepth 1 -type d -not -name services -not -name __pycache__ -not -name ai 2>/dev/null | sort); do
+    if [ -f "$d/__init__.py" ]; then
+        dirname=$(basename "$d")
+        if ! grep -q "$dirname" backend/MAP.md 2>/dev/null; then
+            UNDOCUMENTED="$UNDOCUMENTED\n  $dirname/"
+        fi
+    fi
+done
+if [ -n "$UNDOCUMENTED" ]; then
+    warn "Services not documented in backend/MAP.md — add entries:$UNDOCUMENTED"
+else
+    ok "All services documented in MAP.md"
+fi
+echo ""
+
 # ─── Summary ─────────────────────────────────────────────────────────
 echo "═══════════════════════════════════════════════════════"
 if [ "$ERRORS" -gt 0 ]; then

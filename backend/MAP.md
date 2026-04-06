@@ -43,7 +43,7 @@
 - Точка входа: `services/ai/orchestrator.py`
 - Агенты: `services/ai/agents/` (analyst, financier, marketer, advertiser, supply_manager, logistics, logistician)
 - Базовый класс: `services/ai/agents/base.py`
-- Tools: `services/ai/tools/` (finance.py, marketing.py, logistics.py, shipping.py, supply.py)
+- Tools: `services/ai/tools/` (finance.py, marketing.py, logistics.py, shipping.py, supply.py, funnel.py, warehouse.py, health.py, planning.py, products.py, reports.py, common.py)
 - Промпты: `services/ai/prompts/`
 - Память (BrandNote): `services/ai/memory.py`
 - LLM клиент: `services/ai/llm_client.py`
@@ -53,6 +53,7 @@
 - CRUD: `services/warehouse_crud.py`
 - Сервис: `services/warehouse_service.py`, `warehouse_stock_service.py`, `warehouse_stock_engine.py`
 - Входящие/исходящие: `services/warehouse_inbound.py`, `services/warehouse_outbound.py`
+- Расчёт потребности: `services/warehouse_need_service.py`
 - FBO поставки WB: `services/fbo_supply_service.py`
 - Гео данные складов: `services/warehouse_geo.py`, `services/warehouse_geo_data.py`
 
@@ -79,7 +80,7 @@ from backend.models.mixins import SoftDeleteMixin
 |---------|-----|
 | Модель таблицы | `models/{domain}.py` + `models/__init__.py` |
 | API endpoint | `routers/` (assembly, auth, cost, fbo_supplies, funnel, import_txn, integrations, monitoring, planning, planning_customs, planning_wb_payouts, projects, refs, reports, reports_stock, reports_wb, telegram, warehouse, ws) |
-| Бизнес-логика | `services/` (domain services + `project_settings_service.py` для мутаций настроек проекта) |
+| Бизнес-логика | `services/` (domain services + `project_settings_service.py` для мутаций настроек проекта). NB: `assembly/` и `fbo_supply/` — пакеты (разбиты из монолитов) |
 | Pydantic schemas | `schemas/` (anomaly, assembly, auth, capital, common, cost, imports, integrations, monitoring, planning, refs, reports, tariff, tax, telegram, transactions, warehouse, wb_fbo) |
 | Импорт файлов / ETL | `etl/` |
 | WB HTTP клиент | `integrations/wb_api.py` |
