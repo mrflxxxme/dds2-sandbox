@@ -1,0 +1,52 @@
+# Auto-merge PR from dev to main after CI passes
+name: Auto Merge
+
+on:
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
+  check_suite:
+    types: [completed]
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  auto-merge:
+    name: Auto-merge dev → main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Only run when the triggering workflow succeeded
+    if: >
+      (github.event_name == 'check_suite' && github.event.check_suite.conclusion == 'success') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Find and auto-merge PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Find open PR from dev to main
+          PR_NUMBER=$(gh pr list --base main --head dev --state open --json number --jq '.[0].number')
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No open PR from dev → main found, skipping"
+            exit 0
+          fi
+
+          echo "Found PR #${PR_NUMBER}"
+
+          # Get PR author to verify it was created by github-actions or repo owner
+          PR_AUTHOR=$(gh pr view "$PR_NUMBER" --json author --jq '.author.login')
+          echo "PR author: ${PR_AUTHOR}"
+
+          if [ "$PR_AUTHOR" != "github-actions" ] && [ "$PR_AUTHOR" != "github-actions[bot]" ] && [ "$PR_AUTHOR" != "vladbydaev37" ]; then
+            echo "PR was not created by auto-pr workflow or repo owner (author: ${PR_AUTHOR}), skipping"
+            exit 0
+          fi
+
+          # Enable auto-merge (will merge when all required checks pass)
+          echo "Enabling auto-merge for PR #${PR_NUMBER}..."
+          gh pr merge "$PR_NUMBER" --auto --merge
