@@ -1,0 +1,4 @@
+# xlsx (SheetJS) — no fix available on npm, 0.20.2+ is SheetJS Pro only
+# Used for Excel export in frontend, not server-side processing
+CVE-2023-30533
+CVE-2024-22363
