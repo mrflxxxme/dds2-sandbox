@@ -4,6 +4,23 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
+
+/** Нормализация габаритов → "60x40x40" */
+const normalizeBoxSize = (s: string): string => s.trim().replace(/[×*,/\\]/g, 'x');
+
+/** Кол-во мест (коробок) для одной позиции */
+const calcBoxes = (qty: number, pcsPerBox: number | null): number =>
+    pcsPerBox && pcsPerBox > 0 ? Math.ceil(qty / pcsPerBox) : 0;
+
+/** Объём одной позиции в м³ */
+const calcVolumeM3 = (boxSize: string, qty: number, pcsPerBox: number | null): number => {
+    if (!boxSize || !qty) return 0;
+    const parts = normalizeBoxSize(boxSize).split('x').map(Number);
+    if (parts.length < 3 || parts.some(isNaN)) return 0;
+    const volPerBox = (parts[0] * parts[1] * parts[2]) / 1_000_000;
+    const boxes = calcBoxes(qty, pcsPerBox);
+    return boxes > 0 ? boxes * volPerBox : 0;
+};
 import PageHeader from '@/components/PageHeader';
 import TabLayout from '@/components/TabLayout';
 import DataTable, { Column } from '@/components/DataTable';
@@ -124,8 +141,9 @@ function FactoryOrdersTab() {
     const [error, setError] = useState('');
     const [showCreate, setShowCreate] = useState(false);
     const [editOrder, setEditOrder] = useState<FactoryOrder | null>(null);
-    const [expandedId, setExpandedId] = useState<number | null>(null);
     const [splitOrderId, setSplitOrderId] = useState<number | null>(null);
+    const router = useRouter();
+    const { slug } = useParams() as { slug: string };
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -174,24 +192,8 @@ function FactoryOrdersTab() {
         }
     };
 
-    const handleRowClick = async (row: FactoryOrder) => {
-        if (expandedId === row.id) {
-            setExpandedId(null);
-            return;
-        }
-        // Load detail with items
-        try {
-            const detail = await api.getFactoryOrder(row.id);
-            const idx = orders.findIndex(o => o.id === row.id);
-            if (idx >= 0) {
-                const updated = [...orders];
-                updated[idx] = detail;
-                setOrders(updated);
-            }
-            setExpandedId(row.id);
-        } catch {
-            setExpandedId(row.id);
-        }
+    const handleRowClick = (row: FactoryOrder) => {
+        router.push(`/p/${slug}/supply-chain/factory-orders/${row.id}`);
     };
 
     const columns: Column[] = [
@@ -210,6 +212,22 @@ function FactoryOrdersTab() {
                 const items = row.items || [];
                 const total = items.reduce((s, i) => s + i.qty, 0);
                 return total > 0 ? formatNumber(total, 0) : '\u2014';
+            },
+        },
+        {
+            key: 'boxes', label: 'Мест', align: 'right',
+            render: (_v: unknown, row: FactoryOrder) => {
+                const items = row.items || [];
+                const total = items.reduce((s, i) => s + calcBoxes(i.qty, i.pcs_per_box), 0);
+                return total > 0 ? formatNumber(total, 0) : '\u2014';
+            },
+        },
+        {
+            key: 'volume', label: 'Объём м³', align: 'right',
+            render: (_v: unknown, row: FactoryOrder) => {
+                const items = row.items || [];
+                const total = items.reduce((s, i) => s + calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box), 0);
+                return total > 0 ? formatNumber(total, 1) : '\u2014';
             },
         },
         {
@@ -268,31 +286,21 @@ function FactoryOrdersTab() {
             const items = o.items || [];
             const totalQty = items.reduce((s, i) => s + i.qty, 0);
             const assignedQty = items.reduce((s, i) => s + i.assigned_qty, 0);
+            const totalBoxes = items.reduce((s, i) => s + calcBoxes(i.qty, i.pcs_per_box), 0);
+            const totalVolume = items.reduce((s, i) => s + calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box), 0);
             return {
                 'Номер': o.order_number,
                 'Поставщик': o.factory_name || '',
                 'Позиций': items.length,
                 'Кол-во': totalQty,
+                'Мест': totalBoxes || '',
+                'Объём м³': totalVolume > 0 ? Number(totalVolume.toFixed(1)) : '',
                 'Распределено': `${assignedQty}/${totalQty}`,
                 'Готовность': o.expected_ready_date || '',
                 'Создан': o.created_at || '',
-                'Заметка': o.note || '',
             };
         });
         exportToExcel(rows, 'Фабричные_заказы');
-    };
-
-    // Find the expanded order for detail view
-    const expandedOrder = expandedId != null ? orders.find(o => o.id === expandedId) : null;
-
-    const reloadExpanded = async (orderId: number) => {
-        const detail = await api.getFactoryOrder(orderId);
-        const idx = orders.findIndex(o => o.id === orderId);
-        if (idx >= 0) {
-            const updated = [...orders];
-            updated[idx] = detail;
-            setOrders(updated);
-        }
     };
 
     return (
@@ -319,15 +327,6 @@ function FactoryOrdersTab() {
                     </button>
                 }
             />
-
-            {/* Expanded detail with inline item add */}
-            {expandedOrder && (
-                <InlineItemsSection
-                    order={expandedOrder}
-                    onCollapse={() => setExpandedId(null)}
-                    onItemsAdded={() => reloadExpanded(expandedOrder.id)}
-                />
-            )}
 
             {/* Create Modal */}
             <FormModal

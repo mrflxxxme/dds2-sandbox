@@ -138,13 +138,13 @@ class TestRateLimiterUnit:
             await limiter(request)
 
     @pytest.mark.asyncio
-    async def test_uses_x_real_ip_header(self):
-        """Rate limiter should prefer x-real-ip header over client.host."""
+    async def test_uses_client_host_not_header(self):
+        """Rate limiter must use request.client.host, ignoring x-real-ip (prevents IP spoofing)."""
         limiter = RateLimiter(limit=5, window=60, action="test_ip")
         request = _make_request_with_header("10.0.0.1")
 
         mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value=None)  # First request
+        mock_redis.get = AsyncMock(return_value=None)
         mock_pipe = AsyncMock()
         mock_pipe.incr = MagicMock()
         mock_pipe.expire = MagicMock()
@@ -157,8 +157,8 @@ class TestRateLimiterUnit:
         ):
             await limiter(request)
 
-        # Key should use x-real-ip (10.0.0.1), not client.host (127.0.0.1)
-        mock_pipe.incr.assert_called_once_with("rate_limit:test_ip:10.0.0.1")
+        # Key must use client.host (127.0.0.1), NOT spoofable x-real-ip header
+        mock_pipe.incr.assert_called_once_with("rate_limit:test_ip:127.0.0.1")
 
     @pytest.mark.asyncio
     async def test_first_request_no_existing_counter(self):

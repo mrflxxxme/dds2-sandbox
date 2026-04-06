@@ -14,6 +14,8 @@ from backend.schemas.supply_chain import (
     AddItemsToVehicleRequest,
     FactoryOrderCreate,
     FactoryOrderItemCreate,
+    FactoryOrderItemSchema,
+    FactoryOrderItemUpdate,
     FactoryOrderSchema,
     FactoryOrderUpdate,
     SplitToVehiclesRequest,
@@ -101,6 +103,37 @@ async def add_items_to_order(
         return {"ok": True, "added": len(created)}
     except ValueError as e:
         raise HTTPException(404, str(e)) from e
+
+
+@router.put("/factory-orders/{order_id}/items/{item_id}", dependencies=[Depends(rate_limit_write)])
+async def update_factory_order_item(
+    order_id: int,
+    item_id: int,
+    payload: FactoryOrderItemUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        item = await factory_orders.update_item(db, project.id, order_id, item_id, payload)
+        if not item:
+            raise HTTPException(404, "Item not found")
+        return FactoryOrderItemSchema.model_validate(item)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.delete("/factory-orders/{order_id}/items/{item_id}", dependencies=[Depends(rate_limit_write)])
+async def delete_factory_order_item(
+    order_id: int,
+    item_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        await factory_orders.delete_item(db, project.id, order_id, item_id)
+        return {"ok": True}
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @router.post("/factory-orders/{order_id}/split-to-vehicles", dependencies=[Depends(rate_limit_write)])

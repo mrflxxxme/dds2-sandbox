@@ -21,10 +21,7 @@ logger = logging.getLogger("dds.admin")
 
 
 def _get_client_ip(request: Request) -> str:
-    """Extract real client IP from X-Forwarded-For or direct connection."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    """Extract real client IP (set by uvicorn --forwarded-allow-ips)."""
     if request.client:
         return request.client.host
     return ""

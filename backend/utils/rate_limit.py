@@ -46,7 +46,7 @@ class RateLimiter:
             if redis is None:
                 return  # Redis unavailable — skip rate limiting
 
-            client_ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
+            client_ip = request.client.host if request.client else "unknown"
             key = f"rate_limit:{self.action}:{client_ip}"
 
             current = await redis.get(key)

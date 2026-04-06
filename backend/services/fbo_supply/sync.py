@@ -233,24 +233,21 @@ async def sync_fbo_statuses(
     integration_id: int,
 ) -> dict[str, object]:
     """
-    Status-only sync: fetch active FBW supplies from Suppliers API
-    and update statuses + dates.
+    Status-only sync: fetch FBW supplies from Suppliers API
+    and update statuses + dates for non-ACCEPTED supplies.
 
-    Uses single POST /api/v1/supplies call with statusIDs=[1,2,3]
-    to get all non-final supplies. No per-supply detail calls needed.
+    Includes CANCELLED supplies because WB may accept items after
+    initial cancellation (partial acceptance with statusID=5).
+
+    Uses single POST /api/v1/supplies call with statusIDs=[1..6].
 
     Returns: {synced, updated, errors, message}
     """
-    # Get our active supplies from DB
+    # Get non-final supplies from DB (include CANCELLED — WB may accept items later)
     result = await db.execute(
         select(WbFboSupply).where(
             WbFboSupply.project_id == project_id,
-            WbFboSupply.wb_status.notin_(
-                [
-                    WbSupplyStatus.ACCEPTED,
-                    WbSupplyStatus.CANCELLED,
-                ]
-            ),
+            WbFboSupply.wb_status != WbSupplyStatus.ACCEPTED,
         )
     )
     active_supplies = result.scalars().all()
@@ -299,6 +296,18 @@ async def sync_fbo_statuses(
                 _update_supply_from_fbw_list(supply, wb_data)
                 supply.synced_at = utcnow()
                 updated += 1
+
+                # Log status transitions from CANCELLED
+                if old_status == WbSupplyStatus.CANCELLED and supply.wb_status != WbSupplyStatus.CANCELLED:
+                    logger.info(
+                        "fbo_sync.status_transition",
+                        extra={
+                            "wb_supply_id": supply.wb_supply_id,
+                            "old_status": old_status,
+                            "new_status": supply.wb_status,
+                            "accepted_qty": supply.accepted_qty,
+                        },
+                    )
 
                 # Auto-deliver linked shipment if status changed to ACCEPTED
                 if (

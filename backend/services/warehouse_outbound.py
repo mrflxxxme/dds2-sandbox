@@ -23,7 +23,7 @@ from backend.models.warehouse import (
 from backend.services.warehouse_crud import get_warehouse
 from backend.services.warehouse_stock_engine import (
     _next_number,
-    _resolve_barcode,
+    _resolve_barcodes_batch,
     _update_stock,
 )
 from backend.utils.time import utcnow
@@ -45,6 +45,7 @@ async def list_shipments(db: AsyncSession, project_id: int, warehouse_id: int) -
             OutboundShipment.is_deleted == False,  # noqa: E712
         )
         .order_by(OutboundShipment.id.desc())
+        .limit(500)
     )
     return list(result.scalars().all())
 
@@ -85,8 +86,10 @@ async def create_shipment(db: AsyncSession, project_id: int, warehouse_id: int, 
     db.add(shipment)
     await db.flush()
 
-    for item_data in payload.get("items", []):
-        nom = await _resolve_barcode(db, project_id, item_data["barcode"])
+    items_data = payload.get("items", [])
+    barcode_map = await _resolve_barcodes_batch(db, project_id, [d["barcode"] for d in items_data])
+    for item_data in items_data:
+        nom = barcode_map[item_data["barcode"]]
         item = OutboundShipmentItem(
             project_id=project_id,
             shipment_id=shipment.id,
@@ -201,7 +204,7 @@ async def list_transfers(db: AsyncSession, project_id: int, in_transit_only: boo
     )
     if in_transit_only:
         query = query.where(StockTransfer.status == TransferStatus.IN_TRANSIT)
-    query = query.order_by(StockTransfer.id.desc())
+    query = query.order_by(StockTransfer.id.desc()).limit(500)
     result = await db.execute(query)
     return list(result.scalars().all())
 
@@ -245,8 +248,10 @@ async def create_transfer(db: AsyncSession, project_id: int, payload: dict) -> S
     db.add(transfer)
     await db.flush()
 
-    for item_data in payload.get("items", []):
-        nom = await _resolve_barcode(db, project_id, item_data["barcode"])
+    items_data = payload.get("items", [])
+    barcode_map = await _resolve_barcodes_batch(db, project_id, [d["barcode"] for d in items_data])
+    for item_data in items_data:
+        nom = barcode_map[item_data["barcode"]]
         item = StockTransferItem(
             project_id=project_id,
             transfer_id=transfer.id,

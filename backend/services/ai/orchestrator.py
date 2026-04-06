@@ -85,8 +85,8 @@ async def ask(
     agent_names = classification.get("agents", [_FALLBACK_AGENT])
     reason = classification.get("reason", "")
 
-    # Validate agent names — keep only known agents
-    valid_names = [name for name in agent_names if name in AGENTS]
+    # Validate agent names — keep only known agents, hard cap at 2
+    valid_names = [name for name in agent_names if name in AGENTS][:2]
     if not valid_names:
         valid_names = [_FALLBACK_AGENT]
 

@@ -4,6 +4,7 @@ import type {
     FactoryOrder,
     FactoryOrderCreate,
     FactoryOrderItem,
+    FactoryOrderItemUpdate,
     VehicleStatusUpdate,
     VehicleCreate,
     VehicleUpdateData,
@@ -37,6 +38,13 @@ export function addSupplyChainMethods(api: ApiClient) {
         // ─── Factory Order Items ────────────────────────────────────
         addFactoryOrderItems(orderId: number, items: Omit<FactoryOrderItem, 'id' | 'factory_order_id' | 'assigned_qty' | 'remaining_qty'>[]) {
             return api.request<{ ok: boolean; added: number }>('POST', `/api/v1/supply-chain/factory-orders/${orderId}/items`, items);
+        },
+
+        updateFactoryOrderItem(orderId: number, itemId: number, data: FactoryOrderItemUpdate) {
+            return api.request<FactoryOrderItem>('PUT', `/api/v1/supply-chain/factory-orders/${orderId}/items/${itemId}`, data);
+        },
+        deleteFactoryOrderItem(orderId: number, itemId: number) {
+            return api.request<{ ok: boolean }>('DELETE', `/api/v1/supply-chain/factory-orders/${orderId}/items/${itemId}`);
         },
 
         // ─── Split to Vehicles ──────────────────────────────────────
