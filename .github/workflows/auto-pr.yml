@@ -38,7 +38,7 @@ jobs:
           LAST_COMMIT_MSG=$(git log -1 --format='%s')
 
           # Build PR body with commit summary since main
-          COMMITS=$(git log main..dev --oneline)
+          COMMITS=$(git log origin/main..dev --oneline)
           PR_BODY="## Commits"$'\n\n'"${COMMITS}"$'\n\n'"---"$'\n'"Auto-created by CI from dev branch push."
 
           echo "Creating PR: ${LAST_COMMIT_MSG}"
