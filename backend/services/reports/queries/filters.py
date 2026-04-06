@@ -1,162 +1,20 @@
 """
-Reports — filtered queries (FX control, customs, income daily, filtered transactions).
+Reports — dashboard filtered queries (daily aggregation, transactions, category counterparties).
 """
 
-import calendar
 from datetime import date
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.cache import cached
 from backend.models import Transaction
 
 
-async def get_fx_control(
-    db: AsyncSession,
-    project_id: int,
-    date_from: date | None = None,
-    date_to: date | None = None,
-) -> list[dict]:
-    """FX transactions for control."""
-    q = select(
-        Transaction.date,
-        Transaction.account,
-        Transaction.currency,
-        Transaction.counterparty,
-        Transaction.purpose,
-        Transaction.income,
-        Transaction.expense,
-        Transaction.net,
-        Transaction.txn_id,
-    ).where(Transaction.project_id == project_id, Transaction.is_fx == True, Transaction.is_deleted == False)
-
-    conditions = []
-    if date_from:
-        conditions.append(Transaction.date >= date_from)
-    if date_to:
-        conditions.append(Transaction.date <= date_to)
-    if conditions:
-        q = q.where(and_(*conditions))
-
-    q = q.order_by(Transaction.date.desc())
-    result = await db.execute(q)
-    return [dict(row._mapping) for row in result]
-
-
-async def get_customs_control(
-    db: AsyncSession,
-    project_id: int,
-    date_from: date | None = None,
-    date_to: date | None = None,
-) -> list:
-    """Customs payment transactions for control."""
-    q = select(Transaction).where(
-        Transaction.project_id == project_id,
-        Transaction.event_type2 == "CUSTOMS_PAYMENT",
-        Transaction.is_deleted == False,
-    )
-    conditions = []
-    if date_from:
-        conditions.append(Transaction.date >= date_from)
-    if date_to:
-        conditions.append(Transaction.date <= date_to)
-    if conditions:
-        q = q.where(and_(*conditions))
-    q = q.order_by(Transaction.date.desc())
-    result = await db.execute(q)
-    return result.scalars().all()
-
-
-@cached(prefix="reports:income_daily", ttl=300)
-async def get_income_daily(
-    db: AsyncSession,
-    project_id: int,
-    year: int,
-    month: int,
-    currency: str = "RUB",
-) -> list[dict]:
-    """Daily income breakdown by bank/source for a given month."""
-    date_from = date(year, month, 1)
-    date_to = date(year, month, calendar.monthrange(year, month)[1])
-
-    result = await db.execute(
-        select(
-            func.date_trunc("day", Transaction.date).label("day"),
-            Transaction.bank,
-            func.sum(Transaction.income).label("income"),
-        )
-        .where(
-            Transaction.project_id == project_id,
-            Transaction.currency == currency,
-            Transaction.is_cashflow2 == 1,
-            Transaction.income > 0,
-            Transaction.date >= date_from,
-            Transaction.date <= date_to,
-        )
-        .group_by("day", Transaction.bank)
-        .order_by("day")
-    )
-
-    rows = []
-    for r in result:
-        rows.append(
-            {
-                "date": r.day.date().isoformat(),
-                "bank": r.bank,
-                "income": float(r.income or 0),
-            }
-        )
-    return rows
-
-
-async def get_income_by_category_daily(
-    db: AsyncSession,
-    project_id: int,
-    year: int,
-    month: int,
-    currency: str = "RUB",
-    cat_lvl1: str | None = None,
-) -> list[dict]:
-    """Daily income grouped by category for a given month."""
-    date_from = date(year, month, 1)
-    date_to = date(year, month, calendar.monthrange(year, month)[1])
-
-    if cat_lvl1:
-        group_col = func.coalesce(Transaction.cat_lvl2_2, "Без подкатегории").label("category")
-        extra_filter = Transaction.cat_lvl1_2 == cat_lvl1
-    else:
-        group_col = func.coalesce(Transaction.cat_lvl1_2, "Без категории").label("category")
-        extra_filter = None
-
-    q = select(
-        func.date_trunc("day", Transaction.date).label("day"),
-        group_col,
-        func.sum(Transaction.income).label("income"),
-    ).where(
-        Transaction.project_id == project_id,
-        Transaction.currency == currency,
-        Transaction.is_cashflow2 == 1,
-        Transaction.income > 0,
-        Transaction.date >= date_from,
-        Transaction.date <= date_to,
-    )
-    if extra_filter is not None:
-        q = q.where(extra_filter)
-    q = q.group_by("day", "category").order_by("day")
-
-    result = await db.execute(q)
-
-    rows = []
-    for r in result:
-        rows.append(
-            {
-                "date": r.day.date().isoformat(),
-                "category": r.category,
-                "income": float(r.income or 0),
-            }
-        )
-    return rows
+def _build_category_condition(category: str):
+    """Build SQLAlchemy condition for category filtering (shared by multiple queries)."""
+    if category == "Без категории":
+        return or_(Transaction.cat_lvl1_2 == None, Transaction.cat_lvl1_2 == "")  # noqa: E711
+    return Transaction.cat_lvl1_2 == category
 
 
 async def get_daily_filtered(
@@ -177,10 +35,7 @@ async def get_daily_filtered(
     if cp_key:
         conditions.append(func.coalesce(Transaction.cp_key, Transaction.counterparty) == cp_key)
     if category:
-        if category == "Без категории":
-            conditions.append(or_(Transaction.cat_lvl1_2 == None, Transaction.cat_lvl1_2 == ""))
-        else:
-            conditions.append(Transaction.cat_lvl1_2 == category)
+        conditions.append(_build_category_condition(category))
 
     result = await db.execute(
         select(
@@ -230,10 +85,7 @@ async def get_filtered_transactions(
     if cp_key:
         conditions.append(func.coalesce(Transaction.cp_key, Transaction.counterparty) == cp_key)
     if category:
-        if category == "Без категории":
-            conditions.append(or_(Transaction.cat_lvl1_2 == None, Transaction.cat_lvl1_2 == ""))
-        else:
-            conditions.append(Transaction.cat_lvl1_2 == category)
+        conditions.append(_build_category_condition(category))
     if flow == "income":
         conditions.append(Transaction.income > 0)
     elif flow == "expense":
@@ -315,16 +167,9 @@ async def get_category_counterparties(
     fallback_rate = await fx_service.get_rate_for_date(db, project_id, date_to) if not rates_map else None
 
     # Compute average rate for the period
-    if rates_map:
-        avg_rate = sum(rates_map.values()) / len(rates_map)
-    else:
-        avg_rate = fallback_rate or 1.0
+    avg_rate = sum(rates_map.values()) / len(rates_map) if rates_map else fallback_rate or 1.0
 
-    cat_condition = (
-        or_(Transaction.cat_lvl1_2 == None, Transaction.cat_lvl1_2 == "")
-        if category == "Без категории"
-        else Transaction.cat_lvl1_2 == category
-    )
+    cat_condition = _build_category_condition(category)
 
     result = await db.execute(
         select(

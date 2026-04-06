@@ -37,13 +37,17 @@ def _mock_response(status_code: int = 200, json_data=None, headers=None, text=""
 
 @pytest.fixture(autouse=True)
 def _reset_circuit_breaker():
-    """Reset the shared WB circuit breaker before each test."""
-    from backend.integrations.resilience import CircuitState
-    from backend.integrations.wb_api import _wb_circuit
+    """Reset the per-project WB circuit breaker registry before each test."""
+    from backend.integrations.wb_api import _wb_circuits
 
-    _wb_circuit._state = CircuitState.CLOSED
-    _wb_circuit._failure_count = 0
-    _wb_circuit._last_failure_time = None
+    # Clear all per-project breakers so each test starts fresh
+    _wb_circuits._breakers.clear()
+    # Reset the fallback breaker too
+    from backend.integrations.resilience import CircuitState
+
+    _wb_circuits._fallback._state = CircuitState.CLOSED
+    _wb_circuits._fallback._failure_count = 0
+    _wb_circuits._fallback._last_failure_time = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -57,7 +61,7 @@ class TestWBApiClientGet:
     @pytest.mark.asyncio
     async def test_get_returns_list(self):
         """Normal 200 response with list body."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         mock_resp = _mock_response(200, json_data=[{"id": 1}, {"id": 2}])
         with patch("httpx.AsyncClient.get", return_value=mock_resp):
             result = await client._get.__wrapped__(client, "https://api.test", "/path")
@@ -66,7 +70,7 @@ class TestWBApiClientGet:
     @pytest.mark.asyncio
     async def test_get_returns_data_key(self):
         """200 response with {data: [...]} wrapper."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         mock_resp = _mock_response(200, json_data={"data": [{"x": 1}]})
         with patch("httpx.AsyncClient.get", return_value=mock_resp):
             result = await client._get.__wrapped__(client, "https://api.test", "/path")
@@ -75,7 +79,7 @@ class TestWBApiClientGet:
     @pytest.mark.asyncio
     async def test_get_204_returns_empty(self):
         """204 No Content returns empty list."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         mock_resp = _mock_response(204)
         with patch("httpx.AsyncClient.get", return_value=mock_resp):
             result = await client._get.__wrapped__(client, "https://api.test", "/path")
@@ -84,7 +88,7 @@ class TestWBApiClientGet:
     @pytest.mark.asyncio
     async def test_get_401_raises(self):
         """401 raises ValueError with message about API key."""
-        client = WBApiClient("bad-key")
+        client = WBApiClient("bad-key", project_id=1)
         mock_resp = _mock_response(401)
         with patch("httpx.AsyncClient.get", return_value=mock_resp), pytest.raises(ValueError, match="401"):
             await client._get.__wrapped__(client, "https://api.test", "/path")
@@ -92,7 +96,7 @@ class TestWBApiClientGet:
     @pytest.mark.asyncio
     async def test_get_429_raises_rate_limit(self):
         """429 raises RateLimitError with Retry-After."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         mock_resp = _mock_response(429, headers={"Retry-After": "30"})
         with patch("httpx.AsyncClient.get", return_value=mock_resp), pytest.raises(RateLimitError) as exc_info:
             await client._get.__wrapped__(client, "https://api.test", "/path")
@@ -101,7 +105,7 @@ class TestWBApiClientGet:
     @pytest.mark.asyncio
     async def test_get_500_raises(self):
         """500 server error raises ValueError."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         mock_resp = _mock_response(500)
         with patch("httpx.AsyncClient.get", return_value=mock_resp), pytest.raises(ValueError, match="server error"):
             await client._get.__wrapped__(client, "https://api.test", "/path")
@@ -122,7 +126,7 @@ class TestWBApiClientMethods:
     @pytest.mark.asyncio
     async def test_get_sales(self):
         """get_sales returns sale data."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         with patch.object(client, "_get", new_callable=AsyncMock, return_value=[{"saleID": "S1"}]):
             result = await client.get_sales(date_from=date(2024, 1, 1))
         assert len(result) == 1
@@ -131,7 +135,7 @@ class TestWBApiClientMethods:
     @pytest.mark.asyncio
     async def test_get_orders(self):
         """get_orders returns order data."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         with patch.object(client, "_get", new_callable=AsyncMock, return_value=[{"orderId": "O1"}]):
             result = await client.get_orders(date_from=date(2024, 1, 1))
         assert len(result) == 1
@@ -139,7 +143,7 @@ class TestWBApiClientMethods:
     @pytest.mark.asyncio
     async def test_get_finance_report(self):
         """get_finance_report returns report data."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         with patch.object(client, "_get", new_callable=AsyncMock, return_value=[{"rrd_id": 1}]):
             result = await client.get_finance_report(date_from=date(2024, 1, 1), date_to=date(2024, 1, 31))
         assert len(result) == 1
@@ -147,7 +151,7 @@ class TestWBApiClientMethods:
     @pytest.mark.asyncio
     async def test_test_connection_valid(self):
         """test_connection returns True on valid key."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         with patch.object(client, "_get", new_callable=AsyncMock, return_value=[]):
             result = await client.test_connection()
         assert result is True
@@ -155,7 +159,7 @@ class TestWBApiClientMethods:
     @pytest.mark.asyncio
     async def test_test_connection_invalid(self):
         """test_connection returns False on invalid key."""
-        client = WBApiClient("bad-key")
+        client = WBApiClient("bad-key", project_id=1)
         with patch.object(client, "_get", new_callable=AsyncMock, side_effect=ValueError("401")):
             result = await client.test_connection()
         assert result is False
@@ -176,7 +180,7 @@ class TestFBOSupplies:
     @pytest.mark.asyncio
     async def test_get_fbo_supplies(self):
         """get_fbo_supplies returns structured dict."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         mock_resp = _mock_response(
             200,
             json_data={"next": 100, "supplies": [{"id": "WB-1"}]},
@@ -191,7 +195,7 @@ class TestFBOSupplies:
     @pytest.mark.asyncio
     async def test_get_fbo_supply_orders_404(self):
         """get_fbo_supply_orders returns [] on 404."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         mock_resp = _mock_response(404)
         with patch("httpx.AsyncClient.get", return_value=mock_resp):
             fn = client.get_fbo_supply_orders.__wrapped__
@@ -201,7 +205,7 @@ class TestFBOSupplies:
     @pytest.mark.asyncio
     async def test_get_fbo_supply_detail_not_found(self):
         """get_fbo_supply returns None on 404."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         mock_resp = _mock_response(404)
         with patch("httpx.AsyncClient.get", return_value=mock_resp):
             fn = client.get_fbo_supply.__wrapped__
@@ -211,7 +215,7 @@ class TestFBOSupplies:
     @pytest.mark.asyncio
     async def test_get_warehouses_list(self):
         """get_warehouses_list returns list of warehouses."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         mock_resp = _mock_response(
             200,
             json_data=[{"id": 1, "name": "Коледино"}],
@@ -225,7 +229,7 @@ class TestFBOSupplies:
     @pytest.mark.asyncio
     async def test_get_warehouses_list_error_returns_empty(self):
         """get_warehouses_list returns [] on error."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         mock_resp = _mock_response(500)
         with patch("httpx.AsyncClient.get", return_value=mock_resp):
             fn = client.get_warehouses_list.__wrapped__
@@ -244,7 +248,7 @@ class TestFBWSupplies:
     @pytest.mark.asyncio
     async def test_get_fbw_supplies(self):
         """get_fbw_supplies returns list."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         mock_resp = _mock_response(200, json_data=[{"supplyId": 42}])
         with patch("httpx.AsyncClient.post", return_value=mock_resp):
             fn = client.get_fbw_supplies.__wrapped__
@@ -254,7 +258,7 @@ class TestFBWSupplies:
     @pytest.mark.asyncio
     async def test_get_fbw_supply_detail_not_found(self):
         """get_fbw_supply_detail returns None on 404."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         mock_resp = _mock_response(404)
         with patch("httpx.AsyncClient.get", return_value=mock_resp):
             fn = client.get_fbw_supply_detail.__wrapped__
@@ -264,7 +268,7 @@ class TestFBWSupplies:
     @pytest.mark.asyncio
     async def test_get_fbw_supply_goods(self):
         """get_fbw_supply_goods returns items list."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         mock_resp = _mock_response(200, json_data=[{"nmID": 123, "quantity": 10}])
         with patch("httpx.AsyncClient.get", return_value=mock_resp):
             fn = client.get_fbw_supply_goods.__wrapped__
@@ -274,7 +278,7 @@ class TestFBWSupplies:
     @pytest.mark.asyncio
     async def test_get_fbw_supply_goods_404(self):
         """get_fbw_supply_goods returns [] on 404."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         mock_resp = _mock_response(404)
         with patch("httpx.AsyncClient.get", return_value=mock_resp):
             fn = client.get_fbw_supply_goods.__wrapped__
@@ -284,7 +288,7 @@ class TestFBWSupplies:
     @pytest.mark.asyncio
     async def test_get_fbw_warehouses(self):
         """get_fbw_warehouses returns list."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         mock_resp = _mock_response(200, json_data=[{"ID": 1, "name": "WH-1"}])
         with patch("httpx.AsyncClient.get", return_value=mock_resp):
             fn = client.get_fbw_warehouses.__wrapped__
@@ -303,7 +307,7 @@ class TestGetCardsList:
     @pytest.mark.asyncio
     async def test_single_page(self):
         """Single page of cards (fewer than limit)."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         page_data = {
             "cards": [{"nmID": 1}, {"nmID": 2}],
             "cursor": {"updatedAt": "2024-01-01", "nmID": 2},
@@ -318,7 +322,7 @@ class TestGetCardsList:
     @pytest.mark.asyncio
     async def test_empty_cards(self):
         """No cards at all."""
-        client = WBApiClient("test-key")
+        client = WBApiClient("test-key", project_id=1)
         mock_resp = _mock_response(200, json_data={"cards": []})
         with patch("httpx.AsyncClient.post", return_value=mock_resp):
             fn = client.get_cards_list.__wrapped__

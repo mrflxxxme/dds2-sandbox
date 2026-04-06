@@ -9,11 +9,9 @@ Used by WB API client and other external integrations.
 """
 
 import asyncio
-import logging
 import time
 from enum import Enum
 from functools import wraps
-from typing import Optional
 
 import structlog
 
@@ -22,9 +20,10 @@ logger = structlog.get_logger("dds.resilience")
 
 # ─── Circuit Breaker ────────────────────────────────────────────────────────
 
+
 class CircuitState(Enum):
-    CLOSED = "closed"        # Normal operation — requests pass through
-    OPEN = "open"            # Failures exceeded threshold — requests blocked
+    CLOSED = "closed"  # Normal operation — requests pass through
+    OPEN = "open"  # Failures exceeded threshold — requests blocked
     HALF_OPEN = "half_open"  # Testing if service recovered — one request allowed
 
 
@@ -60,23 +59,23 @@ class CircuitBreaker:
 
         self._state = CircuitState.CLOSED
         self._failure_count = 0
-        self._last_failure_time: Optional[float] = None
+        self._last_failure_time: float | None = None
         self._half_open_calls = 0
 
     @property
     def state(self) -> CircuitState:
-        if self._state == CircuitState.OPEN:
-            # Check if recovery period has elapsed
-            if self._last_failure_time and (
-                time.monotonic() - self._last_failure_time >= self.recovery_timeout
-            ):
-                self._state = CircuitState.HALF_OPEN
-                self._half_open_calls = 0
-                logger.info(
-                    "circuit_breaker.half_open",
-                    name=self.name,
-                    recovery_timeout=self.recovery_timeout,
-                )
+        if (
+            self._state == CircuitState.OPEN
+            and self._last_failure_time
+            and (time.monotonic() - self._last_failure_time >= self.recovery_timeout)
+        ):
+            self._state = CircuitState.HALF_OPEN
+            self._half_open_calls = 0
+            logger.info(
+                "circuit_breaker.half_open",
+                name=self.name,
+                recovery_timeout=self.recovery_timeout,
+            )
         return self._state
 
     def record_success(self):
@@ -111,16 +110,11 @@ class CircuitBreaker:
     async def __aenter__(self):
         state = self.state
         if state == CircuitState.OPEN:
-            raise CircuitOpenError(
-                f"Circuit breaker '{self.name}' is OPEN. "
-                f"Retry after {self.recovery_timeout}s."
-            )
+            raise CircuitOpenError(f"Circuit breaker '{self.name}' is OPEN. " f"Retry after {self.recovery_timeout}s.")
         if state == CircuitState.HALF_OPEN:
             self._half_open_calls += 1
             if self._half_open_calls > self.half_open_max_calls:
-                raise CircuitOpenError(
-                    f"Circuit breaker '{self.name}' is HALF_OPEN, max test calls reached."
-                )
+                raise CircuitOpenError(f"Circuit breaker '{self.name}' is HALF_OPEN, max test calls reached.")
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -133,19 +127,86 @@ class CircuitBreaker:
         return False  # Don't suppress exceptions
 
 
+class CircuitBreakerRegistry:
+    """
+    Per-key circuit breaker registry.
+
+    Maintains separate CircuitBreaker instances per key (e.g. project_id),
+    so one project's WB API failures don't block other projects.
+
+    Usage:
+        registry = CircuitBreakerRegistry(
+            failure_threshold=5,
+            recovery_timeout=120.0,
+            exclude_errors=(RateLimitError,),
+        )
+        breaker = registry.get(project_id)
+        async with breaker:
+            await some_api_call()
+    """
+
+    def __init__(
+        self,
+        name_prefix: str = "default",
+        failure_threshold: int = 5,
+        recovery_timeout: float = 60.0,
+        half_open_max_calls: int = 1,
+        exclude_errors: tuple = (),
+    ):
+        self._name_prefix = name_prefix
+        self._failure_threshold = failure_threshold
+        self._recovery_timeout = recovery_timeout
+        self._half_open_max_calls = half_open_max_calls
+        self._exclude_errors = exclude_errors
+        self._breakers: dict[int, CircuitBreaker] = {}
+        self._fallback = CircuitBreaker(
+            name=f"{name_prefix}-global",
+            failure_threshold=failure_threshold,
+            recovery_timeout=recovery_timeout,
+            half_open_max_calls=half_open_max_calls,
+            exclude_errors=exclude_errors,
+        )
+
+    def get(self, key: int | None) -> CircuitBreaker:
+        """Get or create a circuit breaker for the given key (project_id)."""
+        if key is None:
+            return self._fallback
+        if key not in self._breakers:
+            self._breakers[key] = CircuitBreaker(
+                name=f"{self._name_prefix}-{key}",
+                failure_threshold=self._failure_threshold,
+                recovery_timeout=self._recovery_timeout,
+                half_open_max_calls=self._half_open_max_calls,
+                exclude_errors=self._exclude_errors,
+            )
+        return self._breakers[key]
+
+    def reset(self, key: int) -> None:
+        """Remove a circuit breaker (e.g. after project key rotation)."""
+        self._breakers.pop(key, None)
+
+    @property
+    def active_count(self) -> int:
+        """Number of tracked circuit breakers (excluding fallback)."""
+        return len(self._breakers)
+
+
 class CircuitOpenError(Exception):
     """Raised when circuit breaker is open and request is blocked."""
+
     pass
 
 
 class RateLimitError(Exception):
     """429 rate limit — NOT a circuit breaker failure, just a signal to wait."""
+
     def __init__(self, message: str = "Rate limited", retry_after: int = 60):
         super().__init__(message)
         self.retry_after = retry_after
 
 
 # ─── Retry with Exponential Backoff ─────────────────────────────────────────
+
 
 def retry_with_backoff(
     max_retries: int = 3,
@@ -166,6 +227,7 @@ def retry_with_backoff(
         async def fetch_data():
             ...
     """
+
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
@@ -196,15 +258,14 @@ def retry_with_backoff(
                     if isinstance(e, ValueError):
                         error_msg = str(e)
                         is_retryable = any(
-                            f"({code})" in error_msg or f"HTTP {code}" in error_msg
-                            for code in retry_on_status
+                            f"({code})" in error_msg or f"HTTP {code}" in error_msg for code in retry_on_status
                         )
 
                     if not is_retryable or attempt == max_retries:
                         raise
 
                     # Calculate delay with exponential backoff
-                    delay = min(base_delay * (2 ** attempt), max_delay)
+                    delay = min(base_delay * (2**attempt), max_delay)
 
                     logger.warning(
                         "api.retry",
@@ -218,5 +279,7 @@ def retry_with_backoff(
                     await asyncio.sleep(delay)
 
             raise last_exception  # Should not reach here, but safety net
+
         return wrapper
+
     return decorator

@@ -59,7 +59,7 @@ async def sync_wb_finance(
     from backend.integrations.wb_api import WBApiClient
 
     _key, api_key = await _get_wb_key(db, project_id)
-    client = WBApiClient(api_key)
+    client = WBApiClient(api_key, project_id=project_id)
 
     logger.info("wb_finance_sync: fetching %s — %s (period=%s) for project %s", date_from, date_to, period, project_id)
 

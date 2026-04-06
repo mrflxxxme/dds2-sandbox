@@ -1,4 +1,4 @@
-# CI — Security audit (pip-audit + gitleaks)
+# CI — Security audit (pip-audit + gitleaks + Snyk Code SAST)
 # Runs on push/PR and can be triggered manually
 
 name: Security Audit
@@ -10,11 +10,14 @@ on:
     paths:
       - 'requirements*.txt'
       - 'backend/**'
+      - 'frontend-react/src/**'
       - '.github/workflows/security.yml'
   pull_request:
     branches: [main]
     paths:
       - 'requirements*.txt'
+      - 'backend/**'
+      - 'frontend-react/src/**'
 
 jobs:
   pip-audit:
@@ -70,3 +73,27 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: 0  # advisory-only, не блокирует CI (меняй на 1 для strict mode)
           format: table
+
+  snyk-code:
+    name: Snyk Code (SAST)
+    runs-on: ubuntu-latest
+    # Advisory-only: не блокирует CI
+    # Требует SNYK_TOKEN secret → https://app.snyk.io/account → API Token
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Snyk CLI
+        uses: snyk/actions/setup@master
+
+      - name: Run Snyk Code analysis
+        run: snyk code test --severity-threshold=high --sarif-file-output=snyk-code.sarif
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always() && hashFiles('snyk-code.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-code.sarif
+        continue-on-error: true

@@ -14,7 +14,7 @@ Supported endpoints:
 - /api/v1/warehouses — склады WB (Suppliers API)
 
 Resilience:
-- Circuit breaker: stops calling WB API after 5 consecutive failures (60s cooldown)
+- Per-project circuit breaker: stops calling WB API after 5 consecutive failures (120s cooldown)
 - Exponential backoff: retries 429/5xx errors up to 3 times
 """
 
@@ -25,7 +25,7 @@ import httpx
 import structlog
 
 from backend.integrations.resilience import (
-    CircuitBreaker,
+    CircuitBreakerRegistry,
     RateLimitError,
     retry_with_backoff,
 )
@@ -43,9 +43,9 @@ WB_SUPPLIERS_API_BASE = "https://supplies-api.wildberries.ru"
 # Request timeout in seconds
 TIMEOUT = 30
 
-# Shared circuit breaker — only 5xx errors trip it, 429 is excluded
-_wb_circuit = CircuitBreaker(
-    name="wildberries",
+# Per-project circuit breakers — one project's failures don't block others
+_wb_circuits = CircuitBreakerRegistry(
+    name_prefix="wb",
     failure_threshold=5,
     recovery_timeout=120.0,  # 2 min for real server failures
     exclude_errors=(RateLimitError,),
@@ -53,16 +53,18 @@ _wb_circuit = CircuitBreaker(
 
 
 class WBApiClient:
-    """Wildberries API client with circuit breaker, retry, and rate limit handling."""
+    """Wildberries API client with per-project circuit breaker, retry, and rate limit handling."""
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, project_id: int | None = None):
         self.api_key = api_key
+        self.project_id = project_id
         self.headers = {"Authorization": api_key}
+        self._circuit = _wb_circuits.get(project_id)
 
     @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
     async def _get(self, base_url: str, path: str, params: dict = None) -> list[dict]:
         """Make GET request to WB API with circuit breaker and retry."""
-        async with _wb_circuit:
+        async with self._circuit:
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
                 url = f"{base_url}{path}"
                 logger.info("wb_api.request", method="GET", path=path, params=params)
@@ -158,7 +160,7 @@ class WBApiClient:
 
         Returns: {next: int, supplies: [dict]}
         """
-        async with _wb_circuit:
+        async with self._circuit:
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
                 params = {"limit": limit, "next": next}
                 url = f"{WB_MARKETPLACE_API_BASE}/api/v3/supplies"
@@ -187,7 +189,7 @@ class WBApiClient:
         Fetch orders (items) for a specific FBO supply.
         WB Marketplace API: GET /api/v3/supplies/{supplyId}/orders
         """
-        async with _wb_circuit:
+        async with self._circuit:
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
                 url = f"{WB_MARKETPLACE_API_BASE}/api/v3/supplies/{supply_id}/orders"
                 logger.info("wb_api.request", method="GET", path=f"/api/v3/supplies/{supply_id}/orders")
@@ -216,7 +218,7 @@ class WBApiClient:
         Fetch single FBO supply details.
         WB Marketplace API: GET /api/v3/supplies/{supplyId}
         """
-        async with _wb_circuit:
+        async with self._circuit:
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
                 url = f"{WB_MARKETPLACE_API_BASE}/api/v3/supplies/{supply_id}"
                 logger.info("wb_api.request", method="GET", path=f"/api/v3/supplies/{supply_id}")
@@ -243,7 +245,7 @@ class WBApiClient:
         WB Marketplace API: GET /api/v3/offices
         Returns list of {id, name, city, address, ...}
         """
-        async with _wb_circuit:
+        async with self._circuit:
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
                 url = f"{WB_MARKETPLACE_API_BASE}/api/v3/offices"
                 logger.info("wb_api.request", method="GET", path="/api/v3/offices")
@@ -281,7 +283,7 @@ class WBApiClient:
 
         Returns: list of supply dicts
         """
-        async with _wb_circuit:
+        async with self._circuit:
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
                 body = {
                     "dates": [{"from": date_from, "till": date_to, "type": "createDate"}],
@@ -325,7 +327,7 @@ class WBApiClient:
         Suppliers API: GET /api/v1/supplies/{supply_id}
         Rate limit: 6 req/min — caller must throttle!
         """
-        async with _wb_circuit:
+        async with self._circuit:
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
                 url = f"{WB_SUPPLIERS_API_BASE}/api/v1/supplies/{supply_id}"
                 logger.info("wb_api.request", method="GET", path=f"/api/v1/supplies/{supply_id}")
@@ -357,7 +359,7 @@ class WBApiClient:
         Suppliers API: GET /api/v1/supplies/{supply_id}/goods
         Rate limit: 6 req/min — caller must throttle!
         """
-        async with _wb_circuit:
+        async with self._circuit:
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
                 params = {"limit": limit, "offset": offset}
                 url = f"{WB_SUPPLIERS_API_BASE}/api/v1/supplies/{supply_id}/goods"
@@ -390,7 +392,7 @@ class WBApiClient:
         GET /api/v1/warehouses
         Returns: [{ID, name, address}, ...]
         """
-        async with _wb_circuit:
+        async with self._circuit:
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
                 url = f"{WB_SUPPLIERS_API_BASE}/api/v1/warehouses"
                 logger.info("wb_api.request", method="GET", path="/api/v1/warehouses")
@@ -422,7 +424,7 @@ class WBApiClient:
                         "filter": {"withPhoto": -1},
                     }
                 }
-                async with _wb_circuit:
+                async with self._circuit:
                     url = f"{WB_CONTENT_API_BASE}/content/v2/get/cards/list"
                     logger.info("wb_api.request", method="POST", path="cards/list", cursor=cursor)
                     response = await client.post(url, headers=self.headers, json=body)

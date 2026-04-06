@@ -95,7 +95,7 @@ async def get_fbo_supply_items(
         # Build API client for lazy-load
         try:
             key, api_key = await _get_wb_key(db, project.id)
-            api_client = WBApiClient(api_key)
+            api_client = WBApiClient(api_key, project_id=project.id)
         except ValueError:
             api_client = None
 
@@ -122,7 +122,7 @@ async def sync_fbo_supplies(
     """Fast sync: load supply list (1 API call), then enrich details in background."""
     try:
         key, api_key = await _get_wb_key(db, project.id)
-        api_client = WBApiClient(api_key)
+        api_client = WBApiClient(api_key, project_id=project.id)
 
         # Fast: list + upsert (1-2 sec)
         result = await fbo_supply_service.sync_fbo_supplies(
@@ -150,7 +150,7 @@ async def sync_fbo_supplies(
 async def _enrich_in_background(project_id: int, api_key: str):
     """Run enrichment in a separate DB session (detached from HTTP request)."""
     try:
-        api_client = WBApiClient(api_key)
+        api_client = WBApiClient(api_key, project_id=project_id)
         async with AsyncSessionLocal() as db:
             result = await fbo_supply_service.enrich_fbo_supplies(
                 db,
@@ -179,7 +179,7 @@ async def sync_fbo_statuses(
     """Sync only statuses of active (non-final) supplies."""
     try:
         key, api_key = await _get_wb_key(db, project.id)
-        api_client = WBApiClient(api_key)
+        api_client = WBApiClient(api_key, project_id=project.id)
         result = await fbo_supply_service.sync_fbo_statuses(
             db,
             project.id,

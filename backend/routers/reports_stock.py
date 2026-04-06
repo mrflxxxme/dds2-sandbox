@@ -183,7 +183,7 @@ async def get_stock_need(
     if await _auto_sync_wb_stocks_if_stale(project.id, db):
         background_tasks.add_task(_bg_sync_wb_stocks, project.id)
 
-    from backend.services.stock_analytics_service import get_warehouse_need
+    from backend.services.warehouse_need_service import get_warehouse_need
 
     return await get_warehouse_need(db, project.id, supply_days, analysis_days, mode)
 

@@ -8,9 +8,9 @@ Runs 4 independent checks and returns a structured report:
 """
 
 import logging
-from datetime import date, timedelta
+from datetime import timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -74,7 +74,10 @@ async def get_daily_health(
     # --- Check 3: Category-A health ---
     try:
         category_a_health = await _check_category_a_health(
-            db, project_id, tax_info, brand,
+            db,
+            project_id,
+            tax_info,
+            brand,
         )
     except Exception:
         logger.exception("Health check: category_a_health failed for project %s", project_id)
@@ -83,19 +86,18 @@ async def get_daily_health(
     # --- Check 4: Illiquid actions ---
     try:
         illiquid_actions = await _check_illiquid_actions(
-            db, project_id, tax_info, brand,
+            db,
+            project_id,
+            tax_info,
+            brand,
         )
     except Exception:
         logger.exception("Health check: illiquid_actions failed for project %s", project_id)
         pass  # graceful: continue with other checks
 
     # --- Summary ---
-    urgent_without_assembly = sum(
-        1 for item in urgent_shipments if not item["has_assembly"]
-    )
-    category_a_issue_count = sum(
-        len(item["issues"]) for item in category_a_health
-    )
+    urgent_without_assembly = sum(1 for item in urgent_shipments if not item["has_assembly"])
+    category_a_issue_count = sum(len(item["issues"]) for item in category_a_health)
 
     health_score = 100
     health_score -= 5 * urgent_without_assembly
@@ -126,21 +128,19 @@ async def get_daily_health(
 # Check 1: Urgent shipments
 # ---------------------------------------------------------------------------
 
+
 async def _check_urgent_shipments(
     db: AsyncSession,
     project_id: int,
 ) -> list[dict]:
     """Find articles with deficit on WB and cross-check assembly requests."""
-    from backend.services.warehouse_stock_service import get_warehouse_need
+    from backend.services.warehouse_need_service import get_warehouse_need
 
     need_data = await get_warehouse_need(db, project_id)
     articles = need_data.get("articles", [])
 
     # Filter to articles with deficit AND available RF stock to send
-    deficit_articles = [
-        a for a in articles
-        if a.get("deficit", 0) > 0 and a.get("can_send", 0) > 0
-    ]
+    deficit_articles = [a for a in articles if a.get("deficit", 0) > 0 and a.get("can_send", 0) > 0]
     if not deficit_articles:
         return []
 
@@ -196,16 +196,18 @@ async def _check_urgent_shipments(
                 total_avg_daily += wh_art.get("avg_daily", 0)
         days_left_wb = round(stocks_wb / total_avg_daily, 1) if total_avg_daily > 0 else 0.0
 
-        result.append({
-            "nm_id": nm_id,
-            "vendor_code": art.get("vendor_code", ""),
-            "subject": art.get("subject", ""),
-            "deficit": art["deficit"],
-            "can_send": art.get("can_send", 0),
-            "has_assembly": nm_id in active_assembly_nm_ids,
-            "days_left_wb": days_left_wb,
-            "warehouse": target_warehouse,
-        })
+        result.append(
+            {
+                "nm_id": nm_id,
+                "vendor_code": art.get("vendor_code", ""),
+                "subject": art.get("subject", ""),
+                "deficit": art["deficit"],
+                "can_send": art.get("can_send", 0),
+                "has_assembly": nm_id in active_assembly_nm_ids,
+                "days_left_wb": days_left_wb,
+                "warehouse": target_warehouse,
+            }
+        )
 
     result.sort(key=lambda x: x["days_left_wb"])
     return result
@@ -214,6 +216,7 @@ async def _check_urgent_shipments(
 # ---------------------------------------------------------------------------
 # Check 2: Overdue assemblies
 # ---------------------------------------------------------------------------
+
 
 async def _check_overdue_assemblies(
     db: AsyncSession,
@@ -245,16 +248,18 @@ async def _check_overdue_assemblies(
         items_count = len(req.items) if req.items else 0
         total_qty = sum(item.quantity for item in req.items) if req.items else 0
 
-        overdue.append({
-            "id": req.id,
-            "number": req.number,
-            "status": req.status,
-            "warehouse_name": req.warehouse.name if req.warehouse else "",
-            "delivery_date": req.delivery_date.isoformat(),
-            "days_overdue": days_overdue,
-            "items_count": items_count,
-            "total_qty": total_qty,
-        })
+        overdue.append(
+            {
+                "id": req.id,
+                "number": req.number,
+                "status": req.status,
+                "warehouse_name": req.warehouse.name if req.warehouse else "",
+                "delivery_date": req.delivery_date.isoformat(),
+                "days_overdue": days_overdue,
+                "items_count": items_count,
+                "total_qty": total_qty,
+            }
+        )
 
     return overdue
 
@@ -262,6 +267,7 @@ async def _check_overdue_assemblies(
 # ---------------------------------------------------------------------------
 # Check 3: Category-A product health
 # ---------------------------------------------------------------------------
+
 
 async def _check_category_a_health(
     db: AsyncSession,
@@ -274,7 +280,10 @@ async def _check_category_a_health(
 
     # Get stock analytics with RF + transit data
     stock_data = await get_stock_analytics(
-        db, project_id, mode="wb_rf_transit", brand_filter=brand,
+        db,
+        project_id,
+        mode="wb_rf_transit",
+        brand_filter=brand,
     )
     stock_articles = stock_data.get("articles", [])
     stock_map: dict[int, dict] = {a["nm_id"]: a for a in stock_articles}
@@ -287,7 +296,9 @@ async def _check_category_a_health(
     date_to = today.isoformat()
 
     sku_data = await get_funnel_by_sku(
-        db, project_id, tax_info,
+        db,
+        project_id,
+        tax_info,
         date_from=date_from,
         date_to=date_to,
         brand=brand,
@@ -324,17 +335,19 @@ async def _check_category_a_health(
         if not issues:
             continue
 
-        result.append({
-            "nm_id": nm_id,
-            "vendor_code": product.get("vendor_code", ""),
-            "subject": product.get("subject", ""),
-            "revenue_30d": round(revenue_30d, 2),
-            "margin_pct": round(margin_pct, 2),
-            "drr": round(drr, 2),
-            "days_left": round(days_left, 1),
-            "stocks_total": stocks_total,
-            "issues": issues,
-        })
+        result.append(
+            {
+                "nm_id": nm_id,
+                "vendor_code": product.get("vendor_code", ""),
+                "subject": product.get("subject", ""),
+                "revenue_30d": round(revenue_30d, 2),
+                "margin_pct": round(margin_pct, 2),
+                "drr": round(drr, 2),
+                "days_left": round(days_left, 1),
+                "stocks_total": stocks_total,
+                "issues": issues,
+            }
+        )
 
     result.sort(key=lambda x: x["revenue_30d"], reverse=True)
     return result
@@ -343,6 +356,7 @@ async def _check_category_a_health(
 # ---------------------------------------------------------------------------
 # Check 4: Illiquid product actions
 # ---------------------------------------------------------------------------
+
 
 def _decide_illiquid_action(
     margin: float,
@@ -416,7 +430,9 @@ async def _check_illiquid_actions(
     from backend.services.funnel.capital import get_capital_analysis
 
     capital_data = await get_capital_analysis(
-        db, project_id, tax_info,
+        db,
+        project_id,
+        tax_info,
         period_days=30,
         brand=brand,
         group_by="article",
@@ -443,20 +459,21 @@ async def _check_illiquid_actions(
         vendor_code = group.get("vendor_code") or group.get("group_key", "")
         # Get stocks from capital data if available
         stocks_total = 0
-        capital_val = group.get("capital", 0.0)
 
-        result.append({
-            "nm_id": nm_id,
-            "vendor_code": vendor_code,
-            "subject": group.get("subject", ""),
-            "turnover_days": round(turnover_days, 1),
-            "margin_pct": round(margin, 2),
-            "drr": round(drr, 2),
-            "frozen_value": round(frozen_value, 2),
-            "stocks_total": stocks_total,
-            "recommendation": recommendation,
-            "reason": reason,
-        })
+        result.append(
+            {
+                "nm_id": nm_id,
+                "vendor_code": vendor_code,
+                "subject": group.get("subject", ""),
+                "turnover_days": round(turnover_days, 1),
+                "margin_pct": round(margin, 2),
+                "drr": round(drr, 2),
+                "frozen_value": round(frozen_value, 2),
+                "stocks_total": stocks_total,
+                "recommendation": recommendation,
+                "reason": reason,
+            }
+        )
 
     result.sort(key=lambda x: x["frozen_value"], reverse=True)
     return result

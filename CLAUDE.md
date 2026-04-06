@@ -147,6 +147,7 @@ src/types/api.ts — TypeScript интерфейсы
 - **BuildKit cache** — Docker layer cache через `actions/cache` (ключ: `requirements-backend.txt` + `Dockerfile.backend`)
 - **pip-audit** — CVE в Python-зависимостях
 - **Trivy** — filesystem scan (HIGH/CRITICAL)
+- **Snyk Code** — SAST (статический анализ кода, advisory-only; требует `SNYK_TOKEN` secret)
 - **CodeRabbit** — AI code review на каждый PR (конфиг `.coderabbit.yaml` с iron rules DDS)
 
 ### Dependabot (еженедельно)
