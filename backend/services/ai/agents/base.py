@@ -245,7 +245,7 @@ class BaseAgent(ABC):
 def _extract_text(response: object) -> str:
     """Extract concatenated text from Claude response content blocks."""
     parts: list[str] = []
-    for block in response.content:
+    for block in response.content:  # type: ignore[attr-defined]
         if block.type == "text":
             parts.append(block.text)
     return "\n".join(parts) if parts else ""

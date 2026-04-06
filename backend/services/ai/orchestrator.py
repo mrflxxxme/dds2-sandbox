@@ -145,7 +145,7 @@ async def ask(
                 )
                 clean_results.append(AgentResult(answer=f"Агент {valid_names[idx]}: ошибка при обработке."))
             else:
-                clean_results.append(result)
+                clean_results.append(result)  # type: ignore[arg-type]
         results = clean_results
 
     # 6. Synthesize if multiple agents
