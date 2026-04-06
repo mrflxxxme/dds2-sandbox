@@ -40,7 +40,7 @@ async def list_receipts(db: AsyncSession, project_id: int, warehouse_id: int) ->
         )
         .order_by(InboundReceipt.id.desc())
     )
-    return result.scalars().all()
+    return list(result.scalars().all())
 
 
 async def get_receipt(db: AsyncSession, project_id: int, receipt_id: int) -> InboundReceipt | None:

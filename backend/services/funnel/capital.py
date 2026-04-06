@@ -243,7 +243,7 @@ def _wavg(items: list[dict], field: str, weight_field: str) -> float:
     total_w = sum(i[weight_field] for i in items)
     if total_w <= 0:
         return 0.0
-    return sum(i[field] * i[weight_field] for i in items) / total_w
+    return float(sum(i[field] * i[weight_field] for i in items) / total_w)
 
 
 async def _build_capital_trend(

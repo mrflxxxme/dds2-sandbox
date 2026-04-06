@@ -28,6 +28,7 @@ from backend.schemas.warehouse import (
     WarehouseUpdate,
 )
 from backend.services import warehouse_service
+from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/warehouse", tags=["Warehouse"])
 
@@ -45,7 +46,7 @@ async def list_warehouses(
     return [WarehouseSchema.model_validate(r) for r in rows]
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(rate_limit_write)])
 async def create_warehouse(
     payload: WarehouseCreate,
     project: Project = Depends(get_current_project),
@@ -60,7 +61,7 @@ async def create_warehouse(
     return WarehouseSchema.model_validate(wh)
 
 
-@router.put("/reorder")
+@router.put("/reorder", dependencies=[Depends(rate_limit_write)])
 async def reorder_warehouses(
     payload: WarehouseReorder,
     project: Project = Depends(get_current_project),
@@ -71,7 +72,7 @@ async def reorder_warehouses(
     return {"ok": True}
 
 
-@router.put("/{warehouse_id}")
+@router.put("/{warehouse_id}", dependencies=[Depends(rate_limit_write)])
 async def update_warehouse(
     warehouse_id: int,
     payload: WarehouseUpdate,
@@ -90,7 +91,7 @@ async def update_warehouse(
     return WarehouseSchema.model_validate(wh)
 
 
-@router.delete("/{warehouse_id}")
+@router.delete("/{warehouse_id}", dependencies=[Depends(rate_limit_write)])
 async def delete_warehouse(
     warehouse_id: int,
     project: Project = Depends(get_current_project),
@@ -119,7 +120,7 @@ async def get_delivery_times(
     return result
 
 
-@router.put("/{warehouse_id}/delivery-times")
+@router.put("/{warehouse_id}/delivery-times", dependencies=[Depends(rate_limit_write)])
 async def update_delivery_times(
     warehouse_id: int,
     body: DeliveryTimesUpdate,
@@ -180,7 +181,7 @@ async def list_receipts(
     return [InboundReceiptSchema.model_validate(r) for r in rows]
 
 
-@router.post("/{warehouse_id}/receipts")
+@router.post("/{warehouse_id}/receipts", dependencies=[Depends(rate_limit_write)])
 async def create_receipt(
     warehouse_id: int,
     payload: InboundReceiptCreate,
@@ -213,7 +214,7 @@ async def get_receipt(
     return InboundReceiptSchema.model_validate(receipt)
 
 
-@router.put("/receipts/{receipt_id}")
+@router.put("/receipts/{receipt_id}", dependencies=[Depends(rate_limit_write)])
 async def update_receipt(
     receipt_id: int,
     payload: InboundReceiptUpdate,
@@ -235,7 +236,7 @@ async def update_receipt(
         raise HTTPException(400, str(e)) from None
 
 
-@router.post("/receipts/{receipt_id}/accept")
+@router.post("/receipts/{receipt_id}/accept", dependencies=[Depends(rate_limit_write)])
 async def accept_receipt(
     receipt_id: int,
     project: Project = Depends(get_current_project),
@@ -249,7 +250,7 @@ async def accept_receipt(
         raise HTTPException(400, str(e)) from None
 
 
-@router.post("/receipts/{receipt_id}/cancel")
+@router.post("/receipts/{receipt_id}/cancel", dependencies=[Depends(rate_limit_write)])
 async def cancel_receipt(
     receipt_id: int,
     project: Project = Depends(get_current_project),
@@ -277,7 +278,7 @@ async def list_shipments(
     return [OutboundShipmentSchema.model_validate(r) for r in rows]
 
 
-@router.post("/{warehouse_id}/shipments")
+@router.post("/{warehouse_id}/shipments", dependencies=[Depends(rate_limit_write)])
 async def create_shipment(
     warehouse_id: int,
     payload: OutboundShipmentCreate,
@@ -310,7 +311,7 @@ async def get_shipment(
     return OutboundShipmentSchema.model_validate(shipment)
 
 
-@router.post("/shipments/{shipment_id}/ship")
+@router.post("/shipments/{shipment_id}/ship", dependencies=[Depends(rate_limit_write)])
 async def ship_shipment(
     shipment_id: int,
     project: Project = Depends(get_current_project),
@@ -324,7 +325,7 @@ async def ship_shipment(
         raise HTTPException(400, str(e)) from None
 
 
-@router.post("/shipments/{shipment_id}/deliver")
+@router.post("/shipments/{shipment_id}/deliver", dependencies=[Depends(rate_limit_write)])
 async def deliver_shipment(
     shipment_id: int,
     project: Project = Depends(get_current_project),
@@ -338,7 +339,7 @@ async def deliver_shipment(
         raise HTTPException(400, str(e)) from None
 
 
-@router.post("/shipments/{shipment_id}/cancel")
+@router.post("/shipments/{shipment_id}/cancel", dependencies=[Depends(rate_limit_write)])
 async def cancel_shipment(
     shipment_id: int,
     project: Project = Depends(get_current_project),
@@ -366,7 +367,7 @@ async def list_transfers(
     return [StockTransferSchema.model_validate(r) for r in rows]
 
 
-@router.post("/transfers")
+@router.post("/transfers", dependencies=[Depends(rate_limit_write)])
 async def create_transfer(
     payload: StockTransferCreate,
     project: Project = Depends(get_current_project),
@@ -384,7 +385,7 @@ async def create_transfer(
         raise HTTPException(400, str(e)) from None
 
 
-@router.post("/transfers/{transfer_id}/send")
+@router.post("/transfers/{transfer_id}/send", dependencies=[Depends(rate_limit_write)])
 async def send_transfer(
     transfer_id: int,
     project: Project = Depends(get_current_project),
@@ -398,7 +399,7 @@ async def send_transfer(
         raise HTTPException(400, str(e)) from None
 
 
-@router.post("/transfers/{transfer_id}/complete")
+@router.post("/transfers/{transfer_id}/complete", dependencies=[Depends(rate_limit_write)])
 async def complete_transfer(
     transfer_id: int,
     project: Project = Depends(get_current_project),
@@ -415,7 +416,7 @@ async def complete_transfer(
 # ─── Stock Adjustments (Корректировка) ────────────────────────────────────
 
 
-@router.post("/{warehouse_id}/adjustment")
+@router.post("/{warehouse_id}/adjustment", dependencies=[Depends(rate_limit_write)])
 async def create_adjustment(
     warehouse_id: int,
     payload: StockAdjustmentCreate,
@@ -461,7 +462,7 @@ async def get_unified_stock(
     )
 
 
-@router.put("/stock/{stock_id}/cost-price")
+@router.put("/stock/{stock_id}/cost-price", dependencies=[Depends(rate_limit_write)])
 async def update_cost_price(
     stock_id: int,
     payload: CostPriceUpdate,

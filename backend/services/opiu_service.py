@@ -171,7 +171,7 @@ async def get_opiu(
 
     cost_result = await db.execute(text(build_cost_qty_sql(brand, article)), params)
     monthly_cost: dict[str, float] = {mk: 0.0 for mk in months_set}
-    for row in cost_result:
+    for row in cost_result:  # type: ignore[assignment]
         mk = row.month_key
         sa_name = row.sa_name or ""
         nm_id = row.nm_id or 0
@@ -188,7 +188,7 @@ async def get_opiu(
     # ── 8. Build P&L rows ──
     months_sorted = sorted(months_set, reverse=True)
 
-    return _build_pnl_result(
+    pnl_result: dict = _build_pnl_result(
         monthly_data,
         total_data,
         months_sorted,
@@ -200,6 +200,7 @@ async def get_opiu(
         date_from,
         date_to,
     )
+    return pnl_result
 
 
 def _build_pnl_result(

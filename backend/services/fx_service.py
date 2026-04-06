@@ -57,7 +57,7 @@ async def backfill_rates_from_transactions(db: AsyncSession, project_id: int) ->
     skipped = 0
 
     for txn in rows:
-        rate = await extract_rate_from_purpose(txn.purpose)
+        rate = await extract_rate_from_purpose(txn.purpose or "")
         if rate is None:
             skipped += 1
             continue

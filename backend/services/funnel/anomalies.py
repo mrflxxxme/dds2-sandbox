@@ -227,7 +227,7 @@ def _make_item(
     description: str,
     loss_amount: float | None,
     action: str,
-    **extra_metrics,
+    **extra_metrics: object,
 ) -> dict:
     """Build an anomaly item dict from product data and extra metrics."""
     metrics = {

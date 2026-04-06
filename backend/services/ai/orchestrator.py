@@ -129,13 +129,13 @@ async def ask(
             results = [AgentResult(answer=f"Агент {valid_names[0]}: ошибка при обработке. Попробуйте позже.")]
     else:
         # Multiple agents: each gets its own DB session to avoid conflicts
-        results = await asyncio.gather(
+        raw_results = await asyncio.gather(
             *[_run_agent_with_own_session(name) for name in valid_names],
             return_exceptions=True,
         )
         # Replace exceptions with error results
         clean_results: list[AgentResult] = []
-        for idx, result in enumerate(results):
+        for idx, result in enumerate(raw_results):
             if isinstance(result, Exception):
                 logger.error(
                     "Agent '%s' failed: %s",
@@ -145,7 +145,7 @@ async def ask(
                 )
                 clean_results.append(AgentResult(answer=f"Агент {valid_names[idx]}: ошибка при обработке."))
             else:
-                clean_results.append(result)
+                clean_results.append(result)  # type: ignore[arg-type]
         results = clean_results
 
     # 6. Synthesize if multiple agents

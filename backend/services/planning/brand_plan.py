@@ -4,6 +4,7 @@ Brand Plan service — CRUD for monthly revenue plans per brand + plan-fact anal
 
 import calendar
 import logging
+from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
 
@@ -26,7 +27,7 @@ async def get_brand_plans(db: AsyncSession, project_id: int, year: int) -> list[
         .order_by(BrandPlan.brand, BrandPlan.month)
         .limit(500)
     )
-    return result.scalars().all()
+    return list(result.scalars().all())
 
 
 async def upsert_brand_plan(
@@ -298,7 +299,7 @@ async def get_plan_fact_brands(
     return rows
 
 
-def _iter_months(year_from: int, month_from: int, year_to: int, month_to: int):
+def _iter_months(year_from: int, month_from: int, year_to: int, month_to: int) -> Iterator[tuple[int, int]]:
     """Yield (year, month) pairs from start to end inclusive."""
     y, m = year_from, month_from
     while (y, m) <= (year_to, month_to):

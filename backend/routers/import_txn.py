@@ -19,6 +19,7 @@ from backend.schemas import (
     TransactionSchema,
 )
 from backend.services import transactions_service
+from backend.utils.rate_limit import rate_limit_import, rate_limit_write
 
 router = APIRouter()
 
@@ -26,7 +27,7 @@ router = APIRouter()
 # ─── Import ───────────────────────────────────────────────────────────────────
 
 
-@router.post("/import/upload", response_model=ImportLogSchema)
+@router.post("/import/upload", response_model=ImportLogSchema, dependencies=[Depends(rate_limit_import)])
 async def upload_statement(
     file: UploadFile = File(...),
     source_type: str = Form(...),
@@ -138,7 +139,7 @@ async def get_unassigned(
     return await transactions_service.get_unassigned_with_fx(db, project.id, limit)
 
 
-@router.post("/transactions/assign_category")
+@router.post("/transactions/assign_category", dependencies=[Depends(rate_limit_write)])
 async def assign_category(
     payload: CategoryAssignment,
     project: Project = Depends(get_current_project),
@@ -171,7 +172,7 @@ async def get_unassigned_grouped(project: Project = Depends(get_current_project)
     return await transactions_service.get_unassigned_grouped(db, project.id)
 
 
-@router.post("/transactions/assign_category_bulk")
+@router.post("/transactions/assign_category_bulk", dependencies=[Depends(rate_limit_write)])
 async def assign_category_bulk(
     payload: BulkCategoryAssignment, project: Project = Depends(get_current_project), db: AsyncSession = Depends(get_db)
 ):
@@ -188,7 +189,7 @@ async def assign_category_bulk(
     )
 
 
-@router.post("/transactions/assign_category_by_ids")
+@router.post("/transactions/assign_category_by_ids", dependencies=[Depends(rate_limit_write)])
 async def assign_category_by_ids(
     payload: CategoryAssignByIds, project: Project = Depends(get_current_project), db: AsyncSession = Depends(get_db)
 ):
@@ -228,7 +229,7 @@ async def get_auto_rules(project: Project = Depends(get_current_project), db: As
     ]
 
 
-@router.post("/transactions/auto_categorize/rules")
+@router.post("/transactions/auto_categorize/rules", dependencies=[Depends(rate_limit_write)])
 async def create_auto_rule(
     payload: AutoRuleCreate,
     project: Project = Depends(get_current_project),
@@ -257,7 +258,7 @@ async def create_auto_rule(
     }
 
 
-@router.delete("/transactions/auto_categorize/rules/{rule_id}")
+@router.delete("/transactions/auto_categorize/rules/{rule_id}", dependencies=[Depends(rate_limit_write)])
 async def delete_auto_rule(
     rule_id: int,
     project: Project = Depends(get_current_project),
@@ -280,7 +281,7 @@ async def preview_auto_categorize(project: Project = Depends(get_current_project
     return await auto_categorize.preview_auto_categorize(db, project.id)
 
 
-@router.post("/transactions/auto_categorize/apply")
+@router.post("/transactions/auto_categorize/apply", dependencies=[Depends(rate_limit_write)])
 async def apply_auto_categorize(project: Project = Depends(get_current_project), db: AsyncSession = Depends(get_db)):
     """Apply auto-categorization: assign categories to all matching uncategorized transactions."""
     from backend.services import auto_categorize

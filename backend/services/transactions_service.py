@@ -75,7 +75,7 @@ async def search_transactions(
 
     q = q.order_by(Transaction.date.desc()).limit(limit).offset(offset)
     result = await db.execute(q)
-    return result.scalars().all()
+    return list(result.scalars().all())
 
 
 async def get_unassigned(
@@ -100,7 +100,7 @@ async def get_unassigned(
         .limit(limit)
     )
     result = await db.execute(q)
-    return result.scalars().all()
+    return list(result.scalars().all())
 
 
 async def get_unassigned_with_fx(

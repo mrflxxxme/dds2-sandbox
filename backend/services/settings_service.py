@@ -1,7 +1,7 @@
 """Settings service — project-level key-value settings."""
+
 import json
 import logging
-from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,11 +12,10 @@ from backend.services.warehouse_geo import WAREHOUSE_COORDS
 logger = logging.getLogger("dds.settings")
 
 
-async def get_setting(db: AsyncSession, project_id: int, key: str) -> Optional[str]:
+async def get_setting(db: AsyncSession, project_id: int, key: str) -> str | None:
     """Get a raw setting value by key."""
     result = await db.execute(
-        select(ProjectSetting)
-        .where(ProjectSetting.project_id == project_id, ProjectSetting.key == key)
+        select(ProjectSetting).where(ProjectSetting.project_id == project_id, ProjectSetting.key == key)
     )
     row = result.scalar_one_or_none()
     return row.value if row else None
@@ -25,8 +24,7 @@ async def get_setting(db: AsyncSession, project_id: int, key: str) -> Optional[s
 async def set_setting(db: AsyncSession, project_id: int, key: str, value: str) -> None:
     """Upsert a setting value."""
     result = await db.execute(
-        select(ProjectSetting)
-        .where(ProjectSetting.project_id == project_id, ProjectSetting.key == key)
+        select(ProjectSetting).where(ProjectSetting.project_id == project_id, ProjectSetting.key == key)
     )
     row = result.scalar_one_or_none()
     if row:
@@ -42,7 +40,8 @@ async def get_excluded_warehouses(db: AsyncSession, project_id: int) -> list[str
     if not raw:
         return []
     try:
-        return json.loads(raw)
+        parsed: list[str] = json.loads(raw)
+        return parsed
     except (json.JSONDecodeError, TypeError):
         return []
 
@@ -57,7 +56,4 @@ async def set_excluded_warehouses(db: AsyncSession, project_id: int, warehouses:
 
 def get_all_warehouses() -> list[dict]:
     """Return all warehouses from WAREHOUSE_COORDS with their coordinates."""
-    return [
-        {"name": name, "lat": coords[0], "lng": coords[1]}
-        for name, coords in sorted(WAREHOUSE_COORDS.items())
-    ]
+    return [{"name": name, "lat": coords[0], "lng": coords[1]} for name, coords in sorted(WAREHOUSE_COORDS.items())]

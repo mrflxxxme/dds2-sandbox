@@ -6,22 +6,23 @@ Contains:
 - batch_resync_ads: batch re-sync ALL ad data for a project
 """
 
-import logging
 import asyncio
-from datetime import date, timedelta
+import logging
+from datetime import date
 
-from sqlalchemy import select, func, update as sa_update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select, update as sa_update
 
 from backend.models import WbFunnelDaily
 from backend.services.funnel.wb_api_client import (
-    get_wb_key, fetch_ad_campaigns, fetch_ad_stats,
+    fetch_ad_campaigns,
+    fetch_ad_stats,
+    get_wb_key,
 )
 
 logger = logging.getLogger("dds.funnel")
 
 
-async def run_backfill_bg(project_id: int, missing_dates: list[str]):
+async def run_backfill_bg(project_id: int, missing_dates: list[str]) -> None:
     """Background coroutine: sync missing days with concurrent semaphore."""
     from backend.database import AsyncSessionLocal
     from backend.services.funnel.sync import run_funnel_sync
@@ -40,14 +41,14 @@ async def run_backfill_bg(project_id: int, missing_dates: list[str]):
                         timeout=600,
                     )
                     return {"day": day_str, "rows": result.get("rows", 0), "errors": result.get("errors", [])}
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return {"day": day_str, "rows": 0, "errors": [f"Timeout 5min: {day_str}"]}
             except Exception as e:
                 return {"day": day_str, "rows": 0, "errors": [str(e)[:200]]}
 
     batch_size = 5
     for i in range(0, len(missing_dates), batch_size):
-        batch = missing_dates[i:i + batch_size]
+        batch = missing_dates[i : i + batch_size]
         results = await asyncio.gather(
             *[_sync_one(d) for d in batch],
             return_exceptions=True,
@@ -61,10 +62,7 @@ async def run_backfill_bg(project_id: int, missing_dates: list[str]):
                 total_rows += r.get("rows", 0)
                 if r.get("errors"):
                     total_errors += len(r["errors"])
-                logger.info(
-                    f"Backfill bg: project {project_id} — "
-                    f"day {r['day']}, +{r.get('rows', 0)} rows"
-                )
+                logger.info(f"Backfill bg: project {project_id} — " f"day {r['day']}, +{r.get('rows', 0)} rows")
 
         if i + batch_size < len(missing_dates):
             await asyncio.sleep(3)
@@ -83,17 +81,19 @@ async def batch_resync_ads(project_id: int) -> dict:
     Pauses scheduler ad jobs to avoid 429 conflicts.
     Returns {status, days_updated, total_updated, errors}.
     """
-    from backend.database import AsyncSessionLocal
     from datetime import timedelta as td
+
+    from backend.database import AsyncSessionLocal
 
     try:
         from backend.scheduler import get_scheduler_instance
+
         sched = get_scheduler_instance()
         if sched:
             try:
                 sched.pause_job("ad_anomaly_check")
                 logger.info("🔄 Paused ad_anomaly_check scheduler job")
-            except Exception:
+            except Exception:  # noqa: S110
                 pass
     except Exception:
         sched = None
@@ -106,8 +106,7 @@ async def batch_resync_ads(project_id: int) -> dict:
         async with AsyncSessionLocal() as db:
             adv_key = await get_wb_key(db, project_id, "wb")
             if not adv_key:
-                return {"status": "error", "days_updated": 0,
-                        "total_updated": 0, "errors": ["API key not found"]}
+                return {"status": "error", "days_updated": 0, "total_updated": 0, "errors": ["API key not found"]}
 
             result = await db.execute(
                 select(
@@ -117,21 +116,18 @@ async def batch_resync_ads(project_id: int) -> dict:
             )
             row = result.one_or_none()
             if not row or not row[0]:
-                return {"status": "error", "days_updated": 0,
-                        "total_updated": 0, "errors": ["No existing data"]}
+                return {"status": "error", "days_updated": 0, "total_updated": 0, "errors": ["No existing data"]}
 
             start_date = row[0]
             end_date = row[1]
             total_days = (end_date - start_date).days + 1
             logger.info(
-                f"🔄 Batch ad resync: project {project_id}, "
-                f"range {start_date} → {end_date} ({total_days} days)"
+                f"🔄 Batch ad resync: project {project_id}, " f"range {start_date} → {end_date} ({total_days} days)"
             )
 
             campaign_ids = await fetch_ad_campaigns(adv_key)
             if not campaign_ids:
-                return {"status": "error", "days_updated": 0,
-                        "total_updated": 0, "errors": ["No campaigns found"]}
+                return {"status": "error", "days_updated": 0, "total_updated": 0, "errors": ["No campaigns found"]}
 
             logger.info(f"🔄 Batch ad resync: {len(campaign_ids)} campaigns")
 
@@ -145,25 +141,22 @@ async def batch_resync_ads(project_id: int) -> dict:
                 w_from = window_start.isoformat()
                 w_to = window_end.isoformat()
 
-                logger.info(
-                    f"🔄 Batch ad resync: window {window_num} — "
-                    f"{w_from} → {w_to}"
-                )
+                logger.info(f"🔄 Batch ad resync: window {window_num} — " f"{w_from} → {w_to}")
 
-                ad_stats = await fetch_ad_stats(
-                    adv_key, campaign_ids, w_from, w_to
-                )
+                ad_stats = await fetch_ad_stats(adv_key, campaign_ids, w_from, w_to)
 
                 if ad_stats:
                     for date_str, nm_data in ad_stats.items():
                         day_count = 0
                         for nm_id, ad in nm_data.items():
                             res = await db.execute(
-                                sa_update(WbFunnelDaily).where(
+                                sa_update(WbFunnelDaily)
+                                .where(
                                     WbFunnelDaily.project_id == project_id,
                                     WbFunnelDaily.date == date.fromisoformat(date_str),
                                     WbFunnelDaily.nm_id == nm_id,
-                                ).values(
+                                )
+                                .values(
                                     adv_sum=ad["sum"],
                                     adv_views=ad["views"],
                                     adv_clicks=ad["clicks"],
@@ -175,15 +168,10 @@ async def batch_resync_ads(project_id: int) -> dict:
                         total_updated += day_count
                         days_updated += 1
 
-                    logger.info(
-                        f"🔄 Window {window_num} done: "
-                        f"{len(ad_stats)} days updated"
-                    )
+                    logger.info(f"🔄 Window {window_num} done: " f"{len(ad_stats)} days updated")
                 else:
                     errors.append(f"No data for window {w_from}→{w_to}")
-                    logger.warning(
-                        f"🔄 Window {window_num}: no ad data returned"
-                    )
+                    logger.warning(f"🔄 Window {window_num}: no ad data returned")
 
                 window_start = window_end + td(days=1)
 
@@ -205,6 +193,6 @@ async def batch_resync_ads(project_id: int) -> dict:
 
     except Exception as e:
         import traceback
+
         logger.error(f"Batch ad resync error: {e}\n{traceback.format_exc()}")
-        return {"status": "error", "days_updated": 0,
-                "total_updated": 0, "errors": [str(e)[:500]]}
+        return {"status": "error", "days_updated": 0, "total_updated": 0, "errors": [str(e)[:500]]}
