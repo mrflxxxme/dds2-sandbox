@@ -4,6 +4,7 @@ Cost — Nomenclature (get, upload Excel).
 
 import io
 from decimal import Decimal
+from typing import Any
 
 import pandas as pd
 from sqlalchemy import select
@@ -39,7 +40,7 @@ async def upload_nomenclature(db: AsyncSession, project_id: int, data: bytes) ->
     df = df.rename(columns=col_map)
 
     # Collect valid barcodes from DataFrame
-    rows_by_barcode: dict[str, object] = {}
+    rows_by_barcode: dict[str, Any] = {}
     for _, row in df.iterrows():
         bc = str(row.get("barcode", "")).strip()
         if not bc or bc == "nan":
