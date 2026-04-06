@@ -6,6 +6,12 @@ All models are re-exported here for backward compatibility:
     from backend.models import User, Transaction, Order  # still works
 """
 
+# AI Chat
+from backend.models.ai_chat import (
+    AiConversation,
+    AiMessage,
+)
+
 # Enums
 # Audit
 from backend.models.audit import (
@@ -98,6 +104,8 @@ from backend.models.refs import (
 from backend.models.supply_chain import (
     FactoryOrder,
     FactoryOrderItem,
+    VehicleDocument,
+    VehicleStatusHistory,
 )
 
 # Tax
@@ -261,4 +269,9 @@ __all__ = [
     # Supply Chain
     "FactoryOrder",
     "FactoryOrderItem",
+    "VehicleDocument",
+    "VehicleStatusHistory",
+    # AI Chat
+    "AiConversation",
+    "AiMessage",
 ]
