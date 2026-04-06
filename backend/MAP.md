@@ -26,7 +26,7 @@
 
 ### WB интеграция
 - HTTP клиент: `integrations/wb_api.py`
-- Resilience (circuit breaker): `integrations/resilience.py`
+- Resilience (per-project circuit breaker, retry): `integrations/resilience.py`
 - Воронка/реклама: `services/funnel/` (sync.py, unified_sync.py, wb_funnel_api.py, wb_advertising_api.py, ad_campaigns_service.py)
 - Финансы WB: `wb_finance_sync.py` (в корне `services/`, не в funnel/)
 - WB акции/остатки: `scheduler/jobs/wb_stocks.py`

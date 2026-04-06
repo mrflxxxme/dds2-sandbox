@@ -3,7 +3,7 @@
 ## Ownership
 Файлы этого домена:
 - `integrations/wb_api.py` — WB Statistics/Content API клиент
-- `integrations/resilience.py` — CircuitBreaker + retry_with_backoff
+- `integrations/resilience.py` — CircuitBreakerRegistry (per-project) + retry_with_backoff
 - `services/funnel/wb_api_client.py` — WB API обёртка для funnel
 - `services/funnel/wb_funnel_api.py` — Funnel Statistics API
 - `services/funnel/wb_advertising_api.py` — Advertising API
@@ -58,7 +58,7 @@
 
 ### Rate Limiting
 - 429 → RateLimitError (respect Retry-After), НЕ считается Circuit Breaker failure
-- Circuit Breaker → ТОЛЬКО для 500-504 (5 failures → 120s cooldown)
+- Circuit Breaker → per-project (CircuitBreakerRegistry), ТОЛЬКО для 500-504 (5 failures → 120s cooldown)
 - Retry: max 3 attempts, exponential backoff (2s, 4s, 8s)
 
 ### Sync
@@ -81,7 +81,7 @@
 - Unit-экономика: revenue - cost - ads - tax = profit per unit
 
 ## Known Issues & Gotchas
-- **Глобальный CircuitBreaker:** один `_wb_circuit` на весь процесс — проблемы одного клиента блокируют всех
+- ~~**Глобальный CircuitBreaker:**~~ исправлено — теперь per-project CircuitBreakerRegistry (`_wb_circuits`), каждый проект имеет свой circuit breaker
 - **Дублирование кода:** wb_funnel_api, wb_advertising_api, wb_supplier_api — одинаковая retry-логика (нужно использовать resilience.retry_with_backoff)
 - **TOCTOU в scheduler locks:** _backfill_locks проверка locked() + acquire не атомарны
 - **wb_finance_sync:** partial commit — если sync fails mid-page, часть данных committed

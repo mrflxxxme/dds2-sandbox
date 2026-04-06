@@ -139,8 +139,8 @@ class TestHelpers:
     def test_map_fbw_box_type(self):
         assert _map_fbw_box_type(None) is None
         assert _map_fbw_box_type(0) is None
-        assert _map_fbw_box_type(1) == "Короб"  # noqa: RUF001
-        assert _map_fbw_box_type(2) == "Короб"  # noqa: RUF001
+        assert _map_fbw_box_type(1) == "Короб"
+        assert _map_fbw_box_type(2) == "Короб"
         assert _map_fbw_box_type(5) == "Монопаллет"
         assert _map_fbw_box_type(6) == "Суперсейф"
         assert "Тип" in _map_fbw_box_type(99)  # Unknown
@@ -157,7 +157,7 @@ class TestHelpers:
         supply = _create_supply_from_fbw_list(project_id=1, wb_data=wb_data)
         assert supply.wb_supply_id == "37847227"
         assert supply.wb_status == WbSupplyStatus.ON_DELIVERY
-        assert supply.cargo_type == "Короб"  # noqa: RUF001
+        assert supply.cargo_type == "Короб"
         assert supply.planned_date == date(2026, 3, 21)
         assert supply.actual_date == date(2026, 3, 20)
         assert supply.project_id == 1
@@ -441,6 +441,7 @@ class TestGetFboSupplyItems:
         await db_session.flush()
 
         item = WbFboSupplyItem(
+            project_id=1,
             supply_id=supply.id,
             wb_order_id="ORD-1",
             barcode="123456789",
@@ -598,6 +599,7 @@ class TestModels:
 
     def test_item_defaults(self):
         item = WbFboSupplyItem(
+            project_id=1,
             supply_id=1,
             wb_order_id="ORD-1",
             barcode="123",

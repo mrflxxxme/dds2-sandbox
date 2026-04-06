@@ -88,6 +88,7 @@ async def create_shipment(db: AsyncSession, project_id: int, warehouse_id: int, 
     for item_data in payload.get("items", []):
         nom = await _resolve_barcode(db, project_id, item_data["barcode"])
         item = OutboundShipmentItem(
+            project_id=project_id,
             shipment_id=shipment.id,
             nomenclature_id=nom.id,
             barcode=item_data["barcode"],
@@ -247,6 +248,7 @@ async def create_transfer(db: AsyncSession, project_id: int, payload: dict) -> S
     for item_data in payload.get("items", []):
         nom = await _resolve_barcode(db, project_id, item_data["barcode"])
         item = StockTransferItem(
+            project_id=project_id,
             transfer_id=transfer.id,
             nomenclature_id=nom.id,
             barcode=item_data["barcode"],

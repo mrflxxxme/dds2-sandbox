@@ -123,6 +123,7 @@ class InboundReceiptItem(Base):
     __tablename__ = "inbound_receipt_items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     receipt_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("inbound_receipts.id", ondelete="CASCADE"), nullable=False
     )
@@ -135,6 +136,7 @@ class InboundReceiptItem(Base):
     receipt: Mapped["InboundReceipt"] = relationship(back_populates="items")
 
     __table_args__ = (
+        Index("ix_inbound_receipt_items_project_id", "project_id"),
         Index("ix_inbound_receipt_items_receipt_id", "receipt_id"),
         Index("ix_inbound_receipt_items_nomenclature_id", "nomenclature_id"),
     )
@@ -173,6 +175,7 @@ class OutboundShipmentItem(Base):
     __tablename__ = "outbound_shipment_items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     shipment_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("outbound_shipments.id", ondelete="CASCADE"), nullable=False
     )
@@ -184,6 +187,7 @@ class OutboundShipmentItem(Base):
     shipment: Mapped["OutboundShipment"] = relationship(back_populates="items")
 
     __table_args__ = (
+        Index("ix_outbound_shipment_items_project_id", "project_id"),
         Index("ix_outbound_shipment_items_shipment_id", "shipment_id"),
         Index("ix_outbound_shipment_items_nomenclature_id", "nomenclature_id"),
     )
@@ -216,6 +220,7 @@ class StockTransferItem(Base):
     __tablename__ = "stock_transfer_items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     transfer_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("stock_transfers.id", ondelete="CASCADE"), nullable=False
     )
@@ -227,6 +232,7 @@ class StockTransferItem(Base):
     transfer: Mapped["StockTransfer"] = relationship(back_populates="items")
 
     __table_args__ = (
+        Index("ix_stock_transfer_items_project_id", "project_id"),
         Index("ix_stock_transfer_items_transfer_id", "transfer_id"),
         Index("ix_stock_transfer_items_nomenclature_id", "nomenclature_id"),
     )

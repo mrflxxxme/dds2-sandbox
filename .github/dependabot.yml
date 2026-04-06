@@ -1,5 +1,7 @@
 # Dependabot — automatic dependency updates
 # https://docs.github.com/en/code-security/dependabot
+#
+# POLICY: only patch/minor updates auto-PR. Major versions need manual upgrade.
 version: 2
 updates:
   # Python backend dependencies
@@ -14,6 +16,9 @@ updates:
       - dependencies
       - security
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # Node.js frontend dependencies
   - package-ecosystem: npm
@@ -27,6 +32,9 @@ updates:
       - dependencies
       - frontend
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # GitHub Actions
   - package-ecosystem: github-actions

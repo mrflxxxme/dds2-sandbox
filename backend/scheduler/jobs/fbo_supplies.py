@@ -61,7 +61,7 @@ async def sync_all_projects_fbo_supplies():
                 await db.flush()
                 log_id = sync_log.id
 
-                api_client = WBApiClient(api_key)
+                api_client = WBApiClient(api_key, project_id=project_id)
                 result = await asyncio.wait_for(
                     sync_fbo_supplies(db, project_id, api_client, key.id),
                     timeout=600,
@@ -167,7 +167,7 @@ async def enrich_all_projects_fbo_supplies():
                     logger.debug("FBO enrich: project %d has no WB key, skipping", project_id)
                     continue
 
-                api_client = WBApiClient(api_key)
+                api_client = WBApiClient(api_key, project_id=project_id)
                 result = await enrich_fbo_supplies(db, project_id, api_client, max_calls=300)
 
                 logger.info(

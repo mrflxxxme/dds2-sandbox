@@ -18,6 +18,7 @@ COPY --from=builder /install /usr/local
 COPY backend/ ./backend/
 COPY tests/ ./tests/
 COPY pytest.ini .
+COPY pyproject.toml .
 COPY migrations/ ./migrations/
 COPY alembic.ini .
 COPY entrypoint.sh .

@@ -75,12 +75,16 @@ class Settings(BaseSettings):
     @field_validator("MINIO_ACCESS_KEY", "MINIO_SECRET_KEY")
     @classmethod
     def validate_minio_credentials(cls, v: str, info) -> str:
+        import os
+
+        # Skip validation in CI/test environments
+        if os.getenv("CI") or os.getenv("TESTING") or os.getenv("DDS_ENV") == "testing":
+            return v
         if not v or v in ("", "minioadmin"):
-            warnings.warn(
-                f"\n⚠️  {info.field_name} не задан или использует дефолтное значение!\n"
-                f"   Укажите безопасное значение в .env для production.",
-                UserWarning,
-                stacklevel=2,
+            raise ValueError(
+                f"{info.field_name} не задан или использует дефолтное значение 'minioadmin'! "
+                f"Укажите безопасное значение в .env. "
+                f'Для генерации: python3 -c "import secrets; print(secrets.token_urlsafe(24))"'
             )
         return v
 

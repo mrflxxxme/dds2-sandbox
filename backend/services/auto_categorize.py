@@ -3,12 +3,11 @@ Auto-categorization service — match uncategorized transactions by keywords in 
 """
 
 import logging
-from typing import Optional
 
-from sqlalchemy import select, update, or_, and_
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import Transaction, CategoryRule, CategoryChangeLog
+from backend.models import CategoryChangeLog, CategoryRule, Transaction
 
 logger = logging.getLogger("dds.auto_categorize")
 
@@ -19,8 +18,8 @@ async def get_rules(db: AsyncSession, project_id: int) -> list:
         select(CategoryRule)
         .where(
             CategoryRule.project_id == project_id,
-            CategoryRule.is_deleted == False,
-            CategoryRule.is_active == True,
+            CategoryRule.is_deleted == False,  # noqa: E712
+            CategoryRule.is_active == True,  # noqa: E712
         )
         .order_by(CategoryRule.priority.desc(), CategoryRule.id)
     )
@@ -34,7 +33,7 @@ async def get_all_rules(db: AsyncSession, project_id: int) -> list:
         select(CategoryRule)
         .where(
             CategoryRule.project_id == project_id,
-            CategoryRule.is_deleted == False,
+            CategoryRule.is_deleted == False,  # noqa: E712
         )
         .order_by(CategoryRule.priority.desc(), CategoryRule.id)
     )
@@ -47,7 +46,7 @@ async def create_rule(
     project_id: int,
     keyword: str,
     cat_lvl1: str,
-    cat_lvl2: Optional[str] = None,
+    cat_lvl2: str | None = None,
     direction: str = "expense",
     priority: int = 0,
 ) -> CategoryRule:
@@ -72,7 +71,7 @@ async def delete_rule(db: AsyncSession, project_id: int, rule_id: int) -> dict:
         select(CategoryRule).where(
             CategoryRule.id == rule_id,
             CategoryRule.project_id == project_id,
-            CategoryRule.is_deleted == False,
+            CategoryRule.is_deleted == False,  # noqa: E712
         )
     )
     rule = result.scalar_one_or_none()
@@ -100,7 +99,7 @@ async def preview_auto_categorize(db: AsyncSession, project_id: int) -> list[dic
         select(Transaction)
         .where(
             Transaction.project_id == project_id,
-            Transaction.is_deleted == False,
+            Transaction.is_deleted == False,  # noqa: E712
             Transaction.is_cashflow2 == 1,
             or_(
                 Transaction.cat_lvl1_2.is_(None),
@@ -131,18 +130,20 @@ async def preview_auto_categorize(db: AsyncSession, project_id: int) -> list[dic
                 if rule.direction == "income" and not has_income:
                     continue
 
-                matches.append({
-                    "txn_id": txn.txn_id,
-                    "date": txn.date.isoformat() if txn.date else None,
-                    "counterparty": txn.counterparty,
-                    "purpose": txn.purpose,
-                    "expense": float(txn.expense or 0),
-                    "income": float(txn.income or 0),
-                    "currency": txn.currency,
-                    "matched_keyword": rule.keyword,
-                    "suggested_cat_lvl1": rule.cat_lvl1,
-                    "suggested_cat_lvl2": rule.cat_lvl2,
-                })
+                matches.append(
+                    {
+                        "txn_id": txn.txn_id,
+                        "date": txn.date.isoformat() if txn.date else None,
+                        "counterparty": txn.counterparty,
+                        "purpose": txn.purpose,
+                        "expense": float(txn.expense or 0),
+                        "income": float(txn.income or 0),
+                        "currency": txn.currency,
+                        "matched_keyword": rule.keyword,
+                        "suggested_cat_lvl1": rule.cat_lvl1,
+                        "suggested_cat_lvl2": rule.cat_lvl2,
+                    }
+                )
                 break  # first match wins
 
     return matches
@@ -176,15 +177,18 @@ async def apply_auto_categorize(db: AsyncSession, project_id: int) -> dict:
 
         if result.rowcount > 0:
             updated_count += 1
-            details.append({
-                "txn_id": txn_id,
-                "cat_lvl1": cat_lvl1,
-                "cat_lvl2": cat_lvl2,
-                "keyword": m["matched_keyword"],
-            })
+            details.append(
+                {
+                    "txn_id": txn_id,
+                    "cat_lvl1": cat_lvl1,
+                    "cat_lvl2": cat_lvl2,
+                    "keyword": m["matched_keyword"],
+                }
+            )
 
             # Log the change
             log = CategoryChangeLog(
+                project_id=project_id,
                 txn_id=txn_id,
                 old_cat_lvl1=None,
                 old_cat_lvl2=None,
@@ -199,6 +203,7 @@ async def apply_auto_categorize(db: AsyncSession, project_id: int) -> dict:
 
     # Invalidate caches
     from backend.cache import invalidate_project_reports
+
     await invalidate_project_reports(project_id)
 
     logger.info(f"Auto-categorized {updated_count} transactions for project {project_id}")

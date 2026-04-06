@@ -64,7 +64,7 @@ async def add_key(
     if service == "wb":
         from backend.integrations.wb_api import WBApiClient
 
-        client = WBApiClient(api_key)
+        client = WBApiClient(api_key, project_id=None)
         valid = await client.test_connection()
         if not valid:
             raise ValueError("WB API ключ невалидный. Проверьте ключ.")
@@ -179,7 +179,7 @@ async def sync_wb_sales(
     try:
         from backend.integrations.wb_api import WBApiClient, parse_wb_sales_to_payouts
 
-        client = WBApiClient(api_key)
+        client = WBApiClient(api_key, project_id=project_id)
 
         if sync_type == "sales":
             raw_data = await client.get_sales(date_from)
@@ -266,7 +266,7 @@ async def sync_wb_nomenclature(db: AsyncSession, project_id: int) -> SyncLog:
     try:
         from backend.integrations.wb_api import WBApiClient, parse_wb_cards_to_nomenclature
 
-        client = WBApiClient(api_key)
+        client = WBApiClient(api_key, project_id=project_id)
         raw_cards = await client.get_cards_list(limit=100)
         nom_items = parse_wb_cards_to_nomenclature(raw_cards)
 

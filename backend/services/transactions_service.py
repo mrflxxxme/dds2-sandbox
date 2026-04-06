@@ -304,6 +304,7 @@ async def assign_category(
 
     # Log the change
     log = CategoryChangeLog(
+        project_id=project_id,
         txn_id=txn_id,
         old_cat_lvl1=old_cat1,
         old_cat_lvl2=old_cat2,

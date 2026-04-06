@@ -84,6 +84,7 @@ async def create_receipt(db: AsyncSession, project_id: int, warehouse_id: int, p
     for item_data in payload.get("items", []):
         nom = await _resolve_barcode(db, project_id, item_data["barcode"])
         item = InboundReceiptItem(
+            project_id=project_id,
             receipt_id=receipt.id,
             nomenclature_id=nom.id,
             barcode=item_data["barcode"],
@@ -163,6 +164,7 @@ async def update_receipt(db: AsyncSession, project_id: int, receipt_id: int, pay
             for item_data in payload["items"]:
                 nom = await _resolve_barcode(db, project_id, item_data["barcode"])
                 item = InboundReceiptItem(
+                    project_id=project_id,
                     receipt_id=receipt.id,
                     nomenclature_id=nom.id,
                     barcode=item_data["barcode"],

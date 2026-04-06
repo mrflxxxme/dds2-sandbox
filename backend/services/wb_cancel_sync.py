@@ -38,7 +38,7 @@ async def sync_cancel_stats(
 
     key_row, api_key = await _get_wb_key(db, project_id)
 
-    client = WBApiClient(api_key)
+    client = WBApiClient(api_key, project_id=project_id)
     orders = await client.get_orders(date_from=date_from, flag=0)
 
     if not orders:

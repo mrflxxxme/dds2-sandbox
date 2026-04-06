@@ -58,6 +58,7 @@ class FactoryOrderItem(Base):
     __tablename__ = "factory_order_items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     factory_order_id: Mapped[int] = mapped_column(Integer, ForeignKey("factory_orders.id"), nullable=False)
     barcode: Mapped[str] = mapped_column(String(50), nullable=False)
     subject: Mapped[str | None] = mapped_column(String(100))
@@ -72,4 +73,7 @@ class FactoryOrderItem(Base):
 
     factory_order: Mapped["FactoryOrder"] = relationship(back_populates="items")
 
-    __table_args__ = (Index("ix_factory_order_items_order_id", "factory_order_id"),)
+    __table_args__ = (
+        Index("ix_factory_order_items_project_id", "project_id"),
+        Index("ix_factory_order_items_order_id", "factory_order_id"),
+    )
