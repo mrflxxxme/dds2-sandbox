@@ -19,6 +19,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Fetch main branch
+        run: git fetch origin main
+
       - name: Check for existing PR and create if needed
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
