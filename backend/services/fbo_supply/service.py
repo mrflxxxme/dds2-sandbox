@@ -10,6 +10,7 @@ Functions:
 
 import logging
 from datetime import date
+from typing import Any
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,11 +59,11 @@ async def list_fbo_supplies(
     limit: int = 50,
     offset: int = 0,
     exclude_with_assembly: bool = False,
-) -> tuple[list[WbFboSupply], int]:
+) -> tuple[list[dict], int]:
     """
     List FBO supplies with filtering, search, sorting, and pagination.
 
-    Returns: (supplies, total_count)
+    Returns: (enriched_dicts, total_count)
     """
     base_query = select(WbFboSupply).where(
         WbFboSupply.project_id == project_id,
@@ -181,7 +182,7 @@ async def get_fbo_supply_items(
     db: AsyncSession,
     project_id: int,
     supply_id: int,
-    api_client=None,
+    api_client: Any = None,
     force_refresh: bool = False,
 ) -> list[WbFboSupplyItem]:
     """
@@ -200,14 +201,14 @@ async def get_fbo_supply_items(
     if not supply:
         raise ValueError("FBO Supply not found")
 
-    result = await db.execute(
+    items_result = await db.execute(
         select(WbFboSupplyItem)
         .where(
             WbFboSupplyItem.supply_id == supply_id,
         )
         .order_by(WbFboSupplyItem.id)
     )
-    items = result.scalars().all()
+    items = list(items_result.scalars().all())
 
     # Lazy-load from WB API if no items cached or force refresh
     if (not items or force_refresh) and api_client and supply.wb_supply_id.isdigit():
@@ -235,10 +236,10 @@ async def get_fbo_supply_items(
 
             await db.commit()
             # Re-fetch from DB
-            result = await db.execute(
+            items_result2 = await db.execute(
                 select(WbFboSupplyItem).where(WbFboSupplyItem.supply_id == supply_id).order_by(WbFboSupplyItem.id)
             )
-            items = result.scalars().all()
+            items = list(items_result2.scalars().all())
         except Exception as e:
             logger.warning(
                 "fbo_items.lazy_load_error",
@@ -324,7 +325,7 @@ async def unlink_supply_from_shipment(
         )
         shipment = result.scalar_one_or_none()
         if shipment:
-            shipment.wb_supply_id = None
+            shipment.wb_supply_id = None  # type: ignore[assignment]
 
     supply.outbound_shipment_id = None
     await db.commit()

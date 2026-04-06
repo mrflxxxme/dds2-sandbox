@@ -20,7 +20,7 @@ class DecimalEncoder(json.JSONEncoder):
         return super().default(o)
 
 
-def _json(data) -> str:
+def _json(data: object) -> str:
     """Serialize to JSON string, truncating if too large."""
     result = json.dumps(data, cls=DecimalEncoder, ensure_ascii=False)
     if len(result) > 60000:

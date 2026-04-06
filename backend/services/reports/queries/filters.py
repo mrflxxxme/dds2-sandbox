@@ -4,13 +4,13 @@ Reports — dashboard filtered queries (daily aggregation, transactions, categor
 
 from datetime import date
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import Transaction
 
 
-def _build_category_condition(category: str):
+def _build_category_condition(category: str) -> ColumnElement[bool]:
     """Build SQLAlchemy condition for category filtering (shared by multiple queries)."""
     if category == "Без категории":
         return or_(Transaction.cat_lvl1_2 == None, Transaction.cat_lvl1_2 == "")  # noqa: E711

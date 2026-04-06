@@ -63,4 +63,4 @@ async def get_customs_control(
         q = q.where(and_(*conditions))
     q = q.order_by(Transaction.date.desc())
     result = await db.execute(q)
-    return result.scalars().all()
+    return list(result.scalars().all())

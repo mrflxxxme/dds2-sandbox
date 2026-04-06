@@ -4,7 +4,13 @@ FBO Supply mappers — pure transformations, no DB access.
 Constants and helpers for mapping WB FBW API data to internal models.
 """
 
+from __future__ import annotations
+
 from datetime import date, datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem, WbSupplyStatus
 from backend.utils.time import utcnow
@@ -23,7 +29,7 @@ FBW_STATUS_MAP: dict[int, str] = {
     6: WbSupplyStatus.ACCEPTED,  # Частично принята -> ACCEPTED
 }
 
-FBW_BOX_TYPE_MAP: dict[int, str] = {
+FBW_BOX_TYPE_MAP: dict[int, str | None] = {
     0: None,  # virtual (no physical box)
     1: "Короб",  # noqa: RUF001
     2: "Короб",  # noqa: RUF001
@@ -53,7 +59,7 @@ def _map_fbw_box_type(box_type_id: int | None) -> str | None:
 # ─── Parse helpers ───────────────────────────────────────────────────────────
 
 
-def _parse_wb_datetime(value: str) -> datetime | None:
+def _parse_wb_datetime(value: str | None) -> datetime | None:
     """Parse WB API datetime string (ISO 8601)."""
     if not value:
         return None
@@ -64,7 +70,7 @@ def _parse_wb_datetime(value: str) -> datetime | None:
         return None
 
 
-def _parse_wb_date(value: str) -> date | None:
+def _parse_wb_date(value: str | None) -> date | None:
     """Parse WB API date string (take first 10 chars as YYYY-MM-DD)."""
     if not value:
         return None
@@ -153,7 +159,7 @@ def _update_supply_from_fbw_detail(supply: WbFboSupply, detail: dict) -> None:
 
 
 async def _upsert_supply_items_fbw(
-    db,
+    db: AsyncSession,
     project_id: int,
     supply_id: int,
     wb_supply_id_int: int,

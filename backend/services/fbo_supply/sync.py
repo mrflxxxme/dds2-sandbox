@@ -10,6 +10,7 @@ Functions:
 import asyncio
 import logging
 from datetime import timedelta
+from typing import Any
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,9 +37,9 @@ logger = logging.getLogger(__name__)
 async def sync_fbo_supplies(
     db: AsyncSession,
     project_id: int,
-    api_client,
+    api_client: Any,
     integration_id: int,
-) -> dict:
+) -> dict[str, object]:
     """
     Fast sync: fetch all FBW supplies list (1 API call), upsert into DB, return immediately.
     Detail enrichment (warehouse, qty) runs in background via enrich_fbo_supplies().
@@ -158,9 +159,9 @@ async def sync_fbo_supplies(
 async def enrich_fbo_supplies(
     db: AsyncSession,
     project_id: int,
-    api_client,
+    api_client: Any,
     max_calls: int = 30,
-) -> dict:
+) -> dict[str, int]:
     """
     Background enrichment: fetch detail (warehouse, qty) for supplies missing it.
     Called after sync or on-demand. Rate-limited to max_calls per run.
@@ -228,9 +229,9 @@ async def enrich_fbo_supplies(
 async def sync_fbo_statuses(
     db: AsyncSession,
     project_id: int,
-    api_client,
+    api_client: Any,
     integration_id: int,
-) -> dict:
+) -> dict[str, object]:
     """
     Status-only sync: fetch active FBW supplies from Suppliers API
     and update statuses + dates.

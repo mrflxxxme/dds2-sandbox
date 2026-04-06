@@ -318,7 +318,7 @@ async def list_assembly_requests(
         .offset(offset)
     )
     result = await db.execute(items_q)
-    items = result.scalars().all()
+    items = list(result.scalars().all())
 
     return items, total
 
@@ -542,4 +542,6 @@ async def update_assembly_request(
     await db.commit()
     # Expunge all cached objects so selectinload re-fetches fresh data from DB
     db.expunge_all()
-    return await get_assembly_request(db, project_id, req.id)
+    updated = await get_assembly_request(db, project_id, req.id)
+    assert updated is not None, "Assembly request disappeared after update"
+    return updated

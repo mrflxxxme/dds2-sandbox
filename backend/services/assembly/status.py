@@ -390,4 +390,4 @@ async def get_assembly_history(
         .where(AssemblyStatusHistory.assembly_request_id == request_id)
         .order_by(AssemblyStatusHistory.changed_at.asc())
     )
-    return result.scalars().all()
+    return list(result.scalars().all())

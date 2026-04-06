@@ -20,7 +20,7 @@ from backend.models.assembly import (
 from backend.models.cost import Nomenclature
 from backend.models.warehouse import Warehouse
 from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem
-from backend.schemas.assembly import RefreshFromFboResponse
+from backend.schemas.assembly import AssemblyItemResponse, RefreshFromFboResponse
 from backend.services.warehouse_service import _resolve_barcode
 
 # --- FBO sync ---------------------------------------------------------------
@@ -97,12 +97,12 @@ async def refresh_from_fbo(
         removed=removed,
         changed=changed,
         items=[
-            {
-                "id": item.id,
-                "nomenclature_id": item.nomenclature_id,
-                "barcode": item.barcode,
-                "quantity": item.quantity,
-            }
+            AssemblyItemResponse(
+                id=item.id,
+                nomenclature_id=item.nomenclature_id,
+                barcode=item.barcode,
+                quantity=item.quantity,
+            )
             for item in req.items
         ],
     )
