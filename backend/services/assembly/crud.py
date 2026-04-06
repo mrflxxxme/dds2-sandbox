@@ -28,7 +28,6 @@ from backend.schemas.assembly import (
 )
 from backend.services.warehouse_service import (
     _next_number,
-    _resolve_barcode,
     get_warehouse,
 )
 
@@ -48,34 +47,43 @@ async def _validate_stock_for_ship(
     Returns list of deficits with product names for readable error messages.
     Empty list = OK to ship.
     """
-    deficits: list[dict] = []
-    for item in items:
-        result = await db.execute(
-            select(WarehouseStock).where(
-                WarehouseStock.project_id == project_id,
-                WarehouseStock.warehouse_id == warehouse_id,
-                WarehouseStock.nomenclature_id == item.nomenclature_id,
-            )
+    nom_ids = [item.nomenclature_id for item in items if item.nomenclature_id]
+    if not nom_ids:
+        return []
+
+    # Batch load stock quantities
+    stock_result = await db.execute(
+        select(WarehouseStock.nomenclature_id, WarehouseStock.quantity).where(
+            WarehouseStock.project_id == project_id,
+            WarehouseStock.warehouse_id == warehouse_id,
+            WarehouseStock.nomenclature_id.in_(nom_ids),
         )
-        stock = result.scalar_one_or_none()
-        have = stock.quantity if stock else 0
-        if have < item.quantity:
-            # Get product name from nomenclature
-            nom_result = await db.execute(
-                select(Nomenclature).where(
-                    Nomenclature.id == item.nomenclature_id,
-                )
-            )
-            nom = nom_result.scalar_one_or_none()
-            name = (nom.subject or nom.article_seller or item.barcode) if nom else item.barcode
-            deficits.append(
-                {
-                    "name": name,
-                    "barcode": item.barcode,
-                    "need": item.quantity,
-                    "have": have,
-                }
-            )
+    )
+    stock_map = {r.nomenclature_id: r.quantity for r in stock_result.all()}
+
+    # Find deficit items
+    deficit_items = [item for item in items if stock_map.get(item.nomenclature_id, 0) < item.quantity]
+    if not deficit_items:
+        return []
+
+    # Batch load nomenclature names only for deficit items
+    deficit_nom_ids = [item.nomenclature_id for item in deficit_items]
+    nom_result = await db.execute(select(Nomenclature).where(Nomenclature.id.in_(deficit_nom_ids)))
+    nom_map = {n.id: n for n in nom_result.scalars().all()}
+
+    deficits: list[dict] = []
+    for item in deficit_items:
+        have = stock_map.get(item.nomenclature_id, 0)
+        nom = nom_map.get(item.nomenclature_id)
+        name = (nom.subject or nom.article_seller or item.barcode) if nom else item.barcode
+        deficits.append(
+            {
+                "name": name,
+                "barcode": item.barcode,
+                "need": item.quantity,
+                "have": have,
+            }
+        )
     return deficits
 
 
@@ -415,10 +423,21 @@ async def create_assembly_request(
     db.add(assembly_req)
     await db.flush()
 
-    # 5. Resolve barcodes and create items
+    # 5. Resolve barcodes (batch) and create items
+    barcodes = [item_data.barcode for item_data in payload.items]
+    barcode_result = await db.execute(
+        select(Nomenclature).where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.barcode.in_(barcodes),
+        )
+    )
+    barcode_map = {n.barcode: n for n in barcode_result.scalars().all()}
+
     resolved_items: list[AssemblyRequestItem] = []
     for item_data in payload.items:
-        nom = await _resolve_barcode(db, project_id, item_data.barcode)
+        nom = barcode_map.get(item_data.barcode)
+        if not nom:
+            raise ValueError(f"Barcode not found: {item_data.barcode}")
         item = AssemblyRequestItem(
             project_id=project_id,
             assembly_request_id=assembly_req.id,
@@ -527,9 +546,20 @@ async def update_assembly_request(
             raise ValueError("Items can only be edited before READY status")
         # Delete existing items
         await db.execute(delete(AssemblyRequestItem).where(AssemblyRequestItem.assembly_request_id == req.id))
-        # Create new items
+        # Resolve barcodes (batch) and create new items
+        barcodes = [item_data.barcode for item_data in payload.items]
+        barcode_result = await db.execute(
+            select(Nomenclature).where(
+                Nomenclature.project_id == project_id,
+                Nomenclature.barcode.in_(barcodes),
+            )
+        )
+        barcode_map = {n.barcode: n for n in barcode_result.scalars().all()}
+
         for item_data in payload.items:
-            nom = await _resolve_barcode(db, project_id, item_data.barcode)
+            nom = barcode_map.get(item_data.barcode)
+            if not nom:
+                raise ValueError(f"Barcode not found: {item_data.barcode}")
             item = AssemblyRequestItem(
                 project_id=project_id,
                 assembly_request_id=req.id,

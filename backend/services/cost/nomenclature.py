@@ -38,41 +38,47 @@ async def upload_nomenclature(db: AsyncSession, project_id: int, data: bytes) ->
     }
     df = df.rename(columns=col_map)
 
-    inserted, updated = 0, 0
+    # Collect valid barcodes from DataFrame
+    rows_by_barcode: dict[str, object] = {}
     for _, row in df.iterrows():
         bc = str(row.get("barcode", "")).strip()
         if not bc or bc == "nan":
             continue
-        result = await db.execute(
-            select(Nomenclature).where(
-                Nomenclature.project_id == project_id,
-                Nomenclature.barcode == bc,
-            )
+        rows_by_barcode[bc] = row
+
+    if not rows_by_barcode:
+        return 0, 0
+
+    # Single batch SELECT instead of N queries
+    existing_result = await db.execute(
+        select(Nomenclature).where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.barcode.in_(list(rows_by_barcode.keys())),
         )
-        nom = result.scalar_one_or_none()
+    )
+    existing = {nom.barcode: nom for nom in existing_result.scalars().all()}
+
+    inserted, updated = 0, 0
+    for bc, row in rows_by_barcode.items():
+        try:
+            awb = int(row.get("article_wb")) if row.get("article_wb") else None
+        except Exception:
+            awb = None
+        try:
+            vol = Decimal(str(row.get("volume_l", 0) or 0))
+        except Exception:
+            vol = None
+
+        nom = existing.get(bc)
         if nom:
             nom.brand = str(row.get("brand", "") or "").strip() or None
             nom.subject = str(row.get("subject", "") or "").strip() or None
             nom.article_seller = str(row.get("article_seller", "") or "").strip() or None
-            try:
-                nom.article_wb = int(row.get("article_wb")) if row.get("article_wb") else None
-            except Exception:
-                nom.article_wb = None
-            try:
-                nom.volume_l = Decimal(str(row.get("volume_l", 0) or 0))
-            except Exception:
-                nom.volume_l = None
+            nom.article_wb = awb
+            nom.volume_l = vol
             nom.updated_at = utcnow()
             updated += 1
         else:
-            try:
-                vol = Decimal(str(row.get("volume_l", 0) or 0))
-            except Exception:
-                vol = None
-            try:
-                awb = int(row.get("article_wb")) if row.get("article_wb") else None
-            except Exception:
-                awb = None
             nom = Nomenclature(
                 project_id=project_id,
                 barcode=bc,

@@ -387,7 +387,10 @@ async def get_assembly_history(
         raise ValueError("Assembly request not found")
     result = await db.execute(
         select(AssemblyStatusHistory)
-        .where(AssemblyStatusHistory.assembly_request_id == request_id)
+        .where(
+            AssemblyStatusHistory.assembly_request_id == request_id,
+            AssemblyStatusHistory.project_id == project_id,
+        )
         .order_by(AssemblyStatusHistory.changed_at.asc())
     )
     return list(result.scalars().all())

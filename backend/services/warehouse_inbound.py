@@ -18,7 +18,7 @@ from backend.models.warehouse import (
 from backend.services.warehouse_crud import get_warehouse
 from backend.services.warehouse_stock_engine import (
     _next_number,
-    _resolve_barcode,
+    _resolve_barcodes_batch,
     _update_stock,
 )
 
@@ -39,6 +39,7 @@ async def list_receipts(db: AsyncSession, project_id: int, warehouse_id: int) ->
             InboundReceipt.is_deleted == False,  # noqa: E712
         )
         .order_by(InboundReceipt.id.desc())
+        .limit(500)
     )
     return list(result.scalars().all())
 
@@ -80,9 +81,11 @@ async def create_receipt(db: AsyncSession, project_id: int, warehouse_id: int, p
     db.add(receipt)
     await db.flush()  # get receipt.id
 
-    # Add items — resolve barcodes
-    for item_data in payload.get("items", []):
-        nom = await _resolve_barcode(db, project_id, item_data["barcode"])
+    # Add items — resolve barcodes in one batch query
+    items_data = payload.get("items", [])
+    barcode_map = await _resolve_barcodes_batch(db, project_id, [d["barcode"] for d in items_data])
+    for item_data in items_data:
+        nom = barcode_map[item_data["barcode"]]
         item = InboundReceiptItem(
             project_id=project_id,
             receipt_id=receipt.id,
@@ -161,8 +164,9 @@ async def update_receipt(db: AsyncSession, project_id: int, receipt_id: int, pay
                 await db.delete(old_item)
             await db.flush()
 
+            barcode_map = await _resolve_barcodes_batch(db, project_id, [d["barcode"] for d in payload["items"]])
             for item_data in payload["items"]:
-                nom = await _resolve_barcode(db, project_id, item_data["barcode"])
+                nom = barcode_map[item_data["barcode"]]
                 item = InboundReceiptItem(
                     project_id=project_id,
                     receipt_id=receipt.id,

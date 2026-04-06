@@ -43,6 +43,23 @@ async def _resolve_barcode(db: AsyncSession, project_id: int, barcode: str) -> N
     return nom
 
 
+async def _resolve_barcodes_batch(db: AsyncSession, project_id: int, barcodes: list[str]) -> dict[str, Nomenclature]:
+    """Batch barcode → Nomenclature lookup. One SELECT with IN()."""
+    if not barcodes:
+        return {}
+    result = await db.execute(
+        select(Nomenclature).where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.barcode.in_(barcodes),
+        )
+    )
+    mapping = {nom.barcode: nom for nom in result.scalars().all()}
+    missing = [b for b in barcodes if b not in mapping]
+    if missing:
+        raise ValueError(f"Barcode not found: {missing[0]}")
+    return mapping
+
+
 # ─── Next number generator ─────────────────────────────────────────────────
 
 
@@ -152,6 +169,41 @@ async def _get_reserved_map(db: AsyncSession, project_id: int, warehouse_id: int
         .group_by(AssemblyRequestItem.nomenclature_id)
     )
     return {row.nomenclature_id: row.reserved for row in result.all()}
+
+
+async def _get_reserved_map_batch(
+    db: AsyncSession, project_id: int, warehouse_ids: set[int]
+) -> dict[int, dict[int, int]]:
+    """Batch version: one query for all warehouses. Returns {warehouse_id: {nomenclature_id: reserved}}."""
+    if not warehouse_ids:
+        return {}
+    result = await db.execute(
+        select(
+            AssemblyRequest.warehouse_id,
+            AssemblyRequestItem.nomenclature_id,
+            func.sum(AssemblyRequestItem.quantity).label("reserved"),
+        )
+        .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.warehouse_id.in_(warehouse_ids),
+            AssemblyRequest.is_deleted.is_(False),
+            AssemblyRequest.status.in_(
+                [
+                    AssemblyStatus.PENDING,
+                    AssemblyStatus.IN_PROGRESS,
+                    AssemblyStatus.READY,
+                    AssemblyStatus.VEHICLE_ASSIGNED,
+                ]
+            ),
+        )
+        .group_by(AssemblyRequest.warehouse_id, AssemblyRequestItem.nomenclature_id)
+    )
+    all_reserved: dict[int, dict[int, int]] = {}
+    for row in result.all():
+        wh_map = all_reserved.setdefault(row.warehouse_id, {})
+        wh_map[row.nomenclature_id] = row.reserved
+    return all_reserved
 
 
 async def get_warehouse_stock(db: AsyncSession, project_id: int, warehouse_id: int) -> list[dict]:
@@ -264,14 +316,13 @@ async def get_stock_summary(db: AsyncSession, project_id: int) -> list[dict]:
             WarehouseStock.project_id == project_id,
         )
         .order_by(WarehouseStock.barcode)
+        .limit(500)
     )
     rows = result.scalars().all()
 
-    # Collect unique warehouse_ids to get reserved maps
+    # Collect unique warehouse_ids and fetch reserved maps in one batch query
     wh_ids = {row.warehouse_id for row in rows}
-    all_reserved: dict[int, dict[int, int]] = {}
-    for wh_id in wh_ids:
-        all_reserved[wh_id] = await _get_reserved_map(db, project_id, wh_id)
+    all_reserved = await _get_reserved_map_batch(db, project_id, wh_ids)
 
     # Group by nomenclature_id
     summary: dict[int, dict] = {}
@@ -691,10 +742,10 @@ async def get_unified_stock_summary(
 
     # 5. Reserved from active assembly requests (all warehouses)
     wh_ids = {row.warehouse_id for row in own_rows}
+    batch_reserved = await _get_reserved_map_batch(db, project_id, wh_ids)
     all_reserved: dict[int, int] = {}  # nomenclature_id -> total reserved
-    for wh_id in wh_ids:
-        wh_reserved = await _get_reserved_map(db, project_id, wh_id)
-        for nom_id, qty in wh_reserved.items():
+    for wh_map in batch_reserved.values():
+        for nom_id, qty in wh_map.items():
             all_reserved[nom_id] = all_reserved.get(nom_id, 0) + qty
 
     # 6. Nomenclature details (include article_wb for BDR nm_id mapping)

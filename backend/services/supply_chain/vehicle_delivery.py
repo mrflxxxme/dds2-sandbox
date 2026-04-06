@@ -354,35 +354,39 @@ async def _enrich_vehicle(
     has_weight = False
     has_volume = False
 
+    # Batch-load FactoryOrderItem + FactoryOrder data to avoid N+1
+    fo_item_ids = [ci.factory_order_item_id for ci in vehicle.items if ci.factory_order_item_id is not None]
+    fo_item_map: dict[int, tuple] = {}
+    if fo_item_ids:
+        fo_batch_result = await db.execute(
+            select(
+                FactoryOrderItem.id,
+                FactoryOrderItem.box_size,
+                FactoryOrderItem.pcs_per_box,
+                FactoryOrder.order_number,
+            )
+            .join(FactoryOrder, FactoryOrderItem.factory_order_id == FactoryOrder.id)
+            .where(
+                FactoryOrderItem.id.in_(fo_item_ids),
+                FactoryOrder.project_id == project_id,
+            )
+        )
+        for row in fo_batch_result:
+            fo_item_map[row[0]] = (row[1], row[2], row[3])
+
     for cost_item in vehicle.items:
         total_qty += cost_item.qty
         total_cny += cost_item.price_cny * cost_item.qty
 
-        # Enrich with factory order item data
+        # Enrich with factory order item data (from pre-loaded batch)
         box_size = None
         pcs_per_box = None
         fo_order_number = None
 
         if cost_item.factory_order_item_id:
-            fo_result = await db.execute(
-                select(FactoryOrderItem)
-                .join(FactoryOrder)
-                .where(
-                    FactoryOrderItem.id == cost_item.factory_order_item_id,
-                    FactoryOrder.project_id == project_id,
-                )
-            )
-            fo_item = fo_result.scalar_one_or_none()
-            if fo_item:
-                box_size = fo_item.box_size
-                pcs_per_box = fo_item.pcs_per_box
-                # Get order number
-                fo_order_result = await db.execute(
-                    select(FactoryOrder.order_number).where(
-                        FactoryOrder.id == fo_item.factory_order_id,
-                    )
-                )
-                fo_order_number = fo_order_result.scalar_one_or_none()
+            fo_data = fo_item_map.get(cost_item.factory_order_item_id)
+            if fo_data:
+                box_size, pcs_per_box, fo_order_number = fo_data
 
         w = _safe_decimal(cost_item.weight_kg)
         v = _safe_decimal(cost_item.volume_m3)
