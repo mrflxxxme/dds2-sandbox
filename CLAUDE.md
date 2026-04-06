@@ -12,7 +12,8 @@ bash scripts/check_conventions.sh                 # Проверка конве�
 make test-fast                                    # Параллельные тесты (xdist)
 make test-changed                                 # Только изменённые тесты (testmon)
 make test-unit                                    # Только unit-тесты
-cd frontend-react && npx vitest run              # Frontend тесты (39)
+cd frontend-react && npx vitest run              # Frontend тесты
+cd frontend-react && npx playwright test          # E2E тесты (73)
 ```
 
 ## Железные правила (нарушение = баг)
@@ -94,8 +95,8 @@ Model → Alembic migration → Schema → Service → Router → Test
 
 ## Архитектура frontend
 ```
-src/app/(main)/p/[slug]/ — основное приложение (23+ страниц: dds, import, txn, inbox, reports, planning, cost, funnel, trends, refs, settings, opiu, orders, plan-fact, team, monitoring, bulk-cost, container-loader, order-geography, warehouse/*, supply-chain)
-src/app/(tma)/tma/[slug]/ — Telegram Mini App (dashboard, capital, chat, funnel, pnl, pulse, warehouse)
+src/app/(main)/p/[slug]/ — основное приложение (23 страниц: dds, import, txn, inbox, reports, planning, cost, funnel, trends, refs, settings, opiu, orders, plan-fact, team, monitoring, bulk-cost, container-loader, order-geography, warehouse/*, supply-chain)
+src/app/(tma)/tma/[slug]/ — Telegram Mini App (capital, chat, funnel, pnl, pulse, warehouse)
 src/lib/api/ — модульный API клиент (client.ts + 13 доменных файлов, JWT auth + auto-refresh)
 src/lib/utils.ts — formatNumber, formatDate, exportToExcel
 src/components/ — DataTable, FormModal, PageHeader, PageGuard, TabLayout, Toast
@@ -120,7 +121,7 @@ src/types/api.ts — TypeScript интерфейсы
 | Склад | FBO vs FBS; stock_date ≠ report_date; остатки WB daily sync | warehouse_*, fbo_supply_service |
 | WB API | Semaphore; Retry-After; partial save; sync_log в finally | integrations/, funnel/, scheduler/jobs/ |
 | Сборка | assembly/ — crud+status+analytics (рефакторнут) | assembly/, routers/assembly |
-| AI Агенты | orchestrator→agents→synthesizer; 22 tools в 7 модулях (ai/tools/); memory=BrandNote | services/ai/ |
+| AI Агенты | orchestrator→agents→synthesizer; 19 tools в 11 модулях (ai/tools/); memory=BrandNote | services/ai/ |
 | Telegram | polling с прокси на проде; HMAC auth для TMA | telegram_bot, telegram_service |
 | Поставки | FactoryOrder→CostOrder→Warehouse; VehicleStatus; split_to_vehicles | supply_chain/, cost.py |
 | Фронтенд | types/api.ts; formatNumber(); loading+error+empty states | src/app/, src/lib/api/ |
@@ -156,6 +157,8 @@ src/types/api.ts — TypeScript интерфейсы
 - **Trivy** — filesystem scan (HIGH/CRITICAL)
 - **Snyk Code** — SAST (статический анализ кода, advisory-only; требует `SNYK_TOKEN` secret)
 - **CodeRabbit** — AI code review на каждый PR (конфиг `.coderabbit.yaml` с iron rules DDS)
+- **auto-pr.yml** — автосоздание PR dev→main при push
+- **auto-merge.yml** — автомерж PR после зелёного CI
 
 ### Dependabot (еженедельно)
 - Авто-PR для pip, npm, GitHub Actions зависимостей

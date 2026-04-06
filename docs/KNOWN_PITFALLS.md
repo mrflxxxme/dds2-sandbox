@@ -96,7 +96,7 @@ from backend.models import WbApiKey  # это IntegrationKey
 
 ## P16: services/ai — неверная точка входа
 - Оркестратор: `services/ai/orchestrator.py` (классификация интента, маршрутизация)
-- Агенты: `services/ai/agents/{role}.py` (8 файлов: analyst, financier, marketer, advertiser, supply_manager, logistics, logistician + base)
+- Агенты: `services/ai/agents/{role}.py` (7 агентов + base.py (базовый класс): analyst, financier, marketer, advertiser, supply_manager, logistics, logistician)
 - Tools: `services/ai/tools/` (finance, marketing, logistics, shipping, supply + all_tools.py)
 - Промпты: `services/ai/prompts/` (по одному файлу на агента + orchestrator + synthesizer)
 - НЕ путать `services/ai/tools/logistics.py` и `services/ai/agents/logistics.py` — это разные файлы
