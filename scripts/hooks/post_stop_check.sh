@@ -27,21 +27,34 @@ if [ $issues -gt 0 ]; then
   echo "[DDS2] $issues проблем найдено" >&2
 fi
 
-# --- Docs reminder for new files ---
+# --- Docs reminder for new AND changed files ---
+all_changed=$(git diff --name-only HEAD 2>/dev/null)
 new_files=$(git diff --name-only --diff-filter=A HEAD 2>/dev/null)
-if [ -n "$new_files" ]; then
+if [ -n "$all_changed" ]; then
   hints=''
+  docs_updated=0
+
+  # Check if docs were updated in this diff
+  echo "$all_changed" | grep -qE "(MAP\.md|DOMAIN_|CLAUDE\.md)" && docs_updated=1
+
   for f in $new_files; do
     case "$f" in
-      backend/models/*.py) hints="$hints\n[DOCS] Новая модель $f — обнови DOMAIN_*.md и проверь SOFT_MODELS в check_conventions.sh" ;;
-      backend/services/*.py) hints="$hints\n[DOCS] Новый сервис $f — обнови DOMAIN_*.md" ;;
+      backend/models/*.py) hints="$hints\n[DOCS] Новая модель $f — обнови DOMAIN_*.md и SOFT_MODELS" ;;
+      backend/services/*.py|backend/services/*/*.py) hints="$hints\n[DOCS] Новый сервис $f — обнови MAP.md и DOMAIN_*.md" ;;
       backend/routers/*.py) hints="$hints\n[DOCS] Новый роутер $f — обнови DOMAIN_*.md" ;;
       migrations/versions/*.py) hints="$hints\n[DOCS] Новая миграция $f — обнови DOMAIN_*.md" ;;
     esac
   done
+
+  # Check for significant service changes (not just new files)
+  svc_changes=$(echo "$all_changed" | grep -c "backend/services/" 2>/dev/null || echo 0)
+  if [ "$svc_changes" -gt 3 ] && [ "$docs_updated" -eq 0 ]; then
+    hints="$hints\n[DOCS] Изменено $svc_changes файлов в services/ но документация не обновлена!"
+  fi
+
   if [ -n "$hints" ]; then
     echo -e "$hints" >&2
-    echo '[DOCS] Запусти /docs для автообновления документации' >&2
+    echo '[DOCS] Обнови документацию: MAP.md, DOMAIN_*.md, CLAUDE.md' >&2
   fi
 fi
 
