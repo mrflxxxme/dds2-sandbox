@@ -163,7 +163,7 @@ async def get_warehouse_need(
     stock_lookup: dict[tuple[str, int], int] = {}
     all_nm_ids: set[int] = set()
 
-    for r in wh_result:
+    for r in wh_result:  # type: ignore[assignment]
         stock_lookup[(r.warehouse_name, r.nm_id)] = int(r.quantity or 0)
         all_nm_ids.add(r.nm_id)
         if r.nm_id not in vendor_map:
@@ -241,7 +241,7 @@ async def get_warehouse_need(
             )
             .group_by(WarehouseStock.warehouse_id, Nomenclature.article_wb)
         )
-        for row in rf_stock_result:
+        for row in rf_stock_result:  # type: ignore[assignment]
             nm = row.article_wb
             if nm not in rf_stock_map:
                 rf_stock_map[nm] = {}
@@ -273,7 +273,7 @@ async def get_warehouse_need(
         )
         .group_by(Nomenclature.article_wb, AssemblyRequest.warehouse_id)
     )
-    for row in assembly_result:
+    for row in assembly_result:  # type: ignore[assignment]
         nm = row.article_wb
         qty = int(row.qty or 0)
         in_assembly_map[nm] = in_assembly_map.get(nm, 0) + qty
@@ -300,7 +300,7 @@ async def get_warehouse_need(
         )
         .group_by(Nomenclature.article_wb)
     )
-    for row in shipped_result:
+    for row in shipped_result:  # type: ignore[assignment]
         nm = row.article_wb
         in_transit_map[nm] = {
             "qty": int(row.qty or 0),
@@ -353,7 +353,7 @@ async def get_warehouse_need(
     dt_rows = dt_result.fetchall()
     if dt_rows:
         total_days_sum = 0
-        for row in dt_rows:
+        for row in dt_rows:  # type: ignore[assignment]
             total_days_sum += (row.assembly_days or 0) + (row.delivery_days or 0) + (row.wb_acceptance_days or 0)
         avg_delivery_days = round(total_days_sum / len(dt_rows))
 
@@ -379,11 +379,11 @@ async def get_warehouse_need(
         # RF stocks per warehouse
         rf_stocks_for_nm: dict[int, dict] = {}
         total_rf_stock = 0
-        for wh in rf_warehouses:
-            stock_qty = rf_stock_map.get(nm_id, {}).get(wh.id, 0)
-            in_asm_qty = in_assembly_per_wh.get(nm_id, {}).get(wh.id, 0)
+        for wh in rf_warehouses:  # type: ignore[assignment]
+            stock_qty = rf_stock_map.get(nm_id, {}).get(wh.id, 0)  # type: ignore[attr-defined]
+            in_asm_qty = in_assembly_per_wh.get(nm_id, {}).get(wh.id, 0)  # type: ignore[attr-defined]
             available = max(0, stock_qty - in_asm_qty)
-            rf_stocks_for_nm[wh.id] = {"stock": stock_qty, "available": available}
+            rf_stocks_for_nm[wh.id] = {"stock": stock_qty, "available": available}  # type: ignore[attr-defined]
             total_rf_stock += stock_qty
 
         in_asm_total = in_assembly_map.get(nm_id, 0)

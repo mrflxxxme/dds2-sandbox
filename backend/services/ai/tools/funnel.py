@@ -78,6 +78,7 @@ async def get_day_analysis(db: AsyncSession, project_id: int, tax_rate: float, b
         tax_info,
         target_date=target_date,
         brand=brand,
+        subject=None,
     )
     if not result:
         return json.dumps({"message": "No data for this date"})
