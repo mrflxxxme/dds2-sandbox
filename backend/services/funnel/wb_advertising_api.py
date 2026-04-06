@@ -83,7 +83,7 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int], begin_date: str,
     t_start = time.monotonic()
 
     async with httpx.AsyncClient(timeout=60) as client:
-        for w_begin, w_end in windows:
+        for win_begin, win_end in windows:
             if budget_exceeded:
                 break
 
@@ -94,19 +94,19 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int], begin_date: str,
                     logger.warning(
                         f"WB adv: time budget {TIME_BUDGET}s exceeded after "
                         f"{elapsed:.0f}s — skipping {remaining} remaining chunks "
-                        f"({w_begin}→{w_end})"
+                        f"({win_begin}→{win_end})"
                     )
                     skipped_chunks += remaining
                     budget_exceeded = True
                     break
 
-                if idx > 0 or w_begin != windows[0][0]:
+                if idx > 0 or win_begin != windows[0][0]:
                     await asyncio.sleep(5)
 
                 ids_param = ",".join(str(c) for c in chunk)
                 url = (
                     f"https://advert-api.wildberries.ru/adv/v3/fullstats"
-                    f"?ids={ids_param}&beginDate={w_begin}&endDate={w_end}"
+                    f"?ids={ids_param}&beginDate={win_begin}&endDate={win_end}"
                 )
 
                 chunk_ok = False
@@ -196,7 +196,7 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int], begin_date: str,
                     skipped_chunks += 1
                     logger.warning(
                         f"WB adv: chunk {idx+1}/{len(chunks)} SKIPPED after retries "
-                        f"({len(chunk)} campaigns, {w_begin}→{w_end})"
+                        f"({len(chunk)} campaigns, {win_begin}→{win_end})"
                     )
 
     elapsed_total = time.monotonic() - t_start
@@ -209,7 +209,7 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int], begin_date: str,
     else:
         logger.info(f"WB adv: all chunks OK " f"for {begin_date}→{end_date} in {elapsed_total:.0f}s")
 
-    result["_by_campaign"] = by_campaign
+    result["_by_campaign"] = by_campaign  # type: ignore[assignment]
     return result
 
 

@@ -188,7 +188,7 @@ async def get_opiu(
     # ── 8. Build P&L rows ──
     months_sorted = sorted(months_set, reverse=True)
 
-    result: dict = _build_pnl_result(
+    pnl_result: dict = _build_pnl_result(
         monthly_data,
         total_data,
         months_sorted,
@@ -200,7 +200,7 @@ async def get_opiu(
         date_from,
         date_to,
     )
-    return result
+    return pnl_result
 
 
 def _build_pnl_result(

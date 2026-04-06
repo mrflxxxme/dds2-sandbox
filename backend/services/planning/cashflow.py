@@ -105,8 +105,8 @@ async def calculate_cashflow_daily(
         )
     )
     income_map: dict[date, Decimal] = {}
-    for inc in inc_result.scalars().all():
-        income_map[inc.date] = income_map.get(inc.date, Decimal("0")) + inc.amount_rub
+    for inc_row in inc_result.scalars().all():
+        income_map[inc_row.date] = income_map.get(inc_row.date, Decimal("0")) + inc_row.amount_rub
 
     # WB payouts in transit → expected income (created_at + 2 days)
     transit_result = await db.execute(
@@ -153,14 +153,14 @@ async def calculate_cashflow_daily(
     rows = []
     for i in range(days + 1):
         d = today + timedelta(days=i)
-        inc: Decimal = income_map.get(d, Decimal("0"))
+        day_inc: Decimal = income_map.get(d, Decimal("0"))
         exp: Decimal = expense_map.get(d, Decimal("0"))
-        net = inc - exp
+        net = day_inc - exp
         running += net
         rows.append(
             {
                 "date": str(d),
-                "planned_income": float(inc),
+                "planned_income": float(day_inc),
                 "planned_expense": float(exp),
                 "net": float(net),
                 "deficit_running": float(running),

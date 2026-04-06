@@ -58,7 +58,7 @@ async def get_balance(
     balances = []
     for acc in accounts:
         key = (acc.account, acc.currency)
-        ob: Decimal = opening_map.get(key, Decimal("0"))
+        ob_val: Decimal = opening_map.get(key, Decimal("0"))
         net: Decimal = net_map.get(key, Decimal("0"))
         balances.append(
             {
@@ -66,7 +66,7 @@ async def get_balance(
                 "bank": acc.bank,
                 "currency": acc.currency,
                 "account_name": acc.account_name,
-                "balance": float(ob + net),
+                "balance": float(ob_val + net),
             }
         )
 

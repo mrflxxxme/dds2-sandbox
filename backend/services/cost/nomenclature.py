@@ -21,7 +21,7 @@ async def get_nomenclature(db: AsyncSession, project_id: int, limit: int = 1000,
         .limit(limit)
         .offset(offset)
     )
-    return result.scalars().all()
+    return list(result.scalars().all())
 
 
 async def upload_nomenclature(db: AsyncSession, project_id: int, data: bytes) -> tuple[int, int]:
