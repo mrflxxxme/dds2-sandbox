@@ -5,3 +5,9 @@ out/
 .env.local
 .env*.local
 npm-debug.log*
+
+# Playwright
+tests/e2e/.auth/*
+!tests/e2e/.auth/.gitkeep
+test-results/
+playwright-report/

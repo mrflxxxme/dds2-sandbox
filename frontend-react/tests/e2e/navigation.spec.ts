@@ -1,51 +1,54 @@
 import { test, expect } from '@playwright/test';
-
-/**
- * Navigation tests — verify sidebar links and page rendering.
- * Requires authenticated session (login before each test).
- */
+import { projectUrl, waitForPageLoad } from './helpers';
 
 test.describe('Navigation', () => {
-  test.beforeEach(async ({ page }) => {
-    // Login first
-    await page.goto('/login');
-    await page.fill('input[type="email"], input[name="email"], input[placeholder*="mail"]', 'admin@dds.local');
-    await page.fill('input[type="password"]', 'admin');
-    await page.locator('button[type="submit"], button:has-text("Войти")').click();
-    await page.waitForURL(/(?!.*login).*/, { timeout: 5000 });
+  test('should render sidebar with logo and project name', async ({ page }) => {
+    await page.goto(projectUrl());
+    await waitForPageLoad(page);
+    await expect(page.locator('.sidebar-logo')).toHaveText('DDS');
+    await expect(page.locator('.project-selector')).toBeVisible();
   });
 
-  test('should render dashboard page', async ({ page }) => {
-    // Dashboard should be accessible after login
-    const heading = page.locator('h1, h2, [class*="title"]').first();
-    await expect(heading).toBeVisible({ timeout: 5000 });
+  test('should render sidebar nav groups', async ({ page }) => {
+    await page.goto(projectUrl());
+    await waitForPageLoad(page);
+    const sections = page.locator('.sidebar-section');
+    await expect(sections.filter({ hasText: 'Финансы' })).toBeVisible();
+    await expect(sections.filter({ hasText: 'Склад' })).toBeVisible();
+    await expect(sections.filter({ hasText: 'Настройки' })).toBeVisible();
   });
 
   test('should navigate to transactions page', async ({ page }) => {
-    // Find and click transactions link in sidebar
-    const txnLink = page.locator('a[href*="txn"], a[href*="transaction"], nav a:has-text("Транзакции")').first();
-    if (await txnLink.isVisible()) {
-      await txnLink.click();
-      await page.waitForTimeout(1000);
-      await expect(page).toHaveURL(/txn|transaction/);
-    }
+    await page.goto(projectUrl());
+    await waitForPageLoad(page);
+    await page.click('a.sidebar-link:has-text("Операции")');
+    await page.waitForURL(/\/txn/);
+    await waitForPageLoad(page);
+    await expect(page.locator('.page-title')).toContainText('Операции');
   });
 
   test('should navigate to reports page', async ({ page }) => {
-    const reportsLink = page.locator('a[href*="report"], a[href*="dds"], nav a:has-text("ДДС")').first();
-    if (await reportsLink.isVisible()) {
-      await reportsLink.click();
-      await page.waitForTimeout(1000);
-      await expect(page).toHaveURL(/report|dds/);
-    }
+    await page.goto(projectUrl());
+    await waitForPageLoad(page);
+    await page.click('a.sidebar-link:has-text("Отчёты")');
+    await page.waitForURL(/\/reports/);
+    await waitForPageLoad(page);
+    await expect(page.locator('.page-title')).toContainText('Отчёты');
   });
 
   test('should navigate to settings page', async ({ page }) => {
-    const settingsLink = page.locator('a[href*="settings"], nav a:has-text("Настройки")').first();
-    if (await settingsLink.isVisible()) {
-      await settingsLink.click();
-      await page.waitForTimeout(1000);
-      await expect(page).toHaveURL(/settings/);
-    }
+    await page.goto(projectUrl());
+    await waitForPageLoad(page);
+    await page.click('a.sidebar-link:has-text("Настройка проекта")');
+    await page.waitForURL(/\/settings/);
+    await waitForPageLoad(page);
+    await expect(page.locator('.page-title')).toContainText('Настройки проекта');
+  });
+
+  test('should show user info in sidebar', async ({ page }) => {
+    await page.goto(projectUrl());
+    await waitForPageLoad(page);
+    await expect(page.locator('.sidebar-user')).toBeVisible();
+    await expect(page.locator('.sidebar-avatar')).toBeVisible();
   });
 });
