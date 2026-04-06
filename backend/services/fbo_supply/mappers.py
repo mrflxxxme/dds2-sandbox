@@ -25,7 +25,7 @@ FBW_STATUS_MAP: dict[int, str] = {
     2: WbSupplyStatus.ON_DELIVERY,  # В пути  # noqa: RUF003
     3: WbSupplyStatus.IN_PROGRESS,  # Разгрузка
     4: WbSupplyStatus.ACCEPTED,  # Принята
-    5: WbSupplyStatus.CANCELLED,  # Отменена
+    5: WbSupplyStatus.ACCEPTED,  # Принята (WB docs say "Отменена", but real data = accepted)
     6: WbSupplyStatus.ACCEPTED,  # Частично принята -> ACCEPTED
 }
 
@@ -39,13 +39,7 @@ FBW_BOX_TYPE_MAP: dict[int, str | None] = {
 
 
 def _map_fbw_status(status_id: int, accepted_qty: int | None = None) -> str:
-    """Map FBW statusID to WbSupplyStatus enum value.
-
-    WB API returns statusID=5 (CANCELLED) even when items were partially accepted.
-    If accepted_qty > 0 and statusID=5, treat as ACCEPTED (partially received).
-    """
-    if status_id == 5 and accepted_qty and accepted_qty > 0:
-        return WbSupplyStatus.ACCEPTED
+    """Map FBW statusID to WbSupplyStatus enum value."""
     return FBW_STATUS_MAP.get(status_id, WbSupplyStatus.ACTIVE)
 
 
