@@ -94,7 +94,7 @@ jobs:
 
       - name: Create .env for docker-compose
         run: |
-          cat > .env <<'EOF'
+          cat > .env <<'DOTENV'
           POSTGRES_USER=dds
           POSTGRES_PASSWORD=dds_ci_secret
           POSTGRES_DB=dds_db
@@ -110,7 +110,9 @@ jobs:
           SECRET_KEY=ci-test-secret-key-minimum-32-chars-long
           TESTING=1
           REGISTER_ENABLED=true
-          EOF
+          DOTENV
+          # Strip leading whitespace from .env (heredoc preserves indentation)
+          sed -i 's/^[[:space:]]*//' .env
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

@@ -78,7 +78,7 @@ class Settings(BaseSettings):
         import os
 
         # Skip validation in CI/test environments
-        if os.getenv("CI") or os.getenv("DDS_ENV") == "testing":
+        if os.getenv("CI") or os.getenv("TESTING") or os.getenv("DDS_ENV") == "testing":
             return v
         if not v or v in ("", "minioadmin"):
             raise ValueError(
