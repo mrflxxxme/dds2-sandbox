@@ -35,6 +35,13 @@ integrations/ — внешние API (WB)
 scheduler/jobs/ — фоновые задачи (ТОЛЬКО в worker container)
 ```
 
+### Рефакторнутые пакеты (разбиты из монолитов)
+- `services/assembly/` — crud.py + status.py + analytics.py (было assembly_service.py)
+- `services/fbo_supply/` — service.py + sync.py + mappers.py (было fbo_supply_service.py)
+- `services/ai/tools/` — 7 domain modules + common.py (было executor.py)
+- `services/reports/queries/` — control.py + income.py + filters.py (было queries.py)
+- `services/warehouse_need_service.py` — расчёт потребности (выделен из warehouse_stock_service.py)
+
 ### Порядок создания нового модуля
 Model → Alembic migration → Schema → Service → Router → Test
 
@@ -112,8 +119,8 @@ src/types/api.ts — TypeScript интерфейсы
 | Себестоимость | FIFO; duty per container; cost_price = себест + пошлина + логистика | cost/, cost_parsers, cost_parser_helpers |
 | Склад | FBO vs FBS; stock_date ≠ report_date; остатки WB daily sync | warehouse_*, fbo_supply_service |
 | WB API | Semaphore; Retry-After; partial save; sync_log в finally | integrations/, funnel/, scheduler/jobs/ |
-| Сборка | assembly_service 1121 строк — нужен рефакторинг | assembly_service, routers/assembly |
-| AI Агенты | orchestrator→agents→synthesizer; 19 tools; memory=BrandNote | services/ai/ |
+| Сборка | assembly/ — crud+status+analytics (рефакторнут) | assembly/, routers/assembly |
+| AI Агенты | orchestrator→agents→synthesizer; 22 tools в 7 модулях (ai/tools/); memory=BrandNote | services/ai/ |
 | Telegram | polling с прокси на проде; HMAC auth для TMA | telegram_bot, telegram_service |
 | Поставки | FactoryOrder→CostOrder→Warehouse; VehicleStatus; split_to_vehicles | supply_chain/, cost.py |
 | Фронтенд | types/api.ts; formatNumber(); loading+error+empty states | src/app/, src/lib/api/ |

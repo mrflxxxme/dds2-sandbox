@@ -213,6 +213,7 @@ DRAFT → IN_TRANSIT → COMPLETED
 | services/warehouse_stock_engine.py | Движения + остатки + единые остатки (~760 строк) |
 | services/fbo_supply_service.py | FBO синхронизация + авто-доставка (882 строки — нужен рефакторинг) |
 | services/warehouse_stock_service.py | WB остатки sync + compute_need (852 строки — нужен рефакторинг) |
+| services/warehouse_need_service.py | Расчёт потребности в товарах (get_warehouse_need, compute_need) |
 | routers/warehouse.py | 21 endpoint: склады, stock, receipt, shipment, transfer, FBO |
 | routers/assembly.py | 14 endpoints: заявки на сборку (см. DOMAIN_ASSEMBLY.md) |
 
