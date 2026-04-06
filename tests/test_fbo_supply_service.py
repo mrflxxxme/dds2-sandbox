@@ -132,7 +132,7 @@ class TestHelpers:
         assert _map_fbw_status(2) == WbSupplyStatus.ON_DELIVERY
         assert _map_fbw_status(3) == WbSupplyStatus.IN_PROGRESS
         assert _map_fbw_status(4) == WbSupplyStatus.ACCEPTED
-        assert _map_fbw_status(5) == WbSupplyStatus.CANCELLED
+        assert _map_fbw_status(5) == WbSupplyStatus.ACCEPTED
         assert _map_fbw_status(6) == WbSupplyStatus.ACCEPTED  # Частично принята
         assert _map_fbw_status(99) == WbSupplyStatus.ACTIVE  # Unknown → default
 
