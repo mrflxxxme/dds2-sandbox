@@ -19,6 +19,10 @@ on:
       - 'backend/**'
       - 'frontend-react/**'
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   pip-audit:
     name: pip-audit (dependency vulnerabilities)
