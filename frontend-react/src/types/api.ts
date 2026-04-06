@@ -1507,6 +1507,18 @@ export interface FactoryOrder {
   items?: FactoryOrderItem[];
 }
 
+export interface FactoryOrderItemUpdate {
+  barcode?: string;
+  subject?: string;
+  article_seller?: string;
+  qty?: number;
+  price_cny?: number;
+  box_size?: string;
+  pcs_per_box?: number;
+  weight_kg?: number;
+  note?: string;
+}
+
 export interface FactoryOrderCreate {
   order_number: string;
   factory_name?: string;
@@ -1645,4 +1657,41 @@ export interface AvailableItem {
   box_size?: string;
   pcs_per_box?: number;
   weight_kg?: string;
+}
+
+// ─── AI Chat ──────────────────────────────────────────────────────────────────
+
+export interface AiConversation {
+  id: number;
+  project_id: number;
+  user_id: number;
+  brand: string | null;
+  title: string;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export interface AiMessage {
+  id: number;
+  conversation_id: number;
+  role: 'user' | 'assistant';
+  content: string;
+  files: FileAttachment[] | null;
+  tokens_used: number;
+  tools_used: string[] | null;
+  created_at: string;
+}
+
+export interface FileAttachment {
+  name: string;
+  type: 'excel' | 'image';
+  size: number;
+  content: string;
+}
+
+export interface AiFileUploadResponse {
+  name: string;
+  type: string;
+  size: number;
+  content: string;
 }
