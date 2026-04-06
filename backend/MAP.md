@@ -16,6 +16,14 @@
 3. Schema: `schemas/{domain}.py` + добавить в `schemas/__init__.py`
 4. Service → Router → Test
 
+### Транзакции
+- Импорт/ETL: `etl/` (парсеры VTB, WB)
+- Поиск, категоризация, INBOX: `services/transactions_service.py`
+- Курсы валют: `services/fx_service.py` — извлечение CNY/RUB из назначений платежей VTB, backfill, lookup (FxRate)
+
+### Справочники
+- CRUD (Account, Override, CounterpartyCategory, OpeningBalance): `services/refs_service.py`
+
 ### Изменить отчёт
 - ДДС: `services/reports/dds.py`
 - БДР: `services/wb_bdr_service.py` (+ `bdr_loaders.py`, `bdr_enrichment.py`, `wb_bdr_helpers.py`)
@@ -32,12 +40,15 @@
 - WB акции/остатки: `scheduler/jobs/wb_stocks.py`
 - Scheduler jobs: `scheduler/jobs/`
 - Rate limiting: asyncio.Semaphore в wb_api.py
+- Интеграционные ключи: `services/integrations_service.py` — CRUD ключей (шифрование/маскирование), синхронизации, payouts
 
 ### Себестоимость
 - Парсеры: `etl/cost_parsers.py` + `etl/cost_parser_helpers.py`
 - Вспомогательные парсеры: `etl/parsers/` (vtb.py, wb.py, order_city_parser.py)
 - Расчёт: `services/cost/` (duty.py, helpers.py, items.py, nomenclature.py, orders.py, plan_gen.py)
 - История себестоимости: `services/cost_history_service.py`
+- Тарифы WB: `services/tariff_service.py` — CRUD комиссий WB, загрузка из xlsx, карта среднего выкупа
+- Налоги: `services/tax_service.py` — CRUD помесячных налоговых ставок проекта (TaxRate)
 
 ### AI агенты
 - Точка входа: `services/ai/orchestrator.py`
@@ -54,6 +65,7 @@
 - Сервис: `services/warehouse_service.py`, `warehouse_stock_service.py`, `warehouse_stock_engine.py`
 - Входящие/исходящие: `services/warehouse_inbound.py`, `services/warehouse_outbound.py`
 - Расчёт потребности: `services/warehouse_need_service.py`
+- Прогноз остатков: `services/stock_forecast_service.py` — прогноз выбытия по трендам продаж (wb / wb_rf / wb_rf_transit), светофор
 - FBO поставки WB: `services/fbo_supply_service.py`
 - Гео данные складов: `services/warehouse_geo.py`, `services/warehouse_geo_data.py`
 
@@ -63,6 +75,22 @@
 - Таможня: `services/planning/customs.py`
 - WB выплаты: `services/planning/wb.py`
 - Связи платежей с фактом: `services/planning/fact_links.py`
+
+### Цепочка поставок (Supply Chain)
+- Пакет: `services/supply_chain/` (factory_orders.py, vehicle_delivery.py)
+- Заказы на производство: `services/supply_chain/factory_orders.py` — CRUD FactoryOrder, split_to_vehicles
+- Доставка (Vehicle/CostOrder): `services/supply_chain/vehicle_delivery.py` — CRUD транспортов, статусы (VehicleStatus), обзор цепочки
+
+### Мониторинг и здоровье
+- Метрики синхронизаций: `services/monitoring_service.py` — sync health, статус scheduler, обзор за 24ч
+- Ежедневная проверка: `services/health_check_service.py` — дефицит на складах WB, просроченные сборки, здоровье Category-A, неликвид
+
+### География заказов
+- Агрегация по городам: `services/order_geography_service.py` — WB заказы по городам/регионам, график по дням, фильтры (бренд, категория, артикул)
+
+### Telegram
+- Бот-сервис: `services/telegram_service.py` — deep link auth, привязка чатов, BrandNote, TMA авторизация
+- Бот (polling): `integrations/telegram_bot.py`
 
 ## Типовые импорты
 ```python
@@ -79,9 +107,9 @@ from backend.models.mixins import SoftDeleteMixin
 | Что ищу | Где |
 |---------|-----|
 | Модель таблицы | `models/{domain}.py` + `models/__init__.py` |
-| API endpoint | `routers/` (assembly, auth, cost, fbo_supplies, funnel, import_txn, integrations, monitoring, planning, planning_customs, planning_wb_payouts, projects, refs, reports, reports_stock, reports_wb, telegram, warehouse, ws) |
-| Бизнес-логика | `services/` (domain services + `project_settings_service.py` для мутаций настроек проекта). NB: `assembly/` и `fbo_supply/` — пакеты (разбиты из монолитов) |
-| Pydantic schemas | `schemas/` (anomaly, assembly, auth, capital, common, cost, imports, integrations, monitoring, planning, refs, reports, tariff, tax, telegram, transactions, warehouse, wb_fbo) |
+| API endpoint | `routers/` (assembly, auth, cost, fbo_supplies, funnel, import_txn, integrations, monitoring, planning, planning_customs, planning_wb_payouts, projects, refs, reports, reports_stock, reports_wb, supply_chain, telegram, telegram_miniapp, telegram_webhook, warehouse, ws) |
+| Бизнес-логика | `services/` (domain services + `project_settings_service.py` для мутаций настроек проекта). NB: `assembly/`, `fbo_supply/`, `supply_chain/` — пакеты (разбиты из монолитов) |
+| Pydantic schemas | `schemas/` (anomaly, assembly, auth, capital, common, cost, imports, integrations, monitoring, planning, refs, reports, supply_chain, tariff, tax, telegram, transactions, warehouse, wb_fbo) |
 | Импорт файлов / ETL | `etl/` |
 | WB HTTP клиент | `integrations/wb_api.py` |
 | Telegram бот | `integrations/telegram_bot.py` |

@@ -1,0 +1,46 @@
+# Auto-create PR from dev to main after push
+name: Auto PR
+
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  create-pr:
+    name: Create PR dev → main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check for existing PR and create if needed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check if an open PR from dev to main already exists
+          EXISTING_PR=$(gh pr list --base main --head dev --state open --json number --jq '.[0].number')
+
+          if [ -n "$EXISTING_PR" ]; then
+            echo "PR #${EXISTING_PR} already exists (dev → main), skipping creation"
+            exit 0
+          fi
+
+          # Get the last commit message for the PR title
+          LAST_COMMIT_MSG=$(git log -1 --format='%s')
+
+          # Build PR body with commit summary since main
+          COMMITS=$(git log main..dev --oneline)
+          PR_BODY="## Commits"$'\n\n'"${COMMITS}"$'\n\n'"---"$'\n'"Auto-created by CI from dev branch push."
+
+          echo "Creating PR: ${LAST_COMMIT_MSG}"
+          gh pr create \
+            --base main \
+            --head dev \
+            --title "${LAST_COMMIT_MSG}" \
+            --body "${PR_BODY}"

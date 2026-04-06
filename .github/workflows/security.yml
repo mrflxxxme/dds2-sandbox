@@ -19,6 +19,10 @@ on:
       - 'backend/**'
       - 'frontend-react/**'
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   pip-audit:
     name: pip-audit (dependency vulnerabilities)
@@ -71,7 +75,7 @@ jobs:
           scan-type: fs
           scan-ref: .
           severity: HIGH,CRITICAL
-          exit-code: 0  # advisory-only, не блокирует CI (меняй на 1 для strict mode)
+          exit-code: '1'
           format: table
 
   snyk-code:

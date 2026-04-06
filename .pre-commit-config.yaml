@@ -54,3 +54,8 @@ repos:
         language: system
         pass_filenames: false
         types: [python]
+      - id: dds-docs-check
+        name: DDS Documentation Checker
+        entry: bash scripts/check_docs.sh
+        language: system
+        pass_filenames: false
