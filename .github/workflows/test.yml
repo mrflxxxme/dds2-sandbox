@@ -173,3 +173,21 @@ jobs:
       - name: Cleanup
         if: always()
         run: docker compose down -v 2>/dev/null || true
+
+  frontend-tests:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: cd frontend-react && npm ci --legacy-peer-deps
+
+      - name: Run vitest
+        run: cd frontend-react && npx vitest run

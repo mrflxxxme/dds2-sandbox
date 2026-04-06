@@ -24,7 +24,7 @@ paths = [
   ".claude/worktrees",
 ]
 
-# Known findings — acknowledged, rotation in progress
-# ⚠️  ДЕЙСТВИЕ ТРЕБУЕТСЯ: Обновить SECRET_KEY на staging-сервере!
+# Known findings — allowlisted commits
+# NOTE: Commit a8aeeee6 allowlisted (.env.staging generic-api-key). Rotate SECRET_KEY on staging server.
 # Fingerprint: a8aeeee65554540a7903ddd60ec7fd3cbae20fc9:.env.staging:generic-api-key:25
 commits = ["a8aeeee65554540a7903ddd60ec7fd3cbae20fc9"]
