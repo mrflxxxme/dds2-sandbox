@@ -9,6 +9,7 @@ docker compose up -d                              # Запуск
 docker compose exec backend pytest tests/ -x      # Тесты
 docker compose logs backend --tail=50             # Логи
 bash scripts/check_conventions.sh                 # Проверка конвенций
+bash scripts/check_docs.sh                        # Проверка актуальности документации
 make test-fast                                    # Параллельные тесты (xdist)
 make test-changed                                 # Только изменённые тесты (testmon)
 make test-unit                                    # Только unit-тесты
@@ -95,11 +96,11 @@ Model → Alembic migration → Schema → Service → Router → Test
 
 ## Архитектура frontend
 ```
-src/app/(main)/p/[slug]/ — основное приложение (23 страниц: dds, import, txn, inbox, reports, planning, cost, funnel, trends, refs, settings, opiu, orders, plan-fact, team, monitoring, bulk-cost, container-loader, order-geography, warehouse/*, supply-chain)
+src/app/(main)/p/[slug]/ — основное приложение (21 страниц: dds, import, txn, inbox, reports, planning, cost, funnel, trends, refs, settings, opiu, orders, plan-fact, team, monitoring, bulk-cost, container-loader, order-geography, warehouse, supply-chain)
 src/app/(tma)/tma/[slug]/ — Telegram Mini App (capital, chat, funnel, pnl, pulse, warehouse)
-src/lib/api/ — модульный API клиент (client.ts + 13 доменных файлов, JWT auth + auto-refresh)
+src/lib/api/ — модульный API клиент (client.ts + 14 доменных файлов, JWT auth + auto-refresh)
 src/lib/utils.ts — formatNumber, formatDate, exportToExcel
-src/components/ — DataTable, FormModal, PageHeader, PageGuard, TabLayout, Toast
+src/components/ — DataTable, FormModal, KpiCard, PageGuard, PageHeader, TabLayout, TanStackDataTable, Toast
 src/types/api.ts — TypeScript интерфейсы
 ```
 

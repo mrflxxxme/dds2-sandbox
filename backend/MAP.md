@@ -107,9 +107,9 @@ from backend.models.mixins import SoftDeleteMixin
 | Что ищу | Где |
 |---------|-----|
 | Модель таблицы | `models/{domain}.py` + `models/__init__.py` |
-| API endpoint | `routers/` (assembly, auth, cost, fbo_supplies, funnel, import_txn, integrations, monitoring, planning, planning_customs, planning_wb_payouts, projects, refs, reports, reports_stock, reports_wb, telegram, warehouse, ws) |
+| API endpoint | `routers/` (assembly, auth, cost, fbo_supplies, funnel, import_txn, integrations, monitoring, planning, planning_customs, planning_wb_payouts, projects, refs, reports, reports_stock, reports_wb, supply_chain, telegram, telegram_miniapp, telegram_webhook, warehouse, ws) |
 | Бизнес-логика | `services/` (domain services + `project_settings_service.py` для мутаций настроек проекта). NB: `assembly/`, `fbo_supply/`, `supply_chain/` — пакеты (разбиты из монолитов) |
-| Pydantic schemas | `schemas/` (anomaly, assembly, auth, capital, common, cost, imports, integrations, monitoring, planning, refs, reports, tariff, tax, telegram, transactions, warehouse, wb_fbo) |
+| Pydantic schemas | `schemas/` (anomaly, assembly, auth, capital, common, cost, imports, integrations, monitoring, planning, refs, reports, supply_chain, tariff, tax, telegram, transactions, warehouse, wb_fbo) |
 | Импорт файлов / ETL | `etl/` |
 | WB HTTP клиент | `integrations/wb_api.py` |
 | Telegram бот | `integrations/telegram_bot.py` |
