@@ -204,7 +204,7 @@ def _row_to_values(row: dict, project_id: int) -> dict:
     return values
 
 
-async def _upsert_batch(db: AsyncSession, batch: list[dict]):
+async def _upsert_batch(db: AsyncSession, batch: list[dict]) -> None:
     """Bulk upsert a batch of rows using ON CONFLICT DO UPDATE."""
     stmt = pg_insert(WbFinanceRow).values(batch)
     update_cols = {k: stmt.excluded[k] for k in batch[0].keys() if k not in ("project_id", "rrd_id")}
@@ -264,7 +264,7 @@ async def ensure_initial_sync(db: AsyncSession, project_id: int) -> dict | None:
     return await sync_wb_finance(db, project_id, date_from, today)
 
 
-def _parse_date(val) -> date | None:
+def _parse_date(val: object) -> date | None:
     """Parse date from WB API (can be string or None).
 
     Returns None for missing/invalid values instead of date.today()

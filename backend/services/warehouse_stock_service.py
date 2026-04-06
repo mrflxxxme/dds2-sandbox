@@ -6,6 +6,7 @@ Restocking need calculation lives in warehouse_need_service.py.
 """
 
 import logging
+from typing import Any
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -18,7 +19,7 @@ from backend.utils.time import utcnow
 logger = logging.getLogger("dds.stock_analytics")
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     """Backward-compatible lazy re-export of get_warehouse_need for callers that import from here."""
     if name == "get_warehouse_need":
         from backend.services.warehouse_need_service import get_warehouse_need

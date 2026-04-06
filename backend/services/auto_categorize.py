@@ -24,7 +24,7 @@ async def get_rules(db: AsyncSession, project_id: int) -> list:
         .order_by(CategoryRule.priority.desc(), CategoryRule.id)
     )
     result = await db.execute(q)
-    return result.scalars().all()
+    return list(result.scalars().all())
 
 
 async def get_all_rules(db: AsyncSession, project_id: int) -> list:
@@ -38,7 +38,7 @@ async def get_all_rules(db: AsyncSession, project_id: int) -> list:
         .order_by(CategoryRule.priority.desc(), CategoryRule.id)
     )
     result = await db.execute(q)
-    return result.scalars().all()
+    return list(result.scalars().all())
 
 
 async def create_rule(

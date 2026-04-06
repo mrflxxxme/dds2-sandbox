@@ -242,7 +242,7 @@ class BaseAgent(ABC):
 # ── Helpers (module-private) ──────────────────────────────────────────────
 
 
-def _extract_text(response) -> str:
+def _extract_text(response: object) -> str:
     """Extract concatenated text from Claude response content blocks."""
     parts: list[str] = []
     for block in response.content:
@@ -251,7 +251,7 @@ def _extract_text(response) -> str:
     return "\n".join(parts) if parts else ""
 
 
-def _count_tokens(response) -> int:
+def _count_tokens(response: object) -> int:
     """Return approximate total tokens from the response usage metadata."""
     usage = getattr(response, "usage", None)
     if usage is None:

@@ -347,4 +347,4 @@ async def get_sync_log(
     if service:
         q = q.where(SyncLog.service == service)
     result = await db.execute(q)
-    return result.scalars().all()
+    return list(result.scalars().all())

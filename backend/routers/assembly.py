@@ -23,6 +23,7 @@ from backend.schemas.assembly import (
     ShipBulk,
 )
 from backend.services import assembly_service
+from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/warehouse/assembly", tags=["Assembly"])
 
@@ -103,7 +104,7 @@ async def get_logistics_analytics(
 # --- Create -----------------------------------------------------------------
 
 
-@router.post("", response_model=AssemblyRequestResponse)
+@router.post("", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
 async def create_assembly_request(
     payload: AssemblyRequestCreate,
     project: Project = Depends(get_current_project),
@@ -136,7 +137,7 @@ async def get_assembly_request(
 # --- Update -----------------------------------------------------------------
 
 
-@router.put("/{request_id}", response_model=AssemblyRequestResponse)
+@router.put("/{request_id}", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
 async def update_assembly_request(
     request_id: int,
     payload: AssemblyRequestUpdate,
@@ -154,7 +155,7 @@ async def update_assembly_request(
 # --- Status transitions -----------------------------------------------------
 
 
-@router.post("/{request_id}/start", response_model=AssemblyRequestResponse)
+@router.post("/{request_id}/start", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
 async def start_assembly(
     request_id: int,
     project: Project = Depends(get_current_project),
@@ -168,7 +169,7 @@ async def start_assembly(
         raise HTTPException(400, str(e)) from None
 
 
-@router.post("/{request_id}/ready", response_model=AssemblyRequestResponse)
+@router.post("/{request_id}/ready", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
 async def mark_ready(
     request_id: int,
     project: Project = Depends(get_current_project),
@@ -182,7 +183,9 @@ async def mark_ready(
         raise HTTPException(400, str(e)) from None
 
 
-@router.post("/{request_id}/assign-vehicle", response_model=AssemblyRequestResponse)
+@router.post(
+    "/{request_id}/assign-vehicle", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)]
+)
 async def assign_vehicle(
     request_id: int,
     payload: AssignVehicle,
@@ -197,7 +200,9 @@ async def assign_vehicle(
         raise HTTPException(400, str(e)) from None
 
 
-@router.post("/{request_id}/unassign-vehicle", response_model=AssemblyRequestResponse)
+@router.post(
+    "/{request_id}/unassign-vehicle", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)]
+)
 async def unassign_vehicle(
     request_id: int,
     project: Project = Depends(get_current_project),
@@ -211,7 +216,7 @@ async def unassign_vehicle(
         raise HTTPException(400, str(e)) from None
 
 
-@router.post("/{request_id}/ship", response_model=AssemblyRequestResponse)
+@router.post("/{request_id}/ship", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
 async def ship_request(
     request_id: int,
     project: Project = Depends(get_current_project),
@@ -225,7 +230,7 @@ async def ship_request(
         raise HTTPException(400, str(e)) from None
 
 
-@router.post("/{request_id}/cancel", response_model=AssemblyRequestResponse)
+@router.post("/{request_id}/cancel", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
 async def cancel_request(
     request_id: int,
     project: Project = Depends(get_current_project),
@@ -242,7 +247,9 @@ async def cancel_request(
 # --- Bulk operations --------------------------------------------------------
 
 
-@router.post("/assign-vehicle-bulk", response_model=list[AssemblyRequestResponse])
+@router.post(
+    "/assign-vehicle-bulk", response_model=list[AssemblyRequestResponse], dependencies=[Depends(rate_limit_write)]
+)
 async def assign_vehicle_bulk(
     payload: AssignVehicleBulk,
     project: Project = Depends(get_current_project),
@@ -272,7 +279,7 @@ async def assign_vehicle_bulk(
         raise HTTPException(400, str(e)) from None
 
 
-@router.post("/ship-bulk", response_model=list[AssemblyRequestResponse])
+@router.post("/ship-bulk", response_model=list[AssemblyRequestResponse], dependencies=[Depends(rate_limit_write)])
 async def ship_bulk(
     payload: ShipBulk,
     project: Project = Depends(get_current_project),
@@ -310,7 +317,9 @@ async def get_assembly_history(
 # --- FBO sync ---------------------------------------------------------------
 
 
-@router.post("/{request_id}/refresh-from-fbo", response_model=RefreshFromFboResponse)
+@router.post(
+    "/{request_id}/refresh-from-fbo", response_model=RefreshFromFboResponse, dependencies=[Depends(rate_limit_write)]
+)
 async def refresh_from_fbo(
     request_id: int,
     project: Project = Depends(get_current_project),

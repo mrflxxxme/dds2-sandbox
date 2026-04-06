@@ -5,6 +5,7 @@ Extracted from wb_bdr_service.py for maintainability.
 """
 
 from decimal import Decimal
+from typing import Any
 
 D = Decimal
 ZERO = D("0")
@@ -127,7 +128,7 @@ def build_group_nm_ids_sql(group_by: str, brand: str | None, article: str | None
     if article:
         where += r" AND LOWER(sa_name) LIKE :article_like ESCAPE '\\'"
     return (
-        f"SELECT DISTINCT NULLIF(nm_id, 0) AS nm_id, {group_col} AS group_key"
+        f"SELECT DISTINCT NULLIF(nm_id, 0) AS nm_id, {group_col} AS group_key"  # noqa: S608
         f" FROM wb_finance_rows WHERE {where} AND nm_id IS NOT NULL AND nm_id != 0"
     )
 
@@ -148,7 +149,7 @@ def build_group_sa_names_sql(group_by: str, brand: str | None, article: str | No
     if article:
         where += r" AND LOWER(sa_name) LIKE :article_like ESCAPE '\\'"
     return (
-        f"SELECT DISTINCT sa_name, {group_col} AS group_key"
+        f"SELECT DISTINCT sa_name, {group_col} AS group_key"  # noqa: S608
         f" FROM wb_finance_rows WHERE {where} AND sa_name IS NOT NULL"
     )
 
@@ -205,7 +206,7 @@ def empty_metrics() -> dict:
     }
 
 
-def compute_metrics_from_sql(row) -> dict:
+def compute_metrics_from_sql(row: Any) -> dict:  # type: ignore[type-arg]
     """Compute BDR metrics from a SQL aggregation row.
 
     Commission formula verified against TrueStats:

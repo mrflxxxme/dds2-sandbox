@@ -11,6 +11,7 @@ from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas import CostOrderCreate, DutyRuleSchema, VatRateUpdate
 from backend.services import cost as cost_service
+from backend.utils.rate_limit import rate_limit_import, rate_limit_write
 
 router = APIRouter(prefix="/cost")
 
@@ -40,7 +41,7 @@ async def get_nomenclature(
     ]
 
 
-@router.post("/nomenclature/upload")
+@router.post("/nomenclature/upload", dependencies=[Depends(rate_limit_import)])
 async def upload_nomenclature(
     file: UploadFile = File(...),
     project: Project = Depends(get_current_project),
@@ -89,7 +90,7 @@ async def get_duty_rules(
     ]
 
 
-@router.post("/duty_rules")
+@router.post("/duty_rules", dependencies=[Depends(rate_limit_write)])
 async def upsert_duty_rule(
     payload: DutyRuleSchema,
     project: Project = Depends(get_current_project),
@@ -101,7 +102,7 @@ async def upsert_duty_rule(
     return {"ok": True}
 
 
-@router.delete("/duty_rules/{rule_id}")
+@router.delete("/duty_rules/{rule_id}", dependencies=[Depends(rate_limit_write)])
 async def delete_duty_rule(
     rule_id: int,
     project: Project = Depends(get_current_project),
@@ -126,7 +127,7 @@ async def get_cost_orders(
     return await cost_service.get_cost_orders(db, project.id, limit, offset)
 
 
-@router.post("/orders")
+@router.post("/orders", dependencies=[Depends(rate_limit_write)])
 async def create_cost_order(
     payload: CostOrderCreate,
     project: Project = Depends(get_current_project),
@@ -138,7 +139,7 @@ async def create_cost_order(
     return result
 
 
-@router.put("/orders/{order_no:path}")
+@router.put("/orders/{order_no:path}", dependencies=[Depends(rate_limit_write)])
 async def update_cost_order(
     order_no: str,
     payload: CostOrderCreate,
@@ -155,7 +156,7 @@ async def update_cost_order(
     return result
 
 
-@router.delete("/orders/{order_no:path}")
+@router.delete("/orders/{order_no:path}", dependencies=[Depends(rate_limit_write)])
 async def delete_cost_order(
     order_no: str,
     project: Project = Depends(get_current_project),
@@ -170,7 +171,7 @@ async def delete_cost_order(
 # ─── Generate Payment Plan ───────────────────────────────────────────────────
 
 
-@router.post("/orders/{order_no:path}/generate_plan")
+@router.post("/orders/{order_no:path}/generate_plan", dependencies=[Depends(rate_limit_write)])
 async def generate_plan(
     order_no: str,
     project: Project = Depends(get_current_project),
@@ -183,7 +184,7 @@ async def generate_plan(
     return result
 
 
-@router.post("/orders/{order_no:path}/recalculate")
+@router.post("/orders/{order_no:path}/recalculate", dependencies=[Depends(rate_limit_write)])
 async def recalculate_order(
     order_no: str,
     project: Project = Depends(get_current_project),
@@ -234,7 +235,7 @@ async def get_cost_order_items(
     ]
 
 
-@router.post("/orders/{order_no:path}/upload")
+@router.post("/orders/{order_no:path}/upload", dependencies=[Depends(rate_limit_import)])
 async def upload_order_items(
     order_no: str,
     file: UploadFile = File(...),
@@ -293,7 +294,7 @@ async def get_vat_rate(
     return {"vat_rate": float(project.vat_rate or 22)}
 
 
-@router.put("/vat_rate")
+@router.put("/vat_rate", dependencies=[Depends(rate_limit_write)])
 async def set_vat_rate(
     payload: VatRateUpdate,
     project: Project = Depends(get_current_project),

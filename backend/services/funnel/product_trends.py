@@ -10,6 +10,7 @@ from datetime import date, timedelta
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from backend.models import WbFunnelDaily
 from backend.services.funnel.bdr_rates import BdrRatesLookup, compute_profit_bdr
@@ -70,7 +71,7 @@ async def get_product_trends(
         q = q.where(WbFunnelDaily.brand == brand)
     if search:
         _s = search.replace("%", r"\%").replace("_", r"\_")
-        vc_filter = WbFunnelDaily.vendor_code.ilike(f"%{_s}%", escape="\\")
+        vc_filter: ColumnElement[bool] = WbFunnelDaily.vendor_code.ilike(f"%{_s}%", escape="\\")
         if search.isdigit():
             vc_filter = or_(vc_filter, WbFunnelDaily.nm_id == int(search))
         q = q.where(vc_filter)

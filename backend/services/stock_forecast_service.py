@@ -145,7 +145,7 @@ def _build_forecast_with_transit(
 ) -> list[int]:
     """Build forecast considering in-transit deliveries arriving on specific dates."""
     forecast = []
-    remaining = stocks_wb
+    remaining: float = stocks_wb
     # Sort deliveries by date
     deliveries = sorted(
         [e for e in transit_entries if e.get("delivery_date")],

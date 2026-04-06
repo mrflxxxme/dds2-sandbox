@@ -238,8 +238,8 @@ async def verify_project_access(db: AsyncSession, user_id: int, project_id: int)
             detail="no_project_access",
         )
 
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
+    proj_result = await db.execute(select(Project).where(Project.id == project_id))
+    project = proj_result.scalar_one_or_none()
     if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

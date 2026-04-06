@@ -50,7 +50,7 @@ async def get_factory_orders(db: AsyncSession, project_id: int) -> list[FactoryO
         .order_by(FactoryOrder.id.desc())
         .limit(500)
     )
-    orders = result.scalars().all()
+    orders = list(result.scalars().all())
     await _enrich_items_from_nomenclature(db, project_id, orders)
     return orders
 

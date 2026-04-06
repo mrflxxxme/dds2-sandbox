@@ -25,6 +25,7 @@ from backend.schemas import (
     PlannedPaymentSchema,
 )
 from backend.services import planning as planning_service
+from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/planning")
 
@@ -46,7 +47,7 @@ async def get_orders(
     return await planning_service.get_orders(db, project.id, limit, offset)
 
 
-@router.post("/orders", response_model=OrderSchema)
+@router.post("/orders", response_model=OrderSchema, dependencies=[Depends(rate_limit_write)])
 async def upsert_order(
     payload: OrderSchema,
     project: Project = Depends(get_current_project),
@@ -56,7 +57,7 @@ async def upsert_order(
     return await planning_service.upsert_order(db, project.id, data, payload.id)
 
 
-@router.delete("/orders/{order_id}")
+@router.delete("/orders/{order_id}", dependencies=[Depends(rate_limit_write)])
 async def delete_order(
     order_id: int,
     project: Project = Depends(get_current_project),
@@ -79,7 +80,7 @@ async def get_lead_times(
     return await planning_service.get_lead_times(db, project.id)
 
 
-@router.post("/lead_times", response_model=LeadTimeSchema)
+@router.post("/lead_times", response_model=LeadTimeSchema, dependencies=[Depends(rate_limit_write)])
 async def upsert_lead_time(
     payload: LeadTimeSchema,
     project: Project = Depends(get_current_project),
@@ -102,7 +103,7 @@ async def get_payments(
     return await planning_service.get_payments(db, project.id, order_no, limit, offset)
 
 
-@router.post("/payments", response_model=PlannedPaymentSchema)
+@router.post("/payments", response_model=PlannedPaymentSchema, dependencies=[Depends(rate_limit_write)])
 async def upsert_payment(
     payload: PlannedPaymentSchema,
     project: Project = Depends(get_current_project),
@@ -112,7 +113,7 @@ async def upsert_payment(
     return await planning_service.upsert_payment(db, project.id, data, payload.id)
 
 
-@router.delete("/payments/{payment_id}")
+@router.delete("/payments/{payment_id}", dependencies=[Depends(rate_limit_write)])
 async def delete_payment(
     payment_id: int,
     project: Project = Depends(get_current_project),
@@ -124,7 +125,7 @@ async def delete_payment(
     return {"ok": True}
 
 
-@router.post("/payments/{payment_id}/mark_paid")
+@router.post("/payments/{payment_id}/mark_paid", dependencies=[Depends(rate_limit_write)])
 async def mark_paid(
     payment_id: int,
     project: Project = Depends(get_current_project),
@@ -149,7 +150,7 @@ async def get_incomes(
     return await planning_service.get_incomes(db, project.id, limit, offset)
 
 
-@router.post("/incomes", response_model=PlannedIncomeSchema)
+@router.post("/incomes", response_model=PlannedIncomeSchema, dependencies=[Depends(rate_limit_write)])
 async def upsert_income(
     payload: PlannedIncomeSchema,
     project: Project = Depends(get_current_project),
@@ -159,7 +160,7 @@ async def upsert_income(
     return await planning_service.upsert_income(db, project.id, data, payload.id)
 
 
-@router.delete("/incomes/{income_id}")
+@router.delete("/incomes/{income_id}", dependencies=[Depends(rate_limit_write)])
 async def delete_income(
     income_id: int,
     project: Project = Depends(get_current_project),
@@ -211,7 +212,7 @@ async def order_summary(
 # ─── Manual Sync Plan Payments ───────────────────────────────────────────────
 
 
-@router.post("/sync_plan_payments")
+@router.post("/sync_plan_payments", dependencies=[Depends(rate_limit_write)])
 async def sync_plan_payments_endpoint(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -255,7 +256,7 @@ async def get_fact_links(
     ]
 
 
-@router.post("/fact_links")
+@router.post("/fact_links", dependencies=[Depends(rate_limit_write)])
 async def create_fact_link(
     payload: FactLinkCreate,
     project: Project = Depends(get_current_project),
@@ -269,7 +270,7 @@ async def create_fact_link(
     return {"ok": True, "id": link.id}
 
 
-@router.delete("/fact_links/{link_id}")
+@router.delete("/fact_links/{link_id}", dependencies=[Depends(rate_limit_write)])
 async def delete_fact_link(
     link_id: int,
     project: Project = Depends(get_current_project),
@@ -317,7 +318,7 @@ async def get_accounts_list(
 # ─── WB Forecast ─────────────────────────────────────────────────────────────
 
 
-@router.post("/wb_forecast/refresh")
+@router.post("/wb_forecast/refresh", dependencies=[Depends(rate_limit_write)])
 async def refresh_wb_forecast(
     trend_days: int = Query(7, ge=1, le=90),
     project: Project = Depends(get_current_project),
@@ -346,7 +347,7 @@ async def get_brand_plans(
     return await planning_service.get_brand_plans(db, project.id, year)
 
 
-@router.post("/brand-plans", response_model=BrandPlanSchema)
+@router.post("/brand-plans", response_model=BrandPlanSchema, dependencies=[Depends(rate_limit_write)])
 async def upsert_brand_plan(
     payload: BrandPlanSchema,
     project: Project = Depends(get_current_project),
@@ -362,7 +363,7 @@ async def upsert_brand_plan(
     )
 
 
-@router.delete("/brand-plans/{plan_id}")
+@router.delete("/brand-plans/{plan_id}", dependencies=[Depends(rate_limit_write)])
 async def delete_brand_plan(
     plan_id: int,
     project: Project = Depends(get_current_project),

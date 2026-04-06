@@ -22,6 +22,7 @@ from backend.schemas.supply_chain import (
     VehicleUpdate,
 )
 from backend.services.supply_chain import factory_orders, vehicle_delivery
+from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/supply-chain")
 
@@ -50,7 +51,7 @@ async def get_factory_order(
     return FactoryOrderSchema.model_validate(order)
 
 
-@router.post("/factory-orders", status_code=201)
+@router.post("/factory-orders", status_code=201, dependencies=[Depends(rate_limit_write)])
 async def create_factory_order(
     payload: FactoryOrderCreate,
     project: Project = Depends(get_current_project),
@@ -63,7 +64,7 @@ async def create_factory_order(
     return FactoryOrderSchema.model_validate(order)
 
 
-@router.put("/factory-orders/{order_id}")
+@router.put("/factory-orders/{order_id}", dependencies=[Depends(rate_limit_write)])
 async def update_factory_order(
     order_id: int,
     payload: FactoryOrderUpdate,
@@ -76,7 +77,7 @@ async def update_factory_order(
     return FactoryOrderSchema.model_validate(order)
 
 
-@router.delete("/factory-orders/{order_id}")
+@router.delete("/factory-orders/{order_id}", dependencies=[Depends(rate_limit_write)])
 async def delete_factory_order(
     order_id: int,
     project: Project = Depends(get_current_project),
@@ -88,7 +89,7 @@ async def delete_factory_order(
     return {"ok": True}
 
 
-@router.post("/factory-orders/{order_id}/items")
+@router.post("/factory-orders/{order_id}/items", dependencies=[Depends(rate_limit_write)])
 async def add_items_to_order(
     order_id: int,
     items: list[FactoryOrderItemCreate],
@@ -102,7 +103,7 @@ async def add_items_to_order(
         raise HTTPException(404, str(e)) from e
 
 
-@router.post("/factory-orders/{order_id}/split-to-vehicles")
+@router.post("/factory-orders/{order_id}/split-to-vehicles", dependencies=[Depends(rate_limit_write)])
 async def split_to_vehicles(
     order_id: int,
     payload: SplitToVehiclesRequest,
@@ -148,7 +149,7 @@ async def get_vehicle(
     return vehicle
 
 
-@router.post("/vehicles", status_code=201)
+@router.post("/vehicles", status_code=201, dependencies=[Depends(rate_limit_write)])
 async def create_vehicle(
     payload: VehicleCreate,
     project: Project = Depends(get_current_project),
@@ -160,7 +161,7 @@ async def create_vehicle(
         raise HTTPException(409, f"Машина «{payload.order_no}» уже существует") from None
 
 
-@router.put("/vehicles/{order_no}")
+@router.put("/vehicles/{order_no}", dependencies=[Depends(rate_limit_write)])
 async def update_vehicle(
     order_no: str,
     payload: VehicleUpdate,
@@ -176,7 +177,7 @@ async def update_vehicle(
         raise HTTPException(400, str(e)) from e
 
 
-@router.put("/vehicles/{order_no}/status")
+@router.put("/vehicles/{order_no}/status", dependencies=[Depends(rate_limit_write)])
 async def update_vehicle_status(
     order_no: str,
     payload: VehicleStatusUpdate,
@@ -190,7 +191,7 @@ async def update_vehicle_status(
         raise HTTPException(400, str(e)) from e
 
 
-@router.post("/vehicles/{order_no}/recalc")
+@router.post("/vehicles/{order_no}/recalc", dependencies=[Depends(rate_limit_write)])
 async def recalculate_vehicle(
     order_no: str,
     project: Project = Depends(get_current_project),
@@ -202,7 +203,7 @@ async def recalculate_vehicle(
         raise HTTPException(400, str(e)) from e
 
 
-@router.post("/vehicles/{order_no}/items")
+@router.post("/vehicles/{order_no}/items", dependencies=[Depends(rate_limit_write)])
 async def add_items_to_vehicle(
     order_no: str,
     payload: AddItemsToVehicleRequest,
@@ -215,7 +216,7 @@ async def add_items_to_vehicle(
         raise HTTPException(400, str(e)) from e
 
 
-@router.delete("/vehicles/{order_no}/items/{item_id}")
+@router.delete("/vehicles/{order_no}/items/{item_id}", dependencies=[Depends(rate_limit_write)])
 async def remove_item_from_vehicle(
     order_no: str,
     item_id: int,

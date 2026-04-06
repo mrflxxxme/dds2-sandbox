@@ -27,6 +27,7 @@ cd frontend-react && npx playwright test          # E2E тесты (73)
 6. **SQL** — параметризованный `:param` (НИКОГДА f-string)
 7. **кэш** — `invalidate_cache(prefix)` после мутаций
 8. **логика** — бизнес-логика в `services/` (НИКОГДА в `routers/`)
+9. **rate limit** — write endpoints через `Depends(rate_limit_write)` из `backend/utils/rate_limit.py`
 
 ## Архитектура backend
 ```

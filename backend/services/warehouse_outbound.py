@@ -46,7 +46,7 @@ async def list_shipments(db: AsyncSession, project_id: int, warehouse_id: int) -
         )
         .order_by(OutboundShipment.id.desc())
     )
-    return result.scalars().all()
+    return list(result.scalars().all())
 
 
 async def get_shipment(db: AsyncSession, project_id: int, shipment_id: int) -> OutboundShipment | None:
@@ -203,7 +203,7 @@ async def list_transfers(db: AsyncSession, project_id: int, in_transit_only: boo
         query = query.where(StockTransfer.status == TransferStatus.IN_TRANSIT)
     query = query.order_by(StockTransfer.id.desc())
     result = await db.execute(query)
-    return result.scalars().all()
+    return list(result.scalars().all())
 
 
 async def get_transfer(db: AsyncSession, project_id: int, transfer_id: int) -> StockTransfer | None:

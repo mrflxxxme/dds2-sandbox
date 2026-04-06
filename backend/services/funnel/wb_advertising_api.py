@@ -65,7 +65,7 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int], begin_date: str,
     # Split date range into ≤31-day windows
     d_start = datetime.strptime(begin_date, "%Y-%m-%d").date()
     d_end = datetime.strptime(end_date, "%Y-%m-%d").date()
-    windows = []
+    windows: list[tuple[str, str]] = []
     w_start = d_start
     while w_start <= d_end:
         w_end = min(w_start + timedelta(days=30), d_end)  # 31 days = 0..30
@@ -74,7 +74,7 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int], begin_date: str,
 
     logger.info(f"WB adv stats: {begin_date}→{end_date} split into {len(windows)} window(s)")
 
-    result = {}
+    result: dict[str, dict[int, dict]] = {}
     by_campaign: dict[str, dict[int, dict]] = {}  # date -> campaign_id -> stats
     chunks = [campaign_ids[i : i + 50] for i in range(0, len(campaign_ids), 50)]
     skipped_chunks = 0

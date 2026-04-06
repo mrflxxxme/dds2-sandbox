@@ -18,6 +18,7 @@ from datetime import date
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from backend.models import WbFunnelDaily
 from backend.services.funnel.bdr_rates import BdrRatesLookup, compute_profit_bdr
@@ -1034,7 +1035,7 @@ async def get_funnel_detailed(
         q = q.where(WbFunnelDaily.brand == brand)
     if vendor_code:
         _vc = vendor_code.replace("%", r"\%").replace("_", r"\_")
-        vc_filter = WbFunnelDaily.vendor_code.ilike(f"%{_vc}%", escape="\\")
+        vc_filter: ColumnElement[bool] = WbFunnelDaily.vendor_code.ilike(f"%{_vc}%", escape="\\")
         if vendor_code.isdigit():
             vc_filter = or_(vc_filter, WbFunnelDaily.nm_id == int(vendor_code))
         q = q.where(vc_filter)

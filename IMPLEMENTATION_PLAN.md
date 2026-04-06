@@ -67,12 +67,15 @@
 - **Усилия:** 1-2 недели (с Agent Teams — быстрее)
 - **Приоритет внутри:** сначала финансовые (opiu, bdr, cost), потом остальные
 
-### 2.2 mypy --strict на services/ и models/
+### 2.2 mypy --strict на services/ и models/ ✅ DONE (2026-04-05 setup, 2026-04-06 cleanup)
 - **Что:** Статическая проверка типов в CI
 - **Как:** Добавить mypy в pre-commit + CI, начать с `# type: ignore` на legacy
 - **Даст:** Float не просочится в Decimal расчёты. Ruff это НЕ ловит
 - **Усилия:** 1 день setup + постепенное исправление
 - **Файлы:** `pyproject.toml` / `mypy.ini`, `.pre-commit-config.yaml`, `.github/workflows/test.yml`
+- **Сделано:**
+  - Phase 1: strict на services/models, 132 файла, 0 ошибок, CI job
+  - Phase 2 (2026-04-06): снят suppress с 37 из 52 модулей. Осталось 15 сложных. mypy чисто на 151 файле
 
 ### 2.3 Vitest для frontend
 - **Что:** Базовые тесты для критичных компонентов
@@ -99,12 +102,11 @@
 
 ## ФАЗА 3: Зрелость (3-4 недели)
 
-### 3.1 E2E тесты Playwright
+### 3.1 E2E тесты Playwright ✅ DONE (2026-04-06)
 - **Что:** 10-15 критичных user flows
 - **Как:** С Playwright MCP: агент пишет тест → запускает → видит результат → итерирует
 - **Даст:** Визуальные и интеграционные баги ловятся автоматически
-- **Усилия:** 1 неделя
-- **Сценарии:** логин, импорт выписки, создание транзакции, генерация отчёта DDS/BDR/OPIU, настройки проекта, warehouse receipt flow
+- **Сделано:** 11 spec-файлов, 73 E2E теста (auth, dashboard, import, navigation, planning, reports, settings, smoke, team, transactions, warehouse)
 
 ### 3.2 Snyk Code в CI
 - **Что:** Глубокий SAST поверх Bandit + Trivy
@@ -166,18 +168,30 @@
 
 | Метрика | Сейчас | Цель |
 |---------|--------|------|
-| Backend test coverage | 16% | 60%+ |
-| Frontend test coverage | 0% | 40%+ |
-| E2E сценариев | 0 | 10-15 |
+| Backend test coverage | 16% → ~50% | 60%+ |
+| Frontend test coverage | 0% → базовый | 40%+ |
+| E2E сценариев | 0 → 73 | 10-15 ✅ |
 | Скорость фич (backend+frontend) | baseline | 2-3x (Agent Teams + MCP) |
 | Скорость рефакторинга | baseline | 2-4x |
 | MCP серверов | 1 | 4-5 |
 | Модели с project_id | 23/30 | 30/30 |
-| Type checking (mypy) | нет | strict на services/ |
+| Type checking (mypy) | нет → strict (15 suppress) | strict на services/ |
 | Upload security | size only | size + magic bytes |
 | SAST | Bandit (patterns) | + Snyk (data flow) |
-| CircuitBreaker | глобальный | per-project |
+| CircuitBreaker | глобальный → per-project ✅ | per-project |
 | Файлы >500 строк (нарушение) | 5 | 0 |
+
+### 3.6 Rate limiting на write endpoints ✅ DONE (2026-04-06)
+- **Что:** Rate limiting на POST/PUT/DELETE эндпоинтах (кроме auth — уже было)
+- **Как:** Reusable `RateLimiter` dependency в `backend/utils/rate_limit.py`, Redis sliding window
+- **Даст:** Защита от brute-force/скриптовых атак на мутирующие эндпоинты
+- **Сделано:**
+  - `backend/utils/rate_limit.py` — `RateLimiter` class с graceful degradation
+  - Import endpoints: 5/min, обычные write: 30/min
+  - 6 роутеров: import_txn, cost, planning, warehouse, assembly, supply_chain (71 endpoint)
+  - 10 unit тестов в `tests/test_rate_limit.py`, все проходят
+
+---
 
 ## НЕ ВНЕДРЯЕМ (и почему)
 

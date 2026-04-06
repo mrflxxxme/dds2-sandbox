@@ -244,6 +244,8 @@ async def _check_overdue_assemblies(
 
     overdue: list[dict] = []
     for req in requests:
+        if not req.delivery_date:
+            continue
         days_overdue = (today - req.delivery_date).days
         items_count = len(req.items) if req.items else 0
         total_qty = sum(item.quantity for item in req.items) if req.items else 0

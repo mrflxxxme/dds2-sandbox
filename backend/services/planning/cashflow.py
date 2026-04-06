@@ -153,8 +153,8 @@ async def calculate_cashflow_daily(
     rows = []
     for i in range(days + 1):
         d = today + timedelta(days=i)
-        inc = income_map.get(d, Decimal("0"))
-        exp = expense_map.get(d, Decimal("0"))
+        inc: Decimal = income_map.get(d, Decimal("0"))
+        exp: Decimal = expense_map.get(d, Decimal("0"))
         net = inc - exp
         running += net
         rows.append(

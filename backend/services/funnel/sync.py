@@ -189,7 +189,7 @@ async def run_funnel_sync(
             rows_to_upsert = []
             for nm_id, fd in funnel_data.items():
                 ad = day_ads.get(nm_id, {})
-                cost = cost_map.get(nm_id) or cost_map.get(fd.get("vendor_code"))
+                cost: float | None = cost_map.get(nm_id) or cost_map.get(fd.get("vendor_code"))
 
                 row = {
                     "project_id": pid,

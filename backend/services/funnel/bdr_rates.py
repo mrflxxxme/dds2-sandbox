@@ -345,4 +345,4 @@ def _compute_tax(
         tax_base = income - nds_sum - expenses
 
     usn_sum = max(tax_base * usn_rate, 0)
-    return nds_sum + usn_sum
+    return float(nds_sum + usn_sum)

@@ -3,9 +3,6 @@ Cost — Nomenclature (get, upload Excel).
 """
 
 import io
-from datetime import datetime
-
-from backend.utils.time import utcnow
 from decimal import Decimal
 
 import pandas as pd
@@ -13,25 +10,30 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import Nomenclature
+from backend.utils.time import utcnow
 
 
-async def get_nomenclature(db: AsyncSession, project_id: int, limit: int = 1000, offset: int = 0):
+async def get_nomenclature(db: AsyncSession, project_id: int, limit: int = 1000, offset: int = 0) -> list:  # type: ignore[type-arg]
     result = await db.execute(
         select(Nomenclature)
         .where(Nomenclature.project_id == project_id)
         .order_by(Nomenclature.subject, Nomenclature.article_seller)
-        .limit(limit).offset(offset)
+        .limit(limit)
+        .offset(offset)
     )
     return result.scalars().all()
 
 
-async def upload_nomenclature(db: AsyncSession, project_id: int, data: bytes):
+async def upload_nomenclature(db: AsyncSession, project_id: int, data: bytes) -> tuple[int, int]:
     """Upload nomenclature from Excel data, returns (inserted, updated)."""
     df = pd.read_excel(io.BytesIO(data))
 
     col_map = {
-        "Баркод": "barcode", "Бренд": "brand", "Предмет": "subject",
-        "Артикул продавца": "article_seller", "Артикул WB": "article_wb",
+        "Баркод": "barcode",
+        "Бренд": "brand",
+        "Предмет": "subject",
+        "Артикул продавца": "article_seller",
+        "Артикул WB": "article_wb",
         "Объем, л": "volume_l",
     }
     df = df.rename(columns=col_map)
