@@ -77,7 +77,7 @@ class CostOrder(Base, SoftDeleteMixin):
     estimated_arrival_date: Mapped[date | None] = mapped_column(Date)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     # Supply chain fields
-    status: Mapped[str | None] = mapped_column(SAEnum(VehicleStatus), default=VehicleStatus.FORMING)
+    status: Mapped[str | None] = mapped_column(SAEnum(VehicleStatus))
     target_warehouse_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("warehouses.id"))
     inbound_receipt_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("inbound_receipts.id"))
     items: Mapped[list["CostOrderItem"]] = relationship(back_populates="order", cascade="all, delete-orphan")

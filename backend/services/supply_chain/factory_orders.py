@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.models.cost import CostOrder, CostOrderItem, Nomenclature
-from backend.models.enums import FactoryOrderStatus
+from backend.models.enums import FactoryOrderStatus, VehicleStatus
 from backend.models.supply_chain import FactoryOrder, FactoryOrderHistory, FactoryOrderItem
 from backend.schemas.supply_chain import (
     FactoryOrderCreate,
@@ -363,6 +363,7 @@ async def split_to_vehicles(
             vehicle = CostOrder(
                 project_id=project_id,
                 order_no=assignment.vehicle_order_no,
+                status=VehicleStatus.FORMING,
             )
             db.add(vehicle)
             await db.flush()
