@@ -20,6 +20,7 @@ from backend.auth import ensure_default_admin, get_current_user, require_admin
 from backend.config import settings
 from backend.database import AsyncSessionLocal, async_engine
 from backend.routers import (
+    ai_chat,
     assembly,
     auth,
     cost,
@@ -481,6 +482,12 @@ app.include_router(
     supply_chain.router,
     prefix="/api/v1",
     tags=["Supply Chain"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    ai_chat.router,
+    prefix="/api/v1",
+    tags=["AI Chat"],
     dependencies=[Depends(get_current_user)],
 )
 

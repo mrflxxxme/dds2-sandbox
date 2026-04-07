@@ -48,6 +48,7 @@ from backend.models.customs import (
 from backend.models.enums import (
     DutyBasis,
     EventType2,
+    FactoryOrderStatus,
     PurposeTag,
     TransactionStatus,
     VehicleStatus,
@@ -103,6 +104,7 @@ from backend.models.refs import (
 # Supply Chain
 from backend.models.supply_chain import (
     FactoryOrder,
+    FactoryOrderHistory,
     FactoryOrderItem,
     VehicleDocument,
     VehicleStatusHistory,
@@ -179,6 +181,7 @@ __all__ = [
     "TransactionStatus",
     "PurposeTag",
     "DutyBasis",
+    "FactoryOrderStatus",
     "VehicleStatus",
     # Auth
     "User",
@@ -268,6 +271,7 @@ __all__ = [
     "WbSupplyStatus",
     # Supply Chain
     "FactoryOrder",
+    "FactoryOrderHistory",
     "FactoryOrderItem",
     "VehicleDocument",
     "VehicleStatusHistory",

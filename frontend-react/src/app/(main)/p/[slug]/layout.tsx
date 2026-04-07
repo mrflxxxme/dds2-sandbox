@@ -54,6 +54,13 @@ const navGroups = [
         ],
     },
     {
+        title: 'AI',
+        section: 'ai',
+        items: [
+            { href: '/ai-chat', label: 'AI-ассистент', icon: '🤖', pageKey: 'ai-chat' },
+        ],
+    },
+    {
         title: 'Настройки',
         section: 'settings',
         items: [
@@ -79,8 +86,8 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
         // Resolve slug to project_id and sync localStorage
         api.getProject(slug).then(p => {
             api.setProjectId(p.id);
-            localStorage.setItem('dds_project_slug', p.slug);
-            localStorage.setItem('dds_project_name', p.name);
+            try { localStorage.setItem('dds_project_slug', p.slug); } catch { /* SSR */ }
+            try { localStorage.setItem('dds_project_name', p.name); } catch { /* SSR */ }
             setProjectName(p.name);
         }).catch(() => {
             setProjectName(slug);

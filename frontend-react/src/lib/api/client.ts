@@ -16,31 +16,48 @@ import type {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
+// Node.js 22+ has a built-in localStorage that throws without --localstorage-file.
+// Check for browser environment more reliably than just `typeof window`.
+const isBrowser = typeof window !== 'undefined' && typeof window.document !== 'undefined';
+
+function safeGetItem(key: string): string | null {
+    if (!isBrowser) return null;
+    try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function safeSetItem(key: string, value: string): void {
+    if (!isBrowser) return;
+    try { localStorage.setItem(key, value); } catch { /* noop */ }
+}
+
+function safeRemoveItem(key: string): void {
+    if (!isBrowser) return;
+    try { localStorage.removeItem(key); } catch { /* noop */ }
+}
+
 export class ApiClient {
     private _refreshPromise: Promise<'ok' | 'invalid' | 'unavailable'> | null = null;
 
     getToken(): string | null {
-        if (typeof window === 'undefined') return null;
-        return localStorage.getItem('dds_token');
+        return safeGetItem('dds_token');
     }
 
     setToken(token: string) {
-        localStorage.setItem('dds_token', token);
+        safeSetItem('dds_token', token);
     }
 
     getRefreshToken(): string | null {
-        if (typeof window === 'undefined') return null;
-        return localStorage.getItem('dds_refresh_token');
+        return safeGetItem('dds_refresh_token');
     }
 
     setRefreshToken(token: string) {
-        localStorage.setItem('dds_refresh_token', token);
+        safeSetItem('dds_refresh_token', token);
     }
 
     clearToken() {
-        localStorage.removeItem('dds_token');
-        localStorage.removeItem('dds_refresh_token');
-        localStorage.removeItem('dds_project_id');
+        safeRemoveItem('dds_token');
+        safeRemoveItem('dds_refresh_token');
+        safeRemoveItem('dds_project_id');
     }
 
     isAuthenticated(): boolean {
@@ -48,13 +65,12 @@ export class ApiClient {
     }
 
     getProjectId(): number | null {
-        if (typeof window === 'undefined') return null;
-        const pid = localStorage.getItem('dds_project_id');
+        const pid = safeGetItem('dds_project_id');
         return pid ? parseInt(pid) : null;
     }
 
     setProjectId(id: number) {
-        localStorage.setItem('dds_project_id', String(id));
+        safeSetItem('dds_project_id', String(id));
     }
 
     /**
