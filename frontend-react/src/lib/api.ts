@@ -23,6 +23,7 @@ import { addTelegramMethods } from './api/telegram';
 import { addWarehouseMethods } from './api/warehouse';
 import { addMonitoringMethods } from './api/monitoring';
 import { addSupplyChainMethods } from './api/supply-chain';
+import { addAiChatMethods } from './api/ai-chat';
 
 const client = new ApiClient();
 
@@ -41,4 +42,5 @@ export const api = Object.assign(client, {
     ...addWarehouseMethods(client),
     ...addMonitoringMethods(client),
     ...addSupplyChainMethods(client),
+    ...addAiChatMethods(client),
 });

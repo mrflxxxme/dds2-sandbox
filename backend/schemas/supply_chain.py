@@ -97,10 +97,35 @@ class FactoryOrderSchema(BaseModel):
     order_date: date | None = None
     expected_ready_date: date | None = None
     total_cny: Decimal | None = None
+    status: str = "FORMING"
     note: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
     items: list[FactoryOrderItemSchema] | None = None
+
+
+# --- Factory Order Status Update ---
+
+
+class FactoryOrderStatusUpdate(BaseModel):
+    status: str  # FactoryOrderStatus value
+
+
+# --- Factory Order History ---
+
+
+class FactoryOrderHistorySchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    factory_order_id: int
+    event_type: str
+    old_status: str | None = None
+    new_status: str | None = None
+    details: str | None = None
+    changed_at: datetime
+    changed_by: str | None = None
 
 
 # --- Vehicle (CostOrder) status update ---

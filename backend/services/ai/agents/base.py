@@ -9,7 +9,6 @@ per agent.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -174,17 +173,15 @@ class BaseAgent(ABC):
                         )
                         tool_calls.append({"id": block.id, "name": block.name, "input": block.input})
 
-                # Execute all tool calls in parallel
-                raw_results = await asyncio.gather(
-                    *[execute_tool(db, project_id, brand, tax_rate, tc["name"], tc["input"]) for tc in tool_calls],
-                    return_exceptions=True,
-                )
-
+                # Execute tool calls sequentially — async session does not
+                # support concurrent operations on the same connection.
                 tool_results: list[dict] = []
-                for tc, raw in zip(tool_calls, raw_results, strict=False):
-                    if isinstance(raw, Exception):
-                        logger.error("Tool '%s' failed: %s", tc["name"], raw)
-                        raw = f'{{"error": "{raw!s}"}}'
+                for tc in tool_calls:
+                    try:
+                        raw = await execute_tool(db, project_id, brand, tax_rate, tc["name"], tc["input"])
+                    except Exception as exc:
+                        logger.error("Tool '%s' failed: %s", tc["name"], exc)
+                        raw = f'{{"error": "{exc!s}"}}'
                     tool_results.append(
                         {
                             "type": "tool_result",

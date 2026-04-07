@@ -1,38 +1,43 @@
 """
-Multi-agent orchestrator — routes questions to specialized agents.
+Web-chat AI orchestrator — single powerful agent with all tools.
+
+Same quality as Telegram bot (monolithic prompt, all tools, full context)
+but with Markdown formatting and DB-backed conversation history.
 
 Flow:
-1. Load memory context (Obsidian)
-2. Classify intent via Haiku (cheap, fast)
-3. Route to 1-2 domain agents (parallel if multiple)
-4. If multiple agents → synthesize responses
+1. Load conversation history from DB
+2. Load memory context + brand notes
+3. Build comprehensive system prompt
+4. Run tool-calling loop (up to MAX_ROUNDS)
 5. Save insights to memory
 6. Return final answer
-
-Replaces the monolithic agent.ask() with orchestrated multi-agent calls.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.database import AsyncSessionLocal
-from backend.services.ai.agent import _check_rate_limit, _get_history, _save_history
-from backend.services.ai.agents import AGENTS
-from backend.services.ai.agents.base import AgentResult
+from backend.models.ai_chat import AiMessage
+from backend.services.ai.executor import execute_tool
 from backend.services.ai.llm_client import chat
 from backend.services.ai.memory import get_memory_context, save_insights
-from backend.services.ai.prompts.orchestrator import ORCHESTRATOR_PROMPT
-from backend.services.ai.synthesizer import synthesize
+from backend.services.ai.prompts.web_chat import WEB_CHAT_PROMPT
+from backend.services.ai.tools import ALL_TOOLS
+from backend.services.ai.tools.common import normalize_brand
+from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.ai.orchestrator")
 
-# Default agent when classification fails or is ambiguous
-_FALLBACK_AGENT = "analyst"
+# Quality > token savings
+MAX_ROUNDS = 8
+MAX_TOKENS = 4096
+TEMPERATURE = 0.3
+MODEL = "claude-sonnet-4-20250514"
+HISTORY_LIMIT = 20  # last 20 messages for context
 
 
 async def ask(
@@ -43,226 +48,223 @@ async def ask(
     question: str,
     tax_rate: float = 6.0,
 ) -> str:
-    """Main entry point — same signature as old agent.ask() for drop-in replacement.
+    """Main entry point — user question -> AI answer.
 
-    1. Check rate limit (reuse existing _check_rate_limit from agent.py)
-    2. Load/save chat history (reuse existing _get_history/_save_history)
-    3. Load memory context via memory.get_memory_context()
-    4. Classify intent via _classify_intent() using Haiku
-    5. Run selected agent(s) — use asyncio.gather for parallel
-    6. If 2+ agents: synthesize via synthesizer.synthesize()
-    7. Save insights via memory.save_insights()
-    8. Return final answer
+    1. Check rate limit
+    2. Load conversation history from DB
+    3. Build system prompt with brand notes + memory
+    4. Run tool-calling loop
+    5. Save insights
+    6. Return answer
     """
+    from backend.services.ai.agent import _check_rate_limit
+
     # 1. Rate limit
     rate_error = await _check_rate_limit(chat_id, project_id)
     if rate_error:
         return rate_error
 
-    # 2. Load chat history
-    history = await _get_history(chat_id)
-    history.append({"role": "user", "content": question})
+    # 2. Load conversation history from DB (persistent, not Redis)
+    db_history = await _load_db_history(db, chat_id, limit=HISTORY_LIMIT)
 
-    # Build a short summary of recent history for intent classification
-    history_summary = _build_history_summary(history)
+    # 3. Build system prompt
+    brand_for_tools = normalize_brand(brand)
+    brand_name = brand or "все бренды"
 
-    # 3. Load memory context + brand notes from DB
-    memory_context = await get_memory_context(project_id, brand)
-    # Restore brand notes (lost during refactoring from agent.py)
+    # Memory context
+    memory_context = await get_memory_context(project_id, brand_for_tools)
+
+    # Brand notes from DB
+    brand_notes = "(нет заметок)"
     try:
         from backend.services.telegram_service import list_brand_notes
 
-        if brand:
-            note_objs = await list_brand_notes(db, project_id, brand)
+        if brand_for_tools:
+            note_objs = await list_brand_notes(db, project_id, brand_for_tools)
             if note_objs:
-                notes_text = "\n".join(f"- {n.note}" for n in note_objs)
-                memory_context += f"\n\n## Заметки о бренде\n{notes_text}"
+                brand_notes = "\n".join(f"- {n.note}" for n in note_objs)
     except Exception:  # noqa: S110
-        pass  # graceful: brand notes optional
+        pass  # brand notes are optional, don't fail the whole request
 
-    # 4. Classify intent
-    classification = await _classify_intent(question, history_summary)
-    agent_names = classification.get("agents", [_FALLBACK_AGENT])
-    reason = classification.get("reason", "")
-
-    # Validate agent names — keep only known agents, hard cap at 2
-    valid_names = [name for name in agent_names if name in AGENTS][:2]
-    if not valid_names:
-        valid_names = [_FALLBACK_AGENT]
-
-    logger.info(
-        "Routing question to %s (reason: %s)",
-        valid_names,
-        reason,
+    today = utcnow().strftime("%Y-%m-%d")
+    system = WEB_CHAT_PROMPT.format(
+        brand=brand_name,
+        today=today,
+        brand_notes=brand_notes,
+        memory_context=memory_context or "(нет предыдущих инсайтов)",
     )
 
-    # 5. Run selected agents (parallel if multiple)
-    brand_name = brand or "все бренды"
+    # 4. Build messages for Claude
+    messages: list[dict] = list(db_history)
+    messages.append({"role": "user", "content": question})
 
-    # Build history for agents (exclude the last user message — it's in question)
-    agent_history = history[:-1] if len(history) > 1 else []
+    # 5. Tool-calling loop
+    tools_used: list[str] = []
+    total_tokens = 0
 
-    async def _run_agent(name: str, session: AsyncSession) -> AgentResult:
-        agent = AGENTS[name]
-        logger.info("Running agent '%s' for project=%s brand=%s", name, project_id, brand_name)
-        return await agent.run(
-            db=session,
-            project_id=project_id,
-            brand=brand_name,
-            tax_rate=tax_rate,
-            question=question,
-            memory_context=memory_context,
-            history=agent_history,
-        )
-
-    async def _run_agent_with_own_session(name: str) -> AgentResult:
-        """Run agent with a dedicated DB session (safe for parallel execution)."""
-        async with AsyncSessionLocal() as own_db:
-            return await _run_agent(name, own_db)
-
-    if len(valid_names) == 1:
-        # Single agent: reuse caller's DB session
+    for _round in range(MAX_ROUNDS):
         try:
-            results = [await _run_agent(valid_names[0], db)]
+            response = await chat(
+                messages=messages,
+                tools=ALL_TOOLS,
+                system=system,
+                model=MODEL,
+                max_tokens=MAX_TOKENS,
+                temperature=TEMPERATURE,
+            )
         except Exception as exc:
-            logger.error("Single agent '%s' failed: %s", valid_names[0], exc, exc_info=exc)
-            results = [AgentResult(answer=f"Агент {valid_names[0]}: ошибка при обработке. Попробуйте позже.")]
-    else:
-        # Multiple agents: each gets its own DB session to avoid conflicts
-        raw_results = await asyncio.gather(
-            *[_run_agent_with_own_session(name) for name in valid_names],
-            return_exceptions=True,
-        )
-        # Replace exceptions with error results
-        clean_results: list[AgentResult] = []
-        for idx, result in enumerate(raw_results):
-            if isinstance(result, Exception):
-                logger.error(
-                    "Agent '%s' failed: %s",
-                    valid_names[idx],
-                    result,
-                    exc_info=result,
-                )
-                clean_results.append(AgentResult(answer=f"Агент {valid_names[idx]}: ошибка при обработке."))
-            else:
-                clean_results.append(result)  # type: ignore[arg-type]
-        results = clean_results
+            logger.error("Chat API failed (round %d): %s", _round + 1, exc)
+            return "Ошибка при обращении к AI. Попробуйте позже."
 
-    # 6. Synthesize if multiple agents
-    if len(results) > 1:
-        final_answer = await synthesize(
-            question=question,
-            brand=brand_name,
-            agent_results=results,
-        )
-    else:
-        final_answer = results[0].answer
+        total_tokens += _count_tokens(response)
 
-    # 7. Collect and save insights from all agents + synthesizer
-    all_insights: list[str] = []
-    for result in results:
-        all_insights.extend(result.insights)
-    # Parse insights from synthesized answer (<!-- INSIGHTS: ... -->)
-    all_insights.extend(_parse_synthesis_insights(final_answer))
-    if all_insights:
-        await save_insights(project_id, brand, all_insights)
+        # Final answer
+        if response.stop_reason == "end_turn":
+            answer = _extract_text(response)
+            logger.info(
+                "Web chat complete: tools=%s tokens=%d rounds=%d",
+                tools_used,
+                total_tokens,
+                _round + 1,
+            )
 
-    # 8. Save history and return
-    history.append({"role": "assistant", "content": final_answer})
-    await _save_history(chat_id, history)
+            # Save insights asynchronously
+            insights = _extract_insights(answer)
+            if insights:
+                await save_insights(project_id, brand_for_tools, insights)
 
-    total_tokens = sum(r.tokens_used for r in results)
-    all_tools = []
-    for r in results:
-        all_tools.extend(r.tools_used)
-    logger.info(
-        "Orchestrator complete: agents=%s tools=%s tokens=%d",
-        valid_names,
-        all_tools,
-        total_tokens,
-    )
+            return answer
 
-    return final_answer
+        # Tool calls — execute sequentially (async session safety)
+        if response.stop_reason == "tool_use":
+            assistant_content: list[dict] = []
+            tool_results: list[dict] = []
 
+            for block in response.content:
+                if block.type == "text":
+                    assistant_content.append({"type": "text", "text": block.text})
+                elif block.type == "tool_use":
+                    assistant_content.append(
+                        {
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input,
+                        }
+                    )
+                    tools_used.append(block.name)
+                    logger.info("Tool call '%s' (round %d)", block.name, _round + 1)
 
-async def _classify_intent(question: str, history_summary: str) -> dict:
-    """Use Haiku to classify intent and select agents.
+                    try:
+                        result = await execute_tool(
+                            db,
+                            project_id,
+                            brand_for_tools,
+                            tax_rate,
+                            block.name,
+                            block.input,
+                        )
+                    except Exception as exc:
+                        logger.error("Tool '%s' failed: %s", block.name, exc)
+                        result = json.dumps({"error": str(exc)})
 
-    Returns: {"agents": ["financier"], "reason": "..."}
-    Uses ORCHESTRATOR_PROMPT, model=claude-haiku-4-5-20251001, max_tokens=200.
-    Parse JSON from response. On parse error, fallback to analyst.
-    """
-    user_message = question
-    if history_summary:
-        user_message = f"Контекст диалога: {history_summary}\n\nВопрос: {question}"
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result,
+                        }
+                    )
 
-    text = ""
+            messages.append({"role": "assistant", "content": assistant_content})
+            messages.append({"role": "user", "content": tool_results})
+            continue
+
+        # Unexpected stop reason — try to extract text
+        text = _extract_text(response)
+        if text:
+            return text
+        break
+
+    # Loop exhausted — force final answer without tools
+    logger.warning("Web chat exhausted %d rounds, forcing final answer", MAX_ROUNDS)
     try:
-        response = await chat(
-            messages=[{"role": "user", "content": user_message}],
-            system=ORCHESTRATOR_PROMPT,
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
-            temperature=0.0,
+        messages.append(
+            {"role": "user", "content": "Суммируй все полученные данные и дай финальный ответ. Не вызывай инструменты."}
         )
+        final_response = await chat(
+            messages=messages,
+            system=system,
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            temperature=TEMPERATURE,
+        )
+        answer = _extract_text(final_response)
+        if answer:
+            return answer
+    except Exception:
+        logger.exception("Failed to produce final answer")
 
-        # Extract text from response
-        for block in response.content:
-            if block.type == "text":
-                text += block.text
-
-        text = text.strip()
-        logger.debug("Intent classification raw: %s", text)
-
-        # Parse JSON — handle cases where LLM wraps in markdown code block
-        if text.startswith("```"):
-            # Strip ```json ... ```
-            lines = text.splitlines()
-            json_lines = [ln for ln in lines if not ln.strip().startswith("```")]
-            text = "\n".join(json_lines).strip()
-
-        result = json.loads(text)
-
-        # Validate structure
-        if isinstance(result, dict) and "agents" in result and isinstance(result["agents"], list):
-            return result
-
-        logger.warning("Unexpected classification format: %s", result)
-
-    except json.JSONDecodeError as exc:
-        logger.warning("Failed to parse intent JSON: %s (raw: %.200s)", exc, text)
-    except Exception as exc:
-        logger.warning("Intent classification failed: %s", exc, exc_info=True)
-
-    return {"agents": [_FALLBACK_AGENT], "reason": "fallback — classification error"}
+    return "Не удалось получить ответ. Попробуйте переформулировать вопрос."
 
 
-def _parse_synthesis_insights(text: str) -> list[str]:
-    """Extract insights from synthesizer output (<!-- INSIGHTS: ... --> blocks)."""
-    import re
-
-    pattern = re.compile(r"<!--\s*INSIGHTS?:\s*(.*?)\s*-->", re.DOTALL | re.IGNORECASE)
-    insights: list[str] = []
-    for match in pattern.finditer(text):
-        raw = match.group(1).strip()
-        for line in raw.splitlines():
-            line = line.strip().lstrip("•-– ")
-            if line:
-                insights.append(line)
-    return insights
+# ── DB History ───────────────────────────────────────────────────────────
 
 
-def _build_history_summary(history: list[dict]) -> str:
-    """Build a brief summary of recent conversation for intent classification.
+async def _load_db_history(
+    db: AsyncSession,
+    conversation_id: int,
+    limit: int = 20,
+) -> list[dict]:
+    """Load recent messages from DB for conversation context.
 
-    Takes last 4 messages (2 turns) and truncates each to 300 chars.
+    Returns list of {"role": "user"|"assistant", "content": "..."} dicts.
+    Only loads user/assistant text messages (no tool calls in history).
     """
-    recent = history[-4:]
+    result = await db.execute(
+        select(AiMessage)
+        .where(AiMessage.conversation_id == conversation_id)
+        .order_by(AiMessage.created_at.desc())
+        .limit(limit)
+    )
+    rows = list(result.scalars().all())
+    rows.reverse()  # oldest first
+
+    messages: list[dict] = []
+    for msg in rows:
+        if msg.role in ("user", "assistant") and msg.content:
+            messages.append({"role": msg.role, "content": msg.content})
+
+    return messages
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────
+
+
+def _extract_text(response: object) -> str:
+    """Extract concatenated text from Claude response content blocks."""
     parts: list[str] = []
-    for msg in recent:
-        role = msg.get("role", "?")
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            truncated = content[:300] + ("..." if len(content) > 300 else "")
-            parts.append(f"{role}: {truncated}")
-    return " | ".join(parts)
+    for block in response.content:  # type: ignore[attr-defined]
+        if block.type == "text":
+            parts.append(block.text)
+    return "\n".join(parts) if parts else ""
+
+
+def _count_tokens(response: object) -> int:
+    """Return total tokens from the response usage metadata."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return 0
+    return (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "output_tokens", 0) or 0)
+
+
+def _extract_insights(text: str) -> list[str]:
+    """Extract [INSIGHT] markers from agent output."""
+    insights: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[INSIGHT]"):
+            insight = stripped[len("[INSIGHT]") :].strip()
+            if insight:
+                insights.append(insight)
+    return insights

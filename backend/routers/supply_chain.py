@@ -18,10 +18,12 @@ from backend.project_context import get_current_project
 from backend.schemas.supply_chain import (
     AddItemsToVehicleRequest,
     FactoryOrderCreate,
+    FactoryOrderHistorySchema,
     FactoryOrderItemCreate,
     FactoryOrderItemSchema,
     FactoryOrderItemUpdate,
     FactoryOrderSchema,
+    FactoryOrderStatusUpdate,
     FactoryOrderUpdate,
     SplitToVehiclesRequest,
     VehicleCreate,
@@ -72,10 +74,12 @@ async def get_factory_order(
 async def create_factory_order(
     payload: FactoryOrderCreate,
     project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        order = await factory_orders.create_factory_order(db, project.id, payload)
+        display_name = user.first_name or user.username or user.email
+        order = await factory_orders.create_factory_order(db, project.id, payload, user_name=display_name)
     except IntegrityError:
         raise HTTPException(409, f"Заказ с номером «{payload.order_number}» уже существует") from None  # noqa: RUF001
     return FactoryOrderSchema.model_validate(order)
@@ -111,10 +115,12 @@ async def add_items_to_order(
     order_id: int,
     items: list[FactoryOrderItemCreate],
     project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        created = await factory_orders.add_items(db, project.id, order_id, items)
+        display_name = user.first_name or user.username or user.email
+        created = await factory_orders.add_items(db, project.id, order_id, items, user_name=display_name)
         return {"ok": True, "added": len(created)}
     except ValueError as e:
         raise HTTPException(404, str(e)) from e
@@ -156,11 +162,50 @@ async def split_to_vehicles(
     order_id: int,
     payload: SplitToVehiclesRequest,
     project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        result = await factory_orders.split_to_vehicles(db, project.id, order_id, payload)
+        display_name = user.first_name or user.username or user.email
+        result = await factory_orders.split_to_vehicles(db, project.id, order_id, payload, user_name=display_name)
         return result
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+# ─── Factory Order History & Status ─────────────────────────────────────────
+
+
+@router.get("/factory-orders/{order_id}/history")
+async def get_factory_order_history(
+    order_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    history = await factory_orders.get_factory_order_history(db, project.id, order_id)
+    return [FactoryOrderHistorySchema.model_validate(h) for h in history]
+
+
+@router.put("/factory-orders/{order_id}/status", dependencies=[Depends(rate_limit_write)])
+async def update_factory_order_status(
+    order_id: int,
+    payload: FactoryOrderStatusUpdate,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        display_name = user.first_name or user.username or user.email
+        order = await factory_orders.update_factory_order_status(
+            db,
+            project.id,
+            order_id,
+            payload.status,
+            user_name=display_name,
+        )
+        if not order:
+            raise HTTPException(404, "Factory order not found")
+        return FactoryOrderSchema.model_validate(order)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 

@@ -31,6 +31,12 @@ class DutyBasis(str, enum.Enum):
     INVOICE = "INVOICE"  # % от инвойса
 
 
+class FactoryOrderStatus(str, enum.Enum):
+    FORMING = "FORMING"  # формируется (позиции добавляются)
+    READY = "READY"  # готов к распределению
+    DISTRIBUTED = "DISTRIBUTED"  # полностью распределён по машинам
+
+
 class VehicleStatus(str, enum.Enum):
     FORMING = "FORMING"  # наполняется товаром
     SHIPPED = "SHIPPED"  # отгружен с фабрики  # noqa: RUF003

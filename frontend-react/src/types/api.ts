@@ -1494,6 +1494,8 @@ export interface FactoryOrderItem {
   remaining_qty?: number;
 }
 
+export type FactoryOrderStatus = 'FORMING' | 'READY' | 'DISTRIBUTED';
+
 export interface FactoryOrder {
   id: number;
   project_id: number;
@@ -1502,10 +1504,23 @@ export interface FactoryOrder {
   order_date?: string;
   expected_ready_date?: string;
   total_cny?: number;
+  status: FactoryOrderStatus;
   note?: string;
   created_at?: string;
   updated_at?: string;
   items?: FactoryOrderItem[];
+}
+
+export interface FactoryOrderHistory {
+  id: number;
+  project_id: number;
+  factory_order_id: number;
+  event_type: string;
+  old_status?: string;
+  new_status?: string;
+  details?: string;
+  changed_at: string;
+  changed_by?: string;
 }
 
 export interface FactoryOrderItemUpdate {

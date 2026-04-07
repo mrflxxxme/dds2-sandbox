@@ -3,8 +3,10 @@ import { ApiClient } from './client';
 import type {
     FactoryOrder,
     FactoryOrderCreate,
+    FactoryOrderHistory,
     FactoryOrderItem,
     FactoryOrderItemUpdate,
+    FactoryOrderStatus,
     VehicleStatusUpdate,
     VehicleCreate,
     VehicleUpdateData,
@@ -52,6 +54,14 @@ export function addSupplyChainMethods(api: ApiClient) {
         // ─── Split to Vehicles ──────────────────────────────────────
         splitToVehicles(orderId: number, assignments: SplitItem[]) {
             return api.request<MessageResponse>('POST', `/api/v1/supply-chain/factory-orders/${orderId}/split-to-vehicles`, { assignments });
+        },
+
+        // ─── Factory Order History & Status ────────────────────────
+        getFactoryOrderHistory(orderId: number) {
+            return api.request<FactoryOrderHistory[]>('GET', `/api/v1/supply-chain/factory-orders/${orderId}/history`);
+        },
+        updateFactoryOrderStatus(orderId: number, status: FactoryOrderStatus) {
+            return api.request<FactoryOrder>('PUT', `/api/v1/supply-chain/factory-orders/${orderId}/status`, { status });
         },
 
         // ─── Vehicles (CostOrders with supply chain context) ────────
