@@ -402,6 +402,13 @@ async def split_to_vehicles(
     await _maybe_update_status(db, order, changed_by=user_name)
 
     await db.commit()
+
+    # Auto-recalculate costs (duty, vat, delivery) for affected vehicles
+    from backend.services.cost.items import recalculate_order_items
+
+    for v_order_no in vehicles_used:
+        await recalculate_order_items(db, project_id, v_order_no)
+
     return {"ok": True, "created_cost_items": created_cost_items}
 
 

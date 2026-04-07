@@ -263,6 +263,12 @@ async def add_items_to_vehicle(
         added += 1
 
     await db.commit()
+
+    # Auto-recalculate costs (duty, vat, delivery) for the vehicle
+    from backend.services.cost.items import recalculate_order_items
+
+    await recalculate_order_items(db, project_id, order_no)
+
     return {"ok": True, "added": added}
 
 
