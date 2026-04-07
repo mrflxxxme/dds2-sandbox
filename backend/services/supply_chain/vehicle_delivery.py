@@ -263,6 +263,12 @@ async def add_items_to_vehicle(
         added += 1
 
     await db.commit()
+
+    # Auto-recalculate costs (duty, vat, delivery) for the vehicle
+    from backend.services.cost.items import recalculate_order_items
+
+    await recalculate_order_items(db, project_id, order_no)
+
     return {"ok": True, "added": added}
 
 
@@ -680,6 +686,32 @@ async def recalculate_vehicle(
         total_vat_rub=total_vat,
         total_rub=total_rub,
     )
+
+
+async def recalculate_all_vehicles(
+    db: AsyncSession,
+    project_id: int,
+) -> dict:
+    """Recalculate costs for ALL vehicles in the project."""
+    from backend.services.cost.items import recalculate_order_items
+
+    result = await db.execute(
+        select(CostOrder.order_no)
+        .where(
+            CostOrder.project_id == project_id,
+            CostOrder.is_deleted == False,  # noqa: E712
+            CostOrder.status.isnot(None),
+        )
+        .limit(500)
+    )
+    order_nos = [row[0] for row in result.all()]
+
+    total_updated = 0
+    for order_no in order_nos:
+        updated, _ = await recalculate_order_items(db, project_id, order_no)
+        total_updated += updated or 0
+
+    return {"ok": True, "vehicles": len(order_nos), "items_updated": total_updated}
 
 
 async def _create_inbound_from_vehicle(
