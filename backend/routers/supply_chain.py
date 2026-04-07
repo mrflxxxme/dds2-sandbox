@@ -286,6 +286,15 @@ async def update_vehicle_status(
         raise HTTPException(400, str(e)) from e
 
 
+@router.post("/vehicles/recalc-all", dependencies=[Depends(rate_limit_write)])
+async def recalculate_all_vehicles(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Recalculate costs for all vehicles in the project."""
+    return await vehicle_delivery.recalculate_all_vehicles(db, project.id)
+
+
 @router.post("/vehicles/{order_no}/recalc", dependencies=[Depends(rate_limit_write)])
 async def recalculate_vehicle(
     order_no: str,
