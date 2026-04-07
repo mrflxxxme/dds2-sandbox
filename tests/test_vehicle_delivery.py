@@ -240,21 +240,23 @@ class TestGetSupplyChainOverview:
     @pytest.mark.asyncio
     async def test_overview_empty(self, db_session, project):
         overview = await get_supply_chain_overview(db_session, project.id)
-        assert overview["factory_orders_count"] == 0
-        assert overview["total_items_in_transit"] == 0
+        assert overview["total_factory_orders"] == 0
+        assert overview["total_vehicles"] == 0
+        assert overview["total_items"] == 0
+        assert overview["total_amount_cny"] == 0
         assert isinstance(overview["vehicles_by_status"], dict)
 
     @pytest.mark.asyncio
     async def test_overview_counts_factory_orders(self, db_session, project):
         await _create_factory_order_with_items(db_session, project.id, [("BC-OV1", 100)])
         overview = await get_supply_chain_overview(db_session, project.id)
-        assert overview["factory_orders_count"] >= 1
+        assert overview["total_factory_orders"] >= 1
 
     @pytest.mark.asyncio
     async def test_overview_project_isolation(self, db_session, project, other_project):
         await _create_factory_order_with_items(db_session, project.id, [("BC-OVI", 100)])
         overview = await get_supply_chain_overview(db_session, other_project.id)
-        assert overview["factory_orders_count"] == 0
+        assert overview["total_factory_orders"] == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

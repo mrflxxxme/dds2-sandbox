@@ -1,5 +1,6 @@
 """
-Supply Chain models: FactoryOrder, FactoryOrderItem, VehicleDocument, VehicleStatusHistory.
+Supply Chain models: FactoryOrder, FactoryOrderItem, FactoryOrderHistory,
+VehicleDocument, VehicleStatusHistory.
 
 Represents factory orders (1 order = 1 factory) that get split
 into vehicles (CostOrder) for delivery.
@@ -40,7 +41,8 @@ class FactoryOrder(Base, TimestampMixin, SoftDeleteMixin):
     factory_name: Mapped[str | None] = mapped_column(String(200))
     order_date: Mapped[date | None] = mapped_column(Date)
     expected_ready_date: Mapped[date | None] = mapped_column(Date)
-    total_cny: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    total_cny: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="FORMING", server_default="FORMING")
     note: Mapped[str | None] = mapped_column(Text)
 
     items: Mapped[list["FactoryOrderItem"]] = relationship(back_populates="factory_order", cascade="all, delete-orphan")
@@ -127,4 +129,30 @@ class VehicleStatusHistory(Base):
     __table_args__ = (
         Index("ix_vehicle_status_history_project_id", "project_id"),
         Index("ix_vehicle_status_history_order_no", "order_no"),
+    )
+
+
+# ─── Factory Order History ─────────────────────────────────────────────────
+
+
+class FactoryOrderHistory(Base):
+    """Audit log for factory order events: status changes, distribution, item changes."""
+
+    __tablename__ = "factory_order_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    factory_order_id: Mapped[int] = mapped_column(Integer, ForeignKey("factory_orders.id"), nullable=False)
+    event_type: Mapped[str] = mapped_column(
+        String(30), nullable=False
+    )  # created, status_change, distributed, items_added, items_removed
+    old_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    new_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)  # human-readable description
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    changed_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    __table_args__ = (
+        Index("ix_factory_order_history_project_id", "project_id"),
+        Index("ix_factory_order_history_order_id", "factory_order_id"),
     )

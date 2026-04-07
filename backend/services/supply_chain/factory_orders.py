@@ -9,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.models.cost import CostOrder, CostOrderItem, Nomenclature
-from backend.models.supply_chain import FactoryOrder, FactoryOrderItem
+from backend.models.enums import FactoryOrderStatus
+from backend.models.supply_chain import FactoryOrder, FactoryOrderHistory, FactoryOrderItem
 from backend.schemas.supply_chain import (
     FactoryOrderCreate,
     FactoryOrderItemCreate,
@@ -17,8 +18,110 @@ from backend.schemas.supply_chain import (
     FactoryOrderUpdate,
     SplitToVehiclesRequest,
 )
+from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
+
+
+# ─── History helpers ──────────────────────────────────────────────────────────
+
+
+async def _add_history(
+    db: AsyncSession,
+    project_id: int,
+    factory_order_id: int,
+    event_type: str,
+    *,
+    old_status: str | None = None,
+    new_status: str | None = None,
+    details: str | None = None,
+    changed_by: str | None = None,
+) -> FactoryOrderHistory:
+    entry = FactoryOrderHistory(
+        project_id=project_id,
+        factory_order_id=factory_order_id,
+        event_type=event_type,
+        old_status=old_status,
+        new_status=new_status,
+        details=details,
+        changed_at=utcnow(),
+        changed_by=changed_by,
+    )
+    db.add(entry)
+    return entry
+
+
+def _compute_status(order: FactoryOrder) -> str:
+    """Compute status based on distribution progress."""
+    items = order.items or []
+    if not items:
+        return FactoryOrderStatus.FORMING.value
+    total_qty = sum(i.qty for i in items)
+    total_assigned = sum(i.assigned_qty for i in items)
+    if total_qty > 0 and total_assigned >= total_qty:
+        return FactoryOrderStatus.DISTRIBUTED.value
+    return order.status
+
+
+async def _maybe_update_status(db: AsyncSession, order: FactoryOrder, changed_by: str | None = None) -> None:
+    """Auto-transition status to DISTRIBUTED if all items are assigned."""
+    new_status = _compute_status(order)
+    if new_status != order.status:
+        old_status = order.status
+        order.status = new_status
+        await _add_history(
+            db,
+            order.project_id,
+            order.id,
+            "status_change",
+            old_status=old_status,
+            new_status=new_status,
+            details=f"Автосмена статуса: {old_status} → {new_status}",
+            changed_by=changed_by,
+        )
+
+
+async def get_factory_order_history(
+    db: AsyncSession,
+    project_id: int,
+    order_id: int,
+) -> list[FactoryOrderHistory]:
+    """Get history entries for a factory order."""
+    result = await db.execute(
+        select(FactoryOrderHistory)
+        .where(
+            FactoryOrderHistory.project_id == project_id,
+            FactoryOrderHistory.factory_order_id == order_id,
+        )
+        .order_by(FactoryOrderHistory.changed_at.desc())
+        .limit(200)
+    )
+    return list(result.scalars().all())
+
+
+async def update_factory_order_status(
+    db: AsyncSession,
+    project_id: int,
+    order_id: int,
+    new_status: str,
+    user_name: str | None = None,
+) -> FactoryOrder | None:
+    """Manually change factory order status (no history logged for manual changes)."""
+    valid = {s.value for s in FactoryOrderStatus}
+    if new_status not in valid:
+        raise ValueError(f"Недопустимый статус: {new_status}. Допустимые: {', '.join(valid)}")
+
+    order = await get_factory_order(db, project_id, order_id)
+    if not order:
+        return None
+
+    if order.status == new_status:
+        return order
+
+    order.status = new_status
+    await db.commit()
+    await db.refresh(order, ["items"])
+    return order
 
 
 async def _enrich_items_from_nomenclature(
@@ -73,7 +176,12 @@ async def get_factory_order(db: AsyncSession, project_id: int, order_id: int) ->
     return order
 
 
-async def create_factory_order(db: AsyncSession, project_id: int, data: FactoryOrderCreate) -> FactoryOrder:
+async def create_factory_order(
+    db: AsyncSession,
+    project_id: int,
+    data: FactoryOrderCreate,
+    user_name: str | None = None,
+) -> FactoryOrder:
     """Create a factory order with optional items."""
     order = FactoryOrder(
         project_id=project_id,
@@ -83,6 +191,7 @@ async def create_factory_order(db: AsyncSession, project_id: int, data: FactoryO
         expected_ready_date=data.expected_ready_date,
         total_cny=data.total_cny,
         note=data.note,
+        status=FactoryOrderStatus.FORMING.value,
     )
     db.add(order)
     await db.flush()  # get order.id
@@ -104,6 +213,17 @@ async def create_factory_order(db: AsyncSession, project_id: int, data: FactoryO
                 note=item_data.note,
             )
             db.add(item)
+
+    items_count = len(data.items) if data.items else 0
+    await _add_history(
+        db,
+        project_id,
+        order.id,
+        "created",
+        new_status=FactoryOrderStatus.FORMING.value,
+        details=f"Заказ создан ({items_count} позиций)" if items_count else "Заказ создан",
+        changed_by=user_name,
+    )
 
     await db.commit()
     await db.refresh(order, ["items"])
@@ -143,6 +263,7 @@ async def add_items(
     project_id: int,
     factory_order_id: int,
     items: list[FactoryOrderItemCreate],
+    user_name: str | None = None,
 ) -> list[FactoryOrderItem]:
     """Add items to an existing factory order."""
     order = await get_factory_order(db, project_id, factory_order_id)
@@ -150,6 +271,7 @@ async def add_items(
         raise ValueError("Factory order not found")
 
     created = []
+    total_qty = 0
     for item_data in items:
         item = FactoryOrderItem(
             project_id=project_id,
@@ -167,6 +289,16 @@ async def add_items(
         )
         db.add(item)
         created.append(item)
+        total_qty += item_data.qty
+
+    await _add_history(
+        db,
+        project_id,
+        order.id,
+        "items_added",
+        details=f"Добавлено {len(items)} позиций ({total_qty} шт.)",
+        changed_by=user_name,
+    )
 
     await db.commit()
     for item in created:
@@ -179,6 +311,7 @@ async def split_to_vehicles(
     project_id: int,
     factory_order_id: int,
     data: SplitToVehiclesRequest,
+    user_name: str | None = None,
 ) -> dict:
     """
     Assign factory order items to vehicles (CostOrder).
@@ -197,6 +330,8 @@ async def split_to_vehicles(
     items_by_id: dict[int, FactoryOrderItem] = {item.id: item for item in order.items}
 
     created_cost_items = 0
+    vehicles_used: set[str] = set()
+    total_assigned_qty = 0
     for assignment in data.assignments:
         # Validate item exists and belongs to this order
         fo_item = items_by_id.get(assignment.factory_order_item_id)
@@ -248,6 +383,22 @@ async def split_to_vehicles(
         # Update assigned_qty
         fo_item.assigned_qty += assignment.qty
         created_cost_items += 1
+        vehicles_used.add(assignment.vehicle_order_no)
+        total_assigned_qty += assignment.qty
+
+    # Log distribution event
+    vehicles_str = ", ".join(sorted(vehicles_used))
+    await _add_history(
+        db,
+        project_id,
+        order.id,
+        "distributed",
+        details=f"Распределено {total_assigned_qty} шт. в машины: {vehicles_str}",
+        changed_by=user_name,
+    )
+
+    # Auto-transition status if fully distributed
+    await _maybe_update_status(db, order, changed_by=user_name)
 
     await db.commit()
     return {"ok": True, "created_cost_items": created_cost_items}

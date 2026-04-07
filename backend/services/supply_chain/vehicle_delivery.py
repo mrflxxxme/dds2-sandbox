@@ -216,6 +216,7 @@ async def add_items_to_vehicle(
             .join(FactoryOrder)
             .where(
                 FactoryOrderItem.id == item_req.factory_order_item_id,
+                FactoryOrderItem.project_id == project_id,
                 FactoryOrder.project_id == project_id,
                 FactoryOrder.is_deleted == False,  # noqa: E712
             )
@@ -291,6 +292,7 @@ async def remove_item_from_vehicle(
         fo_item_result = await db.execute(
             select(FactoryOrderItem).where(
                 FactoryOrderItem.id == cost_item.factory_order_item_id,
+                FactoryOrderItem.project_id == project_id,
             )
         )
         fo_item = fo_item_result.scalar_one_or_none()
@@ -647,7 +649,14 @@ async def recalculate_vehicle(
         raise ValueError(err)
 
     # Aggregate from recalculated items
-    items_result = await db.execute(select(CostOrderItem).where(CostOrderItem.order_no == order_no))
+    items_result = await db.execute(
+        select(CostOrderItem)
+        .where(
+            CostOrderItem.order_no == order_no,
+            CostOrderItem.project_id == project_id,
+        )
+        .limit(2000)
+    )
     items = items_result.scalars().all()
 
     total_cost = Decimal("0")
@@ -722,9 +731,11 @@ async def _create_inbound_from_vehicle(
 async def get_supply_chain_overview(db: AsyncSession, project_id: int) -> dict:
     """
     Aggregated supply chain overview:
-    - count of vehicles by status
-    - total items across all active vehicles
-    - factory orders count
+    - total_factory_orders: count of active factory orders
+    - total_vehicles: count of active vehicles (CostOrder with status)
+    - vehicles_by_status: breakdown by VehicleStatus
+    - total_items: total item qty across all active vehicles
+    - total_amount_cny: sum of total_cny across all active factory orders
     """
     from backend.models.supply_chain import FactoryOrder
 
@@ -735,7 +746,16 @@ async def get_supply_chain_overview(db: AsyncSession, project_id: int) -> dict:
             FactoryOrder.is_deleted == False,  # noqa: E712
         )
     )
-    factory_orders_count = fo_result.scalar() or 0
+    total_factory_orders = fo_result.scalar() or 0
+
+    # Total amount CNY across all active factory orders
+    amount_result = await db.execute(
+        select(func.coalesce(func.sum(FactoryOrder.total_cny), 0)).where(
+            FactoryOrder.project_id == project_id,
+            FactoryOrder.is_deleted == False,  # noqa: E712
+        )
+    )
+    total_amount_cny = float(amount_result.scalar() or 0)
 
     # Count vehicles by status
     status_result = await db.execute(
@@ -749,23 +769,29 @@ async def get_supply_chain_overview(db: AsyncSession, project_id: int) -> dict:
     )
     vehicles_by_status = {row[0]: row[1] for row in status_result}
 
+    # Total vehicles count
+    total_vehicles = sum(vehicles_by_status.values())
+
     # Total items in active (non-delivered) vehicles
     active_statuses = [VehicleStatus.FORMING, VehicleStatus.SHIPPED, VehicleStatus.CUSTOMS]
     items_result = await db.execute(
-        select(func.sum(CostOrderItem.qty))
+        select(func.coalesce(func.sum(CostOrderItem.qty), 0))
         .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)
         .where(
+            CostOrderItem.project_id == project_id,
             CostOrder.project_id == project_id,
             CostOrder.is_deleted == False,  # noqa: E712
             CostOrder.status.in_(active_statuses),
         )
     )
-    total_items_in_transit = items_result.scalar() or 0
+    total_items = items_result.scalar() or 0
 
     return {
-        "factory_orders_count": factory_orders_count,
+        "total_factory_orders": total_factory_orders,
+        "total_vehicles": total_vehicles,
         "vehicles_by_status": vehicles_by_status,
-        "total_items_in_transit": total_items_in_transit,
+        "total_items": total_items,
+        "total_amount_cny": total_amount_cny,
     }
 
 

@@ -131,7 +131,7 @@ export default function SupplyChainPage() {
     );
 }
 
-// ─── Tab 1: Factory Orders ──────────────────────────────────────────────────
+// ─── Create Factory Order Inline Form ────────────────────────────────────
 
 const createOrderFields = [
     { key: 'order_number', label: 'Номер заказа', required: true },
@@ -139,6 +139,69 @@ const createOrderFields = [
     { key: 'expected_ready_date', label: 'Примерная дата готовности', type: 'date' as const },
     { key: 'note', label: 'Заметка' },
 ];
+
+function CreateFactoryOrderForm({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+    const [form, setForm] = useState<FactoryOrderCreate>({
+        order_number: '',
+        factory_name: undefined,
+        expected_ready_date: undefined,
+        note: undefined,
+    });
+    const [submitting, setSubmitting] = useState(false);
+
+    const handleSubmit = async () => {
+        if (!form.order_number.trim()) return;
+        setSubmitting(true);
+        try {
+            await api.createFactoryOrder(form);
+            onDone();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setSubmitting(false);
+    };
+
+    const inputStyle: React.CSSProperties = {
+        width: '100%', padding: '8px 12px', borderRadius: 8,
+        border: '1px solid var(--color-border)', background: 'var(--color-bg)',
+        color: 'var(--color-text)', fontSize: 13,
+    };
+
+    return (
+        <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>Новый фабричный заказ</h3>
+                <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12 }}>
+                <div>
+                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Номер заказа *</label>
+                    <input value={form.order_number} onChange={e => setForm(f => ({ ...f, order_number: e.target.value }))} placeholder="ЗАК-001" style={inputStyle} autoFocus />
+                </div>
+                <div>
+                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Поставщик / Фабрика</label>
+                    <input value={form.factory_name || ''} onChange={e => setForm(f => ({ ...f, factory_name: e.target.value || undefined }))} placeholder="Название" style={inputStyle} />
+                </div>
+                <div>
+                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Дата готовности (план)</label>
+                    <input type="date" value={form.expected_ready_date || ''} onChange={e => setForm(f => ({ ...f, expected_ready_date: e.target.value || undefined }))} style={inputStyle} />
+                </div>
+                <div>
+                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Заметка</label>
+                    <input value={form.note || ''} onChange={e => setForm(f => ({ ...f, note: e.target.value || undefined }))} placeholder="Комментарий" style={inputStyle} />
+                </div>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
+                <button className="btn btn-secondary btn-sm" onClick={onClose}>Отмена</button>
+                <button className="btn btn-primary btn-sm" onClick={handleSubmit} disabled={!form.order_number.trim() || submitting}>
+                    {submitting ? 'Создаём...' : 'Создать'}
+                </button>
+            </div>
+        </div>
+    );
+}
+
+// ─── Tab 1: Factory Orders ──────────────────────────────────────────────────
 
 function FactoryOrdersTab() {
     const [orders, setOrders] = useState<FactoryOrder[]>([]);
@@ -262,14 +325,6 @@ function FactoryOrdersTab() {
                     <button
                         className="btn btn-secondary btn-sm"
                         style={{ fontSize: 11, padding: '2px 8px' }}
-                        onClick={() => setSplitOrderId(row.id)}
-                        title="Разбить на машины"
-                    >
-                        Разбить
-                    </button>
-                    <button
-                        className="btn btn-secondary btn-sm"
-                        style={{ fontSize: 11, padding: '2px 8px' }}
                         onClick={() => setEditOrder(row)}
                     >
                         Ред.
@@ -317,6 +372,14 @@ function FactoryOrdersTab() {
                 </div>
             )}
 
+            {/* Create order inline form */}
+            {showCreate && (
+                <CreateFactoryOrderForm
+                    onClose={() => setShowCreate(false)}
+                    onDone={() => { setShowCreate(false); load(); }}
+                />
+            )}
+
             <DataTable
                 columns={columns}
                 data={orders}
@@ -327,19 +390,10 @@ function FactoryOrdersTab() {
                 exportName="factory_orders"
                 onRowClick={(row) => handleRowClick(row)}
                 actions={
-                    <button className="btn btn-primary btn-sm" onClick={() => setShowCreate(true)}>
-                        + Создать заказ
+                    <button className="btn btn-primary btn-sm" onClick={() => setShowCreate(v => !v)}>
+                        {showCreate ? '✕ Закрыть' : '+ Создать заказ'}
                     </button>
                 }
-            />
-
-            {/* Create Modal */}
-            <FormModal
-                open={showCreate}
-                onClose={() => setShowCreate(false)}
-                onSubmit={handleCreate}
-                title="Новый фабричный заказ"
-                fields={createOrderFields}
             />
 
             {/* Edit Modal */}
@@ -1093,9 +1147,9 @@ function AddItemsModal({ vehicle, onClose, onDone }: { vehicle: VehicleSchema; o
     );
 }
 
-// ─── Create Vehicle Modal ──────────────────────────────────────────────────
+// ─── Create Vehicle Inline Form ──────────────────────────────────────────
 
-function CreateVehicleModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
     const [form, setForm] = useState<VehicleCreate>({
         order_no: '',
         container_type: 'truck1',
@@ -1131,19 +1185,17 @@ function CreateVehicleModal({ onClose, onDone }: { onClose: () => void; onDone: 
     };
 
     return (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)' }} onClick={onClose} />
-            <div style={{ position: 'relative', background: 'var(--color-bg)', borderRadius: 16, width: '90%', maxWidth: 520, boxShadow: '0 20px 60px rgba(0,0,0,0.3)', maxHeight: '90vh', overflow: 'auto' }}>
-                <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--color-border)' }}>
-                    <h3 style={{ fontSize: 16, fontWeight: 600 }}>Новая машина</h3>
-                </div>
-                <div style={{ padding: '16px 24px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>Новая машина</h3>
+                <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                     <div>
                         <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Номер машины *</label>
                         <input value={form.order_no} onChange={e => setForm(f => ({ ...f, order_no: e.target.value }))} placeholder="М-001" style={inputStyle} autoFocus />
                     </div>
-
-                    {/* Container type selector */}
                     <div>
                         <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6, display: 'block' }}>Тип контейнера</label>
                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -1168,45 +1220,45 @@ function CreateVehicleModal({ onClose, onDone }: { onClose: () => void; onDone: 
                             })}
                         </div>
                     </div>
+                </div>
 
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
-                        <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Дата забора (план)</label>
-                            <input type="date" value={form.ship_date || ''} onChange={e => setForm(f => ({ ...f, ship_date: e.target.value || undefined }))} style={inputStyle} />
-                        </div>
-                        <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Инвойс</label>
-                            <input value={form.invoice_no || ''} onChange={e => setForm(f => ({ ...f, invoice_no: e.target.value || undefined }))} placeholder="CC20260011" style={inputStyle} />
-                        </div>
-                        <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Номер заказа</label>
-                            <input value={form.payment_ref || ''} onChange={e => setForm(f => ({ ...f, payment_ref: e.target.value || undefined }))} placeholder="ENV-001" style={inputStyle} />
-                        </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+                    <div>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Дата забора (план)</label>
+                        <input type="date" value={form.ship_date || ''} onChange={e => setForm(f => ({ ...f, ship_date: e.target.value || undefined }))} style={inputStyle} />
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                        <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Стоимость перевозки {'\u00A5'}</label>
-                            <input type="number" value={form.delivery_cost_cny || ''} onChange={e => setForm(f => ({ ...f, delivery_cost_cny: parseFloat(e.target.value) || 0 }))} style={inputStyle} />
-                        </div>
-                        <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Стоимость перевозки $</label>
-                            <input type="number" value={form.delivery_cost_usd || ''} onChange={e => setForm(f => ({ ...f, delivery_cost_usd: parseFloat(e.target.value) || 0 }))} style={inputStyle} />
-                        </div>
+                    <div>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Инвойс</label>
+                        <input value={form.invoice_no || ''} onChange={e => setForm(f => ({ ...f, invoice_no: e.target.value || undefined }))} placeholder="CC20260011" style={inputStyle} />
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
-                        <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Курс {'\u00A5'}/{'\u20BD'}</label>
-                            <input type="number" step="0.01" value={form.rate_cny || ''} onChange={e => setForm(f => ({ ...f, rate_cny: parseFloat(e.target.value) || 1 }))} style={inputStyle} />
-                        </div>
-                        <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Курс $/{'\u20BD'}</label>
-                            <input type="number" step="0.01" value={form.rate_usd || ''} onChange={e => setForm(f => ({ ...f, rate_usd: parseFloat(e.target.value) || 1 }))} style={inputStyle} />
-                        </div>
-                        <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Курс {'\u20AC'}/{'\u20BD'}</label>
-                            <input type="number" step="0.01" value={form.rate_eur || ''} onChange={e => setForm(f => ({ ...f, rate_eur: parseFloat(e.target.value) || 1 }))} style={inputStyle} />
-                        </div>
+                    <div>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Номер заказа</label>
+                        <input value={form.payment_ref || ''} onChange={e => setForm(f => ({ ...f, payment_ref: e.target.value || undefined }))} placeholder="ENV-001" style={inputStyle} />
                     </div>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr', gap: 12 }}>
+                    <div>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Перевозка ¥</label>
+                        <input type="number" value={form.delivery_cost_cny || ''} onChange={e => setForm(f => ({ ...f, delivery_cost_cny: parseFloat(e.target.value) || 0 }))} style={inputStyle} />
+                    </div>
+                    <div>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Перевозка $</label>
+                        <input type="number" value={form.delivery_cost_usd || ''} onChange={e => setForm(f => ({ ...f, delivery_cost_usd: parseFloat(e.target.value) || 0 }))} style={inputStyle} />
+                    </div>
+                    <div>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Курс ¥/₽</label>
+                        <input type="number" step="0.01" value={form.rate_cny || ''} onChange={e => setForm(f => ({ ...f, rate_cny: parseFloat(e.target.value) || 1 }))} style={inputStyle} />
+                    </div>
+                    <div>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Курс $/₽</label>
+                        <input type="number" step="0.01" value={form.rate_usd || ''} onChange={e => setForm(f => ({ ...f, rate_usd: parseFloat(e.target.value) || 1 }))} style={inputStyle} />
+                    </div>
+                    <div>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Курс €/₽</label>
+                        <input type="number" step="0.01" value={form.rate_eur || ''} onChange={e => setForm(f => ({ ...f, rate_eur: parseFloat(e.target.value) || 1 }))} style={inputStyle} />
+                    </div>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                     {warehouses.length > 0 && (
                         <div>
                             <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Склад назначения</label>
@@ -1221,12 +1273,12 @@ function CreateVehicleModal({ onClose, onDone }: { onClose: () => void; onDone: 
                         <input value={form.note || ''} onChange={e => setForm(f => ({ ...f, note: e.target.value }))} style={inputStyle} />
                     </div>
                 </div>
-                <div style={{ padding: '16px 24px', borderTop: '1px solid var(--color-border)', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-                    <button className="btn btn-secondary" onClick={onClose}>Отмена</button>
-                    <button className="btn btn-primary" onClick={handleSubmit} disabled={!form.order_no.trim() || submitting}>
-                        {submitting ? 'Создаём...' : 'Создать'}
-                    </button>
-                </div>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
+                <button className="btn btn-secondary btn-sm" onClick={onClose}>Отмена</button>
+                <button className="btn btn-primary btn-sm" onClick={handleSubmit} disabled={!form.order_no.trim() || submitting}>
+                    {submitting ? 'Создаём...' : 'Создать'}
+                </button>
             </div>
         </div>
     );
@@ -1297,13 +1349,23 @@ function VehiclesTab() {
                 </div>
             )}
 
+            {/* Create vehicle inline form */}
+            {showCreate && (
+                <CreateVehicleForm
+                    onClose={() => setShowCreate(false)}
+                    onDone={() => { setShowCreate(false); load(); }}
+                />
+            )}
+
             <div className="glass-card" style={{ overflow: 'hidden' }}>
                 {/* Header */}
                 <div style={{ padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--color-border)' }}>
                     <h3 style={{ fontSize: 15, fontWeight: 600 }}>Машины ({vehicles.length})</h3>
                     <div style={{ display: 'flex', gap: 8 }}>
                         <button className="btn btn-secondary btn-sm" onClick={load}>Обновить</button>
-                        <button className="btn btn-primary btn-sm" onClick={() => setShowCreate(true)}>+ Новая машина</button>
+                        <button className="btn btn-primary btn-sm" onClick={() => setShowCreate(v => !v)}>
+                            {showCreate ? '✕ Закрыть' : '+ Новая машина'}
+                        </button>
                     </div>
                 </div>
 
@@ -1382,13 +1444,6 @@ function VehiclesTab() {
                 )}
             </div>
 
-            {/* Modals */}
-            {showCreate && (
-                <CreateVehicleModal
-                    onClose={() => setShowCreate(false)}
-                    onDone={() => { setShowCreate(false); load(); }}
-                />
-            )}
         </>
     );
 }
@@ -1450,25 +1505,25 @@ function OverviewTab() {
                     label="Фабричные заказы"
                     value={overview.total_factory_orders}
                     icon="📦"
-                    color="#a78bfa"
+                    color="var(--color-accent)"
                 />
                 <KpiCard
                     label="Машины"
                     value={overview.total_vehicles}
                     icon="🚛"
-                    color="#3b82f6"
+                    color="var(--color-info, #3b82f6)"
                 />
                 <KpiCard
                     label="Позиции"
                     value={overview.total_items}
                     icon="📋"
-                    color="#f59e0b"
+                    color="var(--color-warning)"
                 />
                 <KpiCard
                     label="Сумма (CNY)"
                     value={formatNumber(overview.total_amount_cny) + ' \u00A5'}
                     icon="💰"
-                    color="#22c55e"
+                    color="var(--color-success)"
                 />
             </div>
 
