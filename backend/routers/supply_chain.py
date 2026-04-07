@@ -10,9 +10,10 @@ from fastapi.responses import Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.auth import get_current_user
 from backend.config import settings
 from backend.database import get_db
-from backend.models import Project
+from backend.models import Project, User
 from backend.project_context import get_current_project
 from backend.schemas.supply_chain import (
     AddItemsToVehicleRequest,
@@ -229,10 +230,12 @@ async def update_vehicle_status(
     order_no: str,
     payload: VehicleStatusUpdate,
     project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        result = await vehicle_delivery.update_vehicle_status(db, project.id, order_no, payload)
+        display_name = user.first_name or user.username or user.email
+        result = await vehicle_delivery.update_vehicle_status(db, project.id, order_no, payload, user_name=display_name)
         return result
     except ValueError as e:
         raise HTTPException(400, str(e)) from e

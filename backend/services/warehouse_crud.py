@@ -7,6 +7,8 @@ import logging
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.models.cost import CostOrder
+from backend.models.enums import VehicleStatus
 from backend.models.warehouse import (
     Warehouse,
     WarehouseDeliveryTime,
@@ -34,9 +36,26 @@ async def list_warehouses(db: AsyncSession, project_id: int) -> list:
         .subquery()
     )
 
+    # Count vehicles in transit (SHIPPED or CUSTOMS) targeting each warehouse
+    vehicles_sub = (
+        select(
+            CostOrder.target_warehouse_id,
+            func.count().label("vehicles_in_transit"),
+        )
+        .where(
+            CostOrder.project_id == project_id,
+            CostOrder.is_deleted == False,  # noqa: E712
+            CostOrder.status.in_([VehicleStatus.SHIPPED, VehicleStatus.CUSTOMS, VehicleStatus.DISPATCHED]),
+            CostOrder.target_warehouse_id.isnot(None),
+        )
+        .group_by(CostOrder.target_warehouse_id)
+        .subquery()
+    )
+
     result = await db.execute(
-        select(Warehouse, stock_sub.c.total_stock)
+        select(Warehouse, stock_sub.c.total_stock, vehicles_sub.c.vehicles_in_transit)
         .outerjoin(stock_sub, Warehouse.id == stock_sub.c.warehouse_id)
+        .outerjoin(vehicles_sub, Warehouse.id == vehicles_sub.c.target_warehouse_id)
         .where(
             Warehouse.project_id == project_id,
             Warehouse.is_deleted.is_(False),
@@ -45,10 +64,37 @@ async def list_warehouses(db: AsyncSession, project_id: int) -> list:
     )
     rows = result.all()
     warehouses = []
-    for wh, total_stock in rows:
+    for wh, total_stock, vehicles_in_transit in rows:
         wh.total_stock = int(total_stock or 0)
+        wh.vehicles_in_transit = int(vehicles_in_transit or 0)
         warehouses.append(wh)
     return warehouses
+
+
+async def get_or_create_transit_warehouse(db: AsyncSession, project_id: int) -> Warehouse:
+    """Get or create a default 'Транзит' warehouse for vehicles without a target."""
+    result = await db.execute(
+        select(Warehouse).where(
+            Warehouse.project_id == project_id,
+            Warehouse.name == "Транзит",
+            Warehouse.is_deleted == False,  # noqa: E712
+        )
+    )
+    wh = result.scalar_one_or_none()
+    if wh:
+        return wh
+
+    wh = Warehouse(
+        project_id=project_id,
+        name="Транзит",
+        warehouse_type="EXTERNAL",
+        sort_order=999,
+    )
+    db.add(wh)
+    await db.flush()
+    await db.refresh(wh)
+    logger.info("Auto-created transit warehouse id=%s for project=%s", wh.id, project_id)
+    return wh
 
 
 async def get_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -> Warehouse | None:
@@ -93,6 +139,24 @@ async def update_warehouse(db: AsyncSession, project_id: int, warehouse_id: int,
     await db.commit()
     await db.refresh(wh)
     return wh
+
+
+async def get_expected_vehicles(db: AsyncSession, project_id: int, warehouse_id: int) -> list:
+    """Get vehicles in transit (SHIPPED/CUSTOMS) targeting this warehouse."""
+    from sqlalchemy.orm import selectinload
+
+    result = await db.execute(
+        select(CostOrder)
+        .options(selectinload(CostOrder.items))
+        .where(
+            CostOrder.project_id == project_id,
+            CostOrder.target_warehouse_id == warehouse_id,
+            CostOrder.is_deleted == False,  # noqa: E712
+            CostOrder.status.in_([VehicleStatus.SHIPPED, VehicleStatus.CUSTOMS, VehicleStatus.DISPATCHED]),
+        )
+        .order_by(CostOrder.ship_date.desc().nulls_last())
+    )
+    return list(result.scalars().all())
 
 
 async def delete_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -> bool:

@@ -391,7 +391,15 @@ async def test_update_vehicle_status_delivered_creates_receipt(client, auth_head
         headers=headers,
     )
 
-    # Go through full status flow: FORMING → SHIPPED → CUSTOMS → DELIVERED
+    # Set invoice_no (required for DISPATCHED transition)
+    resp = await client.put(
+        f"/api/v1/supply-chain/vehicles/{vno}",
+        json={"invoice_no": "INV-TEST", "target_warehouse_id": warehouse_id},
+        headers=headers,
+    )
+    assert resp.status_code == 200, f"Update vehicle failed: {resp.text}"
+
+    # Go through full status flow: FORMING → SHIPPED → CUSTOMS → DISPATCHED
     resp = await client.put(
         f"/api/v1/supply-chain/vehicles/{vno}/status",
         json={"status": "SHIPPED"},
@@ -406,18 +414,16 @@ async def test_update_vehicle_status_delivered_creates_receipt(client, auth_head
     )
     assert resp.status_code == 200, f"CUSTOMS failed: {resp.text}"
 
+    # CUSTOMS → DISPATCHED creates InboundReceipt
     resp = await client.put(
         f"/api/v1/supply-chain/vehicles/{vno}/status",
-        json={
-            "status": "DELIVERED",
-            "target_warehouse_id": warehouse_id,
-        },
+        json={"status": "DISPATCHED"},
         headers=headers,
     )
-    assert resp.status_code == 200, f"Delivery failed: {resp.text}"
+    assert resp.status_code == 200, f"DISPATCHED failed: {resp.text}"
     data = resp.json()
     assert data["ok"] is True
-    assert data["status"] == "DELIVERED"
+    assert data["status"] == "DISPATCHED"
     assert "inbound_receipt_id" in data
     assert data["inbound_receipt_id"] is not None
 

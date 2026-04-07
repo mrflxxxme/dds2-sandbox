@@ -125,6 +125,7 @@ class VehicleCreate(BaseModel):
     rate_eur: Decimal = Decimal("98")
     ship_date: date | None = None
     invoice_no: str | None = None
+    payment_ref: str | None = None
     target_warehouse_id: int | None = None
     note: str | None = None
 
@@ -139,7 +140,10 @@ class VehicleUpdate(BaseModel):
     rate_usd: Decimal | None = None
     rate_eur: Decimal | None = None
     ship_date: date | None = None
+    actual_ship_date: date | None = None
+    estimated_arrival_date: date | None = None
     invoice_no: str | None = None
+    payment_ref: str | None = None
     dt_number: str | None = None
     target_warehouse_id: int | None = None
     note: str | None = None
@@ -201,6 +205,7 @@ class VehicleSchema(BaseModel):
     rate_usd: Decimal = Decimal("1")
     rate_eur: Decimal = Decimal("1")
     invoice_no: str | None = None
+    payment_ref: str | None = None
     note: str | None = None
     dt_number: str | None = None
     target_warehouse_id: int | None = None
@@ -278,4 +283,5 @@ class VehicleStatusHistorySchema(BaseModel):
     old_status: str | None = None
     new_status: str
     changed_at: datetime
+    changed_by: str | None = None
     comment: str | None = None

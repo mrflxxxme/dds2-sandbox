@@ -167,6 +167,33 @@ async def get_stock_movements(
     return [StockMovementSchema.model_validate(r) for r in rows]
 
 
+@router.get("/{warehouse_id}/expected-vehicles")
+async def get_expected_vehicles(
+    warehouse_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get vehicles in transit (SHIPPED/CUSTOMS) targeting this warehouse."""
+    from backend.services.warehouse_crud import get_expected_vehicles as _get_expected
+
+    vehicles = await _get_expected(db, project.id, warehouse_id)
+    return [
+        {
+            "order_no": v.order_no,
+            "status": v.status,
+            "invoice_no": v.invoice_no,
+            "ship_date": v.ship_date.isoformat() if v.ship_date else None,
+            "estimated_arrival_date": v.estimated_arrival_date.isoformat() if v.estimated_arrival_date else None,
+            "actual_ship_date": v.actual_ship_date.isoformat() if v.actual_ship_date else None,
+            "items_count": len(v.items),
+            "total_qty": sum(i.qty for i in v.items),
+            "container_type": v.container_type,
+            "transport_type": v.transport_type,
+        }
+        for v in vehicles
+    ]
+
+
 # ─── Inbound Receipts (Приёмка) ────────────────────────────────────────────
 
 
@@ -239,12 +266,18 @@ async def update_receipt(
 @router.post("/receipts/{receipt_id}/accept", dependencies=[Depends(rate_limit_write)])
 async def accept_receipt(
     receipt_id: int,
+    actual_quantities: list[dict] | None = None,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Accept receipt → write stock."""
+    """Accept receipt → write stock. Optionally pass actual_quantities: [{item_id, actual_qty}]."""
     try:
-        receipt = await warehouse_service.accept_receipt(db, project.id, receipt_id)
+        receipt = await warehouse_service.accept_receipt(
+            db,
+            project.id,
+            receipt_id,
+            actual_quantities=actual_quantities,
+        )
         return InboundReceiptSchema.model_validate(receipt)
     except ValueError as e:
         raise HTTPException(400, str(e)) from None

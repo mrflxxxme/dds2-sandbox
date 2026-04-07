@@ -809,6 +809,7 @@ export interface Warehouse {
   sort_order: number;
   is_active: boolean;
   total_stock: number;
+  vehicles_in_transit: number;
   created_at?: string;
   updated_at?: string;
 }
@@ -1529,7 +1530,7 @@ export interface FactoryOrderCreate {
   items?: { barcode: string; subject?: string; article_seller?: string; qty: number; price_cny: number; note?: string }[];
 }
 
-export type VehicleStatus = 'FORMING' | 'SHIPPED' | 'CUSTOMS' | 'DELIVERED';
+export type VehicleStatus = 'FORMING' | 'SHIPPED' | 'CUSTOMS' | 'DISPATCHED' | 'DELIVERED';
 
 export interface VehicleStatusUpdate {
   status: VehicleStatus;
@@ -1569,6 +1570,7 @@ export interface VehicleCreate {
   rate_eur?: number;
   ship_date?: string;
   invoice_no?: string;
+  payment_ref?: string;
   target_warehouse_id?: number;
   note?: string;
 }
@@ -1679,6 +1681,7 @@ export interface VehicleStatusHistoryEntry {
   old_status: string | null;
   new_status: string;
   changed_at: string;
+  changed_by: string | null;
   comment: string | null;
 }
 

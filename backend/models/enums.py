@@ -35,4 +35,5 @@ class VehicleStatus(str, enum.Enum):
     FORMING = "FORMING"  # наполняется товаром
     SHIPPED = "SHIPPED"  # отгружен с фабрики  # noqa: RUF003
     CUSTOMS = "CUSTOMS"  # на таможне
-    DELIVERED = "DELIVERED"  # доставлено на склад
+    DISPATCHED = "DISPATCHED"  # отправлена с таможни на склад  # noqa: RUF003
+    DELIVERED = "DELIVERED"  # принята на складе

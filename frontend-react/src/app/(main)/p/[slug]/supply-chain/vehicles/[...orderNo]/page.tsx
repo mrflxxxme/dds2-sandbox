@@ -24,17 +24,19 @@ const STATUS_LABELS: Record<VehicleStatus, string> = {
     FORMING: 'Формируется',
     SHIPPED: 'Отгружен',
     CUSTOMS: 'Таможня',
-    DELIVERED: 'Доставлено',
+    DISPATCHED: 'Отправлена',
+    DELIVERED: 'Принята',
 };
 
 const STATUS_COLORS: Record<VehicleStatus, string> = {
     FORMING: '#6b7280',
     SHIPPED: '#3b82f6',
     CUSTOMS: '#f59e0b',
+    DISPATCHED: '#8b5cf6',
     DELIVERED: '#22c55e',
 };
 
-const STATUSES: VehicleStatus[] = ['FORMING', 'SHIPPED', 'CUSTOMS', 'DELIVERED'];
+const STATUSES: VehicleStatus[] = ['FORMING', 'SHIPPED', 'CUSTOMS', 'DISPATCHED', 'DELIVERED'];
 
 const CONTAINER_LABELS: Record<string, string> = {
     truck1: 'Авто 13.5м', truck2: 'Авто 13.6м',
@@ -101,9 +103,9 @@ function InfoField({ label, value, editing, input }: {
 }) {
     return (
         <div>
-            <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginBottom: 4 }}>{label}</div>
+            <div style={{ fontSize: 10, color: 'var(--color-text-muted)', marginBottom: 2 }}>{label}</div>
             {editing && input ? input : (
-                <div style={{ fontSize: 14, fontWeight: 600, color: value ? 'var(--color-text)' : 'var(--color-text-muted)' }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: value ? 'var(--color-text)' : 'var(--color-text-muted)' }}>
                     {value || '—'}
                 </div>
             )}
@@ -113,25 +115,43 @@ function InfoField({ label, value, editing, input }: {
 
 function SummaryKpi({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
     return (
-        <div style={{ textAlign: 'center', padding: '8px 4px', background: accent ? 'rgba(59,130,246,0.04)' : 'var(--color-bg-secondary)', borderRadius: 8 }}>
-            <div style={{ fontSize: 10, color: 'var(--color-text-muted)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.3px' }}>{label}</div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: accent ? 'var(--color-primary)' : 'var(--color-text)' }}>{value}</div>
+        <div style={{ textAlign: 'center', padding: '6px 4px', background: accent ? 'rgba(59,130,246,0.04)' : 'var(--color-bg-secondary)', borderRadius: 8 }}>
+            <div style={{ fontSize: 9, color: 'var(--color-text-muted)', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.3px' }}>{label}</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: accent ? 'var(--color-primary)' : 'var(--color-text)' }}>{value}</div>
+        </div>
+    );
+}
+
+function CostKpi({ label, value, color, pct }: { label: string; value: string; color?: string; pct?: string }) {
+    return (
+        <div style={{ padding: '12px 16px', borderRadius: 12, border: '1px solid var(--color-border)', background: 'var(--color-bg)' }}>
+            <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginBottom: 4 }}>{label}</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: color || 'var(--color-text)' }}>{value}</div>
+            {pct && <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>↑ {pct}</div>}
         </div>
     );
 }
 
 // ─── Vehicle Info Card (editable header) ───────────────────────────────────
 
-function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, onUpdated }: {
-    vehicle: VehicleSchema; containerLabel: string; totalBoxes: number; isForming: boolean; onUpdated: () => void;
+function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, warehouses, onUpdated }: {
+    vehicle: VehicleSchema; containerLabel: string; totalBoxes: number; isForming: boolean; warehouses: { id: number; name: string }[]; onUpdated: () => void;
 }) {
-    const canEdit = vehicle.status === 'FORMING' || vehicle.status === 'SHIPPED';
+    const canEdit = true; // always editable — backend controls field restrictions
     const [editing, setEditing] = useState(false);
     const [saving, setSaving] = useState(false);
     const [form, setForm] = useState({
         invoice_no: vehicle.invoice_no || '',
         dt_number: vehicle.dt_number || '',
         ship_date: vehicle.ship_date || '',
+        actual_ship_date: vehicle.actual_ship_date || '',
+        delivery_cost_cny: vehicle.delivery_cost_cny ? String(vehicle.delivery_cost_cny) : '',
+        estimated_arrival_date: vehicle.estimated_arrival_date || '',
+        target_warehouse_id: vehicle.target_warehouse_id ? String(vehicle.target_warehouse_id) : '',
+        rate_cny: vehicle.rate_cny ? String(vehicle.rate_cny) : '',
+        rate_usd: vehicle.rate_usd ? String(vehicle.rate_usd) : '',
+        rate_eur: vehicle.rate_eur ? String(vehicle.rate_eur) : '',
+        payment_ref: vehicle.payment_ref || '',
     });
 
     useEffect(() => {
@@ -139,6 +159,14 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, onUpd
             invoice_no: vehicle.invoice_no || '',
             dt_number: vehicle.dt_number || '',
             ship_date: vehicle.ship_date || '',
+            actual_ship_date: vehicle.actual_ship_date || '',
+            delivery_cost_cny: vehicle.delivery_cost_cny ? String(vehicle.delivery_cost_cny) : '',
+            estimated_arrival_date: vehicle.estimated_arrival_date || '',
+            target_warehouse_id: vehicle.target_warehouse_id ? String(vehicle.target_warehouse_id) : '',
+            rate_cny: vehicle.rate_cny ? String(vehicle.rate_cny) : '',
+            rate_usd: vehicle.rate_usd ? String(vehicle.rate_usd) : '',
+            rate_eur: vehicle.rate_eur ? String(vehicle.rate_eur) : '',
+            payment_ref: vehicle.payment_ref || '',
         });
     }, [vehicle]);
 
@@ -149,6 +177,14 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, onUpd
                 invoice_no: form.invoice_no || undefined,
                 dt_number: form.dt_number || undefined,
                 ship_date: form.ship_date || undefined,
+                actual_ship_date: form.actual_ship_date || undefined,
+                delivery_cost_cny: form.delivery_cost_cny ? Number(form.delivery_cost_cny) : undefined,
+                estimated_arrival_date: form.estimated_arrival_date || undefined,
+                target_warehouse_id: form.target_warehouse_id ? Number(form.target_warehouse_id) : undefined,
+                rate_cny: form.rate_cny ? Number(form.rate_cny) : undefined,
+                rate_usd: form.rate_usd ? Number(form.rate_usd) : undefined,
+                rate_eur: form.rate_eur ? Number(form.rate_eur) : undefined,
+                payment_ref: form.payment_ref || undefined,
             } as any);
             setEditing(false);
             onUpdated();
@@ -172,10 +208,10 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, onUpd
         : '—';
 
     return (
-        <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+        <div className="glass-card" style={{ padding: '14px 16px', marginBottom: 12 }}>
             {/* Header row with actions */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Информация о машине</div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Информация о машине</div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                     {isForming && !editing && vehicle.items.length > 0 && (
                         <>
@@ -187,7 +223,7 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, onUpd
                         <StatusTransitionButton orderNo={vehicle.order_no} nextStatus="CUSTOMS" label="На таможню" icon="🏛" onDone={onUpdated} />
                     )}
                     {vehicle.status === 'CUSTOMS' && (
-                        <StatusTransitionButton orderNo={vehicle.order_no} nextStatus="DELIVERED" label="Доставлена" icon="✓" onDone={onUpdated} />
+                        <StatusTransitionButton orderNo={vehicle.order_no} nextStatus="DISPATCHED" label="Отправлена" icon="🚛" onDone={onUpdated} />
                     )}
                     {canEdit && !editing && (
                         <button className="btn btn-secondary btn-sm" onClick={() => setEditing(true)}>Редактировать</button>
@@ -204,21 +240,39 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, onUpd
             </div>
 
             {/* Fields grid — 5 columns */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '16px 24px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '10px 16px' }}>
                 <InfoField label="Тип транспорта" value={containerLabel} />
                 <InfoField label="Инвойс" value={vehicle.invoice_no} editing={editing}
-                    input={<input value={form.invoice_no} onChange={e => setForm(f => ({ ...f, invoice_no: e.target.value }))} placeholder="INV-001" style={editInput} />} />
+                    input={<input value={form.invoice_no} onChange={e => setForm(f => ({ ...f, invoice_no: e.target.value }))} placeholder="CC20260011" style={editInput} />} />
+                <InfoField label="Номер заказа" value={vehicle.payment_ref} editing={editing}
+                    input={<input value={form.payment_ref} onChange={e => setForm(f => ({ ...f, payment_ref: e.target.value }))} placeholder="ENV-001" style={editInput} />} />
                 <InfoField label="Номер ДТ" value={vehicle.dt_number} editing={editing}
                     input={<input value={form.dt_number} onChange={e => setForm(f => ({ ...f, dt_number: e.target.value }))} placeholder="—" style={editInput} />} />
-                <InfoField label="Перевозка" value={deliveryCost} />
+                <InfoField label="Перевозка" value={deliveryCost} editing={editing}
+                    input={<input value={form.delivery_cost_cny} onChange={e => setForm(f => ({ ...f, delivery_cost_cny: e.target.value }))} placeholder="0" style={editInput} />} />
                 <InfoField label="Дата забора (план)" value={vehicle.ship_date ? formatDate(vehicle.ship_date) : undefined} editing={editing}
                     input={<input type="date" value={form.ship_date} onChange={e => setForm(f => ({ ...f, ship_date: e.target.value }))} style={editInput} />} />
-                <InfoField label="Отгрузка (факт)" value={vehicle.actual_ship_date ? formatDate(vehicle.actual_ship_date) : undefined} />
-                <InfoField label="Прибытие (прогноз)" value={vehicle.estimated_arrival_date ? formatDate(vehicle.estimated_arrival_date) : undefined} />
+                <InfoField label="Отгрузка (факт)" value={vehicle.actual_ship_date ? formatDate(vehicle.actual_ship_date) : undefined} editing={editing}
+                    input={<input type="date" value={form.actual_ship_date} onChange={e => setForm(f => ({ ...f, actual_ship_date: e.target.value }))} style={editInput} />} />
+                <InfoField label="Прибытие (прогноз)" value={vehicle.estimated_arrival_date ? formatDate(vehicle.estimated_arrival_date) : undefined} editing={editing}
+                    input={<input type="date" value={form.estimated_arrival_date} onChange={e => setForm(f => ({ ...f, estimated_arrival_date: e.target.value }))} style={editInput} />} />
+                <InfoField label="Склад назначения" value={warehouses.find(w => w.id === vehicle.target_warehouse_id)?.name} editing={editing}
+                    input={
+                        <select value={form.target_warehouse_id} onChange={e => setForm(f => ({ ...f, target_warehouse_id: e.target.value }))} style={editInput}>
+                            <option value="">— Не выбран —</option>
+                            {warehouses.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+                        </select>
+                    } />
+                <InfoField label="Курс ¥/₽" value={Number(vehicle.rate_cny) > 0 ? String(vehicle.rate_cny) : undefined} editing={editing}
+                    input={<input value={form.rate_cny} onChange={e => setForm(f => ({ ...f, rate_cny: e.target.value }))} placeholder="12.5" style={editInput} />} />
+                <InfoField label="Курс $/₽" value={Number(vehicle.rate_usd) > 0 ? String(vehicle.rate_usd) : undefined} editing={editing}
+                    input={<input value={form.rate_usd} onChange={e => setForm(f => ({ ...f, rate_usd: e.target.value }))} placeholder="92" style={editInput} />} />
+                <InfoField label="Курс €/₽" value={Number(vehicle.rate_eur) > 0 ? String(vehicle.rate_eur) : undefined} editing={editing}
+                    input={<input value={form.rate_eur} onChange={e => setForm(f => ({ ...f, rate_eur: e.target.value }))} placeholder="98" style={editInput} />} />
             </div>
 
             {/* Summary KPIs */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--color-border)' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--color-border)' }}>
                 <SummaryKpi label="Артикулов" value={String(vehicle.items_count)} />
                 <SummaryKpi label="Товаров" value={`${formatNumber(vehicle.total_qty, 0)} шт`} />
                 <SummaryKpi label="Мест" value={totalBoxes > 0 ? String(totalBoxes) : '—'} />
@@ -239,6 +293,7 @@ export default function VehicleDetailPage() {
     const orderNo = segments.map(decodeURIComponent).join('/');
 
     const [vehicle, setVehicle] = useState<VehicleSchema | null>(null);
+    const [warehouses, setWarehouses] = useState<{ id: number; name: string }[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [tab, setTab] = useState('main');
@@ -247,8 +302,12 @@ export default function VehicleDetailPage() {
         setLoading(true);
         setError('');
         try {
-            const data = await api.getVehicle(orderNo);
+            const [data, wh] = await Promise.all([
+                api.getVehicle(orderNo),
+                api.getWarehouses(),
+            ]);
             setVehicle(data);
+            setWarehouses(wh);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         }
@@ -257,7 +316,7 @@ export default function VehicleDetailPage() {
 
     useEffect(() => { load(); }, [load]);
 
-    const goBack = () => router.push(`/p/${slug}/supply-chain`);
+    const goBack = () => router.push(`/p/${slug}/supply-chain?tab=vehicles`);
 
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}><div className="spinner" style={{ margin: '0 auto 12px' }} />Загрузка...</div>;
     if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error} <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>Повторить</button></div>;
@@ -308,32 +367,33 @@ export default function VehicleDetailPage() {
             {tab === 'main' && (
                 <>
                     {/* Info card — editable fields + action buttons */}
-                    <VehicleInfoCard vehicle={vehicle} containerLabel={containerLabel} totalBoxes={totalBoxes} isForming={isForming} onUpdated={load} />
+                    <VehicleInfoCard vehicle={vehicle} containerLabel={containerLabel} totalBoxes={totalBoxes} isForming={isForming} warehouses={warehouses} onUpdated={load} />
 
-                    {/* Cost summary */}
+                    {/* Cost summary — detailed breakdown */}
                     {cs && (
-                        <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
-                                <div style={{ textAlign: 'center' }}>
-                                    <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Товар</div>
-                                    <div style={{ fontSize: 15, fontWeight: 600 }}>{formatNumber(Number(cs.total_cost_rub), 0)} ₽</div>
+                        <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+                            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span style={{ fontSize: 16 }}>📊</span> Расчёт себестоимости по позициям
+                            </div>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 12 }}>
+                                <CostKpi label="Кол-во (шт)" value={formatNumber(vehicle.total_qty, 0)} />
+                                <CostKpi label="Себестоимость" value={`${formatNumber(Number(cs.total_cost_rub))} ₽`} color="var(--color-success)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_cost_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
+                                <CostKpi label="Доставка" value={`${formatNumber(Number(cs.total_delivery_rub))} ₽`} color="var(--color-warning)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_delivery_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
+                                <CostKpi label="Пошлина" value={`${formatNumber(Number(cs.total_duty_rub))} ₽`} color="var(--color-warning)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_duty_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
+                                <CostKpi label="НДС" value={`${formatNumber(Number(cs.total_vat_rub))} ₽`} color="var(--color-danger)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_vat_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
+                            </div>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+                                <div style={{ padding: 16, borderRadius: 12, background: 'linear-gradient(135deg, rgba(255,182,193,0.15), rgba(255,105,180,0.08))', textAlign: 'center' }}>
+                                    <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginBottom: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                                        <span style={{ fontSize: 13 }}>🔥</span> ИТОГО
+                                    </div>
+                                    <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--color-success)' }}>
+                                        {formatNumber(Number(cs.total_rub))} ₽
+                                    </div>
                                 </div>
-                                <div style={{ textAlign: 'center' }}>
-                                    <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Доставка</div>
-                                    <div style={{ fontSize: 15, fontWeight: 600 }}>{formatNumber(Number(cs.total_delivery_rub), 0)} ₽</div>
-                                </div>
-                                <div style={{ textAlign: 'center' }}>
-                                    <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Пошлина</div>
-                                    <div style={{ fontSize: 15, fontWeight: 600 }}>{formatNumber(Number(cs.total_duty_rub), 0)} ₽</div>
-                                </div>
-                                <div style={{ textAlign: 'center' }}>
-                                    <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>НДС</div>
-                                    <div style={{ fontSize: 15, fontWeight: 600 }}>{formatNumber(Number(cs.total_vat_rub), 0)} ₽</div>
-                                </div>
-                                <div style={{ textAlign: 'center' }}>
-                                    <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Итого</div>
-                                    <div style={{ fontSize: 17, fontWeight: 700, color: 'var(--color-primary)' }}>{formatNumber(Number(cs.total_rub), 0)} ₽</div>
-                                </div>
+                                <CostKpi label="Курс ¥/₽" value={String(vehicle.rate_cny)} />
+                                <CostKpi label="Доставка ¥" value={Number(vehicle.delivery_cost_cny) > 0 ? `${formatNumber(Number(vehicle.delivery_cost_cny), 0)}` : '—'} />
+                                <CostKpi label="Вес" value={vehicle.total_weight_kg ? `${formatNumber(Number(vehicle.total_weight_kg), 0)} кг` : '—'} />
                             </div>
                         </div>
                     )}
@@ -1176,8 +1236,13 @@ function HistoryTab({ orderNo }: { orderNo: string }) {
 
                             {/* Content */}
                             <div>
-                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>
-                                    {formatDateTime(entry.changed_at)}
+                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <span>{formatDateTime(entry.changed_at)}</span>
+                                    {entry.changed_by && (
+                                        <span style={{ fontSize: 11, padding: '1px 8px', borderRadius: 8, background: 'var(--color-bg-secondary)', color: 'var(--color-text)' }}>
+                                            {entry.changed_by}
+                                        </span>
+                                    )}
                                 </div>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: entry.comment ? 4 : 0 }}>
                                     {oldStatus && (

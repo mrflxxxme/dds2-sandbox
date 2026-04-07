@@ -17,7 +17,7 @@ export default function WarehouseDetailPage() {
     const router = useRouter();
     const slug = params.slug as string;
     const warehouseId = Number(params.id);
-    const [tab, setTab] = useState<'all' | 'receipts' | 'shipments' | 'stock' | 'delivery'>('all');
+    const [tab, setTab] = useState<'all' | 'receipts' | 'shipments' | 'stock' | 'delivery'>('receipts');
     const [warehouse, setWarehouse] = useState<Warehouse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -50,11 +50,11 @@ export default function WarehouseDetailPage() {
     const isFulfillment = warehouse.warehouse_type === 'FULFILLMENT';
 
     const tabs = [
-        { key: 'all' as const, label: 'Все' },
         { key: 'receipts' as const, label: 'Приёмки', count: receiptCount },
         ...(isFulfillment ? [{ key: 'shipments' as const, label: 'Отгрузки', count: shipmentCount }] : []),
         { key: 'stock' as const, label: 'Остатки и статистика' },
         { key: 'delivery' as const, label: 'Время доставки' },
+        { key: 'all' as const, label: 'История движений' },
     ];
 
     return (
@@ -77,6 +77,9 @@ export default function WarehouseDetailPage() {
                     </button>
                 </div>
             </div>
+
+            {/* Expected vehicles */}
+            <ExpectedVehicles warehouseId={warehouseId} slug={slug} />
 
             {/* Tabs with counts */}
             <div style={{ display: 'flex', gap: 4, marginBottom: 20, borderBottom: '1px solid var(--color-border)', paddingBottom: 0 }}>
@@ -129,6 +132,102 @@ export default function WarehouseDetailPage() {
             )}
             {tab === 'stock' && <StockTab warehouseId={warehouseId} />}
             {tab === 'delivery' && <DeliveryTab warehouseId={warehouseId} />}
+        </div>
+    );
+}
+
+/* ─── Expected Vehicles (Ожидаемые поставки) ──────────────────────────── */
+
+const STATUS_LABELS_VEHICLE: Record<string, string> = {
+    SHIPPED: 'Отгружен', CUSTOMS: 'Таможня', DISPATCHED: 'Отправлена',
+};
+const STATUS_COLORS_VEHICLE: Record<string, string> = {
+    SHIPPED: '#3b82f6', CUSTOMS: '#f59e0b', DISPATCHED: '#8b5cf6',
+};
+
+const NEXT_VEHICLE_ACTION: Record<string, { status: string; label: string; color: string }> = {
+    SHIPPED: { status: 'CUSTOMS', label: 'На таможню', color: '#f59e0b' },
+    CUSTOMS: { status: 'DISPATCHED', label: 'Отправлена', color: '#8b5cf6' },
+    // DISPATCHED: приёмка через InboundReceipt (таб "Приёмки")
+};
+
+function ExpectedVehicles({ warehouseId, slug }: { warehouseId: number; slug: string }) {
+    const router = useRouter();
+    const [vehicles, setVehicles] = useState<any[]>([]);
+
+    const loadVehicles = useCallback(() => {
+        api.getExpectedVehicles(warehouseId).then(setVehicles).catch(() => {});
+    }, [warehouseId]);
+
+    useEffect(() => { loadVehicles(); }, [loadVehicles]);
+
+    const handleAction = async (e: React.MouseEvent, orderNo: string, nextStatus: string) => {
+        e.stopPropagation();
+        try {
+            await api.updateVehicleStatus(orderNo, { status: nextStatus });
+            loadVehicles();
+        } catch (err: unknown) {
+            alert(err instanceof Error ? err.message : 'Ошибка');
+        }
+    };
+
+    if (vehicles.length === 0) return null;
+
+    return (
+        <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span>🚛</span> Ожидаемые поставки ({vehicles.length})
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
+                {vehicles.map(v => {
+                    const action = NEXT_VEHICLE_ACTION[v.status];
+                    return (
+                        <div
+                            key={v.order_no}
+                            onClick={() => router.push(`/p/${slug}/supply-chain/vehicles/${encodeURIComponent(v.order_no)}`)}
+                            style={{
+                                padding: '12px 14px', borderRadius: 12,
+                                border: '1px solid var(--color-border)',
+                                cursor: 'pointer', transition: 'all 0.15s',
+                            }}
+                            onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--color-primary)'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
+                            onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--color-border)'; e.currentTarget.style.transform = ''; }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                                <span style={{ fontWeight: 600, fontSize: 13 }}>{v.order_no}</span>
+                                <span style={{
+                                    padding: '2px 8px', borderRadius: 10, fontSize: 10, fontWeight: 600,
+                                    color: '#fff', background: STATUS_COLORS_VEHICLE[v.status] || '#6b7280',
+                                }}>
+                                    {STATUS_LABELS_VEHICLE[v.status] || v.status}
+                                </span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <div style={{ display: 'flex', gap: 12, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                    <span>{v.items_count} поз. / {formatNumber(v.total_qty, 0)} шт</span>
+                                    {v.estimated_arrival_date && (
+                                        <span style={{ color: 'var(--color-text)' }}>📅 {formatDate(v.estimated_arrival_date)}</span>
+                                    )}
+                                </div>
+                                {action ? (
+                                    <button
+                                        onClick={e => handleAction(e, v.order_no, action.status)}
+                                        style={{
+                                            padding: '3px 10px', borderRadius: 8, fontSize: 11, fontWeight: 600,
+                                            border: `1px solid ${action.color}`, background: action.color,
+                                            color: '#fff', cursor: 'pointer', whiteSpace: 'nowrap',
+                                        }}
+                                    >
+                                        {action.label}
+                                    </button>
+                                ) : v.status === 'DISPATCHED' ? (
+                                    <span style={{ fontSize: 11, color: 'var(--color-success)', fontWeight: 600 }}>→ Приёмки</span>
+                                ) : null}
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
         </div>
     );
 }
@@ -240,8 +339,15 @@ function ReceiptsTab({ warehouseId, onCountChange }: {
         {
             key: 'items', label: 'Позиции',
             render: (_: unknown, row: InboundReceipt) => {
-                const qty = row.items.reduce((s: number, it: { expected_qty: number }) => s + it.expected_qty, 0);
-                return <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{row.items.length} поз., {formatNumber(qty)} шт.</span>;
+                const expected = row.items.reduce((s: number, it: any) => s + (it.expected_qty || 0), 0);
+                const actual = row.items.reduce((s: number, it: any) => s + (it.actual_qty || 0), 0);
+                const accepted = row.status === 'ACCEPTED';
+                return (
+                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                        {row.items.length} поз., {formatNumber(expected, 0)} ожид.
+                        {accepted && <span style={{ color: actual < expected ? '#b45309' : 'var(--color-success)', fontWeight: 600 }}> / {formatNumber(actual, 0)} факт</span>}
+                    </span>
+                );
             },
         },
         { key: 'planned_date', label: 'Плановая дата', format: 'date' },
