@@ -48,7 +48,8 @@ def _safe_decimal(val: Decimal | None) -> Decimal | None:
 VALID_TRANSITIONS: dict[str, list[str]] = {
     VehicleStatus.FORMING: [VehicleStatus.SHIPPED],
     VehicleStatus.SHIPPED: [VehicleStatus.CUSTOMS],
-    VehicleStatus.CUSTOMS: [VehicleStatus.DELIVERED],
+    VehicleStatus.CUSTOMS: [VehicleStatus.DISPATCHED],
+    # DISPATCHED → DELIVERED happens automatically when InboundReceipt is accepted
 }
 
 
@@ -99,7 +100,15 @@ async def create_vehicle(
     data: VehicleCreate,
 ) -> VehicleSchema:
     """Create a new vehicle (CostOrder) for forming."""
+    from backend.services.warehouse_crud import get_or_create_transit_warehouse
+
     transport_type = CONTAINER_TRANSPORT_MAP.get(data.container_type, "AUTO")
+
+    target_wh_id = data.target_warehouse_id
+    if not target_wh_id:
+        transit = await get_or_create_transit_warehouse(db, project_id)
+        target_wh_id = transit.id
+
     vehicle = CostOrder(
         project_id=project_id,
         order_no=data.order_no,
@@ -112,7 +121,8 @@ async def create_vehicle(
         rate_eur=data.rate_eur,
         ship_date=data.ship_date,
         invoice_no=data.invoice_no,
-        target_warehouse_id=data.target_warehouse_id,
+        payment_ref=data.payment_ref,
+        target_warehouse_id=target_wh_id,
         note=data.note,
         status=VehicleStatus.FORMING,
     )
@@ -142,7 +152,21 @@ async def update_vehicle(
     if not vehicle:
         return None
 
-    always_editable = {"invoice_no", "dt_number", "note"}
+    always_editable = {
+        "invoice_no",
+        "dt_number",
+        "note",
+        "actual_ship_date",
+        "delivery_cost_cny",
+        "delivery_cost_usd",
+        "ship_date",
+        "estimated_arrival_date",
+        "target_warehouse_id",
+        "rate_cny",
+        "rate_usd",
+        "rate_eur",
+        "payment_ref",
+    }
     update_data = data.model_dump(exclude_unset=True)
 
     if vehicle.status != VehicleStatus.FORMING:
@@ -420,14 +444,17 @@ async def _enrich_vehicle(
             )
         )
 
-    # Calculate estimated arrival from lead time
-    estimated_arrival = None
-    base_date = vehicle.actual_ship_date or vehicle.ship_date
-    if base_date:
-        transport = vehicle.transport_type or "AUTO"
-        lead_days = await _get_lead_time_days(db, project_id, transport)
-        if lead_days:
-            estimated_arrival = base_date + timedelta(days=lead_days)
+    # Use manually set estimated_arrival_date, or calculate from lead time
+    if vehicle.estimated_arrival_date:
+        estimated_arrival = vehicle.estimated_arrival_date
+    else:
+        estimated_arrival = None
+        base_date = vehicle.actual_ship_date or vehicle.ship_date
+        if base_date:
+            transport = vehicle.transport_type or "AUTO"
+            lead_days = await _get_lead_time_days(db, project_id, transport)
+            if lead_days:
+                estimated_arrival = base_date + timedelta(days=lead_days)
 
     # Cost summary from items
     cost_summary = None
@@ -472,6 +499,7 @@ async def _enrich_vehicle(
         rate_usd=vehicle.rate_usd,
         rate_eur=vehicle.rate_eur,
         invoice_no=vehicle.invoice_no,
+        payment_ref=vehicle.payment_ref,
         note=vehicle.note,
         dt_number=vehicle.dt_number,
         target_warehouse_id=vehicle.target_warehouse_id,
@@ -507,6 +535,7 @@ async def update_vehicle_status(
     project_id: int,
     order_no: str,
     data: VehicleStatusUpdate,
+    user_name: str | None = None,
 ) -> dict:
     """
     Update CostOrder (vehicle) status with transition validation.
@@ -566,8 +595,17 @@ async def update_vehicle_status(
     if data.status == VehicleStatus.CUSTOMS and data.dt_number:
         vehicle.dt_number = data.dt_number
 
-    # CUSTOMS → DELIVERED: auto-create InboundReceipt
-    if data.status == VehicleStatus.DELIVERED and vehicle.target_warehouse_id:
+    # CUSTOMS → DISPATCHED: validate + create InboundReceipt (ожидается на складе)
+    if data.status == VehicleStatus.DISPATCHED:
+        errors = []
+        if not vehicle.invoice_no:
+            errors.append("номер инвойса")
+        if not vehicle.dt_number:
+            errors.append("номер ДТ")
+        if not vehicle.target_warehouse_id:
+            errors.append("склад назначения")
+        if errors:
+            raise ValueError(f"Укажите: {', '.join(errors)}")
         receipt = await _create_inbound_from_vehicle(db, project_id, vehicle)
         vehicle.inbound_receipt_id = receipt.id
 
@@ -582,6 +620,7 @@ async def update_vehicle_status(
         old_status=old_status,
         new_status=data.status,
         changed_at=utcnow(),
+        changed_by=user_name,
         comment=None,
     )
     db.add(history)

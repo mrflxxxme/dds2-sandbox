@@ -185,10 +185,16 @@ async def update_receipt(db: AsyncSession, project_id: int, receipt_id: int, pay
         raise ValueError(f"Cannot edit receipt in status {receipt.status}")
 
 
-async def accept_receipt(db: AsyncSession, project_id: int, receipt_id: int) -> InboundReceipt:
+async def accept_receipt(
+    db: AsyncSession,
+    project_id: int,
+    receipt_id: int,
+    actual_quantities: list[dict] | None = None,
+) -> InboundReceipt:
     """
     Accept receipt: DRAFT/EXPECTED → ACCEPTED.
     Adds actual_qty to warehouse stock for each item.
+    If actual_quantities provided, updates actual_qty before accepting.
     """
     receipt = await get_receipt(db, project_id, receipt_id)
     if not receipt:
@@ -199,6 +205,13 @@ async def accept_receipt(db: AsyncSession, project_id: int, receipt_id: int) -> 
 
     if not receipt.items:
         raise ValueError("Cannot accept receipt with no items")
+
+    # Apply provided actual quantities
+    if actual_quantities:
+        qty_map = {aq["item_id"]: aq["actual_qty"] for aq in actual_quantities}
+        for item in receipt.items:
+            if item.id in qty_map:
+                item.actual_qty = qty_map[item.id]
 
     # Auto-fill actual_qty from expected_qty if not set
     for item in receipt.items:
@@ -223,6 +236,16 @@ async def accept_receipt(db: AsyncSession, project_id: int, receipt_id: int) -> 
 
     receipt.status = InboundStatus.ACCEPTED
     receipt.actual_date = date.today()
+
+    # Auto-transition vehicle DISPATCHED → DELIVERED
+    if receipt.cost_order_id:
+        from backend.models.cost import CostOrder
+        from backend.models.enums import VehicleStatus
+
+        result = await db.execute(select(CostOrder).where(CostOrder.id == receipt.cost_order_id))
+        vehicle = result.scalar_one_or_none()
+        if vehicle and vehicle.status == VehicleStatus.DISPATCHED:
+            vehicle.status = VehicleStatus.DELIVERED
 
     await db.commit()
     await db.refresh(receipt, ["items"])

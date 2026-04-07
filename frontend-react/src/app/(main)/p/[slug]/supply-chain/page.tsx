@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 
@@ -49,17 +49,19 @@ const VEHICLE_STATUS_LABELS: Record<VehicleStatus, string> = {
     FORMING: 'Формируется',
     SHIPPED: 'Отгружен',
     CUSTOMS: 'Таможня',
-    DELIVERED: 'Доставлено',
+    DISPATCHED: 'Отправлена',
+    DELIVERED: 'Принята',
 };
 
 const VEHICLE_STATUS_COLORS: Record<VehicleStatus, string> = {
     FORMING: '#6b7280',
     SHIPPED: '#3b82f6',
     CUSTOMS: '#f59e0b',
+    DISPATCHED: '#8b5cf6',
     DELIVERED: '#22c55e',
 };
 
-const VEHICLE_STATUSES: VehicleStatus[] = ['FORMING', 'SHIPPED', 'CUSTOMS', 'DELIVERED'];
+const VEHICLE_STATUSES: VehicleStatus[] = ['FORMING', 'SHIPPED', 'CUSTOMS', 'DISPATCHED', 'DELIVERED'];
 
 const CONTAINER_OPTIONS: { key: string; label: string; transport: string }[] = [
     { key: 'truck1', label: 'Авто 13.5м', transport: 'AUTO' },
@@ -74,9 +76,10 @@ const TRANSPORT_TYPES: Record<string, { label: string; color: string }> = {
     CONTAINER: { label: 'КОНТЕЙНЕР', color: '#f59e0b' },
 };
 
-const NEXT_STATUS: Partial<Record<VehicleStatus, { status: VehicleStatus; label: string; icon: string }>> = {
+const NEXT_STATUS_MAP: Partial<Record<VehicleStatus, { status: VehicleStatus; label: string; icon: string }>> = {
     SHIPPED: { status: 'CUSTOMS', label: 'На таможню', icon: '🏛' },
-    CUSTOMS: { status: 'DELIVERED', label: 'Доставлена', icon: '✓' },
+    CUSTOMS: { status: 'DISPATCHED', label: 'Отправлена', icon: '🚛' },
+    DISPATCHED: { status: 'DELIVERED', label: 'Принять', icon: '✓' },
 };
 
 function StatusBadge({ status }: { status: string }) {
@@ -101,7 +104,9 @@ function StatusBadge({ status }: { status: string }) {
 // ─── Main page ──────────────────────────────────────────────────────────────
 
 export default function SupplyChainPage() {
-    const [tab, setTab] = useState('orders');
+    const searchParams = useSearchParams();
+    const initialTab = searchParams.get('tab') || 'orders';
+    const [tab, setTab] = useState(initialTab);
 
     return (
         <div className="animate-in">
@@ -1164,14 +1169,18 @@ function CreateVehicleModal({ onClose, onDone }: { onClose: () => void; onDone: 
                         </div>
                     </div>
 
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
                         <div>
                             <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Дата забора (план)</label>
                             <input type="date" value={form.ship_date || ''} onChange={e => setForm(f => ({ ...f, ship_date: e.target.value || undefined }))} style={inputStyle} />
                         </div>
                         <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Инвойс (для оплаты)</label>
-                            <input value={form.invoice_no || ''} onChange={e => setForm(f => ({ ...f, invoice_no: e.target.value || undefined }))} placeholder="INV-001" style={inputStyle} />
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Инвойс</label>
+                            <input value={form.invoice_no || ''} onChange={e => setForm(f => ({ ...f, invoice_no: e.target.value || undefined }))} placeholder="CC20260011" style={inputStyle} />
+                        </div>
+                        <div>
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Номер заказа</label>
+                            <input value={form.payment_ref || ''} onChange={e => setForm(f => ({ ...f, payment_ref: e.target.value || undefined }))} placeholder="ENV-001" style={inputStyle} />
                         </div>
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
@@ -1252,6 +1261,24 @@ function VehiclesTab() {
         router.push(`/p/${slug}/supply-chain/vehicles/${encodeURIComponent(orderNo)}`);
     };
 
+    const NEXT_STATUS: Record<string, { status: string; label: string; color: string }> = {
+        FORMING: { status: 'SHIPPED', label: 'Отгрузить', color: 'var(--color-primary)' },
+        SHIPPED: { status: 'CUSTOMS', label: 'На таможню', color: '#f59e0b' },
+        CUSTOMS: { status: 'DISPATCHED', label: 'Отправлена', color: '#8b5cf6' },
+        // DISPATCHED → DELIVERED: автоматически при приёмке на складе
+    };
+
+    const handleStatusChange = async (e: React.MouseEvent, orderNo: string, nextStatus: string) => {
+        e.stopPropagation();
+        if (!confirm(`Сменить статус машины ${orderNo}?`)) return;
+        try {
+            await api.updateVehicleStatus(orderNo, { status: nextStatus });
+            load();
+        } catch (err: unknown) {
+            alert(err instanceof Error ? err.message : 'Ошибка');
+        }
+    };
+
     if (loading) {
         return (
             <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>
@@ -1289,14 +1316,18 @@ function VehiclesTab() {
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                         <thead>
                             <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                <th style={{ textAlign: 'left', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Номер</th>
+                                <th style={{ textAlign: 'left', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Машина</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Заказ</th>
                                 <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Статус</th>
                                 <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Контейнер</th>
                                 <th style={{ textAlign: 'right', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Позиции</th>
                                 <th style={{ textAlign: 'right', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Кол-во</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Инвойс</th>
+                                <th style={{ textAlign: 'right', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Вес</th>
                                 <th style={{ textAlign: 'right', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Стоимость</th>
                                 <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Отправлена</th>
-                                <th style={{ textAlign: 'right', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500, width: 160 }}>Действия</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Прибытие</th>
+                                <th style={{ textAlign: 'right', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500, width: 180 }}>Действия</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -1311,16 +1342,37 @@ function VehiclesTab() {
                                         onMouseLeave={e => (e.currentTarget.style.background = '')}
                                     >
                                         <td style={{ padding: '10px 16px', fontWeight: 600 }}>{v.order_no}</td>
+                                        <td style={{ padding: '10px 8px', fontSize: 12, color: v.payment_ref ? 'var(--color-text)' : 'var(--color-text-muted)' }}>{v.payment_ref || '\u2014'}</td>
                                         <td style={{ padding: '10px 8px' }}><StatusBadge status={status} /></td>
                                         <td style={{ padding: '10px 8px' }}>
                                             <span style={{ fontSize: 12 }}>{CONTAINER_OPTIONS.find(c => c.key === v.container_type)?.label || v.transport_type || 'AUTO'}</span>
                                         </td>
                                         <td style={{ padding: '10px 8px', textAlign: 'right' }}>{v.items_count}</td>
-                                        <td style={{ padding: '10px 8px', textAlign: 'right' }}>{formatNumber(v.total_qty)}</td>
-                                        <td style={{ padding: '10px 8px', textAlign: 'right' }}>{v.total_cny > 0 ? formatNumber(v.total_cny) + ' \u00A5' : '\u2014'}</td>
+                                        <td style={{ padding: '10px 8px', textAlign: 'right' }}>{formatNumber(v.total_qty, 0)}</td>
+                                        <td style={{ padding: '10px 8px', fontSize: 12, color: v.invoice_no ? 'var(--color-text)' : 'var(--color-text-muted)' }}>{v.invoice_no || '\u2014'}</td>
+                                        <td style={{ padding: '10px 8px', textAlign: 'right' }}>{v.total_weight_kg ? formatNumber(Number(v.total_weight_kg), 0) + ' кг' : '\u2014'}</td>
+                                        <td style={{ padding: '10px 8px', textAlign: 'right' }}>{Number(v.total_cny) > 0 ? formatNumber(Number(v.total_cny), 0) + ' \u00A5' : '\u2014'}</td>
                                         <td style={{ padding: '10px 8px' }}>{v.ship_date ? formatDate(v.ship_date) : '\u2014'}</td>
-                                        <td style={{ padding: '10px 16px', textAlign: 'right' }}>
-                                            <span style={{ fontSize: 12, color: 'var(--color-primary)' }}>Открыть →</span>
+                                        <td style={{ padding: '10px 8px' }}>{v.estimated_arrival_date ? formatDate(v.estimated_arrival_date) : '\u2014'}</td>
+                                        <td style={{ padding: '10px 16px', textAlign: 'right' }} onClick={e => e.stopPropagation()}>
+                                            <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'center' }}>
+                                                {NEXT_STATUS[status] && (
+                                                    <button
+                                                        onClick={e => handleStatusChange(e, v.order_no, NEXT_STATUS[status].status)}
+                                                        style={{
+                                                            padding: '3px 10px', borderRadius: 8, fontSize: 11, fontWeight: 600,
+                                                            border: `1px solid ${NEXT_STATUS[status].color}`,
+                                                            background: 'transparent', color: NEXT_STATUS[status].color,
+                                                            cursor: 'pointer', transition: 'all 0.15s', whiteSpace: 'nowrap',
+                                                        }}
+                                                        onMouseEnter={e => { e.currentTarget.style.background = NEXT_STATUS[status].color; e.currentTarget.style.color = '#fff'; }}
+                                                        onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = NEXT_STATUS[status].color; }}
+                                                    >
+                                                        {NEXT_STATUS[status].label}
+                                                    </button>
+                                                )}
+                                                <span style={{ fontSize: 12, color: 'var(--color-primary)', cursor: 'pointer' }} onClick={() => openVehicle(v.order_no)}>Открыть →</span>
+                                            </div>
                                         </td>
                                     </tr>
                                 );

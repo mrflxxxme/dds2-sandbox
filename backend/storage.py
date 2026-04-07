@@ -7,23 +7,21 @@ Uses miniopy-async for non-blocking I/O (compatible with FastAPI async handlers)
 
 import io
 import logging
-from datetime import datetime, timezone
 
-from backend.utils.time import utcnow
-from typing import Optional
-
+import aiohttp
 from miniopy_async import Minio
 from miniopy_async.error import S3Error
 
 from backend.config import settings
+from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
 
 # Lazy MinIO client
-_minio_client: Optional[Minio] = None
+_minio_client: Minio | None = None
 
 
-async def get_minio() -> Optional[Minio]:
+async def get_minio() -> Minio | None:
     """Get or create async MinIO client."""
     global _minio_client
     if _minio_client is None:
@@ -51,7 +49,7 @@ async def upload_file(
     filename: str,
     source_type: str = "",
     content_type: str = "application/octet-stream",
-) -> Optional[str]:
+) -> str | None:
     """
     Upload a file to MinIO (async).
 
@@ -91,7 +89,7 @@ async def upload_file(
         return None
 
 
-async def download_file(object_name: str) -> Optional[bytes]:
+async def download_file(object_name: str) -> bytes | None:
     """
     Download a file from MinIO (async).
 
@@ -106,10 +104,10 @@ async def download_file(object_name: str) -> Optional[bytes]:
         return None
 
     try:
-        response = await client.get_object(settings.MINIO_BUCKET, object_name)
-        data = await response.read()
-        response.close()
-        response.release_conn()
+        async with aiohttp.ClientSession() as session:
+            response = await client.get_object(settings.MINIO_BUCKET, object_name, session)
+            data = await response.read()
+            response.close()
         return data
     except S3Error as e:
         logger.error("MinIO download error: %s", e)

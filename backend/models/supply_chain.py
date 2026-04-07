@@ -121,6 +121,7 @@ class VehicleStatusHistory(Base):
     old_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     new_status: Mapped[str] = mapped_column(String(20), nullable=False)
     changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    changed_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (

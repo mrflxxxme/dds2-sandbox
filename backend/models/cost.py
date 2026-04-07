@@ -61,6 +61,7 @@ class CostOrder(Base, SoftDeleteMixin):
     project_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("projects.id"))
     order_no: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     invoice_no: Mapped[str | None] = mapped_column(String(100))
+    payment_ref: Mapped[str | None] = mapped_column(String(100))
     ship_date: Mapped[date | None] = mapped_column(Date)
     actual_arrival_date: Mapped[date | None] = mapped_column(Date)
     transport_type: Mapped[str | None] = mapped_column(String(30), default="AUTO")
@@ -73,6 +74,7 @@ class CostOrder(Base, SoftDeleteMixin):
     dt_number: Mapped[str | None] = mapped_column(String(100))
     container_type: Mapped[str | None] = mapped_column(String(20))
     actual_ship_date: Mapped[date | None] = mapped_column(Date)
+    estimated_arrival_date: Mapped[date | None] = mapped_column(Date)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     # Supply chain fields
     status: Mapped[str | None] = mapped_column(SAEnum(VehicleStatus), default=VehicleStatus.FORMING)

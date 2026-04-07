@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.config import settings
 from backend.models.cost import CostOrder
 from backend.models.supply_chain import VehicleDocument
-from backend.storage import get_minio
+from backend.storage import download_file as minio_download_file, get_minio
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
@@ -134,14 +134,9 @@ async def download_document(
     if not doc:
         raise ValueError("Document not found")
 
-    client = await get_minio()
-    if client is None:
-        raise ValueError("File storage (MinIO) is unavailable")
-
-    response = await client.get_object(settings.MINIO_BUCKET, doc.file_url)
-    data = await response.read()
-    response.close()
-    response.release_conn()
+    data = await minio_download_file(doc.file_url)
+    if data is None:
+        raise ValueError("File storage (MinIO) is unavailable or file not found")
 
     content_type = mimetypes.guess_type(doc.filename)[0] or "application/octet-stream"
     return data, doc.filename, content_type
