@@ -438,8 +438,9 @@ async def test_overview_empty(client, auth_headers):
     resp = await client.get("/api/v1/supply-chain/overview", headers=headers)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["factory_orders_count"] == 0
-    assert data["total_items_in_transit"] == 0
+    assert data["total_factory_orders"] == 0
+    assert data["total_items"] == 0
+    assert data["total_vehicles"] == 0
     assert isinstance(data["vehicles_by_status"], dict)
 
 
@@ -475,9 +476,10 @@ async def test_overview_with_data(client, auth_headers):
     # Overview
     resp = await client.get("/api/v1/supply-chain/overview", headers=headers)
     data = resp.json()
-    assert data["factory_orders_count"] == 1
+    assert data["total_factory_orders"] == 1
+    assert data["total_vehicles"] == 1
     # Vehicle is in FORMING status by default, so items should be counted
-    assert data["total_items_in_transit"] == 100
+    assert data["total_items"] == 100
 
 
 # ─── Vehicle Create & Recalc ────────────────────────────────────────────

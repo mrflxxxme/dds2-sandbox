@@ -3,9 +3,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
-import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
+import { formatNumber, formatDate, formatDateTime, exportToExcel } from '@/lib/utils';
 import PageHeader from '@/components/PageHeader';
-import type { FactoryOrder, FactoryOrderItem, FactoryOrderItemUpdate, Nomenclature } from '@/types/api';
+import type { FactoryOrder, FactoryOrderItem, FactoryOrderItemUpdate, FactoryOrderHistory, Nomenclature } from '@/types/api';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -27,6 +27,81 @@ const calcVolumeM3 = (boxSize: string, qty: number, pcsPerBox: number | null): n
     const boxes = pcsPerBox && pcsPerBox > 0 ? Math.ceil(qty / pcsPerBox) : 0;
     return boxes > 0 ? boxes * volumePerBoxM3 : 0;
 };
+
+// ─── Status constants ────────────────────────────────────────────────────
+
+const FO_STATUS_LABELS: Record<string, string> = {
+    FORMING: 'Формируется',
+    READY: 'Готов',
+    DISTRIBUTED: 'Распределён',
+};
+
+const FO_STATUS_COLORS: Record<string, string> = {
+    FORMING: 'var(--color-text-muted)',
+    READY: 'var(--color-warning)',
+    DISTRIBUTED: 'var(--color-success)',
+};
+
+const FO_EVENT_LABELS: Record<string, string> = {
+    created: 'Заказ создан',
+    status_change: 'Смена статуса',
+    distributed: 'Распределение',
+    items_added: 'Позиции добавлены',
+    items_removed: 'Позиции удалены',
+};
+
+const FO_EVENT_ICONS: Record<string, string> = {
+    created: '+',
+    status_change: '~',
+    distributed: '>',
+    items_added: '+',
+    items_removed: '-',
+};
+
+function DistributionBadge({ totalQty, totalAssigned }: { totalQty: number; totalAssigned: number }) {
+    const pct = totalQty > 0 ? Math.round((totalAssigned / totalQty) * 100) : 0;
+    let label: string;
+    let badgeClass: string;
+    if (pct === 0) {
+        label = 'Не распред.';
+        badgeClass = 'badge badge-secondary';
+    } else if (pct >= 100) {
+        label = 'Распределён';
+        badgeClass = 'badge badge-success';
+    } else {
+        label = `${pct}%`;
+        badgeClass = 'badge badge-warning';
+    }
+    return <span className={badgeClass}>{label}</span>;
+}
+
+function MiniProgressBar({ qty, assignedQty }: { qty: number; assignedQty: number }) {
+    const pct = qty > 0 ? Math.min(100, Math.round((assignedQty / qty) * 100)) : 0;
+    const color = pct >= 100 ? 'var(--color-success)' : pct > 0 ? 'var(--color-warning)' : 'var(--color-border)';
+    const remaining = qty - assignedQty;
+    return (
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{
+                    fontSize: 12, fontWeight: 600,
+                    color: pct >= 100 ? 'var(--color-success)' : pct > 0 ? 'var(--color-warning)' : 'var(--color-text-dim)',
+                }}>
+                    {formatNumber(assignedQty, 0)}<span style={{ fontWeight: 400, color: 'var(--color-text-dim)' }}>/{formatNumber(qty, 0)}</span>
+                </span>
+            </div>
+            <div style={{
+                width: 56, height: 4, borderRadius: 2,
+                background: 'var(--color-bg-secondary)', overflow: 'hidden',
+            }}>
+                <div style={{
+                    width: `${Math.max(pct, 2)}%`, height: '100%', borderRadius: 2,
+                    background: color, transition: 'width 0.3s ease',
+                    opacity: pct === 0 ? 0.3 : 1,
+                }} />
+            </div>
+        </div>
+    );
+}
 
 function InfoField({ label, value, editing, input }: {
     label: string; value?: string | null; editing?: boolean; input?: React.ReactNode;
@@ -105,6 +180,7 @@ function OrderInfoCard({ order, onUpdated }: { order: FactoryOrder; onUpdated: (
     const totalQty = items.reduce((s, i) => s + i.qty, 0);
     const totalAssigned = items.reduce((s, i) => s + i.assigned_qty, 0);
     const totalCny = items.reduce((s, i) => s + i.qty * Number(i.price_cny), 0);
+    const distPct = totalQty > 0 ? Math.round((totalAssigned / totalQty) * 100) : 0;
 
     return (
         <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
@@ -141,16 +217,41 @@ function OrderInfoCard({ order, onUpdated }: { order: FactoryOrder; onUpdated: (
             {/* Summary KPIs */}
             {(() => {
                 const totalBoxes = items.reduce((s, i) => s + (i.pcs_per_box && i.pcs_per_box > 0 ? Math.ceil(i.qty / i.pcs_per_box) : 0), 0);
-                const totalVolume = items.reduce((s, i) => s + calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box), 0);
+                const totalVolume = items.reduce((s, i) => s + calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box ?? null), 0);
+                const progressColor = distPct >= 100 ? 'var(--color-success)' : distPct > 0 ? 'var(--color-warning)' : 'var(--color-border)';
                 return (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12, marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--color-border)' }}>
-                        <SummaryKpi label="Артикулов" value={String(items.length)} />
-                        <SummaryKpi label="Всего шт" value={formatNumber(totalQty, 0)} />
-                        <SummaryKpi label="Распределено" value={`${formatNumber(totalAssigned, 0)} шт`} />
-                        <SummaryKpi label="Мест" value={totalBoxes > 0 ? formatNumber(totalBoxes, 0) : '—'} />
-                        <SummaryKpi label="Объём" value={totalVolume > 0 ? `${formatNumber(totalVolume, 1)} м³` : '—'} />
-                        <SummaryKpi label="Стоимость" value={totalCny > 0 ? `${formatNumber(totalCny, 0)} ¥` : '—'} accent />
-                    </div>
+                    <>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--color-border)' }}>
+                            <SummaryKpi label="Артикулов" value={String(items.length)} />
+                            <SummaryKpi label="Всего шт" value={formatNumber(totalQty, 0)} />
+                            <SummaryKpi label="Мест" value={totalBoxes > 0 ? formatNumber(totalBoxes, 0) : '—'} />
+                            <SummaryKpi label="Объём" value={totalVolume > 0 ? `${formatNumber(totalVolume, 1)} м³` : '—'} />
+                            <SummaryKpi label="Стоимость" value={totalCny > 0 ? `${formatNumber(totalCny, 0)} ¥` : '—'} accent />
+                        </div>
+                        {/* Distribution progress */}
+                        {totalQty > 0 && (
+                            <div style={{ marginTop: 12 }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>
+                                        Распределено: {formatNumber(totalAssigned, 0)} из {formatNumber(totalQty, 0)} шт.
+                                    </span>
+                                    <span style={{ fontSize: 11, fontWeight: 700, color: progressColor }}>
+                                        {distPct}%
+                                    </span>
+                                </div>
+                                <div style={{
+                                    height: 8, borderRadius: 4,
+                                    background: 'var(--color-bg-secondary)', overflow: 'hidden',
+                                }}>
+                                    <div style={{
+                                        width: `${distPct}%`, height: '100%', borderRadius: 4,
+                                        background: progressColor,
+                                        transition: 'width 0.4s ease',
+                                    }} />
+                                </div>
+                            </div>
+                        )}
+                    </>
                 );
             })()}
         </div>
@@ -327,7 +428,6 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                             <th style={th}>Артикул</th>
                             <th style={thR}>Кол-во</th>
                             <th style={thR}>Распред.</th>
-                            <th style={thR}>Остаток</th>
                             <th style={thR}>Цена ¥</th>
                             <th style={thR}>Сумма ¥</th>
                             <th style={th}>Габариты коробки</th>
@@ -350,8 +450,7 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                                     <td style={td}><span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{nomMap.get(row.barcode)?.subject || row.subject || '—'}</span></td>
                                     <td style={td}><span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{nomMap.get(row.barcode)?.article_seller || row.article_seller || '—'}</span></td>
                                     <td style={tdR}><input type="number" value={row.qty} onChange={e => updateRow(idx, 'qty', e.target.value)} style={inpNum} /></td>
-                                    <td style={tdR}><span style={{ color: assignedQty > 0 ? 'var(--color-primary)' : 'var(--color-text-dim)' }}>{formatNumber(assignedQty, 0)}</span></td>
-                                    <td style={tdR}><span style={{ color: remaining > 0 ? 'var(--color-warning)' : 'var(--color-success)', fontWeight: 600 }}>{formatNumber(remaining, 0)}</span></td>
+                                    <td style={tdR}><MiniProgressBar qty={qty} assignedQty={assignedQty} /></td>
                                     <td style={tdR}><input type="number" step="0.01" value={row.price_cny} onChange={e => updateRow(idx, 'price_cny', e.target.value)} style={inpNum} /></td>
                                     <td style={tdR}>{formatNumber(qty * priceCny, 0)}</td>
                                     <td style={td}><input value={row.box_size} onChange={e => updateRow(idx, 'box_size', e.target.value)} style={{ ...inp, width: 80 }} placeholder="40x30x25" /></td>
@@ -361,7 +460,6 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                                 </tr>
                             );
                         }) : items.map(item => {
-                            const remaining = item.qty - item.assigned_qty;
                             const canDelete = item.assigned_qty === 0;
                             return (
                                 <tr key={item.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
@@ -369,8 +467,7 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                                     <td style={td}>{item.subject || <span style={{ color: 'var(--color-text-dim)' }}>—</span>}</td>
                                     <td style={td}>{item.article_seller || <span style={{ color: 'var(--color-text-dim)' }}>—</span>}</td>
                                     <td style={tdR}>{formatNumber(item.qty, 0)}</td>
-                                    <td style={tdR}><span style={{ color: item.assigned_qty > 0 ? 'var(--color-primary)' : 'var(--color-text-dim)' }}>{formatNumber(item.assigned_qty, 0)}</span></td>
-                                    <td style={tdR}><span style={{ color: remaining > 0 ? 'var(--color-warning)' : 'var(--color-success)', fontWeight: 600 }}>{formatNumber(remaining, 0)}</span></td>
+                                    <td style={tdR}><MiniProgressBar qty={item.qty} assignedQty={item.assigned_qty} /></td>
                                     <td style={tdR}>{formatNumber(Number(item.price_cny), 2)}</td>
                                     <td style={tdR}>{formatNumber(item.qty * Number(item.price_cny), 0)}</td>
                                     <td style={td}>{item.box_size || '—'}</td>
@@ -393,8 +490,7 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                             <tr style={{ borderTop: '2px solid var(--color-border)', fontWeight: 600 }}>
                                 <td colSpan={3} style={{ ...td, fontSize: 12, color: 'var(--color-text-muted)' }}>ИТОГО</td>
                                 <td style={tdR}>{formatNumber(totalQty, 0)}</td>
-                                <td style={tdR}>{formatNumber(totalAssigned, 0)}</td>
-                                <td style={tdR}>{formatNumber(totalQty - totalAssigned, 0)}</td>
+                                <td style={tdR}><MiniProgressBar qty={totalQty} assignedQty={totalAssigned} /></td>
                                 <td style={tdR} />
                                 <td style={tdR}>{formatNumber(totalCny, 0)}</td>
                                 <td colSpan={editing ? 4 : 5} />
@@ -419,8 +515,9 @@ const emptyPasteRow = (): PasteRow => ({
     box_size: '', pcs_per_box: '', weight_kg: '',
 });
 
-function AddItemsSection({ orderId, nomMap, onAdded }: {
+function AddItemsSection({ orderId, nomMap, onAdded, alwaysOpen, onClose }: {
     orderId: number; nomMap: Map<string, Nomenclature>; onAdded: () => void;
+    alwaysOpen?: boolean; onClose?: () => void;
 }) {
     const [open, setOpen] = useState(false);
     const [rows, setRows] = useState<PasteRow[]>(() => Array.from({ length: 5 }, emptyPasteRow));
@@ -489,6 +586,7 @@ function AddItemsSection({ orderId, nomMap, onAdded }: {
             setRows(Array.from({ length: 5 }, emptyPasteRow));
             setOpen(false);
             setError('');
+            onClose?.();
             onAdded();
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка добавления');
@@ -501,13 +599,21 @@ function AddItemsSection({ orderId, nomMap, onAdded }: {
         setError('');
     };
 
-    if (!open) {
+    const isOpen = alwaysOpen || open;
+
+    if (!isOpen) {
         return (
             <button className="btn btn-secondary btn-sm" onClick={() => setOpen(true)} style={{ marginTop: 12 }}>
                 + Добавить позиции
             </button>
         );
     }
+
+    const handleClose = () => {
+        setOpen(false);
+        handleClear();
+        onClose?.();
+    };
 
     const cellInp: React.CSSProperties = {
         width: '100%', background: 'var(--color-bg)',
@@ -523,12 +629,12 @@ function AddItemsSection({ orderId, nomMap, onAdded }: {
     const thR: React.CSSProperties = { ...thStyle, textAlign: 'right' };
 
     return (
-        <div style={{ marginTop: 20, paddingTop: 20, borderTop: '1px solid var(--color-border)' }}>
+        <div className="glass-card" style={{ padding: 16, ...(alwaysOpen ? {} : { marginTop: 20, paddingTop: 20, borderTop: '1px solid var(--color-border)' }) }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                 <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
                     Добавить позиции <span style={{ fontSize: 12 }}>(вставьте из Excel: Баркод, Кол-во, Цена, Коробка, Шт/кор, Вес)</span>
                 </div>
-                <button className="btn btn-secondary btn-sm" onClick={() => { setOpen(false); handleClear(); }}>
+                <button className="btn btn-secondary btn-sm" onClick={handleClose}>
                     Отмена
                 </button>
             </div>
@@ -629,8 +735,12 @@ export default function FactoryOrderDetailPage() {
 
     const [order, setOrder] = useState<FactoryOrder | null>(null);
     const [nomenclature, setNomenclature] = useState<Nomenclature[]>([]);
+    const [history, setHistory] = useState<FactoryOrderHistory[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    const [tab, setTab] = useState<'main' | 'history'>('main');
+    const [itemFilter, setItemFilter] = useState<'all' | 'distributed' | 'undistributed'>('all');
+    const [showAddItems, setShowAddItems] = useState(false);
 
     const nomMap = useMemo(() => {
         const m = new Map<string, Nomenclature>();
@@ -642,8 +752,12 @@ export default function FactoryOrderDetailPage() {
         setLoading(true);
         setError('');
         try {
-            const data = await api.getFactoryOrder(orderId);
+            const [data, hist] = await Promise.all([
+                api.getFactoryOrder(orderId),
+                api.getFactoryOrderHistory(orderId),
+            ]);
             setOrder(data);
+            setHistory(hist);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         }
@@ -661,6 +775,19 @@ export default function FactoryOrderDetailPage() {
 
     const items = order.items || [];
 
+    const totalQtyAll = items.reduce((s, i) => s + i.qty, 0);
+    const totalAssignedAll = items.reduce((s, i) => s + i.assigned_qty, 0);
+    const distPctAll = totalQtyAll > 0 ? Math.round((totalAssignedAll / totalQtyAll) * 100) : 0;
+
+    const filteredItems = itemFilter === 'distributed'
+        ? items.filter(i => i.assigned_qty >= i.qty && i.qty > 0)
+        : itemFilter === 'undistributed'
+            ? items.filter(i => i.assigned_qty < i.qty)
+            : items;
+
+    const distributedCount = items.filter(i => i.assigned_qty >= i.qty && i.qty > 0).length;
+    const undistributedCount = items.filter(i => i.assigned_qty < i.qty).length;
+
     return (
         <div className="animate-in">
             {/* Header */}
@@ -669,9 +796,12 @@ export default function FactoryOrderDetailPage() {
                     ← Назад
                 </button>
                 <div style={{ flex: 1 }}>
-                    <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>
-                        Заказ #{order.order_number}
-                    </h1>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>
+                            Заказ #{order.order_number}
+                        </h1>
+                        <DistributionBadge totalQty={totalQtyAll} totalAssigned={totalAssignedAll} />
+                    </div>
                     {order.factory_name && (
                         <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 2 }}>
                             {order.factory_name}
@@ -688,19 +818,144 @@ export default function FactoryOrderDetailPage() {
             {/* Info card */}
             <OrderInfoCard order={order} onUpdated={load} />
 
-            {/* Items */}
-            <div className="glass-card" style={{ padding: 16 }}>
-                {items.length === 0 ? (
-                    <div className="empty-state">
-                        <div className="empty-state-icon">📦</div>
-                        <div className="empty-state-text">Нет позиций. Добавьте товары ниже.</div>
-                    </div>
-                ) : (
-                    <ItemsTable items={items} orderId={order.id} nomMap={nomMap} onChanged={load} />
-                )}
-
-                <AddItemsSection orderId={order.id} nomMap={nomMap} onAdded={load} />
+            {/* Tabs */}
+            <div style={{ display: 'flex', gap: 0, marginBottom: 16, borderBottom: '2px solid var(--color-border)' }}>
+                {[
+                    { key: 'main' as const, label: 'Позиции' },
+                    { key: 'history' as const, label: `История${history.length > 0 ? ` (${history.length})` : ''}` },
+                ].map(t => (
+                    <button
+                        key={t.key}
+                        onClick={() => setTab(t.key)}
+                        style={{
+                            padding: '10px 20px', fontSize: 13, fontWeight: 600,
+                            border: 'none', background: 'none', cursor: 'pointer',
+                            color: tab === t.key ? 'var(--color-accent)' : 'var(--color-text-muted)',
+                            borderBottom: tab === t.key ? '2px solid var(--color-accent)' : '2px solid transparent',
+                            marginBottom: -2, transition: 'all 0.2s ease',
+                        }}
+                    >
+                        {t.label}
+                    </button>
+                ))}
             </div>
+
+            {/* Tab: Items */}
+            {tab === 'main' && (
+                <>
+                    {/* Toolbar: filters + add button */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                        <div style={{ display: 'flex', gap: 6 }}>
+                            {([
+                                { key: 'all' as const, label: `Все (${items.length})` },
+                                { key: 'undistributed' as const, label: `Не распред. (${undistributedCount})` },
+                                { key: 'distributed' as const, label: `Распред. (${distributedCount})` },
+                            ]).map(f => (
+                                <button
+                                    key={f.key}
+                                    className={`btn btn-sm ${itemFilter === f.key ? 'btn-primary' : 'btn-secondary'}`}
+                                    onClick={() => setItemFilter(f.key)}
+                                >
+                                    {f.label}
+                                </button>
+                            ))}
+                        </div>
+                        <button
+                            className="btn btn-primary btn-sm"
+                            onClick={() => setShowAddItems(v => !v)}
+                        >
+                            {showAddItems ? '✕ Закрыть' : '+ Добавить позиции'}
+                        </button>
+                    </div>
+
+                    {/* Add items form (toggled from toolbar button) */}
+                    {showAddItems && (
+                        <div style={{ marginBottom: 16 }}>
+                            <AddItemsSection
+                                orderId={order.id}
+                                nomMap={nomMap}
+                                onAdded={() => { load(); setShowAddItems(false); }}
+                                alwaysOpen
+                                onClose={() => setShowAddItems(false)}
+                            />
+                        </div>
+                    )}
+
+                    <div className="glass-card" style={{ padding: 16 }}>
+                        {filteredItems.length === 0 ? (
+                            <div className="empty-state">
+                                <div className="empty-state-icon">📦</div>
+                                <div className="empty-state-text">
+                                    {items.length === 0
+                                        ? 'Нет позиций. Добавьте товары кнопкой выше.'
+                                        : itemFilter === 'distributed'
+                                            ? 'Нет распределённых позиций'
+                                            : 'Все позиции распределены'}
+                                </div>
+                            </div>
+                        ) : (
+                            <ItemsTable items={filteredItems} orderId={order.id} nomMap={nomMap} onChanged={load} />
+                        )}
+                    </div>
+                </>
+            )}
+
+            {/* Tab: History */}
+            {tab === 'history' && (
+                <div className="glass-card" style={{ padding: 20 }}>
+                    {history.length === 0 ? (
+                        <div style={{ textAlign: 'center', padding: '24px 0', color: 'var(--color-text-dim)', fontSize: 13 }}>
+                            Нет записей. История записывается при добавлении позиций и распределении по машинам.
+                        </div>
+                    ) : (
+                        <div style={{ position: 'relative', paddingLeft: 28 }}>
+                            {/* Vertical line */}
+                            <div style={{
+                                position: 'absolute', left: 7, top: 8, bottom: 8, width: 2,
+                                background: 'var(--color-border)',
+                            }} />
+
+                            {history.map((entry, i) => {
+                                const dotColor = entry.event_type === 'distributed' ? 'var(--color-success)'
+                                    : entry.event_type === 'items_added' ? 'var(--color-accent)'
+                                    : entry.event_type === 'created' ? 'var(--color-text-muted)'
+                                    : 'var(--color-warning)';
+                                return (
+                                    <div key={entry.id} style={{ position: 'relative', marginBottom: i < history.length - 1 ? 20 : 0 }}>
+                                        {/* Dot */}
+                                        <div style={{
+                                            position: 'absolute', left: -24, top: 4,
+                                            width: 12, height: 12, borderRadius: '50%',
+                                            background: dotColor, border: '2px solid var(--color-bg-card)',
+                                            boxShadow: `0 0 0 2px ${dotColor}33`,
+                                        }} />
+
+                                        {/* Content */}
+                                        <div>
+                                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                <span>{formatDateTime(entry.changed_at)}</span>
+                                                {entry.changed_by && (
+                                                    <span style={{ fontSize: 11, padding: '1px 8px', borderRadius: 8, background: 'var(--color-bg-secondary)', color: 'var(--color-text)' }}>
+                                                        {entry.changed_by}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div style={{ fontSize: 13, fontWeight: 500 }}>
+                                                {FO_EVENT_LABELS[entry.event_type] || entry.event_type}
+                                            </div>
+                                            {entry.details && (
+                                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 2 }}>
+                                                    {entry.details}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            )}
         </div>
     );
 }
