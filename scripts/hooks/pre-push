@@ -53,10 +53,15 @@ fi
 # ─── 3. Convention checks (~5 сек) ──────────────────────────────────
 echo ""
 echo "━━━ Conventions ━━━"
-if bash "$ROOT_DIR/scripts/check_conventions.sh"; then
+CONV_OUTPUT=$(bash "$ROOT_DIR/scripts/check_conventions.sh" 2>&1)
+CONV_EXIT=$?
+# Show only last 5 lines (summary) to avoid pipe buffer overflow
+echo "$CONV_OUTPUT" | tail -5
+if [ $CONV_EXIT -eq 0 ]; then
     echo -e "${GREEN}✓ Conventions passed${NC}"
 else
     echo -e "${RED}✗ Conventions FAILED${NC}"
+    echo "$CONV_OUTPUT" | grep -E '(FAIL|ERROR|✗)' | head -10
     FAILED=1
 fi
 
