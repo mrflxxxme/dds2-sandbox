@@ -1,7 +1,7 @@
 ---
 name: security-reviewer
 description: "Поиск уязвимостей безопасности в DDS2. Используй ПРОАКТИВНО при работе с auth, API, SQL, пользовательским вводом, шифрованием."
-tools: ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]
+tools: ["Read", "Bash", "Grep", "Glob"]
 model: sonnet
 ---
 

@@ -13,10 +13,13 @@
 ## Фазы разработки
 
 ```
-Фаза 0: Понимание   → Человек описывает + Агент уточняет → ТЗ
-Фаза 1: Фундамент   → Агент (последовательно)
-Фаза 2: Реализация  → Агенты (параллельно)
-Фаза 3: Интеграция  → Агент (последовательно)
+Фаза 0:   Понимание    → Lead (opus): уточняет → ТЗ
+Фаза 1:   Фундамент    → Lead (sonnet): Model→Migration→Schema
+           + Pre-warm   → Frontend explorer (haiku, read-only) — параллельно
+Фаза 2:   Реализация   → 2-3 агента (sonnet) параллельно
+Фаза 2.5: Review       → code-reviewer + security-reviewer (sonnet) параллельно
+Фаза 3:   Валидация    → pytest ‖ vitest ‖ conventions ‖ docs (haiku) параллельно
+           → Коммит
 ```
 
 ### Фаза 0 — Понимание задачи (человек + агент)
@@ -97,9 +100,9 @@
 
 ---
 
-### Фаза 1 — Фундамент (последовательно, один агент)
+### Фаза 1 — Фундамент + Pre-warm (lead последовательно + 1 read-only агент)
 
-**Порядок строго фиксирован:**
+**Lead agent (sonnet) — строго последовательно:**
 
 ```
 1. Model (models/*.py)
@@ -112,20 +115,33 @@
 - Schema зависит от Model
 - Два Alembic revision одновременно → сломанная цепочка
 
-**Результат фазы:** модель в БД, схемы готовы, можно импортировать.
+**Frontend Pre-warm (haiku, read-only) — параллельно с lead:**
+
+Пока lead создаёт модели/миграции, read-only агент изучает frontend:
+1. Читает `src/types/api.ts` — существующие интерфейсы
+2. Читает `src/lib/api/{domain}.ts` — существующие API методы
+3. Читает целевую страницу или ближайший аналог
+4. Читает `src/components/` которые будут использоваться
+5. Читает `.claude/templates/new_page.tsx.tmpl`
+
+**CONSTRAINT:** Pre-warm агент НЕ пишет файлы. Только чтение.
+**Зачем:** Frontend agent в Фазе 2 стартует с полным контекстом, без разгона.
+
+**Результат фазы:** модель в БД, схемы готовы, frontend контекст загружен.
 
 ---
 
-### Фаза 2 — Реализация (параллельно, агент оркестрирует сам)
+### Фаза 2 — Реализация (2-3 агента параллельно, sonnet)
 
 Главный агент сам запускает sub-агентов через Agent tool и контролирует результат.
 Человек не участвует — ждёт результат Фазы 3.
 
-После Фазы 1 запускаем два агента одновременно:
+#### Стандартный режим (2 агента — backend + frontend):
 
 ```
 ┌─────────────────────────┐    ┌─────────────────────────┐
 │  Агент 1: Backend       │    │  Агент 2: Frontend      │
+│  (sonnet)               │    │  (sonnet)               │
 │                         │    │                         │
 │  1. Тесты (красные)     │    │  1. Типы в api.ts       │
 │  2. Service             │    │  2. API метод в api.ts   │
@@ -142,21 +158,67 @@
          ↓ 0 пересечений файлов ↓
 ```
 
+#### Расширенный режим (3 агента — 2 backend домена + frontend):
+
+Когда задача затрагивает 2+ **изолированных** backend домена:
+
+```
+┌───────────────────┐  ┌───────────────────┐  ┌───────────────────┐
+│  Backend-A        │  │  Backend-B        │  │  Frontend         │
+│  (sonnet)         │  │  (sonnet)         │  │  (sonnet)         │
+│                   │  │                   │  │                   │
+│  domain A:        │  │  domain B:        │  │  types + api +    │
+│  service+router   │  │  service+router   │  │  page + tests     │
+│  +tests           │  │  +tests           │  │                   │
+└───────────────────┘  └───────────────────┘  └───────────────────┘
+```
+
+**Условия для 3 агентов:**
+1. Домены в матрице изоляции (см. ниже) — НЕ импортируют друг друга
+2. `cache.py` — изменения очереди для lead agent ПОСЛЕ обоих backend
+3. Каждый backend агент владеет ТОЛЬКО файлами своего домена
+
 **Frontend работает по API-контракту из ТЗ**, не дожидаясь backend.
 API-методы в `api.ts` пишутся по контракту — когда backend готов, всё подключается без изменений.
 
 ---
 
-### Фаза 3 — Интеграция (последовательно, один агент)
+### Фаза 2.5 — Параллельный Review (2 read-only агента, sonnet)
+
+Запускается сразу после завершения Фазы 2, ДО тестов:
 
 ```
-1. Проверить что backend тесты зелёные:  docker compose exec backend pytest tests/ -x
-   (быстрая альтернатива: make test-fast — запускает только изменённые тесты)
-2. Проверить frontend тесты:             cd frontend-react && npm run test
-3. Проверить конвенции:                  bash scripts/check_conventions.sh
-4. Обновить CLAUDE.md (если новый домен/модель/кэш)
-5. Один коммит или логическая серия коммитов
+┌──────────────────────────┐    ┌──────────────────────────┐
+│  code-reviewer (sonnet)  │    │  security-reviewer       │
+│  read-only               │    │  (sonnet) read-only      │
+│                          │    │                          │
+│  - Iron rules            │    │  - SQL injection         │
+│  - Качество кода         │    │  - Multi-tenancy         │
+│  - Конвенции DDS         │    │  - Crypto / secrets      │
+│  → APPROVE/WARNING/BLOCK │    │  → APPROVE/WARNING/BLOCK │
+└──────────────────────────┘    └──────────────────────────┘
 ```
+
+**CRITICAL issues** → исправить ДО Фазы 3
+**WARNING/LOW** → заметить, продолжить к Фазе 3
+
+### Фаза 3 — Параллельная валидация + Docs (3-4 агента, haiku)
+
+Все проверки НЕЗАВИСИМЫ — запускать параллельно:
+
+```
+┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│  pytest          │  │  vitest          │  │  conventions     │  │  docs (optional) │
+│  (haiku)         │  │  (haiku)         │  │  (haiku)         │  │  (haiku)         │
+│                  │  │                  │  │                  │  │                  │
+│  docker compose  │  │  cd frontend-    │  │  bash scripts/   │  │  git diff →      │
+│  exec backend    │  │  react && npx    │  │  check_          │  │  update          │
+│  pytest tests/   │  │  vitest run      │  │  conventions.sh  │  │  DOMAIN_*.md     │
+│  -x --tb=short   │  │                  │  │                  │  │  CLAUDE.md       │
+└──────────────────┘  └──────────────────┘  └──────────────────┘  └──────────────────┘
+```
+
+После всех проверок → один коммит или логическая серия коммитов
 
 ---
 
@@ -188,6 +250,50 @@ API-методы в `api.ts` пишутся по контракту — когд
 - `cache.py` (invalidate_project_reports)
 - `alembic/versions/*`
 - `scripts/check_conventions.sh`
+- `src/types/api.ts` (frontend singleton)
+- `src/app/globals.css` (стили singleton)
+
+---
+
+### Матрица изоляции доменов (для multi-domain backend)
+
+Перед запуском 2+ backend агентов — проверь что домены НЕ импортируют друг друга.
+
+#### Безопасные пары (0 зависимостей):
+| Домен A | Домен B | Можно параллелить |
+|---------|---------|-------------------|
+| reports/ | planning/ | ✅ |
+| funnel/ | assembly/ | ✅ |
+| transactions_service | warehouse_* | ✅ |
+| telegram_service | cost/ | ✅ |
+| ai/ | reports/ | ✅ |
+
+#### НЕЛЬЗЯ параллелить (есть import-зависимости):
+| Домен A | Домен B | Причина |
+|---------|---------|---------|
+| warehouse_stock | warehouse_need | need импортирует stock |
+| supply_chain/ | cost/ | vehicle_delivery → cost/items |
+| opiu_service | wb_bdr_service | оба используют bdr_loaders |
+| health_check | warehouse_*/funnel/ | health_check импортирует оба |
+| stock_analytics | stock_forecast | analytics → forecast |
+
+**Правило:** Если сомневаешься — проверь через `grep -r "from backend.services.{domain}" backend/services/`.
+
+---
+
+### Model Routing (оптимизация токенов и скорости)
+
+| Задача | Модель | Обоснование |
+|--------|--------|-------------|
+| Lead agent (Фаза 0 + оркестрация) | opus | Сложное планирование, формирование ТЗ |
+| Фаза 1 (Model+Migration+Schema) | sonnet | Структурная генерация кода |
+| Фаза 2 Backend (service+router+tests) | sonnet | Реализация с iron rules |
+| Фаза 2 Frontend (page+types+api) | sonnet | Реализация с conventions |
+| Фаза 2.5 code-reviewer | sonnet | Уже настроен |
+| Фаза 2.5 security-reviewer | sonnet | Уже настроен |
+| Фаза 1 Pre-warm (frontend exploration) | haiku | Read-only, сбор контекста |
+| Фаза 3 валидаторы (pytest/vitest/conventions) | haiku | Запуск команд, парсинг вывода |
+| Фаза 3 docs agent | haiku | Чтение diff, обновление markdown |
 
 ---
 
