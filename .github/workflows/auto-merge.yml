@@ -11,6 +11,7 @@ on:
 permissions:
   pull-requests: write
   contents: write
+  checks: read
 
 jobs:
   auto-merge:
@@ -47,9 +48,13 @@ jobs:
             exit 0
           fi
 
-          # Check if all CI checks passed
+          # Check if all CI checks passed (with fallback for permission issues)
           echo "Checking CI status for PR #${PR_NUMBER}..."
-          CHECKS_STATUS=$(gh pr checks "$PR_NUMBER" --json bucket --jq '[.[] | select(.bucket != "pass")] | length')
+          CHECKS_STATUS=$(gh pr checks "$PR_NUMBER" --json bucket --jq '[.[] | select(.bucket != "pass")] | length' 2>&1) || {
+            echo "Failed to query checks (likely permission issue): ${CHECKS_STATUS}"
+            echo "Skipping — will retry on next trigger"
+            exit 0
+          }
 
           if [ "$CHECKS_STATUS" != "0" ]; then
             echo "Not all checks passed yet (${CHECKS_STATUS} pending/failed), skipping"
