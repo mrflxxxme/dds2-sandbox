@@ -3,13 +3,14 @@ Supply Chain — Factory Orders CRUD and split-to-vehicles logic.
 """
 
 import logging
+import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.models.cost import CostOrder, CostOrderItem, Nomenclature
-from backend.models.enums import FactoryOrderStatus
+from backend.models.enums import FactoryOrderStatus, VehicleStatus
 from backend.models.supply_chain import FactoryOrder, FactoryOrderHistory, FactoryOrderItem
 from backend.schemas.supply_chain import (
     FactoryOrderCreate,
@@ -363,6 +364,7 @@ async def split_to_vehicles(
             vehicle = CostOrder(
                 project_id=project_id,
                 order_no=assignment.vehicle_order_no,
+                status=VehicleStatus.FORMING,
             )
             db.add(vehicle)
             await db.flush()
@@ -401,6 +403,13 @@ async def split_to_vehicles(
     await _maybe_update_status(db, order, changed_by=user_name)
 
     await db.commit()
+
+    # Auto-recalculate costs (duty, vat, delivery) for affected vehicles
+    from backend.services.cost.items import recalculate_order_items
+
+    for v_order_no in vehicles_used:
+        await recalculate_order_items(db, project_id, v_order_no)
+
     return {"ok": True, "created_cost_items": created_cost_items}
 
 
@@ -439,6 +448,17 @@ async def update_item(
         if new_qty < item.assigned_qty:
             raise ValueError(f"Нельзя уменьшить кол-во ниже {item.assigned_qty} " f"(уже распределено по машинам)")
 
+    # Validate box_detail: each value > 0, sum == qty
+    if "box_detail" in update_data and update_data["box_detail"] is not None:
+        bd = update_data["box_detail"]
+        if not isinstance(bd, list) or not bd:
+            raise ValueError("box_detail должен быть непустым списком")
+        if any(not isinstance(v, int) or v <= 0 for v in bd):
+            raise ValueError("Каждая коробка должна содержать > 0 штук")
+        effective_qty = update_data.get("qty", item.qty)
+        if sum(bd) != effective_qty:
+            raise ValueError(f"Сумма коробок ({sum(bd)}) ≠ кол-ву ({effective_qty})")
+
     for field, value in update_data.items():
         setattr(item, field, value)
 
@@ -472,9 +492,93 @@ async def delete_item(
     if not item:
         raise ValueError("Item not found in this order")
 
+    if item.mix_group_id is not None:
+        raise ValueError("Нельзя удалить: позиция входит в микс-группу. Сначала разбейте микс.")
+
     if item.assigned_qty > 0:
         raise ValueError(f"Нельзя удалить: позиция распределена по машинам " f"({item.assigned_qty} шт.)")
 
     await db.delete(item)
     await db.commit()
     return True
+
+
+# ─── Mix Groups ──────────────────────────────────────────────────────────
+
+
+async def set_mix_group(
+    db: AsyncSession,
+    project_id: int,
+    order_id: int,
+    items: list,
+    box_size: str,
+) -> tuple[str, list[int]]:
+    """Group items into a mix box (shared packaging).
+
+    Returns (mix_group_id, matched_item_ids).
+    Validates all items belong to the same order and project.
+    `items` is a list of objects with `.id` and `.pcs_per_box` attributes.
+    """
+    if len(items) < 2:
+        raise ValueError("Микс-группа должна содержать минимум 2 позиции")
+
+    if not box_size:
+        raise ValueError("Размер коробки не может быть пустым")
+
+    order = await get_factory_order(db, project_id, order_id)
+    if not order:
+        raise ValueError("Factory order not found")
+
+    items_by_id = {i.id: i for i in order.items}
+    matched: list[tuple[FactoryOrderItem, int]] = []
+    for input_item in items:
+        if input_item.pcs_per_box <= 0:
+            raise ValueError(f"pcs_per_box для позиции {input_item.id} должен быть больше 0")
+        item = items_by_id.get(input_item.id)
+        if not item:
+            raise ValueError(f"Позиция {input_item.id} не найдена в заказе {order_id}")
+        if item.assigned_qty != 0:
+            raise ValueError(f"Позиция {input_item.id} уже распределена по машинам")
+        if item.mix_group_id is not None:
+            raise ValueError(f"Позиция {input_item.id} уже входит в микс-группу")
+        matched.append((item, input_item.pcs_per_box))
+
+    mix_id = str(uuid.uuid4())
+    matched_ids = []
+    for item, pcs_per_box in matched:
+        item.mix_group_id = mix_id
+        item.mix_box_size = box_size
+        item.mix_pcs_per_box = pcs_per_box
+        matched_ids.append(item.id)
+
+    await db.commit()
+    return mix_id, matched_ids
+
+
+async def remove_mix_group(
+    db: AsyncSession,
+    project_id: int,
+    order_id: int,
+    mix_group_id: str,
+) -> int:
+    """Remove a mix group — set mix_group_id=None on all items in the group.
+
+    Returns count of affected items.
+    """
+    order = await get_factory_order(db, project_id, order_id)
+    if not order:
+        raise ValueError("Factory order not found")
+
+    count = 0
+    for item in order.items:
+        if item.mix_group_id == mix_group_id:
+            item.mix_group_id = None
+            item.mix_box_size = None
+            item.mix_pcs_per_box = None
+            count += 1
+
+    if count == 0:
+        raise ValueError(f"Микс-группа {mix_group_id} не найдена в заказе {order_id}")
+
+    await db.commit()
+    return count

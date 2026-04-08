@@ -3,9 +3,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
-import { formatNumber, formatDate, formatDateTime } from '@/lib/utils';
+import { formatNumber, formatDate, formatDateTime, exportToExcel, calcTotalBoxesWithMix } from '@/lib/utils';
 import PageHeader from '@/components/PageHeader';
 import TabLayout from '@/components/TabLayout';
+import BoxDetailCell, { BoxDetailExpandRow, BoxDropdown } from '@/components/BoxDetailCell';
 import type {
     VehicleSchema,
     VehicleStatus,
@@ -317,6 +318,19 @@ export default function VehicleDetailPage() {
     useEffect(() => { load(); }, [load]);
 
     const goBack = () => router.push(`/p/${slug}/supply-chain?tab=vehicles`);
+    const [deleting, setDeleting] = useState(false);
+    const handleDelete = async () => {
+        if (!vehicle) return;
+        if (!confirm(`Удалить машину ${vehicle.order_no}? Все позиции будут возвращены в доступные.`)) return;
+        setDeleting(true);
+        try {
+            await api.deleteVehicle(vehicle.order_no);
+            goBack();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка удаления');
+        }
+        setDeleting(false);
+    };
 
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}><div className="spinner" style={{ margin: '0 auto 12px' }} />Загрузка...</div>;
     if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error} <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>Повторить</button></div>;
@@ -326,13 +340,8 @@ export default function VehicleDetailPage() {
     const containerLabel = CONTAINER_LABELS[vehicle.container_type || ''] || vehicle.transport_type || 'AUTO';
     const cs = vehicle.cost_summary;
 
-    // Calculate totals for header
-    const totalBoxes = vehicle.items.reduce((sum, item) => {
-        if (item.pcs_per_box && item.pcs_per_box > 0) {
-            return sum + Math.ceil(item.qty / item.pcs_per_box);
-        }
-        return sum;
-    }, 0);
+    // Calculate totals for header (mix groups deduplicated by max boxes)
+    const totalBoxes = calcTotalBoxesWithMix(vehicle.items);
 
     return (
         <div className="animate-in">
@@ -346,6 +355,11 @@ export default function VehicleDetailPage() {
                         Машина {vehicle.order_no}
                     </h1>
                 </div>
+                {isForming && (
+                    <button className="btn btn-danger btn-sm" onClick={handleDelete} disabled={deleting} style={{ fontSize: 13 }}>
+                        {deleting ? 'Удаляем...' : 'Удалить'}
+                    </button>
+                )}
                 <StatusBadge status={vehicle.status || 'FORMING'} />
             </div>
 
@@ -448,10 +462,14 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
 }) {
     const [removingId, setRemovingId] = useState<number | null>(null);
     const [perUnit, setPerUnit] = useState(false); // false = общая, true = за 1 шт
+    const [expandedId, setExpandedId] = useState<number | null>(null);
     const hasCosts = items.some(i => i.total_rub);
 
-    const handleRemove = async (itemId: number) => {
-        if (!confirm('Удалить позицию из машины?')) return;
+    const handleRemove = async (itemId: number, isMix?: boolean) => {
+        const msg = isMix
+            ? 'Удалить микс-коробку? Все позиции микса будут удалены из машины.'
+            : 'Удалить позицию из машины?';
+        if (!confirm(msg)) return;
         setRemovingId(itemId);
         try {
             await api.removeItemFromVehicle(vehicleOrderNo, itemId);
@@ -462,6 +480,33 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
         setRemovingId(null);
     };
 
+    const handleExport = () => {
+        const rows = items.map(item => {
+            const ppb = item.pcs_per_box || 0;
+            const boxes = ppb > 0 ? Math.ceil(item.qty / ppb) : 0;
+            const dims = parseBoxDims(item.box_size);
+            const vol = dims && ppb > 0 ? (dims.l * dims.w * dims.h) / 1e6 * boxes : 0;
+            return {
+                'Баркод': item.barcode,
+                'Артикул': item.article_seller || '',
+                'Категория': item.subject || '',
+                'Кол-во': item.qty,
+                'Мест': item.mix_group_id ? 'микс' : (boxes || ''),
+                'Вес 1шт, кг': item.weight_kg || '',
+                'Вес общ, кг': item.weight_kg ? Number(((item.weight_kg || 0) * item.qty).toFixed(1)) : '',
+                'Коробка': item.box_size || '',
+                'V м³': vol > 0 ? Number(vol.toFixed(2)) : '',
+                'Цена ¥': Number(item.price_cny) || '',
+                'Сумма ¥': Number(item.price_cny) * item.qty || '',
+                'Доставка ₽': item.delivery_rub ? Number((item.delivery_rub * item.qty).toFixed(0)) : '',
+                'Пошлина ₽': item.duty_rub ? Number((item.duty_rub * item.qty).toFixed(0)) : '',
+                'НДС ₽': item.vat_rub ? Number((item.vat_rub * item.qty).toFixed(0)) : '',
+                'Итого ₽': item.total_rub ? Number((item.total_rub * item.qty).toFixed(0)) : '',
+            };
+        });
+        exportToExcel(rows, `Машина_${vehicleOrderNo}`);
+    };
+
     const th: React.CSSProperties = { textAlign: 'left', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500, whiteSpace: 'nowrap' };
     const thR: React.CSSProperties = { ...th, textAlign: 'right' };
     const thF: React.CSSProperties = { ...thR, background: 'rgba(59,130,246,0.04)' };
@@ -469,12 +514,12 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
     const tdR: React.CSSProperties = { ...td, textAlign: 'right' };
     const tdF: React.CSSProperties = { ...tdR, background: 'rgba(59,130,246,0.02)' };
 
-    // Totals
-    let totalBoxes = 0, totalWeight = 0, totalVolume = 0;
+    // Totals (mix groups deduplicated by max boxes)
+    const totalBoxes = calcTotalBoxesWithMix(items);
+    let totalWeight = 0, totalVolume = 0;
     let totalRub = 0, totalDelivery = 0, totalDuty = 0, totalVat = 0;
     for (const item of items) {
         const ppb = item.pcs_per_box || 0;
-        if (ppb > 0) totalBoxes += Math.ceil(item.qty / ppb);
         totalWeight += (item.weight_kg || 0) * item.qty;
         const dims = parseBoxDims(item.box_size);
         if (dims && ppb > 0) totalVolume += (dims.l * dims.w * dims.h) / 1e6 * Math.ceil(item.qty / ppb);
@@ -488,6 +533,12 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
     const baseCols = 11 + (isForming ? 1 : 0);
 
     return (
+        <>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+            <button className="btn btn-secondary btn-sm" onClick={handleExport} style={{ fontSize: 12 }}>
+                📊 Excel
+            </button>
+        </div>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             {/* Column group headers */}
             {hasCosts && (
@@ -553,17 +604,25 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                     const boxLabel = item.box_size ? `${item.box_size}${ppb ? ` (${ppb}шт)` : ''}` : '—';
 
                     return (
-                        <tr key={item.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                    <React.Fragment key={item.id}>
+                        <tr style={{ borderBottom: expandedId === item.id ? 'none' : '1px solid var(--color-border)' }}>
                             <td style={{ ...td, fontFamily: 'monospace', fontSize: 12 }}>{item.barcode}</td>
                             <td style={{ ...td, fontSize: 12, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.article_seller || ''}>{item.article_seller || '—'}</td>
                             <td style={{ ...td, fontSize: 12 }}>{item.subject || '—'}</td>
                             <td style={{ ...tdR, fontWeight: 600 }}>{formatNumber(item.qty, 0)}</td>
                             <td style={tdR}>
-                                {boxes > 0 ? (
-                                    <span style={{ color: notFull ? '#f59e0b' : 'inherit', fontWeight: notFull ? 600 : 400 }}>
-                                        {boxes}{notFull && ' ⚠'}
-                                    </span>
-                                ) : '—'}
+                                {item.mix_group_id ? (
+                                    <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-accent)' }}
+                                        title={`Микс: ${item.mix_group_id.slice(0, 8)}`}>микс</span>
+                                ) : (
+                                    <BoxDetailCell
+                                        qty={item.qty}
+                                        pcsPerBox={item.pcs_per_box}
+                                        boxDetail={item.box_detail}
+                                        expanded={expandedId === item.id}
+                                        onToggle={ppb > 0 ? () => setExpandedId(expandedId === item.id ? null : item.id) : undefined}
+                                    />
+                                )}
                             </td>
                             <td style={{ ...tdR, color: 'var(--color-text-muted)' }}>{item.weight_kg ? formatNumber(item.weight_kg, 2) : '—'}</td>
                             <td style={tdR}>{weight > 0 ? formatNumber(weight, 1) : '—'}</td>
@@ -577,12 +636,36 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                             {hasCosts && <td style={{ ...tdF, fontWeight: 700 }}>{formatNumber(perUnit ? (item.total_rub || 0) : (item.total_rub || 0) * item.qty, perUnit ? 2 : 0)}</td>}
                             {isForming && (
                                 <td style={{ ...td, textAlign: 'center' }}>
-                                    <button onClick={() => handleRemove(item.id)} disabled={removingId === item.id}
-                                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-danger)', fontSize: 14, opacity: removingId === item.id ? 0.3 : 0.6, padding: 2 }}
-                                        title="Удалить">✕</button>
+                                    <button
+                                        onClick={() => handleRemove(item.id, !!item.mix_group_id)}
+                                        disabled={removingId === item.id}
+                                        style={{
+                                            background: 'none', border: 'none', cursor: 'pointer',
+                                            color: item.mix_group_id ? 'var(--color-accent)' : 'var(--color-danger)',
+                                            fontSize: item.mix_group_id ? 11 : 14,
+                                            opacity: removingId === item.id ? 0.3 : 0.6, padding: 2,
+                                        }}
+                                        title={item.mix_group_id ? 'Удалить микс' : 'Удалить'}>
+                                        {item.mix_group_id ? 'Удалить микс' : '✕'}
+                                    </button>
                                 </td>
                             )}
                         </tr>
+                        {expandedId === item.id && ppb > 0 && (
+                            <tr>
+                                <BoxDetailExpandRow
+                                    qty={item.qty}
+                                    pcsPerBox={ppb}
+                                    boxDetail={item.box_detail}
+                                    colSpan={baseCols + costCols}
+                                    editable={isForming}
+                                    orderId={item.factory_order_id}
+                                    itemId={item.factory_order_item_id}
+                                    onSaved={onRemoved}
+                                />
+                            </tr>
+                        )}
+                    </React.Fragment>
                     );
                 })}
             </tbody>
@@ -605,6 +688,7 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                 </tr>
             </tfoot>
         </table>
+        </>
     );
 }
 
@@ -617,8 +701,24 @@ function CapacityBar({ vehicle }: { vehicle: VehicleSchema }) {
 
     const containerVol = container.l * container.w * container.h;
     let usedVol = 0;
+    const mixGroupSeen = new Set<string>();
     for (const item of vehicle.items) {
-        if (item.box_size && item.pcs_per_box && item.pcs_per_box > 0) {
+        if (item.mix_group_id) {
+            // Only count volume once per unique mix group, using mix_box_size
+            if (!mixGroupSeen.has(item.mix_group_id)) {
+                mixGroupSeen.add(item.mix_group_id);
+                const effectiveBoxSize = item.mix_box_size || item.box_size;
+                const effectivePpb = item.mix_pcs_per_box || item.pcs_per_box;
+                if (effectiveBoxSize && effectivePpb && effectivePpb > 0) {
+                    const parts = effectiveBoxSize.split(/[*xх×]/).map(Number);
+                    if (parts.length === 3 && parts.every(p => p > 0)) {
+                        const boxVol = (parts[0] * parts[1] * parts[2]) / 1e6;
+                        const boxes = Math.ceil(item.qty / effectivePpb);
+                        usedVol += boxVol * boxes;
+                    }
+                }
+            }
+        } else if (item.box_size && item.pcs_per_box && item.pcs_per_box > 0) {
             const parts = item.box_size.split(/[*xх×]/).map(Number);
             if (parts.length === 3 && parts.every(p => p > 0)) {
                 const boxVol = (parts[0] * parts[1] * parts[2]) / 1e6;
@@ -647,7 +747,7 @@ function CapacityBar({ vehicle }: { vehicle: VehicleSchema }) {
 
 // ─── Add Items Section (two modes: list + paste) ──────────────────────────
 
-interface PasteRow { barcode: string; qty: string; article: string }
+interface PasteRow { barcode: string; qty: string; article: string; autoAdded?: boolean; mixGroupId?: string | null }
 const emptyRow = (): PasteRow => ({ barcode: '', qty: '', article: '' });
 
 function calcBoxes(qty: number, pcsPerBox: number | undefined): { boxes: number; notFull: boolean } {
@@ -655,6 +755,51 @@ function calcBoxes(qty: number, pcsPerBox: number | undefined): { boxes: number;
     const boxes = Math.ceil(qty / pcsPerBox);
     const notFull = qty % pcsPerBox !== 0;
     return { boxes, notFull };
+}
+
+function resolveMixSiblings(
+    rows: PasteRow[],
+    allItemMap: Record<string, AvailableItem & { source_order: string; source_factory: string }>,
+): PasteRow[] {
+    const result = [...rows];
+    const existingBarcodes = new Set(rows.map(r => r.barcode.trim()).filter(Boolean));
+
+    for (let i = 0; i < result.length; i++) {
+        const row = result[i];
+        const bc = row.barcode.trim();
+        if (!bc || row.autoAdded) continue;
+        const item = allItemMap[bc];
+        if (!item?.mix_group_id) continue;
+
+        const ppb = item.mix_pcs_per_box || item.pcs_per_box || 0;
+        if (ppb <= 0) continue;
+        const qty = parseInt(row.qty) || 0;
+        if (qty <= 0) continue;
+        const boxes = Math.floor(qty / ppb);
+        if (boxes <= 0) continue;
+
+        // Find siblings
+        for (const [siblingBc, siblingItem] of Object.entries(allItemMap)) {
+            if (siblingBc === bc) continue;
+            if (siblingItem.mix_group_id !== item.mix_group_id) continue;
+            if (existingBarcodes.has(siblingBc)) continue;
+
+            const siblingPpb = siblingItem.mix_pcs_per_box || siblingItem.pcs_per_box || 0;
+            const autoQty = siblingPpb > 0 ? boxes * siblingPpb : 0;
+            if (autoQty <= 0) continue;
+
+            result.push({
+                barcode: siblingBc,
+                qty: String(autoQty),
+                article: siblingItem.article_seller || siblingItem.subject || '',
+                autoAdded: true,
+                mixGroupId: item.mix_group_id,
+            });
+            existingBarcodes.add(siblingBc);
+        }
+    }
+
+    return result;
 }
 
 function CollapsibleAddItems({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; onAdded: () => void }) {
@@ -670,7 +815,11 @@ function CollapsibleAddItems({ vehicleOrderNo, onAdded }: { vehicleOrderNo: stri
     }
     return (
         <div>
-            <AddItemsSection vehicleOrderNo={vehicleOrderNo} onAdded={() => { onAdded(); setOpen(false); }} />
+            <AddItemsSection
+                vehicleOrderNo={vehicleOrderNo}
+                onAdded={() => { onAdded(); setOpen(false); }}
+                onPartialAdded={onAdded}
+            />
             <div style={{ textAlign: 'center', marginTop: 8 }}>
                 <button className="btn btn-secondary btn-sm" onClick={() => setOpen(false)}>Свернуть</button>
             </div>
@@ -678,7 +827,7 @@ function CollapsibleAddItems({ vehicleOrderNo, onAdded }: { vehicleOrderNo: stri
     );
 }
 
-function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; onAdded: () => void }) {
+function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleOrderNo: string; onAdded: () => void; onPartialAdded: () => void }) {
     const [mode, setMode] = useState<'list' | 'paste'>('list');
     const [groups, setGroups] = useState<AvailableItemGroup[]>([]);
     const [selectedOrder, setSelectedOrder] = useState<string>('');
@@ -712,6 +861,20 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
         }
     }
 
+    // Cross-order map for paste mode: search across ALL orders (FIFO — first order wins)
+    const allItemMap: Record<string, AvailableItem & { source_order: string; source_factory: string }> = {};
+    for (const group of groups) {
+        for (const item of group.items) {
+            if (!(item.barcode in allItemMap)) {
+                allItemMap[item.barcode] = {
+                    ...item,
+                    source_order: group.order_number,
+                    source_factory: group.factory_name || '',
+                };
+            }
+        }
+    }
+
     const inputStyle: React.CSSProperties = {
         width: '100%', padding: '8px 12px', borderRadius: 8,
         border: '1px solid var(--color-border)', background: 'var(--color-bg)',
@@ -732,6 +895,23 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
         const qty = parseInt(quantities[item.id]?.toString() || '0') || 0;
         return qty > 0 && qty <= item.remaining_qty;
     });
+
+    const allChecked = listItems.length > 0 && listItems.every(item => checked[item.id]);
+    const toggleAll = () => {
+        if (allChecked) {
+            setChecked({});
+            setQuantities({});
+        } else {
+            const newChecked: Record<number, boolean> = {};
+            const newQty: Record<number, string> = {};
+            for (const item of listItems) {
+                newChecked[item.id] = true;
+                newQty[item.id] = String(item.remaining_qty);
+            }
+            setChecked(newChecked);
+            setQuantities(newQty);
+        }
+    };
 
     const handleListSubmit = async () => {
         if (!listCanSave) return;
@@ -754,7 +934,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
 
     // ─── Paste mode helpers ───
     const resolveArticle = (bc: string): string => {
-        const item = itemMap[bc];
+        const item = allItemMap[bc];
         return item ? (item.article_seller || item.subject || '') : '';
     };
 
@@ -763,6 +943,11 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
             const next = [...prev];
             next[idx] = { ...next[idx], [field]: value };
             if (field === 'barcode' && value.trim()) next[idx].article = resolveArticle(value.trim());
+            // Re-run mix sibling resolution when barcode or qty changes
+            if (field === 'barcode' || field === 'qty') {
+                const withoutAutoAdded = next.filter(r => !r.autoAdded);
+                return resolveMixSiblings(withoutAutoAdded, allItemMap);
+            }
             return next;
         });
         if (idx === rows.length - 1) setRows(prev => [...prev, emptyRow()]);
@@ -780,17 +965,27 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
             const qty = cols.length >= 2 ? parseNum(cols[1]) : '';
             if (barcode) newRows.push({ barcode, qty, article: resolveArticle(barcode) });
         }
-        if (newRows.length > 0) setRows([...newRows, emptyRow(), emptyRow()]);
+        if (newRows.length > 0) {
+            const resolved = resolveMixSiblings(newRows, allItemMap);
+            setRows([...resolved, emptyRow(), emptyRow()]);
+        }
     };
 
     const filledRows = rows.filter(r => r.barcode.trim());
-    const invalidRows = filledRows.filter(r => !(r.barcode.trim() in itemMap));
+    const invalidRows = filledRows.filter(r => !(r.barcode.trim() in allItemMap));
+    const exceededRows = filledRows.filter(r => {
+        const item = allItemMap[r.barcode.trim()];
+        const qty = parseInt(r.qty) || 0;
+        return item && qty > 0 && qty > item.remaining_qty;
+    });
     const validRows = filledRows.filter(r => {
-        const item = itemMap[r.barcode.trim()];
+        const item = allItemMap[r.barcode.trim()];
         const qty = parseInt(r.qty) || 0;
         return item && qty > 0 && qty <= item.remaining_qty;
     });
-    const pasteCanSave = validRows.length > 0 && invalidRows.length === 0;
+    // Allow adding found items even if some are not found (fallback A)
+    const pasteCanSave = validRows.length > 0;
+    const hasUnfound = invalidRows.length > 0 || exceededRows.length > 0;
 
     const handlePasteSubmit = async () => {
         if (!pasteCanSave) return;
@@ -798,12 +993,28 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
         setError('');
         try {
             const items = validRows.map(r => ({
-                factory_order_item_id: itemMap[r.barcode.trim()].id,
+                factory_order_item_id: allItemMap[r.barcode.trim()].id,
                 qty: parseInt(r.qty) || 0,
             }));
+            const validBarcodes = new Set(validRows.map(r => r.barcode.trim()));
             await api.addItemsToVehicle(vehicleOrderNo, items);
-            setRows(Array.from({ length: 5 }, emptyRow));
-            onAdded();
+
+            // Keep rows that weren't successfully added (unfound + exceeded qty)
+            const remainingRows = rows.filter(r => {
+                const bc = r.barcode.trim();
+                return bc && !validBarcodes.has(bc);
+            });
+
+            if (remainingRows.length > 0) {
+                setRows([...remainingRows, emptyRow(), emptyRow()]);
+                // Refresh vehicle data + available items, but keep section open
+                onPartialAdded();
+                const freshData = await api.getAvailableItems();
+                setGroups(freshData);
+            } else {
+                setRows(Array.from({ length: 5 }, emptyRow));
+                onAdded(); // all done — close section
+            }
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
         }
@@ -820,17 +1031,19 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
                 <div style={{ textAlign: 'center', padding: 16, opacity: 0.5 }}>Нет доступных фабричных заказов</div>
             ) : (
                 <>
-                    {/* Order selector */}
-                    <div style={{ marginBottom: 12 }}>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Фабричный заказ</label>
-                        <select value={selectedOrder} onChange={e => { setSelectedOrder(e.target.value); setChecked({}); setQuantities({}); }} style={inputStyle}>
-                            {groups.map(g => (
-                                <option key={g.order_number} value={g.order_number}>
-                                    {g.order_number}{g.factory_name ? ` — ${g.factory_name}` : ''} ({g.items.length} поз.)
-                                </option>
-                            ))}
-                        </select>
-                    </div>
+                    {/* Order selector — only for list mode (paste searches all orders) */}
+                    {mode === 'list' && (
+                        <div style={{ marginBottom: 12 }}>
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Фабричный заказ</label>
+                            <select value={selectedOrder} onChange={e => { setSelectedOrder(e.target.value); setChecked({}); setQuantities({}); }} style={inputStyle}>
+                                {groups.map(g => (
+                                    <option key={g.order_number} value={g.order_number}>
+                                        {g.order_number}{g.factory_name ? ` — ${g.factory_name}` : ''} ({g.items.length} поз.)
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
 
                     {/* Mode tabs */}
                     <div style={{ display: 'flex', gap: 4, marginBottom: 12 }}>
@@ -859,7 +1072,9 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
                                     <table className="data-table" style={{ marginBottom: 0, fontSize: 13 }}>
                                         <thead>
                                             <tr>
-                                                <th style={{ width: 36, textAlign: 'center' }}></th>
+                                                <th style={{ width: 36, textAlign: 'center' }}>
+                                                    <input type="checkbox" checked={allChecked} onChange={toggleAll} title="Выбрать все" />
+                                                </th>
                                                 <th>Баркод</th>
                                                 <th>Артикул</th>
                                                 <th>Категория</th>
@@ -871,44 +1086,142 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {listItems.map(item => {
-                                                const isChecked = !!checked[item.id];
-                                                const qty = parseInt(quantities[item.id]?.toString() || '0') || 0;
-                                                const { boxes, notFull } = calcBoxes(qty, item.pcs_per_box);
-                                                const exceeds = qty > item.remaining_qty;
-                                                return (
-                                                    <tr key={item.id} style={{ background: isChecked ? 'rgba(59,130,246,0.04)' : undefined }}>
-                                                        <td style={{ textAlign: 'center' }}>
-                                                            <input type="checkbox" checked={isChecked}
-                                                                onChange={e => setChecked(prev => ({ ...prev, [item.id]: e.target.checked }))} />
-                                                        </td>
-                                                        <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{item.barcode}</td>
-                                                        <td style={{ fontSize: 12 }}>{item.article_seller || '—'}</td>
-                                                        <td style={{ fontSize: 12 }}>{item.subject || '—'}</td>
-                                                        <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-text-muted)' }}>{item.pcs_per_box || '—'}</td>
-                                                        <td style={{ textAlign: 'right', fontSize: 12 }}>{item.remaining_qty}</td>
-                                                        <td>
-                                                            <input type="number" min={0} max={item.remaining_qty}
-                                                                value={quantities[item.id] || ''}
-                                                                onChange={e => {
-                                                                    setQuantities(prev => ({ ...prev, [item.id]: e.target.value }));
-                                                                    if (parseInt(e.target.value) > 0) setChecked(prev => ({ ...prev, [item.id]: true }));
-                                                                }}
-                                                                placeholder="0"
-                                                                style={{ ...cellInput, width: 80, borderColor: exceeds ? '#f59e0b' : 'var(--color-border)' }} />
-                                                        </td>
-                                                        <td style={{ textAlign: 'right', fontSize: 12 }}>
-                                                            {qty > 0 && item.pcs_per_box ? (
-                                                                <span style={{ color: notFull ? '#f59e0b' : 'var(--color-text)' }}>
-                                                                    {boxes}
-                                                                    {notFull && <span title="Не кратно коробке" style={{ marginLeft: 2 }}>⚠</span>}
-                                                                </span>
-                                                            ) : '—'}
-                                                        </td>
-                                                        <td style={{ textAlign: 'right', fontSize: 12 }}>{formatNumber(parseFloat(item.price_cny))}</td>
-                                                    </tr>
-                                                );
-                                            })}
+                                            {(() => {
+                                                // Group mix items, keep standalone in order
+                                                const mixGroups = new Map<string, AvailableItem[]>();
+                                                const standaloneItems: AvailableItem[] = [];
+                                                for (const item of listItems) {
+                                                    if (item.mix_group_id) {
+                                                        const group = mixGroups.get(item.mix_group_id) || [];
+                                                        group.push(item);
+                                                        mixGroups.set(item.mix_group_id, group);
+                                                    } else {
+                                                        standaloneItems.push(item);
+                                                    }
+                                                }
+
+                                                const rows: React.ReactNode[] = [];
+
+                                                // Render standalone items
+                                                for (const item of standaloneItems) {
+                                                    const isChecked = !!checked[item.id];
+                                                    const qty = parseInt(quantities[item.id]?.toString() || '0') || 0;
+                                                    const { boxes } = calcBoxes(qty, item.pcs_per_box);
+                                                    const exceeds = qty > item.remaining_qty;
+                                                    rows.push(
+                                                        <tr key={item.id} style={{ background: isChecked ? 'rgba(59,130,246,0.04)' : undefined }}>
+                                                            <td style={{ textAlign: 'center' }}>
+                                                                <input type="checkbox" checked={isChecked}
+                                                                    onChange={e => setChecked(prev => ({ ...prev, [item.id]: e.target.checked }))} />
+                                                            </td>
+                                                            <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{item.barcode}</td>
+                                                            <td style={{ fontSize: 12 }}>{item.article_seller || '—'}</td>
+                                                            <td style={{ fontSize: 12 }}>{item.subject || '—'}</td>
+                                                            <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-text-muted)' }}>{item.pcs_per_box || '—'}</td>
+                                                            <td style={{ textAlign: 'right', fontSize: 12 }}>{item.remaining_qty}</td>
+                                                            <td>
+                                                                <input type="number" min={0} max={item.remaining_qty}
+                                                                    value={quantities[item.id] || ''}
+                                                                    onChange={e => {
+                                                                        setQuantities(prev => ({ ...prev, [item.id]: e.target.value }));
+                                                                        if (parseInt(e.target.value) > 0) setChecked(prev => ({ ...prev, [item.id]: true }));
+                                                                    }}
+                                                                    placeholder="0"
+                                                                    style={{ ...cellInput, width: 80, borderColor: exceeds ? '#f59e0b' : 'var(--color-border)' }} />
+                                                            </td>
+                                                            <td style={{ textAlign: 'right', fontSize: 12 }}>
+                                                                {qty > 0 && item.pcs_per_box ? (
+                                                                    <BoxDropdown qty={qty} pcsPerBox={item.pcs_per_box} />
+                                                                ) : '—'}
+                                                            </td>
+                                                            <td style={{ textAlign: 'right', fontSize: 12 }}>{formatNumber(parseFloat(item.price_cny))}</td>
+                                                        </tr>
+                                                    );
+                                                }
+
+                                                // Render mix groups
+                                                for (const [mixGroupId, groupItems] of mixGroups.entries()) {
+                                                    const availableBoxes = Math.min(...groupItems.map(i => Math.floor(i.remaining_qty / (i.mix_pcs_per_box || i.pcs_per_box || 1))));
+                                                    // Use first item's checkbox as group checkbox
+                                                    const firstItem = groupItems[0];
+                                                    const groupChecked = groupItems.every(i => !!checked[i.id]);
+                                                    const boxQtyStr = quantities[firstItem.id] || '';
+                                                    const boxQty = parseInt(boxQtyStr) || 0;
+
+                                                    // Group header row
+                                                    rows.push(
+                                                        <tr key={`mix-header-${mixGroupId}`} style={{ background: 'rgba(0,113,227,0.05)', borderTop: '2px solid var(--color-accent)' }}>
+                                                            <td style={{ textAlign: 'center' }}>
+                                                                <input type="checkbox" checked={groupChecked}
+                                                                    onChange={e => {
+                                                                        const newChecked = { ...checked };
+                                                                        const newQty = { ...quantities };
+                                                                        for (const gi of groupItems) {
+                                                                            newChecked[gi.id] = e.target.checked;
+                                                                            if (e.target.checked && boxQty > 0) {
+                                                                                newQty[gi.id] = String(boxQty * (gi.mix_pcs_per_box || gi.pcs_per_box || 1));
+                                                                            }
+                                                                        }
+                                                                        setChecked(newChecked);
+                                                                        setQuantities(newQty);
+                                                                    }} />
+                                                            </td>
+                                                            <td colSpan={3} style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-accent)', padding: '6px 4px' }}>
+                                                                Микс-группа ({groupItems.length} поз.)
+                                                                {groupItems[0]?.mix_box_size && <span style={{ fontWeight: 400, color: 'var(--color-text-muted)', marginLeft: 8 }}>{groupItems[0].mix_box_size}</span>}
+                                                            </td>
+                                                            <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-text-muted)' }}>—</td>
+                                                            <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-accent)', fontWeight: 600 }}>
+                                                                {availableBoxes} кор.
+                                                            </td>
+                                                            <td>
+                                                                <input type="number" min={0} max={availableBoxes}
+                                                                    value={boxQtyStr}
+                                                                    placeholder="0"
+                                                                    onChange={e => {
+                                                                        const boxes = parseInt(e.target.value) || 0;
+                                                                        const newQty = { ...quantities };
+                                                                        const newChecked = { ...checked };
+                                                                        for (const gi of groupItems) {
+                                                                            const ppb = gi.mix_pcs_per_box || gi.pcs_per_box || 1;
+                                                                            newQty[gi.id] = String(boxes * ppb);
+                                                                            newChecked[gi.id] = boxes > 0;
+                                                                        }
+                                                                        setQuantities(newQty);
+                                                                        setChecked(newChecked);
+                                                                    }}
+                                                                    style={{ ...cellInput, width: 80 }} />
+                                                            </td>
+                                                            <td style={{ textAlign: 'right', fontSize: 12 }}>
+                                                                {boxQty > 0 ? `${boxQty} кор.` : '—'}
+                                                            </td>
+                                                            <td />
+                                                        </tr>
+                                                    );
+
+                                                    // Individual mix items (indented, no separate checkboxes)
+                                                    for (const item of groupItems) {
+                                                        const itemQty = parseInt(quantities[item.id]?.toString() || '0') || 0;
+                                                        rows.push(
+                                                            <tr key={item.id} style={{ borderLeft: '3px solid var(--color-accent)', background: 'rgba(0,113,227,0.02)' }}>
+                                                                <td />
+                                                                <td style={{ fontFamily: 'monospace', fontSize: 11, paddingLeft: 12 }}>{item.barcode}</td>
+                                                                <td style={{ fontSize: 11 }}>{item.article_seller || '—'}</td>
+                                                                <td style={{ fontSize: 11 }}>{item.subject || '—'}</td>
+                                                                <td style={{ textAlign: 'right', fontSize: 11, color: 'var(--color-text-muted)' }}>{item.mix_pcs_per_box || item.pcs_per_box || '—'}</td>
+                                                                <td style={{ textAlign: 'right', fontSize: 11 }}>{item.remaining_qty}</td>
+                                                                <td style={{ textAlign: 'right', fontSize: 11, color: 'var(--color-text-muted)', padding: '4px 6px' }}>
+                                                                    {itemQty > 0 ? `${itemQty} шт` : '—'}
+                                                                </td>
+                                                                <td />
+                                                                <td style={{ textAlign: 'right', fontSize: 11 }}>{formatNumber(parseFloat(item.price_cny))}</td>
+                                                            </tr>
+                                                        );
+                                                    }
+                                                }
+
+                                                return rows;
+                                            })()}
                                         </tbody>
                                     </table>
                                 </div>
@@ -931,7 +1244,13 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
 
                             {invalidRows.length > 0 && (
                                 <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 13, color: '#ef4444' }}>
-                                    Не найдено в заказе: <b>{invalidRows.length}</b>
+                                    Не найдено ни в одном заказе: <b>{invalidRows.length}</b> ({formatNumber(invalidRows.reduce((s, r) => s + (parseInt(r.qty) || 0), 0), 0)} шт)
+                                </div>
+                            )}
+
+                            {exceededRows.length > 0 && (
+                                <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 13, color: '#b45309' }}>
+                                    Превышено доступное кол-во: <b>{exceededRows.length}</b> ({formatNumber(exceededRows.reduce((s, r) => s + (parseInt(r.qty) || 0), 0), 0)} шт запрошено, доступно {formatNumber(exceededRows.reduce((s, r) => s + (allItemMap[r.barcode.trim()]?.remaining_qty || 0), 0), 0)} шт)
                                 </div>
                             )}
 
@@ -947,26 +1266,36 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
                                             <th style={{ textAlign: 'right' }}>Доступно</th>
                                             <th style={{ width: 90 }}>Кол-во</th>
                                             <th style={{ textAlign: 'right' }}>Мест</th>
+                                            <th>Заказ</th>
                                             <th style={{ width: 50, textAlign: 'center' }}></th>
                                         </tr>
                                     </thead>
                                     <tbody>
                                         {rows.map((row, i) => {
                                             const bc = row.barcode.trim();
-                                            const item = itemMap[bc];
+                                            const item = allItemMap[bc];
                                             const unknown = bc && !item;
                                             const qty = parseInt(row.qty) || 0;
                                             const exceeds = item && qty > item.remaining_qty;
                                             const { boxes, notFull } = calcBoxes(qty, item?.pcs_per_box);
+                                            const isAutoAdded = row.autoAdded;
                                             return (
-                                                <tr key={i} style={{ background: unknown ? 'rgba(239,68,68,0.06)' : exceeds ? 'rgba(245,158,11,0.06)' : undefined }}>
+                                                <tr key={i} style={{
+                                                    background: isAutoAdded ? 'rgba(0,113,227,0.04)' : unknown ? 'rgba(239,68,68,0.06)' : exceeds ? 'rgba(245,158,11,0.06)' : undefined,
+                                                    borderLeft: isAutoAdded ? '3px solid var(--color-accent)' : undefined,
+                                                    opacity: isAutoAdded ? 0.85 : 1,
+                                                }}>
                                                     <td style={{ fontSize: 12, color: 'var(--color-text-muted)', textAlign: 'center' }}>{i + 1}</td>
-                                                    <td style={{ fontSize: 12 }}>{row.article || (bc ? '—' : '')}</td>
+                                                    <td style={{ fontSize: 12 }}>
+                                                        {row.article || (bc ? '—' : '')}
+                                                        {isAutoAdded && <span style={{ fontSize: 10, color: 'var(--color-accent)', marginLeft: 4, fontStyle: 'italic' }}>автодобавлено</span>}
+                                                    </td>
                                                     <td style={{ fontSize: 12 }}>{item?.subject || (bc ? '—' : '')}</td>
                                                     <td>
                                                         <input value={row.barcode} onChange={e => updateRow(i, 'barcode', e.target.value)}
                                                             placeholder="Баркод"
-                                                            style={{ ...cellInput, borderColor: unknown ? '#ef4444' : 'var(--color-border)', color: unknown ? '#ef4444' : 'var(--color-text)', fontFamily: 'monospace' }}
+                                                            readOnly={isAutoAdded}
+                                                            style={{ ...cellInput, borderColor: unknown ? '#ef4444' : 'var(--color-border)', color: unknown ? '#ef4444' : 'var(--color-text)', fontFamily: 'monospace', opacity: isAutoAdded ? 0.7 : 1 }}
                                                             autoComplete="off" />
                                                     </td>
                                                     <td style={{ fontSize: 12, textAlign: 'right', color: 'var(--color-text-muted)' }}>
@@ -978,15 +1307,17 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
                                                     <td>
                                                         <input type="number" value={row.qty} onChange={e => updateRow(i, 'qty', e.target.value)}
                                                             placeholder="0" min={0}
-                                                            style={{ ...cellInput, borderColor: exceeds ? '#f59e0b' : 'var(--color-border)' }}
+                                                            readOnly={isAutoAdded}
+                                                            style={{ ...cellInput, borderColor: exceeds ? '#f59e0b' : 'var(--color-border)', opacity: isAutoAdded ? 0.7 : 1 }}
                                                             autoComplete="off" />
                                                     </td>
                                                     <td style={{ fontSize: 12, textAlign: 'right' }}>
                                                         {qty > 0 && item?.pcs_per_box ? (
-                                                            <span style={{ color: notFull ? '#f59e0b' : 'var(--color-text)' }}>
-                                                                {boxes}{notFull && <span title="Не кратно коробке"> ⚠</span>}
-                                                            </span>
+                                                            <BoxDropdown qty={qty} pcsPerBox={item.pcs_per_box} />
                                                         ) : '—'}
+                                                    </td>
+                                                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>
+                                                        {item ? item.source_order : ''}
                                                     </td>
                                                     <td style={{ textAlign: 'center' }}>
                                                         {!bc ? '' :
@@ -1003,12 +1334,35 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
                             </div>
 
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--color-border)' }}>
-                                <button className="btn btn-secondary btn-sm" onClick={() => { setRows(Array.from({ length: 5 }, emptyRow)); setError(''); }}>
-                                    Очистить
-                                </button>
+                                <div style={{ display: 'flex', gap: 8 }}>
+                                    <button className="btn btn-secondary btn-sm" onClick={() => { setRows(Array.from({ length: 5 }, emptyRow)); setError(''); }}>
+                                        Очистить
+                                    </button>
+                                    {invalidRows.length > 0 && (
+                                        <button className="btn btn-secondary btn-sm" onClick={() => {
+                                            const text = invalidRows.map(r => `${r.barcode.trim()}\t${r.qty}`).join('\n');
+                                            navigator.clipboard.writeText(text);
+                                            alert(`Скопировано ${invalidRows.length} ненайденных баркодов`);
+                                        }}>
+                                            Скопировать ненайденные ({invalidRows.length})
+                                        </button>
+                                    )}
+                                    {exceededRows.length > 0 && (
+                                        <button className="btn btn-secondary btn-sm" onClick={() => {
+                                            const text = exceededRows.map(r => {
+                                                const item = allItemMap[r.barcode.trim()];
+                                                return `${r.barcode.trim()}\t${r.qty}\t${item?.remaining_qty || 0}`;
+                                            }).join('\n');
+                                            navigator.clipboard.writeText(`Баркод\tЗапрошено\tДоступно\n${text}`);
+                                            alert(`Скопировано ${exceededRows.length} превышенных (баркод + запрошено + доступно)`);
+                                        }}>
+                                            Скопировать превышенные ({exceededRows.length})
+                                        </button>
+                                    )}
+                                </div>
                                 <button className="btn btn-primary" onClick={handlePasteSubmit} disabled={!pasteCanSave || submitting}
                                     style={{ minWidth: 160, opacity: pasteCanSave ? 1 : 0.5 }}>
-                                    {submitting ? 'Добавляем...' : `Добавить (${validRows.length})`}
+                                    {submitting ? 'Добавляем...' : hasUnfound ? `Добавить найденные (${validRows.length})` : `Добавить (${validRows.length})`}
                                 </button>
                             </div>
                         </>

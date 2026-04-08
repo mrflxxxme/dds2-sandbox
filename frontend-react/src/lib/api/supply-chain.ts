@@ -51,6 +51,14 @@ export function addSupplyChainMethods(api: ApiClient) {
             return api.request<{ ok: boolean }>('DELETE', `/api/v1/supply-chain/factory-orders/${orderId}/items/${itemId}`);
         },
 
+        // ─── Mix Groups ────────────────────────────────────────────
+        setMixGroup(orderId: number, items: { id: number; pcs_per_box: number }[], boxSize: string) {
+            return api.request<{ mix_group_id: string; item_ids: number[]; box_size: string }>('POST', `/api/v1/supply-chain/factory-orders/${orderId}/mix-group`, { items, box_size: boxSize });
+        },
+        removeMixGroup(orderId: number, mixGroupId: string) {
+            return api.request<{ ok: boolean; removed_items: number }>('DELETE', `/api/v1/supply-chain/factory-orders/${orderId}/mix-group/${mixGroupId}`);
+        },
+
         // ─── Split to Vehicles ──────────────────────────────────────
         splitToVehicles(orderId: number, assignments: SplitItem[]) {
             return api.request<MessageResponse>('POST', `/api/v1/supply-chain/factory-orders/${orderId}/split-to-vehicles`, { assignments });
@@ -88,6 +96,9 @@ export function addSupplyChainMethods(api: ApiClient) {
         },
         removeItemFromVehicle(orderNo: string, itemId: number) {
             return api.request<{ ok: boolean }>('DELETE', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items/${itemId}`);
+        },
+        deleteVehicle(orderNo: string) {
+            return api.request<{ ok: boolean }>('DELETE', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}`);
         },
         getAvailableItems() {
             return api.request<AvailableItemGroup[]>('GET', '/api/v1/supply-chain/vehicles/available-items');

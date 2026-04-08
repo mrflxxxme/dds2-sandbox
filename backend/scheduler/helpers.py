@@ -123,11 +123,17 @@ async def get_missing_dates(project_id: int, lookback_days: int = BACKFILL_DAYS)
 
 
 async def get_days_with_incomplete_ads(project_id: int, lookback_days: int = AD_ANOMALY_LOOKBACK_DAYS) -> list[str]:
-    """Find dates that have funnel data but ZERO ad data.
+    """Find dates that have funnel data but incomplete ad data.
+
+    Detects two cases:
+    1. ZERO ad data — adv_sum == 0 for the whole day
+    2. ANOMALOUSLY LOW — adv_sum < 50% of median of neighboring days
 
     Only checks recent days (default 14) — older data is finalized.
     Skips dates that have been retried too many times (poisoned).
     """
+    from statistics import median
+
     from sqlalchemy import func, select
 
     today = date.today()
@@ -152,19 +158,33 @@ async def get_days_with_incomplete_ads(project_id: int, lookback_days: int = AD_
     if not rows:
         return []
 
-    zero_days = [r.date.isoformat() for r in rows if float(r.total_adv or 0) == 0]
-    if not zero_days:
+    # Build date → adv_sum map
+    day_sums = {r.date: float(r.total_adv or 0) for r in rows}
+    non_zero_sums = [v for v in day_sums.values() if v > 0]
+    median_adv = median(non_zero_sums) if len(non_zero_sums) >= 3 else 0
+
+    # Detect anomalies: zero OR < 50% of median
+    anomaly_threshold = median_adv * 0.5
+    anomaly_days = []
+    for d, adv in day_sums.items():
+        if adv == 0 or (median_adv > 0 and adv < anomaly_threshold):
+            anomaly_days.append(d.isoformat())
+
+    if not anomaly_days:
         return []
 
     # Filter out dates that have been retried too many times
     poisoned = await get_failed_dates(project_id)
     if poisoned:
-        before = len(zero_days)
-        zero_days = [d for d in zero_days if d not in poisoned]
-        skipped = before - len(zero_days)
+        before = len(anomaly_days)
+        anomaly_days = [d for d in anomaly_days if d not in poisoned]
+        skipped = before - len(anomaly_days)
         if skipped:
             logger.info(f"Ad completeness: project {project_id}, skipped {skipped} poisoned dates")
 
-    if zero_days:
-        logger.info(f"Ad completeness check: project {project_id}, zero ad days: {len(zero_days)}")
-    return zero_days[:30]
+    if anomaly_days:
+        logger.info(
+            f"Ad completeness check: project {project_id}, anomaly days: {len(anomaly_days)} "
+            f"(median={median_adv:.0f}, threshold={anomaly_threshold:.0f})"
+        )
+    return anomaly_days[:30]

@@ -20,6 +20,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -74,12 +75,22 @@ class FactoryOrderItem(Base):
     pcs_per_box: Mapped[int | None] = mapped_column(Integer)
     weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     note: Mapped[str | None] = mapped_column(Text)
+    box_detail: Mapped[list[int] | None] = mapped_column(JSONB, nullable=True, default=None)
+    mix_group_id: Mapped[str | None] = mapped_column(String(36), nullable=True, default=None)
+    mix_box_size: Mapped[str | None] = mapped_column(String(50), nullable=True, default=None)
+    mix_pcs_per_box: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
 
     factory_order: Mapped["FactoryOrder"] = relationship(back_populates="items")
 
     __table_args__ = (
         Index("ix_factory_order_items_project_id", "project_id"),
         Index("ix_factory_order_items_order_id", "factory_order_id"),
+        Index(
+            "ix_factory_order_items_mix_group",
+            "factory_order_id",
+            "mix_group_id",
+            postgresql_where="mix_group_id IS NOT NULL",
+        ),
     )
 
 

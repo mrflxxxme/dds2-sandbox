@@ -174,6 +174,9 @@ async def update_vehicle(
         if restricted:
             raise ValueError("Редактирование возможно только в статусе ФОРМИРОВАНИЕ")
 
+    cost_fields = {"rate_cny", "rate_usd", "rate_eur", "delivery_cost_cny", "delivery_cost_usd"}
+    needs_recalc = bool(cost_fields & set(update_data.keys()))
+
     for field, value in update_data.items():
         if field == "container_type" and value:
             vehicle.container_type = value
@@ -182,6 +185,12 @@ async def update_vehicle(
             setattr(vehicle, field, value)
 
     await db.commit()
+
+    if needs_recalc and vehicle.items:
+        from backend.services.cost.items import recalculate_order_items
+
+        await recalculate_order_items(db, project_id, order_no)
+
     await db.refresh(vehicle, attribute_names=["items"])
     return await _enrich_vehicle(db, project_id, vehicle)
 
@@ -263,6 +272,12 @@ async def add_items_to_vehicle(
         added += 1
 
     await db.commit()
+
+    # Auto-recalculate costs (duty, vat, delivery) for the vehicle
+    from backend.services.cost.items import recalculate_order_items
+
+    await recalculate_order_items(db, project_id, order_no)
+
     return {"ok": True, "added": added}
 
 
@@ -287,7 +302,8 @@ async def remove_item_from_vehicle(
     if not cost_item:
         raise ValueError(f"Item {item_id} not found in vehicle {order_no}")
 
-    # Restore assigned_qty on factory order item
+    # Check if the linked FactoryOrderItem belongs to a mix group
+    mix_group_id = None
     if cost_item.factory_order_item_id:
         fo_item_result = await db.execute(
             select(FactoryOrderItem).where(
@@ -297,9 +313,121 @@ async def remove_item_from_vehicle(
         )
         fo_item = fo_item_result.scalar_one_or_none()
         if fo_item:
-            fo_item.assigned_qty = max(0, fo_item.assigned_qty - cost_item.qty)
+            mix_group_id = fo_item.mix_group_id
+
+    if mix_group_id is not None:
+        # Remove all mix group members from this vehicle
+        mix_fo_items_result = await db.execute(
+            select(FactoryOrderItem.id).where(
+                FactoryOrderItem.mix_group_id == mix_group_id,
+                FactoryOrderItem.project_id == project_id,
+            )
+        )
+        mix_fo_item_ids = {row[0] for row in mix_fo_items_result}
+
+        mix_cost_items_result = await db.execute(
+            select(CostOrderItem)
+            .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)
+            .where(
+                CostOrderItem.order_no == order_no,
+                CostOrderItem.factory_order_item_id.in_(mix_fo_item_ids),
+                CostOrder.project_id == project_id,
+                CostOrder.is_deleted == False,  # noqa: E712
+            )
+        )
+        mix_cost_items = mix_cost_items_result.scalars().all()
+
+        # Restore assigned_qty for each and delete
+        fo_restore_result = await db.execute(
+            select(FactoryOrderItem).where(
+                FactoryOrderItem.id.in_(mix_fo_item_ids),
+                FactoryOrderItem.project_id == project_id,
+            )
+        )
+        fo_items_map = {fi.id: fi for fi in fo_restore_result.scalars().all()}
+
+        removed = 0
+        for mix_ci in mix_cost_items:
+            if mix_ci.factory_order_item_id and mix_ci.factory_order_item_id in fo_items_map:
+                fi = fo_items_map[mix_ci.factory_order_item_id]
+                fi.assigned_qty = max(0, fi.assigned_qty - mix_ci.qty)
+            await db.delete(mix_ci)
+            removed += 1
+
+        await db.commit()
+
+        from backend.services.cost.items import recalculate_order_items
+
+        await recalculate_order_items(db, project_id, order_no)
+
+        return {"ok": True, "removed": removed}
+
+    # Single-item removal (not in a mix group)
+    if cost_item.factory_order_item_id:
+        fo_item_result2 = await db.execute(
+            select(FactoryOrderItem).where(
+                FactoryOrderItem.id == cost_item.factory_order_item_id,
+                FactoryOrderItem.project_id == project_id,
+            )
+        )
+        fo_item2 = fo_item_result2.scalar_one_or_none()
+        if fo_item2:
+            fo_item2.assigned_qty = max(0, fo_item2.assigned_qty - cost_item.qty)
 
     await db.delete(cost_item)
+    await db.commit()
+
+    # Recalculate remaining items (delivery allocation changes)
+    from backend.services.cost.items import recalculate_order_items
+
+    await recalculate_order_items(db, project_id, order_no)
+
+    return {"ok": True}
+
+
+async def delete_vehicle(
+    db: AsyncSession,
+    project_id: int,
+    order_no: str,
+) -> dict:
+    """Soft-delete a FORMING vehicle, restore assigned_qty on factory items."""
+    result = await db.execute(
+        select(CostOrder)
+        .options(selectinload(CostOrder.items))
+        .where(
+            CostOrder.order_no == order_no,
+            CostOrder.project_id == project_id,
+            CostOrder.is_deleted == False,  # noqa: E712
+        )
+    )
+    vehicle = result.scalar_one_or_none()
+    if not vehicle:
+        raise ValueError(f"Vehicle {order_no} not found")
+
+    if vehicle.status != VehicleStatus.FORMING:
+        raise ValueError("Удалить можно только машину в статусе FORMING")
+
+    # Restore assigned_qty on linked factory order items
+    fo_item_ids = [item.factory_order_item_id for item in vehicle.items if item.factory_order_item_id]
+    if fo_item_ids:
+        fo_result = await db.execute(
+            select(FactoryOrderItem).where(
+                FactoryOrderItem.id.in_(fo_item_ids),
+                FactoryOrderItem.project_id == project_id,
+            )
+        )
+        fo_items_map = {fi.id: fi for fi in fo_result.scalars().all()}
+        for cost_item in vehicle.items:
+            if cost_item.factory_order_item_id and cost_item.factory_order_item_id in fo_items_map:
+                fo_item = fo_items_map[cost_item.factory_order_item_id]
+                fo_item.assigned_qty = max(0, fo_item.assigned_qty - cost_item.qty)
+
+    # Hard-delete CostOrderItems (no SoftDeleteMixin)
+    for cost_item in list(vehicle.items):
+        await db.delete(cost_item)
+
+    # Soft-delete the vehicle
+    vehicle.soft_delete()
     await db.commit()
     return {"ok": True}
 
@@ -351,6 +479,10 @@ async def get_available_items(
                         "price_cny": str(item.price_cny),
                         "box_size": item.box_size,
                         "pcs_per_box": item.pcs_per_box,
+                        "box_detail": item.box_detail,
+                        "mix_group_id": item.mix_group_id,
+                        "mix_box_size": item.mix_box_size,
+                        "mix_pcs_per_box": item.mix_pcs_per_box,
                         "weight_kg": str(item.weight_kg) if item.weight_kg else None,
                     }
                 )
@@ -389,7 +521,12 @@ async def _enrich_vehicle(
                 FactoryOrderItem.id,
                 FactoryOrderItem.box_size,
                 FactoryOrderItem.pcs_per_box,
+                FactoryOrderItem.box_detail,
+                FactoryOrderItem.factory_order_id,
                 FactoryOrder.order_number,
+                FactoryOrderItem.mix_group_id,
+                FactoryOrderItem.mix_box_size,
+                FactoryOrderItem.mix_pcs_per_box,
             )
             .join(FactoryOrder, FactoryOrderItem.factory_order_id == FactoryOrder.id)
             .where(
@@ -398,7 +535,7 @@ async def _enrich_vehicle(
             )
         )
         for row in fo_batch_result:
-            fo_item_map[row[0]] = (row[1], row[2], row[3])
+            fo_item_map[row[0]] = (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8])
 
     for cost_item in vehicle.items:
         total_qty += cost_item.qty
@@ -407,12 +544,26 @@ async def _enrich_vehicle(
         # Enrich with factory order item data (from pre-loaded batch)
         box_size = None
         pcs_per_box = None
+        box_detail = None
+        fo_order_id = None
         fo_order_number = None
+        mix_group_id = None
+        mix_box_size = None
+        mix_pcs_per_box = None
 
         if cost_item.factory_order_item_id:
             fo_data = fo_item_map.get(cost_item.factory_order_item_id)
             if fo_data:
-                box_size, pcs_per_box, fo_order_number = fo_data
+                (
+                    box_size,
+                    pcs_per_box,
+                    box_detail,
+                    fo_order_id,
+                    fo_order_number,
+                    mix_group_id,
+                    mix_box_size,
+                    mix_pcs_per_box,
+                ) = fo_data
 
         w = _safe_decimal(cost_item.weight_kg)
         v = _safe_decimal(cost_item.volume_m3)
@@ -442,6 +593,11 @@ async def _enrich_vehicle(
                 factory_order_item_id=cost_item.factory_order_item_id,
                 box_size=box_size,
                 pcs_per_box=pcs_per_box,
+                box_detail=box_detail,
+                mix_group_id=mix_group_id,
+                mix_box_size=mix_box_size,
+                mix_pcs_per_box=mix_pcs_per_box,
+                factory_order_id=fo_order_id,
                 factory_order_number=fo_order_number,
             )
         )
@@ -680,6 +836,32 @@ async def recalculate_vehicle(
         total_vat_rub=total_vat,
         total_rub=total_rub,
     )
+
+
+async def recalculate_all_vehicles(
+    db: AsyncSession,
+    project_id: int,
+) -> dict:
+    """Recalculate costs for ALL vehicles in the project."""
+    from backend.services.cost.items import recalculate_order_items
+
+    result = await db.execute(
+        select(CostOrder.order_no)
+        .where(
+            CostOrder.project_id == project_id,
+            CostOrder.is_deleted == False,  # noqa: E712
+            CostOrder.status.isnot(None),
+        )
+        .limit(500)
+    )
+    order_nos = [row[0] for row in result.all()]
+
+    total_updated = 0
+    for order_no in order_nos:
+        updated, _ = await recalculate_order_items(db, project_id, order_no)
+        total_updated += updated or 0
+
+    return {"ok": True, "vehicles": len(order_nos), "items_updated": total_updated}
 
 
 async def _create_inbound_from_vehicle(

@@ -95,6 +95,18 @@ jobs:
             git remote set-url origin https://${{ secrets.GH_PAT }}@github.com/vladbydaev37/dds2.git 2>/dev/null || true
             git pull origin main
 
+            echo "📦 Pre-pulling base images (with retry)..."
+            for image in python:3.11-slim node:20-slim; do
+              for attempt in 1 2 3; do
+                if docker pull "$image"; then
+                  echo "✅ Pulled $image"
+                  break
+                fi
+                echo "⚠️ Pull $image failed (attempt $attempt/3), retrying in 10s..."
+                sleep 10
+              done
+            done
+
             echo "🔨 Building and restarting all services..."
             docker compose -f docker-compose.app.yml up -d --build --remove-orphans --force-recreate backend worker frontend-react nginx
 

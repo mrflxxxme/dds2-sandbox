@@ -1491,6 +1491,10 @@ export interface FactoryOrderItem {
   pcs_per_box?: number;
   weight_kg?: number;
   note?: string;
+  box_detail?: number[] | null;
+  mix_group_id?: string | null;
+  mix_box_size?: string | null;
+  mix_pcs_per_box?: number | null;
   remaining_qty?: number;
 }
 
@@ -1533,6 +1537,10 @@ export interface FactoryOrderItemUpdate {
   pcs_per_box?: number;
   weight_kg?: number;
   note?: string;
+  box_detail?: number[] | null;
+  mix_group_id?: string | null;
+  mix_box_size?: string | null;
+  mix_pcs_per_box?: number | null;
 }
 
 export interface FactoryOrderCreate {
@@ -1620,8 +1628,13 @@ export interface VehicleItemSchema {
   vat_rub?: number;
   total_rub?: number;
   factory_order_item_id?: number;
+  factory_order_id?: number;
   box_size?: string;
   pcs_per_box?: number;
+  box_detail?: number[] | null;
+  mix_group_id?: string | null;
+  mix_box_size?: string | null;
+  mix_pcs_per_box?: number | null;
   factory_order_number?: string;
 }
 
@@ -1673,6 +1686,10 @@ export interface AvailableItem {
   price_cny: string;
   box_size?: string;
   pcs_per_box?: number;
+  box_detail?: number[] | null;
+  mix_group_id?: string | null;
+  mix_box_size?: string | null;
+  mix_pcs_per_box?: number | null;
   weight_kg?: string;
 }
 

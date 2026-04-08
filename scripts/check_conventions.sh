@@ -6,7 +6,7 @@
 # CI:  added as step in .github/workflows/ci.yml
 # ─────────────────────────────────────────────────────────────────────
 
-set -euo pipefail
+set -uo pipefail
 
 RED='\033[0;31m'
 YELLOW='\033[1;33m'

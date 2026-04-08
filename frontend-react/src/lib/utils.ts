@@ -30,3 +30,22 @@ export function formatDateTime(d: string | null | undefined): string {
     if (!d) return '—';
     return new Date(d).toLocaleString('ru-RU');
 }
+
+/** Calculate total boxes with mix group deduplication */
+export function calcTotalBoxesWithMix(items: { qty: number; pcs_per_box?: number | null | undefined; mix_group_id?: string | null | undefined; mix_pcs_per_box?: number | null | undefined }[]): number {
+    let total = 0;
+    const mixBoxes = new Map<string, number>(); // mix_group_id → max boxes in group
+    for (const item of items) {
+        if (item.mix_group_id) {
+            const ppb = item.mix_pcs_per_box || item.pcs_per_box || 0;
+            const boxes = ppb > 0 ? Math.ceil(item.qty / ppb) : 0;
+            const prev = mixBoxes.get(item.mix_group_id) || 0;
+            mixBoxes.set(item.mix_group_id, Math.max(prev, boxes));
+        } else {
+            const ppb = item.pcs_per_box || 0;
+            if (ppb > 0) total += Math.ceil(item.qty / ppb);
+        }
+    }
+    for (const boxes of mixBoxes.values()) total += boxes;
+    return total;
+}

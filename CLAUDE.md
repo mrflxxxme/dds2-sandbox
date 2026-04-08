@@ -53,17 +53,15 @@ Model → Alembic migration → Schema → Service → Router → Test
 
 #### Фичи и кросс-доменные изменения (полный цикл)
 ```
-Фаза 0: Человек описывает задачу своими словами
-         → Агент читает DOMAIN_*.md, анализирует код
-         → Агент задаёт уточняющие вопросы (только неясное)
-         → Агент формирует ТЗ, показывает на подтверждение
-         → Человек: "ок" или правки
-Фаза 1: Model → Migration → Schema (последовательно, один агент)
-Фаза 2: Backend ‖ Frontend (параллельно, агент оркестрирует сам)
-Фаза 3: pytest + vitest + check_conventions → коммит
+Фаза 0:   Lead (opus): уточняет → ТЗ
+Фаза 1:   Lead (sonnet): Model→Migration→Schema + Pre-warm frontend (haiku, read-only)
+Фаза 2:   2-3 агента (sonnet) параллельно: Backend[-A, -B] ‖ Frontend
+Фаза 2.5: code-reviewer ‖ security-reviewer (sonnet, read-only)
+Фаза 3:   pytest ‖ vitest ‖ conventions ‖ docs (haiku, параллельно) → коммит
 ```
 - Агент НЕ пишет код, пока человек не подтвердил ТЗ
 - Backend и Frontend — 0 пересечений файлов, всегда параллелятся
+- 2+ backend домена параллельно — только если изолированы (см. `docs/AGENT_DEVELOPMENT.md`)
 - Alembic миграции — ТОЛЬКО последовательно
 - Один файл — ТОЛЬКО один агент
 
@@ -72,6 +70,22 @@ Model → Alembic migration → Schema → Service → Router → Test
 
 ### Agent Teams (координация параллельных агентов)
 Включено: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` в `.claude/settings.json`
+
+#### Автоматическое создание команды
+**ПРАВИЛО:** Если задача затрагивает И backend, И frontend — АВТОМАТИЧЕСКИ создавать Team (TeamCreate) и запускать Backend + Frontend teammates параллельно. НЕ спрашивать разрешения.
+- Lead agent (opus): Фаза 0 (ТЗ) + Фаза 1 (Model→Migration→Schema) + Фаза 2.5 (review) + Фаза 3 (валидация)
+- Backend teammate (sonnet): service + router + tests (параллельно с frontend)
+- Frontend teammate (sonnet): types + api + page + tests (параллельно с backend)
+- Для чисто backend или чисто frontend задач — обычный Agent tool (без Team)
+- **Multi-domain:** если 2+ изолированных backend домена → 3 агента (Backend-A ‖ Backend-B ‖ Frontend)
+
+#### Model Routing (экономия токенов)
+| Задача | Модель |
+|--------|--------|
+| Lead + планирование | opus |
+| Реализация (Фаза 2) | sonnet |
+| Review (Фаза 2.5) | sonnet |
+| Pre-warm, валидация, docs | haiku |
 
 #### File Ownership Rules (0 конфликтов)
 | Зона | Файлы | Владелец |
@@ -87,6 +101,7 @@ Model → Alembic migration → Schema → Service → Router → Test
 - **Backend ‖ Frontend** — всегда параллельно (0 пересечений)
 - **Model → Migration → Schema** — последовательно (lead), потом параллелятся
 - **Рефакторинг** — один teammate пишет тесты, другой рефакторит (разные файлы)
+- **cache.py** — только lead agent, ПОСЛЕ завершения backend teammates
 
 ### Технические детали
 Подробности в `.claude/rules/` и DOMAIN файлах. Ключевое:
@@ -152,6 +167,13 @@ src/types/api.ts — TypeScript интерфейсы
 - **Bandit** — Python security linter (eval, injection, weak crypto; конфиг в `bandit.yaml`)
 - **Gitleaks** — секреты в коде
 
+### Pre-push (автоматически при пуше, блокирует если падает)
+- **pytest --testmon** — только изменённые тесты (~30-60 сек)
+- **vitest** — frontend тесты (~20-30 сек)
+- **check_conventions.sh** — конвенции (~5 сек)
+- Установка: `make setup` или `bash scripts/setup-hooks.sh`
+- Экстренный пропуск: `git push --no-verify`
+
 ### CI (автоматически при push/PR)
 - **Conventions + Tests** — параллельные jobs
 - **BuildKit cache** — Docker layer cache через `actions/cache` (ключ: `requirements-backend.txt` + `Dockerfile.backend`)
@@ -160,7 +182,9 @@ src/types/api.ts — TypeScript интерфейсы
 - **Snyk Code** — SAST (статический анализ кода, advisory-only; требует `SNYK_TOKEN` secret)
 - **CodeRabbit** — AI code review на каждый PR (конфиг `.coderabbit.yaml` с iron rules DDS)
 - **auto-pr.yml** — автосоздание PR dev→main при push
-- **auto-merge.yml** — автомерж PR после зелёного CI
+- **auto-merge.yml** — автомерж PR после зелёного CI (проверяет PR state + `gh pr checks`, мержит без `--auto`)
+- **Branch protection на `main`** — require Tests + Security Audit, strict (up-to-date branch), запрет force push/delete; `enforce_admins: false` (owner может обойти в экстренных случаях)
+- **CI Monitor** — scheduled task (каждые 5 мин): проверяет PR, автомерж, автофикс простых ошибок CI
 
 ### Dependabot (еженедельно)
 - Авто-PR для pip, npm, GitHub Actions зависимостей

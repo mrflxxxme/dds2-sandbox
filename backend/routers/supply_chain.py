@@ -25,6 +25,8 @@ from backend.schemas.supply_chain import (
     FactoryOrderSchema,
     FactoryOrderStatusUpdate,
     FactoryOrderUpdate,
+    SetMixGroupRequest,
+    SetMixGroupResponse,
     SplitToVehiclesRequest,
     VehicleCreate,
     VehicleDocumentSchema,
@@ -173,6 +175,37 @@ async def split_to_vehicles(
         raise HTTPException(400, str(e)) from e
 
 
+# ─── Mix Groups ──────────────────────────────────────────────────────────────
+
+
+@router.post("/factory-orders/{order_id}/mix-group", dependencies=[Depends(rate_limit_write)])
+async def set_mix_group(
+    order_id: int,
+    payload: SetMixGroupRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        mix_id, item_ids = await factory_orders.set_mix_group(db, project.id, order_id, payload.items, payload.box_size)
+        return SetMixGroupResponse(mix_group_id=mix_id, item_ids=item_ids, box_size=payload.box_size)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.delete("/factory-orders/{order_id}/mix-group/{mix_group_id}", dependencies=[Depends(rate_limit_write)])
+async def remove_mix_group(
+    order_id: int,
+    mix_group_id: str,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        count = await factory_orders.remove_mix_group(db, project.id, order_id, mix_group_id)
+        return {"ok": True, "removed_items": count}
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
 # ─── Factory Order History & Status ─────────────────────────────────────────
 
 
@@ -270,6 +303,18 @@ async def update_vehicle(
         raise HTTPException(400, str(e)) from e
 
 
+@router.delete("/vehicles/{order_no}", dependencies=[Depends(rate_limit_write)])
+async def delete_vehicle(
+    order_no: str,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await vehicle_delivery.delete_vehicle(db, project.id, order_no)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @router.put("/vehicles/{order_no}/status", dependencies=[Depends(rate_limit_write)])
 async def update_vehicle_status(
     order_no: str,
@@ -284,6 +329,15 @@ async def update_vehicle_status(
         return result
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+
+
+@router.post("/vehicles/recalc-all", dependencies=[Depends(rate_limit_write)])
+async def recalculate_all_vehicles(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Recalculate costs for all vehicles in the project."""
+    return await vehicle_delivery.recalculate_all_vehicles(db, project.id)
 
 
 @router.post("/vehicles/{order_no}/recalc", dependencies=[Depends(rate_limit_write)])
