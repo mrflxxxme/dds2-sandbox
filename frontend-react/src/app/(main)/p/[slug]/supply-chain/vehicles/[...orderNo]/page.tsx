@@ -1082,9 +1082,20 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                             </div>
 
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--color-border)' }}>
-                                <button className="btn btn-secondary btn-sm" onClick={() => { setRows(Array.from({ length: 5 }, emptyRow)); setError(''); }}>
-                                    Очистить
-                                </button>
+                                <div style={{ display: 'flex', gap: 8 }}>
+                                    <button className="btn btn-secondary btn-sm" onClick={() => { setRows(Array.from({ length: 5 }, emptyRow)); setError(''); }}>
+                                        Очистить
+                                    </button>
+                                    {invalidRows.length > 0 && (
+                                        <button className="btn btn-secondary btn-sm" onClick={() => {
+                                            const text = invalidRows.map(r => `${r.barcode.trim()}\t${r.qty}`).join('\n');
+                                            navigator.clipboard.writeText(text);
+                                            alert(`Скопировано ${invalidRows.length} ненайденных баркодов`);
+                                        }}>
+                                            Скопировать ненайденные ({invalidRows.length})
+                                        </button>
+                                    )}
+                                </div>
                                 <button className="btn btn-primary" onClick={handlePasteSubmit} disabled={!pasteCanSave || submitting}
                                     style={{ minWidth: 160, opacity: pasteCanSave ? 1 : 0.5 }}>
                                     {submitting ? 'Добавляем...' : hasUnfound ? `Добавить найденные (${validRows.length})` : `Добавить (${validRows.length})`}
