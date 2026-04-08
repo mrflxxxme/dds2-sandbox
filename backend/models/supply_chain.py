@@ -77,6 +77,8 @@ class FactoryOrderItem(Base):
     note: Mapped[str | None] = mapped_column(Text)
     box_detail: Mapped[list[int] | None] = mapped_column(JSONB, nullable=True, default=None)
     mix_group_id: Mapped[str | None] = mapped_column(String(36), nullable=True, default=None)
+    mix_box_size: Mapped[str | None] = mapped_column(String(50), nullable=True, default=None)
+    mix_pcs_per_box: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
 
     factory_order: Mapped["FactoryOrder"] = relationship(back_populates="items")
 

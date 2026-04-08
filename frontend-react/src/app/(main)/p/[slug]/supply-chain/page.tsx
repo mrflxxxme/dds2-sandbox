@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
-import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
+import { formatNumber, formatDate, exportToExcel, calcTotalBoxesWithMix } from '@/lib/utils';
 
 /** Нормализация габаритов → "60x40x40" */
 const normalizeBoxSize = (s: string): string => s.trim().replace(/[×*,/\\]/g, 'x');
@@ -11,21 +11,6 @@ const normalizeBoxSize = (s: string): string => s.trim().replace(/[×*,/\\]/g, '
 /** Кол-во мест (коробок) для одной позиции */
 const calcBoxes = (qty: number, pcsPerBox: number | null): number =>
     pcsPerBox && pcsPerBox > 0 ? Math.ceil(qty / pcsPerBox) : 0;
-
-/** Расчёт мест с учётом микс-групп: микс = 1 коробка */
-const calcTotalBoxesWithMix = (items: { qty: number; pcs_per_box?: number | null; mix_group_id?: string | null }[]): number => {
-    let total = 0;
-    const seen = new Set<string>();
-    for (const item of items) {
-        if (item.mix_group_id) {
-            if (!seen.has(item.mix_group_id)) { seen.add(item.mix_group_id); total += 1; }
-        } else {
-            const ppb = item.pcs_per_box || 0;
-            if (ppb > 0) total += Math.ceil(item.qty / ppb);
-        }
-    }
-    return total;
-};
 
 /** Объём одной позиции в м³ */
 const calcVolumeM3 = (boxSize: string, qty: number, pcsPerBox: number | null): number => {

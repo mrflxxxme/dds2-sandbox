@@ -302,7 +302,8 @@ async def remove_item_from_vehicle(
     if not cost_item:
         raise ValueError(f"Item {item_id} not found in vehicle {order_no}")
 
-    # Restore assigned_qty on factory order item
+    # Check if the linked FactoryOrderItem belongs to a mix group
+    mix_group_id = None
     if cost_item.factory_order_item_id:
         fo_item_result = await db.execute(
             select(FactoryOrderItem).where(
@@ -312,7 +313,66 @@ async def remove_item_from_vehicle(
         )
         fo_item = fo_item_result.scalar_one_or_none()
         if fo_item:
-            fo_item.assigned_qty = max(0, fo_item.assigned_qty - cost_item.qty)
+            mix_group_id = fo_item.mix_group_id
+
+    if mix_group_id is not None:
+        # Remove all mix group members from this vehicle
+        mix_fo_items_result = await db.execute(
+            select(FactoryOrderItem.id).where(
+                FactoryOrderItem.mix_group_id == mix_group_id,
+                FactoryOrderItem.project_id == project_id,
+            )
+        )
+        mix_fo_item_ids = {row[0] for row in mix_fo_items_result}
+
+        mix_cost_items_result = await db.execute(
+            select(CostOrderItem)
+            .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)
+            .where(
+                CostOrderItem.order_no == order_no,
+                CostOrderItem.factory_order_item_id.in_(mix_fo_item_ids),
+                CostOrder.project_id == project_id,
+                CostOrder.is_deleted == False,  # noqa: E712
+            )
+        )
+        mix_cost_items = mix_cost_items_result.scalars().all()
+
+        # Restore assigned_qty for each and delete
+        fo_restore_result = await db.execute(
+            select(FactoryOrderItem).where(
+                FactoryOrderItem.id.in_(mix_fo_item_ids),
+                FactoryOrderItem.project_id == project_id,
+            )
+        )
+        fo_items_map = {fi.id: fi for fi in fo_restore_result.scalars().all()}
+
+        removed = 0
+        for mix_ci in mix_cost_items:
+            if mix_ci.factory_order_item_id and mix_ci.factory_order_item_id in fo_items_map:
+                fi = fo_items_map[mix_ci.factory_order_item_id]
+                fi.assigned_qty = max(0, fi.assigned_qty - mix_ci.qty)
+            await db.delete(mix_ci)
+            removed += 1
+
+        await db.commit()
+
+        from backend.services.cost.items import recalculate_order_items
+
+        await recalculate_order_items(db, project_id, order_no)
+
+        return {"ok": True, "removed": removed}
+
+    # Single-item removal (not in a mix group)
+    if cost_item.factory_order_item_id:
+        fo_item_result2 = await db.execute(
+            select(FactoryOrderItem).where(
+                FactoryOrderItem.id == cost_item.factory_order_item_id,
+                FactoryOrderItem.project_id == project_id,
+            )
+        )
+        fo_item2 = fo_item_result2.scalar_one_or_none()
+        if fo_item2:
+            fo_item2.assigned_qty = max(0, fo_item2.assigned_qty - cost_item.qty)
 
     await db.delete(cost_item)
     await db.commit()
@@ -421,6 +481,8 @@ async def get_available_items(
                         "pcs_per_box": item.pcs_per_box,
                         "box_detail": item.box_detail,
                         "mix_group_id": item.mix_group_id,
+                        "mix_box_size": item.mix_box_size,
+                        "mix_pcs_per_box": item.mix_pcs_per_box,
                         "weight_kg": str(item.weight_kg) if item.weight_kg else None,
                     }
                 )
@@ -463,6 +525,8 @@ async def _enrich_vehicle(
                 FactoryOrderItem.factory_order_id,
                 FactoryOrder.order_number,
                 FactoryOrderItem.mix_group_id,
+                FactoryOrderItem.mix_box_size,
+                FactoryOrderItem.mix_pcs_per_box,
             )
             .join(FactoryOrder, FactoryOrderItem.factory_order_id == FactoryOrder.id)
             .where(
@@ -471,7 +535,7 @@ async def _enrich_vehicle(
             )
         )
         for row in fo_batch_result:
-            fo_item_map[row[0]] = (row[1], row[2], row[3], row[4], row[5], row[6])
+            fo_item_map[row[0]] = (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8])
 
     for cost_item in vehicle.items:
         total_qty += cost_item.qty
@@ -484,11 +548,22 @@ async def _enrich_vehicle(
         fo_order_id = None
         fo_order_number = None
         mix_group_id = None
+        mix_box_size = None
+        mix_pcs_per_box = None
 
         if cost_item.factory_order_item_id:
             fo_data = fo_item_map.get(cost_item.factory_order_item_id)
             if fo_data:
-                box_size, pcs_per_box, box_detail, fo_order_id, fo_order_number, mix_group_id = fo_data
+                (
+                    box_size,
+                    pcs_per_box,
+                    box_detail,
+                    fo_order_id,
+                    fo_order_number,
+                    mix_group_id,
+                    mix_box_size,
+                    mix_pcs_per_box,
+                ) = fo_data
 
         w = _safe_decimal(cost_item.weight_kg)
         v = _safe_decimal(cost_item.volume_m3)
@@ -520,6 +595,8 @@ async def _enrich_vehicle(
                 pcs_per_box=pcs_per_box,
                 box_detail=box_detail,
                 mix_group_id=mix_group_id,
+                mix_box_size=mix_box_size,
+                mix_pcs_per_box=mix_pcs_per_box,
                 factory_order_id=fo_order_id,
                 factory_order_number=fo_order_number,
             )

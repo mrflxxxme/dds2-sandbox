@@ -52,8 +52,8 @@ export function addSupplyChainMethods(api: ApiClient) {
         },
 
         // ─── Mix Groups ────────────────────────────────────────────
-        setMixGroup(orderId: number, itemIds: number[]) {
-            return api.request<{ mix_group_id: string; item_ids: number[] }>('POST', `/api/v1/supply-chain/factory-orders/${orderId}/mix-group`, { item_ids: itemIds });
+        setMixGroup(orderId: number, items: { id: number; pcs_per_box: number }[], boxSize: string) {
+            return api.request<{ mix_group_id: string; item_ids: number[]; box_size: string }>('POST', `/api/v1/supply-chain/factory-orders/${orderId}/mix-group`, { items, box_size: boxSize });
         },
         removeMixGroup(orderId: number, mixGroupId: string) {
             return api.request<{ ok: boolean; removed_items: number }>('DELETE', `/api/v1/supply-chain/factory-orders/${orderId}/mix-group/${mixGroupId}`);

@@ -492,6 +492,9 @@ async def delete_item(
     if not item:
         raise ValueError("Item not found in this order")
 
+    if item.mix_group_id is not None:
+        raise ValueError("Нельзя удалить: позиция входит в микс-группу. Сначала разбейте микс.")
+
     if item.assigned_qty > 0:
         raise ValueError(f"Нельзя удалить: позиция распределена по машинам " f"({item.assigned_qty} шт.)")
 
@@ -507,32 +510,45 @@ async def set_mix_group(
     db: AsyncSession,
     project_id: int,
     order_id: int,
-    item_ids: list[int],
+    items: list,
+    box_size: str,
 ) -> tuple[str, list[int]]:
     """Group items into a mix box (shared packaging).
 
     Returns (mix_group_id, matched_item_ids).
     Validates all items belong to the same order and project.
+    `items` is a list of objects with `.id` and `.pcs_per_box` attributes.
     """
-    if len(item_ids) < 2:
+    if len(items) < 2:
         raise ValueError("Микс-группа должна содержать минимум 2 позиции")
+
+    if not box_size:
+        raise ValueError("Размер коробки не может быть пустым")
 
     order = await get_factory_order(db, project_id, order_id)
     if not order:
         raise ValueError("Factory order not found")
 
     items_by_id = {i.id: i for i in order.items}
-    matched: list[FactoryOrderItem] = []
-    for iid in item_ids:
-        item = items_by_id.get(iid)
+    matched: list[tuple[FactoryOrderItem, int]] = []
+    for input_item in items:
+        if input_item.pcs_per_box <= 0:
+            raise ValueError(f"pcs_per_box для позиции {input_item.id} должен быть больше 0")
+        item = items_by_id.get(input_item.id)
         if not item:
-            raise ValueError(f"Позиция {iid} не найдена в заказе {order_id}")
-        matched.append(item)
+            raise ValueError(f"Позиция {input_item.id} не найдена в заказе {order_id}")
+        if item.assigned_qty != 0:
+            raise ValueError(f"Позиция {input_item.id} уже распределена по машинам")
+        if item.mix_group_id is not None:
+            raise ValueError(f"Позиция {input_item.id} уже входит в микс-группу")
+        matched.append((item, input_item.pcs_per_box))
 
     mix_id = str(uuid.uuid4())
     matched_ids = []
-    for item in matched:
+    for item, pcs_per_box in matched:
         item.mix_group_id = mix_id
+        item.mix_box_size = box_size
+        item.mix_pcs_per_box = pcs_per_box
         matched_ids.append(item.id)
 
     await db.commit()
@@ -557,6 +573,8 @@ async def remove_mix_group(
     for item in order.items:
         if item.mix_group_id == mix_group_id:
             item.mix_group_id = None
+            item.mix_box_size = None
+            item.mix_pcs_per_box = None
             count += 1
 
     if count == 0:

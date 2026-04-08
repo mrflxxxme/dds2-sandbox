@@ -186,8 +186,8 @@ async def set_mix_group(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        mix_id, item_ids = await factory_orders.set_mix_group(db, project.id, order_id, payload.item_ids)
-        return SetMixGroupResponse(mix_group_id=mix_id, item_ids=item_ids)
+        mix_id, item_ids = await factory_orders.set_mix_group(db, project.id, order_id, payload.items, payload.box_size)
+        return SetMixGroupResponse(mix_group_id=mix_id, item_ids=item_ids, box_size=payload.box_size)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 

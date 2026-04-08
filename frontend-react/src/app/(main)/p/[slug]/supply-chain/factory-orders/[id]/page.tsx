@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
-import { formatNumber, formatDate, formatDateTime, exportToExcel } from '@/lib/utils';
+import { formatNumber, formatDate, formatDateTime, exportToExcel, calcTotalBoxesWithMix } from '@/lib/utils';
 import PageHeader from '@/components/PageHeader';
 import BoxDetailCell, { BoxDetailExpandRow } from '@/components/BoxDetailCell';
 import type { FactoryOrder, FactoryOrderItem, FactoryOrderItemUpdate, FactoryOrderHistory, Nomenclature } from '@/types/api';
@@ -15,24 +15,6 @@ const MIX_COLORS = ['#0071e3', '#34c759', '#ff9f0a', '#af52de', '#ff375f', '#00c
 function getMixColor(mixGroupId: string, allMixIds: string[]): string {
     const idx = allMixIds.indexOf(mixGroupId);
     return MIX_COLORS[idx % MIX_COLORS.length];
-}
-
-/** Расчёт мест с учётом микс-групп: микс = 1 коробка */
-function calcTotalBoxesWithMix(items: { qty: number; pcs_per_box?: number | null; mix_group_id?: string | null }[]): number {
-    let total = 0;
-    const seen = new Set<string>();
-    for (const item of items) {
-        if (item.mix_group_id) {
-            if (!seen.has(item.mix_group_id)) {
-                seen.add(item.mix_group_id);
-                total += 1;
-            }
-        } else {
-            const ppb = item.pcs_per_box || 0;
-            if (ppb > 0) total += Math.ceil(item.qty / ppb);
-        }
-    }
-    return total;
 }
 
 const parseNum = (s: string) => (s || '').trim().replace(/\s/g, '').replace(',', '.').replace(/[^\d.]/g, '');
@@ -322,6 +304,11 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
     const [expandedId, setExpandedId] = useState<number | null>(null);
     const [selected, setSelected] = useState<Set<number>>(new Set());
     const [mixSaving, setMixSaving] = useState(false);
+    const [mixFormOpen, setMixFormOpen] = useState(false);
+    const [mixFormData, setMixFormData] = useState<{
+        boxSize: string;
+        items: { id: number; barcode: string; subject: string; qty: number; pcsPerBox: string }[];
+    }>({ boxSize: '', items: [] });
 
     // Unique mix group IDs for color assignment
     const mixGroupIds = useMemo(() => {
@@ -342,17 +329,40 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
         else setSelected(new Set(items.map(i => i.id)));
     };
 
-    const handleSetMix = async () => {
+    const handleOpenMixForm = () => {
         if (selected.size < 2) return;
+        const selectedItems = items.filter(i => selected.has(i.id));
+        setMixFormData({
+            boxSize: '',
+            items: selectedItems.map(i => ({
+                id: i.id,
+                barcode: i.barcode,
+                subject: i.subject || '',
+                qty: i.qty,
+                pcsPerBox: i.pcs_per_box ? String(i.pcs_per_box) : '',
+            })),
+        });
+        setMixFormOpen(true);
+    };
+
+    const handleSaveMix = async () => {
         setMixSaving(true);
         try {
-            await api.setMixGroup(orderId, Array.from(selected));
+            const mixItems = mixFormData.items.map(i => ({ id: i.id, pcs_per_box: parseInt(i.pcsPerBox) || 0 }));
+            await api.setMixGroup(orderId, mixItems, mixFormData.boxSize);
+            setMixFormOpen(false);
             setSelected(new Set());
+            setMixFormData({ boxSize: '', items: [] });
             onChanged();
         } catch (e: unknown) {
             alert(e instanceof Error ? e.message : 'Ошибка создания микса');
         }
         setMixSaving(false);
+    };
+
+    const handleCancelMix = () => {
+        setMixFormOpen(false);
+        setMixFormData({ boxSize: '', items: [] });
     };
 
     const handleRemoveMix = async (mixGroupId: string) => {
@@ -477,10 +487,10 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                     Позиции ({items.length})
                 </h3>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    {!editing && selected.size >= 2 && (
-                        <button className="btn btn-primary btn-sm" onClick={handleSetMix} disabled={mixSaving}
+                    {!editing && selected.size >= 2 && !mixFormOpen && (
+                        <button className="btn btn-primary btn-sm" onClick={handleOpenMixForm}
                             style={{ fontSize: 12 }}>
-                            {mixSaving ? '...' : `Микс (${selected.size})`}
+                            Микс-коробка ({selected.size})
                         </button>
                     )}
                     {!editing ? (
@@ -498,6 +508,78 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                     )}
                 </div>
             </div>
+
+            {/* Mix form */}
+            {mixFormOpen && (
+                <div style={{
+                    margin: '12px 0', padding: 16, borderRadius: 12,
+                    background: 'var(--color-bg)', border: '1px solid var(--color-accent)',
+                }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--color-accent)' }}>
+                        Микс-коробка
+                    </div>
+                    <div style={{ marginBottom: 12 }}>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'block', marginBottom: 4 }}>
+                            Размер коробки
+                        </label>
+                        <input
+                            value={mixFormData.boxSize}
+                            onChange={e => setMixFormData(f => ({ ...f, boxSize: e.target.value }))}
+                            onBlur={e => setMixFormData(f => ({ ...f, boxSize: normalizeBoxSize(e.target.value) }))}
+                            placeholder="60x40x40"
+                            style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid var(--color-border)', background: 'var(--color-bg)', color: 'var(--color-text)', fontSize: 13, width: 160 }}
+                        />
+                    </div>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, marginBottom: 12 }}>
+                        <thead>
+                            <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                <th style={{ textAlign: 'left', padding: '6px 4px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Баркод</th>
+                                <th style={{ textAlign: 'left', padding: '6px 4px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Предмет</th>
+                                <th style={{ textAlign: 'right', padding: '6px 4px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Всего</th>
+                                <th style={{ textAlign: 'right', padding: '6px 4px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Шт в коробке</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {mixFormData.items.map((item, idx) => (
+                                <tr key={item.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                    <td style={{ padding: '6px 4px', fontFamily: 'monospace', fontSize: 12 }}>{item.barcode}</td>
+                                    <td style={{ padding: '6px 4px', fontSize: 12 }}>{item.subject || '—'}</td>
+                                    <td style={{ padding: '6px 4px', textAlign: 'right' }}>{item.qty}</td>
+                                    <td style={{ padding: '6px 4px', textAlign: 'right' }}>
+                                        <input
+                                            type="number"
+                                            min={1}
+                                            value={item.pcsPerBox}
+                                            onChange={e => setMixFormData(f => ({
+                                                ...f,
+                                                items: f.items.map((it, i) => i === idx ? { ...it, pcsPerBox: e.target.value } : it),
+                                            }))}
+                                            style={{ padding: '4px 6px', borderRadius: 6, border: '1px solid var(--color-border)', background: 'var(--color-bg)', color: 'var(--color-text)', fontSize: 12, width: 70, textAlign: 'right' }}
+                                        />
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                    {(() => {
+                        const totalMixBoxes = mixFormData.items.every(i => parseInt(i.pcsPerBox) > 0)
+                            ? Math.min(...mixFormData.items.map(i => Math.floor(i.qty / (parseInt(i.pcsPerBox) || 1))))
+                            : 0;
+                        return (
+                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+                                Итого: <b style={{ color: 'var(--color-text)' }}>{totalMixBoxes}</b> микс-коробок
+                            </div>
+                        );
+                    })()}
+                    <div style={{ display: 'flex', gap: 8 }}>
+                        <button className="btn btn-secondary btn-sm" onClick={handleCancelMix}>Отмена</button>
+                        <button className="btn btn-primary btn-sm" onClick={handleSaveMix} disabled={mixSaving || !mixFormData.boxSize || mixFormData.items.some(i => !parseInt(i.pcsPerBox))}>
+                            {mixSaving ? '...' : 'Сохранить'}
+                        </button>
+                    </div>
+                </div>
+            )}
+
             <div style={{ overflow: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                     <thead>
@@ -565,13 +647,33 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                                     <td style={tdR}><MiniProgressBar qty={item.qty} assignedQty={item.assigned_qty} /></td>
                                     <td style={tdR}>{formatNumber(Number(item.price_cny), 2)}</td>
                                     <td style={tdR}>{formatNumber(item.qty * Number(item.price_cny), 0)}</td>
-                                    <td style={td}>{item.box_size || '—'}</td>
-                                    <td style={tdR}>{item.pcs_per_box || '—'}</td>
+                                    <td style={td}>
+                                        {item.mix_group_id
+                                            ? (item.mix_box_size || item.box_size || '—')
+                                            : (item.box_size || '—')}
+                                    </td>
                                     <td style={tdR}>
-                                        {item.mix_group_id ? (
-                                            <span style={{ fontSize: 11, fontWeight: 600, color: mixColor, cursor: 'default' }}
-                                                title={`Микс-группа: ${item.mix_group_id.slice(0, 8)}`}>микс</span>
-                                        ) : (
+                                        {item.mix_group_id
+                                            ? (item.mix_pcs_per_box || item.pcs_per_box || '—')
+                                            : (item.pcs_per_box || '—')}
+                                    </td>
+                                    <td style={tdR}>
+                                        {item.mix_group_id ? (() => {
+                                            const effectivePpb = item.mix_pcs_per_box || item.pcs_per_box;
+                                            const mixBoxCount = effectivePpb && effectivePpb > 0 ? Math.ceil(item.qty / effectivePpb) : null;
+                                            return (
+                                                <span title={`Микс-группа: ${item.mix_group_id.slice(0, 8)}`}>
+                                                    {mixBoxCount !== null ? (
+                                                        <>
+                                                            <span style={{ fontWeight: 600, color: mixColor }}>{mixBoxCount}</span>
+                                                            <span style={{ fontSize: 10, fontWeight: 600, color: mixColor, marginLeft: 3 }}>микс</span>
+                                                        </>
+                                                    ) : (
+                                                        <span style={{ fontSize: 11, fontWeight: 600, color: mixColor }}>микс</span>
+                                                    )}
+                                                </span>
+                                            );
+                                        })() : (
                                             <BoxDetailCell
                                                 qty={item.qty}
                                                 pcsPerBox={item.pcs_per_box}
