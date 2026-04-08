@@ -47,6 +47,14 @@ jobs:
             exit 0
           fi
 
-          # Enable auto-merge (will merge when all required checks pass)
-          echo "Enabling auto-merge for PR #${PR_NUMBER}..."
-          gh pr merge "$PR_NUMBER" --auto --merge
+          # Check if all CI checks passed
+          echo "Checking CI status for PR #${PR_NUMBER}..."
+          CHECKS_STATUS=$(gh pr checks "$PR_NUMBER" --json bucket --jq '[.[] | select(.bucket != "pass")] | length')
+
+          if [ "$CHECKS_STATUS" != "0" ]; then
+            echo "Not all checks passed yet (${CHECKS_STATUS} pending/failed), skipping"
+            exit 0
+          fi
+
+          echo "All checks passed! Merging PR #${PR_NUMBER}..."
+          gh pr merge "$PR_NUMBER" --merge --delete-branch=false
