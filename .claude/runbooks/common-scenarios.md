@@ -117,3 +117,34 @@
 - `types/api.ts` и `lib/api.ts` — ОДИН агент за раз
 - `globals.css` — ОДИН агент за раз
 - Если нужен общий файл — один агент делает, второй ждёт
+
+## 10. Коммит + деплой (чеклист)
+
+```
+ПЕРЕД коммитом:
+1. Проверить окружение: command -v docker, command -v npx, command -v gitleaks
+2. Если docker недоступен → предупредить, тесты нельзя прогнать
+3. git status — убедиться что нет лишних файлов в stage
+4. git log --oneline -3 — понять текущее состояние
+
+КОММИТ:
+5. git add <конкретные файлы> (НЕ git add -A)
+6. git commit (pre-commit hooks отработают автоматически)
+7. Если pre-commit падает на gitleaks/bandit → установить или SKIP=tool
+8. НИКОГДА amend после push — только новый коммит
+
+ДЕПЛОЙ:
+9.  git log origin/dev..HEAD — проверить что есть непушенные коммиты
+10. git push origin dev — pre-push hook прогонит тесты
+11. Если pre-push падает на Docker → make dev, потом повторить
+12. После пуша — CI автоматически: Auto PR → Tests → Auto Merge → Deploy
+13. НЕ делать merge вручную — CI сделает сам
+```
+
+**Автоматический пайплайн после `git push origin dev`:**
+```
+push dev → auto-pr.yml (PR dev→main)
+         → test.yml (pytest + vitest + conventions + mypy)
+         → auto-merge.yml (merge после зелёного CI)
+         → cd-production.yml (backup → build → migrate → health check)
+```
