@@ -340,13 +340,19 @@ export default function VehicleDetailPage() {
     const containerLabel = CONTAINER_LABELS[vehicle.container_type || ''] || vehicle.transport_type || 'AUTO';
     const cs = vehicle.cost_summary;
 
-    // Calculate totals for header
-    const totalBoxes = vehicle.items.reduce((sum, item) => {
-        if (item.pcs_per_box && item.pcs_per_box > 0) {
-            return sum + Math.ceil(item.qty / item.pcs_per_box);
+    // Calculate totals for header (mix groups = 1 box)
+    const totalBoxes = (() => {
+        let total = 0;
+        const mixSeen = new Set<string>();
+        for (const item of vehicle.items) {
+            if (item.mix_group_id) {
+                if (!mixSeen.has(item.mix_group_id)) { mixSeen.add(item.mix_group_id); total += 1; }
+            } else if (item.pcs_per_box && item.pcs_per_box > 0) {
+                total += Math.ceil(item.qty / item.pcs_per_box);
+            }
         }
-        return sum;
-    }, 0);
+        return total;
+    })();
 
     return (
         <div className="animate-in">
@@ -493,7 +499,7 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                 'Артикул': item.article_seller || '',
                 'Категория': item.subject || '',
                 'Кол-во': item.qty,
-                'Мест': boxes || '',
+                'Мест': item.mix_group_id ? 'микс' : (boxes || ''),
                 'Вес 1шт, кг': item.weight_kg || '',
                 'Вес общ, кг': item.weight_kg ? Number(((item.weight_kg || 0) * item.qty).toFixed(1)) : '',
                 'Коробка': item.box_size || '',
@@ -516,12 +522,17 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
     const tdR: React.CSSProperties = { ...td, textAlign: 'right' };
     const tdF: React.CSSProperties = { ...tdR, background: 'rgba(59,130,246,0.02)' };
 
-    // Totals
+    // Totals (mix groups = 1 box)
     let totalBoxes = 0, totalWeight = 0, totalVolume = 0;
     let totalRub = 0, totalDelivery = 0, totalDuty = 0, totalVat = 0;
+    const mixSeen = new Set<string>();
     for (const item of items) {
-        const ppb = item.pcs_per_box || 0;
-        if (ppb > 0) totalBoxes += Math.ceil(item.qty / ppb);
+        if (item.mix_group_id) {
+            if (!mixSeen.has(item.mix_group_id)) { mixSeen.add(item.mix_group_id); totalBoxes += 1; }
+        } else {
+            const ppb = item.pcs_per_box || 0;
+            if (ppb > 0) totalBoxes += Math.ceil(item.qty / ppb);
+        }
         totalWeight += (item.weight_kg || 0) * item.qty;
         const dims = parseBoxDims(item.box_size);
         if (dims && ppb > 0) totalVolume += (dims.l * dims.w * dims.h) / 1e6 * Math.ceil(item.qty / ppb);
@@ -613,13 +624,18 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                             <td style={{ ...td, fontSize: 12 }}>{item.subject || '—'}</td>
                             <td style={{ ...tdR, fontWeight: 600 }}>{formatNumber(item.qty, 0)}</td>
                             <td style={tdR}>
-                                <BoxDetailCell
-                                    qty={item.qty}
-                                    pcsPerBox={item.pcs_per_box}
-                                    boxDetail={item.box_detail}
-                                    expanded={expandedId === item.id}
-                                    onToggle={ppb > 0 ? () => setExpandedId(expandedId === item.id ? null : item.id) : undefined}
-                                />
+                                {item.mix_group_id ? (
+                                    <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-accent)' }}
+                                        title={`Микс: ${item.mix_group_id.slice(0, 8)}`}>микс</span>
+                                ) : (
+                                    <BoxDetailCell
+                                        qty={item.qty}
+                                        pcsPerBox={item.pcs_per_box}
+                                        boxDetail={item.box_detail}
+                                        expanded={expandedId === item.id}
+                                        onToggle={ppb > 0 ? () => setExpandedId(expandedId === item.id ? null : item.id) : undefined}
+                                    />
+                                )}
                             </td>
                             <td style={{ ...tdR, color: 'var(--color-text-muted)' }}>{item.weight_kg ? formatNumber(item.weight_kg, 2) : '—'}</td>
                             <td style={tdR}>{weight > 0 ? formatNumber(weight, 1) : '—'}</td>

@@ -10,6 +10,31 @@ import type { FactoryOrder, FactoryOrderItem, FactoryOrderItemUpdate, FactoryOrd
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
+/** Mix-group color palette for visual grouping */
+const MIX_COLORS = ['#0071e3', '#34c759', '#ff9f0a', '#af52de', '#ff375f', '#00c7be', '#ff6482', '#5e5ce6'];
+function getMixColor(mixGroupId: string, allMixIds: string[]): string {
+    const idx = allMixIds.indexOf(mixGroupId);
+    return MIX_COLORS[idx % MIX_COLORS.length];
+}
+
+/** Расчёт мест с учётом микс-групп: микс = 1 коробка */
+function calcTotalBoxesWithMix(items: { qty: number; pcs_per_box?: number | null; mix_group_id?: string | null }[]): number {
+    let total = 0;
+    const seen = new Set<string>();
+    for (const item of items) {
+        if (item.mix_group_id) {
+            if (!seen.has(item.mix_group_id)) {
+                seen.add(item.mix_group_id);
+                total += 1;
+            }
+        } else {
+            const ppb = item.pcs_per_box || 0;
+            if (ppb > 0) total += Math.ceil(item.qty / ppb);
+        }
+    }
+    return total;
+}
+
 const parseNum = (s: string) => (s || '').trim().replace(/\s/g, '').replace(',', '.').replace(/[^\d.]/g, '');
 
 /** Нормализация габаритов: "60,40,40" / "60/40/40" / "60*40*40" / "60×40×40" → "60x40x40" */
@@ -217,7 +242,7 @@ function OrderInfoCard({ order, onUpdated }: { order: FactoryOrder; onUpdated: (
 
             {/* Summary KPIs */}
             {(() => {
-                const totalBoxes = items.reduce((s, i) => s + (i.pcs_per_box && i.pcs_per_box > 0 ? Math.ceil(i.qty / i.pcs_per_box) : 0), 0);
+                const totalBoxes = calcTotalBoxesWithMix(items);
                 const totalVolume = items.reduce((s, i) => s + calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box ?? null), 0);
                 const progressColor = distPct >= 100 ? 'var(--color-success)' : distPct > 0 ? 'var(--color-warning)' : 'var(--color-border)';
                 return (
@@ -295,6 +320,51 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
     const [saving, setSaving] = useState(false);
     const [deletingId, setDeletingId] = useState<number | null>(null);
     const [expandedId, setExpandedId] = useState<number | null>(null);
+    const [selected, setSelected] = useState<Set<number>>(new Set());
+    const [mixSaving, setMixSaving] = useState(false);
+
+    // Unique mix group IDs for color assignment
+    const mixGroupIds = useMemo(() => {
+        const ids = new Set<string>();
+        items.forEach(i => { if (i.mix_group_id) ids.add(i.mix_group_id); });
+        return Array.from(ids);
+    }, [items]);
+
+    const toggleSelect = (id: number) => {
+        setSelected(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id); else next.add(id);
+            return next;
+        });
+    };
+    const toggleAll = () => {
+        if (selected.size === items.length) setSelected(new Set());
+        else setSelected(new Set(items.map(i => i.id)));
+    };
+
+    const handleSetMix = async () => {
+        if (selected.size < 2) return;
+        setMixSaving(true);
+        try {
+            await api.setMixGroup(orderId, Array.from(selected));
+            setSelected(new Set());
+            onChanged();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка создания микса');
+        }
+        setMixSaving(false);
+    };
+
+    const handleRemoveMix = async (mixGroupId: string) => {
+        setMixSaving(true);
+        try {
+            await api.removeMixGroup(orderId, mixGroupId);
+            onChanged();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка удаления микса');
+        }
+        setMixSaving(false);
+    };
 
     const startBulkEdit = () => {
         setEditRows(items.map(itemToEditRow));
@@ -379,7 +449,8 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
             'Сумма ¥': i.qty * Number(i.price_cny),
             'Коробка': i.box_size || '',
             'Шт/кор': i.pcs_per_box || '',
-            'Мест': i.pcs_per_box && i.pcs_per_box > 0 ? Math.ceil(i.qty / i.pcs_per_box) : '',
+            'Мест': i.mix_group_id ? 'микс' : (i.pcs_per_box && i.pcs_per_box > 0 ? Math.ceil(i.qty / i.pcs_per_box) : ''),
+            'Микс': i.mix_group_id ? i.mix_group_id.slice(0, 8) : '',
             'Вес (кг) 1шт': i.weight_kg ? Number(i.weight_kg) : '',
         }));
         exportToExcel(rows, 'factory-order-items');
@@ -405,7 +476,13 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                 <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>
                     Позиции ({items.length})
                 </h3>
-                <div style={{ display: 'flex', gap: 8 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    {!editing && selected.size >= 2 && (
+                        <button className="btn btn-primary btn-sm" onClick={handleSetMix} disabled={mixSaving}
+                            style={{ fontSize: 12 }}>
+                            {mixSaving ? '...' : `Микс (${selected.size})`}
+                        </button>
+                    )}
                     {!editing ? (
                         <>
                             <button className="btn btn-secondary btn-sm" onClick={startBulkEdit}>Редактировать всё</button>
@@ -425,6 +502,12 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                     <thead>
                         <tr style={{ borderBottom: '2px solid var(--color-border)' }}>
+                            {!editing && (
+                                <th style={{ width: 32, textAlign: 'center', padding: '8px 2px' }}>
+                                    <input type="checkbox" checked={selected.size === items.length && items.length > 0}
+                                        onChange={toggleAll} style={{ cursor: 'pointer' }} />
+                                </th>
+                            )}
                             <th style={th}>Баркод</th>
                             <th style={th}>Предмет</th>
                             <th style={th}>Артикул</th>
@@ -464,9 +547,17 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                         }) : items.map(item => {
                             const canDelete = item.assigned_qty === 0;
                             const ppb = item.pcs_per_box || 0;
+                            const mixColor = item.mix_group_id ? getMixColor(item.mix_group_id, mixGroupIds) : undefined;
                             return (
                                 <React.Fragment key={item.id}>
-                                <tr style={{ borderBottom: expandedId === item.id ? 'none' : '1px solid var(--color-border)' }}>
+                                <tr style={{
+                                    borderBottom: expandedId === item.id ? 'none' : '1px solid var(--color-border)',
+                                    borderLeft: mixColor ? `3px solid ${mixColor}` : undefined,
+                                }}>
+                                    <td style={{ textAlign: 'center', padding: '4px 2px' }}>
+                                        <input type="checkbox" checked={selected.has(item.id)}
+                                            onChange={() => toggleSelect(item.id)} style={{ cursor: 'pointer' }} />
+                                    </td>
                                     <td style={{ ...td, fontFamily: 'monospace', fontSize: 12 }}>{item.barcode}</td>
                                     <td style={td}>{item.subject || <span style={{ color: 'var(--color-text-dim)' }}>—</span>}</td>
                                     <td style={td}>{item.article_seller || <span style={{ color: 'var(--color-text-dim)' }}>—</span>}</td>
@@ -477,16 +568,26 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                                     <td style={td}>{item.box_size || '—'}</td>
                                     <td style={tdR}>{item.pcs_per_box || '—'}</td>
                                     <td style={tdR}>
-                                        <BoxDetailCell
-                                            qty={item.qty}
-                                            pcsPerBox={item.pcs_per_box}
-                                            boxDetail={item.box_detail}
-                                            expanded={expandedId === item.id}
-                                            onToggle={ppb > 0 ? () => setExpandedId(expandedId === item.id ? null : item.id) : undefined}
-                                        />
+                                        {item.mix_group_id ? (
+                                            <span style={{ fontSize: 11, fontWeight: 600, color: mixColor, cursor: 'default' }}
+                                                title={`Микс-группа: ${item.mix_group_id.slice(0, 8)}`}>микс</span>
+                                        ) : (
+                                            <BoxDetailCell
+                                                qty={item.qty}
+                                                pcsPerBox={item.pcs_per_box}
+                                                boxDetail={item.box_detail}
+                                                expanded={expandedId === item.id}
+                                                onToggle={ppb > 0 ? () => setExpandedId(expandedId === item.id ? null : item.id) : undefined}
+                                            />
+                                        )}
                                     </td>
                                     <td style={tdR}>{item.weight_kg ? formatNumber(Number(item.weight_kg), 2) : '—'}</td>
-                                    <td style={{ ...td, textAlign: 'center' }}>
+                                    <td style={{ ...td, textAlign: 'center', whiteSpace: 'nowrap' }}>
+                                        {item.mix_group_id && (
+                                            <button onClick={() => handleRemoveMix(item.mix_group_id!)} disabled={mixSaving}
+                                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: mixColor, fontSize: 12, opacity: 0.7, padding: 2 }}
+                                                title="Разбить микс">⊘</button>
+                                        )}
                                         {canDelete && (
                                             <button onClick={() => handleDelete(item)} disabled={deletingId === item.id}
                                                 style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-danger)', fontSize: 14, opacity: deletingId === item.id ? 0.3 : 0.6, padding: 2 }}
@@ -500,7 +601,7 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                                             qty={item.qty}
                                             pcsPerBox={ppb}
                                             boxDetail={item.box_detail}
-                                            colSpan={12}
+                                            colSpan={13}
                                             editable
                                             orderId={orderId}
                                             itemId={item.id}
@@ -515,7 +616,7 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                     {items.length > 1 && (
                         <tfoot>
                             <tr style={{ borderTop: '2px solid var(--color-border)', fontWeight: 600 }}>
-                                <td colSpan={3} style={{ ...td, fontSize: 12, color: 'var(--color-text-muted)' }}>ИТОГО</td>
+                                <td colSpan={editing ? 3 : 4} style={{ ...td, fontSize: 12, color: 'var(--color-text-muted)' }}>ИТОГО</td>
                                 <td style={tdR}>{formatNumber(totalQty, 0)}</td>
                                 <td style={tdR}><MiniProgressBar qty={totalQty} assignedQty={totalAssigned} /></td>
                                 <td style={tdR} />
