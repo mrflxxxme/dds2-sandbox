@@ -44,22 +44,34 @@ from backend.services.fbo_supply_service import (
 @pytest_asyncio.fixture(autouse=True)
 async def ensure_test_project(db_session):
     """Create a test user + project with id=1 if not exists, clean FBO data before each test."""
-    # Clean FBO data from previous test runs (respect FK order)
+    # Clean FBO data from previous test runs (scoped to project_id=1, respect FK order)
     await db_session.execute(
         text(
-            "DELETE FROM assembly_status_history WHERE assembly_request_id IN (SELECT id FROM assembly_requests WHERE wb_fbo_supply_id IN (SELECT id FROM wb_fbo_supplies))"
+            "DELETE FROM assembly_status_history WHERE assembly_request_id IN "
+            "(SELECT id FROM assembly_requests WHERE project_id = 1 AND wb_fbo_supply_id IN "
+            "(SELECT id FROM wb_fbo_supplies WHERE project_id = 1))"
         )
     )
     await db_session.execute(
         text(
-            "DELETE FROM assembly_request_items WHERE assembly_request_id IN (SELECT id FROM assembly_requests WHERE wb_fbo_supply_id IN (SELECT id FROM wb_fbo_supplies))"
+            "DELETE FROM assembly_request_items WHERE assembly_request_id IN "
+            "(SELECT id FROM assembly_requests WHERE project_id = 1 AND wb_fbo_supply_id IN "
+            "(SELECT id FROM wb_fbo_supplies WHERE project_id = 1))"
         )
     )
     await db_session.execute(
-        text("DELETE FROM assembly_requests WHERE wb_fbo_supply_id IN (SELECT id FROM wb_fbo_supplies)")
+        text(
+            "DELETE FROM assembly_requests WHERE project_id = 1 AND wb_fbo_supply_id IN "
+            "(SELECT id FROM wb_fbo_supplies WHERE project_id = 1)"
+        )
     )
-    await db_session.execute(text("DELETE FROM wb_fbo_supply_items"))
-    await db_session.execute(text("DELETE FROM wb_fbo_supplies"))
+    await db_session.execute(
+        text(
+            "DELETE FROM wb_fbo_supply_items WHERE supply_id IN "
+            "(SELECT id FROM wb_fbo_supplies WHERE project_id = 1)"
+        )
+    )
+    await db_session.execute(text("DELETE FROM wb_fbo_supplies WHERE project_id = 1"))
     await db_session.commit()
 
     # Ensure project exists

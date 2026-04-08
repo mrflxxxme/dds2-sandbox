@@ -55,9 +55,15 @@ TEST_BARCODE_2 = "TEST_BC_ASM_002"
 @pytest_asyncio.fixture(autouse=True)
 async def setup_test_data(db_session):
     """Clean assembly data and ensure test fixtures exist."""
-    # Clean in dependency order
-    await db_session.execute(text("DELETE FROM assembly_request_items"))
-    await db_session.execute(text("DELETE FROM assembly_requests"))
+    # Clean in dependency order (scoped to project_id to avoid cross-test contamination)
+    await db_session.execute(
+        text(
+            "DELETE FROM assembly_request_items WHERE assembly_request_id IN "
+            "(SELECT id FROM assembly_requests WHERE project_id = :pid)"
+        ),
+        {"pid": PROJECT_ID},
+    )
+    await db_session.execute(text("DELETE FROM assembly_requests WHERE project_id = :pid"), {"pid": PROJECT_ID})
     # Unlink FBO supplies from outbound shipments before deleting them
     await db_session.execute(
         text(
