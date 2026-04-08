@@ -872,6 +872,11 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
 
     const filledRows = rows.filter(r => r.barcode.trim());
     const invalidRows = filledRows.filter(r => !(r.barcode.trim() in allItemMap));
+    const exceededRows = filledRows.filter(r => {
+        const item = allItemMap[r.barcode.trim()];
+        const qty = parseInt(r.qty) || 0;
+        return item && qty > 0 && qty > item.remaining_qty;
+    });
     const validRows = filledRows.filter(r => {
         const item = allItemMap[r.barcode.trim()];
         const qty = parseInt(r.qty) || 0;
@@ -879,7 +884,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
     });
     // Allow adding found items even if some are not found (fallback A)
     const pasteCanSave = validRows.length > 0;
-    const hasUnfound = invalidRows.length > 0;
+    const hasUnfound = invalidRows.length > 0 || exceededRows.length > 0;
 
     const handlePasteSubmit = async () => {
         if (!pasteCanSave) return;
@@ -1040,7 +1045,13 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
 
                             {invalidRows.length > 0 && (
                                 <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 13, color: '#ef4444' }}>
-                                    Не найдено ни в одном заказе: <b>{invalidRows.length}</b>
+                                    Не найдено ни в одном заказе: <b>{invalidRows.length}</b> ({formatNumber(invalidRows.reduce((s, r) => s + (parseInt(r.qty) || 0), 0), 0)} шт)
+                                </div>
+                            )}
+
+                            {exceededRows.length > 0 && (
+                                <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 13, color: '#b45309' }}>
+                                    Превышено доступное кол-во: <b>{exceededRows.length}</b> ({formatNumber(exceededRows.reduce((s, r) => s + (parseInt(r.qty) || 0), 0), 0)} шт запрошено, доступно {formatNumber(exceededRows.reduce((s, r) => s + (allItemMap[r.barcode.trim()]?.remaining_qty || 0), 0), 0)} шт)
                                 </div>
                             )}
 
@@ -1127,6 +1138,18 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                             alert(`Скопировано ${invalidRows.length} ненайденных баркодов`);
                                         }}>
                                             Скопировать ненайденные ({invalidRows.length})
+                                        </button>
+                                    )}
+                                    {exceededRows.length > 0 && (
+                                        <button className="btn btn-secondary btn-sm" onClick={() => {
+                                            const text = exceededRows.map(r => {
+                                                const item = allItemMap[r.barcode.trim()];
+                                                return `${r.barcode.trim()}\t${r.qty}\t${item?.remaining_qty || 0}`;
+                                            }).join('\n');
+                                            navigator.clipboard.writeText(`Баркод\tЗапрошено\tДоступно\n${text}`);
+                                            alert(`Скопировано ${exceededRows.length} превышенных (баркод + запрошено + доступно)`);
+                                        }}>
+                                            Скопировать превышенные ({exceededRows.length})
                                         </button>
                                     )}
                                 </div>
