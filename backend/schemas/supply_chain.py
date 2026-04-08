@@ -33,6 +33,7 @@ class FactoryOrderItemCreate(BaseModel):
     pcs_per_box: int | None = None
     weight_kg: Decimal | None = None
     note: str | None = None
+    box_detail: list[int] | None = None
 
 
 class FactoryOrderItemUpdate(BaseModel):
@@ -45,6 +46,7 @@ class FactoryOrderItemUpdate(BaseModel):
     pcs_per_box: int | None = None
     weight_kg: Decimal | None = None
     note: str | None = None
+    box_detail: list[int] | None = None
 
 
 class FactoryOrderItemSchema(BaseModel):
@@ -62,6 +64,7 @@ class FactoryOrderItemSchema(BaseModel):
     pcs_per_box: int | None = None
     weight_kg: Decimal | None = None
     note: str | None = None
+    box_detail: list[int] | None = None
     remaining_qty: int | None = None  # computed: qty - assigned_qty
 
 
@@ -195,8 +198,10 @@ class VehicleItemSchema(BaseModel):
     total_rub: Decimal | None = None
     factory_order_item_id: int | None = None
     # Enriched from factory order item
+    factory_order_id: int | None = None
     box_size: str | None = None
     pcs_per_box: int | None = None
+    box_detail: list[int] | None = None
     factory_order_number: str | None = None
 
 

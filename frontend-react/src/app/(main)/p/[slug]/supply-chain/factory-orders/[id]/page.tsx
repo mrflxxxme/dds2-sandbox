@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, formatDateTime, exportToExcel } from '@/lib/utils';
 import PageHeader from '@/components/PageHeader';
+import BoxDetailCell, { BoxDetailExpandRow } from '@/components/BoxDetailCell';
 import type { FactoryOrder, FactoryOrderItem, FactoryOrderItemUpdate, FactoryOrderHistory, Nomenclature } from '@/types/api';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -293,6 +294,7 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
     const [editRows, setEditRows] = useState<EditRow[]>([]);
     const [saving, setSaving] = useState(false);
     const [deletingId, setDeletingId] = useState<number | null>(null);
+    const [expandedId, setExpandedId] = useState<number | null>(null);
 
     const startBulkEdit = () => {
         setEditRows(items.map(itemToEditRow));
@@ -461,8 +463,10 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                             );
                         }) : items.map(item => {
                             const canDelete = item.assigned_qty === 0;
+                            const ppb = item.pcs_per_box || 0;
                             return (
-                                <tr key={item.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                <React.Fragment key={item.id}>
+                                <tr style={{ borderBottom: expandedId === item.id ? 'none' : '1px solid var(--color-border)' }}>
                                     <td style={{ ...td, fontFamily: 'monospace', fontSize: 12 }}>{item.barcode}</td>
                                     <td style={td}>{item.subject || <span style={{ color: 'var(--color-text-dim)' }}>—</span>}</td>
                                     <td style={td}>{item.article_seller || <span style={{ color: 'var(--color-text-dim)' }}>—</span>}</td>
@@ -472,7 +476,15 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                                     <td style={tdR}>{formatNumber(item.qty * Number(item.price_cny), 0)}</td>
                                     <td style={td}>{item.box_size || '—'}</td>
                                     <td style={tdR}>{item.pcs_per_box || '—'}</td>
-                                    <td style={tdR}>{item.pcs_per_box && item.pcs_per_box > 0 ? Math.ceil(item.qty / item.pcs_per_box) : '—'}</td>
+                                    <td style={tdR}>
+                                        <BoxDetailCell
+                                            qty={item.qty}
+                                            pcsPerBox={item.pcs_per_box}
+                                            boxDetail={item.box_detail}
+                                            expanded={expandedId === item.id}
+                                            onToggle={ppb > 0 ? () => setExpandedId(expandedId === item.id ? null : item.id) : undefined}
+                                        />
+                                    </td>
                                     <td style={tdR}>{item.weight_kg ? formatNumber(Number(item.weight_kg), 2) : '—'}</td>
                                     <td style={{ ...td, textAlign: 'center' }}>
                                         {canDelete && (
@@ -482,6 +494,21 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                                         )}
                                     </td>
                                 </tr>
+                                {expandedId === item.id && ppb > 0 && (
+                                    <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                        <BoxDetailExpandRow
+                                            qty={item.qty}
+                                            pcsPerBox={ppb}
+                                            boxDetail={item.box_detail}
+                                            colSpan={12}
+                                            editable
+                                            orderId={orderId}
+                                            itemId={item.id}
+                                            onSaved={onChanged}
+                                        />
+                                    </tr>
+                                )}
+                                </React.Fragment>
                             );
                         })}
                     </tbody>

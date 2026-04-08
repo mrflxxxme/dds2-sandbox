@@ -20,6 +20,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -74,6 +75,7 @@ class FactoryOrderItem(Base):
     pcs_per_box: Mapped[int | None] = mapped_column(Integer)
     weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     note: Mapped[str | None] = mapped_column(Text)
+    box_detail: Mapped[list[int] | None] = mapped_column(JSONB, nullable=True, default=None)
 
     factory_order: Mapped["FactoryOrder"] = relationship(back_populates="items")
 
