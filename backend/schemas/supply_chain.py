@@ -34,6 +34,7 @@ class FactoryOrderItemCreate(BaseModel):
     weight_kg: Decimal | None = None
     note: str | None = None
     box_detail: list[int] | None = None
+    mix_group_id: str | None = None
 
 
 class FactoryOrderItemUpdate(BaseModel):
@@ -47,6 +48,7 @@ class FactoryOrderItemUpdate(BaseModel):
     weight_kg: Decimal | None = None
     note: str | None = None
     box_detail: list[int] | None = None
+    mix_group_id: str | None = None
 
 
 class FactoryOrderItemSchema(BaseModel):
@@ -65,6 +67,7 @@ class FactoryOrderItemSchema(BaseModel):
     weight_kg: Decimal | None = None
     note: str | None = None
     box_detail: list[int] | None = None
+    mix_group_id: str | None = None
     remaining_qty: int | None = None  # computed: qty - assigned_qty
 
 
@@ -202,6 +205,7 @@ class VehicleItemSchema(BaseModel):
     box_size: str | None = None
     pcs_per_box: int | None = None
     box_detail: list[int] | None = None
+    mix_group_id: str | None = None
     factory_order_number: str | None = None
 
 
@@ -261,6 +265,20 @@ class AddItemsToVehicleRequest(BaseModel):
 class AddItemToVehicle(BaseModel):
     factory_order_item_id: int
     qty: int
+
+
+# --- Mix Groups ---
+
+
+class SetMixGroupRequest(BaseModel):
+    """Group items into a single mix box."""
+
+    item_ids: list[int]
+
+
+class SetMixGroupResponse(BaseModel):
+    mix_group_id: str
+    item_ids: list[int]
 
 
 # --- Split factory order to vehicles ---

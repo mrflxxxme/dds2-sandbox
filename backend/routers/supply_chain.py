@@ -25,6 +25,8 @@ from backend.schemas.supply_chain import (
     FactoryOrderSchema,
     FactoryOrderStatusUpdate,
     FactoryOrderUpdate,
+    SetMixGroupRequest,
+    SetMixGroupResponse,
     SplitToVehiclesRequest,
     VehicleCreate,
     VehicleDocumentSchema,
@@ -169,6 +171,37 @@ async def split_to_vehicles(
         display_name = user.first_name or user.username or user.email
         result = await factory_orders.split_to_vehicles(db, project.id, order_id, payload, user_name=display_name)
         return result
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+# ─── Mix Groups ──────────────────────────────────────────────────────────────
+
+
+@router.post("/factory-orders/{order_id}/mix-group", dependencies=[Depends(rate_limit_write)])
+async def set_mix_group(
+    order_id: int,
+    payload: SetMixGroupRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        mix_id, item_ids = await factory_orders.set_mix_group(db, project.id, order_id, payload.item_ids)
+        return SetMixGroupResponse(mix_group_id=mix_id, item_ids=item_ids)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.delete("/factory-orders/{order_id}/mix-group/{mix_group_id}", dependencies=[Depends(rate_limit_write)])
+async def remove_mix_group(
+    order_id: int,
+    mix_group_id: str,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        count = await factory_orders.remove_mix_group(db, project.id, order_id, mix_group_id)
+        return {"ok": True, "removed_items": count}
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 

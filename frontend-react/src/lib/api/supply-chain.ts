@@ -51,6 +51,14 @@ export function addSupplyChainMethods(api: ApiClient) {
             return api.request<{ ok: boolean }>('DELETE', `/api/v1/supply-chain/factory-orders/${orderId}/items/${itemId}`);
         },
 
+        // ─── Mix Groups ────────────────────────────────────────────
+        setMixGroup(orderId: number, itemIds: number[]) {
+            return api.request<{ mix_group_id: string; item_ids: number[] }>('POST', `/api/v1/supply-chain/factory-orders/${orderId}/mix-group`, { item_ids: itemIds });
+        },
+        removeMixGroup(orderId: number, mixGroupId: string) {
+            return api.request<{ ok: boolean; removed_items: number }>('DELETE', `/api/v1/supply-chain/factory-orders/${orderId}/mix-group/${mixGroupId}`);
+        },
+
         // ─── Split to Vehicles ──────────────────────────────────────
         splitToVehicles(orderId: number, assignments: SplitItem[]) {
             return api.request<MessageResponse>('POST', `/api/v1/supply-chain/factory-orders/${orderId}/split-to-vehicles`, { assignments });

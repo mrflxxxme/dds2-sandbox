@@ -12,6 +12,21 @@ const normalizeBoxSize = (s: string): string => s.trim().replace(/[×*,/\\]/g, '
 const calcBoxes = (qty: number, pcsPerBox: number | null): number =>
     pcsPerBox && pcsPerBox > 0 ? Math.ceil(qty / pcsPerBox) : 0;
 
+/** Расчёт мест с учётом микс-групп: микс = 1 коробка */
+const calcTotalBoxesWithMix = (items: { qty: number; pcs_per_box?: number | null; mix_group_id?: string | null }[]): number => {
+    let total = 0;
+    const seen = new Set<string>();
+    for (const item of items) {
+        if (item.mix_group_id) {
+            if (!seen.has(item.mix_group_id)) { seen.add(item.mix_group_id); total += 1; }
+        } else {
+            const ppb = item.pcs_per_box || 0;
+            if (ppb > 0) total += Math.ceil(item.qty / ppb);
+        }
+    }
+    return total;
+};
+
 /** Объём одной позиции в м³ */
 const calcVolumeM3 = (boxSize: string, qty: number, pcsPerBox: number | null): number => {
     if (!boxSize || !qty) return 0;
@@ -302,7 +317,7 @@ function FactoryOrdersTab() {
             key: 'boxes', label: 'Мест', align: 'right',
             render: (_v: unknown, row: FactoryOrder) => {
                 const items = row.items || [];
-                const total = items.reduce((s, i) => s + calcBoxes(i.qty, i.pcs_per_box), 0);
+                const total = calcTotalBoxesWithMix(items);
                 return total > 0 ? formatNumber(total, 0) : '\u2014';
             },
         },
@@ -370,7 +385,7 @@ function FactoryOrdersTab() {
             const items = o.items || [];
             const totalQty = items.reduce((s, i) => s + i.qty, 0);
             const assignedQty = items.reduce((s, i) => s + i.assigned_qty, 0);
-            const totalBoxes = items.reduce((s, i) => s + calcBoxes(i.qty, i.pcs_per_box), 0);
+            const totalBoxes = calcTotalBoxesWithMix(items);
             const totalVolume = items.reduce((s, i) => s + calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box), 0);
             const totalWeight = items.reduce((s, i) => s + (Number(i.weight_kg) || 0) * i.qty, 0);
             const totalCny = items.reduce((s, i) => s + (Number(i.price_cny) || 0) * i.qty, 0);

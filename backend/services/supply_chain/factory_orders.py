@@ -3,6 +3,7 @@ Supply Chain — Factory Orders CRUD and split-to-vehicles logic.
 """
 
 import logging
+import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -497,3 +498,69 @@ async def delete_item(
     await db.delete(item)
     await db.commit()
     return True
+
+
+# ─── Mix Groups ──────────────────────────────────────────────────────────
+
+
+async def set_mix_group(
+    db: AsyncSession,
+    project_id: int,
+    order_id: int,
+    item_ids: list[int],
+) -> tuple[str, list[int]]:
+    """Group items into a mix box (shared packaging).
+
+    Returns (mix_group_id, matched_item_ids).
+    Validates all items belong to the same order and project.
+    """
+    if len(item_ids) < 2:
+        raise ValueError("Микс-группа должна содержать минимум 2 позиции")
+
+    order = await get_factory_order(db, project_id, order_id)
+    if not order:
+        raise ValueError("Factory order not found")
+
+    items_by_id = {i.id: i for i in order.items}
+    matched: list[FactoryOrderItem] = []
+    for iid in item_ids:
+        item = items_by_id.get(iid)
+        if not item:
+            raise ValueError(f"Позиция {iid} не найдена в заказе {order_id}")
+        matched.append(item)
+
+    mix_id = str(uuid.uuid4())
+    matched_ids = []
+    for item in matched:
+        item.mix_group_id = mix_id
+        matched_ids.append(item.id)
+
+    await db.commit()
+    return mix_id, matched_ids
+
+
+async def remove_mix_group(
+    db: AsyncSession,
+    project_id: int,
+    order_id: int,
+    mix_group_id: str,
+) -> int:
+    """Remove a mix group — set mix_group_id=None on all items in the group.
+
+    Returns count of affected items.
+    """
+    order = await get_factory_order(db, project_id, order_id)
+    if not order:
+        raise ValueError("Factory order not found")
+
+    count = 0
+    for item in order.items:
+        if item.mix_group_id == mix_group_id:
+            item.mix_group_id = None
+            count += 1
+
+    if count == 0:
+        raise ValueError(f"Микс-группа {mix_group_id} не найдена в заказе {order_id}")
+
+    await db.commit()
+    return count
