@@ -404,6 +404,7 @@ async def get_available_items(
                         "price_cny": str(item.price_cny),
                         "box_size": item.box_size,
                         "pcs_per_box": item.pcs_per_box,
+                        "box_detail": item.box_detail,
                         "weight_kg": str(item.weight_kg) if item.weight_kg else None,
                     }
                 )
@@ -442,6 +443,8 @@ async def _enrich_vehicle(
                 FactoryOrderItem.id,
                 FactoryOrderItem.box_size,
                 FactoryOrderItem.pcs_per_box,
+                FactoryOrderItem.box_detail,
+                FactoryOrderItem.factory_order_id,
                 FactoryOrder.order_number,
             )
             .join(FactoryOrder, FactoryOrderItem.factory_order_id == FactoryOrder.id)
@@ -451,7 +454,7 @@ async def _enrich_vehicle(
             )
         )
         for row in fo_batch_result:
-            fo_item_map[row[0]] = (row[1], row[2], row[3])
+            fo_item_map[row[0]] = (row[1], row[2], row[3], row[4], row[5])
 
     for cost_item in vehicle.items:
         total_qty += cost_item.qty
@@ -460,12 +463,14 @@ async def _enrich_vehicle(
         # Enrich with factory order item data (from pre-loaded batch)
         box_size = None
         pcs_per_box = None
+        box_detail = None
+        fo_order_id = None
         fo_order_number = None
 
         if cost_item.factory_order_item_id:
             fo_data = fo_item_map.get(cost_item.factory_order_item_id)
             if fo_data:
-                box_size, pcs_per_box, fo_order_number = fo_data
+                box_size, pcs_per_box, box_detail, fo_order_id, fo_order_number = fo_data
 
         w = _safe_decimal(cost_item.weight_kg)
         v = _safe_decimal(cost_item.volume_m3)
@@ -495,6 +500,8 @@ async def _enrich_vehicle(
                 factory_order_item_id=cost_item.factory_order_item_id,
                 box_size=box_size,
                 pcs_per_box=pcs_per_box,
+                box_detail=box_detail,
+                factory_order_id=fo_order_id,
                 factory_order_number=fo_order_number,
             )
         )

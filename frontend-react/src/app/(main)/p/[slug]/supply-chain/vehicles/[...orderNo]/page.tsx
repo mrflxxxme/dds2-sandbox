@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 import { formatNumber, formatDate, formatDateTime, exportToExcel } from '@/lib/utils';
 import PageHeader from '@/components/PageHeader';
 import TabLayout from '@/components/TabLayout';
+import BoxDetailCell, { BoxDetailExpandRow, BoxDropdown } from '@/components/BoxDetailCell';
 import type {
     VehicleSchema,
     VehicleStatus,
@@ -466,6 +467,7 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
 }) {
     const [removingId, setRemovingId] = useState<number | null>(null);
     const [perUnit, setPerUnit] = useState(false); // false = общая, true = за 1 шт
+    const [expandedId, setExpandedId] = useState<number | null>(null);
     const hasCosts = items.some(i => i.total_rub);
 
     const handleRemove = async (itemId: number) => {
@@ -604,17 +606,20 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                     const boxLabel = item.box_size ? `${item.box_size}${ppb ? ` (${ppb}шт)` : ''}` : '—';
 
                     return (
-                        <tr key={item.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                    <React.Fragment key={item.id}>
+                        <tr style={{ borderBottom: expandedId === item.id ? 'none' : '1px solid var(--color-border)' }}>
                             <td style={{ ...td, fontFamily: 'monospace', fontSize: 12 }}>{item.barcode}</td>
                             <td style={{ ...td, fontSize: 12, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.article_seller || ''}>{item.article_seller || '—'}</td>
                             <td style={{ ...td, fontSize: 12 }}>{item.subject || '—'}</td>
                             <td style={{ ...tdR, fontWeight: 600 }}>{formatNumber(item.qty, 0)}</td>
                             <td style={tdR}>
-                                {boxes > 0 ? (
-                                    <span style={{ color: notFull ? '#f59e0b' : 'inherit', fontWeight: notFull ? 600 : 400 }}>
-                                        {boxes}{notFull && ' ⚠'}
-                                    </span>
-                                ) : '—'}
+                                <BoxDetailCell
+                                    qty={item.qty}
+                                    pcsPerBox={item.pcs_per_box}
+                                    boxDetail={item.box_detail}
+                                    expanded={expandedId === item.id}
+                                    onToggle={ppb > 0 ? () => setExpandedId(expandedId === item.id ? null : item.id) : undefined}
+                                />
                             </td>
                             <td style={{ ...tdR, color: 'var(--color-text-muted)' }}>{item.weight_kg ? formatNumber(item.weight_kg, 2) : '—'}</td>
                             <td style={tdR}>{weight > 0 ? formatNumber(weight, 1) : '—'}</td>
@@ -634,6 +639,21 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                                 </td>
                             )}
                         </tr>
+                        {expandedId === item.id && ppb > 0 && (
+                            <tr>
+                                <BoxDetailExpandRow
+                                    qty={item.qty}
+                                    pcsPerBox={ppb}
+                                    boxDetail={item.box_detail}
+                                    colSpan={baseCols + costCols}
+                                    editable={isForming}
+                                    orderId={item.factory_order_id}
+                                    itemId={item.factory_order_item_id}
+                                    onSaved={onRemoved}
+                                />
+                            </tr>
+                        )}
+                    </React.Fragment>
                     );
                 })}
             </tbody>
@@ -1013,10 +1033,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                                         </td>
                                                         <td style={{ textAlign: 'right', fontSize: 12 }}>
                                                             {qty > 0 && item.pcs_per_box ? (
-                                                                <span style={{ color: notFull ? '#f59e0b' : 'var(--color-text)' }}>
-                                                                    {boxes}
-                                                                    {notFull && <span title="Не кратно коробке" style={{ marginLeft: 2 }}>⚠</span>}
-                                                                </span>
+                                                                <BoxDropdown qty={qty} pcsPerBox={item.pcs_per_box} />
                                                             ) : '—'}
                                                         </td>
                                                         <td style={{ textAlign: 'right', fontSize: 12 }}>{formatNumber(parseFloat(item.price_cny))}</td>
@@ -1104,9 +1121,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                                     </td>
                                                     <td style={{ fontSize: 12, textAlign: 'right' }}>
                                                         {qty > 0 && item?.pcs_per_box ? (
-                                                            <span style={{ color: notFull ? '#f59e0b' : 'var(--color-text)' }}>
-                                                                {boxes}{notFull && <span title="Не кратно коробке"> ⚠</span>}
-                                                            </span>
+                                                            <BoxDropdown qty={qty} pcsPerBox={item.pcs_per_box} />
                                                         ) : '—'}
                                                     </td>
                                                     <td style={{ fontSize: 12, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>

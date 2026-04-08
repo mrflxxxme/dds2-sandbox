@@ -447,6 +447,17 @@ async def update_item(
         if new_qty < item.assigned_qty:
             raise ValueError(f"Нельзя уменьшить кол-во ниже {item.assigned_qty} " f"(уже распределено по машинам)")
 
+    # Validate box_detail: each value > 0, sum == qty
+    if "box_detail" in update_data and update_data["box_detail"] is not None:
+        bd = update_data["box_detail"]
+        if not isinstance(bd, list) or not bd:
+            raise ValueError("box_detail должен быть непустым списком")
+        if any(not isinstance(v, int) or v <= 0 for v in bd):
+            raise ValueError("Каждая коробка должна содержать > 0 штук")
+        effective_qty = update_data.get("qty", item.qty)
+        if sum(bd) != effective_qty:
+            raise ValueError(f"Сумма коробок ({sum(bd)}) ≠ кол-ву ({effective_qty})")
+
     for field, value in update_data.items():
         setattr(item, field, value)
 
