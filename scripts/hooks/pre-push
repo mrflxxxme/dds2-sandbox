@@ -2,8 +2,6 @@
 # DDS Pre-push hook — прогоняет тесты перед пушем
 # Пропустить: git push --no-verify (ТОЛЬКО для экстренных случаев)
 
-set -e
-
 echo "🔍 Pre-push: запуск проверок..."
 
 # ─── Цвета ───────────────────────────────────────────────────────────
@@ -14,6 +12,7 @@ NC='\033[0m'
 
 FAILED=0
 SKIPPED=0
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 
 # ─── Проверка Docker ────────────────────────────────────────────────
 DOCKER_OK=0
@@ -40,13 +39,12 @@ fi
 echo ""
 echo "━━━ Frontend tests (vitest) ━━━"
 if [ -d "frontend-react/node_modules" ] && command -v npx &>/dev/null; then
-    if cd frontend-react && npx vitest run --reporter=dot 2>/dev/null; then
+    if (cd frontend-react && npx vitest run --reporter=dot 2>/dev/null); then
         echo -e "${GREEN}✓ Frontend tests passed${NC}"
     else
         echo -e "${RED}✗ Frontend tests FAILED${NC}"
         FAILED=1
     fi
-    cd - > /dev/null
 else
     echo -e "${YELLOW}⚠ SKIPPED — node_modules не установлены (cd frontend-react && npm i)${NC}"
     SKIPPED=1
@@ -55,7 +53,7 @@ fi
 # ─── 3. Convention checks (~5 сек) ──────────────────────────────────
 echo ""
 echo "━━━ Conventions ━━━"
-if bash scripts/check_conventions.sh 2>/dev/null; then
+if bash "$ROOT_DIR/scripts/check_conventions.sh"; then
     echo -e "${GREEN}✓ Conventions passed${NC}"
 else
     echo -e "${RED}✗ Conventions FAILED${NC}"
