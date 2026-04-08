@@ -670,7 +670,11 @@ function CollapsibleAddItems({ vehicleOrderNo, onAdded }: { vehicleOrderNo: stri
     }
     return (
         <div>
-            <AddItemsSection vehicleOrderNo={vehicleOrderNo} onAdded={() => { onAdded(); setOpen(false); }} />
+            <AddItemsSection
+                vehicleOrderNo={vehicleOrderNo}
+                onAdded={() => { onAdded(); setOpen(false); }}
+                onPartialAdded={onAdded}
+            />
             <div style={{ textAlign: 'center', marginTop: 8 }}>
                 <button className="btn btn-secondary btn-sm" onClick={() => setOpen(false)}>Свернуть</button>
             </div>
@@ -678,7 +682,7 @@ function CollapsibleAddItems({ vehicleOrderNo, onAdded }: { vehicleOrderNo: stri
     );
 }
 
-function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; onAdded: () => void }) {
+function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleOrderNo: string; onAdded: () => void; onPartialAdded: () => void }) {
     const [mode, setMode] = useState<'list' | 'paste'>('list');
     const [groups, setGroups] = useState<AvailableItemGroup[]>([]);
     const [selectedOrder, setSelectedOrder] = useState<string>('');
@@ -709,6 +713,20 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
     if (selectedGroup) {
         for (const item of selectedGroup.items) {
             itemMap[item.barcode] = item;
+        }
+    }
+
+    // Cross-order map for paste mode: search across ALL orders (FIFO — first order wins)
+    const allItemMap: Record<string, AvailableItem & { source_order: string; source_factory: string }> = {};
+    for (const group of groups) {
+        for (const item of group.items) {
+            if (!(item.barcode in allItemMap)) {
+                allItemMap[item.barcode] = {
+                    ...item,
+                    source_order: group.order_number,
+                    source_factory: group.factory_name || '',
+                };
+            }
         }
     }
 
@@ -754,7 +772,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
 
     // ─── Paste mode helpers ───
     const resolveArticle = (bc: string): string => {
-        const item = itemMap[bc];
+        const item = allItemMap[bc];
         return item ? (item.article_seller || item.subject || '') : '';
     };
 
@@ -784,13 +802,15 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
     };
 
     const filledRows = rows.filter(r => r.barcode.trim());
-    const invalidRows = filledRows.filter(r => !(r.barcode.trim() in itemMap));
+    const invalidRows = filledRows.filter(r => !(r.barcode.trim() in allItemMap));
     const validRows = filledRows.filter(r => {
-        const item = itemMap[r.barcode.trim()];
+        const item = allItemMap[r.barcode.trim()];
         const qty = parseInt(r.qty) || 0;
         return item && qty > 0 && qty <= item.remaining_qty;
     });
-    const pasteCanSave = validRows.length > 0 && invalidRows.length === 0;
+    // Allow adding found items even if some are not found (fallback A)
+    const pasteCanSave = validRows.length > 0;
+    const hasUnfound = invalidRows.length > 0;
 
     const handlePasteSubmit = async () => {
         if (!pasteCanSave) return;
@@ -798,12 +818,28 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
         setError('');
         try {
             const items = validRows.map(r => ({
-                factory_order_item_id: itemMap[r.barcode.trim()].id,
+                factory_order_item_id: allItemMap[r.barcode.trim()].id,
                 qty: parseInt(r.qty) || 0,
             }));
+            const validBarcodes = new Set(validRows.map(r => r.barcode.trim()));
             await api.addItemsToVehicle(vehicleOrderNo, items);
-            setRows(Array.from({ length: 5 }, emptyRow));
-            onAdded();
+
+            // Keep rows that weren't successfully added (unfound + exceeded qty)
+            const remainingRows = rows.filter(r => {
+                const bc = r.barcode.trim();
+                return bc && !validBarcodes.has(bc);
+            });
+
+            if (remainingRows.length > 0) {
+                setRows([...remainingRows, emptyRow(), emptyRow()]);
+                // Refresh vehicle data + available items, but keep section open
+                onPartialAdded();
+                const freshData = await api.getAvailableItems();
+                setGroups(freshData);
+            } else {
+                setRows(Array.from({ length: 5 }, emptyRow));
+                onAdded(); // all done — close section
+            }
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
         }
@@ -820,17 +856,19 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
                 <div style={{ textAlign: 'center', padding: 16, opacity: 0.5 }}>Нет доступных фабричных заказов</div>
             ) : (
                 <>
-                    {/* Order selector */}
-                    <div style={{ marginBottom: 12 }}>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Фабричный заказ</label>
-                        <select value={selectedOrder} onChange={e => { setSelectedOrder(e.target.value); setChecked({}); setQuantities({}); }} style={inputStyle}>
-                            {groups.map(g => (
-                                <option key={g.order_number} value={g.order_number}>
-                                    {g.order_number}{g.factory_name ? ` — ${g.factory_name}` : ''} ({g.items.length} поз.)
-                                </option>
-                            ))}
-                        </select>
-                    </div>
+                    {/* Order selector — only for list mode (paste searches all orders) */}
+                    {mode === 'list' && (
+                        <div style={{ marginBottom: 12 }}>
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Фабричный заказ</label>
+                            <select value={selectedOrder} onChange={e => { setSelectedOrder(e.target.value); setChecked({}); setQuantities({}); }} style={inputStyle}>
+                                {groups.map(g => (
+                                    <option key={g.order_number} value={g.order_number}>
+                                        {g.order_number}{g.factory_name ? ` — ${g.factory_name}` : ''} ({g.items.length} поз.)
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
 
                     {/* Mode tabs */}
                     <div style={{ display: 'flex', gap: 4, marginBottom: 12 }}>
@@ -931,7 +969,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
 
                             {invalidRows.length > 0 && (
                                 <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 13, color: '#ef4444' }}>
-                                    Не найдено в заказе: <b>{invalidRows.length}</b>
+                                    Не найдено ни в одном заказе: <b>{invalidRows.length}</b>
                                 </div>
                             )}
 
@@ -947,13 +985,14 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
                                             <th style={{ textAlign: 'right' }}>Доступно</th>
                                             <th style={{ width: 90 }}>Кол-во</th>
                                             <th style={{ textAlign: 'right' }}>Мест</th>
+                                            <th>Заказ</th>
                                             <th style={{ width: 50, textAlign: 'center' }}></th>
                                         </tr>
                                     </thead>
                                     <tbody>
                                         {rows.map((row, i) => {
                                             const bc = row.barcode.trim();
-                                            const item = itemMap[bc];
+                                            const item = allItemMap[bc];
                                             const unknown = bc && !item;
                                             const qty = parseInt(row.qty) || 0;
                                             const exceeds = item && qty > item.remaining_qty;
@@ -988,6 +1027,9 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
                                                             </span>
                                                         ) : '—'}
                                                     </td>
+                                                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>
+                                                        {item ? item.source_order : ''}
+                                                    </td>
                                                     <td style={{ textAlign: 'center' }}>
                                                         {!bc ? '' :
                                                          unknown ? <span style={{ color: '#ef4444', fontSize: 11 }}>✗</span> :
@@ -1008,7 +1050,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; 
                                 </button>
                                 <button className="btn btn-primary" onClick={handlePasteSubmit} disabled={!pasteCanSave || submitting}
                                     style={{ minWidth: 160, opacity: pasteCanSave ? 1 : 0.5 }}>
-                                    {submitting ? 'Добавляем...' : `Добавить (${validRows.length})`}
+                                    {submitting ? 'Добавляем...' : hasUnfound ? `Добавить найденные (${validRows.length})` : `Добавить (${validRows.length})`}
                                 </button>
                             </div>
                         </>
