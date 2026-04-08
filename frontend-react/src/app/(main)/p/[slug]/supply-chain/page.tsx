@@ -210,6 +210,7 @@ function FactoryOrdersTab() {
     const [showCreate, setShowCreate] = useState(false);
     const [editOrder, setEditOrder] = useState<FactoryOrder | null>(null);
     const [splitOrderId, setSplitOrderId] = useState<number | null>(null);
+    const [filterFactory, setFilterFactory] = useState<string>('');
     const router = useRouter();
     const { slug } = useParams() as { slug: string };
 
@@ -264,6 +265,21 @@ function FactoryOrdersTab() {
         router.push(`/p/${slug}/supply-chain/factory-orders/${row.id}`);
     };
 
+    // Unique factory names for filter
+    const factoryNames = [...new Set(orders.map(o => o.factory_name).filter(Boolean))].sort();
+    const filteredOrders = filterFactory ? orders.filter(o => o.factory_name === filterFactory) : orders;
+
+    // KPI aggregates (from filtered orders)
+    const kpi = filteredOrders.reduce((acc, o) => {
+        for (const i of o.items || []) {
+            acc.weight += (Number(i.weight_kg) || 0) * i.qty;
+            acc.volume += calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box);
+            acc.sumCny += (Number(i.price_cny) || 0) * i.qty;
+            acc.qty += i.qty;
+        }
+        return acc;
+    }, { weight: 0, volume: 0, sumCny: 0, qty: 0 });
+
     const columns: Column[] = [
         { key: 'order_number', label: 'Номер', width: '120px' },
         { key: 'factory_name', label: 'Поставщик' },
@@ -296,6 +312,14 @@ function FactoryOrdersTab() {
                 const items = row.items || [];
                 const total = items.reduce((s, i) => s + calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box), 0);
                 return total > 0 ? formatNumber(total, 1) : '\u2014';
+            },
+        },
+        {
+            key: 'weight', label: 'Вес, кг', align: 'right',
+            render: (_v: unknown, row: FactoryOrder) => {
+                const items = row.items || [];
+                const total = items.reduce((s, i) => s + (Number(i.weight_kg) || 0) * i.qty, 0);
+                return total > 0 ? formatNumber(total, 0) : '\u2014';
             },
         },
         {
@@ -348,6 +372,8 @@ function FactoryOrdersTab() {
             const assignedQty = items.reduce((s, i) => s + i.assigned_qty, 0);
             const totalBoxes = items.reduce((s, i) => s + calcBoxes(i.qty, i.pcs_per_box), 0);
             const totalVolume = items.reduce((s, i) => s + calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box), 0);
+            const totalWeight = items.reduce((s, i) => s + (Number(i.weight_kg) || 0) * i.qty, 0);
+            const totalCny = items.reduce((s, i) => s + (Number(i.price_cny) || 0) * i.qty, 0);
             return {
                 'Номер': o.order_number,
                 'Поставщик': o.factory_name || '',
@@ -355,6 +381,8 @@ function FactoryOrdersTab() {
                 'Кол-во': totalQty,
                 'Мест': totalBoxes || '',
                 'Объём м³': totalVolume > 0 ? Number(totalVolume.toFixed(1)) : '',
+                'Вес, кг': totalWeight > 0 ? Math.round(totalWeight) : '',
+                'Сумма ¥': totalCny > 0 ? Number(totalCny.toFixed(2)) : '',
                 'Распределено': `${assignedQty}/${totalQty}`,
                 'Готовность': o.expected_ready_date || '',
                 'Создан': o.created_at || '',
@@ -380,9 +408,35 @@ function FactoryOrdersTab() {
                 />
             )}
 
+            {/* KPI Summary */}
+            {!loading && filteredOrders.length > 0 && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
+                    <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Заказов</div>
+                        <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-accent)' }}>{filteredOrders.length}</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>{formatNumber(kpi.qty, 0)} шт</div>
+                    </div>
+                    <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Общий вес</div>
+                        <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-warning)' }}>{formatNumber(kpi.weight, 0)}</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>кг</div>
+                    </div>
+                    <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Общий объём</div>
+                        <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-text)' }}>{formatNumber(kpi.volume, 1)}</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>м³</div>
+                    </div>
+                    <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Сумма заказов</div>
+                        <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-success)' }}>{formatNumber(kpi.sumCny, 0)}</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>¥</div>
+                    </div>
+                </div>
+            )}
+
             <DataTable
                 columns={columns}
-                data={orders}
+                data={filteredOrders}
                 loading={loading}
                 title="Фабричные заказы"
                 emptyText="Нет фабричных заказов"
@@ -390,9 +444,23 @@ function FactoryOrdersTab() {
                 exportName="factory_orders"
                 onRowClick={(row) => handleRowClick(row)}
                 actions={
-                    <button className="btn btn-primary btn-sm" onClick={() => setShowCreate(v => !v)}>
-                        {showCreate ? '✕ Закрыть' : '+ Создать заказ'}
-                    </button>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        {factoryNames.length > 1 && (
+                            <select
+                                value={filterFactory}
+                                onChange={e => setFilterFactory(e.target.value)}
+                                style={{ padding: '6px 12px', borderRadius: 8, border: '1px solid var(--color-border)', background: 'var(--color-bg)', color: 'var(--color-text)', fontSize: 13 }}
+                            >
+                                <option value="">Все поставщики</option>
+                                {factoryNames.map(name => (
+                                    <option key={name} value={name!}>{name}</option>
+                                ))}
+                            </select>
+                        )}
+                        <button className="btn btn-primary btn-sm" onClick={() => setShowCreate(v => !v)}>
+                            {showCreate ? '✕ Закрыть' : '+ Создать заказ'}
+                        </button>
+                    </div>
                 }
             />
 

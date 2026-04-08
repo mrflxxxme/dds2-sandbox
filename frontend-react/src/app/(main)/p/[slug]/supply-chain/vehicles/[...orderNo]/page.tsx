@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
-import { formatNumber, formatDate, formatDateTime } from '@/lib/utils';
+import { formatNumber, formatDate, formatDateTime, exportToExcel } from '@/lib/utils';
 import PageHeader from '@/components/PageHeader';
 import TabLayout from '@/components/TabLayout';
 import type {
@@ -480,6 +480,33 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
         setRemovingId(null);
     };
 
+    const handleExport = () => {
+        const rows = items.map(item => {
+            const ppb = item.pcs_per_box || 0;
+            const boxes = ppb > 0 ? Math.ceil(item.qty / ppb) : 0;
+            const dims = parseBoxDims(item.box_size);
+            const vol = dims && ppb > 0 ? (dims.l * dims.w * dims.h) / 1e6 * boxes : 0;
+            return {
+                'Баркод': item.barcode,
+                'Артикул': item.article_seller || '',
+                'Категория': item.subject || '',
+                'Кол-во': item.qty,
+                'Мест': boxes || '',
+                'Вес 1шт, кг': item.weight_kg || '',
+                'Вес общ, кг': item.weight_kg ? Number(((item.weight_kg || 0) * item.qty).toFixed(1)) : '',
+                'Коробка': item.box_size || '',
+                'V м³': vol > 0 ? Number(vol.toFixed(2)) : '',
+                'Цена ¥': Number(item.price_cny) || '',
+                'Сумма ¥': Number(item.price_cny) * item.qty || '',
+                'Доставка ₽': item.delivery_rub ? Number((item.delivery_rub * item.qty).toFixed(0)) : '',
+                'Пошлина ₽': item.duty_rub ? Number((item.duty_rub * item.qty).toFixed(0)) : '',
+                'НДС ₽': item.vat_rub ? Number((item.vat_rub * item.qty).toFixed(0)) : '',
+                'Итого ₽': item.total_rub ? Number((item.total_rub * item.qty).toFixed(0)) : '',
+            };
+        });
+        exportToExcel(rows, `Машина_${vehicleOrderNo}`);
+    };
+
     const th: React.CSSProperties = { textAlign: 'left', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500, whiteSpace: 'nowrap' };
     const thR: React.CSSProperties = { ...th, textAlign: 'right' };
     const thF: React.CSSProperties = { ...thR, background: 'rgba(59,130,246,0.04)' };
@@ -506,6 +533,12 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
     const baseCols = 11 + (isForming ? 1 : 0);
 
     return (
+        <>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+            <button className="btn btn-secondary btn-sm" onClick={handleExport} style={{ fontSize: 12 }}>
+                📊 Excel
+            </button>
+        </div>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             {/* Column group headers */}
             {hasCosts && (
@@ -623,6 +656,7 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                 </tr>
             </tfoot>
         </table>
+        </>
     );
 }
 
@@ -838,6 +872,11 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
 
     const filledRows = rows.filter(r => r.barcode.trim());
     const invalidRows = filledRows.filter(r => !(r.barcode.trim() in allItemMap));
+    const exceededRows = filledRows.filter(r => {
+        const item = allItemMap[r.barcode.trim()];
+        const qty = parseInt(r.qty) || 0;
+        return item && qty > 0 && qty > item.remaining_qty;
+    });
     const validRows = filledRows.filter(r => {
         const item = allItemMap[r.barcode.trim()];
         const qty = parseInt(r.qty) || 0;
@@ -845,7 +884,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
     });
     // Allow adding found items even if some are not found (fallback A)
     const pasteCanSave = validRows.length > 0;
-    const hasUnfound = invalidRows.length > 0;
+    const hasUnfound = invalidRows.length > 0 || exceededRows.length > 0;
 
     const handlePasteSubmit = async () => {
         if (!pasteCanSave) return;
@@ -1006,7 +1045,13 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
 
                             {invalidRows.length > 0 && (
                                 <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 13, color: '#ef4444' }}>
-                                    Не найдено ни в одном заказе: <b>{invalidRows.length}</b>
+                                    Не найдено ни в одном заказе: <b>{invalidRows.length}</b> ({formatNumber(invalidRows.reduce((s, r) => s + (parseInt(r.qty) || 0), 0), 0)} шт)
+                                </div>
+                            )}
+
+                            {exceededRows.length > 0 && (
+                                <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 13, color: '#b45309' }}>
+                                    Превышено доступное кол-во: <b>{exceededRows.length}</b> ({formatNumber(exceededRows.reduce((s, r) => s + (parseInt(r.qty) || 0), 0), 0)} шт запрошено, доступно {formatNumber(exceededRows.reduce((s, r) => s + (allItemMap[r.barcode.trim()]?.remaining_qty || 0), 0), 0)} шт)
                                 </div>
                             )}
 
@@ -1093,6 +1138,18 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                             alert(`Скопировано ${invalidRows.length} ненайденных баркодов`);
                                         }}>
                                             Скопировать ненайденные ({invalidRows.length})
+                                        </button>
+                                    )}
+                                    {exceededRows.length > 0 && (
+                                        <button className="btn btn-secondary btn-sm" onClick={() => {
+                                            const text = exceededRows.map(r => {
+                                                const item = allItemMap[r.barcode.trim()];
+                                                return `${r.barcode.trim()}\t${r.qty}\t${item?.remaining_qty || 0}`;
+                                            }).join('\n');
+                                            navigator.clipboard.writeText(`Баркод\tЗапрошено\tДоступно\n${text}`);
+                                            alert(`Скопировано ${exceededRows.length} превышенных (баркод + запрошено + доступно)`);
+                                        }}>
+                                            Скопировать превышенные ({exceededRows.length})
                                         </button>
                                     )}
                                 </div>
