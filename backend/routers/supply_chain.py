@@ -270,6 +270,18 @@ async def update_vehicle(
         raise HTTPException(400, str(e)) from e
 
 
+@router.delete("/vehicles/{order_no}", dependencies=[Depends(rate_limit_write)])
+async def delete_vehicle(
+    order_no: str,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await vehicle_delivery.delete_vehicle(db, project.id, order_no)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @router.put("/vehicles/{order_no}/status", dependencies=[Depends(rate_limit_write)])
 async def update_vehicle_status(
     order_no: str,

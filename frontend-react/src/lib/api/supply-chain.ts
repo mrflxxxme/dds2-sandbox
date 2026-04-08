@@ -89,6 +89,9 @@ export function addSupplyChainMethods(api: ApiClient) {
         removeItemFromVehicle(orderNo: string, itemId: number) {
             return api.request<{ ok: boolean }>('DELETE', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items/${itemId}`);
         },
+        deleteVehicle(orderNo: string) {
+            return api.request<{ ok: boolean }>('DELETE', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}`);
+        },
         getAvailableItems() {
             return api.request<AvailableItemGroup[]>('GET', '/api/v1/supply-chain/vehicles/available-items');
         },

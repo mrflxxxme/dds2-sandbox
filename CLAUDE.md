@@ -182,7 +182,8 @@ src/types/api.ts — TypeScript интерфейсы
 - **Snyk Code** — SAST (статический анализ кода, advisory-only; требует `SNYK_TOKEN` secret)
 - **CodeRabbit** — AI code review на каждый PR (конфиг `.coderabbit.yaml` с iron rules DDS)
 - **auto-pr.yml** — автосоздание PR dev→main при push
-- **auto-merge.yml** — автомерж PR после зелёного CI
+- **auto-merge.yml** — автомерж PR после зелёного CI (проверяет `gh pr checks`, мержит без `--auto`)
+- **CI Monitor** — scheduled task (каждые 5 мин): проверяет PR, автомерж, автофикс простых ошибок CI
 
 ### Dependabot (еженедельно)
 - Авто-PR для pip, npm, GitHub Actions зависимостей

@@ -317,6 +317,19 @@ export default function VehicleDetailPage() {
     useEffect(() => { load(); }, [load]);
 
     const goBack = () => router.push(`/p/${slug}/supply-chain?tab=vehicles`);
+    const [deleting, setDeleting] = useState(false);
+    const handleDelete = async () => {
+        if (!vehicle) return;
+        if (!confirm(`Удалить машину ${vehicle.order_no}? Все позиции будут возвращены в доступные.`)) return;
+        setDeleting(true);
+        try {
+            await api.deleteVehicle(vehicle.order_no);
+            goBack();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка удаления');
+        }
+        setDeleting(false);
+    };
 
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}><div className="spinner" style={{ margin: '0 auto 12px' }} />Загрузка...</div>;
     if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error} <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>Повторить</button></div>;
@@ -346,6 +359,11 @@ export default function VehicleDetailPage() {
                         Машина {vehicle.order_no}
                     </h1>
                 </div>
+                {isForming && (
+                    <button className="btn btn-danger btn-sm" onClick={handleDelete} disabled={deleting} style={{ fontSize: 13 }}>
+                        {deleting ? 'Удаляем...' : 'Удалить'}
+                    </button>
+                )}
                 <StatusBadge status={vehicle.status || 'FORMING'} />
             </div>
 
@@ -751,6 +769,23 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
         return qty > 0 && qty <= item.remaining_qty;
     });
 
+    const allChecked = listItems.length > 0 && listItems.every(item => checked[item.id]);
+    const toggleAll = () => {
+        if (allChecked) {
+            setChecked({});
+            setQuantities({});
+        } else {
+            const newChecked: Record<number, boolean> = {};
+            const newQty: Record<number, string> = {};
+            for (const item of listItems) {
+                newChecked[item.id] = true;
+                newQty[item.id] = String(item.remaining_qty);
+            }
+            setChecked(newChecked);
+            setQuantities(newQty);
+        }
+    };
+
     const handleListSubmit = async () => {
         if (!listCanSave) return;
         setSubmitting(true);
@@ -897,7 +932,9 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                     <table className="data-table" style={{ marginBottom: 0, fontSize: 13 }}>
                                         <thead>
                                             <tr>
-                                                <th style={{ width: 36, textAlign: 'center' }}></th>
+                                                <th style={{ width: 36, textAlign: 'center' }}>
+                                                    <input type="checkbox" checked={allChecked} onChange={toggleAll} title="Выбрать все" />
+                                                </th>
                                                 <th>Баркод</th>
                                                 <th>Артикул</th>
                                                 <th>Категория</th>
@@ -1045,9 +1082,20 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                             </div>
 
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--color-border)' }}>
-                                <button className="btn btn-secondary btn-sm" onClick={() => { setRows(Array.from({ length: 5 }, emptyRow)); setError(''); }}>
-                                    Очистить
-                                </button>
+                                <div style={{ display: 'flex', gap: 8 }}>
+                                    <button className="btn btn-secondary btn-sm" onClick={() => { setRows(Array.from({ length: 5 }, emptyRow)); setError(''); }}>
+                                        Очистить
+                                    </button>
+                                    {invalidRows.length > 0 && (
+                                        <button className="btn btn-secondary btn-sm" onClick={() => {
+                                            const text = invalidRows.map(r => `${r.barcode.trim()}\t${r.qty}`).join('\n');
+                                            navigator.clipboard.writeText(text);
+                                            alert(`Скопировано ${invalidRows.length} ненайденных баркодов`);
+                                        }}>
+                                            Скопировать ненайденные ({invalidRows.length})
+                                        </button>
+                                    )}
+                                </div>
                                 <button className="btn btn-primary" onClick={handlePasteSubmit} disabled={!pasteCanSave || submitting}
                                     style={{ minWidth: 160, opacity: pasteCanSave ? 1 : 0.5 }}>
                                     {submitting ? 'Добавляем...' : hasUnfound ? `Добавить найденные (${validRows.length})` : `Добавить (${validRows.length})`}

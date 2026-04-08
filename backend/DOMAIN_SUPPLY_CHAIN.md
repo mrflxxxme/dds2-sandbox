@@ -57,8 +57,16 @@ FORMING | IN_TRANSIT | CUSTOMS | DISPATCHED | DELIVERED
 1. Создать машину (POST /vehicles) с номером, типом транспорта, курсами
 2. Добавить товар из заказов (POST /vehicles/{no}/items) — пикер доступных позиций
 3. Удалить позицию (DELETE /vehicles/{no}/items/{id}) — восстанавливает assigned_qty
-4. Доступные позиции (GET /vehicles/available-items) — FactoryOrderItems с remaining_qty > 0
-5. Расчёт загрузки — box_size из FactoryOrderItem + CONTAINERS из container-loader
+4. Удалить машину (DELETE /vehicles/{no}) — только FORMING, soft-delete + restore assigned_qty
+5. Доступные позиции (GET /vehicles/available-items) — FactoryOrderItems с remaining_qty > 0
+6. Расчёт загрузки — box_size из FactoryOrderItem + CONTAINERS из container-loader
+
+### Кросс-заказный поиск (paste mode)
+При вставке баркодов из буфера — поиск идёт по ВСЕМ фабричным заказам (не только выбранному).
+- `allItemMap` строится из всех AvailableItemGroups (FIFO: первый заказ приоритетнее)
+- Колонка "Заказ" показывает источник каждой позиции
+- Кнопка "Добавить найденные (N)" активна даже если часть баркодов не найдена
+- После добавления ненайденные строки остаются в таблице
 
 ## API Endpoints
 Prefix: `/api/v1/supply-chain`
@@ -77,6 +85,7 @@ Prefix: `/api/v1/supply-chain`
 | POST | /vehicles | Создать машину |
 | PUT | /vehicles/{order_no}/status | Изменить статус машины |
 | POST | /vehicles/{order_no}/items | Добавить товар в машину |
+| DELETE | /vehicles/{order_no} | Удалить машину (только FORMING) |
 | DELETE | /vehicles/{order_no}/items/{id} | Удалить товар из машины |
 | GET | /vehicles/available-items | Доступные позиции для добавления |
 | POST | /vehicles/recalc-all | Пересчёт себестоимости ВСЕХ машин |

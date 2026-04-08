@@ -310,6 +310,53 @@ async def remove_item_from_vehicle(
     return {"ok": True}
 
 
+async def delete_vehicle(
+    db: AsyncSession,
+    project_id: int,
+    order_no: str,
+) -> dict:
+    """Soft-delete a FORMING vehicle, restore assigned_qty on factory items."""
+    result = await db.execute(
+        select(CostOrder)
+        .options(selectinload(CostOrder.items))
+        .where(
+            CostOrder.order_no == order_no,
+            CostOrder.project_id == project_id,
+            CostOrder.is_deleted == False,  # noqa: E712
+        )
+    )
+    vehicle = result.scalar_one_or_none()
+    if not vehicle:
+        raise ValueError(f"Vehicle {order_no} not found")
+
+    if vehicle.status != VehicleStatus.FORMING:
+        raise ValueError("Удалить можно только машину в статусе FORMING")
+
+    # Restore assigned_qty on linked factory order items
+    fo_item_ids = [item.factory_order_item_id for item in vehicle.items if item.factory_order_item_id]
+    if fo_item_ids:
+        fo_result = await db.execute(
+            select(FactoryOrderItem).where(
+                FactoryOrderItem.id.in_(fo_item_ids),
+                FactoryOrderItem.project_id == project_id,
+            )
+        )
+        fo_items_map = {fi.id: fi for fi in fo_result.scalars().all()}
+        for cost_item in vehicle.items:
+            if cost_item.factory_order_item_id and cost_item.factory_order_item_id in fo_items_map:
+                fo_item = fo_items_map[cost_item.factory_order_item_id]
+                fo_item.assigned_qty = max(0, fo_item.assigned_qty - cost_item.qty)
+
+    # Hard-delete CostOrderItems (no SoftDeleteMixin)
+    for cost_item in list(vehicle.items):
+        await db.delete(cost_item)
+
+    # Soft-delete the vehicle
+    vehicle.soft_delete()
+    await db.commit()
+    return {"ok": True}
+
+
 async def get_available_items(
     db: AsyncSession,
     project_id: int,
