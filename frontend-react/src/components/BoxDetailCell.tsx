@@ -375,11 +375,16 @@ function DropdownEdit({ qty, pcsPerBox, boxDetail, orderId, itemId, onSaved, onC
             </div>
             {error && <div style={{ fontSize: 11, color: 'var(--color-danger)', marginTop: 4 }}>{error}</div>}
             <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-                <button onClick={onCancel} className="btn btn-secondary btn-sm" style={{ flex: 1, fontSize: 11 }}>Назад</button>
-                {canSave && (
+                <button onClick={onCancel} className="btn btn-secondary btn-sm" style={{ flex: 1, fontSize: 11 }}>Закрыть</button>
+                {canSave ? (
                     <button onClick={handleSave} disabled={!isValid || saving} className="btn btn-primary btn-sm"
                         style={{ flex: 1, fontSize: 11, opacity: isValid ? 1 : 0.5 }}>
                         {saving ? '...' : 'Сохранить'}
+                    </button>
+                ) : (
+                    <button onClick={onCancel} disabled={!isValid} className="btn btn-primary btn-sm"
+                        style={{ flex: 1, fontSize: 11, opacity: isValid ? 1 : 0.5 }}>
+                        Готово
                     </button>
                 )}
             </div>
