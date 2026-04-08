@@ -20,7 +20,7 @@
 - `factory_order_item_id` на CostOrderItem — связь с позицией фабричного заказа
 
 ### Enum VehicleStatus
-FORMING | IN_TRANSIT | CUSTOMS | DELIVERED
+FORMING | IN_TRANSIT | CUSTOMS | DISPATCHED | DELIVERED
 
 ## Поток данных
 1. Создаётся FactoryOrder с items (qty, barcode, price_cny)
@@ -31,13 +31,24 @@ FORMING | IN_TRANSIT | CUSTOMS | DELIVERED
 3. Машина меняет статусы: FORMING → IN_TRANSIT → CUSTOMS → DELIVERED
 4. При DELIVERED + target_warehouse_id → auto-create InboundReceipt
 
-## Расчёт себестоимости
+## Расчёт себестоимости и автопересчёт
 **НЕ ТРОГАТЬ** — `services/cost/items.py` работает с CostOrder/CostOrderItem как раньше.
 Новые поля (status, factory_order_item_id) не влияют на расчёт.
+
+### Автопересчёт при добавлении позиций
+При split_to_vehicles и add_items_to_vehicle автоматически вызывается `recalculate_order_items(db, project_id, order_no)` для каждой затронутой машины. Это пересчитывает пошлину, НДС и логистику на позициях.
+
+Места вызова:
+- `factory_orders.split_to_vehicles` — после commit, для каждой vehicles_used
+- `vehicle_delivery.add_items_to_vehicle` — после commit, для конкретной машины
+- `vehicle_delivery.dispatch_vehicle` — при DISPATCHED (отгрузке)
+- `vehicle_delivery.recalculate_vehicle_costs` — ручной пересчёт одной машины
+- `vehicle_delivery.recalculate_all_vehicles` — массовый пересчёт всех машин проекта
 
 ## Gotchas
 - CostOrder.order_no UNIQUE — при split_to_vehicles проверяем is_deleted тоже
 - assigned_qty + new_qty <= qty — валидация в split_to_vehicles
+- CostOrder.status=NULL для НЕ-vehicle заказов (sc07 почистила, default убран)
 - InboundReceipt создаётся через warehouse_stock_engine._next_number
 - Barcode может не быть в Nomenclature — skipped с warning в логах
 - Таможня (customs_dt) привязывается через dt_number отдельно (не через статус)
@@ -68,6 +79,8 @@ Prefix: `/api/v1/supply-chain`
 | POST | /vehicles/{order_no}/items | Добавить товар в машину |
 | DELETE | /vehicles/{order_no}/items/{id} | Удалить товар из машины |
 | GET | /vehicles/available-items | Доступные позиции для добавления |
+| POST | /vehicles/recalc-all | Пересчёт себестоимости ВСЕХ машин |
+| POST | /vehicles/{order_no}/recalc | Пересчёт себестоимости одной машины |
 | GET | /overview | Сводка по supply chain |
 
 ## Файлы
@@ -78,7 +91,10 @@ Prefix: `/api/v1/supply-chain`
 - `services/supply_chain/factory_orders.py` — CRUD + split
 - `services/supply_chain/vehicle_delivery.py` — статусы + auto-receipt
 - `routers/supply_chain.py` — API endpoints
-- `migrations/versions/sc01_add_supply_chain.py` — миграция
+- `migrations/versions/sc01_add_supply_chain.py` — основная миграция
+- `migrations/versions/sc05_fix_missing_columns.py` — changed_by/changed_at в vehicle_status_history
+- `migrations/versions/sc06_add_dispatched_status.py` — DISPATCHED в enum VehicleStatus
+- `migrations/versions/sc07_cleanup_vehicle_status.py` — обнуление status у старых (не-vehicle) cost_orders
 
 ## Frontend
 - `types/api.ts` — FactoryOrder*, VehicleStatus, SupplyChainOverview, SplitItem
