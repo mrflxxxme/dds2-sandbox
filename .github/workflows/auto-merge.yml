@@ -48,13 +48,25 @@ jobs:
             exit 0
           fi
 
-          # Check if all CI checks passed (with fallback for permission issues)
+          # Check if PR is still open (avoid errors on already-merged PRs)
+          PR_STATE=$(gh pr view "$PR_NUMBER" --json state --jq '.state')
+          if [ "$PR_STATE" != "OPEN" ]; then
+            echo "PR #${PR_NUMBER} is ${PR_STATE}, skipping"
+            exit 0
+          fi
+
+          # Check if all CI checks passed (REST API — no GraphQL permission issues)
           echo "Checking CI status for PR #${PR_NUMBER}..."
-          CHECKS_STATUS=$(gh pr checks "$PR_NUMBER" --json bucket --jq '[.[] | select(.bucket != "pass")] | length' 2>&1) || {
-            echo "Failed to query checks (likely permission issue): ${CHECKS_STATUS}"
+          set +e
+          CHECKS_STATUS=$(gh pr checks "$PR_NUMBER" --json bucket --jq '[.[] | select(.bucket != "pass")] | length' 2>&1)
+          CHECKS_EXIT=$?
+          set -e
+
+          if [ $CHECKS_EXIT -ne 0 ]; then
+            echo "Failed to query checks: ${CHECKS_STATUS}"
             echo "Skipping — will retry on next trigger"
             exit 0
-          }
+          fi
 
           if [ "$CHECKS_STATUS" != "0" ]; then
             echo "Not all checks passed yet (${CHECKS_STATUS} pending/failed), skipping"
