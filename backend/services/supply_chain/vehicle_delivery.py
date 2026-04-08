@@ -174,6 +174,9 @@ async def update_vehicle(
         if restricted:
             raise ValueError("Редактирование возможно только в статусе ФОРМИРОВАНИЕ")
 
+    cost_fields = {"rate_cny", "rate_usd", "rate_eur", "delivery_cost_cny", "delivery_cost_usd"}
+    needs_recalc = bool(cost_fields & set(update_data.keys()))
+
     for field, value in update_data.items():
         if field == "container_type" and value:
             vehicle.container_type = value
@@ -182,6 +185,12 @@ async def update_vehicle(
             setattr(vehicle, field, value)
 
     await db.commit()
+
+    if needs_recalc and vehicle.items:
+        from backend.services.cost.items import recalculate_order_items
+
+        await recalculate_order_items(db, project_id, order_no)
+
     await db.refresh(vehicle, attribute_names=["items"])
     return await _enrich_vehicle(db, project_id, vehicle)
 
@@ -307,6 +316,12 @@ async def remove_item_from_vehicle(
 
     await db.delete(cost_item)
     await db.commit()
+
+    # Recalculate remaining items (delivery allocation changes)
+    from backend.services.cost.items import recalculate_order_items
+
+    await recalculate_order_items(db, project_id, order_no)
+
     return {"ok": True}
 
 
@@ -405,6 +420,7 @@ async def get_available_items(
                         "box_size": item.box_size,
                         "pcs_per_box": item.pcs_per_box,
                         "box_detail": item.box_detail,
+                        "mix_group_id": item.mix_group_id,
                         "weight_kg": str(item.weight_kg) if item.weight_kg else None,
                     }
                 )
@@ -446,6 +462,7 @@ async def _enrich_vehicle(
                 FactoryOrderItem.box_detail,
                 FactoryOrderItem.factory_order_id,
                 FactoryOrder.order_number,
+                FactoryOrderItem.mix_group_id,
             )
             .join(FactoryOrder, FactoryOrderItem.factory_order_id == FactoryOrder.id)
             .where(
@@ -454,7 +471,7 @@ async def _enrich_vehicle(
             )
         )
         for row in fo_batch_result:
-            fo_item_map[row[0]] = (row[1], row[2], row[3], row[4], row[5])
+            fo_item_map[row[0]] = (row[1], row[2], row[3], row[4], row[5], row[6])
 
     for cost_item in vehicle.items:
         total_qty += cost_item.qty
@@ -466,11 +483,12 @@ async def _enrich_vehicle(
         box_detail = None
         fo_order_id = None
         fo_order_number = None
+        mix_group_id = None
 
         if cost_item.factory_order_item_id:
             fo_data = fo_item_map.get(cost_item.factory_order_item_id)
             if fo_data:
-                box_size, pcs_per_box, box_detail, fo_order_id, fo_order_number = fo_data
+                box_size, pcs_per_box, box_detail, fo_order_id, fo_order_number, mix_group_id = fo_data
 
         w = _safe_decimal(cost_item.weight_kg)
         v = _safe_decimal(cost_item.volume_m3)
@@ -501,6 +519,7 @@ async def _enrich_vehicle(
                 box_size=box_size,
                 pcs_per_box=pcs_per_box,
                 box_detail=box_detail,
+                mix_group_id=mix_group_id,
                 factory_order_id=fo_order_id,
                 factory_order_number=fo_order_number,
             )
