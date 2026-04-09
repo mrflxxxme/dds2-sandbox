@@ -106,5 +106,19 @@ jobs:
             exit 0
           fi
 
-          echo "All checks passed! Merging PR #${PR_NUMBER}..."
+          echo "All checks passed!"
+
+          # Check if branch is behind base — update if needed
+          MERGE_STATE=$(gh pr view "$PR_NUMBER" --json mergeStateStatus --jq '.mergeStateStatus')
+          echo "Merge state: ${MERGE_STATE}"
+
+          if [ "$MERGE_STATE" = "BEHIND" ]; then
+            echo "Branch is behind base, updating..."
+            gh api -X PUT "repos/${REPO}/pulls/${PR_NUMBER}/update-branch" \
+              --field expected_head_sha="$HEAD_SHA" || true
+            echo "Branch update requested — CI will re-trigger auto-merge"
+            exit 0
+          fi
+
+          echo "Merging PR #${PR_NUMBER}..."
           gh pr merge "$PR_NUMBER" --merge --delete-branch=false

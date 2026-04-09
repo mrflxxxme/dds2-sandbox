@@ -7,6 +7,7 @@ import { formatNumber, formatDate, formatDateTime, exportToExcel, calcTotalBoxes
 import PageHeader from '@/components/PageHeader';
 import BoxDetailCell, { BoxDetailExpandRow } from '@/components/BoxDetailCell';
 import type { FactoryOrder, FactoryOrderItem, FactoryOrderItemUpdate, FactoryOrderHistory, Nomenclature } from '@/types/api';
+import { LanguageProvider, useT, LanguageToggle } from '../../i18n';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -36,13 +37,13 @@ const calcVolumeM3 = (boxSize: string, qty: number, pcsPerBox: number | null): n
     return boxes > 0 ? boxes * volumePerBoxM3 : 0;
 };
 
-// ─── Status constants ────────────────────────────────────────────────────
+// ─── Status constants (functions that accept t) ─────────────────────────
 
-const FO_STATUS_LABELS: Record<string, string> = {
-    FORMING: 'Формируется',
-    READY: 'Готов',
-    DISTRIBUTED: 'Распределён',
-};
+const getFoStatusLabels = (t: (k: string) => string): Record<string, string> => ({
+    FORMING: t('factory_status_forming'),
+    READY: t('factory_status_ready'),
+    DISTRIBUTED: t('factory_status_distributed'),
+});
 
 const FO_STATUS_COLORS: Record<string, string> = {
     FORMING: 'var(--color-text-muted)',
@@ -50,13 +51,13 @@ const FO_STATUS_COLORS: Record<string, string> = {
     DISTRIBUTED: 'var(--color-success)',
 };
 
-const FO_EVENT_LABELS: Record<string, string> = {
-    created: 'Заказ создан',
-    status_change: 'Смена статуса',
-    distributed: 'Распределение',
-    items_added: 'Позиции добавлены',
-    items_removed: 'Позиции удалены',
-};
+const getFoEventLabels = (t: (k: string) => string): Record<string, string> => ({
+    created: t('detail_event_created'),
+    status_change: t('detail_event_status_change'),
+    distributed: t('detail_event_distributed'),
+    items_added: t('detail_event_items_added'),
+    items_removed: t('detail_event_items_removed'),
+});
 
 const FO_EVENT_ICONS: Record<string, string> = {
     created: '+',
@@ -67,14 +68,15 @@ const FO_EVENT_ICONS: Record<string, string> = {
 };
 
 function DistributionBadge({ totalQty, totalAssigned }: { totalQty: number; totalAssigned: number }) {
+    const { t } = useT();
     const pct = totalQty > 0 ? Math.round((totalAssigned / totalQty) * 100) : 0;
     let label: string;
     let badgeClass: string;
     if (pct === 0) {
-        label = 'Не распред.';
+        label = t('detail_badge_undistributed');
         badgeClass = 'badge badge-secondary';
     } else if (pct >= 100) {
-        label = 'Распределён';
+        label = t('detail_badge_distributed');
         badgeClass = 'badge badge-success';
     } else {
         label = `${pct}%`;
@@ -138,6 +140,7 @@ function SummaryKpi({ label, value, accent }: { label: string; value: string; ac
 // ─── Order Info Card ──────────────────────────────────────────────────────
 
 function OrderInfoCard({ order, onUpdated }: { order: FactoryOrder; onUpdated: () => void }) {
+    const { t } = useT();
     const [editing, setEditing] = useState(false);
     const [saving, setSaving] = useState(false);
     const [form, setForm] = useState({
@@ -174,7 +177,7 @@ function OrderInfoCard({ order, onUpdated }: { order: FactoryOrder; onUpdated: (
             setEditing(false);
             onUpdated();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка сохранения');
+            alert(e instanceof Error ? e.message : t('msg_save_error'));
         }
         setSaving(false);
     };
@@ -194,17 +197,17 @@ function OrderInfoCard({ order, onUpdated }: { order: FactoryOrder; onUpdated: (
         <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                 <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                    Информация о заказе
+                    {t('detail_field_order_number')}
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
                     {!editing && (
-                        <button className="btn btn-secondary btn-sm" onClick={() => setEditing(true)}>Редактировать</button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => setEditing(true)}>{t('btn_edit')}</button>
                     )}
                     {editing && (
                         <>
-                            <button className="btn btn-secondary btn-sm" onClick={() => setEditing(false)}>Отмена</button>
+                            <button className="btn btn-secondary btn-sm" onClick={() => setEditing(false)}>{t('btn_cancel')}</button>
                             <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={saving}>
-                                {saving ? '...' : 'Сохранить'}
+                                {saving ? '...' : t('btn_save')}
                             </button>
                         </>
                     )}
@@ -212,13 +215,13 @@ function OrderInfoCard({ order, onUpdated }: { order: FactoryOrder; onUpdated: (
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px 24px' }}>
-                <InfoField label="Номер заказа" value={order.order_number} editing={editing}
+                <InfoField label={t('detail_field_order_number')} value={order.order_number} editing={editing}
                     input={<input value={form.order_number} onChange={e => setForm(f => ({ ...f, order_number: e.target.value }))} style={editInput} />} />
-                <InfoField label="Поставщик" value={order.factory_name} editing={editing}
+                <InfoField label={t('detail_field_supplier')} value={order.factory_name} editing={editing}
                     input={<input value={form.factory_name} onChange={e => setForm(f => ({ ...f, factory_name: e.target.value }))} placeholder="—" style={editInput} />} />
-                <InfoField label="Дата заказа" value={order.order_date ? formatDate(order.order_date) : undefined} editing={editing}
+                <InfoField label={t('col_created_date')} value={order.order_date ? formatDate(order.order_date) : undefined} editing={editing}
                     input={<input type="date" value={form.order_date} onChange={e => setForm(f => ({ ...f, order_date: e.target.value }))} style={editInput} />} />
-                <InfoField label="Готовность (план)" value={order.expected_ready_date ? formatDate(order.expected_ready_date) : undefined} editing={editing}
+                <InfoField label={t('detail_field_ready_date')} value={order.expected_ready_date ? formatDate(order.expected_ready_date) : undefined} editing={editing}
                     input={<input type="date" value={form.expected_ready_date} onChange={e => setForm(f => ({ ...f, expected_ready_date: e.target.value }))} style={editInput} />} />
             </div>
 
@@ -230,18 +233,18 @@ function OrderInfoCard({ order, onUpdated }: { order: FactoryOrder; onUpdated: (
                 return (
                     <>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--color-border)' }}>
-                            <SummaryKpi label="Артикулов" value={String(items.length)} />
-                            <SummaryKpi label="Всего шт" value={formatNumber(totalQty, 0)} />
-                            <SummaryKpi label="Мест" value={totalBoxes > 0 ? formatNumber(totalBoxes, 0) : '—'} />
-                            <SummaryKpi label="Объём" value={totalVolume > 0 ? `${formatNumber(totalVolume, 1)} м³` : '—'} />
-                            <SummaryKpi label="Стоимость" value={totalCny > 0 ? `${formatNumber(totalCny, 0)} ¥` : '—'} accent />
+                            <SummaryKpi label={t('detail_kpi_items')} value={String(items.length)} />
+                            <SummaryKpi label={t('detail_kpi_qty')} value={`${formatNumber(totalQty, 0)} ${t('unit_pcs')}`} />
+                            <SummaryKpi label={t('detail_kpi_boxes')} value={totalBoxes > 0 ? formatNumber(totalBoxes, 0) : '—'} />
+                            <SummaryKpi label={t('detail_kpi_volume')} value={totalVolume > 0 ? `${formatNumber(totalVolume, 1)} m³` : '—'} />
+                            <SummaryKpi label={t('detail_kpi_amount')} value={totalCny > 0 ? `${formatNumber(totalCny, 0)} ¥` : '—'} accent />
                         </div>
                         {/* Distribution progress */}
                         {totalQty > 0 && (
                             <div style={{ marginTop: 12 }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
                                     <span style={{ fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>
-                                        Распределено: {formatNumber(totalAssigned, 0)} из {formatNumber(totalQty, 0)} шт.
+                                        {t('detail_kpi_distribution')}: {formatNumber(totalAssigned, 0)} / {formatNumber(totalQty, 0)} {t('unit_pcs')}
                                     </span>
                                     <span style={{ fontSize: 11, fontWeight: 700, color: progressColor }}>
                                         {distPct}%
@@ -297,6 +300,7 @@ function itemToEditRow(item: FactoryOrderItem): EditRow {
 function ItemsTable({ items, orderId, nomMap, onChanged }: {
     items: FactoryOrderItem[]; orderId: number; nomMap: Map<string, Nomenclature>; onChanged: () => void;
 }) {
+    const { t } = useT();
     const [editing, setEditing] = useState(false);
     const [editRows, setEditRows] = useState<EditRow[]>([]);
     const [saving, setSaving] = useState(false);
@@ -355,7 +359,7 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
             setMixFormData({ boxSize: '', items: [] });
             onChanged();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка создания микса');
+            alert(e instanceof Error ? e.message : t('msg_save_error'));
         }
         setMixSaving(false);
     };
@@ -371,7 +375,7 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
             await api.removeMixGroup(orderId, mixGroupId);
             onChanged();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка удаления микса');
+            alert(e instanceof Error ? e.message : t('msg_delete_error'));
         }
         setMixSaving(false);
     };
@@ -430,38 +434,38 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
             setEditing(false);
             onChanged();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка сохранения');
+            alert(e instanceof Error ? e.message : t('msg_save_error'));
         }
         setSaving(false);
     };
 
     const handleDelete = async (item: FactoryOrderItem) => {
-        if (!confirm(`Удалить позицию ${item.barcode}?`)) return;
+        if (!confirm(`${t('detail_confirm_delete_item')} ${item.barcode}`)) return;
         setDeletingId(item.id);
         try {
             await api.deleteFactoryOrderItem(orderId, item.id);
             onChanged();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка удаления');
+            alert(e instanceof Error ? e.message : t('msg_delete_error'));
         }
         setDeletingId(null);
     };
 
     const handleExport = () => {
         const rows = items.map(i => ({
-            'Баркод': i.barcode,
-            'Предмет': i.subject || '',
-            'Артикул': i.article_seller || '',
-            'Кол-во': i.qty,
-            'Распределено': i.assigned_qty,
-            'Остаток': i.qty - i.assigned_qty,
-            'Цена ¥': Number(i.price_cny),
-            'Сумма ¥': i.qty * Number(i.price_cny),
-            'Коробка': i.box_size || '',
-            'Шт/кор': i.pcs_per_box || '',
-            'Мест': i.mix_group_id ? 'микс' : (i.pcs_per_box && i.pcs_per_box > 0 ? Math.ceil(i.qty / i.pcs_per_box) : ''),
-            'Микс': i.mix_group_id ? i.mix_group_id.slice(0, 8) : '',
-            'Вес (кг) 1шт': i.weight_kg ? Number(i.weight_kg) : '',
+            [t('col_barcode')]: i.barcode,
+            [t('detail_col_subject')]: i.subject || '',
+            [t('col_article')]: i.article_seller || '',
+            [t('col_qty')]: i.qty,
+            [t('col_distributed')]: i.assigned_qty,
+            [t('col_remaining')]: i.qty - i.assigned_qty,
+            [t('col_price_cny')]: Number(i.price_cny),
+            [t('col_sum_cny')]: i.qty * Number(i.price_cny),
+            [t('col_box_spec')]: i.box_size || '',
+            [t('col_pcs_per_box')]: i.pcs_per_box || '',
+            [t('col_boxes')]: i.mix_group_id ? t('detail_col_mix') : (i.pcs_per_box && i.pcs_per_box > 0 ? Math.ceil(i.qty / i.pcs_per_box) : ''),
+            [t('detail_col_mix')]: i.mix_group_id ? i.mix_group_id.slice(0, 8) : '',
+            [t('col_weight_1pc')]: i.weight_kg ? Number(i.weight_kg) : '',
         }));
         exportToExcel(rows, 'factory-order-items');
     };
@@ -484,25 +488,25 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
         <>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                 <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>
-                    Позиции ({items.length})
+                    {t('detail_items_title')} ({items.length})
                 </h3>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                     {!editing && selected.size >= 2 && !mixFormOpen && (
                         <button className="btn btn-primary btn-sm" onClick={handleOpenMixForm}
                             style={{ fontSize: 12 }}>
-                            Микс-коробка ({selected.size})
+                            {t('detail_col_mix')} ({selected.size})
                         </button>
                     )}
                     {!editing ? (
                         <>
-                            <button className="btn btn-secondary btn-sm" onClick={startBulkEdit}>Редактировать всё</button>
+                            <button className="btn btn-secondary btn-sm" onClick={startBulkEdit}>{t('btn_edit')}</button>
                             <button className="btn btn-secondary btn-sm" onClick={handleExport}>Excel</button>
                         </>
                     ) : (
                         <>
-                            <button className="btn btn-secondary btn-sm" onClick={cancelBulkEdit}>Отмена</button>
+                            <button className="btn btn-secondary btn-sm" onClick={cancelBulkEdit}>{t('btn_cancel')}</button>
                             <button className="btn btn-primary btn-sm" onClick={handleSaveAll} disabled={saving}>
-                                {saving ? 'Сохранение...' : 'Сохранить всё'}
+                                {saving ? t('msg_saving') : t('btn_save')}
                             </button>
                         </>
                     )}
@@ -516,11 +520,11 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                     background: 'var(--color-bg)', border: '1px solid var(--color-accent)',
                 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--color-accent)' }}>
-                        Микс-коробка
+                        {t('detail_col_mix')}
                     </div>
                     <div style={{ marginBottom: 12 }}>
                         <label style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'block', marginBottom: 4 }}>
-                            Размер коробки
+                            {t('col_box_spec')}
                         </label>
                         <input
                             value={mixFormData.boxSize}
@@ -533,10 +537,10 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, marginBottom: 12 }}>
                         <thead>
                             <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                <th style={{ textAlign: 'left', padding: '6px 4px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Баркод</th>
-                                <th style={{ textAlign: 'left', padding: '6px 4px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Предмет</th>
-                                <th style={{ textAlign: 'right', padding: '6px 4px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Всего</th>
-                                <th style={{ textAlign: 'right', padding: '6px 4px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Шт в коробке</th>
+                                <th style={{ textAlign: 'left', padding: '6px 4px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_barcode')}</th>
+                                <th style={{ textAlign: 'left', padding: '6px 4px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('detail_col_subject')}</th>
+                                <th style={{ textAlign: 'right', padding: '6px 4px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_total')}</th>
+                                <th style={{ textAlign: 'right', padding: '6px 4px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_pcs_per_box')}</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -567,14 +571,14 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                             : 0;
                         return (
                             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
-                                Итого: <b style={{ color: 'var(--color-text)' }}>{totalMixBoxes}</b> микс-коробок
+                                {t('detail_total')}: <b style={{ color: 'var(--color-text)' }}>{totalMixBoxes}</b> {t('detail_col_mix')}
                             </div>
                         );
                     })()}
                     <div style={{ display: 'flex', gap: 8 }}>
-                        <button className="btn btn-secondary btn-sm" onClick={handleCancelMix}>Отмена</button>
+                        <button className="btn btn-secondary btn-sm" onClick={handleCancelMix}>{t('btn_cancel')}</button>
                         <button className="btn btn-primary btn-sm" onClick={handleSaveMix} disabled={mixSaving || !mixFormData.boxSize || mixFormData.items.some(i => !parseInt(i.pcsPerBox))}>
-                            {mixSaving ? '...' : 'Сохранить'}
+                            {mixSaving ? '...' : t('btn_save')}
                         </button>
                     </div>
                 </div>
@@ -590,17 +594,17 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                                         onChange={toggleAll} style={{ cursor: 'pointer' }} />
                                 </th>
                             )}
-                            <th style={th}>Баркод</th>
-                            <th style={th}>Предмет</th>
-                            <th style={th}>Артикул</th>
-                            <th style={thR}>Кол-во</th>
-                            <th style={thR}>Распред.</th>
-                            <th style={thR}>Цена ¥</th>
-                            <th style={thR}>Сумма ¥</th>
-                            <th style={th}>Габариты коробки</th>
-                            <th style={thR}>Шт/кор</th>
-                            <th style={thR}>Мест</th>
-                            <th style={thR}>Вес (кг) 1шт</th>
+                            <th style={th}>{t('col_barcode')}</th>
+                            <th style={th}>{t('detail_col_subject')}</th>
+                            <th style={th}>{t('col_article')}</th>
+                            <th style={thR}>{t('col_qty')}</th>
+                            <th style={thR}>{t('col_progress')}</th>
+                            <th style={thR}>{t('col_price_cny')}</th>
+                            <th style={thR}>{t('col_sum_cny')}</th>
+                            <th style={th}>{t('col_box_spec')}</th>
+                            <th style={thR}>{t('col_pcs_per_box')}</th>
+                            <th style={thR}>{t('col_boxes')}</th>
+                            <th style={thR}>{t('col_weight_1pc')}</th>
                             {!editing && <th style={{ width: 36 }} />}
                         </tr>
                     </thead>
@@ -662,14 +666,14 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                                             const effectivePpb = item.mix_pcs_per_box || item.pcs_per_box;
                                             const mixBoxCount = effectivePpb && effectivePpb > 0 ? Math.ceil(item.qty / effectivePpb) : null;
                                             return (
-                                                <span title={`Микс-группа: ${item.mix_group_id.slice(0, 8)}`}>
+                                                <span title={`${t('detail_mix_group')}: ${item.mix_group_id.slice(0, 8)}`}>
                                                     {mixBoxCount !== null ? (
                                                         <>
                                                             <span style={{ fontWeight: 600, color: mixColor }}>{mixBoxCount}</span>
-                                                            <span style={{ fontSize: 10, fontWeight: 600, color: mixColor, marginLeft: 3 }}>микс</span>
+                                                            <span style={{ fontSize: 10, fontWeight: 600, color: mixColor, marginLeft: 3 }}>{t('detail_col_mix')}</span>
                                                         </>
                                                     ) : (
-                                                        <span style={{ fontSize: 11, fontWeight: 600, color: mixColor }}>микс</span>
+                                                        <span style={{ fontSize: 11, fontWeight: 600, color: mixColor }}>{t('detail_col_mix')}</span>
                                                     )}
                                                 </span>
                                             );
@@ -688,12 +692,12 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                                         {item.mix_group_id && (
                                             <button onClick={() => handleRemoveMix(item.mix_group_id!)} disabled={mixSaving}
                                                 style={{ background: 'none', border: 'none', cursor: 'pointer', color: mixColor, fontSize: 12, opacity: 0.7, padding: 2 }}
-                                                title="Разбить микс">⊘</button>
+                                                title={t('detail_col_mix')}>⊘</button>
                                         )}
                                         {canDelete && (
                                             <button onClick={() => handleDelete(item)} disabled={deletingId === item.id}
                                                 style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-danger)', fontSize: 14, opacity: deletingId === item.id ? 0.3 : 0.6, padding: 2 }}
-                                                title="Удалить">✕</button>
+                                                title={t('btn_delete')}>✕</button>
                                         )}
                                     </td>
                                 </tr>
@@ -718,7 +722,7 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                     {items.length > 1 && (
                         <tfoot>
                             <tr style={{ borderTop: '2px solid var(--color-border)', fontWeight: 600 }}>
-                                <td colSpan={editing ? 3 : 4} style={{ ...td, fontSize: 12, color: 'var(--color-text-muted)' }}>ИТОГО</td>
+                                <td colSpan={editing ? 3 : 4} style={{ ...td, fontSize: 12, color: 'var(--color-text-muted)' }}>{t('detail_total')}</td>
                                 <td style={tdR}>{formatNumber(totalQty, 0)}</td>
                                 <td style={tdR}><MiniProgressBar qty={totalQty} assignedQty={totalAssigned} /></td>
                                 <td style={tdR} />
@@ -749,6 +753,7 @@ function AddItemsSection({ orderId, nomMap, onAdded, alwaysOpen, onClose }: {
     orderId: number; nomMap: Map<string, Nomenclature>; onAdded: () => void;
     alwaysOpen?: boolean; onClose?: () => void;
 }) {
+    const { t } = useT();
     const [open, setOpen] = useState(false);
     const [rows, setRows] = useState<PasteRow[]>(() => Array.from({ length: 5 }, emptyPasteRow));
     const [saving, setSaving] = useState(false);
@@ -819,7 +824,7 @@ function AddItemsSection({ orderId, nomMap, onAdded, alwaysOpen, onClose }: {
             onClose?.();
             onAdded();
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка добавления');
+            setError(e instanceof Error ? e.message : t('msg_save_error'));
         }
         setSaving(false);
     };
@@ -834,7 +839,7 @@ function AddItemsSection({ orderId, nomMap, onAdded, alwaysOpen, onClose }: {
     if (!isOpen) {
         return (
             <button className="btn btn-secondary btn-sm" onClick={() => setOpen(true)} style={{ marginTop: 12 }}>
-                + Добавить позиции
+                {t('detail_add_items')}
             </button>
         );
     }
@@ -862,10 +867,10 @@ function AddItemsSection({ orderId, nomMap, onAdded, alwaysOpen, onClose }: {
         <div className="glass-card" style={{ padding: 16, ...(alwaysOpen ? {} : { marginTop: 20, paddingTop: 20, borderTop: '1px solid var(--color-border)' }) }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                 <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-                    Добавить позиции <span style={{ fontSize: 12 }}>(вставьте из Excel: Баркод, Кол-во, Цена, Коробка, Шт/кор, Вес)</span>
+                    {t('detail_paste_header')} <span style={{ fontSize: 12 }}>({t('detail_paste_sub')})</span>
                 </div>
                 <button className="btn btn-secondary btn-sm" onClick={handleClose}>
-                    Отмена
+                    {t('btn_cancel')}
                 </button>
             </div>
 
@@ -883,12 +888,12 @@ function AddItemsSection({ orderId, nomMap, onAdded, alwaysOpen, onClose }: {
                     <thead>
                         <tr>
                             <th style={{ ...thStyle, width: 36 }}>#</th>
-                            <th style={{ ...thStyle, width: '100%' }}>Баркод</th>
-                            <th style={thR}>Кол-во</th>
-                            <th style={thR}>Цена ¥</th>
-                            <th style={thStyle}>Габариты коробки</th>
-                            <th style={thR}>Шт/кор</th>
-                            <th style={thR}>Вес (кг) 1шт</th>
+                            <th style={{ ...thStyle, width: '100%' }}>{t('col_barcode')}</th>
+                            <th style={thR}>{t('col_qty')}</th>
+                            <th style={thR}>{t('col_price_cny')}</th>
+                            <th style={thStyle}>{t('col_box_spec')}</th>
+                            <th style={thR}>{t('col_pcs_per_box')}</th>
+                            <th style={thR}>{t('col_weight_1pc')}</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -902,7 +907,7 @@ function AddItemsSection({ orderId, nomMap, onAdded, alwaysOpen, onClose }: {
                                         <input
                                             value={row.barcode}
                                             onChange={e => updatePasteRow(i, 'barcode', e.target.value)}
-                                            placeholder="Баркод"
+                                            placeholder={t('col_barcode')}
                                             autoComplete="off"
                                             style={{ ...cellInp, fontFamily: 'monospace' }}
                                         />
@@ -943,21 +948,22 @@ function AddItemsSection({ orderId, nomMap, onAdded, alwaysOpen, onClose }: {
             <div style={{ display: 'flex', gap: 8, marginTop: 12, justifyContent: 'flex-end' }}>
                 {filledRows.length > 0 && (
                     <button className="btn btn-secondary btn-sm" onClick={handleClear}>
-                        Очистить
+                        {t('btn_cancel')}
                     </button>
                 )}
                 <button className="btn btn-primary btn-sm" onClick={handleSubmit}
                     disabled={!canSave || saving}>
-                    {saving ? 'Добавление...' : `Добавить${validRows.length > 0 ? ` (${validRows.length})` : ''}`}
+                    {saving ? t('msg_saving') : `${t('btn_add')}${validRows.length > 0 ? ` (${validRows.length})` : ''}`}
                 </button>
             </div>
         </div>
     );
 }
 
-// ─── Main Page ────────────────────────────────────────────────────────────
+// ─── Inner Content (needs LanguageProvider above) ────────────────────────
 
-export default function FactoryOrderDetailPage() {
+function FactoryOrderDetailContent() {
+    const { t } = useT();
     const params = useParams();
     const router = useRouter();
     const slug = params.slug as string;
@@ -989,19 +995,21 @@ export default function FactoryOrderDetailPage() {
             setOrder(data);
             setHistory(hist);
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+            setError(e instanceof Error ? e.message : t('msg_loading_error'));
         }
         setLoading(false);
-    }, [orderId]);
+    }, [orderId, t]);
 
     useEffect(() => { load(); }, [load]);
     useEffect(() => { api.getNomenclature().then(setNomenclature).catch(() => {}); }, []);
 
     const goBack = () => router.push(`/p/${slug}/supply-chain`);
 
-    if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}><div className="spinner" style={{ margin: '0 auto 12px' }} />Загрузка...</div>;
-    if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error} <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>Повторить</button></div>;
-    if (!order) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Заказ не найден <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={goBack}>Назад</button></div>;
+    const FO_EVENT_LABELS = getFoEventLabels(t);
+
+    if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}><div className="spinner" style={{ margin: '0 auto 12px' }} />{t('msg_loading')}</div>;
+    if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error} <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>{t('btn_retry')}</button></div>;
+    if (!order) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>{t('detail_not_found')} <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={goBack}>{t('detail_back')}</button></div>;
 
     const items = order.items || [];
 
@@ -1023,12 +1031,12 @@ export default function FactoryOrderDetailPage() {
             {/* Header */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 20 }}>
                 <button className="btn btn-secondary btn-sm" onClick={goBack} style={{ fontSize: 13 }}>
-                    ← Назад
+                    {t('detail_back')}
                 </button>
                 <div style={{ flex: 1 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                         <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>
-                            Заказ #{order.order_number}
+                            {t('detail_order')} #{order.order_number}
                         </h1>
                         <DistributionBadge totalQty={totalQtyAll} totalAssigned={totalAssignedAll} />
                     </div>
@@ -1038,9 +1046,10 @@ export default function FactoryOrderDetailPage() {
                         </div>
                     )}
                 </div>
+                <LanguageToggle />
                 {order.created_at && (
                     <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
-                        Создан {formatDate(order.created_at)}
+                        {formatDate(order.created_at)}
                     </div>
                 )}
             </div>
@@ -1051,21 +1060,21 @@ export default function FactoryOrderDetailPage() {
             {/* Tabs */}
             <div style={{ display: 'flex', gap: 0, marginBottom: 16, borderBottom: '2px solid var(--color-border)' }}>
                 {[
-                    { key: 'main' as const, label: 'Позиции' },
-                    { key: 'history' as const, label: `История${history.length > 0 ? ` (${history.length})` : ''}` },
-                ].map(t => (
+                    { key: 'main' as const, label: t('detail_tab_items') },
+                    { key: 'history' as const, label: `${t('detail_tab_history')}${history.length > 0 ? ` (${history.length})` : ''}` },
+                ].map(tb => (
                     <button
-                        key={t.key}
-                        onClick={() => setTab(t.key)}
+                        key={tb.key}
+                        onClick={() => setTab(tb.key)}
                         style={{
                             padding: '10px 20px', fontSize: 13, fontWeight: 600,
                             border: 'none', background: 'none', cursor: 'pointer',
-                            color: tab === t.key ? 'var(--color-accent)' : 'var(--color-text-muted)',
-                            borderBottom: tab === t.key ? '2px solid var(--color-accent)' : '2px solid transparent',
+                            color: tab === tb.key ? 'var(--color-accent)' : 'var(--color-text-muted)',
+                            borderBottom: tab === tb.key ? '2px solid var(--color-accent)' : '2px solid transparent',
                             marginBottom: -2, transition: 'all 0.2s ease',
                         }}
                     >
-                        {t.label}
+                        {tb.label}
                     </button>
                 ))}
             </div>
@@ -1077,9 +1086,9 @@ export default function FactoryOrderDetailPage() {
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                         <div style={{ display: 'flex', gap: 6 }}>
                             {([
-                                { key: 'all' as const, label: `Все (${items.length})` },
-                                { key: 'undistributed' as const, label: `Не распред. (${undistributedCount})` },
-                                { key: 'distributed' as const, label: `Распред. (${distributedCount})` },
+                                { key: 'all' as const, label: `${t('detail_filter_all')} (${items.length})` },
+                                { key: 'undistributed' as const, label: `${t('detail_filter_undistributed')} (${undistributedCount})` },
+                                { key: 'distributed' as const, label: `${t('detail_filter_distributed')} (${distributedCount})` },
                             ]).map(f => (
                                 <button
                                     key={f.key}
@@ -1094,7 +1103,7 @@ export default function FactoryOrderDetailPage() {
                             className="btn btn-primary btn-sm"
                             onClick={() => setShowAddItems(v => !v)}
                         >
-                            {showAddItems ? '✕ Закрыть' : '+ Добавить позиции'}
+                            {showAddItems ? t('btn_close') : t('detail_add_items')}
                         </button>
                     </div>
 
@@ -1117,10 +1126,10 @@ export default function FactoryOrderDetailPage() {
                                 <div className="empty-state-icon">📦</div>
                                 <div className="empty-state-text">
                                     {items.length === 0
-                                        ? 'Нет позиций. Добавьте товары кнопкой выше.'
+                                        ? t('detail_items_empty')
                                         : itemFilter === 'distributed'
-                                            ? 'Нет распределённых позиций'
-                                            : 'Все позиции распределены'}
+                                            ? t('detail_filter_distributed')
+                                            : t('detail_filter_undistributed')}
                                 </div>
                             </div>
                         ) : (
@@ -1135,7 +1144,7 @@ export default function FactoryOrderDetailPage() {
                 <div className="glass-card" style={{ padding: 20 }}>
                     {history.length === 0 ? (
                         <div style={{ textAlign: 'center', padding: '24px 0', color: 'var(--color-text-dim)', fontSize: 13 }}>
-                            Нет записей. История записывается при добавлении позиций и распределении по машинам.
+                            {t('detail_history_empty')}
                         </div>
                     ) : (
                         <div style={{ position: 'relative', paddingLeft: 28 }}>
@@ -1187,5 +1196,15 @@ export default function FactoryOrderDetailPage() {
                 </div>
             )}
         </div>
+    );
+}
+
+// ─── Main Page (wraps content in LanguageProvider) ───────────────────────
+
+export default function FactoryOrderDetailPage() {
+    return (
+        <LanguageProvider>
+            <FactoryOrderDetailContent />
+        </LanguageProvider>
     );
 }
