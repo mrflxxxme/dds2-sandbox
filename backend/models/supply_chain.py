@@ -28,10 +28,36 @@ from backend.models.mixins import SoftDeleteMixin, TimestampMixin
 from backend.utils.time import utcnow
 
 
+class Supplier(Base, TimestampMixin, SoftDeleteMixin):
+    """
+    Supplier reference — one supplier = one factory/vendor.
+    Supports Chinese (CNY) and Russian (RUB) suppliers.
+    """
+
+    __tablename__ = "suppliers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    country: Mapped[str] = mapped_column(String(20), nullable=False, default="CHINA", server_default="CHINA")
+    currency: Mapped[str] = mapped_column(String(5), nullable=False, default="CNY", server_default="CNY")
+    delivery_days_min: Mapped[int | None] = mapped_column(Integer)
+    delivery_days_max: Mapped[int | None] = mapped_column(Integer)
+    note: Mapped[str | None] = mapped_column(Text)
+
+    factory_orders: Mapped[list["FactoryOrder"]] = relationship(back_populates="supplier")
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_supplier_project_name"),
+        Index("ix_suppliers_project_id", "project_id"),
+    )
+
+
 class FactoryOrder(Base, TimestampMixin, SoftDeleteMixin):
     """
     Factory order — one order placed to one factory.
     Items from a factory order get distributed across vehicles (CostOrder).
+    total_cny stores the order cost in the supplier's currency (CNY or RUB).
     """
 
     __tablename__ = "factory_orders"
@@ -40,21 +66,24 @@ class FactoryOrder(Base, TimestampMixin, SoftDeleteMixin):
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     order_number: Mapped[str] = mapped_column(String(50), nullable=False)
     factory_name: Mapped[str | None] = mapped_column(String(200))
+    supplier_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("suppliers.id"), nullable=True)
     order_date: Mapped[date | None] = mapped_column(Date)
     expected_ready_date: Mapped[date | None] = mapped_column(Date)
     total_cny: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="FORMING", server_default="FORMING")
     note: Mapped[str | None] = mapped_column(Text)
 
+    supplier: Mapped["Supplier | None"] = relationship(back_populates="factory_orders")
     items: Mapped[list["FactoryOrderItem"]] = relationship(back_populates="factory_order", cascade="all, delete-orphan")
 
     __table_args__ = (
         UniqueConstraint("project_id", "order_number", name="uq_factory_order_project_number"),
         Index("ix_factory_orders_project_id", "project_id"),
+        Index("ix_factory_orders_supplier_id", "supplier_id"),
     )
 
 
-class FactoryOrderItem(Base):
+class FactoryOrderItem(Base, SoftDeleteMixin):
     """
     Line item in a factory order.
     Tracks ordered qty and how much has been assigned to vehicles.

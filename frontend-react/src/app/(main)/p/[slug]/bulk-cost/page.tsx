@@ -23,7 +23,7 @@ export default function BulkCostPage() {
 
     useEffect(() => {
         api.getNomenclature().then(setNomenclature).catch(() => {});
-        api.getFunnelCosts().then((data: any) => setMissing(data.missing || [])).catch(() => {});
+        api.getMissingCosts().then(setMissing).catch(() => {});
     }, []);
 
     // Build barcode → name AND nmId → name lookups
@@ -210,7 +210,9 @@ export default function BulkCostPage() {
                     )}
                     <button className="btn btn-secondary btn-sm" onClick={() => {
                         const text = missing.map((m: any) => `${m.vendor_code || ''}\t${m.nm_id}\t0\tRUB`).join('\n');
-                        navigator.clipboard.writeText(text);
+                        if (typeof navigator !== 'undefined' && navigator.clipboard) {
+                            navigator.clipboard.writeText(text);
+                        }
                     }}>
                         📋 Скопировать всё
                     </button>

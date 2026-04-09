@@ -25,6 +25,7 @@ from backend.schemas.refs import (
     ProductTagSchema,
 )
 from backend.services import refs_service
+from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/refs")
 
@@ -45,6 +46,7 @@ async def upsert_account(
     payload: AccountSchema,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
 ):
     return await refs_service.upsert_account(db, project.id, payload.model_dump(exclude_unset=True))
 
@@ -54,6 +56,7 @@ async def delete_account(
     account_id: int,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
 ):
     deleted = await refs_service.delete_account(db, project.id, account_id)
     if not deleted:
@@ -77,6 +80,7 @@ async def upsert_cp_category(
     payload: CounterpartyCategorySchema,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
 ):
     return await refs_service.upsert_cp_category(db, project.id, payload.model_dump(exclude_unset=True))
 
@@ -86,6 +90,7 @@ async def delete_cp_category(
     cpc_id: int,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
 ):
     deleted = await refs_service.delete_cp_category(db, project.id, cpc_id)
     if not deleted:
@@ -109,6 +114,7 @@ async def delete_override(
     override_id: int,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
 ):
     deleted = await refs_service.delete_override(db, project.id, override_id)
     if not deleted:
@@ -132,6 +138,7 @@ async def upsert_opening_balance(
     payload: OpeningBalanceSchema,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
 ):
     return await refs_service.upsert_opening_balance(db, project.id, payload.model_dump(exclude_unset=True))
 
@@ -152,6 +159,7 @@ async def add_category(
     payload: CategoryRefCreate,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
 ):
     if not payload.cat_lvl1.strip():
         raise HTTPException(400, "cat_lvl1 is required")
@@ -171,6 +179,7 @@ async def delete_category(
     cat_id: int,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
 ):
     deleted = await refs_service.delete_category(db, cat_id, project.id)
     if not deleted:
@@ -207,6 +216,7 @@ async def set_excluded_warehouses(
     payload: ExcludedWarehousesPayload,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
 ):
     """Set excluded warehouses. Body: {"warehouses": ["Новосибирск", ...]}"""
     from backend.services import settings_service
@@ -231,6 +241,7 @@ async def upsert_product_tag(
     payload: ProductTagSchema,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
 ):
     return await refs_service.upsert_product_tag(db, project.id, payload.model_dump(exclude_unset=True))
 
@@ -240,6 +251,7 @@ async def delete_product_tag(
     tag_id: int,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
 ):
     deleted = await refs_service.delete_product_tag(db, project.id, tag_id)
     if not deleted:
@@ -261,6 +273,7 @@ async def update_product_tag_mapping(
     payload: ProductTagMappingPayload,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
 ):
     await refs_service.update_product_tag_mapping(db, project.id, payload.nm_ids, payload.add_tags, payload.remove_tags)
     return {"ok": True}
@@ -283,6 +296,7 @@ async def set_product_status(
     payload: ProductStatusPayload,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
 ):
     await refs_service.set_product_status(db, project.id, payload.nm_id, payload.status)
     return {"ok": True}
@@ -293,6 +307,7 @@ async def bulk_set_product_status(
     payload: ProductStatusBulkPayload,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
 ):
     await refs_service.bulk_set_product_status(db, project.id, payload.nm_ids, payload.status)
     return {"ok": True}
@@ -315,6 +330,7 @@ async def set_imt_alias(
     payload: ImtAliasPayload,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
 ):
     await refs_service.set_imt_alias(db, project.id, payload.imt_id, payload.name)
     return {"ok": True}

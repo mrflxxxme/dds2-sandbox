@@ -9,8 +9,9 @@
 Заказ на фабрику. 1 заказ = 1 фабрика.
 - `order_number` — уникальный номер в рамках проекта
 - `factory_name` — название фабрики
-- Items: позиции с barcode, qty, price_cny
+- Items: позиции с barcode, qty, price_cny. **SoftDeleteMixin** — фильтровать `is_deleted == False`
 - `assigned_qty` на item — сколько уже распределено по машинам
+- При удалении item → `item.soft_delete()` (не `db.delete()`)
 
 ### Vehicle = CostOrder (cost_orders) — расширен
 Машина (транспортное средство). НЕ новая таблица — расширены cost_orders:

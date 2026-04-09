@@ -323,3 +323,36 @@ from backend.services.funnel.backfill import (  # noqa: F401
     batch_resync_ads,
     run_backfill_bg,
 )
+
+
+async def get_recent_sync_logs(db: AsyncSession, project_id: int, limit: int = 10) -> list[dict]:
+    """Get recent wb_funnel sync log entries for a project."""
+    from sqlalchemy import select
+
+    from backend.models.integrations import IntegrationKey, SyncLog
+
+    key_ids = select(IntegrationKey.id).where(
+        IntegrationKey.project_id == project_id,
+        IntegrationKey.is_deleted == False,  # noqa: E712
+    )
+    result = await db.execute(
+        select(SyncLog)
+        .where(
+            SyncLog.service == "wb_funnel",
+            SyncLog.integration_id.in_(key_ids),
+        )
+        .order_by(SyncLog.id.desc())
+        .limit(limit)
+    )
+    return [
+        {
+            "id": s.id,
+            "sync_type": s.sync_type,
+            "status": s.status,
+            "rows_inserted": s.rows_inserted,
+            "started_at": s.started_at.isoformat() if s.started_at else None,
+            "finished_at": s.finished_at.isoformat() if s.finished_at else None,
+            "error_msg": s.error_msg,
+        }
+        for s in result.scalars()
+    ]

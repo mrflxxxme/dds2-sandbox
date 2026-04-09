@@ -5,7 +5,7 @@ Auth models: User, Project, ProjectMember, ProjectInvite.
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -80,5 +80,7 @@ class ProjectInvite(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime)
     accepted_by_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"))
+
+    __table_args__ = (Index("ix_project_invites_project_id", "project_id"),)
 
     project: Mapped["Project"] = relationship(back_populates="invites")

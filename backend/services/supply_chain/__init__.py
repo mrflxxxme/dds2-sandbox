@@ -3,10 +3,12 @@ Supply Chain service package — factory orders and vehicle delivery management.
 
 Usage:
     from backend.services.supply_chain import factory_orders, vehicle_delivery
+    from backend.services.supply_chain import supplier_service
 """
 
 from backend.services.supply_chain.factory_orders import (
     add_items,
+    check_and_close_order,
     create_factory_order,
     delete_factory_order,
     get_factory_order,
@@ -35,6 +37,7 @@ __all__ = [
     "delete_factory_order",
     "add_items",
     "split_to_vehicles",
+    "check_and_close_order",
     # Vehicles
     "list_vehicles",
     "get_vehicle",

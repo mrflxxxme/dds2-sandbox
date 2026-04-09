@@ -195,10 +195,7 @@ async def upload_order_cities(
     db: AsyncSession = Depends(get_db),
 ):
     """Upload WB order feed Excel to extract city-level delivery mapping."""
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
-
     from backend.etl.parsers.order_city_parser import parse_order_city_excel
-    from backend.models.order_city import OrderCityMap
 
     if not file.filename or not file.filename.endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="Файл должен быть в формате .xlsx")
@@ -222,31 +219,9 @@ async def upload_order_cities(
     if not mappings:
         raise HTTPException(status_code=400, detail="Не найдены данные городов в файле")
 
-    inserted = 0
-    batch_size = 500
-    for i in range(0, len(mappings), batch_size):
-        batch = mappings[i : i + batch_size]
-        stmt = pg_insert(OrderCityMap).values(
-            [
-                {
-                    "project_id": project.id,
-                    "srid": m["srid"],
-                    "city": m["city"],
-                    "okrug": m.get("okrug"),
-                    "order_date": m.get("order_date"),
-                }
-                for m in batch
-            ]
-        )
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["project_id", "srid"],
-            set_={"city": stmt.excluded.city, "okrug": stmt.excluded.okrug, "order_date": stmt.excluded.order_date},
-        )
-        result = await db.execute(stmt)
-        affected = result.rowcount or 0
-        inserted += affected
+    from backend.services.order_geography_service import upsert_order_city_mappings
 
-    await db.commit()
+    inserted = await upsert_order_city_mappings(db, project.id, mappings)
     return {"ok": True, "total_mappings": len(mappings), "affected_rows": inserted}
 
 
@@ -256,26 +231,9 @@ async def order_cities_status(
     db: AsyncSession = Depends(get_db),
 ):
     """Get status of uploaded order city mappings for hypothetical forecast."""
-    from sqlalchemy import func as sqlfunc
+    from backend.services.order_geography_service import get_order_cities_status
 
-    from backend.models.order_city import OrderCityMap
-
-    result = await db.execute(
-        select(
-            sqlfunc.count(OrderCityMap.id).label("total"),
-            sqlfunc.min(OrderCityMap.order_date).label("date_from"),
-            sqlfunc.max(OrderCityMap.order_date).label("date_to"),
-            sqlfunc.max(OrderCityMap.updated_at).label("last_updated"),
-        ).where(OrderCityMap.project_id == project.id)
-    )
-    row = result.one()
-    return {
-        "has_data": (row.total or 0) > 0,
-        "total_mappings": row.total or 0,
-        "date_from": row.date_from.isoformat() if row.date_from else None,
-        "date_to": row.date_to.isoformat() if row.date_to else None,
-        "last_updated": row.last_updated.isoformat() if row.last_updated else None,
-    }
+    return await get_order_cities_status(db, project.id)
 
 
 @router.get("/order_geography")

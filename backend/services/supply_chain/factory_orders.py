@@ -11,7 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from backend.models.cost import CostOrder, CostOrderItem, Nomenclature
 from backend.models.enums import FactoryOrderStatus, VehicleStatus
-from backend.models.supply_chain import FactoryOrder, FactoryOrderHistory, FactoryOrderItem
+from backend.models.supply_chain import FactoryOrder, FactoryOrderHistory, FactoryOrderItem, Supplier
 from backend.schemas.supply_chain import (
     FactoryOrderCreate,
     FactoryOrderItemCreate,
@@ -144,10 +144,10 @@ async def _enrich_items_from_nomenclature(
 
 
 async def get_factory_orders(db: AsyncSession, project_id: int) -> list[FactoryOrder]:
-    """List all factory orders with items, filtered by project_id + is_deleted."""
+    """List all factory orders with items and supplier, filtered by project_id + is_deleted."""
     result = await db.execute(
         select(FactoryOrder)
-        .options(selectinload(FactoryOrder.items))
+        .options(selectinload(FactoryOrder.items), selectinload(FactoryOrder.supplier))
         .where(
             FactoryOrder.project_id == project_id,
             FactoryOrder.is_deleted == False,  # noqa: E712
@@ -161,10 +161,10 @@ async def get_factory_orders(db: AsyncSession, project_id: int) -> list[FactoryO
 
 
 async def get_factory_order(db: AsyncSession, project_id: int, order_id: int) -> FactoryOrder | None:
-    """Get a single factory order with items."""
+    """Get a single factory order with items and supplier."""
     result = await db.execute(
         select(FactoryOrder)
-        .options(selectinload(FactoryOrder.items))
+        .options(selectinload(FactoryOrder.items), selectinload(FactoryOrder.supplier))
         .where(
             FactoryOrder.id == order_id,
             FactoryOrder.project_id == project_id,
@@ -184,10 +184,23 @@ async def create_factory_order(
     user_name: str | None = None,
 ) -> FactoryOrder:
     """Create a factory order with optional items."""
+    # Validate supplier belongs to same project
+    if data.supplier_id is not None:
+        supplier_result = await db.execute(
+            select(Supplier).where(
+                Supplier.id == data.supplier_id,
+                Supplier.project_id == project_id,
+                Supplier.is_deleted == False,  # noqa: E712
+            )
+        )
+        if not supplier_result.scalar_one_or_none():
+            raise ValueError(f"Supplier {data.supplier_id} not found in project {project_id}")
+
     order = FactoryOrder(
         project_id=project_id,
         order_number=data.order_number,
         factory_name=data.factory_name,
+        supplier_id=data.supplier_id,
         order_date=data.order_date,
         expected_ready_date=data.expected_ready_date,
         total_cny=data.total_cny,
@@ -240,11 +253,24 @@ async def update_factory_order(
         return None
 
     update_data = data.model_dump(exclude_unset=True)
+
+    # Validate supplier belongs to same project when updating supplier_id
+    if "supplier_id" in update_data and update_data["supplier_id"] is not None:
+        supplier_result = await db.execute(
+            select(Supplier).where(
+                Supplier.id == update_data["supplier_id"],
+                Supplier.project_id == project_id,
+                Supplier.is_deleted == False,  # noqa: E712
+            )
+        )
+        if not supplier_result.scalar_one_or_none():
+            raise ValueError(f"Supplier {update_data['supplier_id']} not found in project {project_id}")
+
     for field, value in update_data.items():
         setattr(order, field, value)
 
     await db.commit()
-    await db.refresh(order, ["items"])
+    await db.refresh(order, ["items", "supplier"])
     return order
 
 
@@ -582,3 +608,91 @@ async def remove_mix_group(
 
     await db.commit()
     return count
+
+
+# Statuses that count as "shipped or above" for auto-close logic
+_SHIPPED_OR_ABOVE = {
+    VehicleStatus.SHIPPED,
+    VehicleStatus.CUSTOMS,
+    VehicleStatus.DISPATCHED,
+    VehicleStatus.DELIVERED,
+}
+
+
+async def check_and_close_order(
+    db: AsyncSession,
+    project_id: int,
+    factory_order_id: int,
+) -> bool:
+    """
+    Auto-close a factory order when all its vehicles are >= SHIPPED.
+
+    Checks all CostOrderItems linked via factory_order_item_id to items of
+    this factory order, collects unique CostOrder.order_no values, and if
+    every one of them is in SHIPPED_OR_ABOVE status AND the factory order
+    is in DISTRIBUTED status → transitions it to CLOSED.
+
+    Returns True if order was closed, False otherwise.
+    """
+    order = await get_factory_order(db, project_id, factory_order_id)
+    if not order:
+        return False
+
+    # Only auto-close DISTRIBUTED orders
+    if order.status != FactoryOrderStatus.DISTRIBUTED.value:
+        return False
+
+    # Collect factory_order_item IDs for this order
+    fo_item_ids = [item.id for item in order.items if not item.is_deleted]
+    if not fo_item_ids:
+        return False
+
+    # Find all unique CostOrder.order_no linked to these items
+    cost_items_result = await db.execute(
+        select(CostOrderItem.order_no)
+        .where(
+            CostOrderItem.factory_order_item_id.in_(fo_item_ids),
+            CostOrderItem.project_id == project_id,
+            CostOrderItem.is_deleted == False,  # noqa: E712
+        )
+        .distinct()
+        .limit(200)
+    )
+    vehicle_order_nos = [row[0] for row in cost_items_result.all()]
+
+    if not vehicle_order_nos:
+        return False
+
+    # Fetch statuses of all those vehicles
+    vehicles_result = await db.execute(
+        select(CostOrder.order_no, CostOrder.status).where(
+            CostOrder.order_no.in_(vehicle_order_nos),
+            CostOrder.project_id == project_id,
+            CostOrder.is_deleted == False,  # noqa: E712
+        )
+    )
+    vehicle_rows = vehicles_result.all()
+
+    if not vehicle_rows:
+        return False
+
+    # All vehicles must be >= SHIPPED
+    all_shipped = all(row[1] in _SHIPPED_OR_ABOVE for row in vehicle_rows)
+    if not all_shipped:
+        return False
+
+    # Transition to CLOSED
+    old_status = order.status
+    order.status = FactoryOrderStatus.CLOSED.value
+    await _add_history(
+        db,
+        project_id,
+        order.id,
+        "status_change",
+        old_status=old_status,
+        new_status=FactoryOrderStatus.CLOSED.value,
+        details="Автозакрытие: все машины >= SHIPPED",
+    )
+    await db.commit()
+    logger.info("Factory order %d auto-closed (all vehicles shipped)", factory_order_id)
+    return True

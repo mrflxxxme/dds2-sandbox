@@ -8,6 +8,7 @@ import type { Column } from '@/components/DataTable';
 export default function TransactionsPage() {
     const [data, setData] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
     const [start, setStart] = useState('');
     const [end, setEnd] = useState('');
 
@@ -15,13 +16,16 @@ export default function TransactionsPage() {
 
     const load = async () => {
         setLoading(true);
+        setError(null);
         try {
             const res = await api.searchTransactions({
                 date_from: start || undefined,
                 date_to: end || undefined
             });
             setData(Array.isArray(res) ? res : res.transactions || []);
-        } catch { }
+        } catch (e: any) {
+            setError(e?.message || 'Ошибка загрузки');
+        }
         setLoading(false);
     };
 
@@ -66,6 +70,12 @@ export default function TransactionsPage() {
                     <button className="btn btn-primary btn-sm" onClick={load}>Применить</button>
                 </div>
             </div>
+
+            {error && (
+                <div className="glass-card" style={{ color: 'var(--color-danger)', marginBottom: 16, padding: 16 }}>
+                    {error}
+                </div>
+            )}
 
             <TanStackDataTable
                 columns={columns}

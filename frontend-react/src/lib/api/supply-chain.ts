@@ -18,6 +18,7 @@ import type {
     MessageResponse,
     VehicleDocument,
     VehicleStatusHistoryEntry,
+    Supplier,
 } from '@/types/api';
 
 export function addSupplyChainMethods(api: ApiClient) {
@@ -77,6 +78,10 @@ export function addSupplyChainMethods(api: ApiClient) {
             return api.request<VehicleSchema[]>('GET', '/api/v1/supply-chain/vehicles');
         },
         getVehicle(orderNo: string) {
+            // Use query-param endpoint for order_no with slashes (server decodes %2F before routing)
+            if (orderNo.includes('/')) {
+                return api.request<VehicleSchema>('GET', `/api/v1/supply-chain/vehicles/find?order_no=${encodeURIComponent(orderNo)}`);
+            }
             return api.request<VehicleSchema>('GET', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}`);
         },
         createVehicle(data: VehicleCreate) {
@@ -98,6 +103,9 @@ export function addSupplyChainMethods(api: ApiClient) {
             return api.request<{ ok: boolean }>('DELETE', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items/${itemId}`);
         },
         deleteVehicle(orderNo: string) {
+            if (orderNo.includes('/')) {
+                return api.request<{ ok: boolean }>('DELETE', `/api/v1/supply-chain/vehicles/find?order_no=${encodeURIComponent(orderNo)}`);
+            }
             return api.request<{ ok: boolean }>('DELETE', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}`);
         },
         getAvailableItems() {
@@ -137,6 +145,31 @@ export function addSupplyChainMethods(api: ApiClient) {
         // ─── Overview ───────────────────────────────────────────────
         getSupplyChainOverview() {
             return api.request<SupplyChainOverview>('GET', '/api/v1/supply-chain/overview');
+        },
+
+        // ─── Suppliers ──────────────────────────────────────────────
+        getSuppliers() {
+            return api.request<Supplier[]>('GET', '/api/v1/supply-chain/suppliers');
+        },
+        getSupplier(id: number) {
+            return api.request<Supplier>('GET', `/api/v1/supply-chain/suppliers/${id}`);
+        },
+        createSupplier(data: Partial<Supplier>) {
+            return api.request<Supplier>('POST', '/api/v1/supply-chain/suppliers', data);
+        },
+        updateSupplier(id: number, data: Partial<Supplier>) {
+            return api.request<Supplier>('PUT', `/api/v1/supply-chain/suppliers/${id}`, data);
+        },
+        deleteSupplier(id: number) {
+            return api.request<MessageResponse>('DELETE', `/api/v1/supply-chain/suppliers/${id}`);
+        },
+
+        // ─── Vehicles by query (for order_no with slashes) ──────────
+        getVehicleByQuery(orderNo: string) {
+            return api.request<VehicleSchema>('GET', `/api/v1/supply-chain/vehicles/find?order_no=${encodeURIComponent(orderNo)}`);
+        },
+        deleteVehicleByQuery(orderNo: string) {
+            return api.request<{ ok: boolean }>('DELETE', `/api/v1/supply-chain/vehicles/find?order_no=${encodeURIComponent(orderNo)}`);
         },
     };
 }

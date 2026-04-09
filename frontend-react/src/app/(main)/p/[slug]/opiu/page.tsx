@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
@@ -46,6 +46,7 @@ export default function OpiuPage() {
     const [article, setArticle] = useState('');
     const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
     const [computing, setComputing] = useState(false);
+    const retryTimeoutRef = useRef<NodeJS.Timeout>();
 
     // Default: Jan 1 of current year → today
     useEffect(() => {
@@ -65,7 +66,7 @@ export default function OpiuPage() {
                 // Backend is computing in background — retry in 3s
                 setComputing(true);
                 setLoading(false);
-                setTimeout(() => loadData(), 3000);
+                retryTimeoutRef.current = setTimeout(() => loadData(), 3000);
                 return;
             }
             setComputing(false);
@@ -77,7 +78,10 @@ export default function OpiuPage() {
         setLoading(false);
     }, [dateFrom, dateTo, brand, article]);
 
-    useEffect(() => { loadData(); }, [loadData]);
+    useEffect(() => {
+        loadData();
+        return () => { clearTimeout(retryTimeoutRef.current); };
+    }, [loadData]);
 
     const toggleGroup = (key: string) => {
         setCollapsed(prev => {

@@ -79,6 +79,7 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
         result = {"rows": 0, "errors": ["Task cancelled (worker shutdown or restart)"]}
         status = "ERROR"
         logger.warning(f"Scheduler: project {project_id} [{sync_type}] CANCELLED {d_from}→{d_to}")
+        raise
     except Exception as e:
         result = {"rows": 0, "errors": [str(e)[:500]]}
         status = "ERROR"
@@ -422,6 +423,7 @@ async def sync_budgets_all_projects():
             status = "ERROR"
             error_msg = "Task cancelled (worker shutdown or restart)"
             logger.warning(f"Budget sync CANCELLED for project {pid}")
+            raise
         except Exception as e:
             error_msg = str(e)[:500]
             logger.error(f"Budget sync failed for project {pid}: {e}")

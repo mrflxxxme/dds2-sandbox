@@ -397,3 +397,13 @@ async def assign_category_by_ids(
     await invalidate_project_reports(project_id)
 
     return {"ok": True, "updated": result.rowcount}
+
+
+async def get_import_logs(db: AsyncSession, project_id: int, limit: int = 100) -> list:
+    """Get recent import logs for a project."""
+    from backend.models import ImportLog
+
+    result = await db.execute(
+        select(ImportLog).where(ImportLog.project_id == project_id).order_by(ImportLog.imported_at.desc()).limit(limit)
+    )
+    return list(result.scalars().all())

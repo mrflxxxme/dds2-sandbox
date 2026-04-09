@@ -52,6 +52,14 @@ VALID_TRANSITIONS: dict[str, list[str]] = {
     # DISPATCHED → DELIVERED happens automatically when InboundReceipt is accepted
 }
 
+# Statuses that qualify as "shipped or above" for factory order auto-close
+_SHIPPED_OR_ABOVE = {
+    VehicleStatus.SHIPPED,
+    VehicleStatus.CUSTOMS,
+    VehicleStatus.DISPATCHED,
+    VehicleStatus.DELIVERED,
+}
+
 
 async def list_vehicles(
     db: AsyncSession,
@@ -63,7 +71,7 @@ async def list_vehicles(
         .options(selectinload(CostOrder.items))
         .where(
             CostOrder.project_id == project_id,
-            CostOrder.is_deleted == False,  # noqa: E712
+            CostOrder.is_deleted == False,
             CostOrder.status.isnot(None),
         )
         .order_by(CostOrder.created_at.desc())
@@ -85,7 +93,7 @@ async def get_vehicle(
         .where(
             CostOrder.order_no == order_no,
             CostOrder.project_id == project_id,
-            CostOrder.is_deleted == False,  # noqa: E712
+            CostOrder.is_deleted == False,
         )
     )
     vehicle = result.scalar_one_or_none()
@@ -145,7 +153,7 @@ async def update_vehicle(
         .where(
             CostOrder.order_no == order_no,
             CostOrder.project_id == project_id,
-            CostOrder.is_deleted == False,  # noqa: E712
+            CostOrder.is_deleted == False,
         )
     )
     vehicle = result.scalar_one_or_none()
@@ -210,7 +218,7 @@ async def add_items_to_vehicle(
         select(CostOrder).where(
             CostOrder.order_no == order_no,
             CostOrder.project_id == project_id,
-            CostOrder.is_deleted == False,  # noqa: E712
+            CostOrder.is_deleted == False,
         )
     )
     vehicle = result.scalar_one_or_none()
@@ -226,8 +234,9 @@ async def add_items_to_vehicle(
             .where(
                 FactoryOrderItem.id == item_req.factory_order_item_id,
                 FactoryOrderItem.project_id == project_id,
+                FactoryOrderItem.is_deleted == False,
                 FactoryOrder.project_id == project_id,
-                FactoryOrder.is_deleted == False,  # noqa: E712
+                FactoryOrder.is_deleted == False,
             )
         )
         fo_item = fo_item_result.scalar_one_or_none()
@@ -294,8 +303,9 @@ async def remove_item_from_vehicle(
         .where(
             CostOrderItem.id == item_id,
             CostOrderItem.order_no == order_no,
+            CostOrderItem.is_deleted == False,
             CostOrder.project_id == project_id,
-            CostOrder.is_deleted == False,  # noqa: E712
+            CostOrder.is_deleted == False,
         )
     )
     cost_item = result.scalar_one_or_none()
@@ -309,6 +319,7 @@ async def remove_item_from_vehicle(
             select(FactoryOrderItem).where(
                 FactoryOrderItem.id == cost_item.factory_order_item_id,
                 FactoryOrderItem.project_id == project_id,
+                FactoryOrderItem.is_deleted == False,
             )
         )
         fo_item = fo_item_result.scalar_one_or_none()
@@ -321,6 +332,7 @@ async def remove_item_from_vehicle(
             select(FactoryOrderItem.id).where(
                 FactoryOrderItem.mix_group_id == mix_group_id,
                 FactoryOrderItem.project_id == project_id,
+                FactoryOrderItem.is_deleted == False,
             )
         )
         mix_fo_item_ids = {row[0] for row in mix_fo_items_result}
@@ -331,17 +343,19 @@ async def remove_item_from_vehicle(
             .where(
                 CostOrderItem.order_no == order_no,
                 CostOrderItem.factory_order_item_id.in_(mix_fo_item_ids),
+                CostOrderItem.is_deleted == False,
                 CostOrder.project_id == project_id,
-                CostOrder.is_deleted == False,  # noqa: E712
+                CostOrder.is_deleted == False,
             )
         )
         mix_cost_items = mix_cost_items_result.scalars().all()
 
-        # Restore assigned_qty for each and delete
+        # Restore assigned_qty for each and soft-delete
         fo_restore_result = await db.execute(
             select(FactoryOrderItem).where(
                 FactoryOrderItem.id.in_(mix_fo_item_ids),
                 FactoryOrderItem.project_id == project_id,
+                FactoryOrderItem.is_deleted == False,
             )
         )
         fo_items_map = {fi.id: fi for fi in fo_restore_result.scalars().all()}
@@ -351,7 +365,7 @@ async def remove_item_from_vehicle(
             if mix_ci.factory_order_item_id and mix_ci.factory_order_item_id in fo_items_map:
                 fi = fo_items_map[mix_ci.factory_order_item_id]
                 fi.assigned_qty = max(0, fi.assigned_qty - mix_ci.qty)
-            await db.delete(mix_ci)
+            mix_ci.soft_delete()
             removed += 1
 
         await db.commit()
@@ -368,13 +382,14 @@ async def remove_item_from_vehicle(
             select(FactoryOrderItem).where(
                 FactoryOrderItem.id == cost_item.factory_order_item_id,
                 FactoryOrderItem.project_id == project_id,
+                FactoryOrderItem.is_deleted == False,
             )
         )
         fo_item2 = fo_item_result2.scalar_one_or_none()
         if fo_item2:
             fo_item2.assigned_qty = max(0, fo_item2.assigned_qty - cost_item.qty)
 
-    await db.delete(cost_item)
+    cost_item.soft_delete()
     await db.commit()
 
     # Recalculate remaining items (delivery allocation changes)
@@ -397,7 +412,7 @@ async def delete_vehicle(
         .where(
             CostOrder.order_no == order_no,
             CostOrder.project_id == project_id,
-            CostOrder.is_deleted == False,  # noqa: E712
+            CostOrder.is_deleted == False,
         )
     )
     vehicle = result.scalar_one_or_none()
@@ -414,6 +429,7 @@ async def delete_vehicle(
             select(FactoryOrderItem).where(
                 FactoryOrderItem.id.in_(fo_item_ids),
                 FactoryOrderItem.project_id == project_id,
+                FactoryOrderItem.is_deleted == False,
             )
         )
         fo_items_map = {fi.id: fi for fi in fo_result.scalars().all()}
@@ -422,9 +438,9 @@ async def delete_vehicle(
                 fo_item = fo_items_map[cost_item.factory_order_item_id]
                 fo_item.assigned_qty = max(0, fo_item.assigned_qty - cost_item.qty)
 
-    # Hard-delete CostOrderItems (no SoftDeleteMixin)
+    # Soft-delete CostOrderItems when removing vehicle
     for cost_item in list(vehicle.items):
-        await db.delete(cost_item)
+        cost_item.soft_delete()  # no-soft-delete-check
 
     # Soft-delete the vehicle
     vehicle.soft_delete()
@@ -445,7 +461,7 @@ async def get_available_items(
         .options(selectinload(FactoryOrder.items))
         .where(
             FactoryOrder.project_id == project_id,
-            FactoryOrder.is_deleted == False,  # noqa: E712
+            FactoryOrder.is_deleted == False,
         )
         .order_by(FactoryOrder.order_number)
         .limit(200)
@@ -531,6 +547,7 @@ async def _enrich_vehicle(
             .join(FactoryOrder, FactoryOrderItem.factory_order_id == FactoryOrder.id)
             .where(
                 FactoryOrderItem.id.in_(fo_item_ids),
+                FactoryOrderItem.is_deleted == False,
                 FactoryOrder.project_id == project_id,
             )
         )
@@ -708,7 +725,7 @@ async def update_vehicle_status(
         .where(
             CostOrder.order_no == order_no,
             CostOrder.project_id == project_id,
-            CostOrder.is_deleted == False,  # noqa: E712
+            CostOrder.is_deleted == False,
         )
     )
     vehicle = result.scalar_one_or_none()
@@ -789,7 +806,46 @@ async def update_vehicle_status(
         result_data["inbound_receipt_id"] = receipt.id
         result_data["inbound_receipt_number"] = receipt.number
 
+    # Auto-close factory orders if vehicle reached SHIPPED or above
+    if data.status in _SHIPPED_OR_ABOVE:
+        await _check_and_close_factory_orders_for_vehicle(db, project_id, vehicle)
+
     return result_data
+
+
+async def _check_and_close_factory_orders_for_vehicle(
+    db: AsyncSession,
+    project_id: int,
+    vehicle: CostOrder,
+) -> None:
+    """
+    After a vehicle status update, check if any linked factory orders
+    can be auto-closed (all their vehicles >= SHIPPED).
+    """
+    from backend.services.supply_chain.factory_orders import check_and_close_order
+
+    # Find factory orders linked to items in this vehicle
+    fo_item_ids = [item.factory_order_item_id for item in vehicle.items if item.factory_order_item_id is not None]
+    if not fo_item_ids:
+        return
+
+    fo_result = await db.execute(
+        select(FactoryOrderItem.factory_order_id)
+        .where(
+            FactoryOrderItem.id.in_(fo_item_ids),
+            FactoryOrderItem.project_id == project_id,
+            FactoryOrderItem.is_deleted == False,
+        )
+        .distinct()
+        .limit(100)
+    )
+    factory_order_ids = [row[0] for row in fo_result.all()]
+
+    for fo_id in factory_order_ids:
+        try:
+            await check_and_close_order(db, project_id, fo_id)
+        except Exception:
+            logger.exception("Failed to auto-close factory order %d", fo_id)
 
 
 async def recalculate_vehicle(
@@ -810,6 +866,7 @@ async def recalculate_vehicle(
         .where(
             CostOrderItem.order_no == order_no,
             CostOrderItem.project_id == project_id,
+            CostOrderItem.is_deleted == False,
         )
         .limit(2000)
     )
@@ -849,7 +906,7 @@ async def recalculate_all_vehicles(
         select(CostOrder.order_no)
         .where(
             CostOrder.project_id == project_id,
-            CostOrder.is_deleted == False,  # noqa: E712
+            CostOrder.is_deleted == False,
             CostOrder.status.isnot(None),
         )
         .limit(500)
@@ -925,7 +982,7 @@ async def get_supply_chain_overview(db: AsyncSession, project_id: int) -> dict:
     fo_result = await db.execute(
         select(func.count(FactoryOrder.id)).where(
             FactoryOrder.project_id == project_id,
-            FactoryOrder.is_deleted == False,  # noqa: E712
+            FactoryOrder.is_deleted == False,
         )
     )
     total_factory_orders = fo_result.scalar() or 0
@@ -934,7 +991,7 @@ async def get_supply_chain_overview(db: AsyncSession, project_id: int) -> dict:
     amount_result = await db.execute(
         select(func.coalesce(func.sum(FactoryOrder.total_cny), 0)).where(
             FactoryOrder.project_id == project_id,
-            FactoryOrder.is_deleted == False,  # noqa: E712
+            FactoryOrder.is_deleted == False,
         )
     )
     total_amount_cny = float(amount_result.scalar() or 0)
@@ -944,7 +1001,7 @@ async def get_supply_chain_overview(db: AsyncSession, project_id: int) -> dict:
         select(CostOrder.status, func.count(CostOrder.id))
         .where(
             CostOrder.project_id == project_id,
-            CostOrder.is_deleted == False,  # noqa: E712
+            CostOrder.is_deleted == False,
             CostOrder.status.isnot(None),
         )
         .group_by(CostOrder.status)
@@ -961,8 +1018,9 @@ async def get_supply_chain_overview(db: AsyncSession, project_id: int) -> dict:
         .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)
         .where(
             CostOrderItem.project_id == project_id,
+            CostOrderItem.is_deleted == False,
             CostOrder.project_id == project_id,
-            CostOrder.is_deleted == False,  # noqa: E712
+            CostOrder.is_deleted == False,
             CostOrder.status.in_(active_statuses),
         )
     )

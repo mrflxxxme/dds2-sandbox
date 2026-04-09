@@ -7,9 +7,8 @@ Joins nomenclature for WB article (article_wb) and brand.
 """
 
 import logging
-from typing import Optional
 
-from sqlalchemy import select, func, distinct, text as sa_text
+from sqlalchemy import select, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import CostOrder, CostOrderItem
@@ -20,8 +19,8 @@ logger = logging.getLogger("dds.cost_history")
 async def get_cost_history(
     db: AsyncSession,
     project_id: int,
-    article_search: Optional[str] = None,
-    brand_filter: Optional[str] = None,
+    article_search: str | None = None,
+    brand_filter: str | None = None,
 ) -> dict:
     """
     Returns cost history pivot with brand filter, article search, WB article.
@@ -29,7 +28,7 @@ async def get_cost_history(
       orders: [{order_no, ship_date}, ...],
       brands: ["Brand1", "Brand2", ...],
       articles: [
-        {article_seller, barcode, article_wb, brand, subject, 
+        {article_seller, barcode, article_wb, brand, subject,
          costs: {order_no: {cost, qty, price_cny}, ...}, avg_cost, latest_cost},
         ...
       ]
@@ -47,20 +46,20 @@ async def get_cost_history(
     orders_result = await db.execute(orders_q)
     orders = orders_result.scalars().all()
 
-    order_list = [
-        {"order_no": o.order_no, "ship_date": str(o.ship_date) if o.ship_date else None}
-        for o in orders
-    ]
+    order_list = [{"order_no": o.order_no, "ship_date": str(o.ship_date) if o.ship_date else None} for o in orders]
     order_nos = [o.order_no for o in orders]
 
     if not order_nos:
         return {"orders": [], "articles": [], "brands": []}
 
     # 2. Load nomenclature lookup: article_seller -> {article_wb, brand}
-    nomen_q = await db.execute(sa_text(
-        "SELECT article_seller, article_wb, brand FROM nomenclature "
-        "WHERE project_id = :pid AND article_seller IS NOT NULL"
-    ), {"pid": project_id})
+    nomen_q = await db.execute(
+        sa_text(
+            "SELECT article_seller, article_wb, brand FROM nomenclature "
+            "WHERE project_id = :pid AND article_seller IS NOT NULL"
+        ),
+        {"pid": project_id},
+    )
     nomen_map: dict[str, dict] = {}
     all_brands: set[str] = set()
     for row in nomen_q.fetchall():
@@ -71,7 +70,10 @@ async def get_cost_history(
     # 3. Get all cost_order_items for these orders
     items_q = (
         select(CostOrderItem)
-        .where(CostOrderItem.order_no.in_(order_nos))
+        .where(
+            CostOrderItem.order_no.in_(order_nos),
+            CostOrderItem.is_deleted == False,
+        )
         .order_by(CostOrderItem.article_seller, CostOrderItem.id)
     )
     items_result = await db.execute(items_q)
@@ -115,20 +117,18 @@ async def get_cost_history(
         # Filter by search
         if article_search:
             s = article_search.lower()
-            if (s not in art_key.lower() 
+            if (
+                s not in art_key.lower()
                 and s not in art_data.get("article_wb", "").lower()
-                and s not in art_data.get("barcode", "").lower()):
+                and s not in art_data.get("barcode", "").lower()
+            ):
                 continue
 
         # Filter by brand
         if brand_filter and art_data.get("brand", "").lower() != brand_filter.lower():
             continue
 
-        avg_cost = (
-            round(art_data["total_cost_sum"] / art_data["cost_count"], 2)
-            if art_data["cost_count"] > 0
-            else 0.0
-        )
+        avg_cost = round(art_data["total_cost_sum"] / art_data["cost_count"], 2) if art_data["cost_count"] > 0 else 0.0
 
         # Latest cost = first order in order_nos that has this article
         latest_cost = 0.0
@@ -137,16 +137,18 @@ async def get_cost_history(
                 latest_cost = art_data["costs"][ono]["cost"]
                 break
 
-        result_articles.append({
-            "article_seller": art_data["article_seller"],
-            "barcode": art_data["barcode"],
-            "article_wb": art_data["article_wb"],
-            "brand": art_data["brand"],
-            "subject": art_data["subject"],
-            "costs": art_data["costs"],
-            "avg_cost": avg_cost,
-            "latest_cost": latest_cost,
-        })
+        result_articles.append(
+            {
+                "article_seller": art_data["article_seller"],
+                "barcode": art_data["barcode"],
+                "article_wb": art_data["article_wb"],
+                "brand": art_data["brand"],
+                "subject": art_data["subject"],
+                "costs": art_data["costs"],
+                "avg_cost": avg_cost,
+                "latest_cost": latest_cost,
+            }
+        )
 
     # Sort by article name
     result_articles.sort(key=lambda x: x["article_seller"])

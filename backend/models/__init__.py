@@ -50,6 +50,7 @@ from backend.models.enums import (
     EventType2,
     FactoryOrderStatus,
     PurposeTag,
+    SupplierCountry,
     TransactionStatus,
     VehicleStatus,
 )
@@ -106,6 +107,7 @@ from backend.models.supply_chain import (
     FactoryOrder,
     FactoryOrderHistory,
     FactoryOrderItem,
+    Supplier,
     VehicleDocument,
     VehicleStatusHistory,
 )
@@ -182,6 +184,7 @@ __all__ = [
     "PurposeTag",
     "DutyBasis",
     "FactoryOrderStatus",
+    "SupplierCountry",
     "VehicleStatus",
     # Auth
     "User",
@@ -273,6 +276,7 @@ __all__ = [
     "FactoryOrder",
     "FactoryOrderHistory",
     "FactoryOrderItem",
+    "Supplier",
     "VehicleDocument",
     "VehicleStatusHistory",
     # AI Chat

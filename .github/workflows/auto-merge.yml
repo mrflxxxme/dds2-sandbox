@@ -12,6 +12,7 @@ permissions:
   pull-requests: write
   contents: write
   checks: read
+  actions: read
 
 jobs:
   auto-merge:
@@ -29,47 +30,79 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+
           # Find open PR from dev to main
           PR_NUMBER=$(gh pr list --base main --head dev --state open --json number --jq '.[0].number')
 
-          if [ -z "$PR_NUMBER" ]; then
+          if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
             echo "No open PR from dev → main found, skipping"
             exit 0
           fi
 
           echo "Found PR #${PR_NUMBER}"
 
-          # Get PR author to verify it was created by github-actions or repo owner
-          PR_AUTHOR=$(gh pr view "$PR_NUMBER" --json author --jq '.author.login')
-          echo "PR author: ${PR_AUTHOR}"
+          # Get PR info in one call
+          PR_INFO=$(gh pr view "$PR_NUMBER" --json author,state,headRefOid)
+          PR_AUTHOR=$(echo "$PR_INFO" | jq -r '.author.login')
+          PR_STATE=$(echo "$PR_INFO" | jq -r '.state')
+          HEAD_SHA=$(echo "$PR_INFO" | jq -r '.headRefOid')
 
+          echo "PR author: ${PR_AUTHOR}, state: ${PR_STATE}, HEAD: ${HEAD_SHA:0:7}"
+
+          # Verify author
           if [ "$PR_AUTHOR" != "github-actions" ] && [ "$PR_AUTHOR" != "github-actions[bot]" ] && [ "$PR_AUTHOR" != "app/github-actions" ] && [ "$PR_AUTHOR" != "vladbydaev37" ]; then
-            echo "PR was not created by auto-pr workflow or repo owner (author: ${PR_AUTHOR}), skipping"
+            echo "PR not by auto-pr or owner (author: ${PR_AUTHOR}), skipping"
             exit 0
           fi
 
-          # Check if PR is still open (avoid errors on already-merged PRs)
-          PR_STATE=$(gh pr view "$PR_NUMBER" --json state --jq '.state')
           if [ "$PR_STATE" != "OPEN" ]; then
             echo "PR #${PR_NUMBER} is ${PR_STATE}, skipping"
             exit 0
           fi
 
-          # Check if all CI checks passed (REST API — no GraphQL permission issues)
-          echo "Checking CI status for PR #${PR_NUMBER}..."
-          set +e
-          CHECKS_STATUS=$(gh pr checks "$PR_NUMBER" --json bucket --jq '[.[] | select(.bucket != "pass")] | length' 2>&1)
-          CHECKS_EXIT=$?
-          set -e
+          # ── Check CI status via REST API (no GraphQL!) ──
+          echo "Checking CI status via REST API..."
 
-          if [ $CHECKS_EXIT -ne 0 ]; then
-            echo "Failed to query checks: ${CHECKS_STATUS}"
+          # 1. Check runs (GitHub Actions workflows)
+          CHECK_RUNS=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" --jq '
+            [.check_runs[] |
+              select(.name != "Auto-merge dev → main") |
+              {name: .name, status: .status, conclusion: .conclusion}
+            ]')
+
+          TOTAL=$(echo "$CHECK_RUNS" | jq 'length')
+          PENDING=$(echo "$CHECK_RUNS" | jq '[.[] | select(.status != "completed")] | length')
+          FAILED=$(echo "$CHECK_RUNS" | jq '[.[] | select(.status == "completed" and .conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral")] | length')
+
+          echo "Check runs: ${TOTAL} total, ${PENDING} pending, ${FAILED} failed"
+
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "No check runs found, skipping"
+            exit 0
+          fi
+
+          if [ "$PENDING" -gt 0 ]; then
+            echo "Pending checks:"
+            echo "$CHECK_RUNS" | jq -r '.[] | select(.status != "completed") | "  - \(.name): \(.status)"'
             echo "Skipping — will retry on next trigger"
             exit 0
           fi
 
-          if [ "$CHECKS_STATUS" != "0" ]; then
-            echo "Not all checks passed yet (${CHECKS_STATUS} pending/failed), skipping"
+          if [ "$FAILED" -gt 0 ]; then
+            echo "Failed checks:"
+            echo "$CHECK_RUNS" | jq -r '.[] | select(.status == "completed" and .conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral") | "  - \(.name): \(.conclusion)"'
+            echo "Skipping — checks not green"
+            exit 0
+          fi
+
+          # 2. Commit statuses (external integrations like Snyk)
+          STATUSES=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/status" --jq '.state')
+          echo "Commit status: ${STATUSES}"
+
+          if [ "$STATUSES" = "failure" ] || [ "$STATUSES" = "error" ]; then
+            echo "Commit status is ${STATUSES}, skipping"
             exit 0
           fi
 

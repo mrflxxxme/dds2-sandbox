@@ -8,11 +8,14 @@ import type { Column } from '@/components/DataTable';
 export default function OrdersPage() {
     const [orders, setOrders] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
-        api.getOrders().then(res => {
-            setOrders(Array.isArray(res) ? res : res.orders || []);
-        }).catch(() => { }).finally(() => setLoading(false));
+        api.getCostOrders().then(res => {
+            setOrders(Array.isArray(res) ? res : []);
+        }).catch((e: any) => {
+            setError(e?.message || 'Ошибка загрузки');
+        }).finally(() => setLoading(false));
     }, []);
 
     const columns: Column[] = useMemo(() => {
@@ -39,6 +42,12 @@ export default function OrdersPage() {
                     <p className="page-subtitle">Заказы и себестоимость</p>
                 </div>
             </div>
+
+            {error && (
+                <div className="glass-card" style={{ color: 'var(--color-danger)', marginBottom: 16, padding: 16 }}>
+                    {error}
+                </div>
+            )}
 
             <TanStackDataTable
                 columns={columns}

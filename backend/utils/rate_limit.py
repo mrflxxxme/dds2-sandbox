@@ -46,7 +46,11 @@ class RateLimiter:
             if redis is None:
                 return  # Redis unavailable — skip rate limiting
 
-            client_ip = request.client.host if request.client else "unknown"
+            # Use X-Forwarded-For when behind nginx/proxy, fall back to direct IP
+            forwarded = request.headers.get("X-Forwarded-For", "")
+            client_ip = (
+                forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "unknown")
+            )
             key = f"rate_limit:{self.action}:{client_ip}"
 
             current = await redis.get(key)

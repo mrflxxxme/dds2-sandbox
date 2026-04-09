@@ -20,7 +20,7 @@
 - `nomenclature` — справочник товаров (barcode, brand, article_wb, volume_l)
 - `duty_rules` — правила пошлин по категориям (basis: weight/volume/amount)
 - `cost_orders` — заказы с расчётом себестоимости
-- `cost_order_items` — позиции заказа (qty, price_cny, weight, volume, calculated costs)
+- `cost_order_items` — позиции заказа (qty, price_cny, weight, volume, calculated costs). **SoftDeleteMixin** — фильтровать `is_deleted == False` во всех SELECT
 
 ## Business Rules
 1. **Nomenclature:** синхронизируется из WB Content API (get_cards_list → parse_wb_cards_to_nomenclature)

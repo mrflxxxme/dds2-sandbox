@@ -29,7 +29,12 @@ async def get_cost_orders(db: AsyncSession, project_id: int, limit: int = 500, o
     order_nos = [o.order_no for o in orders]
 
     # Batch-load all items for all orders (fixes N+1)
-    all_items_result = await db.execute(select(CostOrderItem).where(CostOrderItem.order_no.in_(order_nos)))
+    all_items_result = await db.execute(
+        select(CostOrderItem).where(
+            CostOrderItem.order_no.in_(order_nos),
+            CostOrderItem.is_deleted == False,
+        )
+    )
     all_items_list = all_items_result.scalars().all()
     items_by_order: dict[str, list] = {}
     for i in all_items_list:

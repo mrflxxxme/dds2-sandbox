@@ -97,14 +97,9 @@ async def upload_statement(
 
 @router.get("/import/logs", response_model=list[ImportLogSchema])
 async def get_import_logs(project: Project = Depends(get_current_project), db: AsyncSession = Depends(get_db)):
-    from sqlalchemy import select
+    from backend.services.transactions_service import get_import_logs as fetch_logs
 
-    from backend.models import ImportLog
-
-    result = await db.execute(
-        select(ImportLog).where(ImportLog.project_id == project.id).order_by(ImportLog.imported_at.desc()).limit(100)
-    )
-    return result.scalars().all()
+    return await fetch_logs(db, project.id)
 
 
 # ─── Transactions ─────────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ import type { Column } from '@/components/DataTable';
 export default function DDSPage() {
     const [data, setData] = useState<any>(null);
     const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
     const [start, setStart] = useState('');
     const [end, setEnd] = useState('');
 
@@ -15,10 +16,13 @@ export default function DDSPage() {
 
     const load = async () => {
         setLoading(true);
+        setError(null);
         try {
             const res = await api.getDDS({ start: start || undefined, end: end || undefined });
             setData(res);
-        } catch { }
+        } catch (e: any) {
+            setError(e?.message || 'Ошибка загрузки');
+        }
         setLoading(false);
     };
 
@@ -63,6 +67,12 @@ export default function DDSPage() {
                     <button className="btn btn-primary btn-sm" onClick={load}>Применить</button>
                 </div>
             </div>
+
+            {error && (
+                <div className="glass-card" style={{ color: 'var(--color-danger)', marginBottom: 16, padding: 16 }}>
+                    {error}
+                </div>
+            )}
 
             <TanStackDataTable
                 columns={columns}

@@ -229,6 +229,7 @@ async def verify_project_access(db: AsyncSession, user_id: int, project_id: int)
         select(ProjectMember).where(
             ProjectMember.project_id == project_id,
             ProjectMember.user_id == user_id,
+            ProjectMember.is_deleted == False,
         )
     )
     member = result.scalar_one_or_none()
@@ -257,7 +258,7 @@ async def get_user_projects(db: AsyncSession, user_id: int) -> list[Project]:
     result = await db.execute(
         select(Project)
         .join(ProjectMember, ProjectMember.project_id == Project.id)
-        .where(ProjectMember.user_id == user_id)
+        .where(ProjectMember.user_id == user_id, ProjectMember.is_deleted == False)
     )
     return list(result.scalars().all())
 
