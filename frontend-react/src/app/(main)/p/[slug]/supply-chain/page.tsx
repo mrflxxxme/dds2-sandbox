@@ -95,10 +95,11 @@ function StatusBadge({ status }: { status: string }) {
     return (
         <span style={{
             display: 'inline-block',
-            padding: '2px 10px',
-            borderRadius: 12,
+            padding: '4px 12px',
+            borderRadius: 24,
             fontSize: 12,
             fontWeight: 600,
+            whiteSpace: 'nowrap',
             color: '#fff',
             background: color,
         }}>
@@ -129,10 +130,11 @@ function FactoryOrderStatusBadge({ status }: { status: string }) {
     return (
         <span style={{
             display: 'inline-block',
-            padding: '2px 10px',
-            borderRadius: 12,
+            padding: '4px 12px',
+            borderRadius: 24,
             fontSize: 12,
             fontWeight: 600,
+            whiteSpace: 'nowrap',
             color: '#fff',
             background: color,
         }}>

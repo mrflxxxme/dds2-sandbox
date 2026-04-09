@@ -50,12 +50,14 @@ ALL_PAGES: list[str] = [
     "project-settings",
     "team",
     "ai-chat",
+    "supply-chain",
 ]
 
 SECTION_PAGES: dict[str, list[str]] = {
     "finance": ["import", "txn", "inbox", "reports", "cost", "refs"],
     "warehouse": ["assembly", "logistics", "fbo", "stocks", "stock-analytics"],
     "orders": ["planning", "container"],
+    "supply": ["supply-chain"],
     "sales": ["funnel", "trends", "opiu", "plan-fact", "geography"],
     "ai": ["ai-chat"],
     "settings": ["monitoring", "project-settings", "team"],

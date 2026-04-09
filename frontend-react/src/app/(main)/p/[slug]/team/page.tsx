@@ -284,10 +284,15 @@ export default function TeamPage() {
 
     const handleRoleSave = async (role: string, pages: string[]) => {
         if (!editMember) return;
-        await api.updateMemberRole(slug, editMember.user_id, role, pages);
-        invalidatePermissionsCache(slug);
-        setMsg('Роль обновлена');
-        loadData();
+        try {
+            await api.updateMemberRole(slug, editMember.user_id, role, pages);
+            invalidatePermissionsCache(slug);
+            setMsg('Роль обновлена');
+            loadData();
+        } catch (e: any) {
+            setMsg(e?.message || 'Ошибка сохранения роли');
+            throw e;
+        }
     };
 
     const startTelegramEdit = (member: ProjectMember) => {
