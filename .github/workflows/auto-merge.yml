@@ -12,6 +12,7 @@ permissions:
   pull-requests: write
   contents: write
   checks: read
+  actions: read
 
 jobs:
   auto-merge:
