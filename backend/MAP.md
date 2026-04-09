@@ -35,7 +35,7 @@
 ### WB интеграция
 - HTTP клиент: `integrations/wb_api.py`
 - Resilience (per-project circuit breaker, retry): `integrations/resilience.py`
-- Воронка/реклама: `services/funnel/` (sync.py, unified_sync.py, wb_funnel_api.py, wb_advertising_api.py, ad_campaigns_service.py)
+- Воронка/реклама: `services/funnel/` (sync.py — `get_recent_sync_logs()`, unified_sync.py, wb_funnel_api.py, wb_advertising_api.py, ad_campaigns_service.py)
 - Финансы WB: `wb_finance_sync.py` (в корне `services/`, не в funnel/)
 - WB акции/остатки: `scheduler/jobs/wb_stocks.py`
 - Scheduler jobs: `scheduler/jobs/`
@@ -86,7 +86,7 @@
 - Ежедневная проверка: `services/health_check_service.py` — дефицит на складах WB, просроченные сборки, здоровье Category-A, неликвид
 
 ### География заказов
-- Агрегация по городам: `services/order_geography_service.py` — WB заказы по городам/регионам, график по дням, фильтры (бренд, категория, артикул)
+- Агрегация по городам: `services/order_geography_service.py` — WB заказы по городам/регионам, график по дням, фильтры (бренд, категория, артикул), `get_order_cities_status()` — статус загруженных маппингов
 
 ### Telegram
 - Бот-сервис: `services/telegram_service.py` — deep link auth, привязка чатов, BrandNote, TMA авторизация

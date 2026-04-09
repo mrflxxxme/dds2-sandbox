@@ -142,3 +142,7 @@ if len(data) > app_settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
 ## P22: Мутация настроек проекта в роутере
 **НЕПРАВИЛЬНО:** `project.tax_rate = value; await db.commit()` в роутере — забудешь инвалидацию кэша
 **ПРАВИЛЬНО:** через `project_settings_service.set_tax_rate()` / `set_vat_rate()` — полная инвалидация внутри
+
+## P23: Soft-delete родителя без cascade на дочерние с SoftDeleteMixin
+**НЕПРАВИЛЬНО:** `factory_order.soft_delete()` без soft_delete на FactoryOrderItem → orphaned items видны в запросах
+**ПРАВИЛЬНО:** при soft_delete родителя — soft_delete все дочерние записи тоже. Модели с SoftDeleteMixin: FactoryOrderItem, CostOrderItem (добавлены 2026-04-09, commit 5158ed4)
