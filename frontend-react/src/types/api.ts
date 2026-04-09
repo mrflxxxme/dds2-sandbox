@@ -1478,6 +1478,19 @@ export interface AdTabGroupRow {
 
 // ─── Supply Chain ─────────────────────────────────────────────────────────────
 
+export interface Supplier {
+  id: number;
+  project_id: number;
+  name: string;
+  country: 'CHINA' | 'RUSSIA';
+  currency: 'CNY' | 'RUB';
+  delivery_days_min?: number;
+  delivery_days_max?: number;
+  note?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
 export interface FactoryOrderItem {
   id: number;
   factory_order_id: number;
@@ -1498,7 +1511,7 @@ export interface FactoryOrderItem {
   remaining_qty?: number;
 }
 
-export type FactoryOrderStatus = 'FORMING' | 'READY' | 'DISTRIBUTED';
+export type FactoryOrderStatus = 'FORMING' | 'READY' | 'DISTRIBUTED' | 'CLOSED';
 
 export interface FactoryOrder {
   id: number;
@@ -1510,6 +1523,8 @@ export interface FactoryOrder {
   total_cny?: number;
   status: FactoryOrderStatus;
   note?: string;
+  supplier_id?: number;
+  supplier?: Supplier;
   created_at?: string;
   updated_at?: string;
   items?: FactoryOrderItem[];
@@ -1550,6 +1565,7 @@ export interface FactoryOrderCreate {
   expected_ready_date?: string;
   total_cny?: number;
   note?: string;
+  supplier_id?: number;
   items?: { barcode: string; subject?: string; article_seller?: string; qty: number; price_cny: number; note?: string }[];
 }
 

@@ -35,6 +35,12 @@ class FactoryOrderStatus(str, enum.Enum):
     FORMING = "FORMING"  # формируется (позиции добавляются)
     READY = "READY"  # готов к распределению
     DISTRIBUTED = "DISTRIBUTED"  # полностью распределён по машинам
+    CLOSED = "CLOSED"  # all vehicles with items >= SHIPPED
+
+
+class SupplierCountry(str, enum.Enum):
+    CHINA = "CHINA"
+    RUSSIA = "RUSSIA"
 
 
 class VehicleStatus(str, enum.Enum):

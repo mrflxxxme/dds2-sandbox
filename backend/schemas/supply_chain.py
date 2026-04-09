@@ -1,11 +1,11 @@
 """
-Supply Chain schemas: FactoryOrder, FactoryOrderItem, Vehicle.
+Supply Chain schemas: Supplier, FactoryOrder, FactoryOrderItem, Vehicle.
 """
 
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 # --- Container → Transport mapping ---
 
@@ -18,6 +18,85 @@ CONTAINER_TRANSPORT_MAP: dict[str, str] = {
 }
 
 VALID_CONTAINER_TYPES = set(CONTAINER_TRANSPORT_MAP.keys())
+
+VALID_SUPPLIER_COUNTRIES = {"CHINA", "RUSSIA"}
+VALID_SUPPLIER_CURRENCIES = {"CNY", "RUB"}
+
+
+# --- Supplier ---
+
+
+class SupplierCreate(BaseModel):
+    name: str
+    country: str = "CHINA"
+    currency: str = "CNY"
+    delivery_days_min: int | None = None
+    delivery_days_max: int | None = None
+    note: str | None = None
+
+    @field_validator("country")
+    @classmethod
+    def validate_country(cls, v: str) -> str:
+        v = v.upper()
+        if v not in VALID_SUPPLIER_COUNTRIES:
+            msg = f"Invalid country: {v}. Must be one of {VALID_SUPPLIER_COUNTRIES}"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("currency")
+    @classmethod
+    def validate_currency(cls, v: str) -> str:
+        v = v.upper()
+        if v not in VALID_SUPPLIER_CURRENCIES:
+            msg = f"Invalid currency: {v}. Must be one of {VALID_SUPPLIER_CURRENCIES}"
+            raise ValueError(msg)
+        return v
+
+
+class SupplierUpdate(BaseModel):
+    name: str | None = None
+    country: str | None = None
+    currency: str | None = None
+    delivery_days_min: int | None = None
+    delivery_days_max: int | None = None
+    note: str | None = None
+
+    @field_validator("country")
+    @classmethod
+    def validate_country(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.upper()
+        if v not in VALID_SUPPLIER_COUNTRIES:
+            msg = f"Invalid country: {v}. Must be one of {VALID_SUPPLIER_COUNTRIES}"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("currency")
+    @classmethod
+    def validate_currency(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.upper()
+        if v not in VALID_SUPPLIER_CURRENCIES:
+            msg = f"Invalid currency: {v}. Must be one of {VALID_SUPPLIER_CURRENCIES}"
+            raise ValueError(msg)
+        return v
+
+
+class SupplierSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    name: str
+    country: str = "CHINA"
+    currency: str = "CNY"
+    delivery_days_min: int | None = None
+    delivery_days_max: int | None = None
+    note: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 # --- FactoryOrderItem ---
@@ -83,6 +162,7 @@ class FactoryOrderItemSchema(BaseModel):
 class FactoryOrderCreate(BaseModel):
     order_number: str
     factory_name: str | None = None
+    supplier_id: int | None = None
     order_date: date | None = None
     expected_ready_date: date | None = None
     total_cny: Decimal | None = None
@@ -93,6 +173,7 @@ class FactoryOrderCreate(BaseModel):
 class FactoryOrderUpdate(BaseModel):
     order_number: str | None = None
     factory_name: str | None = None
+    supplier_id: int | None = None
     order_date: date | None = None
     expected_ready_date: date | None = None
     total_cny: Decimal | None = None
@@ -106,6 +187,8 @@ class FactoryOrderSchema(BaseModel):
     project_id: int
     order_number: str
     factory_name: str | None = None
+    supplier_id: int | None = None
+    supplier: SupplierSchema | None = None
     order_date: date | None = None
     expected_ready_date: date | None = None
     total_cny: Decimal | None = None
@@ -155,6 +238,15 @@ class VehicleStatusUpdate(BaseModel):
 class VehicleCreate(BaseModel):
     order_no: str
     container_type: str = "truck1"
+
+    @field_validator("order_no")
+    @classmethod
+    def validate_order_no(cls, v: str) -> str:
+        if "/" in v or "\\" in v:
+            msg = "order_no must not contain slashes (/ or \\)"
+            raise ValueError(msg)
+        return v
+
     delivery_cost_cny: Decimal = Decimal("0")
     delivery_cost_usd: Decimal = Decimal("0")
     rate_cny: Decimal = Decimal("12.5")

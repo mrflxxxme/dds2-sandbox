@@ -28,13 +28,16 @@ from backend.schemas.supply_chain import (
     SetMixGroupRequest,
     SetMixGroupResponse,
     SplitToVehiclesRequest,
+    SupplierCreate,
+    SupplierSchema,
+    SupplierUpdate,
     VehicleCreate,
     VehicleDocumentSchema,
     VehicleStatusHistorySchema,
     VehicleStatusUpdate,
     VehicleUpdate,
 )
-from backend.services.supply_chain import factory_orders, vehicle_delivery
+from backend.services.supply_chain import factory_orders, supplier_service, vehicle_delivery
 from backend.services.supply_chain.vehicle_documents import (
     delete_document,
     download_document,
@@ -263,6 +266,32 @@ async def get_available_items(
     return await vehicle_delivery.get_available_items(db, project.id)
 
 
+@router.get("/vehicles/find")
+async def find_vehicle_by_order_no(
+    order_no: str,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Find a vehicle by order_no passed as query param (supports slashes in order_no)."""
+    vehicle = await vehicle_delivery.get_vehicle(db, project.id, order_no)
+    if not vehicle:
+        raise HTTPException(404, "Vehicle not found")
+    return vehicle
+
+
+@router.delete("/vehicles/find", dependencies=[Depends(rate_limit_write)])
+async def delete_vehicle_by_order_no(
+    order_no: str,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a vehicle by order_no passed as query param (supports slashes in order_no)."""
+    try:
+        return await vehicle_delivery.delete_vehicle(db, project.id, order_no)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @router.get("/vehicles/{order_no}")
 async def get_vehicle(
     order_no: str,
@@ -485,3 +514,68 @@ async def supply_chain_overview(
     db: AsyncSession = Depends(get_db),
 ):
     return await vehicle_delivery.get_supply_chain_overview(db, project.id)
+
+
+# ─── Suppliers ───────────────────────────────────────────────────────────────
+
+
+@router.get("/suppliers")
+async def list_suppliers(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    suppliers = await supplier_service.list_suppliers(db, project.id)
+    return [SupplierSchema.model_validate(s) for s in suppliers]
+
+
+@router.get("/suppliers/{supplier_id}")
+async def get_supplier(
+    supplier_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    supplier = await supplier_service.get_supplier(db, project.id, supplier_id)
+    if not supplier:
+        raise HTTPException(404, "Supplier not found")
+    return SupplierSchema.model_validate(supplier)
+
+
+@router.post("/suppliers", status_code=201, dependencies=[Depends(rate_limit_write)])
+async def create_supplier(
+    payload: SupplierCreate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        supplier = await supplier_service.create_supplier(db, project.id, payload)
+    except IntegrityError:
+        raise HTTPException(409, f"Supplier with name '{payload.name}' already exists") from None
+    return SupplierSchema.model_validate(supplier)
+
+
+@router.put("/suppliers/{supplier_id}", dependencies=[Depends(rate_limit_write)])
+async def update_supplier(
+    supplier_id: int,
+    payload: SupplierUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        supplier = await supplier_service.update_supplier(db, project.id, supplier_id, payload)
+    except IntegrityError:
+        raise HTTPException(409, "Supplier with this name already exists") from None
+    if not supplier:
+        raise HTTPException(404, "Supplier not found")
+    return SupplierSchema.model_validate(supplier)
+
+
+@router.delete("/suppliers/{supplier_id}", dependencies=[Depends(rate_limit_write)])
+async def delete_supplier(
+    supplier_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    deleted = await supplier_service.delete_supplier(db, project.id, supplier_id)
+    if not deleted:
+        raise HTTPException(404, "Supplier not found")
+    return {"ok": True}

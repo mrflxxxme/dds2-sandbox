@@ -40,6 +40,7 @@ import type {
     AvailableItem,
     SplitItem,
     Warehouse,
+    Supplier,
 } from '@/types/api';
 import { CONTAINERS } from '@/app/(main)/p/[slug]/container-loader/lib/packer';
 
@@ -101,6 +102,38 @@ function StatusBadge({ status }: { status: string }) {
     );
 }
 
+const FACTORY_ORDER_STATUS_LABELS: Record<string, string> = {
+    FORMING: 'Формируется',
+    READY: 'Готов',
+    DISTRIBUTED: 'Распределён',
+    CLOSED: 'Закрыт',
+};
+
+const FACTORY_ORDER_STATUS_COLORS: Record<string, string> = {
+    FORMING: '#6b7280',
+    READY: '#f59e0b',
+    DISTRIBUTED: '#3b82f6',
+    CLOSED: '#22c55e',
+};
+
+function FactoryOrderStatusBadge({ status }: { status: string }) {
+    const label = FACTORY_ORDER_STATUS_LABELS[status] || status;
+    const color = FACTORY_ORDER_STATUS_COLORS[status] || '#6b7280';
+    return (
+        <span style={{
+            display: 'inline-block',
+            padding: '2px 10px',
+            borderRadius: 12,
+            fontSize: 12,
+            fontWeight: 600,
+            color: '#fff',
+            background: color,
+        }}>
+            {label}
+        </span>
+    );
+}
+
 // ─── Main page ──────────────────────────────────────────────────────────────
 
 export default function SupplyChainPage() {
@@ -120,6 +153,7 @@ export default function SupplyChainPage() {
                     { key: 'orders', label: '📦 Фабричные заказы' },
                     { key: 'vehicles', label: '🚛 Машины' },
                     { key: 'overview', label: '📊 Обзор' },
+                    { key: 'suppliers', label: '📋 Поставщики' },
                 ]}
                 active={tab}
                 onChange={setTab}
@@ -127,6 +161,7 @@ export default function SupplyChainPage() {
             {tab === 'orders' && <FactoryOrdersTab />}
             {tab === 'vehicles' && <VehiclesTab />}
             {tab === 'overview' && <OverviewTab />}
+            {tab === 'suppliers' && <SuppliersTab />}
         </div>
     );
 }
@@ -146,8 +181,23 @@ function CreateFactoryOrderForm({ onClose, onDone }: { onClose: () => void; onDo
         factory_name: undefined,
         expected_ready_date: undefined,
         note: undefined,
+        supplier_id: undefined,
     });
+    const [suppliers, setSuppliers] = useState<Supplier[]>([]);
     const [submitting, setSubmitting] = useState(false);
+
+    useEffect(() => {
+        api.getSuppliers().then(setSuppliers).catch(() => {});
+    }, []);
+
+    const handleSupplierChange = (supplierId: number | undefined) => {
+        const supplier = suppliers.find(s => s.id === supplierId);
+        setForm(f => ({
+            ...f,
+            supplier_id: supplierId,
+            factory_name: supplier ? supplier.name : f.factory_name,
+        }));
+    };
 
     const handleSubmit = async () => {
         if (!form.order_number.trim()) return;
@@ -173,10 +223,25 @@ function CreateFactoryOrderForm({ onClose, onDone }: { onClose: () => void; onDo
                 <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>Новый фабричный заказ</h3>
                 <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr', gap: 12 }}>
                 <div>
                     <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Номер заказа *</label>
                     <input value={form.order_number} onChange={e => setForm(f => ({ ...f, order_number: e.target.value }))} placeholder="ЗАК-001" style={inputStyle} autoFocus />
+                </div>
+                <div>
+                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Поставщик из справочника</label>
+                    <select
+                        value={form.supplier_id || ''}
+                        onChange={e => handleSupplierChange(e.target.value ? Number(e.target.value) : undefined)}
+                        style={inputStyle}
+                    >
+                        <option value="">-- Не выбран --</option>
+                        {suppliers.map(s => (
+                            <option key={s.id} value={s.id}>
+                                {s.name} ({s.country === 'CHINA' ? 'CN' : 'RU'})
+                            </option>
+                        ))}
+                    </select>
                 </div>
                 <div>
                     <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Поставщик / Фабрика</label>
@@ -265,20 +330,31 @@ function FactoryOrdersTab() {
         router.push(`/p/${slug}/supply-chain/factory-orders/${row.id}`);
     };
 
-    // Unique factory names for filter
+    // Unique factory names for filter (with supplier info if available)
     const factoryNames = [...new Set(orders.map(o => o.factory_name).filter(Boolean))].sort();
     const filteredOrders = filterFactory ? orders.filter(o => o.factory_name === filterFactory) : orders;
 
-    // KPI aggregates (from filtered orders)
+    // Helper to get supplier label for filter dropdown
+    const getFactoryLabel = (name: string) => {
+        const order = orders.find(o => o.factory_name === name && o.supplier);
+        if (!order?.supplier) return name;
+        const countryFlag = order.supplier.country === 'CHINA' ? '\uD83C\uDDE8\uD83C\uDDF3' : '\uD83C\uDDF7\uD83C\uDDFA';
+        return `${name} ${countryFlag} ${order.supplier.currency}`;
+    };
+
+    // KPI aggregates (from filtered orders), split cost by currency
     const kpi = filteredOrders.reduce((acc, o) => {
+        const currency = o.supplier?.currency || 'CNY';
         for (const i of o.items || []) {
             acc.weight += (Number(i.weight_kg) || 0) * i.qty;
             acc.volume += calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box);
-            acc.sumCny += (Number(i.price_cny) || 0) * i.qty;
+            const itemCost = (Number(i.price_cny) || 0) * i.qty;
+            if (currency === 'RUB') acc.sumRub += itemCost;
+            else acc.sumCny += itemCost;
             acc.qty += i.qty;
         }
         return acc;
-    }, { weight: 0, volume: 0, sumCny: 0, qty: 0 });
+    }, { weight: 0, volume: 0, sumCny: 0, sumRub: 0, qty: 0 });
 
     const columns: Column[] = [
         { key: 'order_number', label: 'Номер', width: '120px' },
@@ -321,6 +397,23 @@ function FactoryOrdersTab() {
                 const total = items.reduce((s, i) => s + (Number(i.weight_kg) || 0) * i.qty, 0);
                 return total > 0 ? formatNumber(total, 0) : '\u2014';
             },
+        },
+        {
+            key: 'total_cny', label: 'Стоимость', align: 'right',
+            render: (_v: unknown, row: FactoryOrder) => {
+                // Use total_cny if set, otherwise calculate from items
+                let cost = Number(row.total_cny) || 0;
+                if (!cost && row.items?.length) {
+                    cost = row.items.reduce((sum, i) => sum + (Number(i.price_cny) || 0) * i.qty, 0);
+                }
+                if (!cost) return '\u2014';
+                const symbol = row.supplier?.currency === 'RUB' ? '\u20BD' : '\u00A5';
+                return `${formatNumber(cost, 0)} ${symbol}`;
+            },
+        },
+        {
+            key: 'status', label: 'Статус', align: 'center',
+            render: (_v: unknown, row: FactoryOrder) => <FactoryOrderStatusBadge status={row.status} />,
         },
         {
             key: 'progress', label: 'Прогресс', align: 'center',
@@ -428,8 +521,19 @@ function FactoryOrdersTab() {
                     </div>
                     <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
                         <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Сумма заказов</div>
-                        <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-success)' }}>{formatNumber(kpi.sumCny, 0)}</div>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>¥</div>
+                        {kpi.sumCny > 0 && (
+                            <div style={{ fontSize: kpi.sumRub > 0 ? 18 : 24, fontWeight: 700, color: 'var(--color-success)' }}>
+                                {formatNumber(kpi.sumCny, 0)} {'\u00A5'}
+                            </div>
+                        )}
+                        {kpi.sumRub > 0 && (
+                            <div style={{ fontSize: kpi.sumCny > 0 ? 18 : 24, fontWeight: 700, color: 'var(--color-success)' }}>
+                                {formatNumber(kpi.sumRub, 0)} {'\u20BD'}
+                            </div>
+                        )}
+                        {kpi.sumCny === 0 && kpi.sumRub === 0 && (
+                            <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-text-muted)' }}>0</div>
+                        )}
                     </div>
                 </div>
             )}
@@ -453,7 +557,7 @@ function FactoryOrdersTab() {
                             >
                                 <option value="">Все поставщики</option>
                                 {factoryNames.map(name => (
-                                    <option key={name} value={name!}>{name}</option>
+                                    <option key={name} value={name!}>{getFactoryLabel(name!)}</option>
                                 ))}
                             </select>
                         )}
@@ -1378,7 +1482,9 @@ function VehiclesTab() {
     useEffect(() => { load(); }, [load]);
 
     const openVehicle = (orderNo: string) => {
-        router.push(`/p/${slug}/supply-chain/vehicles/${encodeURIComponent(orderNo)}`);
+        // For order_no with slashes, encode each segment separately so Next.js catch-all route works
+        const encodedPath = orderNo.split('/').map(encodeURIComponent).join('/');
+        router.push(`/p/${slug}/supply-chain/vehicles/${encodedPath}`);
     };
 
     const NEXT_STATUS: Record<string, { status: string; label: string; color: string }> = {
@@ -1624,5 +1730,330 @@ function OverviewTab() {
                 )}
             </div>
         </div>
+    );
+}
+
+// ─── Tab 4: Suppliers ────────────────────────────────────────────────────────
+
+interface SupplierFormState {
+    name: string;
+    country: 'CHINA' | 'RUSSIA';
+    currency: 'CNY' | 'RUB';
+    delivery_days_min: string;
+    delivery_days_max: string;
+    note: string;
+}
+
+const emptySupplierForm = (): SupplierFormState => ({
+    name: '',
+    country: 'CHINA',
+    currency: 'CNY',
+    delivery_days_min: '',
+    delivery_days_max: '',
+    note: '',
+});
+
+function SuppliersTab() {
+    const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [showForm, setShowForm] = useState(false);
+    const [editSupplier, setEditSupplier] = useState<Supplier | null>(null);
+    const [form, setForm] = useState<SupplierFormState>(emptySupplierForm());
+    const [submitting, setSubmitting] = useState(false);
+
+    const load = useCallback(async () => {
+        setLoading(true);
+        setError('');
+        try {
+            const data = await api.getSuppliers();
+            setSuppliers(data);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+        }
+        setLoading(false);
+    }, []);
+
+    useEffect(() => { load(); }, [load]);
+
+    const openCreate = () => {
+        setEditSupplier(null);
+        setForm(emptySupplierForm());
+        setShowForm(true);
+    };
+
+    const openEdit = (s: Supplier) => {
+        setEditSupplier(s);
+        setForm({
+            name: s.name,
+            country: s.country,
+            currency: s.currency,
+            delivery_days_min: s.delivery_days_min != null ? String(s.delivery_days_min) : '',
+            delivery_days_max: s.delivery_days_max != null ? String(s.delivery_days_max) : '',
+            note: s.note || '',
+        });
+        setShowForm(true);
+    };
+
+    const handleCountryChange = (country: 'CHINA' | 'RUSSIA') => {
+        setForm(f => ({ ...f, country, currency: country === 'CHINA' ? 'CNY' : 'RUB' }));
+    };
+
+    const handleSubmit = async () => {
+        if (!form.name.trim()) return;
+        setSubmitting(true);
+        try {
+            const payload: Partial<Supplier> = {
+                name: form.name.trim(),
+                country: form.country,
+                currency: form.currency,
+                delivery_days_min: form.delivery_days_min ? Number(form.delivery_days_min) : undefined,
+                delivery_days_max: form.delivery_days_max ? Number(form.delivery_days_max) : undefined,
+                note: form.note || undefined,
+            };
+            if (editSupplier) {
+                await api.updateSupplier(editSupplier.id, payload);
+            } else {
+                await api.createSupplier(payload);
+            }
+            setShowForm(false);
+            await load();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setSubmitting(false);
+    };
+
+    const handleDelete = async (id: number, name: string) => {
+        if (!confirm(`Удалить поставщика "${name}"?`)) return;
+        try {
+            await api.deleteSupplier(id);
+            await load();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка удаления');
+        }
+    };
+
+    const chinaCount = suppliers.filter(s => s.country === 'CHINA').length;
+    const russiaCount = suppliers.filter(s => s.country === 'RUSSIA').length;
+
+    const inputStyle: React.CSSProperties = {
+        width: '100%', padding: '8px 12px', borderRadius: 8,
+        border: '1px solid var(--color-border)', background: 'var(--color-bg)',
+        color: 'var(--color-text)', fontSize: 13,
+    };
+
+    if (loading) {
+        return (
+            <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>
+                <div className="spinner" style={{ margin: '0 auto 12px' }} />
+                Загрузка...
+            </div>
+        );
+    }
+
+    return (
+        <>
+            {error && (
+                <div className="glass-card" style={{ padding: 16, color: 'var(--color-danger)', marginBottom: 16 }}>
+                    {error}
+                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>Повторить</button>
+                </div>
+            )}
+
+            {/* KPI */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
+                <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Всего поставщиков</div>
+                    <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--color-accent)' }}>{suppliers.length}</div>
+                </div>
+                <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Китай</div>
+                    <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--color-warning)' }}>{chinaCount}</div>
+                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>CNY</div>
+                </div>
+                <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Россия</div>
+                    <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--color-success)' }}>{russiaCount}</div>
+                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>RUB</div>
+                </div>
+            </div>
+
+            {/* Create/Edit Form */}
+            {showForm && (
+                <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                        <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>
+                            {editSupplier ? 'Редактировать поставщика' : 'Новый поставщик'}
+                        </h3>
+                        <button className="btn btn-secondary btn-sm" onClick={() => setShowForm(false)}>✕</button>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr', gap: 12, marginBottom: 12 }}>
+                        <div>
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Название *</label>
+                            <input
+                                value={form.name}
+                                onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                                placeholder="Название компании"
+                                style={inputStyle}
+                                autoFocus
+                            />
+                        </div>
+                        <div>
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Страна</label>
+                            <select
+                                value={form.country}
+                                onChange={e => handleCountryChange(e.target.value as 'CHINA' | 'RUSSIA')}
+                                style={inputStyle}
+                            >
+                                <option value="CHINA">Китай</option>
+                                <option value="RUSSIA">Россия</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Валюта</label>
+                            <select
+                                value={form.currency}
+                                onChange={e => setForm(f => ({ ...f, currency: e.target.value as 'CNY' | 'RUB' }))}
+                                style={inputStyle}
+                            >
+                                <option value="CNY">CNY (¥)</option>
+                                <option value="RUB">RUB (₽)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Срок мин. (дней)</label>
+                            <input
+                                type="number"
+                                value={form.delivery_days_min}
+                                onChange={e => setForm(f => ({ ...f, delivery_days_min: e.target.value }))}
+                                placeholder="30"
+                                style={inputStyle}
+                            />
+                        </div>
+                        <div>
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Срок макс. (дней)</label>
+                            <input
+                                type="number"
+                                value={form.delivery_days_max}
+                                onChange={e => setForm(f => ({ ...f, delivery_days_max: e.target.value }))}
+                                placeholder="45"
+                                style={inputStyle}
+                            />
+                        </div>
+                    </div>
+                    <div style={{ marginBottom: 12 }}>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Примечание</label>
+                        <input
+                            value={form.note}
+                            onChange={e => setForm(f => ({ ...f, note: e.target.value }))}
+                            placeholder="Доп. информация о поставщике"
+                            style={inputStyle}
+                        />
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
+                        <button className="btn btn-secondary btn-sm" onClick={() => setShowForm(false)}>Отмена</button>
+                        <button
+                            className="btn btn-primary btn-sm"
+                            onClick={handleSubmit}
+                            disabled={!form.name.trim() || submitting}
+                        >
+                            {submitting ? 'Сохранение...' : (editSupplier ? 'Сохранить' : 'Создать')}
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Table */}
+            <div className="glass-card" style={{ overflow: 'hidden' }}>
+                <div style={{ padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--color-border)' }}>
+                    <h3 style={{ fontSize: 15, fontWeight: 600 }}>Поставщики ({suppliers.length})</h3>
+                    <button className="btn btn-primary btn-sm" onClick={openCreate}>
+                        + Создать поставщика
+                    </button>
+                </div>
+
+                {suppliers.length === 0 ? (
+                    <div className="empty-state">
+                        <div className="empty-state-icon">📋</div>
+                        <div>Нет поставщиков. Создайте первого!</div>
+                    </div>
+                ) : (
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                        <thead>
+                            <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                <th style={{ textAlign: 'left', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Название</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Страна</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Валюта</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Сроки доставки</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Примечание</th>
+                                <th style={{ textAlign: 'right', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500, width: 120 }}>Действия</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {suppliers.map(s => (
+                                <tr
+                                    key={s.id}
+                                    style={{ borderBottom: '1px solid var(--color-border)', transition: 'background 0.15s' }}
+                                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-secondary)')}
+                                    onMouseLeave={e => (e.currentTarget.style.background = '')}
+                                >
+                                    <td style={{ padding: '10px 16px', fontWeight: 600 }}>{s.name}</td>
+                                    <td style={{ padding: '10px 8px' }}>
+                                        <span style={{ fontSize: 16 }}>
+                                            {s.country === 'CHINA' ? '\uD83C\uDDE8\uD83C\uDDF3' : '\uD83C\uDDF7\uD83C\uDDFA'}
+                                        </span>
+                                        {' '}
+                                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                            {s.country === 'CHINA' ? 'Китай' : 'Россия'}
+                                        </span>
+                                    </td>
+                                    <td style={{ padding: '10px 8px' }}>
+                                        <span style={{
+                                            display: 'inline-block', padding: '2px 8px', borderRadius: 8,
+                                            fontSize: 12, fontWeight: 600,
+                                            background: s.currency === 'CNY' ? 'rgba(251,146,60,0.12)' : 'rgba(34,197,94,0.12)',
+                                            color: s.currency === 'CNY' ? '#ea580c' : '#16a34a',
+                                        }}>
+                                            {s.currency === 'CNY' ? '\u00A5 CNY' : '\u20BD RUB'}
+                                        </span>
+                                    </td>
+                                    <td style={{ padding: '10px 8px', color: 'var(--color-text-muted)' }}>
+                                        {s.delivery_days_min != null && s.delivery_days_max != null
+                                            ? `${s.delivery_days_min}–${s.delivery_days_max} дн.`
+                                            : s.delivery_days_min != null
+                                                ? `от ${s.delivery_days_min} дн.`
+                                                : s.delivery_days_max != null
+                                                    ? `до ${s.delivery_days_max} дн.`
+                                                    : '\u2014'}
+                                    </td>
+                                    <td style={{ padding: '10px 8px', color: 'var(--color-text-muted)', fontSize: 12 }}>
+                                        {s.note || '\u2014'}
+                                    </td>
+                                    <td style={{ padding: '10px 16px', textAlign: 'right' }}>
+                                        <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
+                                            <button
+                                                className="btn btn-secondary btn-sm"
+                                                style={{ fontSize: 11, padding: '2px 8px' }}
+                                                onClick={() => openEdit(s)}
+                                            >
+                                                Ред.
+                                            </button>
+                                            <button
+                                                className="btn btn-danger btn-sm"
+                                                style={{ fontSize: 11, padding: '2px 8px' }}
+                                                onClick={() => handleDelete(s.id, s.name)}
+                                            >
+                                                Уд.
+                                            </button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                )}
+            </div>
+        </>
     );
 }

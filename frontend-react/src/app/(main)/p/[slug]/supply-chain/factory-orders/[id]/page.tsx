@@ -214,7 +214,7 @@ function OrderInfoCard({ order, onUpdated }: { order: FactoryOrder; onUpdated: (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px 24px' }}>
                 <InfoField label="Номер заказа" value={order.order_number} editing={editing}
                     input={<input value={form.order_number} onChange={e => setForm(f => ({ ...f, order_number: e.target.value }))} style={editInput} />} />
-                <InfoField label="Фабрика" value={order.factory_name} editing={editing}
+                <InfoField label="Поставщик" value={order.factory_name} editing={editing}
                     input={<input value={form.factory_name} onChange={e => setForm(f => ({ ...f, factory_name: e.target.value }))} placeholder="—" style={editInput} />} />
                 <InfoField label="Дата заказа" value={order.order_date ? formatDate(order.order_date) : undefined} editing={editing}
                     input={<input type="date" value={form.order_date} onChange={e => setForm(f => ({ ...f, order_date: e.target.value }))} style={editInput} />} />

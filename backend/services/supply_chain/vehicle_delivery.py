@@ -52,6 +52,14 @@ VALID_TRANSITIONS: dict[str, list[str]] = {
     # DISPATCHED → DELIVERED happens automatically when InboundReceipt is accepted
 }
 
+# Statuses that qualify as "shipped or above" for factory order auto-close
+_SHIPPED_OR_ABOVE = {
+    VehicleStatus.SHIPPED,
+    VehicleStatus.CUSTOMS,
+    VehicleStatus.DISPATCHED,
+    VehicleStatus.DELIVERED,
+}
+
 
 async def list_vehicles(
     db: AsyncSession,
@@ -798,7 +806,46 @@ async def update_vehicle_status(
         result_data["inbound_receipt_id"] = receipt.id
         result_data["inbound_receipt_number"] = receipt.number
 
+    # Auto-close factory orders if vehicle reached SHIPPED or above
+    if data.status in _SHIPPED_OR_ABOVE:
+        await _check_and_close_factory_orders_for_vehicle(db, project_id, vehicle)
+
     return result_data
+
+
+async def _check_and_close_factory_orders_for_vehicle(
+    db: AsyncSession,
+    project_id: int,
+    vehicle: CostOrder,
+) -> None:
+    """
+    After a vehicle status update, check if any linked factory orders
+    can be auto-closed (all their vehicles >= SHIPPED).
+    """
+    from backend.services.supply_chain.factory_orders import check_and_close_order
+
+    # Find factory orders linked to items in this vehicle
+    fo_item_ids = [item.factory_order_item_id for item in vehicle.items if item.factory_order_item_id is not None]
+    if not fo_item_ids:
+        return
+
+    fo_result = await db.execute(
+        select(FactoryOrderItem.factory_order_id)
+        .where(
+            FactoryOrderItem.id.in_(fo_item_ids),
+            FactoryOrderItem.project_id == project_id,
+            FactoryOrderItem.is_deleted == False,
+        )
+        .distinct()
+        .limit(100)
+    )
+    factory_order_ids = [row[0] for row in fo_result.all()]
+
+    for fo_id in factory_order_ids:
+        try:
+            await check_and_close_order(db, project_id, fo_id)
+        except Exception:
+            logger.exception("Failed to auto-close factory order %d", fo_id)
 
 
 async def recalculate_vehicle(
