@@ -18,16 +18,17 @@ import type {
     VehicleStatusHistoryEntry,
 } from '@/types/api';
 import { CONTAINERS } from '@/app/(main)/p/[slug]/container-loader/lib/packer';
+import { LanguageProvider, useT, LanguageToggle } from '../../i18n';
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
-const STATUS_LABELS: Record<VehicleStatus, string> = {
-    FORMING: 'Формируется',
-    SHIPPED: 'Отгружен',
-    CUSTOMS: 'Таможня',
-    DISPATCHED: 'Отправлена',
-    DELIVERED: 'Принята',
-};
+const getStatusLabels = (t: (k: string) => string): Record<VehicleStatus, string> => ({
+    FORMING: t('status_forming'),
+    SHIPPED: t('status_shipped'),
+    CUSTOMS: t('status_customs'),
+    DISPATCHED: t('status_dispatched'),
+    DELIVERED: t('status_delivered'),
+});
 
 const STATUS_COLORS: Record<VehicleStatus, string> = {
     FORMING: '#6b7280',
@@ -39,24 +40,26 @@ const STATUS_COLORS: Record<VehicleStatus, string> = {
 
 const STATUSES: VehicleStatus[] = ['FORMING', 'SHIPPED', 'CUSTOMS', 'DISPATCHED', 'DELIVERED'];
 
-const CONTAINER_LABELS: Record<string, string> = {
-    truck1: 'Авто 13.5м', truck2: 'Авто 13.6м',
-    '20ft': '20 фут', '40ft': '40 фут', '40ft_hc': '40 фут HC',
-};
+const getContainerLabels = (t: (k: string) => string): Record<string, string> => ({
+    truck1: t('container_truck1'), truck2: t('container_truck2'),
+    '20ft': t('container_20ft'), '40ft': t('container_40ft'), '40ft_hc': t('container_40ft_hc'),
+});
 
-const DOC_TYPE_LABELS: Record<string, string> = {
-    invoice: 'Инвойс',
-    order: 'Заказ',
-    customs_declaration: 'ДТ',
-    contract: 'Контракт',
-    other: 'Прочее',
-};
+const getDocTypeLabels = (t: (k: string) => string): Record<string, string> => ({
+    invoice: t('vdetail_doc_type_invoice'),
+    order: t('vdetail_doc_type_order'),
+    customs_declaration: t('vdetail_doc_type_customs'),
+    contract: t('vdetail_doc_type_contract'),
+    other: t('vdetail_doc_type_other'),
+});
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 const parseNum = (s: string) => (s || '').trim().replace(/\s/g, '').replace(',', '.').replace(/[^\d.]/g, '');
 
 function StatusBadge({ status }: { status: string }) {
+    const { t } = useT();
+    const STATUS_LABELS = getStatusLabels(t);
     const s = status as VehicleStatus;
     return (
         <span style={{
@@ -70,6 +73,8 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 function Timeline({ status }: { status?: VehicleStatus }) {
+    const { t } = useT();
+    const STATUS_LABELS = getStatusLabels(t);
     const currentIdx = status ? STATUSES.indexOf(status) : -1;
     return (
         <div style={{ display: 'flex', alignItems: 'center', gap: 0, marginBottom: 20 }}>
@@ -138,6 +143,7 @@ function CostKpi({ label, value, color, pct }: { label: string; value: string; c
 function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, warehouses, onUpdated }: {
     vehicle: VehicleSchema; containerLabel: string; totalBoxes: number; isForming: boolean; warehouses: { id: number; name: string }[]; onUpdated: () => void;
 }) {
+    const { t } = useT();
     const canEdit = true; // always editable — backend controls field restrictions
     const [editing, setEditing] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -190,7 +196,7 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, wareh
             setEditing(false);
             onUpdated();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка');
+            alert(e instanceof Error ? e.message : t('msg_error'));
         }
         setSaving(false);
     };
@@ -212,7 +218,7 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, wareh
         <div className="glass-card" style={{ padding: '14px 16px', marginBottom: 12 }}>
             {/* Header row with actions */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Информация о машине</div>
+                <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>{t('vdetail_vehicle')}</div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                     {isForming && !editing && vehicle.items.length > 0 && (
                         <>
@@ -221,19 +227,19 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, wareh
                         </>
                     )}
                     {vehicle.status === 'SHIPPED' && (
-                        <StatusTransitionButton orderNo={vehicle.order_no} nextStatus="CUSTOMS" label="На таможню" icon="🏛" onDone={onUpdated} />
+                        <StatusTransitionButton orderNo={vehicle.order_no} nextStatus="CUSTOMS" label={t('transition_to_customs')} icon="🏛" onDone={onUpdated} />
                     )}
                     {vehicle.status === 'CUSTOMS' && (
-                        <StatusTransitionButton orderNo={vehicle.order_no} nextStatus="DISPATCHED" label="Отправлена" icon="🚛" onDone={onUpdated} />
+                        <StatusTransitionButton orderNo={vehicle.order_no} nextStatus="DISPATCHED" label={t('transition_dispatched')} icon="🚛" onDone={onUpdated} />
                     )}
                     {canEdit && !editing && (
-                        <button className="btn btn-secondary btn-sm" onClick={() => setEditing(true)}>Редактировать</button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => setEditing(true)}>{t('btn_edit')}</button>
                     )}
                     {editing && (
                         <>
-                            <button className="btn btn-secondary btn-sm" onClick={() => setEditing(false)}>Отмена</button>
+                            <button className="btn btn-secondary btn-sm" onClick={() => setEditing(false)}>{t('btn_cancel')}</button>
                             <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={saving}>
-                                {saving ? '...' : 'Сохранить'}
+                                {saving ? '...' : t('btn_save')}
                             </button>
                         </>
                     )}
@@ -242,43 +248,43 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, wareh
 
             {/* Fields grid — 5 columns */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '10px 16px' }}>
-                <InfoField label="Тип транспорта" value={containerLabel} />
-                <InfoField label="Инвойс" value={vehicle.invoice_no} editing={editing}
+                <InfoField label={t('vdetail_field_container')} value={containerLabel} />
+                <InfoField label={t('cost_invoice')} value={vehicle.invoice_no} editing={editing}
                     input={<input value={form.invoice_no} onChange={e => setForm(f => ({ ...f, invoice_no: e.target.value }))} placeholder="CC20260011" style={editInput} />} />
-                <InfoField label="Номер заказа" value={vehicle.payment_ref} editing={editing}
+                <InfoField label={t('vehicle_form_order_no')} value={vehicle.payment_ref} editing={editing}
                     input={<input value={form.payment_ref} onChange={e => setForm(f => ({ ...f, payment_ref: e.target.value }))} placeholder="ENV-001" style={editInput} />} />
-                <InfoField label="Номер ДТ" value={vehicle.dt_number} editing={editing}
+                <InfoField label={t('vdetail_field_customs_no')} value={vehicle.dt_number} editing={editing}
                     input={<input value={form.dt_number} onChange={e => setForm(f => ({ ...f, dt_number: e.target.value }))} placeholder="—" style={editInput} />} />
-                <InfoField label="Перевозка" value={deliveryCost} editing={editing}
+                <InfoField label={t('vdetail_field_delivery_cost')} value={deliveryCost} editing={editing}
                     input={<input value={form.delivery_cost_cny} onChange={e => setForm(f => ({ ...f, delivery_cost_cny: e.target.value }))} placeholder="0" style={editInput} />} />
-                <InfoField label="Дата забора (план)" value={vehicle.ship_date ? formatDate(vehicle.ship_date) : undefined} editing={editing}
+                <InfoField label={t('vehicle_form_pickup_date')} value={vehicle.ship_date ? formatDate(vehicle.ship_date) : undefined} editing={editing}
                     input={<input type="date" value={form.ship_date} onChange={e => setForm(f => ({ ...f, ship_date: e.target.value }))} style={editInput} />} />
-                <InfoField label="Отгрузка (факт)" value={vehicle.actual_ship_date ? formatDate(vehicle.actual_ship_date) : undefined} editing={editing}
+                <InfoField label={t('vdetail_field_ship_date')} value={vehicle.actual_ship_date ? formatDate(vehicle.actual_ship_date) : undefined} editing={editing}
                     input={<input type="date" value={form.actual_ship_date} onChange={e => setForm(f => ({ ...f, actual_ship_date: e.target.value }))} style={editInput} />} />
-                <InfoField label="Прибытие (прогноз)" value={vehicle.estimated_arrival_date ? formatDate(vehicle.estimated_arrival_date) : undefined} editing={editing}
+                <InfoField label={t('vdetail_field_arrival')} value={vehicle.estimated_arrival_date ? formatDate(vehicle.estimated_arrival_date) : undefined} editing={editing}
                     input={<input type="date" value={form.estimated_arrival_date} onChange={e => setForm(f => ({ ...f, estimated_arrival_date: e.target.value }))} style={editInput} />} />
-                <InfoField label="Склад назначения" value={warehouses.find(w => w.id === vehicle.target_warehouse_id)?.name} editing={editing}
+                <InfoField label={t('vehicle_form_warehouse')} value={warehouses.find(w => w.id === vehicle.target_warehouse_id)?.name} editing={editing}
                     input={
                         <select value={form.target_warehouse_id} onChange={e => setForm(f => ({ ...f, target_warehouse_id: e.target.value }))} style={editInput}>
-                            <option value="">— Не выбран —</option>
+                            <option value="">{t('create_order_unselected')}</option>
                             {warehouses.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
                         </select>
                     } />
-                <InfoField label="Курс ¥/₽" value={Number(vehicle.rate_cny) > 0 ? String(vehicle.rate_cny) : undefined} editing={editing}
+                <InfoField label={t('vehicle_form_rate_cny')} value={Number(vehicle.rate_cny) > 0 ? String(vehicle.rate_cny) : undefined} editing={editing}
                     input={<input value={form.rate_cny} onChange={e => setForm(f => ({ ...f, rate_cny: e.target.value }))} placeholder="12.5" style={editInput} />} />
-                <InfoField label="Курс $/₽" value={Number(vehicle.rate_usd) > 0 ? String(vehicle.rate_usd) : undefined} editing={editing}
+                <InfoField label={t('vehicle_form_rate_usd')} value={Number(vehicle.rate_usd) > 0 ? String(vehicle.rate_usd) : undefined} editing={editing}
                     input={<input value={form.rate_usd} onChange={e => setForm(f => ({ ...f, rate_usd: e.target.value }))} placeholder="92" style={editInput} />} />
-                <InfoField label="Курс €/₽" value={Number(vehicle.rate_eur) > 0 ? String(vehicle.rate_eur) : undefined} editing={editing}
+                <InfoField label={t('vehicle_form_rate_eur')} value={Number(vehicle.rate_eur) > 0 ? String(vehicle.rate_eur) : undefined} editing={editing}
                     input={<input value={form.rate_eur} onChange={e => setForm(f => ({ ...f, rate_eur: e.target.value }))} placeholder="98" style={editInput} />} />
             </div>
 
             {/* Summary KPIs */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--color-border)' }}>
-                <SummaryKpi label="Артикулов" value={String(vehicle.items_count)} />
-                <SummaryKpi label="Товаров" value={`${formatNumber(vehicle.total_qty, 0)} шт`} />
-                <SummaryKpi label="Мест" value={totalBoxes > 0 ? String(totalBoxes) : '—'} />
-                <SummaryKpi label="Вес" value={vehicle.total_weight_kg ? `${formatNumber(Number(vehicle.total_weight_kg), 0)} кг` : '—'} />
-                <SummaryKpi label="Стоимость" value={Number(vehicle.total_cny) > 0 ? `${formatNumber(Number(vehicle.total_cny), 0)} ¥` : '—'} accent />
+                <SummaryKpi label={t('col_items_count')} value={String(vehicle.items_count)} />
+                <SummaryKpi label={t('col_qty')} value={`${formatNumber(vehicle.total_qty, 0)} ${t('unit_pcs')}`} />
+                <SummaryKpi label={t('col_boxes')} value={totalBoxes > 0 ? String(totalBoxes) : '—'} />
+                <SummaryKpi label={t('cost_weight')} value={vehicle.total_weight_kg ? `${formatNumber(Number(vehicle.total_weight_kg), 0)} kg` : '—'} />
+                <SummaryKpi label={t('col_amount')} value={Number(vehicle.total_cny) > 0 ? `${formatNumber(Number(vehicle.total_cny), 0)} ¥` : '—'} accent />
             </div>
         </div>
     );
@@ -287,6 +293,16 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, wareh
 // ─── Main Page ─────────────────────────────────────────────────────────────
 
 export default function VehicleDetailPage() {
+    return (
+        <LanguageProvider>
+            <VehicleDetailContent />
+        </LanguageProvider>
+    );
+}
+
+function VehicleDetailContent() {
+    const { t } = useT();
+    const CONTAINER_LABELS = getContainerLabels(t);
     const params = useParams();
     const router = useRouter();
     const slug = params.slug as string;
@@ -310,10 +326,10 @@ export default function VehicleDetailPage() {
             setVehicle(data);
             setWarehouses(wh);
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+            setError(e instanceof Error ? e.message : t('msg_loading_error'));
         }
         setLoading(false);
-    }, [orderNo]);
+    }, [orderNo, t]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -321,20 +337,20 @@ export default function VehicleDetailPage() {
     const [deleting, setDeleting] = useState(false);
     const handleDelete = async () => {
         if (!vehicle) return;
-        if (!confirm(`Удалить машину ${vehicle.order_no}? Все позиции будут возвращены в доступные.`)) return;
+        if (!confirm(`${t('vdetail_confirm_delete')} ${vehicle.order_no}?`)) return;
         setDeleting(true);
         try {
             await api.deleteVehicle(vehicle.order_no);
             goBack();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка удаления');
+            alert(e instanceof Error ? e.message : t('msg_delete_error'));
         }
         setDeleting(false);
     };
 
-    if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}><div className="spinner" style={{ margin: '0 auto 12px' }} />Загрузка...</div>;
-    if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error} <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>Повторить</button></div>;
-    if (!vehicle) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Машина не найдена <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={goBack}>Назад</button></div>;
+    if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}><div className="spinner" style={{ margin: '0 auto 12px' }} />{t('msg_loading')}</div>;
+    if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error} <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>{t('btn_retry')}</button></div>;
+    if (!vehicle) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>{t('vdetail_not_found')} <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={goBack}>{t('vdetail_back')}</button></div>;
 
     const isForming = vehicle.status === 'FORMING';
     const containerLabel = CONTAINER_LABELS[vehicle.container_type || ''] || vehicle.transport_type || 'AUTO';
@@ -348,16 +364,17 @@ export default function VehicleDetailPage() {
             {/* Header */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 20 }}>
                 <button className="btn btn-secondary btn-sm" onClick={goBack} style={{ fontSize: 13 }}>
-                    ← Назад
+                    {t('vdetail_back')}
                 </button>
                 <div style={{ flex: 1 }}>
                     <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>
-                        Машина {vehicle.order_no}
+                        {t('vdetail_vehicle')} {vehicle.order_no}
                     </h1>
                 </div>
+                <LanguageToggle />
                 {isForming && (
                     <button className="btn btn-danger btn-sm" onClick={handleDelete} disabled={deleting} style={{ fontSize: 13 }}>
-                        {deleting ? 'Удаляем...' : 'Удалить'}
+                        {deleting ? t('vdetail_deleting') : t('btn_delete')}
                     </button>
                 )}
                 <StatusBadge status={vehicle.status || 'FORMING'} />
@@ -369,9 +386,9 @@ export default function VehicleDetailPage() {
             {/* Tabs */}
             <TabLayout
                 tabs={[
-                    { key: 'main', label: 'Основное' },
-                    { key: 'documents', label: 'Документы' },
-                    { key: 'history', label: 'История' },
+                    { key: 'main', label: t('vdetail_tab_items') },
+                    { key: 'documents', label: t('vdetail_tab_docs') },
+                    { key: 'history', label: t('vdetail_tab_history') },
                 ]}
                 active={tab}
                 onChange={setTab}
@@ -387,27 +404,27 @@ export default function VehicleDetailPage() {
                     {cs && (
                         <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
                             <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
-                                <span style={{ fontSize: 16 }}>📊</span> Расчёт себестоимости по позициям
+                                <span style={{ fontSize: 16 }}>📊</span> {t('vdetail_tab_cost')}
                             </div>
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 12 }}>
-                                <CostKpi label="Кол-во (шт)" value={formatNumber(vehicle.total_qty, 0)} />
-                                <CostKpi label="Себестоимость" value={`${formatNumber(Number(cs.total_cost_rub))} ₽`} color="var(--color-success)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_cost_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
-                                <CostKpi label="Доставка" value={`${formatNumber(Number(cs.total_delivery_rub))} ₽`} color="var(--color-warning)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_delivery_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
-                                <CostKpi label="Пошлина" value={`${formatNumber(Number(cs.total_duty_rub))} ₽`} color="var(--color-warning)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_duty_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
-                                <CostKpi label="НДС" value={`${formatNumber(Number(cs.total_vat_rub))} ₽`} color="var(--color-danger)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_vat_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
+                                <CostKpi label={`${t('col_qty')} (${t('unit_pcs')})`} value={formatNumber(vehicle.total_qty, 0)} />
+                                <CostKpi label={t('cost_goods')} value={`${formatNumber(Number(cs.total_cost_rub))} ₽`} color="var(--color-success)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_cost_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
+                                <CostKpi label={t('cost_delivery')} value={`${formatNumber(Number(cs.total_delivery_rub))} ₽`} color="var(--color-warning)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_delivery_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
+                                <CostKpi label={t('cost_duty')} value={`${formatNumber(Number(cs.total_duty_rub))} ₽`} color="var(--color-warning)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_duty_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
+                                <CostKpi label={t('cost_vat')} value={`${formatNumber(Number(cs.total_vat_rub))} ₽`} color="var(--color-danger)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_vat_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
                             </div>
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
                                 <div style={{ padding: 16, borderRadius: 12, background: 'linear-gradient(135deg, rgba(255,182,193,0.15), rgba(255,105,180,0.08))', textAlign: 'center' }}>
                                     <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginBottom: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
-                                        <span style={{ fontSize: 13 }}>🔥</span> ИТОГО
+                                        <span style={{ fontSize: 13 }}>🔥</span> {t('cost_total')}
                                     </div>
                                     <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--color-success)' }}>
                                         {formatNumber(Number(cs.total_rub))} ₽
                                     </div>
                                 </div>
-                                <CostKpi label="Курс ¥/₽" value={String(vehicle.rate_cny)} />
-                                <CostKpi label="Доставка ¥" value={Number(vehicle.delivery_cost_cny) > 0 ? `${formatNumber(Number(vehicle.delivery_cost_cny), 0)}` : '—'} />
-                                <CostKpi label="Вес" value={vehicle.total_weight_kg ? `${formatNumber(Number(vehicle.total_weight_kg), 0)} кг` : '—'} />
+                                <CostKpi label={t('vehicle_form_rate_cny')} value={String(vehicle.rate_cny)} />
+                                <CostKpi label={t('vehicle_form_delivery_cny')} value={Number(vehicle.delivery_cost_cny) > 0 ? `${formatNumber(Number(vehicle.delivery_cost_cny), 0)}` : '—'} />
+                                <CostKpi label={t('cost_weight')} value={vehicle.total_weight_kg ? `${formatNumber(Number(vehicle.total_weight_kg), 0)} kg` : '—'} />
                             </div>
                         </div>
                     )}
@@ -418,10 +435,10 @@ export default function VehicleDetailPage() {
                     {/* Items table (TOP) */}
                     <div className="glass-card" style={{ padding: 16, overflow: 'auto' }}>
                         <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>
-                            Позиции ({vehicle.items.length})
+                            {t('vdetail_tab_items')} ({vehicle.items.length})
                         </h3>
                         {vehicle.items.length === 0 ? (
-                            <div style={{ textAlign: 'center', padding: 24, opacity: 0.5 }}>Нет позиций. Добавьте товары ниже.</div>
+                            <div style={{ textAlign: 'center', padding: 24, opacity: 0.5 }}>{t('vehicle_items_empty')}</div>
                         ) : (
                             <ItemsTable items={vehicle.items} isForming={isForming} vehicleOrderNo={vehicle.order_no} totalQty={vehicle.total_qty} totalCny={vehicle.total_cny} onRemoved={load} />
                         )}
@@ -460,22 +477,20 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
     items: VehicleItemSchema[]; isForming: boolean; vehicleOrderNo: string;
     totalQty: number; totalCny: number; onRemoved: () => void;
 }) {
+    const { t } = useT();
     const [removingId, setRemovingId] = useState<number | null>(null);
-    const [perUnit, setPerUnit] = useState(false); // false = общая, true = за 1 шт
+    const [perUnit, setPerUnit] = useState(false); // false = total, true = per unit
     const [expandedId, setExpandedId] = useState<number | null>(null);
     const hasCosts = items.some(i => i.total_rub);
 
     const handleRemove = async (itemId: number, isMix?: boolean) => {
-        const msg = isMix
-            ? 'Удалить микс-коробку? Все позиции микса будут удалены из машины.'
-            : 'Удалить позицию из машины?';
-        if (!confirm(msg)) return;
+        if (!confirm(t('vehicle_items_confirm_delete'))) return;
         setRemovingId(itemId);
         try {
             await api.removeItemFromVehicle(vehicleOrderNo, itemId);
             onRemoved();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка');
+            alert(e instanceof Error ? e.message : t('msg_error'));
         }
         setRemovingId(null);
     };
@@ -487,24 +502,24 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
             const dims = parseBoxDims(item.box_size);
             const vol = dims && ppb > 0 ? (dims.l * dims.w * dims.h) / 1e6 * boxes : 0;
             return {
-                'Баркод': item.barcode,
-                'Артикул': item.article_seller || '',
-                'Категория': item.subject || '',
-                'Кол-во': item.qty,
-                'Мест': item.mix_group_id ? 'микс' : (boxes || ''),
-                'Вес 1шт, кг': item.weight_kg || '',
-                'Вес общ, кг': item.weight_kg ? Number(((item.weight_kg || 0) * item.qty).toFixed(1)) : '',
-                'Коробка': item.box_size || '',
-                'V м³': vol > 0 ? Number(vol.toFixed(2)) : '',
-                'Цена ¥': Number(item.price_cny) || '',
-                'Сумма ¥': Number(item.price_cny) * item.qty || '',
-                'Доставка ₽': item.delivery_rub ? Number((item.delivery_rub * item.qty).toFixed(0)) : '',
-                'Пошлина ₽': item.duty_rub ? Number((item.duty_rub * item.qty).toFixed(0)) : '',
-                'НДС ₽': item.vat_rub ? Number((item.vat_rub * item.qty).toFixed(0)) : '',
-                'Итого ₽': item.total_rub ? Number((item.total_rub * item.qty).toFixed(0)) : '',
+                [t('col_barcode')]: item.barcode,
+                [t('col_article')]: item.article_seller || '',
+                [t('col_category')]: item.subject || '',
+                [t('col_qty')]: item.qty,
+                [t('col_boxes')]: item.mix_group_id ? t('detail_col_mix') : (boxes || ''),
+                [`${t('col_weight_1pc')} kg`]: item.weight_kg || '',
+                [`${t('col_weight')} kg`]: item.weight_kg ? Number(((item.weight_kg || 0) * item.qty).toFixed(1)) : '',
+                [t('col_box_spec')]: item.box_size || '',
+                'V m³': vol > 0 ? Number(vol.toFixed(2)) : '',
+                [t('col_price_cny')]: Number(item.price_cny) || '',
+                [t('col_sum_cny')]: Number(item.price_cny) * item.qty || '',
+                [`${t('cost_delivery')} ₽`]: item.delivery_rub ? Number((item.delivery_rub * item.qty).toFixed(0)) : '',
+                [`${t('cost_duty')} ₽`]: item.duty_rub ? Number((item.duty_rub * item.qty).toFixed(0)) : '',
+                [`${t('cost_vat')} ₽`]: item.vat_rub ? Number((item.vat_rub * item.qty).toFixed(0)) : '',
+                [`${t('cost_total')} ₽`]: item.total_rub ? Number((item.total_rub * item.qty).toFixed(0)) : '',
             };
         });
-        exportToExcel(rows, `Машина_${vehicleOrderNo}`);
+        exportToExcel(rows, `${t('vdetail_vehicle')}_${vehicleOrderNo}`);
     };
 
     const th: React.CSSProperties = { textAlign: 'left', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500, whiteSpace: 'nowrap' };
@@ -550,22 +565,22 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
             <thead>
                 {hasCosts && (
                     <tr>
-                        <th colSpan={11} style={{ padding: '4px 6px', fontSize: 10, color: 'var(--color-text-muted)', borderBottom: 'none', fontWeight: 400 }}>Товар и логистика</th>
+                        <th colSpan={11} style={{ padding: '4px 6px', fontSize: 10, color: 'var(--color-text-muted)', borderBottom: 'none', fontWeight: 400 }}>{t('cost_goods')}</th>
                         <th colSpan={costCols} style={{ padding: '4px 6px', fontSize: 10, color: 'var(--color-primary)', borderBottom: 'none', fontWeight: 500, textAlign: 'center', background: 'rgba(59,130,246,0.04)' }}>
                             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-                                <span>Себестоимость (₽)</span>
+                                <span>{t('col_cost')} (₽)</span>
                                 <div style={{ display: 'inline-flex', borderRadius: 6, overflow: 'hidden', border: '1px solid #cbd5e1' }}>
                                     <button onClick={() => setPerUnit(false)}
                                         style={{ fontSize: 11, padding: '3px 12px', border: 'none', cursor: 'pointer', fontWeight: 600,
                                             background: !perUnit ? '#3b82f6' : '#f1f5f9',
                                             color: !perUnit ? '#fff' : '#64748b' }}>
-                                        Общая
+                                        {t('col_total')}
                                     </button>
                                     <button onClick={() => setPerUnit(true)}
                                         style={{ fontSize: 11, padding: '3px 12px', border: 'none', borderLeft: '1px solid #cbd5e1', cursor: 'pointer', fontWeight: 600,
                                             background: perUnit ? '#3b82f6' : '#f1f5f9',
                                             color: perUnit ? '#fff' : '#64748b' }}>
-                                        За 1 шт
+                                        1 {t('unit_pcs')}
                                     </button>
                                 </div>
                             </div>
@@ -574,21 +589,21 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                     </tr>
                 )}
                 <tr style={{ borderBottom: '2px solid var(--color-border)' }}>
-                    <th style={th}>Баркод</th>
-                    <th style={th}>Артикул</th>
-                    <th style={th}>Категория</th>
-                    <th style={thR}>Кол-во</th>
-                    <th style={thR}>Мест</th>
-                    <th style={thR}>Вес 1шт</th>
-                    <th style={thR}>Вес общ</th>
-                    <th style={th}>Коробка</th>
-                    <th style={thR}>V м³</th>
-                    <th style={thR}>Цена ¥</th>
-                    <th style={thR}>Сумма ¥</th>
-                    {hasCosts && <th style={thF}>Доставка</th>}
-                    {hasCosts && <th style={thF}>Пошлина</th>}
-                    {hasCosts && <th style={thF}>НДС</th>}
-                    {hasCosts && <th style={{ ...thF, fontWeight: 600 }}>Итого</th>}
+                    <th style={th}>{t('col_barcode')}</th>
+                    <th style={th}>{t('col_article')}</th>
+                    <th style={th}>{t('col_category')}</th>
+                    <th style={thR}>{t('col_qty')}</th>
+                    <th style={thR}>{t('col_boxes')}</th>
+                    <th style={thR}>{t('col_weight_1pc')}</th>
+                    <th style={thR}>{t('col_weight')}</th>
+                    <th style={th}>{t('col_box_spec')}</th>
+                    <th style={thR}>V m³</th>
+                    <th style={thR}>{t('col_price_cny')}</th>
+                    <th style={thR}>{t('col_sum_cny')}</th>
+                    {hasCosts && <th style={thF}>{t('cost_delivery')}</th>}
+                    {hasCosts && <th style={thF}>{t('cost_duty')}</th>}
+                    {hasCosts && <th style={thF}>{t('cost_vat')}</th>}
+                    {hasCosts && <th style={{ ...thF, fontWeight: 600 }}>{t('cost_total')}</th>}
                     {isForming && <th style={{ width: 28 }} />}
                 </tr>
             </thead>
@@ -601,7 +616,7 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                     const boxVol = dims ? (dims.l * dims.w * dims.h) / 1e6 : 0;
                     const itemTotalVol = boxVol * boxes;
                     const weight = item.weight_kg ? item.weight_kg * item.qty : 0;
-                    const boxLabel = item.box_size ? `${item.box_size}${ppb ? ` (${ppb}шт)` : ''}` : '—';
+                    const boxLabel = item.box_size ? `${item.box_size}${ppb ? ` (${ppb}${t('unit_pcs')})` : ''}` : '—';
 
                     return (
                     <React.Fragment key={item.id}>
@@ -613,7 +628,7 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                             <td style={tdR}>
                                 {item.mix_group_id ? (
                                     <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-accent)' }}
-                                        title={`Микс: ${item.mix_group_id.slice(0, 8)}`}>микс</span>
+                                        title={`${t('detail_col_mix')}: ${item.mix_group_id.slice(0, 8)}`}>{t('detail_col_mix')}</span>
                                 ) : (
                                     <BoxDetailCell
                                         qty={item.qty}
@@ -645,8 +660,8 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                                             fontSize: item.mix_group_id ? 11 : 14,
                                             opacity: removingId === item.id ? 0.3 : 0.6, padding: 2,
                                         }}
-                                        title={item.mix_group_id ? 'Удалить микс' : 'Удалить'}>
-                                        {item.mix_group_id ? 'Удалить микс' : '✕'}
+                                        title={item.mix_group_id ? t('vehicle_items_remove') : t('btn_delete')}>
+                                        {item.mix_group_id ? t('vehicle_items_remove') : '✕'}
                                     </button>
                                 </td>
                             )}
@@ -671,11 +686,11 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
             </tbody>
             <tfoot>
                 <tr style={{ borderTop: '2px solid var(--color-border)', fontWeight: 600, whiteSpace: 'nowrap' }}>
-                    <td colSpan={3} style={{ padding: '12px 6px', fontSize: 13 }}>Итого</td>
+                    <td colSpan={3} style={{ padding: '12px 6px', fontSize: 13 }}>{t('cost_total')}</td>
                     <td style={{ padding: '12px 6px', textAlign: 'right', fontSize: 13 }}>{formatNumber(totalQty, 0)}</td>
                     <td style={{ padding: '12px 6px', textAlign: 'right' }}>{totalBoxes || ''}</td>
                     <td />
-                    <td style={{ padding: '12px 6px', textAlign: 'right' }}>{totalWeight > 0 ? formatNumber(totalWeight, 0) : ''} кг</td>
+                    <td style={{ padding: '12px 6px', textAlign: 'right' }}>{totalWeight > 0 ? formatNumber(totalWeight, 0) : ''} kg</td>
                     <td />
                     <td style={{ padding: '12px 6px', textAlign: 'right' }}>{totalVolume > 0 ? totalVolume.toFixed(2) : ''}</td>
                     <td />
@@ -803,12 +818,13 @@ function resolveMixSiblings(
 }
 
 function CollapsibleAddItems({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; onAdded: () => void }) {
+    const { t } = useT();
     const [open, setOpen] = useState(false);
     if (!open) {
         return (
             <div style={{ textAlign: 'center', padding: 16 }}>
                 <button className="btn btn-primary" onClick={() => setOpen(true)}>
-                    + Добавить товары
+                    {t('vdetail_items_add')}
                 </button>
             </div>
         );
@@ -821,13 +837,14 @@ function CollapsibleAddItems({ vehicleOrderNo, onAdded }: { vehicleOrderNo: stri
                 onPartialAdded={onAdded}
             />
             <div style={{ textAlign: 'center', marginTop: 8 }}>
-                <button className="btn btn-secondary btn-sm" onClick={() => setOpen(false)}>Свернуть</button>
+                <button className="btn btn-secondary btn-sm" onClick={() => setOpen(false)}>{t('items_collapse')}</button>
             </div>
         </div>
     );
 }
 
 function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleOrderNo: string; onAdded: () => void; onPartialAdded: () => void }) {
+    const { t } = useT();
     const [mode, setMode] = useState<'list' | 'paste'>('list');
     const [groups, setGroups] = useState<AvailableItemGroup[]>([]);
     const [selectedOrder, setSelectedOrder] = useState<string>('');
@@ -927,7 +944,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
             setQuantities({});
             onAdded();
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка');
+            setError(e instanceof Error ? e.message : t('msg_error'));
         }
         setSubmitting(false);
     };
@@ -1016,29 +1033,29 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                 onAdded(); // all done — close section
             }
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка');
+            setError(e instanceof Error ? e.message : t('msg_error'));
         }
         setSubmitting(false);
     };
 
     return (
         <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
-            <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>Добавить товары</h3>
+            <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>{t('add_items_title')}</h3>
 
             {loadingGroups ? (
                 <div style={{ textAlign: 'center', padding: 16 }}><div className="spinner" style={{ margin: '0 auto' }} /></div>
             ) : groups.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: 16, opacity: 0.5 }}>Нет доступных фабричных заказов</div>
+                <div style={{ textAlign: 'center', padding: 16, opacity: 0.5 }}>{t('add_items_empty')}</div>
             ) : (
                 <>
                     {/* Order selector — only for list mode (paste searches all orders) */}
                     {mode === 'list' && (
                         <div style={{ marginBottom: 12 }}>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Фабричный заказ</label>
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('orders_title')}</label>
                             <select value={selectedOrder} onChange={e => { setSelectedOrder(e.target.value); setChecked({}); setQuantities({}); }} style={inputStyle}>
                                 {groups.map(g => (
                                     <option key={g.order_number} value={g.order_number}>
-                                        {g.order_number}{g.factory_name ? ` — ${g.factory_name}` : ''} ({g.items.length} поз.)
+                                        {g.order_number}{g.factory_name ? ` — ${g.factory_name}` : ''} ({g.items.length} {t('add_items_pos')})
                                     </option>
                                 ))}
                             </select>
@@ -1055,7 +1072,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                     background: mode === m ? 'var(--color-primary-bg)' : 'var(--color-bg)',
                                     color: mode === m ? 'var(--color-primary)' : 'var(--color-text)',
                                 }}>
-                                {m === 'list' ? '📋 Выбрать из списка' : '📎 Вставить из буфера'}
+                                {m === 'list' ? `📋 ${t('add_items_subtitle')}` : `📎 ${t('items_paste_header')}`}
                             </button>
                         ))}
                     </div>
@@ -1066,23 +1083,23 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                     {mode === 'list' && (
                         <>
                             {listItems.length === 0 ? (
-                                <div style={{ textAlign: 'center', padding: 16, opacity: 0.5 }}>Нет доступных позиций</div>
+                                <div style={{ textAlign: 'center', padding: 16, opacity: 0.5 }}>{t('add_items_empty')}</div>
                             ) : (
                                 <div style={{ overflow: 'auto', maxHeight: 400 }}>
                                     <table className="data-table" style={{ marginBottom: 0, fontSize: 13 }}>
                                         <thead>
                                             <tr>
                                                 <th style={{ width: 36, textAlign: 'center' }}>
-                                                    <input type="checkbox" checked={allChecked} onChange={toggleAll} title="Выбрать все" />
+                                                    <input type="checkbox" checked={allChecked} onChange={toggleAll} />
                                                 </th>
-                                                <th>Баркод</th>
-                                                <th>Артикул</th>
-                                                <th>Категория</th>
-                                                <th style={{ textAlign: 'right' }}>Шт/кор</th>
-                                                <th style={{ textAlign: 'right' }}>Доступно</th>
-                                                <th style={{ width: 90 }}>Кол-во</th>
-                                                <th style={{ textAlign: 'right' }}>Мест</th>
-                                                <th style={{ textAlign: 'right' }}>Цена ¥</th>
+                                                <th>{t('col_barcode')}</th>
+                                                <th>{t('col_article')}</th>
+                                                <th>{t('col_category')}</th>
+                                                <th style={{ textAlign: 'right' }}>{t('col_pcs_per_box')}</th>
+                                                <th style={{ textAlign: 'right' }}>{t('col_available')}</th>
+                                                <th style={{ width: 90 }}>{t('col_qty')}</th>
+                                                <th style={{ textAlign: 'right' }}>{t('col_boxes')}</th>
+                                                <th style={{ textAlign: 'right' }}>{t('col_price_cny')}</th>
                                             </tr>
                                         </thead>
                                         <tbody>
@@ -1167,12 +1184,12 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                                                     }} />
                                                             </td>
                                                             <td colSpan={3} style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-accent)', padding: '6px 4px' }}>
-                                                                Микс-группа ({groupItems.length} поз.)
+                                                                {t('detail_mix_group')} ({groupItems.length} {t('add_items_pos')})
                                                                 {groupItems[0]?.mix_box_size && <span style={{ fontWeight: 400, color: 'var(--color-text-muted)', marginLeft: 8 }}>{groupItems[0].mix_box_size}</span>}
                                                             </td>
                                                             <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-text-muted)' }}>—</td>
                                                             <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-accent)', fontWeight: 600 }}>
-                                                                {availableBoxes} кор.
+                                                                {availableBoxes} {t('col_boxes')}
                                                             </td>
                                                             <td>
                                                                 <input type="number" min={0} max={availableBoxes}
@@ -1193,7 +1210,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                                                     style={{ ...cellInput, width: 80 }} />
                                                             </td>
                                                             <td style={{ textAlign: 'right', fontSize: 12 }}>
-                                                                {boxQty > 0 ? `${boxQty} кор.` : '—'}
+                                                                {boxQty > 0 ? `${boxQty} ${t('col_boxes')}` : '—'}
                                                             </td>
                                                             <td />
                                                         </tr>
@@ -1211,7 +1228,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                                                 <td style={{ textAlign: 'right', fontSize: 11, color: 'var(--color-text-muted)' }}>{item.mix_pcs_per_box || item.pcs_per_box || '—'}</td>
                                                                 <td style={{ textAlign: 'right', fontSize: 11 }}>{item.remaining_qty}</td>
                                                                 <td style={{ textAlign: 'right', fontSize: 11, color: 'var(--color-text-muted)', padding: '4px 6px' }}>
-                                                                    {itemQty > 0 ? `${itemQty} шт` : '—'}
+                                                                    {itemQty > 0 ? `${itemQty} ${t('unit_pcs')}` : '—'}
                                                                 </td>
                                                                 <td />
                                                                 <td style={{ textAlign: 'right', fontSize: 11 }}>{formatNumber(parseFloat(item.price_cny))}</td>
@@ -1229,7 +1246,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                             <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--color-border)' }}>
                                 <button className="btn btn-primary" onClick={handleListSubmit} disabled={!listCanSave || submitting}
                                     style={{ minWidth: 160, opacity: listCanSave ? 1 : 0.5 }}>
-                                    {submitting ? 'Добавляем...' : `Добавить (${checkedItems.length})`}
+                                    {submitting ? t('add_items_adding') : `${t('add_items_count')} (${checkedItems.length})`}
                                 </button>
                             </div>
                         </>
@@ -1239,18 +1256,18 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                     {mode === 'paste' && (
                         <>
                             <div style={{ padding: 10, marginBottom: 12, fontSize: 13, color: 'var(--color-text-muted)', background: 'var(--color-bg-secondary)', borderRadius: 8 }}>
-                                Скопируйте из Excel и вставьте (Ctrl+V). Формат: <b>Баркод, Кол-во</b>.
+                                {t('items_paste_sub')}
                             </div>
 
                             {invalidRows.length > 0 && (
                                 <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 13, color: '#ef4444' }}>
-                                    Не найдено ни в одном заказе: <b>{invalidRows.length}</b> ({formatNumber(invalidRows.reduce((s, r) => s + (parseInt(r.qty) || 0), 0), 0)} шт)
+                                    ✗ <b>{invalidRows.length}</b> ({formatNumber(invalidRows.reduce((s, r) => s + (parseInt(r.qty) || 0), 0), 0)} {t('unit_pcs')})
                                 </div>
                             )}
 
                             {exceededRows.length > 0 && (
                                 <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 13, color: '#b45309' }}>
-                                    Превышено доступное кол-во: <b>{exceededRows.length}</b> ({formatNumber(exceededRows.reduce((s, r) => s + (parseInt(r.qty) || 0), 0), 0)} шт запрошено, доступно {formatNumber(exceededRows.reduce((s, r) => s + (allItemMap[r.barcode.trim()]?.remaining_qty || 0), 0), 0)} шт)
+                                    ! <b>{exceededRows.length}</b> ({formatNumber(exceededRows.reduce((s, r) => s + (parseInt(r.qty) || 0), 0), 0)} {t('unit_pcs')}, {t('col_available')}: {formatNumber(exceededRows.reduce((s, r) => s + (allItemMap[r.barcode.trim()]?.remaining_qty || 0), 0), 0)} {t('unit_pcs')})
                                 </div>
                             )}
 
@@ -1259,14 +1276,14 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                     <thead>
                                         <tr>
                                             <th style={{ width: 36, textAlign: 'center' }}>#</th>
-                                            <th style={{ minWidth: 140 }}>Артикул</th>
-                                            <th>Категория</th>
-                                            <th style={{ minWidth: 160 }}>Баркод</th>
-                                            <th style={{ textAlign: 'right' }}>Шт/кор</th>
-                                            <th style={{ textAlign: 'right' }}>Доступно</th>
-                                            <th style={{ width: 90 }}>Кол-во</th>
-                                            <th style={{ textAlign: 'right' }}>Мест</th>
-                                            <th>Заказ</th>
+                                            <th style={{ minWidth: 140 }}>{t('col_article')}</th>
+                                            <th>{t('col_category')}</th>
+                                            <th style={{ minWidth: 160 }}>{t('col_barcode')}</th>
+                                            <th style={{ textAlign: 'right' }}>{t('col_pcs_per_box')}</th>
+                                            <th style={{ textAlign: 'right' }}>{t('col_available')}</th>
+                                            <th style={{ width: 90 }}>{t('col_qty')}</th>
+                                            <th style={{ textAlign: 'right' }}>{t('col_boxes')}</th>
+                                            <th>{t('col_from_order')}</th>
                                             <th style={{ width: 50, textAlign: 'center' }}></th>
                                         </tr>
                                     </thead>
@@ -1288,12 +1305,12 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                                     <td style={{ fontSize: 12, color: 'var(--color-text-muted)', textAlign: 'center' }}>{i + 1}</td>
                                                     <td style={{ fontSize: 12 }}>
                                                         {row.article || (bc ? '—' : '')}
-                                                        {isAutoAdded && <span style={{ fontSize: 10, color: 'var(--color-accent)', marginLeft: 4, fontStyle: 'italic' }}>автодобавлено</span>}
+                                                        {isAutoAdded && <span style={{ fontSize: 10, color: 'var(--color-accent)', marginLeft: 4, fontStyle: 'italic' }}>auto</span>}
                                                     </td>
                                                     <td style={{ fontSize: 12 }}>{item?.subject || (bc ? '—' : '')}</td>
                                                     <td>
                                                         <input value={row.barcode} onChange={e => updateRow(i, 'barcode', e.target.value)}
-                                                            placeholder="Баркод"
+                                                            placeholder={t('col_barcode')}
                                                             readOnly={isAutoAdded}
                                                             style={{ ...cellInput, borderColor: unknown ? '#ef4444' : 'var(--color-border)', color: unknown ? '#ef4444' : 'var(--color-text)', fontFamily: 'monospace', opacity: isAutoAdded ? 0.7 : 1 }}
                                                             autoComplete="off" />
@@ -1336,15 +1353,14 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--color-border)' }}>
                                 <div style={{ display: 'flex', gap: 8 }}>
                                     <button className="btn btn-secondary btn-sm" onClick={() => { setRows(Array.from({ length: 5 }, emptyRow)); setError(''); }}>
-                                        Очистить
+                                        {t('btn_cancel')}
                                     </button>
                                     {invalidRows.length > 0 && (
                                         <button className="btn btn-secondary btn-sm" onClick={() => {
                                             const text = invalidRows.map(r => `${r.barcode.trim()}\t${r.qty}`).join('\n');
                                             navigator.clipboard.writeText(text);
-                                            alert(`Скопировано ${invalidRows.length} ненайденных баркодов`);
                                         }}>
-                                            Скопировать ненайденные ({invalidRows.length})
+                                            ✗ ({invalidRows.length})
                                         </button>
                                     )}
                                     {exceededRows.length > 0 && (
@@ -1353,16 +1369,15 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                                 const item = allItemMap[r.barcode.trim()];
                                                 return `${r.barcode.trim()}\t${r.qty}\t${item?.remaining_qty || 0}`;
                                             }).join('\n');
-                                            navigator.clipboard.writeText(`Баркод\tЗапрошено\tДоступно\n${text}`);
-                                            alert(`Скопировано ${exceededRows.length} превышенных (баркод + запрошено + доступно)`);
+                                            navigator.clipboard.writeText(`${t('col_barcode')}\t${t('col_qty')}\t${t('col_available')}\n${text}`);
                                         }}>
-                                            Скопировать превышенные ({exceededRows.length})
+                                            ! ({exceededRows.length})
                                         </button>
                                     )}
                                 </div>
                                 <button className="btn btn-primary" onClick={handlePasteSubmit} disabled={!pasteCanSave || submitting}
                                     style={{ minWidth: 160, opacity: pasteCanSave ? 1 : 0.5 }}>
-                                    {submitting ? 'Добавляем...' : hasUnfound ? `Добавить найденные (${validRows.length})` : `Добавить (${validRows.length})`}
+                                    {submitting ? t('add_items_adding') : `${t('add_items_count')} (${validRows.length})`}
                                 </button>
                             </div>
                         </>
@@ -1382,6 +1397,8 @@ function formatFileSize(bytes: number): string {
 }
 
 function DocumentsTab({ orderNo }: { orderNo: string }) {
+    const { t } = useT();
+    const DOC_TYPE_LABELS = getDocTypeLabels(t);
     const [docs, setDocs] = useState<VehicleDocument[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -1397,10 +1414,10 @@ function DocumentsTab({ orderNo }: { orderNo: string }) {
         try {
             setDocs(await api.getVehicleDocuments(orderNo));
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+            setError(e instanceof Error ? e.message : t('msg_loading_error'));
         }
         setLoading(false);
-    }, [orderNo]);
+    }, [orderNo, t]);
 
     useEffect(() => { loadDocs(); }, [loadDocs]);
 
@@ -1414,7 +1431,7 @@ function DocumentsTab({ orderNo }: { orderNo: string }) {
             setDocType('invoice');
             loadDocs();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка загрузки');
+            alert(e instanceof Error ? e.message : t('vdetail_docs_upload_error'));
         }
         setUploading(false);
     };
@@ -1429,18 +1446,18 @@ function DocumentsTab({ orderNo }: { orderNo: string }) {
             a.click();
             URL.revokeObjectURL(url);
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка скачивания');
+            alert(e instanceof Error ? e.message : t('msg_error'));
         }
     };
 
     const handleDelete = async (docId: number) => {
-        if (!confirm('Удалить документ?')) return;
+        if (!confirm(t('btn_delete') + '?')) return;
         setDeletingId(docId);
         try {
             await api.deleteVehicleDocument(orderNo, docId);
             loadDocs();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка удаления');
+            alert(e instanceof Error ? e.message : t('msg_delete_error'));
         }
         setDeletingId(null);
     };
@@ -1456,11 +1473,11 @@ function DocumentsTab({ orderNo }: { orderNo: string }) {
             {/* Upload area */}
             <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
                 <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 12 }}>
-                    Загрузить документ
+                    {t('vdetail_docs_upload')}
                 </div>
                 <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
                     <div>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Тип документа</div>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('vdetail_docs_col_type')}</div>
                         <select value={docType} onChange={e => setDocType(e.target.value)} style={inputStyle}>
                             {Object.entries(DOC_TYPE_LABELS).map(([k, v]) => (
                                 <option key={k} value={k}>{v}</option>
@@ -1468,15 +1485,15 @@ function DocumentsTab({ orderNo }: { orderNo: string }) {
                         </select>
                     </div>
                     <div style={{ flex: 1, minWidth: 200 }}>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Файл</div>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('vdetail_docs_col_file')}</div>
                         <input type="file" onChange={e => setFile(e.target.files?.[0] || null)} style={{ fontSize: 13 }} />
                     </div>
                     <div style={{ flex: 1, minWidth: 150 }}>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Заметка</div>
-                        <input value={note} onChange={e => setNote(e.target.value)} placeholder="Необязательно" style={{ ...inputStyle, width: '100%' }} />
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('col_note')}</div>
+                        <input value={note} onChange={e => setNote(e.target.value)} placeholder="—" style={{ ...inputStyle, width: '100%' }} />
                     </div>
                     <button className="btn btn-primary btn-sm" onClick={handleUpload} disabled={!file || uploading}>
-                        {uploading ? 'Загрузка...' : 'Загрузить'}
+                        {uploading ? t('msg_saving') : t('vdetail_docs_upload')}
                     </button>
                 </div>
             </div>
@@ -1488,16 +1505,16 @@ function DocumentsTab({ orderNo }: { orderNo: string }) {
                 ) : error ? (
                     <div style={{ color: 'var(--color-danger)', padding: 16 }}>{error}</div>
                 ) : docs.length === 0 ? (
-                    <div style={{ textAlign: 'center', padding: 32, color: 'var(--color-text-muted)' }}>Нет документов</div>
+                    <div style={{ textAlign: 'center', padding: 32, color: 'var(--color-text-muted)' }}>{t('vdetail_docs_empty')}</div>
                 ) : (
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                         <thead>
                             <tr style={{ borderBottom: '2px solid var(--color-border)' }}>
-                                <th style={{ textAlign: 'left', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Файл</th>
-                                <th style={{ textAlign: 'left', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Тип</th>
-                                <th style={{ textAlign: 'right', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Размер</th>
-                                <th style={{ textAlign: 'left', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Заметка</th>
-                                <th style={{ textAlign: 'left', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Дата</th>
+                                <th style={{ textAlign: 'left', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('vdetail_docs_col_file')}</th>
+                                <th style={{ textAlign: 'left', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('vdetail_docs_col_type')}</th>
+                                <th style={{ textAlign: 'right', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>KB</th>
+                                <th style={{ textAlign: 'left', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_note')}</th>
+                                <th style={{ textAlign: 'left', padding: '8px 6px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('vdetail_docs_col_uploaded')}</th>
                                 <th style={{ width: 100, padding: '8px 6px' }} />
                             </tr>
                         </thead>
@@ -1520,11 +1537,11 @@ function DocumentsTab({ orderNo }: { orderNo: string }) {
                                     <td style={{ padding: '8px 6px', textAlign: 'right' }}>
                                         <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
                                             <button className="btn btn-secondary btn-sm" onClick={() => handleDownload(doc)} style={{ fontSize: 11, padding: '3px 8px' }}>
-                                                Скачать
+                                                {t('vdetail_docs_download')}
                                             </button>
                                             <button className="btn btn-danger btn-sm" onClick={() => handleDelete(doc.id)} disabled={deletingId === doc.id}
                                                 style={{ fontSize: 11, padding: '3px 8px', opacity: deletingId === doc.id ? 0.4 : 1 }}>
-                                                {deletingId === doc.id ? '...' : 'Удалить'}
+                                                {deletingId === doc.id ? '...' : t('btn_delete')}
                                             </button>
                                         </div>
                                     </td>
@@ -1541,6 +1558,8 @@ function DocumentsTab({ orderNo }: { orderNo: string }) {
 // ─── History Tab ──────────────────────────────────────────────────────────
 
 function HistoryTab({ orderNo }: { orderNo: string }) {
+    const { t } = useT();
+    const STATUS_LABELS = getStatusLabels(t);
     const [entries, setEntries] = useState<VehicleStatusHistoryEntry[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -1553,16 +1572,16 @@ function HistoryTab({ orderNo }: { orderNo: string }) {
             // Most recent first
             setEntries(data.sort((a, b) => new Date(b.changed_at).getTime() - new Date(a.changed_at).getTime()));
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+            setError(e instanceof Error ? e.message : t('msg_loading_error'));
         }
         setLoading(false);
-    }, [orderNo]);
+    }, [orderNo, t]);
 
     useEffect(() => { loadHistory(); }, [loadHistory]);
 
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}><div className="spinner" style={{ margin: '0 auto' }} /></div>;
     if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error}</div>;
-    if (entries.length === 0) return <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)' }}>Нет записей</div>;
+    if (entries.length === 0) return <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)' }}>{t('vdetail_history_empty')}</div>;
 
     return (
         <div className="glass-card" style={{ padding: 24 }}>
@@ -1636,6 +1655,7 @@ function HistoryTab({ orderNo }: { orderNo: string }) {
 // ─── Action Buttons ────────────────────────────────────────────────────────
 
 function RecalcButton({ orderNo, onDone }: { orderNo: string; onDone: () => void }) {
+    const { t } = useT();
     const [loading, setLoading] = useState(false);
     const handleClick = async () => {
         setLoading(true);
@@ -1643,33 +1663,34 @@ function RecalcButton({ orderNo, onDone }: { orderNo: string; onDone: () => void
             await api.recalcVehicle(orderNo);
             onDone();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка');
+            alert(e instanceof Error ? e.message : t('vehicle_items_recalc_error'));
         }
         setLoading(false);
     };
     return (
         <button className="btn btn-secondary btn-sm" onClick={handleClick} disabled={loading}>
-            {loading ? 'Пересчёт...' : '🔄 Пересчитать'}
+            {loading ? t('vehicle_items_recalcing') : t('vehicle_items_recalc')}
         </button>
     );
 }
 
 function ShipButton({ orderNo, onDone }: { orderNo: string; onDone: () => void }) {
+    const { t } = useT();
     const [loading, setLoading] = useState(false);
     const handleClick = async () => {
-        if (!confirm('Отгрузить машину? Будет зафиксирована дата и рассчитана себестоимость.')) return;
+        if (!confirm(t('vdetail_ship_confirm'))) return;
         setLoading(true);
         try {
             await api.updateVehicleStatus(orderNo, { status: 'SHIPPED' });
             onDone();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка');
+            alert(e instanceof Error ? e.message : t('msg_error'));
         }
         setLoading(false);
     };
     return (
         <button className="btn btn-primary btn-sm" onClick={handleClick} disabled={loading}>
-            {loading ? 'Отгрузка...' : '🚛 Отгрузить'}
+            {loading ? '...' : `🚛 ${t('btn_ship')}`}
         </button>
     );
 }
@@ -1677,18 +1698,19 @@ function ShipButton({ orderNo, onDone }: { orderNo: string; onDone: () => void }
 function StatusTransitionButton({ orderNo, nextStatus, label, icon, onDone }: {
     orderNo: string; nextStatus: VehicleStatus; label: string; icon: string; onDone: () => void;
 }) {
+    const { t } = useT();
     const [loading, setLoading] = useState(false);
     const handleClick = async () => {
         let dt_number: string | undefined;
         if (nextStatus === 'CUSTOMS') {
-            dt_number = prompt('Номер ДТ (необязательно):') || undefined;
+            dt_number = prompt(`${t('vdetail_field_customs_no')}:`) || undefined;
         }
         setLoading(true);
         try {
             await api.updateVehicleStatus(orderNo, { status: nextStatus, dt_number });
             onDone();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка');
+            alert(e instanceof Error ? e.message : t('msg_error'));
         }
         setLoading(false);
     };

@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel, calcTotalBoxesWithMix } from '@/lib/utils';
+import { LanguageProvider, useT, LanguageToggle } from './i18n';
 
 /** Нормализация габаритов → "60x40x40" */
 const normalizeBoxSize = (s: string): string => s.trim().replace(/[×*,/\\]/g, 'x');
@@ -46,13 +47,15 @@ import { CONTAINERS } from '@/app/(main)/p/[slug]/container-loader/lib/packer';
 
 // ─── Status helpers ─────────────────────────────────────────────────────────
 
-const VEHICLE_STATUS_LABELS: Record<VehicleStatus, string> = {
-    FORMING: 'Формируется',
-    SHIPPED: 'Отгружен',
-    CUSTOMS: 'Таможня',
-    DISPATCHED: 'Отправлена',
-    DELIVERED: 'Принята',
-};
+type TFn = (key: string) => string;
+
+const getVehicleStatusLabels = (t: TFn): Record<VehicleStatus, string> => ({
+    FORMING: t('status_forming'),
+    SHIPPED: t('status_shipped'),
+    CUSTOMS: t('status_customs'),
+    DISPATCHED: t('status_dispatched'),
+    DELIVERED: t('status_delivered'),
+});
 
 const VEHICLE_STATUS_COLORS: Record<VehicleStatus, string> = {
     FORMING: '#6b7280',
@@ -64,28 +67,30 @@ const VEHICLE_STATUS_COLORS: Record<VehicleStatus, string> = {
 
 const VEHICLE_STATUSES: VehicleStatus[] = ['FORMING', 'SHIPPED', 'CUSTOMS', 'DISPATCHED', 'DELIVERED'];
 
-const CONTAINER_OPTIONS: { key: string; label: string; transport: string }[] = [
-    { key: 'truck1', label: 'Авто 13.5м', transport: 'AUTO' },
-    { key: 'truck2', label: 'Авто 13.6м', transport: 'AUTO' },
-    { key: '20ft', label: '20 фут', transport: 'CONTAINER' },
-    { key: '40ft', label: '40 фут', transport: 'CONTAINER' },
-    { key: '40ft_hc', label: '40 фут HC', transport: 'CONTAINER' },
+const getContainerOptions = (t: TFn): { key: string; label: string; transport: string }[] => [
+    { key: 'truck1', label: t('container_truck1'), transport: 'AUTO' },
+    { key: 'truck2', label: t('container_truck2'), transport: 'AUTO' },
+    { key: '20ft', label: t('container_20ft'), transport: 'CONTAINER' },
+    { key: '40ft', label: t('container_40ft'), transport: 'CONTAINER' },
+    { key: '40ft_hc', label: t('container_40ft_hc'), transport: 'CONTAINER' },
 ];
 
-const TRANSPORT_TYPES: Record<string, { label: string; color: string }> = {
-    AUTO: { label: 'АВТО', color: '#3b82f6' },
-    CONTAINER: { label: 'КОНТЕЙНЕР', color: '#f59e0b' },
-};
+const getTransportTypes = (t: TFn): Record<string, { label: string; color: string }> => ({
+    AUTO: { label: t('transport_auto'), color: '#3b82f6' },
+    CONTAINER: { label: t('transport_container'), color: '#f59e0b' },
+});
 
-const NEXT_STATUS_MAP: Partial<Record<VehicleStatus, { status: VehicleStatus; label: string; icon: string }>> = {
-    SHIPPED: { status: 'CUSTOMS', label: 'На таможню', icon: '🏛' },
-    CUSTOMS: { status: 'DISPATCHED', label: 'Отправлена', icon: '🚛' },
-    DISPATCHED: { status: 'DELIVERED', label: 'Принять', icon: '✓' },
-};
+const getNextStatusMap = (t: TFn): Partial<Record<VehicleStatus, { status: VehicleStatus; label: string; icon: string }>> => ({
+    SHIPPED: { status: 'CUSTOMS', label: t('transition_to_customs'), icon: '🏛' },
+    CUSTOMS: { status: 'DISPATCHED', label: t('transition_dispatched'), icon: '🚛' },
+    DISPATCHED: { status: 'DELIVERED', label: t('transition_deliver'), icon: '✓' },
+});
 
 function StatusBadge({ status }: { status: string }) {
+    const { t } = useT();
     const s = status as VehicleStatus;
-    const label = VEHICLE_STATUS_LABELS[s] || status;
+    const labels = getVehicleStatusLabels(t);
+    const label = labels[s] || status;
     const color = VEHICLE_STATUS_COLORS[s] || '#6b7280';
     return (
         <span style={{
@@ -102,12 +107,12 @@ function StatusBadge({ status }: { status: string }) {
     );
 }
 
-const FACTORY_ORDER_STATUS_LABELS: Record<string, string> = {
-    FORMING: 'Формируется',
-    READY: 'Готов',
-    DISTRIBUTED: 'Распределён',
-    CLOSED: 'Закрыт',
-};
+const getFactoryOrderStatusLabels = (t: TFn): Record<string, string> => ({
+    FORMING: t('factory_status_forming'),
+    READY: t('factory_status_ready'),
+    DISTRIBUTED: t('factory_status_distributed'),
+    CLOSED: t('factory_status_closed'),
+});
 
 const FACTORY_ORDER_STATUS_COLORS: Record<string, string> = {
     FORMING: '#6b7280',
@@ -117,7 +122,9 @@ const FACTORY_ORDER_STATUS_COLORS: Record<string, string> = {
 };
 
 function FactoryOrderStatusBadge({ status }: { status: string }) {
-    const label = FACTORY_ORDER_STATUS_LABELS[status] || status;
+    const { t } = useT();
+    const labels = getFactoryOrderStatusLabels(t);
+    const label = labels[status] || status;
     const color = FACTORY_ORDER_STATUS_COLORS[status] || '#6b7280';
     return (
         <span style={{
@@ -137,23 +144,35 @@ function FactoryOrderStatusBadge({ status }: { status: string }) {
 // ─── Main page ──────────────────────────────────────────────────────────────
 
 export default function SupplyChainPage() {
+    return (
+        <LanguageProvider>
+            <SupplyChainContent />
+        </LanguageProvider>
+    );
+}
+
+function SupplyChainContent() {
+    const { t } = useT();
     const searchParams = useSearchParams();
     const initialTab = searchParams.get('tab') || 'orders';
     const [tab, setTab] = useState(initialTab);
 
     return (
         <div className="animate-in">
-            <PageHeader
-                title="Цепочка поставок"
-                subtitle="Фабричные заказы, машины, обзор"
-                icon="🚚"
-            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <PageHeader
+                    title={t('page_title')}
+                    subtitle={t('page_subtitle')}
+                    icon="🚚"
+                />
+                <LanguageToggle />
+            </div>
             <TabLayout
                 tabs={[
-                    { key: 'orders', label: '📦 Фабричные заказы' },
-                    { key: 'vehicles', label: '🚛 Машины' },
-                    { key: 'overview', label: '📊 Обзор' },
-                    { key: 'suppliers', label: '📋 Поставщики' },
+                    { key: 'orders', label: t('tab_orders') },
+                    { key: 'vehicles', label: t('tab_vehicles') },
+                    { key: 'overview', label: t('tab_overview') },
+                    { key: 'suppliers', label: t('tab_suppliers') },
                 ]}
                 active={tab}
                 onChange={setTab}
@@ -168,14 +187,15 @@ export default function SupplyChainPage() {
 
 // ─── Create Factory Order Inline Form ────────────────────────────────────
 
-const createOrderFields = [
-    { key: 'order_number', label: 'Номер заказа', required: true },
-    { key: 'factory_name', label: 'Поставщик / Фабрика' },
-    { key: 'expected_ready_date', label: 'Примерная дата готовности', type: 'date' as const },
-    { key: 'note', label: 'Заметка' },
+const getCreateOrderFields = (t: TFn) => [
+    { key: 'order_number', label: t('create_order_number'), required: true },
+    { key: 'factory_name', label: t('create_order_supplier_name') },
+    { key: 'expected_ready_date', label: t('create_order_ready_date'), type: 'date' as const },
+    { key: 'note', label: t('create_order_note') },
 ];
 
 function CreateFactoryOrderForm({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+    const { t } = useT();
     const [form, setForm] = useState<FactoryOrderCreate>({
         order_number: '',
         factory_name: undefined,
@@ -206,7 +226,7 @@ function CreateFactoryOrderForm({ onClose, onDone }: { onClose: () => void; onDo
             await api.createFactoryOrder(form);
             onDone();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка');
+            alert(e instanceof Error ? e.message : t('msg_error'));
         }
         setSubmitting(false);
     };
@@ -220,22 +240,22 @@ function CreateFactoryOrderForm({ onClose, onDone }: { onClose: () => void; onDo
     return (
         <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>Новый фабричный заказ</h3>
+                <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>{t('create_order_title')}</h3>
                 <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr', gap: 12 }}>
                 <div>
-                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Номер заказа *</label>
-                    <input value={form.order_number} onChange={e => setForm(f => ({ ...f, order_number: e.target.value }))} placeholder="ЗАК-001" style={inputStyle} autoFocus />
+                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('create_order_number')}</label>
+                    <input value={form.order_number} onChange={e => setForm(f => ({ ...f, order_number: e.target.value }))} placeholder={t('create_order_number_placeholder')} style={inputStyle} autoFocus />
                 </div>
                 <div>
-                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Поставщик из справочника</label>
+                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('create_order_supplier_select')}</label>
                     <select
                         value={form.supplier_id || ''}
                         onChange={e => handleSupplierChange(e.target.value ? Number(e.target.value) : undefined)}
                         style={inputStyle}
                     >
-                        <option value="">-- Не выбран --</option>
+                        <option value="">{t('create_order_unselected')}</option>
                         {suppliers.map(s => (
                             <option key={s.id} value={s.id}>
                                 {s.name} ({s.country === 'CHINA' ? 'CN' : 'RU'})
@@ -244,22 +264,22 @@ function CreateFactoryOrderForm({ onClose, onDone }: { onClose: () => void; onDo
                     </select>
                 </div>
                 <div>
-                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Поставщик / Фабрика</label>
-                    <input value={form.factory_name || ''} onChange={e => setForm(f => ({ ...f, factory_name: e.target.value || undefined }))} placeholder="Название" style={inputStyle} />
+                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('create_order_supplier_name')}</label>
+                    <input value={form.factory_name || ''} onChange={e => setForm(f => ({ ...f, factory_name: e.target.value || undefined }))} placeholder={t('create_order_supplier_placeholder')} style={inputStyle} />
                 </div>
                 <div>
-                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Дата готовности (план)</label>
+                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('create_order_ready_date')}</label>
                     <input type="date" value={form.expected_ready_date || ''} onChange={e => setForm(f => ({ ...f, expected_ready_date: e.target.value || undefined }))} style={inputStyle} />
                 </div>
                 <div>
-                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Заметка</label>
-                    <input value={form.note || ''} onChange={e => setForm(f => ({ ...f, note: e.target.value || undefined }))} placeholder="Комментарий" style={inputStyle} />
+                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('create_order_note')}</label>
+                    <input value={form.note || ''} onChange={e => setForm(f => ({ ...f, note: e.target.value || undefined }))} placeholder={t('create_order_note_placeholder')} style={inputStyle} />
                 </div>
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
-                <button className="btn btn-secondary btn-sm" onClick={onClose}>Отмена</button>
+                <button className="btn btn-secondary btn-sm" onClick={onClose}>{t('btn_cancel')}</button>
                 <button className="btn btn-primary btn-sm" onClick={handleSubmit} disabled={!form.order_number.trim() || submitting}>
-                    {submitting ? 'Создаём...' : 'Создать'}
+                    {submitting ? t('msg_creating') : t('btn_create')}
                 </button>
             </div>
         </div>
@@ -269,6 +289,7 @@ function CreateFactoryOrderForm({ onClose, onDone }: { onClose: () => void; onDo
 // ─── Tab 1: Factory Orders ──────────────────────────────────────────────────
 
 function FactoryOrdersTab() {
+    const { t } = useT();
     const [orders, setOrders] = useState<FactoryOrder[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -286,10 +307,10 @@ function FactoryOrdersTab() {
             const data = await api.getFactoryOrders();
             setOrders(data);
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+            setError(e instanceof Error ? e.message : t('msg_loading_error'));
         }
         setLoading(false);
-    }, []);
+    }, [t]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -317,12 +338,12 @@ function FactoryOrdersTab() {
     };
 
     const handleDelete = async (id: number) => {
-        if (!confirm('Удалить заказ?')) return;
+        if (!confirm(t('orders_confirm_delete'))) return;
         try {
             await api.deleteFactoryOrder(id);
             await load();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка');
+            alert(e instanceof Error ? e.message : t('msg_error'));
         }
     };
 
@@ -357,17 +378,17 @@ function FactoryOrdersTab() {
     }, { weight: 0, volume: 0, sumCny: 0, sumRub: 0, qty: 0 });
 
     const columns: Column[] = [
-        { key: 'order_number', label: 'Номер', width: '120px' },
-        { key: 'factory_name', label: 'Поставщик' },
+        { key: 'order_number', label: t('col_number'), width: '120px' },
+        { key: 'factory_name', label: t('col_supplier') },
         {
-            key: 'items', label: 'Позиций', align: 'center',
+            key: 'items', label: t('col_items_count'), align: 'center',
             render: (_v: unknown, row: FactoryOrder) => {
                 const items = row.items || [];
                 return items.length > 0 ? String(items.length) : '\u2014';
             },
         },
         {
-            key: 'total_qty', label: 'Кол-во', align: 'right',
+            key: 'total_qty', label: t('col_qty'), align: 'right',
             render: (_v: unknown, row: FactoryOrder) => {
                 const items = row.items || [];
                 const total = items.reduce((s, i) => s + i.qty, 0);
@@ -375,7 +396,7 @@ function FactoryOrdersTab() {
             },
         },
         {
-            key: 'boxes', label: 'Мест', align: 'right',
+            key: 'boxes', label: t('col_boxes'), align: 'right',
             render: (_v: unknown, row: FactoryOrder) => {
                 const items = row.items || [];
                 const total = calcTotalBoxesWithMix(items);
@@ -383,7 +404,7 @@ function FactoryOrdersTab() {
             },
         },
         {
-            key: 'volume', label: 'Объём м³', align: 'right',
+            key: 'volume', label: t('col_volume_m3'), align: 'right',
             render: (_v: unknown, row: FactoryOrder) => {
                 const items = row.items || [];
                 const total = items.reduce((s, i) => s + calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box), 0);
@@ -391,7 +412,7 @@ function FactoryOrdersTab() {
             },
         },
         {
-            key: 'weight', label: 'Вес, кг', align: 'right',
+            key: 'weight', label: t('col_weight_kg'), align: 'right',
             render: (_v: unknown, row: FactoryOrder) => {
                 const items = row.items || [];
                 const total = items.reduce((s, i) => s + (Number(i.weight_kg) || 0) * i.qty, 0);
@@ -399,7 +420,7 @@ function FactoryOrdersTab() {
             },
         },
         {
-            key: 'total_cny', label: 'Стоимость', align: 'right',
+            key: 'total_cny', label: t('col_amount'), align: 'right',
             render: (_v: unknown, row: FactoryOrder) => {
                 // Use total_cny if set, otherwise calculate from items
                 let cost = Number(row.total_cny) || 0;
@@ -412,11 +433,11 @@ function FactoryOrdersTab() {
             },
         },
         {
-            key: 'status', label: 'Статус', align: 'center',
+            key: 'status', label: t('col_status'), align: 'center',
             render: (_v: unknown, row: FactoryOrder) => <FactoryOrderStatusBadge status={row.status} />,
         },
         {
-            key: 'progress', label: 'Прогресс', align: 'center',
+            key: 'progress', label: t('col_progress'), align: 'center',
             render: (_v: unknown, row: FactoryOrder) => {
                 const items = row.items || [];
                 if (items.length === 0) return '\u2014';
@@ -433,8 +454,8 @@ function FactoryOrdersTab() {
                 );
             },
         },
-        { key: 'expected_ready_date', label: 'Готовность', format: 'date' },
-        { key: 'created_at', label: 'Создан', format: 'date' },
+        { key: 'expected_ready_date', label: t('col_ready_date'), format: 'date' },
+        { key: 'created_at', label: t('col_created_date'), format: 'date' },
         {
             key: 'actions', label: '', width: '180px',
             render: (_v: unknown, row: FactoryOrder) => (
@@ -444,14 +465,14 @@ function FactoryOrdersTab() {
                         style={{ fontSize: 11, padding: '2px 8px' }}
                         onClick={() => setEditOrder(row)}
                     >
-                        Ред.
+                        {t('btn_edit')}
                     </button>
                     <button
                         className="btn btn-secondary btn-sm"
                         style={{ fontSize: 11, padding: '2px 8px', color: 'var(--color-danger)' }}
                         onClick={() => handleDelete(row.id)}
                     >
-                        Уд.
+                        {t('btn_del')}
                     </button>
                 </div>
             ),
@@ -468,20 +489,20 @@ function FactoryOrdersTab() {
             const totalWeight = items.reduce((s, i) => s + (Number(i.weight_kg) || 0) * i.qty, 0);
             const totalCny = items.reduce((s, i) => s + (Number(i.price_cny) || 0) * i.qty, 0);
             return {
-                'Номер': o.order_number,
-                'Поставщик': o.factory_name || '',
-                'Позиций': items.length,
-                'Кол-во': totalQty,
-                'Мест': totalBoxes || '',
-                'Объём м³': totalVolume > 0 ? Number(totalVolume.toFixed(1)) : '',
-                'Вес, кг': totalWeight > 0 ? Math.round(totalWeight) : '',
-                'Сумма ¥': totalCny > 0 ? Number(totalCny.toFixed(2)) : '',
-                'Распределено': `${assignedQty}/${totalQty}`,
-                'Готовность': o.expected_ready_date || '',
-                'Создан': o.created_at || '',
+                [t('col_number')]: o.order_number,
+                [t('col_supplier')]: o.factory_name || '',
+                [t('col_items_count')]: items.length,
+                [t('col_qty')]: totalQty,
+                [t('col_boxes')]: totalBoxes || '',
+                [t('col_volume_m3')]: totalVolume > 0 ? Number(totalVolume.toFixed(1)) : '',
+                [t('col_weight_kg')]: totalWeight > 0 ? Math.round(totalWeight) : '',
+                [t('col_amount') + ' \u00A5']: totalCny > 0 ? Number(totalCny.toFixed(2)) : '',
+                [t('orders_col_distributed')]: `${assignedQty}/${totalQty}`,
+                [t('col_ready_date')]: o.expected_ready_date || '',
+                [t('col_created_date')]: o.created_at || '',
             };
         });
-        exportToExcel(rows, 'Фабричные_заказы');
+        exportToExcel(rows, t('orders_excel_filename'));
     };
 
     return (
@@ -489,7 +510,7 @@ function FactoryOrdersTab() {
             {error && (
                 <div className="glass-card" style={{ padding: 16, color: 'var(--color-danger)', marginBottom: 16 }}>
                     {error}
-                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>Повторить</button>
+                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>{t('btn_retry')}</button>
                 </div>
             )}
 
@@ -505,22 +526,22 @@ function FactoryOrdersTab() {
             {!loading && filteredOrders.length > 0 && (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
                     <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Заказов</div>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('kpi_orders')}</div>
                         <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-accent)' }}>{filteredOrders.length}</div>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>{formatNumber(kpi.qty, 0)} шт</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>{formatNumber(kpi.qty, 0)} {t('unit_pcs')}</div>
                     </div>
                     <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Общий вес</div>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('kpi_total_weight')}</div>
                         <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-warning)' }}>{formatNumber(kpi.weight, 0)}</div>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>кг</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>{t('unit_kg')}</div>
                     </div>
                     <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Общий объём</div>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('kpi_total_volume')}</div>
                         <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-text)' }}>{formatNumber(kpi.volume, 1)}</div>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>м³</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>{t('unit_m3')}</div>
                     </div>
                     <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Сумма заказов</div>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('kpi_total_amount')}</div>
                         {kpi.sumCny > 0 && (
                             <div style={{ fontSize: kpi.sumRub > 0 ? 18 : 24, fontWeight: 700, color: 'var(--color-success)' }}>
                                 {formatNumber(kpi.sumCny, 0)} {'\u00A5'}
@@ -542,8 +563,8 @@ function FactoryOrdersTab() {
                 columns={columns}
                 data={filteredOrders}
                 loading={loading}
-                title="Фабричные заказы"
-                emptyText="Нет фабричных заказов"
+                title={t('orders_title')}
+                emptyText={t('orders_empty')}
                 emptyIcon="📦"
                 exportName="factory_orders"
                 onRowClick={(row) => handleRowClick(row)}
@@ -555,14 +576,14 @@ function FactoryOrdersTab() {
                                 onChange={e => setFilterFactory(e.target.value)}
                                 style={{ padding: '6px 12px', borderRadius: 8, border: '1px solid var(--color-border)', background: 'var(--color-bg)', color: 'var(--color-text)', fontSize: 13 }}
                             >
-                                <option value="">Все поставщики</option>
+                                <option value="">{t('orders_filter_all')}</option>
                                 {factoryNames.map(name => (
                                     <option key={name} value={name!}>{getFactoryLabel(name!)}</option>
                                 ))}
                             </select>
                         )}
                         <button className="btn btn-primary btn-sm" onClick={() => setShowCreate(v => !v)}>
-                            {showCreate ? '✕ Закрыть' : '+ Создать заказ'}
+                            {showCreate ? t('btn_close') : t('orders_btn_create')}
                         </button>
                     </div>
                 }
@@ -573,8 +594,8 @@ function FactoryOrdersTab() {
                 open={!!editOrder}
                 onClose={() => setEditOrder(null)}
                 onSubmit={handleUpdate}
-                title="Редактировать заказ"
-                fields={createOrderFields}
+                title={t('orders_edit_title')}
+                fields={getCreateOrderFields(t)}
                 defaults={editOrder ? {
                     order_number: editOrder.order_number,
                     factory_name: editOrder.factory_name || '',
@@ -606,6 +627,7 @@ interface SplitModalProps {
 }
 
 function SplitToVehiclesModal({ orderId, orders, onClose, onDone }: SplitModalProps) {
+    const { t } = useT();
     const order = orders.find(o => o.id === orderId);
     const items = order?.items || [];
     const [assignments, setAssignments] = useState<Record<number, { qty: string; vehicle: string }>>({});
@@ -647,7 +669,7 @@ function SplitToVehiclesModal({ orderId, orders, onClose, onDone }: SplitModalPr
             });
         }
         if (splitItems.length === 0) {
-            setError('Укажите хотя бы одну позицию для разбивки');
+            setError(t('split_validation'));
             return;
         }
         setSubmitting(true);
@@ -656,7 +678,7 @@ function SplitToVehiclesModal({ orderId, orders, onClose, onDone }: SplitModalPr
             await api.splitToVehicles(orderId, splitItems);
             onDone();
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка');
+            setError(e instanceof Error ? e.message : t('msg_error'));
         }
         setSubmitting(false);
     };
@@ -665,24 +687,24 @@ function SplitToVehiclesModal({ orderId, orders, onClose, onDone }: SplitModalPr
         <div className="modal-overlay" onClick={onClose}>
             <div className="modal-card" style={{ width: 800, maxWidth: '95vw', maxHeight: '85vh', overflow: 'auto' }}
                 onClick={e => e.stopPropagation()}>
-                <div className="modal-title">Разбить на машины: {order?.order_number || `#${orderId}`}</div>
+                <div className="modal-title">{t('split_title')}: {order?.order_number || `#${orderId}`}</div>
                 {error && <div className="auth-error" style={{ marginBottom: 12 }}>{error}</div>}
 
                 {detailItems.length === 0 ? (
                     <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
-                        Нет позиций для разбивки. Добавьте позиции в заказ.
+                        {t('split_empty')}
                     </div>
                 ) : (
                     <table className="data-table" style={{ fontSize: 13, marginBottom: 16 }}>
                         <thead>
                             <tr>
-                                <th>Баркод</th>
-                                <th>Артикул</th>
-                                <th style={{ textAlign: 'right' }}>Всего</th>
-                                <th style={{ textAlign: 'right' }}>Разбито</th>
-                                <th style={{ textAlign: 'right' }}>Остаток</th>
-                                <th style={{ width: 100 }}>Кол-во</th>
-                                <th style={{ width: 160 }}>Машина (номер)</th>
+                                <th>{t('col_barcode')}</th>
+                                <th>{t('col_article')}</th>
+                                <th style={{ textAlign: 'right' }}>{t('col_total')}</th>
+                                <th style={{ textAlign: 'right' }}>{t('col_distributed')}</th>
+                                <th style={{ textAlign: 'right' }}>{t('col_remaining')}</th>
+                                <th style={{ width: 100 }}>{t('col_qty')}</th>
+                                <th style={{ width: 160 }}>{t('col_vehicle_no')}</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -739,10 +761,10 @@ function SplitToVehiclesModal({ orderId, orders, onClose, onDone }: SplitModalPr
 
                 <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                     <button className="btn btn-secondary btn-sm" onClick={onClose} disabled={submitting}>
-                        Отмена
+                        {t('btn_cancel')}
                     </button>
                     <button className="btn btn-primary btn-sm" onClick={handleSubmit} disabled={submitting || detailItems.length === 0}>
-                        {submitting ? 'Сохранение...' : 'Разбить'}
+                        {submitting ? t('msg_saving') : t('split_btn')}
                     </button>
                 </div>
             </div>
@@ -768,6 +790,7 @@ const emptyItemRow = (): ItemRow => ({
 function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
     order: FactoryOrder; onCollapse: () => void; onItemsAdded: () => void;
 }) {
+    const { t } = useT();
     const existingItems = order.items || [];
     const [showAddForm, setShowAddForm] = useState(false);
     const [rows, setRows] = useState<ItemRow[]>(Array.from({ length: 5 }, emptyItemRow));
@@ -843,7 +866,7 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
             setShowAddForm(false);
             onItemsAdded();
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка сохранения');
+            setError(e instanceof Error ? e.message : t('msg_save_error'));
         }
         setSaving(false);
     };
@@ -859,31 +882,31 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
         <div className="glass-card" style={{ marginTop: 8, padding: 16 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                 <h4 style={{ margin: 0, fontSize: 14 }}>
-                    Позиции заказа {order.order_number}
+                    {t('items_title')} {order.order_number}
                 </h4>
-                <button className="btn btn-secondary btn-sm" onClick={onCollapse}>Свернуть</button>
+                <button className="btn btn-secondary btn-sm" onClick={onCollapse}>{t('items_collapse')}</button>
             </div>
 
             {/* Existing items */}
             {existingItems.length > 0 && (
                 <DataTable
                     columns={[
-                        { key: 'barcode', label: 'Баркод' },
-                        { key: 'article_seller', label: 'Артикул', render: (v: string | null) => v || '\u2014' },
-                        { key: 'subject', label: 'Категория', render: (v: string | null) => v || '\u2014' },
-                        { key: 'qty', label: 'Кол-во', align: 'right', render: (v: number) => formatNumber(v, 0) },
+                        { key: 'barcode', label: t('col_barcode') },
+                        { key: 'article_seller', label: t('col_article'), render: (v: string | null) => v || '\u2014' },
+                        { key: 'subject', label: t('col_category'), render: (v: string | null) => v || '\u2014' },
+                        { key: 'qty', label: t('col_qty'), align: 'right', render: (v: number) => formatNumber(v, 0) },
                         {
-                            key: 'price_cny', label: 'Цена \u00A5', align: 'right',
+                            key: 'price_cny', label: t('col_price_cny'), align: 'right',
                             render: (v: unknown) => formatNumber(Number(v), 2) + ' \u00A5',
                         },
-                        { key: 'box_size', label: 'Коробка (см)' },
-                        { key: 'pcs_per_box', label: 'Шт/кор', align: 'right' },
+                        { key: 'box_size', label: t('col_box_spec') },
+                        { key: 'pcs_per_box', label: t('col_pcs_per_box'), align: 'right' },
                         {
-                            key: 'weight_kg', label: 'Вес (кг)', align: 'right',
+                            key: 'weight_kg', label: t('col_weight_1pc'), align: 'right',
                             render: (v: unknown) => v != null ? formatNumber(Number(v), 2) : '\u2014',
                         },
                         {
-                            key: 'distribution', label: 'Распределение', align: 'center',
+                            key: 'distribution', label: t('col_allocation'), align: 'center',
                             render: (_v: unknown, row: FactoryOrderItem) => {
                                 const rem = row.qty - row.assigned_qty;
                                 const pct = row.qty > 0 ? Math.round((row.assigned_qty / row.qty) * 100) : 0;
@@ -893,9 +916,9 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
                                             {row.assigned_qty} / {row.qty}
                                         </span>
                                         {pct === 100 ? (
-                                            <span style={{ fontSize: 11, color: 'var(--color-success)' }}>{'\u2713'} все</span>
+                                            <span style={{ fontSize: 11, color: 'var(--color-success)' }}>{t('orders_all_allocated')}</span>
                                         ) : rem > 0 ? (
-                                            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{'\u2192'} ост. {rem}</span>
+                                            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{t('orders_remaining')} {rem}</span>
                                         ) : null}
                                     </div>
                                 );
@@ -912,11 +935,11 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
                 {!showAddForm ? (
                     <div style={{ textAlign: 'center', padding: existingItems.length > 0 ? 8 : 24 }}>
                         <button className="btn btn-primary btn-sm" onClick={() => setShowAddForm(true)}>
-                            + Добавить позиции
+                            {t('items_add')}
                         </button>
                         {existingItems.length === 0 && (
                             <div style={{ marginTop: 8, fontSize: 13, color: 'var(--color-text-muted)' }}>
-                                или вставьте данные из Excel (Ctrl+V)
+                                {t('items_paste_hint')}
                             </div>
                         )}
                     </div>
@@ -924,15 +947,15 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
                     <>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                             <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-                                Добавить позиции <span style={{ fontSize: 11 }}>(вставьте из Excel: Баркод, Кол-во, Цена, Коробка, Шт/кор, Вес)</span>
+                                {t('items_paste_header')} <span style={{ fontSize: 11 }}>({t('items_paste_sub')})</span>
                             </div>
                             <div style={{ display: 'flex', gap: 8 }}>
                                 <button className="btn btn-secondary btn-sm" onClick={() => { setShowAddForm(false); setRows(Array.from({ length: 5 }, emptyItemRow)); setError(''); }}>
-                                    Отмена
+                                    {t('btn_cancel')}
                                 </button>
                                 {filledRows.length > 0 && (
                                     <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={saving}>
-                                        {saving ? 'Сохранение...' : `Сохранить (${filledRows.length})`}
+                                        {saving ? t('msg_saving') : `${t('items_save_count')} (${filledRows.length})`}
                                     </button>
                                 )}
                             </div>
@@ -944,12 +967,12 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
                             <thead>
                                 <tr>
                                     <th style={{ width: 30, textAlign: 'center' }}>#</th>
-                                    <th style={{ minWidth: 130 }}>Баркод</th>
-                                    <th style={{ width: 70 }}>Кол-во</th>
-                                    <th style={{ width: 80 }}>Цена &#165;</th>
-                                    <th style={{ width: 120 }}>Коробка (см)</th>
-                                    <th style={{ width: 65 }}>Шт/кор</th>
-                                    <th style={{ width: 70 }}>Вес (кг)</th>
+                                    <th style={{ minWidth: 130 }}>{t('col_barcode')}</th>
+                                    <th style={{ width: 70 }}>{t('col_qty')}</th>
+                                    <th style={{ width: 80 }}>{t('col_price_cny')}</th>
+                                    <th style={{ width: 120 }}>{t('col_box_spec')}</th>
+                                    <th style={{ width: 65 }}>{t('col_pcs_per_box')}</th>
+                                    <th style={{ width: 70 }}>{t('col_weight_1pc')}</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -976,18 +999,22 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
 // ─── Tab 2: Vehicles ────────────────────────────────────────────────────────
 
 function TransportBadge({ type }: { type?: string }) {
-    const t = TRANSPORT_TYPES[type || 'AUTO'] || TRANSPORT_TYPES.AUTO;
+    const { t } = useT();
+    const transportTypes = getTransportTypes(t);
+    const tt = transportTypes[type || 'AUTO'] || transportTypes.AUTO;
     return (
         <span style={{
             display: 'inline-block', padding: '2px 8px', borderRadius: 8,
-            fontSize: 11, fontWeight: 600, color: '#fff', background: t.color,
+            fontSize: 11, fontWeight: 600, color: '#fff', background: tt.color,
         }}>
-            {t.label}
+            {tt.label}
         </span>
     );
 }
 
 function VehicleTimeline({ status }: { status?: VehicleStatus }) {
+    const { t } = useT();
+    const statusLabels = getVehicleStatusLabels(t);
     const steps = VEHICLE_STATUSES;
     const currentIdx = status ? steps.indexOf(status) : -1;
     return (
@@ -1012,7 +1039,7 @@ function VehicleTimeline({ status }: { status?: VehicleStatus }) {
                                 boxShadow: isCurrent ? `0 0 6px ${color}66` : 'none',
                             }} />
                             <span style={{ fontSize: 10, color: done ? 'var(--color-text)' : 'var(--color-text-muted)', fontWeight: isCurrent ? 600 : 400 }}>
-                                {VEHICLE_STATUS_LABELS[s]}
+                                {statusLabels[s]}
                             </span>
                         </div>
                     </React.Fragment>
@@ -1062,18 +1089,19 @@ function CapacityBar({ vehicle }: { vehicle: VehicleSchema }) {
 }
 
 function VehicleDetail({ vehicle, onRefresh }: { vehicle: VehicleSchema; onRefresh: () => void }) {
+    const { t } = useT();
     const [removing, setRemoving] = useState<number | null>(null);
     const [recalcing, setRecalcing] = useState(false);
     const [costPreview, setCostPreview] = useState<VehicleCostSummary | null>(vehicle.cost_summary || null);
 
     const handleRemoveItem = async (itemId: number) => {
-        if (!confirm('Удалить позицию из машины?')) return;
+        if (!confirm(t('vehicle_items_confirm_delete'))) return;
         setRemoving(itemId);
         try {
             await api.removeItemFromVehicle(vehicle.order_no, itemId);
             onRefresh();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка');
+            alert(e instanceof Error ? e.message : t('msg_error'));
         }
         setRemoving(null);
     };
@@ -1085,12 +1113,13 @@ function VehicleDetail({ vehicle, onRefresh }: { vehicle: VehicleSchema; onRefre
             setCostPreview(summary);
             onRefresh();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка пересчёта');
+            alert(e instanceof Error ? e.message : t('vehicle_items_recalc_error'));
         }
         setRecalcing(false);
     };
 
-    const containerLabel = CONTAINER_OPTIONS.find(c => c.key === vehicle.container_type)?.label || vehicle.container_type || vehicle.transport_type;
+    const containerOptions = getContainerOptions(t);
+    const containerLabel = containerOptions.find(c => c.key === vehicle.container_type)?.label || vehicle.container_type || vehicle.transport_type;
     const cs = costPreview || vehicle.cost_summary;
 
     return (
@@ -1102,38 +1131,38 @@ function VehicleDetail({ vehicle, onRefresh }: { vehicle: VehicleSchema; onRefre
 
             {/* Summary row */}
             <div style={{ display: 'flex', gap: 24, marginBottom: 16, fontSize: 13, color: 'var(--color-text-muted)', flexWrap: 'wrap' }}>
-                <span>Контейнер: <b style={{ color: 'var(--color-text)' }}>{containerLabel}</b></span>
+                <span>{t('cost_container')}: <b style={{ color: 'var(--color-text)' }}>{containerLabel}</b></span>
                 {vehicle.delivery_cost_cny > 0 && (
-                    <span>Перевозка: {formatNumber(vehicle.delivery_cost_cny)} {'\u00A5'} {'\u00D7'} {Number(vehicle.rate_cny).toFixed(2)} = {formatNumber(Number(vehicle.delivery_cost_cny) * Number(vehicle.rate_cny))} {'\u20BD'}</span>
+                    <span>{t('cost_shipping')}: {formatNumber(vehicle.delivery_cost_cny)} {'\u00A5'} {'\u00D7'} {Number(vehicle.rate_cny).toFixed(2)} = {formatNumber(Number(vehicle.delivery_cost_cny) * Number(vehicle.rate_cny))} {'\u20BD'}</span>
                 )}
-                {vehicle.total_weight_kg && <span>Вес: {formatNumber(vehicle.total_weight_kg)} кг</span>}
+                {vehicle.total_weight_kg && <span>{t('cost_weight')}: {formatNumber(vehicle.total_weight_kg)} kg</span>}
                 {vehicle.estimated_arrival_date && (
-                    <span>Ожидаемое прибытие: <b style={{ color: 'var(--color-text)' }}>{formatDate(vehicle.estimated_arrival_date)}</b></span>
+                    <span>{t('cost_arrival')}: <b style={{ color: 'var(--color-text)' }}>{formatDate(vehicle.estimated_arrival_date)}</b></span>
                 )}
-                {vehicle.invoice_no && <span>Инвойс: {vehicle.invoice_no}</span>}
+                {vehicle.invoice_no && <span>{t('cost_invoice')}: {vehicle.invoice_no}</span>}
             </div>
 
             {/* Cost summary */}
             {cs && (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 16, padding: 12, background: 'var(--color-bg)', borderRadius: 10, border: '1px solid var(--color-border)' }}>
                     <div style={{ textAlign: 'center' }}>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Товар</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{t('cost_goods')}</div>
                         <div style={{ fontSize: 14, fontWeight: 600 }}>{formatNumber(cs.total_cost_rub)} {'\u20BD'}</div>
                     </div>
                     <div style={{ textAlign: 'center' }}>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Доставка</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{t('cost_delivery')}</div>
                         <div style={{ fontSize: 14, fontWeight: 600 }}>{formatNumber(cs.total_delivery_rub)} {'\u20BD'}</div>
                     </div>
                     <div style={{ textAlign: 'center' }}>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Пошлина</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{t('cost_duty')}</div>
                         <div style={{ fontSize: 14, fontWeight: 600 }}>{formatNumber(cs.total_duty_rub)} {'\u20BD'}</div>
                     </div>
                     <div style={{ textAlign: 'center' }}>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>НДС</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{t('cost_vat')}</div>
                         <div style={{ fontSize: 14, fontWeight: 600 }}>{formatNumber(cs.total_vat_rub)} {'\u20BD'}</div>
                     </div>
                     <div style={{ textAlign: 'center' }}>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Итого</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{t('cost_total')}</div>
                         <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--color-primary)' }}>{formatNumber(cs.total_rub)} {'\u20BD'}</div>
                     </div>
                 </div>
@@ -1143,7 +1172,7 @@ function VehicleDetail({ vehicle, onRefresh }: { vehicle: VehicleSchema; onRefre
             {vehicle.status === 'FORMING' && vehicle.items.length > 0 && (
                 <div style={{ marginBottom: 12 }}>
                     <button className="btn btn-secondary btn-sm" onClick={handleRecalc} disabled={recalcing} style={{ fontSize: 12 }}>
-                        {recalcing ? 'Пересчёт...' : '🔄 Пересчитать себестоимость'}
+                        {recalcing ? t('vehicle_items_recalcing') : t('vehicle_items_recalc')}
                     </button>
                 </div>
             )}
@@ -1156,12 +1185,12 @@ function VehicleDetail({ vehicle, onRefresh }: { vehicle: VehicleSchema; onRefre
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, marginTop: 12 }}>
                     <thead>
                         <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                            <th style={{ textAlign: 'left', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>Из заказа</th>
-                            <th style={{ textAlign: 'left', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>Баркод</th>
-                            <th style={{ textAlign: 'left', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>Артикул</th>
-                            <th style={{ textAlign: 'right', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>Кол-во</th>
-                            <th style={{ textAlign: 'right', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>Цена {'\u00A5'}</th>
-                            <th style={{ textAlign: 'right', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>Сумма {'\u00A5'}</th>
+                            <th style={{ textAlign: 'left', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_from_order')}</th>
+                            <th style={{ textAlign: 'left', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_barcode')}</th>
+                            <th style={{ textAlign: 'left', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_article')}</th>
+                            <th style={{ textAlign: 'right', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_qty')}</th>
+                            <th style={{ textAlign: 'right', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_price_cny')}</th>
+                            <th style={{ textAlign: 'right', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_sum_cny')}</th>
                             {vehicle.status === 'FORMING' && <th style={{ width: 40 }}></th>}
                         </tr>
                     </thead>
@@ -1180,7 +1209,7 @@ function VehicleDetail({ vehicle, onRefresh }: { vehicle: VehicleSchema; onRefre
                                             onClick={() => handleRemoveItem(item.id)}
                                             disabled={removing === item.id}
                                             style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-danger)', fontSize: 14, opacity: removing === item.id ? 0.3 : 0.6, padding: 2 }}
-                                            title="Удалить из машины"
+                                            title={t('vehicle_items_remove')}
                                         >
                                             {'\u2716'}
                                         </button>
@@ -1191,7 +1220,7 @@ function VehicleDetail({ vehicle, onRefresh }: { vehicle: VehicleSchema; onRefre
                     </tbody>
                 </table>
             ) : (
-                <div style={{ textAlign: 'center', padding: 20, opacity: 0.5, fontSize: 13 }}>Нет позиций в машине</div>
+                <div style={{ textAlign: 'center', padding: 20, opacity: 0.5, fontSize: 13 }}>{t('vehicle_items_empty')}</div>
             )}
         </div>
     );
@@ -1200,6 +1229,7 @@ function VehicleDetail({ vehicle, onRefresh }: { vehicle: VehicleSchema; onRefre
 // ─── Add Items Modal ───────────────────────────────────────────────────────
 
 function AddItemsModal({ vehicle, onClose, onDone }: { vehicle: VehicleSchema; onClose: () => void; onDone: () => void }) {
+    const { t } = useT();
     const [groups, setGroups] = useState<AvailableItemGroup[]>([]);
     const [loading, setLoading] = useState(true);
     const [submitting, setSubmitting] = useState(false);
@@ -1229,7 +1259,7 @@ function AddItemsModal({ vehicle, onClose, onDone }: { vehicle: VehicleSchema; o
             await api.addItemsToVehicle(vehicle.order_no, items);
             onDone();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка');
+            alert(e instanceof Error ? e.message : t('msg_error'));
         }
         setSubmitting(false);
     };
@@ -1240,8 +1270,8 @@ function AddItemsModal({ vehicle, onClose, onDone }: { vehicle: VehicleSchema; o
             <div style={{ position: 'relative', background: 'var(--color-bg)', borderRadius: 16, width: '90%', maxWidth: 720, maxHeight: '80vh', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
                 {/* Header */}
                 <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--color-border)' }}>
-                    <h3 style={{ fontSize: 16, fontWeight: 600 }}>Добавить товар в {vehicle.order_no}</h3>
-                    <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 4 }}>Выберите позиции из фабричных заказов</p>
+                    <h3 style={{ fontSize: 16, fontWeight: 600 }}>{t('add_items_title')} {vehicle.order_no}</h3>
+                    <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 4 }}>{t('add_items_subtitle')}</p>
                 </div>
 
                 {/* Body */}
@@ -1249,7 +1279,7 @@ function AddItemsModal({ vehicle, onClose, onDone }: { vehicle: VehicleSchema; o
                     {loading ? (
                         <div style={{ textAlign: 'center', padding: 32 }}><div className="spinner" style={{ margin: '0 auto' }} /></div>
                     ) : groups.length === 0 ? (
-                        <div style={{ textAlign: 'center', padding: 32, opacity: 0.5 }}>Нет доступных позиций</div>
+                        <div style={{ textAlign: 'center', padding: 32, opacity: 0.5 }}>{t('add_items_empty')}</div>
                     ) : (
                         groups.map(group => (
                             <div key={group.order_id} style={{ marginBottom: 20 }}>
@@ -1257,15 +1287,15 @@ function AddItemsModal({ vehicle, onClose, onDone }: { vehicle: VehicleSchema; o
                                     <span style={{ fontSize: 14 }}>{'\uD83D\uDCE6'}</span>
                                     <span style={{ fontWeight: 600, fontSize: 14 }}>{group.order_number}</span>
                                     {group.factory_name && <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{'\u2014'} {group.factory_name}</span>}
-                                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)', marginLeft: 'auto' }}>{group.items.length} поз.</span>
+                                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)', marginLeft: 'auto' }}>{group.items.length} {t('add_items_pos')}</span>
                                 </div>
                                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                                     <thead>
                                         <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                            <th style={{ textAlign: 'left', padding: '4px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>Баркод</th>
-                                            <th style={{ textAlign: 'left', padding: '4px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>Артикул</th>
-                                            <th style={{ textAlign: 'right', padding: '4px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>Доступно</th>
-                                            <th style={{ textAlign: 'right', padding: '4px 8px', fontSize: 11, color: 'var(--color-text-muted)', width: 100 }}>Добавить</th>
+                                            <th style={{ textAlign: 'left', padding: '4px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_barcode')}</th>
+                                            <th style={{ textAlign: 'left', padding: '4px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_article')}</th>
+                                            <th style={{ textAlign: 'right', padding: '4px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_available')}</th>
+                                            <th style={{ textAlign: 'right', padding: '4px 8px', fontSize: 11, color: 'var(--color-text-muted)', width: 100 }}>{t('btn_add')}</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -1305,13 +1335,13 @@ function AddItemsModal({ vehicle, onClose, onDone }: { vehicle: VehicleSchema; o
 
                 {/* Footer */}
                 <div style={{ padding: '16px 24px', borderTop: '1px solid var(--color-border)', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-                    <button className="btn btn-secondary" onClick={onClose}>Отмена</button>
+                    <button className="btn btn-secondary" onClick={onClose}>{t('btn_cancel')}</button>
                     <button
                         className="btn btn-primary"
                         onClick={handleSubmit}
                         disabled={totalSelected === 0 || submitting}
                     >
-                        {submitting ? 'Добавляем...' : `Добавить (${formatNumber(totalSelected)} шт)`}
+                        {submitting ? t('add_items_adding') : `${t('add_items_count')} (${formatNumber(totalSelected)} ${t('unit_pcs')})`}
                     </button>
                 </div>
             </div>
@@ -1322,6 +1352,7 @@ function AddItemsModal({ vehicle, onClose, onDone }: { vehicle: VehicleSchema; o
 // ─── Create Vehicle Inline Form ──────────────────────────────────────────
 
 function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+    const { t } = useT();
     const [form, setForm] = useState<VehicleCreate>({
         order_no: '',
         container_type: 'truck1',
@@ -1345,7 +1376,7 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
             await api.createVehicle(form);
             onDone();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка');
+            alert(e instanceof Error ? e.message : t('msg_error'));
         }
         setSubmitting(false);
     };
@@ -1356,22 +1387,24 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
         color: 'var(--color-text)', fontSize: 13,
     };
 
+    const containerOptions = getContainerOptions(t);
+
     return (
         <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>Новая машина</h3>
+                <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>{t('vehicle_form_title')}</h3>
                 <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Номер машины *</label>
-                        <input value={form.order_no} onChange={e => setForm(f => ({ ...f, order_no: e.target.value }))} placeholder="М-001" style={inputStyle} autoFocus />
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_number')}</label>
+                        <input value={form.order_no} onChange={e => setForm(f => ({ ...f, order_no: e.target.value }))} placeholder={t('vehicle_form_number_placeholder')} style={inputStyle} autoFocus />
                     </div>
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6, display: 'block' }}>Тип контейнера</label>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6, display: 'block' }}>{t('vehicle_form_container_type')}</label>
                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                            {CONTAINER_OPTIONS.map(opt => {
+                            {containerOptions.map(opt => {
                                 const selected = form.container_type === opt.key;
                                 return (
                                     <button
@@ -1396,60 +1429,60 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Дата забора (план)</label>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_pickup_date')}</label>
                         <input type="date" value={form.ship_date || ''} onChange={e => setForm(f => ({ ...f, ship_date: e.target.value || undefined }))} style={inputStyle} />
                     </div>
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Инвойс</label>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_invoice')}</label>
                         <input value={form.invoice_no || ''} onChange={e => setForm(f => ({ ...f, invoice_no: e.target.value || undefined }))} placeholder="CC20260011" style={inputStyle} />
                     </div>
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Номер заказа</label>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_order_no')}</label>
                         <input value={form.payment_ref || ''} onChange={e => setForm(f => ({ ...f, payment_ref: e.target.value || undefined }))} placeholder="ENV-001" style={inputStyle} />
                     </div>
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr', gap: 12 }}>
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Перевозка ¥</label>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_delivery_cny')}</label>
                         <input type="number" value={form.delivery_cost_cny || ''} onChange={e => setForm(f => ({ ...f, delivery_cost_cny: parseFloat(e.target.value) || 0 }))} style={inputStyle} />
                     </div>
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Перевозка $</label>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_delivery_usd')}</label>
                         <input type="number" value={form.delivery_cost_usd || ''} onChange={e => setForm(f => ({ ...f, delivery_cost_usd: parseFloat(e.target.value) || 0 }))} style={inputStyle} />
                     </div>
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Курс ¥/₽</label>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_rate_cny')}</label>
                         <input type="number" step="0.01" value={form.rate_cny || ''} onChange={e => setForm(f => ({ ...f, rate_cny: parseFloat(e.target.value) || 1 }))} style={inputStyle} />
                     </div>
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Курс $/₽</label>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_rate_usd')}</label>
                         <input type="number" step="0.01" value={form.rate_usd || ''} onChange={e => setForm(f => ({ ...f, rate_usd: parseFloat(e.target.value) || 1 }))} style={inputStyle} />
                     </div>
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Курс €/₽</label>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_rate_eur')}</label>
                         <input type="number" step="0.01" value={form.rate_eur || ''} onChange={e => setForm(f => ({ ...f, rate_eur: parseFloat(e.target.value) || 1 }))} style={inputStyle} />
                     </div>
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                     {warehouses.length > 0 && (
                         <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Склад назначения</label>
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_warehouse')}</label>
                             <select value={form.target_warehouse_id || ''} onChange={e => setForm(f => ({ ...f, target_warehouse_id: e.target.value ? Number(e.target.value) : undefined }))} style={inputStyle}>
-                                <option value="">-- Не выбран --</option>
+                                <option value="">{t('create_order_unselected')}</option>
                                 {warehouses.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
                             </select>
                         </div>
                     )}
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Заметка</label>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_note')}</label>
                         <input value={form.note || ''} onChange={e => setForm(f => ({ ...f, note: e.target.value }))} style={inputStyle} />
                     </div>
                 </div>
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
-                <button className="btn btn-secondary btn-sm" onClick={onClose}>Отмена</button>
+                <button className="btn btn-secondary btn-sm" onClick={onClose}>{t('btn_cancel')}</button>
                 <button className="btn btn-primary btn-sm" onClick={handleSubmit} disabled={!form.order_no.trim() || submitting}>
-                    {submitting ? 'Создаём...' : 'Создать'}
+                    {submitting ? t('msg_creating') : t('btn_create')}
                 </button>
             </div>
         </div>
@@ -1459,6 +1492,7 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
 // ─── Vehicles Tab Main ─────────────────────────────────────────────────────
 
 function VehiclesTab() {
+    const { t } = useT();
     const params = useParams();
     const router = useRouter();
     const slug = params.slug as string;
@@ -1474,10 +1508,10 @@ function VehiclesTab() {
             const data = await api.getVehicles();
             setVehicles(data);
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+            setError(e instanceof Error ? e.message : t('msg_loading_error'));
         }
         setLoading(false);
-    }, []);
+    }, [t]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -1488,20 +1522,20 @@ function VehiclesTab() {
     };
 
     const NEXT_STATUS: Record<string, { status: string; label: string; color: string }> = {
-        FORMING: { status: 'SHIPPED', label: 'Отгрузить', color: 'var(--color-primary)' },
-        SHIPPED: { status: 'CUSTOMS', label: 'На таможню', color: '#f59e0b' },
-        CUSTOMS: { status: 'DISPATCHED', label: 'Отправлена', color: '#8b5cf6' },
+        FORMING: { status: 'SHIPPED', label: t('btn_ship'), color: 'var(--color-primary)' },
+        SHIPPED: { status: 'CUSTOMS', label: t('transition_to_customs'), color: '#f59e0b' },
+        CUSTOMS: { status: 'DISPATCHED', label: t('transition_dispatched'), color: '#8b5cf6' },
         // DISPATCHED → DELIVERED: автоматически при приёмке на складе
     };
 
     const handleStatusChange = async (e: React.MouseEvent, orderNo: string, nextStatus: string) => {
         e.stopPropagation();
-        if (!confirm(`Сменить статус машины ${orderNo}?`)) return;
+        if (!confirm(`${t('vehicles_confirm_status')} ${orderNo}?`)) return;
         try {
             await api.updateVehicleStatus(orderNo, { status: nextStatus });
             load();
         } catch (err: unknown) {
-            alert(err instanceof Error ? err.message : 'Ошибка');
+            alert(err instanceof Error ? err.message : t('msg_error'));
         }
     };
 
@@ -1509,7 +1543,7 @@ function VehiclesTab() {
         return (
             <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>
                 <div className="spinner" style={{ margin: '0 auto 12px' }} />
-                Загрузка...
+                {t('msg_loading')}
             </div>
         );
     }
@@ -1519,7 +1553,7 @@ function VehiclesTab() {
             {error && (
                 <div className="glass-card" style={{ padding: 16, color: 'var(--color-danger)', marginBottom: 16 }}>
                     {error}
-                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>Повторить</button>
+                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>{t('btn_retry')}</button>
                 </div>
             )}
 
@@ -1534,11 +1568,11 @@ function VehiclesTab() {
             <div className="glass-card" style={{ overflow: 'hidden' }}>
                 {/* Header */}
                 <div style={{ padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--color-border)' }}>
-                    <h3 style={{ fontSize: 15, fontWeight: 600 }}>Машины ({vehicles.length})</h3>
+                    <h3 style={{ fontSize: 15, fontWeight: 600 }}>{t('vehicles_title')} ({vehicles.length})</h3>
                     <div style={{ display: 'flex', gap: 8 }}>
-                        <button className="btn btn-secondary btn-sm" onClick={load}>Обновить</button>
+                        <button className="btn btn-secondary btn-sm" onClick={load}>{t('btn_refresh')}</button>
                         <button className="btn btn-primary btn-sm" onClick={() => setShowCreate(v => !v)}>
-                            {showCreate ? '✕ Закрыть' : '+ Новая машина'}
+                            {showCreate ? t('btn_close') : t('vehicles_btn_create')}
                         </button>
                     </div>
                 </div>
@@ -1546,24 +1580,24 @@ function VehiclesTab() {
                 {vehicles.length === 0 ? (
                     <div style={{ padding: 40, textAlign: 'center', opacity: 0.5 }}>
                         <div style={{ fontSize: 32, marginBottom: 8 }}>{'\uD83D\uDE9B'}</div>
-                        <div>Нет машин. Создайте первую!</div>
+                        <div>{t('vehicles_empty')}</div>
                     </div>
                 ) : (
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                         <thead>
                             <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                <th style={{ textAlign: 'left', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Машина</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Заказ</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Статус</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Контейнер</th>
-                                <th style={{ textAlign: 'right', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Позиции</th>
-                                <th style={{ textAlign: 'right', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Кол-во</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Инвойс</th>
-                                <th style={{ textAlign: 'right', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Вес</th>
-                                <th style={{ textAlign: 'right', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Стоимость</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Отправлена</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Прибытие</th>
-                                <th style={{ textAlign: 'right', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500, width: 180 }}>Действия</th>
+                                <th style={{ textAlign: 'left', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('vehicles_title')}</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_order')}</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_status')}</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_container')}</th>
+                                <th style={{ textAlign: 'right', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_items')}</th>
+                                <th style={{ textAlign: 'right', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_qty')}</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_invoice')}</th>
+                                <th style={{ textAlign: 'right', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_weight')}</th>
+                                <th style={{ textAlign: 'right', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_cost')}</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_shipped_date')}</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_arrival_date')}</th>
+                                <th style={{ textAlign: 'right', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500, width: 180 }}>{t('col_actions')}</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -1581,12 +1615,12 @@ function VehiclesTab() {
                                         <td style={{ padding: '10px 8px', fontSize: 12, color: v.payment_ref ? 'var(--color-text)' : 'var(--color-text-muted)' }}>{v.payment_ref || '\u2014'}</td>
                                         <td style={{ padding: '10px 8px' }}><StatusBadge status={status} /></td>
                                         <td style={{ padding: '10px 8px' }}>
-                                            <span style={{ fontSize: 12 }}>{CONTAINER_OPTIONS.find(c => c.key === v.container_type)?.label || v.transport_type || 'AUTO'}</span>
+                                            <span style={{ fontSize: 12 }}>{getContainerOptions(t).find(c => c.key === v.container_type)?.label || v.transport_type || 'AUTO'}</span>
                                         </td>
                                         <td style={{ padding: '10px 8px', textAlign: 'right' }}>{v.items_count}</td>
                                         <td style={{ padding: '10px 8px', textAlign: 'right' }}>{formatNumber(v.total_qty, 0)}</td>
                                         <td style={{ padding: '10px 8px', fontSize: 12, color: v.invoice_no ? 'var(--color-text)' : 'var(--color-text-muted)' }}>{v.invoice_no || '\u2014'}</td>
-                                        <td style={{ padding: '10px 8px', textAlign: 'right' }}>{v.total_weight_kg ? formatNumber(Number(v.total_weight_kg), 0) + ' кг' : '\u2014'}</td>
+                                        <td style={{ padding: '10px 8px', textAlign: 'right' }}>{v.total_weight_kg ? formatNumber(Number(v.total_weight_kg), 0) + ' kg' : '\u2014'}</td>
                                         <td style={{ padding: '10px 8px', textAlign: 'right' }}>{Number(v.total_cny) > 0 ? formatNumber(Number(v.total_cny), 0) + ' \u00A5' : '\u2014'}</td>
                                         <td style={{ padding: '10px 8px' }}>{v.ship_date ? formatDate(v.ship_date) : '\u2014'}</td>
                                         <td style={{ padding: '10px 8px' }}>{v.estimated_arrival_date ? formatDate(v.estimated_arrival_date) : '\u2014'}</td>
@@ -1607,7 +1641,7 @@ function VehiclesTab() {
                                                         {NEXT_STATUS[status].label}
                                                     </button>
                                                 )}
-                                                <span style={{ fontSize: 12, color: 'var(--color-primary)', cursor: 'pointer' }} onClick={() => openVehicle(v.order_no)}>Открыть →</span>
+                                                <span style={{ fontSize: 12, color: 'var(--color-primary)', cursor: 'pointer' }} onClick={() => openVehicle(v.order_no)}>{t('vehicles_open')}</span>
                                             </div>
                                         </td>
                                     </tr>
@@ -1625,6 +1659,7 @@ function VehiclesTab() {
 // ─── Tab 3: Overview ────────────────────────────────────────────────────────
 
 function OverviewTab() {
+    const { t } = useT();
     const [overview, setOverview] = useState<SupplyChainOverview | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -1636,10 +1671,10 @@ function OverviewTab() {
             const data = await api.getSupplyChainOverview();
             setOverview(data);
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+            setError(e instanceof Error ? e.message : t('msg_loading_error'));
         }
         setLoading(false);
-    }, []);
+    }, [t]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -1647,7 +1682,7 @@ function OverviewTab() {
         return (
             <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>
                 <div className="spinner" style={{ margin: '0 auto 12px' }} />
-                Загрузка...
+                {t('msg_loading')}
             </div>
         );
     }
@@ -1656,7 +1691,7 @@ function OverviewTab() {
         return (
             <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>
                 {error}
-                <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>Повторить</button>
+                <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>{t('btn_retry')}</button>
             </div>
         );
     }
@@ -1664,7 +1699,7 @@ function OverviewTab() {
     if (!overview) {
         return (
             <div className="glass-card" style={{ padding: 32, textAlign: 'center', opacity: 0.6 }}>
-                Нет данных
+                {t('msg_no_data')}
             </div>
         );
     }
@@ -1676,25 +1711,25 @@ function OverviewTab() {
             {/* KPI Cards */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, marginBottom: 24 }}>
                 <KpiCard
-                    label="Фабричные заказы"
+                    label={t('kpi_factory_orders')}
                     value={overview.total_factory_orders}
                     icon="📦"
                     color="var(--color-accent)"
                 />
                 <KpiCard
-                    label="Машины"
+                    label={t('kpi_vehicles')}
                     value={overview.total_vehicles}
                     icon="🚛"
                     color="var(--color-info, #3b82f6)"
                 />
                 <KpiCard
-                    label="Позиции"
+                    label={t('kpi_items')}
                     value={overview.total_items}
                     icon="📋"
                     color="var(--color-warning)"
                 />
                 <KpiCard
-                    label="Сумма (CNY)"
+                    label={t('kpi_sum_cny')}
                     value={formatNumber(overview.total_amount_cny) + ' \u00A5'}
                     icon="💰"
                     color="var(--color-success)"
@@ -1703,9 +1738,9 @@ function OverviewTab() {
 
             {/* Status breakdown */}
             <div className="glass-card" style={{ padding: 20 }}>
-                <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>Машины по статусам</h3>
+                <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>{t('overview_status_title')}</h3>
                 {statusEntries.length === 0 ? (
-                    <div style={{ opacity: 0.5, textAlign: 'center', padding: 20 }}>Нет данных по статусам</div>
+                    <div style={{ opacity: 0.5, textAlign: 'center', padding: 20 }}>{t('overview_no_status_data')}</div>
                 ) : (
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
                         {VEHICLE_STATUSES.map(status => {
@@ -1721,7 +1756,7 @@ function OverviewTab() {
                                 }}>
                                     <div style={{ fontSize: 28, fontWeight: 700, color }}>{count}</div>
                                     <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 4 }}>
-                                        {VEHICLE_STATUS_LABELS[status]}
+                                        {getVehicleStatusLabels(t)[status]}
                                     </div>
                                 </div>
                             );
@@ -1754,6 +1789,7 @@ const emptySupplierForm = (): SupplierFormState => ({
 });
 
 function SuppliersTab() {
+    const { t } = useT();
     const [suppliers, setSuppliers] = useState<Supplier[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -1769,10 +1805,10 @@ function SuppliersTab() {
             const data = await api.getSuppliers();
             setSuppliers(data);
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+            setError(e instanceof Error ? e.message : t('msg_loading_error'));
         }
         setLoading(false);
-    }, []);
+    }, [t]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -1819,18 +1855,18 @@ function SuppliersTab() {
             setShowForm(false);
             await load();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка');
+            alert(e instanceof Error ? e.message : t('msg_error'));
         }
         setSubmitting(false);
     };
 
     const handleDelete = async (id: number, name: string) => {
-        if (!confirm(`Удалить поставщика "${name}"?`)) return;
+        if (!confirm(`${t('suppliers_confirm_delete')} "${name}"?`)) return;
         try {
             await api.deleteSupplier(id);
             await load();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка удаления');
+            alert(e instanceof Error ? e.message : t('msg_delete_error'));
         }
     };
 
@@ -1847,7 +1883,7 @@ function SuppliersTab() {
         return (
             <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>
                 <div className="spinner" style={{ margin: '0 auto 12px' }} />
-                Загрузка...
+                {t('msg_loading')}
             </div>
         );
     }
@@ -1857,23 +1893,23 @@ function SuppliersTab() {
             {error && (
                 <div className="glass-card" style={{ padding: 16, color: 'var(--color-danger)', marginBottom: 16 }}>
                     {error}
-                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>Повторить</button>
+                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>{t('btn_retry')}</button>
                 </div>
             )}
 
             {/* KPI */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
                 <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Всего поставщиков</div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('kpi_suppliers_total')}</div>
                     <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--color-accent)' }}>{suppliers.length}</div>
                 </div>
                 <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Китай</div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('kpi_china')}</div>
                     <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--color-warning)' }}>{chinaCount}</div>
                     <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>CNY</div>
                 </div>
                 <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Россия</div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('kpi_russia')}</div>
                     <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--color-success)' }}>{russiaCount}</div>
                     <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>RUB</div>
                 </div>
@@ -1884,34 +1920,34 @@ function SuppliersTab() {
                 <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                         <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>
-                            {editSupplier ? 'Редактировать поставщика' : 'Новый поставщик'}
+                            {editSupplier ? t('suppliers_edit_title') : t('suppliers_new_title')}
                         </h3>
                         <button className="btn btn-secondary btn-sm" onClick={() => setShowForm(false)}>✕</button>
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr', gap: 12, marginBottom: 12 }}>
                         <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Название *</label>
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('suppliers_form_name')}</label>
                             <input
                                 value={form.name}
                                 onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                                placeholder="Название компании"
+                                placeholder={t('suppliers_form_name_placeholder')}
                                 style={inputStyle}
                                 autoFocus
                             />
                         </div>
                         <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Страна</label>
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('suppliers_form_country')}</label>
                             <select
                                 value={form.country}
                                 onChange={e => handleCountryChange(e.target.value as 'CHINA' | 'RUSSIA')}
                                 style={inputStyle}
                             >
-                                <option value="CHINA">Китай</option>
-                                <option value="RUSSIA">Россия</option>
+                                <option value="CHINA">{t('suppliers_form_country_china')}</option>
+                                <option value="RUSSIA">{t('suppliers_form_country_russia')}</option>
                             </select>
                         </div>
                         <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Валюта</label>
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('suppliers_form_currency')}</label>
                             <select
                                 value={form.currency}
                                 onChange={e => setForm(f => ({ ...f, currency: e.target.value as 'CNY' | 'RUB' }))}
@@ -1922,7 +1958,7 @@ function SuppliersTab() {
                             </select>
                         </div>
                         <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Срок мин. (дней)</label>
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('suppliers_form_min_days')}</label>
                             <input
                                 type="number"
                                 value={form.delivery_days_min}
@@ -1932,7 +1968,7 @@ function SuppliersTab() {
                             />
                         </div>
                         <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Срок макс. (дней)</label>
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('suppliers_form_max_days')}</label>
                             <input
                                 type="number"
                                 value={form.delivery_days_max}
@@ -1943,22 +1979,22 @@ function SuppliersTab() {
                         </div>
                     </div>
                     <div style={{ marginBottom: 12 }}>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>Примечание</label>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('suppliers_form_note')}</label>
                         <input
                             value={form.note}
                             onChange={e => setForm(f => ({ ...f, note: e.target.value }))}
-                            placeholder="Доп. информация о поставщике"
+                            placeholder={t('suppliers_form_note_placeholder')}
                             style={inputStyle}
                         />
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
-                        <button className="btn btn-secondary btn-sm" onClick={() => setShowForm(false)}>Отмена</button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => setShowForm(false)}>{t('btn_cancel')}</button>
                         <button
                             className="btn btn-primary btn-sm"
                             onClick={handleSubmit}
                             disabled={!form.name.trim() || submitting}
                         >
-                            {submitting ? 'Сохранение...' : (editSupplier ? 'Сохранить' : 'Создать')}
+                            {submitting ? t('msg_saving') : (editSupplier ? t('btn_save') : t('btn_create'))}
                         </button>
                     </div>
                 </div>
@@ -1967,27 +2003,27 @@ function SuppliersTab() {
             {/* Table */}
             <div className="glass-card" style={{ overflow: 'hidden' }}>
                 <div style={{ padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--color-border)' }}>
-                    <h3 style={{ fontSize: 15, fontWeight: 600 }}>Поставщики ({suppliers.length})</h3>
+                    <h3 style={{ fontSize: 15, fontWeight: 600 }}>{t('suppliers_title')} ({suppliers.length})</h3>
                     <button className="btn btn-primary btn-sm" onClick={openCreate}>
-                        + Создать поставщика
+                        {t('suppliers_btn_create')}
                     </button>
                 </div>
 
                 {suppliers.length === 0 ? (
                     <div className="empty-state">
                         <div className="empty-state-icon">📋</div>
-                        <div>Нет поставщиков. Создайте первого!</div>
+                        <div>{t('suppliers_empty')}</div>
                     </div>
                 ) : (
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                         <thead>
                             <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                <th style={{ textAlign: 'left', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Название</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Страна</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Валюта</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Сроки доставки</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>Примечание</th>
-                                <th style={{ textAlign: 'right', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500, width: 120 }}>Действия</th>
+                                <th style={{ textAlign: 'left', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_name')}</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_country')}</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_currency')}</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_delivery_terms')}</th>
+                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_note')}</th>
+                                <th style={{ textAlign: 'right', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500, width: 120 }}>{t('col_actions')}</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -2005,7 +2041,7 @@ function SuppliersTab() {
                                         </span>
                                         {' '}
                                         <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                                            {s.country === 'CHINA' ? 'Китай' : 'Россия'}
+                                            {s.country === 'CHINA' ? t('suppliers_form_country_china') : t('suppliers_form_country_russia')}
                                         </span>
                                     </td>
                                     <td style={{ padding: '10px 8px' }}>
@@ -2020,11 +2056,11 @@ function SuppliersTab() {
                                     </td>
                                     <td style={{ padding: '10px 8px', color: 'var(--color-text-muted)' }}>
                                         {s.delivery_days_min != null && s.delivery_days_max != null
-                                            ? `${s.delivery_days_min}–${s.delivery_days_max} дн.`
+                                            ? `${s.delivery_days_min}–${s.delivery_days_max} ${t('unit_days')}`
                                             : s.delivery_days_min != null
-                                                ? `от ${s.delivery_days_min} дн.`
+                                                ? `${t('unit_from')} ${s.delivery_days_min} ${t('unit_days')}`
                                                 : s.delivery_days_max != null
-                                                    ? `до ${s.delivery_days_max} дн.`
+                                                    ? `${t('unit_to')} ${s.delivery_days_max} ${t('unit_days')}`
                                                     : '\u2014'}
                                     </td>
                                     <td style={{ padding: '10px 8px', color: 'var(--color-text-muted)', fontSize: 12 }}>
@@ -2037,14 +2073,14 @@ function SuppliersTab() {
                                                 style={{ fontSize: 11, padding: '2px 8px' }}
                                                 onClick={() => openEdit(s)}
                                             >
-                                                Ред.
+                                                {t('btn_edit')}
                                             </button>
                                             <button
                                                 className="btn btn-danger btn-sm"
                                                 style={{ fontSize: 11, padding: '2px 8px' }}
                                                 onClick={() => handleDelete(s.id, s.name)}
                                             >
-                                                Уд.
+                                                {t('btn_delete')}
                                             </button>
                                         </div>
                                     </td>
