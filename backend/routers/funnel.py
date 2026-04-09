@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
-from backend.models import IntegrationKey, Project, SyncLog
+from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.tariff import WbTariffSchema, WbTariffUploadResult
 from backend.services import funnel as funnel_service
@@ -114,36 +114,11 @@ async def get_sync_status(
     db: AsyncSession = Depends(get_db),
 ):
     """Get scheduler status, last sync info, and missing days count."""
-    from sqlalchemy import select
-
     from backend.scheduler import get_scheduler_info
     from backend.scheduler.helpers import get_missing_dates
+    from backend.services.funnel.sync import get_recent_sync_logs
 
-    key_ids = select(IntegrationKey.id).where(
-        IntegrationKey.project_id == project.id,
-        IntegrationKey.is_deleted == False,  # noqa: E712
-    )
-    last_sync = await db.execute(
-        select(SyncLog)
-        .where(
-            SyncLog.service == "wb_funnel",
-            SyncLog.integration_id.in_(key_ids),
-        )
-        .order_by(SyncLog.id.desc())
-        .limit(10)
-    )
-    logs = [
-        {
-            "id": s.id,
-            "sync_type": s.sync_type,
-            "status": s.status,
-            "rows_inserted": s.rows_inserted,
-            "started_at": s.started_at.isoformat() if s.started_at else None,
-            "finished_at": s.finished_at.isoformat() if s.finished_at else None,
-            "error_msg": s.error_msg,
-        }
-        for s in last_sync.scalars()
-    ]
+    logs = await get_recent_sync_logs(db, project.id)
 
     # Count missing days for this project
     try:

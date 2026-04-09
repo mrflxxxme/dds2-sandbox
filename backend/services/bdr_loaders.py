@@ -8,11 +8,10 @@ import logging
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import select, func, desc, extract
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models.wb_finance import WbFinanceRow
-from backend.models import WbFunnelDaily, CostOrderItem, WbCostOverride
+from backend.models import CostOrderItem, WbCostOverride, WbFunnelDaily
 from backend.models.wb_order_cancel import WbOrderCancelDaily
 
 logger = logging.getLogger("dds.bdr_loaders")
@@ -23,40 +22,43 @@ ZERO = D("0")
 
 # ─── Ads loader ──────────────────────────────────────────────────────────────
 
+
 async def load_ads(db: AsyncSession, pid: int, d_from: date, d_to: date) -> dict[int, float]:
     """Load total ad spend per nm_id from WbFunnelDaily."""
     result = await db.execute(
         select(
             WbFunnelDaily.nm_id,
             func.sum(WbFunnelDaily.adv_sum).label("total_adv"),
-        ).where(
+        )
+        .where(
             WbFunnelDaily.project_id == pid,
             WbFunnelDaily.date >= d_from,
             WbFunnelDaily.date <= d_to,
-        ).group_by(WbFunnelDaily.nm_id)
+        )
+        .group_by(WbFunnelDaily.nm_id)
     )
     return {r.nm_id: float(r.total_adv or 0) for r in result}
 
 
-async def load_ads_monthly(
-    db: AsyncSession, pid: int, d_from: date, d_to: date
-) -> dict[str, dict[int, float]]:
+async def load_ads_monthly(db: AsyncSession, pid: int, d_from: date, d_to: date) -> dict[str, dict[int, float]]:
     """Load ad spend per nm_id grouped by month (YYYY-MM).
 
     Single query replaces N per-month calls to load_ads().
     Returns: { "2025-01": {nm_id: total_adv, ...}, ... }
     """
-    month_label = func.to_char(WbFunnelDaily.date, 'YYYY-MM').label("month_key")
+    month_label = func.to_char(WbFunnelDaily.date, "YYYY-MM").label("month_key")
     result = await db.execute(
         select(
             month_label,
             WbFunnelDaily.nm_id,
             func.sum(WbFunnelDaily.adv_sum).label("total_adv"),
-        ).where(
+        )
+        .where(
             WbFunnelDaily.project_id == pid,
             WbFunnelDaily.date >= d_from,
             WbFunnelDaily.date <= d_to,
-        ).group_by(month_label, WbFunnelDaily.nm_id)
+        )
+        .group_by(month_label, WbFunnelDaily.nm_id)
     )
     monthly: dict[str, dict[int, float]] = {}
     for r in result:
@@ -66,6 +68,7 @@ async def load_ads_monthly(
 
 # ─── Orders & Stocks loader ─────────────────────────────────────────────────
 
+
 async def load_orders_stocks(db: AsyncSession, pid: int, d_from: date, d_to: date) -> dict[int, dict]:
     """Load orders count/sum and latest stocks per nm_id from WbFunnelDaily."""
     # Orders aggregation
@@ -74,11 +77,13 @@ async def load_orders_stocks(db: AsyncSession, pid: int, d_from: date, d_to: dat
             WbFunnelDaily.nm_id,
             func.sum(WbFunnelDaily.orders_count).label("orders_count"),
             func.sum(WbFunnelDaily.orders_sum_rub).label("orders_sum"),
-        ).where(
+        )
+        .where(
             WbFunnelDaily.project_id == pid,
             WbFunnelDaily.date >= d_from,
             WbFunnelDaily.date <= d_to,
-        ).group_by(WbFunnelDaily.nm_id)
+        )
+        .group_by(WbFunnelDaily.nm_id)
     )
     orders_map = {}
     for r in result:
@@ -88,22 +93,26 @@ async def load_orders_stocks(db: AsyncSession, pid: int, d_from: date, d_to: dat
         }
 
     # Latest stocks (last day in period)
-    sub = select(
-        WbFunnelDaily.nm_id,
-        WbFunnelDaily.stocks_wb,
-        func.row_number().over(
-            partition_by=WbFunnelDaily.nm_id,
-            order_by=desc(WbFunnelDaily.date),
-        ).label("rn"),
-    ).where(
-        WbFunnelDaily.project_id == pid,
-        WbFunnelDaily.date >= d_from,
-        WbFunnelDaily.date <= d_to,
-    ).subquery()
-
-    stocks_result = await db.execute(
-        select(sub.c.nm_id, sub.c.stocks_wb).where(sub.c.rn == 1)
+    sub = (
+        select(
+            WbFunnelDaily.nm_id,
+            WbFunnelDaily.stocks_wb,
+            func.row_number()
+            .over(
+                partition_by=WbFunnelDaily.nm_id,
+                order_by=desc(WbFunnelDaily.date),
+            )
+            .label("rn"),
+        )
+        .where(
+            WbFunnelDaily.project_id == pid,
+            WbFunnelDaily.date >= d_from,
+            WbFunnelDaily.date <= d_to,
+        )
+        .subquery()
     )
+
+    stocks_result = await db.execute(select(sub.c.nm_id, sub.c.stocks_wb).where(sub.c.rn == 1))
     for r in stocks_result:
         if r.nm_id in orders_map:
             orders_map[r.nm_id]["stocks_wb"] = int(r.stocks_wb or 0)
@@ -114,6 +123,7 @@ async def load_orders_stocks(db: AsyncSession, pid: int, d_from: date, d_to: dat
 
 
 # ─── Cost loader ─────────────────────────────────────────────────────────────
+
 
 async def load_avg_costs(db: AsyncSession, pid: int) -> dict[str, float]:
     """Load weighted average cost per article_seller from cost_order_items.
@@ -126,21 +136,26 @@ async def load_avg_costs(db: AsyncSession, pid: int) -> dict[str, float]:
     result = await db.execute(
         select(
             CostOrderItem.article_seller,
-            (func.sum(CostOrderItem.total_rub * CostOrderItem.qty) / func.nullif(func.sum(CostOrderItem.qty), 0)).label("avg_cost"),
-        ).join(
-            CostOrder, CostOrderItem.order_no == CostOrder.order_no
-        ).where(
+            (func.sum(CostOrderItem.total_rub * CostOrderItem.qty) / func.nullif(func.sum(CostOrderItem.qty), 0)).label(
+                "avg_cost"
+            ),
+        )
+        .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)
+        .where(
             CostOrder.project_id == pid,
             CostOrder.is_deleted == False,
+            CostOrderItem.is_deleted == False,
             CostOrderItem.article_seller.isnot(None),
             CostOrderItem.total_rub.isnot(None),
             CostOrderItem.qty > 0,
-        ).group_by(CostOrderItem.article_seller)
+        )
+        .group_by(CostOrderItem.article_seller)
     )
     return {r.article_seller: float(r.avg_cost or 0) for r in result if r.article_seller}
 
 
 # ─── Cost overrides loader ───────────────────────────────────────────────────
+
 
 async def load_cost_overrides(db: AsyncSession, pid: int) -> dict[int, float]:
     """Load manual cost overrides keyed by nm_id from WbCostOverride.
@@ -157,6 +172,7 @@ async def load_cost_overrides(db: AsyncSession, pid: int) -> dict[int, float]:
 
 # ─── Tax loader ──────────────────────────────────────────────────────────────
 
+
 async def load_tax_settings(db: AsyncSession, pid: int, d_from: date, d_to: date) -> dict:
     """Load tax rate settings for the period.
 
@@ -169,12 +185,14 @@ async def load_tax_settings(db: AsyncSession, pid: int, d_from: date, d_to: date
     month = d_from.month
 
     result = await db.execute(
-        select(TaxRate).where(
+        select(TaxRate)
+        .where(
             TaxRate.project_id == pid,
             TaxRate.year == year,
             TaxRate.month == month,
             TaxRate.brand == "__project__",
-        ).limit(1)
+        )
+        .limit(1)
     )
     row = result.scalar_one_or_none()
 
@@ -196,9 +214,8 @@ async def load_tax_settings(db: AsyncSession, pid: int, d_from: date, d_to: date
 
 # ─── Cancel stats loader (for accurate buyout_pct) ──────────────────────────
 
-async def load_cancel_stats(
-    db: AsyncSession, pid: int, d_from: date, d_to: date
-) -> dict[int, dict[str, int]]:
+
+async def load_cancel_stats(db: AsyncSession, pid: int, d_from: date, d_to: date) -> dict[int, dict[str, int]]:
     """Load order cancel stats per nm_id from wb_order_cancel_daily.
 
     Returns: {nm_id: {"total": N, "cancelled": M}, ...}
@@ -208,13 +225,12 @@ async def load_cancel_stats(
             WbOrderCancelDaily.nm_id,
             func.sum(WbOrderCancelDaily.total_orders).label("total"),
             func.sum(WbOrderCancelDaily.cancelled_orders).label("cancelled"),
-        ).where(
+        )
+        .where(
             WbOrderCancelDaily.project_id == pid,
             WbOrderCancelDaily.dt >= d_from,
             WbOrderCancelDaily.dt <= d_to,
-        ).group_by(WbOrderCancelDaily.nm_id)
+        )
+        .group_by(WbOrderCancelDaily.nm_id)
     )
-    return {
-        r.nm_id: {"total": int(r.total or 0), "cancelled": int(r.cancelled or 0)}
-        for r in result
-    }
+    return {r.nm_id: {"total": int(r.total or 0), "cancelled": int(r.cancelled or 0)} for r in result}

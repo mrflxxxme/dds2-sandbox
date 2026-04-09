@@ -54,7 +54,7 @@ class FactoryOrder(Base, TimestampMixin, SoftDeleteMixin):
     )
 
 
-class FactoryOrderItem(Base):
+class FactoryOrderItem(Base, SoftDeleteMixin):
     """
     Line item in a factory order.
     Tracks ordered qty and how much has been assigned to vehicles.

@@ -85,7 +85,7 @@ class CostOrder(Base, SoftDeleteMixin):
     __table_args__ = (Index("ix_cost_orders_project_id", "project_id"),)
 
 
-class CostOrderItem(Base):
+class CostOrderItem(Base, SoftDeleteMixin):
     __tablename__ = "cost_order_items"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)

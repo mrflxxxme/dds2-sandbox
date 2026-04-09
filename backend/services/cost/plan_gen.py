@@ -46,7 +46,12 @@ async def generate_payment_plan(
         return {"error": "Укажите дату отправки (ship_date) перед генерацией плана", "status": 400}
 
     # 2. Get items (exclude barcode=0)
-    items_result = await db.execute(select(CostOrderItem).where(CostOrderItem.order_no == order_no))
+    items_result = await db.execute(
+        select(CostOrderItem).where(
+            CostOrderItem.order_no == order_no,
+            CostOrderItem.is_deleted == False,
+        )
+    )
     all_items = items_result.scalars().all()
     items = [i for i in all_items if i.barcode and str(i.barcode).strip() not in ("0", "")]
 

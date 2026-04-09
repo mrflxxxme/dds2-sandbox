@@ -28,7 +28,7 @@ async def get_cost_order_items(db: AsyncSession, project_id: int, order_no: str)
 
     result = await db.execute(
         select(CostOrderItem)
-        .where(CostOrderItem.order_no == order_no)
+        .where(CostOrderItem.order_no == order_no, CostOrderItem.is_deleted == False)
         .order_by(CostOrderItem.subject, CostOrderItem.article_seller)
     )
     items = result.scalars().all()
@@ -88,9 +88,9 @@ async def upload_order_items(
     total_qty_all = (
         int(pd.to_numeric(df.get("qty", 1), errors="coerce").fillna(1).sum()) if "qty" in df.columns else len(df)
     )
-    delivery_rub_total = float(order.delivery_cost_cny) * float(order.rate_cny) + float(
-        order.delivery_cost_usd
-    ) * float(order.rate_usd)
+    delivery_rub_total = Decimal(str(order.delivery_cost_cny)) * Decimal(str(order.rate_cny)) + Decimal(
+        str(order.delivery_cost_usd)
+    ) * Decimal(str(order.rate_usd))
 
     inserted = 0
     unrecognized = 0
@@ -181,7 +181,9 @@ async def recalculate_order_items(db: AsyncSession, project_id: int, order_no: s
         return None, f"Заказ {order_no} не найден"
 
     # Load items
-    items_result = await db.execute(select(CostOrderItem).where(CostOrderItem.order_no == order_no))
+    items_result = await db.execute(
+        select(CostOrderItem).where(CostOrderItem.order_no == order_no, CostOrderItem.is_deleted == False)
+    )
     items = items_result.scalars().all()
     if not items:
         return 0, None
@@ -198,9 +200,9 @@ async def recalculate_order_items(db: AsyncSession, project_id: int, order_no: s
     # Calculate total volume for delivery split
     total_volume = sum(float(item.volume_m3 or 0) * int(item.qty or 1) for item in items)
     total_qty_all = sum(int(item.qty or 1) for item in items)
-    delivery_rub_total = float(order.delivery_cost_cny) * float(order.rate_cny) + float(
-        order.delivery_cost_usd
-    ) * float(order.rate_usd)
+    delivery_rub_total = Decimal(str(order.delivery_cost_cny)) * Decimal(str(order.rate_cny)) + Decimal(
+        str(order.delivery_cost_usd)
+    ) * Decimal(str(order.rate_usd))
 
     vat_rate_dec = Decimal(str(vat_rate / 100)) if vat_rate else DEFAULT_VAT_RATE
     updated = 0

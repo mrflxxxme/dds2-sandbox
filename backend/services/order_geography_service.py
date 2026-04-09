@@ -1,7 +1,8 @@
 """Order geography service — aggregates WB orders by delivery city/region."""
+
 import logging
-from collections import Counter, defaultdict
-from datetime import date, timedelta
+from collections import Counter
+from datetime import date
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,8 +27,8 @@ async def get_order_geography(
     Returns cities with order counts, daily chart data, available dates,
     and filter options (brands, categories, articles).
     """
-    from backend.services.funnel.wb_api_client import get_wb_key, fetch_supplier_orders
     from backend.models.order_city import OrderCityMap
+    from backend.services.funnel.wb_api_client import fetch_supplier_orders, get_wb_key
 
     api_key = await get_wb_key(db, project_id, "wb")
     if not api_key:
@@ -35,9 +36,7 @@ async def get_order_geography(
 
     # Load city map from uploaded Excel
     city_rows = await db.execute(
-        select(OrderCityMap.srid, OrderCityMap.city, OrderCityMap.okrug).where(
-            OrderCityMap.project_id == project_id
-        )
+        select(OrderCityMap.srid, OrderCityMap.city, OrderCityMap.okrug).where(OrderCityMap.project_id == project_id)
     )
     city_map: dict[str, str] = {}
     okrug_map: dict[str, str] = {}
@@ -62,8 +61,8 @@ async def get_order_geography(
     brands_set: set[str] = set()
     categories_set: set[str] = set()
     articles_set: set[str] = set()
-    city_region: dict[str, str] = {}    # city -> regionName
-    city_okrug: dict[str, str] = {}     # city -> okrug
+    city_region: dict[str, str] = {}  # city -> regionName
+    city_okrug: dict[str, str] = {}  # city -> okrug
 
     for order in orders:
         order_date_str = order.get("date", "")[:10]
@@ -122,12 +121,14 @@ async def get_order_geography(
     # Build cities list sorted by count desc
     cities = []
     for city_name, count in city_counter.most_common():
-        cities.append({
-            "city": city_name,
-            "region": city_region.get(city_name, ""),
-            "okrug": city_okrug.get(city_name, ""),
-            "order_count": count,
-        })
+        cities.append(
+            {
+                "city": city_name,
+                "region": city_region.get(city_name, ""),
+                "okrug": city_okrug.get(city_name, ""),
+                "order_count": count,
+            }
+        )
 
     # Build daily chart data sorted by date
     daily = [{"date": d, "count": daily_counter[d]} for d in sorted(daily_counter)]
@@ -148,6 +149,64 @@ async def get_order_geography(
             "categories": sorted(categories_set),
             "articles": sorted(articles_set),
         },
+    }
+
+
+async def upsert_order_city_mappings(db: AsyncSession, project_id: int, mappings: list[dict]) -> int:
+    """Upsert order city mappings from parsed Excel data. Returns affected rows."""
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from backend.models.order_city import OrderCityMap
+
+    inserted = 0
+    batch_size = 500
+    for i in range(0, len(mappings), batch_size):
+        batch = mappings[i : i + batch_size]
+        stmt = pg_insert(OrderCityMap).values(
+            [
+                {
+                    "project_id": project_id,
+                    "srid": m["srid"],
+                    "city": m["city"],
+                    "okrug": m.get("okrug"),
+                    "order_date": m.get("order_date"),
+                }
+                for m in batch
+            ]
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["project_id", "srid"],
+            set_={"city": stmt.excluded.city, "okrug": stmt.excluded.okrug, "order_date": stmt.excluded.order_date},
+        )
+        result = await db.execute(stmt)
+        affected = result.rowcount or 0
+        inserted += affected
+
+    await db.commit()
+    return inserted
+
+
+async def get_order_cities_status(db: AsyncSession, project_id: int) -> dict:
+    """Get status of uploaded order city mappings for hypothetical forecast."""
+    from sqlalchemy import func as sqlfunc
+
+    from backend.models.order_city import OrderCityMap
+
+    result = await db.execute(
+        select(
+            sqlfunc.count(OrderCityMap.id).label("total"),
+            sqlfunc.min(OrderCityMap.order_date).label("date_from"),
+            sqlfunc.max(OrderCityMap.order_date).label("date_to"),
+            sqlfunc.max(OrderCityMap.updated_at).label("last_updated"),
+        ).where(OrderCityMap.project_id == project_id)
+    )
+    row = result.one()
+    return {
+        "has_data": (row.total or 0) > 0,
+        "total_mappings": row.total or 0,
+        "date_from": row.date_from.isoformat() if row.date_from else None,
+        "date_to": row.date_to.isoformat() if row.date_to else None,
+        "last_updated": row.last_updated.isoformat() if row.last_updated else None,
     }
 
 

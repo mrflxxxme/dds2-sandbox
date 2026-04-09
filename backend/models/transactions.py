@@ -112,3 +112,5 @@ class ImportLog(Base):
     status: Mapped[str] = mapped_column(String(20), default="OK")
     error_msg: Mapped[str | None] = mapped_column(Text)
     file_url: Mapped[str | None] = mapped_column(String(500))  # MinIO object path
+
+    __table_args__ = (Index("ix_import_log_project_id", "project_id"),)
