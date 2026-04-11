@@ -52,12 +52,8 @@ class TestRateLimiterUnit:
         request = _make_request()
 
         mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value="2")  # 2 out of 5
-        mock_pipe = AsyncMock()
-        mock_pipe.incr = MagicMock()
-        mock_pipe.expire = MagicMock()
-        mock_pipe.execute = AsyncMock()
-        mock_redis.pipeline = MagicMock(return_value=mock_pipe)
+        # eval returns post-incr counter; 2 is under the limit of 5
+        mock_redis.eval = AsyncMock(return_value=2)
 
         with (
             patch.dict(os.environ, {}, clear=False),
@@ -67,9 +63,13 @@ class TestRateLimiterUnit:
             # Should not raise
             await limiter(request)
 
-        # Verify counter was incremented
-        mock_pipe.incr.assert_called_once()
-        mock_pipe.expire.assert_called_once_with("rate_limit:test_under:127.0.0.1", 60)
+        # Verify eval was called once with the expected key
+        mock_redis.eval.assert_called_once()
+        args = mock_redis.eval.call_args.args
+        # eval(script, numkeys, key, window)
+        assert args[1] == 1
+        assert args[2] == "rate_limit:test_under:127.0.0.1"
+        assert args[3] == 60
 
     @pytest.mark.asyncio
     async def test_blocks_requests_over_limit(self):
@@ -78,7 +78,8 @@ class TestRateLimiterUnit:
         request = _make_request()
 
         mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value="5")  # At limit
+        # Counter just tipped over the limit (6 > 5)
+        mock_redis.eval = AsyncMock(return_value=6)
 
         with (
             patch("backend.utils.rate_limit.os.environ.get", return_value=None),
@@ -97,7 +98,7 @@ class TestRateLimiterUnit:
         request = _make_request()
 
         mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value="10")
+        mock_redis.eval = AsyncMock(return_value=11)
 
         with (
             patch("backend.utils.rate_limit.os.environ.get", return_value=None),
@@ -128,7 +129,7 @@ class TestRateLimiterUnit:
         request = _make_request()
 
         mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(side_effect=ConnectionError("Redis down"))
+        mock_redis.eval = AsyncMock(side_effect=ConnectionError("Redis down"))
 
         with (
             patch("backend.utils.rate_limit.os.environ.get", return_value=None),
@@ -144,12 +145,7 @@ class TestRateLimiterUnit:
         request = _make_request_with_header("10.0.0.1")
 
         mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value=None)
-        mock_pipe = AsyncMock()
-        mock_pipe.incr = MagicMock()
-        mock_pipe.expire = MagicMock()
-        mock_pipe.execute = AsyncMock()
-        mock_redis.pipeline = MagicMock(return_value=mock_pipe)
+        mock_redis.eval = AsyncMock(return_value=1)
 
         with (
             patch("backend.utils.rate_limit.os.environ.get", return_value=None),
@@ -158,29 +154,27 @@ class TestRateLimiterUnit:
             await limiter(request)
 
         # Key must use client.host (127.0.0.1), NOT spoofable x-real-ip header
-        mock_pipe.incr.assert_called_once_with("rate_limit:test_ip:127.0.0.1")
+        mock_redis.eval.assert_called_once()
+        args = mock_redis.eval.call_args.args
+        assert args[2] == "rate_limit:test_ip:127.0.0.1"
 
     @pytest.mark.asyncio
-    async def test_first_request_no_existing_counter(self):
-        """First request (redis.get returns None) should be allowed."""
+    async def test_first_request_counted_as_one(self):
+        """First request should be allowed (eval returns 1 = first in window)."""
         limiter = RateLimiter(limit=5, window=60, action="test_first")
         request = _make_request()
 
         mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value=None)
-        mock_pipe = AsyncMock()
-        mock_pipe.incr = MagicMock()
-        mock_pipe.expire = MagicMock()
-        mock_pipe.execute = AsyncMock()
-        mock_redis.pipeline = MagicMock(return_value=mock_pipe)
+        mock_redis.eval = AsyncMock(return_value=1)
 
         with (
             patch("backend.utils.rate_limit.os.environ.get", return_value=None),
             patch("backend.cache.get_redis", return_value=mock_redis),
         ):
+            # Should not raise
             await limiter(request)
 
-        mock_pipe.incr.assert_called_once()
+        mock_redis.eval.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_different_actions_independent(self):
@@ -189,20 +183,8 @@ class TestRateLimiterUnit:
         limiter_b = RateLimiter(limit=5, window=60, action="action_b")
         request = _make_request()
 
-        calls = []
-
         mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value=None)
-
-        mock_pipe = AsyncMock()
-
-        def track_incr(key):
-            calls.append(key)
-
-        mock_pipe.incr = MagicMock(side_effect=track_incr)
-        mock_pipe.expire = MagicMock()
-        mock_pipe.execute = AsyncMock()
-        mock_redis.pipeline = MagicMock(return_value=mock_pipe)
+        mock_redis.eval = AsyncMock(return_value=1)
 
         with (
             patch("backend.utils.rate_limit.os.environ.get", return_value=None),
@@ -211,8 +193,28 @@ class TestRateLimiterUnit:
             await limiter_a(request)
             await limiter_b(request)
 
-        assert "rate_limit:action_a:127.0.0.1" in calls
-        assert "rate_limit:action_b:127.0.0.1" in calls
+        # Collect all eval key arguments (args[2] is the key)
+        keys = [call.args[2] for call in mock_redis.eval.call_args_list]
+        assert "rate_limit:action_a:127.0.0.1" in keys
+        assert "rate_limit:action_b:127.0.0.1" in keys
+
+    @pytest.mark.asyncio
+    async def test_ttl_not_reset_on_subsequent_requests(self):
+        """
+        Regression test for incident 2026-04-09: the old implementation called
+        `pipe.expire()` unconditionally on every request, which reset the TTL
+        every time a client made a request faster than `window` seconds.
+
+        The new Lua script only sets EXPIRE when INCR returns 1, so the TTL
+        is not extended on later requests. This test documents that contract
+        by checking the Lua script used in the eval call.
+        """
+        from backend.utils.rate_limit import _INCR_EXPIRE_LUA
+
+        # The script MUST only call EXPIRE conditionally on `current == 1`.
+        assert "INCR" in _INCR_EXPIRE_LUA
+        assert "if current == 1" in _INCR_EXPIRE_LUA
+        assert "EXPIRE" in _INCR_EXPIRE_LUA
 
     @pytest.mark.asyncio
     async def test_pre_configured_instances(self):
