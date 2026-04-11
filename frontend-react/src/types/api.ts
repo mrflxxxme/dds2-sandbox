@@ -1733,6 +1733,67 @@ export interface VehicleStatusHistoryEntry {
   comment: string | null;
 }
 
+// ─── Supplier Catalog ─────────────────────────────────────────────────────────
+
+export interface SkuOrderHistoryEntry {
+  factory_order_id: number;
+  order_number: string;
+  order_date: string | null;
+  qty: number;
+  price_cny: string;
+  amount: string;
+  vehicle_order_no: string | null;
+  vehicle_status: string | null;
+  is_delivered: boolean;
+}
+
+export interface SupplierCatalogItem {
+  barcode: string;
+  article_seller: string | null;
+  subject: string | null;
+  box_size: string | null;
+  pcs_per_box: number | null;
+  weight_kg: string | null;
+  total_qty: number;
+  last_price: string;
+  avg_price: string;
+  total_amount: string;
+  orders_count: number;
+  last_order_date: string | null;
+  delivered_qty: number;
+  order_history: SkuOrderHistoryEntry[];
+}
+
+export interface SupplierCatalogSubjectGroup {
+  subject: string;
+  sku_count: number;
+  total_qty: number;
+  total_amount: string;
+  delivered_qty: number;
+  items: SupplierCatalogItem[];
+}
+
+export interface SupplierCatalogSummary {
+  orders_count: number;
+  sku_count: number;
+  total_qty: number;
+  total_amount: string;
+  delivered_amount: string;
+}
+
+export interface SupplierCatalogSupplierInfo {
+  id: number;
+  name: string;
+  country: string;
+  currency: string;
+}
+
+export interface SupplierCatalogResponse {
+  supplier: SupplierCatalogSupplierInfo;
+  summary: SupplierCatalogSummary;
+  subjects: SupplierCatalogSubjectGroup[];
+}
+
 // ─── AI Chat ──────────────────────────────────────────────────────────────────
 
 export interface AiConversation {

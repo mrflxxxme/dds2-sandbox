@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from backend.cache import invalidate_cache
 from backend.models.cost import CostOrder, CostOrderItem, Nomenclature
 from backend.models.enums import FactoryOrderStatus, VehicleStatus
 from backend.models.supply_chain import FactoryOrder, FactoryOrderHistory, FactoryOrderItem, Supplier
@@ -22,6 +23,10 @@ from backend.schemas.supply_chain import (
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
+
+
+async def _invalidate_supplier_catalog(project_id: int) -> None:
+    await invalidate_cache(f"supply_chain:supplier_catalog:project_id={project_id}")
 
 
 # ─── History helpers ──────────────────────────────────────────────────────────
@@ -240,8 +245,14 @@ async def create_factory_order(
     )
 
     await db.commit()
-    await db.refresh(order, ["items"])
-    return order
+    await _invalidate_supplier_catalog(project_id)
+    # Re-fetch with eager-loaded items + supplier (avoids lazy-load MissingGreenlet in async)
+    created = await get_factory_order(db, project_id, order.id)
+    if created is None:
+        # Unreachable in practice — row was just committed above — but keeps mypy happy
+        msg = f"Failed to reload factory order {order.id} after commit"
+        raise RuntimeError(msg)
+    return created
 
 
 async def update_factory_order(
@@ -270,8 +281,9 @@ async def update_factory_order(
         setattr(order, field, value)
 
     await db.commit()
-    await db.refresh(order, ["items", "supplier"])
-    return order
+    await _invalidate_supplier_catalog(project_id)
+    # Re-fetch with eager-loaded items + supplier
+    return await get_factory_order(db, project_id, order_id)
 
 
 async def delete_factory_order(db: AsyncSession, project_id: int, order_id: int) -> bool:
@@ -282,6 +294,7 @@ async def delete_factory_order(db: AsyncSession, project_id: int, order_id: int)
 
     order.soft_delete()
     await db.commit()
+    await _invalidate_supplier_catalog(project_id)
     return True
 
 
@@ -330,6 +343,7 @@ async def add_items(
     await db.commit()
     for item in created:
         await db.refresh(item)
+    await _invalidate_supplier_catalog(project_id)
     return created
 
 
@@ -436,6 +450,7 @@ async def split_to_vehicles(
     for v_order_no in vehicles_used:
         await recalculate_order_items(db, project_id, v_order_no)
 
+    await _invalidate_supplier_catalog(project_id)
     return {"ok": True, "created_cost_items": created_cost_items}
 
 
@@ -490,6 +505,7 @@ async def update_item(
 
     await db.commit()
     await db.refresh(item)
+    await _invalidate_supplier_catalog(project_id)
     return item
 
 
@@ -526,6 +542,7 @@ async def delete_item(
 
     await db.delete(item)
     await db.commit()
+    await _invalidate_supplier_catalog(project_id)
     return True
 
 

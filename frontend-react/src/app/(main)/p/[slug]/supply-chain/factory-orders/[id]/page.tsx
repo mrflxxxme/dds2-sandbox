@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 import { formatNumber, formatDate, formatDateTime, exportToExcel, calcTotalBoxesWithMix } from '@/lib/utils';
 import PageHeader from '@/components/PageHeader';
 import BoxDetailCell, { BoxDetailExpandRow } from '@/components/BoxDetailCell';
-import type { FactoryOrder, FactoryOrderItem, FactoryOrderItemUpdate, FactoryOrderHistory, Nomenclature } from '@/types/api';
+import type { FactoryOrder, FactoryOrderItem, FactoryOrderItemUpdate, FactoryOrderHistory, Nomenclature, Supplier } from '@/types/api';
 import { LanguageProvider, useT, LanguageToggle } from '../../i18n';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -143,9 +143,11 @@ function OrderInfoCard({ order, onUpdated }: { order: FactoryOrder; onUpdated: (
     const { t } = useT();
     const [editing, setEditing] = useState(false);
     const [saving, setSaving] = useState(false);
+    const [suppliers, setSuppliers] = useState<Supplier[]>([]);
     const [form, setForm] = useState({
         order_number: order.order_number || '',
         factory_name: order.factory_name || '',
+        supplier_id: order.supplier_id ?? undefined as number | undefined,
         order_date: order.order_date || '',
         expected_ready_date: order.expected_ready_date || '',
         total_cny: order.total_cny != null ? String(order.total_cny) : '',
@@ -153,9 +155,14 @@ function OrderInfoCard({ order, onUpdated }: { order: FactoryOrder; onUpdated: (
     });
 
     useEffect(() => {
+        api.getSuppliers().then(setSuppliers).catch(() => {});
+    }, []);
+
+    useEffect(() => {
         setForm({
             order_number: order.order_number || '',
             factory_name: order.factory_name || '',
+            supplier_id: order.supplier_id ?? undefined,
             order_date: order.order_date || '',
             expected_ready_date: order.expected_ready_date || '',
             total_cny: order.total_cny != null ? String(order.total_cny) : '',
@@ -163,12 +170,22 @@ function OrderInfoCard({ order, onUpdated }: { order: FactoryOrder; onUpdated: (
         });
     }, [order]);
 
+    const handleSupplierChange = (supplierId: number | undefined) => {
+        const supplier = suppliers.find(s => s.id === supplierId);
+        setForm(f => ({
+            ...f,
+            supplier_id: supplierId,
+            factory_name: supplier ? supplier.name : f.factory_name,
+        }));
+    };
+
     const handleSave = async () => {
         setSaving(true);
         try {
             await api.updateFactoryOrder(order.id, {
                 order_number: form.order_number || order.order_number,
                 factory_name: form.factory_name || undefined,
+                supplier_id: form.supplier_id,
                 order_date: form.order_date || undefined,
                 expected_ready_date: form.expected_ready_date || undefined,
                 total_cny: form.total_cny ? Number(parseNum(form.total_cny)) : undefined,
@@ -181,6 +198,8 @@ function OrderInfoCard({ order, onUpdated }: { order: FactoryOrder; onUpdated: (
         }
         setSaving(false);
     };
+
+    const supplierDisplayValue = order.supplier?.name || order.factory_name || undefined;
 
     const editInput: React.CSSProperties = {
         padding: '4px 8px', borderRadius: 6, border: '1px solid var(--color-border)',
@@ -217,8 +236,21 @@ function OrderInfoCard({ order, onUpdated }: { order: FactoryOrder; onUpdated: (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px 24px' }}>
                 <InfoField label={t('detail_field_order_number')} value={order.order_number} editing={editing}
                     input={<input value={form.order_number} onChange={e => setForm(f => ({ ...f, order_number: e.target.value }))} style={editInput} />} />
-                <InfoField label={t('detail_field_supplier')} value={order.factory_name} editing={editing}
-                    input={<input value={form.factory_name} onChange={e => setForm(f => ({ ...f, factory_name: e.target.value }))} placeholder="—" style={editInput} />} />
+                <InfoField label={t('detail_field_supplier')} value={supplierDisplayValue} editing={editing}
+                    input={
+                        <select
+                            value={form.supplier_id ?? ''}
+                            onChange={e => handleSupplierChange(e.target.value ? Number(e.target.value) : undefined)}
+                            style={editInput}
+                        >
+                            <option value="">—</option>
+                            {suppliers.map(s => (
+                                <option key={s.id} value={s.id}>
+                                    {s.name} ({s.country === 'CHINA' ? 'CN' : 'RU'})
+                                </option>
+                            ))}
+                        </select>
+                    } />
                 <InfoField label={t('col_created_date')} value={order.order_date ? formatDate(order.order_date) : undefined} editing={editing}
                     input={<input type="date" value={form.order_date} onChange={e => setForm(f => ({ ...f, order_date: e.target.value }))} style={editInput} />} />
                 <InfoField label={t('detail_field_ready_date')} value={order.expected_ready_date ? formatDate(order.expected_ready_date) : undefined} editing={editing}

@@ -92,3 +92,6 @@ class RateLimiter:
 # Pre-configured instances for common use cases
 rate_limit_import = RateLimiter(limit=5, window=60, action="import")
 rate_limit_write = RateLimiter(limit=30, window=60, action="write")
+# For heavy read endpoints whose cache-miss path runs expensive JOIN queries
+# (e.g. supplier catalog) — protects against flood when Redis is unavailable.
+rate_limit_read_heavy = RateLimiter(limit=60, window=60, action="read_heavy")

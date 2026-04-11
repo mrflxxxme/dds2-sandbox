@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel, calcTotalBoxesWithMix } from '@/lib/utils';
@@ -42,6 +42,10 @@ import type {
     SplitItem,
     Warehouse,
     Supplier,
+    SupplierCatalogResponse,
+    SupplierCatalogItem,
+    SupplierCatalogSubjectGroup,
+    SkuOrderHistoryEntry,
 } from '@/types/api';
 import { CONTAINERS } from '@/app/(main)/p/[slug]/container-loader/lib/packer';
 
@@ -1790,9 +1794,511 @@ const emptySupplierForm = (): SupplierFormState => ({
     note: '',
 });
 
+// ─── Supplier Catalog View ──────────────────────────────────────────────────
+
+const supplierFlag = (country: string): string =>
+    country === 'CHINA' ? '\uD83C\uDDE8\uD83C\uDDF3' : '\uD83C\uDDF7\uD83C\uDDFA';
+
+const currencySymbol = (currency: string): string => (currency === 'RUB' ? '\u20BD' : '\u00A5');
+
+function CatalogHistoryStatusBadge({ entry }: { entry: SkuOrderHistoryEntry }) {
+    const { t } = useT();
+    if (entry.is_delivered) {
+        return <span className="badge badge-success">{t('catalog_status_delivered')}</span>;
+    }
+    if (entry.vehicle_order_no) {
+        return <span className="badge badge-info">{t('catalog_status_in_transit')}</span>;
+    }
+    return <span className="badge badge-secondary">{t('catalog_status_at_factory')}</span>;
+}
+
+function SupplierCatalogView({
+    supplierId,
+    onBack,
+}: {
+    supplierId: number;
+    onBack: () => void;
+}) {
+    const { t } = useT();
+    const [catalog, setCatalog] = useState<SupplierCatalogResponse | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [search, setSearch] = useState('');
+    const [subjectFilter, setSubjectFilter] = useState<string>('all');
+    const [onlyRemaining, setOnlyRemaining] = useState(false);
+    const [expandedSku, setExpandedSku] = useState<Set<string>>(new Set());
+    const [collapsedSubjects, setCollapsedSubjects] = useState<Set<string>>(new Set());
+
+    const loadCatalog = useCallback(async () => {
+        setLoading(true);
+        setError(null);
+        try {
+            const data = await api.getSupplierCatalog(supplierId);
+            setCatalog(data);
+            // Default: first subject expanded, all others collapsed
+            if (data.subjects.length > 1) {
+                setCollapsedSubjects(new Set(data.subjects.slice(1).map(g => g.subject)));
+            } else {
+                setCollapsedSubjects(new Set());
+            }
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : t('msg_loading_error'));
+        }
+        setLoading(false);
+    }, [supplierId, t]);
+
+    useEffect(() => { loadCatalog(); }, [loadCatalog]);
+
+    const filteredSubjects = useMemo((): SupplierCatalogSubjectGroup[] => {
+        if (!catalog) return [];
+        const q = search.trim().toLowerCase();
+        return catalog.subjects
+            .filter(g => subjectFilter === 'all' || g.subject === subjectFilter)
+            .map(g => {
+                const items = g.items.filter(it => {
+                    if (onlyRemaining && it.delivered_qty >= it.total_qty) return false;
+                    if (!q) return true;
+                    return (
+                        it.barcode.toLowerCase().includes(q) ||
+                        (it.article_seller || '').toLowerCase().includes(q) ||
+                        (it.subject || '').toLowerCase().includes(q)
+                    );
+                });
+                return { ...g, items };
+            })
+            .filter(g => g.items.length > 0);
+    }, [catalog, search, subjectFilter, onlyRemaining]);
+
+    const handleExport = useCallback(() => {
+        if (!catalog) return;
+        const sym = currencySymbol(catalog.supplier.currency);
+        const rows = filteredSubjects.flatMap(g =>
+            g.items.map(it => ({
+                [t('catalog_subject_empty')]: g.subject,
+                [t('catalog_col_barcode')]: it.barcode,
+                [t('catalog_col_article')]: it.article_seller || '',
+                [t('catalog_col_size')]: it.box_size || '',
+                [t('catalog_col_per_box')]: it.pcs_per_box ?? '',
+                [t('catalog_col_weight')]: it.weight_kg ? Number(it.weight_kg) : '',
+                [t('catalog_col_total_qty')]: it.total_qty,
+                [`${t('catalog_col_last_price')}, ${sym}`]: Number(it.last_price),
+                [`${t('catalog_col_avg_price')}, ${sym}`]: Number(it.avg_price),
+                [`${t('catalog_col_amount')}, ${sym}`]: Number(it.total_amount),
+                [t('catalog_col_delivered')]: it.delivered_qty,
+                [t('catalog_col_orders_count')]: it.orders_count,
+            }))
+        );
+        const filename = `${t('catalog_excel_filename')}_${catalog.supplier.name}_${new Date().toISOString().slice(0, 10)}`;
+        exportToExcel(rows, filename);
+    }, [catalog, filteredSubjects, t]);
+
+    const toggleSubject = (subject: string) => {
+        setCollapsedSubjects(prev => {
+            const next = new Set(prev);
+            if (next.has(subject)) next.delete(subject);
+            else next.add(subject);
+            return next;
+        });
+    };
+
+    const toggleSku = (barcode: string) => {
+        setExpandedSku(prev => {
+            const next = new Set(prev);
+            if (next.has(barcode)) next.delete(barcode);
+            else next.add(barcode);
+            return next;
+        });
+    };
+
+    if (loading) {
+        return (
+            <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>
+                <div className="spinner" style={{ margin: '0 auto 12px' }} />
+                {t('msg_loading')}
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="glass-card" style={{ padding: 16, color: 'var(--color-danger)' }}>
+                {error}
+                <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={loadCatalog}>
+                    {t('btn_retry')}
+                </button>
+            </div>
+        );
+    }
+
+    if (!catalog) return null;
+
+    const sym = currencySymbol(catalog.supplier.currency);
+    const flag = supplierFlag(catalog.supplier.country);
+
+    return (
+        <div>
+            {/* Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
+                <div>
+                    <button
+                        onClick={onBack}
+                        style={{
+                            background: 'none',
+                            border: 'none',
+                            color: 'var(--color-accent)',
+                            fontSize: 13,
+                            cursor: 'pointer',
+                            padding: 0,
+                            marginBottom: 8,
+                        }}
+                    >
+                        {t('catalog_back_to_list')}
+                    </button>
+                    <h1 style={{ fontSize: 28, fontWeight: 700, letterSpacing: '-0.03em', margin: 0 }}>
+                        <span style={{ marginRight: 10 }}>{flag}</span>
+                        {catalog.supplier.name}
+                        <span style={{ color: 'var(--color-text-muted)', fontWeight: 400, fontSize: 18, marginLeft: 10 }}>
+                            · {catalog.supplier.currency}
+                        </span>
+                    </h1>
+                    <div style={{ fontSize: 15, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                        {t('catalog_subtitle')}
+                    </div>
+                </div>
+                <button className="btn btn-sm" onClick={handleExport} disabled={filteredSubjects.length === 0}>
+                    📥 Excel
+                </button>
+            </div>
+
+            {/* KPI */}
+            <div className="stats-grid" style={{ marginBottom: 24 }}>
+                <div className="glass-card" style={{ padding: '20px 24px' }}>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                        {t('catalog_kpi_orders')}
+                    </div>
+                    <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--color-accent)' }}>
+                        {catalog.summary.orders_count}
+                    </div>
+                </div>
+                <div className="glass-card" style={{ padding: '20px 24px' }}>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                        {t('catalog_kpi_sku')}
+                    </div>
+                    <div style={{ fontSize: 28, fontWeight: 700 }}>{catalog.summary.sku_count}</div>
+                </div>
+                <div className="glass-card" style={{ padding: '20px 24px' }}>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                        {t('catalog_kpi_qty')}
+                    </div>
+                    <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--color-warning)' }}>
+                        {formatNumber(catalog.summary.total_qty, 0)}
+                    </div>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                        {t('unit_pcs')}
+                    </div>
+                </div>
+                <div className="glass-card" style={{ padding: '20px 24px' }}>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                        {t('catalog_kpi_amount')}
+                    </div>
+                    <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--color-success)' }}>
+                        {formatNumber(Number(catalog.summary.total_amount), 0)}
+                    </div>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 4 }}>{sym}</div>
+                </div>
+            </div>
+
+            {/* Toolbar */}
+            <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap', alignItems: 'center' }}>
+                <input
+                    type="text"
+                    value={search}
+                    onChange={e => setSearch(e.target.value)}
+                    placeholder={t('catalog_search_placeholder')}
+                    style={{
+                        flex: 1,
+                        minWidth: 240,
+                        padding: '10px 14px',
+                        borderRadius: 12,
+                        border: '1px solid var(--color-border)',
+                        background: 'white',
+                        fontSize: 14,
+                    }}
+                />
+                <select
+                    value={subjectFilter}
+                    onChange={e => setSubjectFilter(e.target.value)}
+                    style={{
+                        padding: '10px 14px',
+                        borderRadius: 12,
+                        border: '1px solid var(--color-border)',
+                        background: 'white',
+                        fontSize: 14,
+                        minWidth: 180,
+                    }}
+                >
+                    <option value="all">{t('catalog_subject_all')}</option>
+                    {catalog.subjects.map(g => (
+                        <option key={g.subject} value={g.subject}>
+                            {g.subject}
+                        </option>
+                    ))}
+                </select>
+                <label style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    fontSize: 13,
+                    color: 'var(--color-text-muted)',
+                }}>
+                    <input
+                        type="checkbox"
+                        checked={onlyRemaining}
+                        onChange={e => setOnlyRemaining(e.target.checked)}
+                    />
+                    {t('catalog_only_remaining')}
+                </label>
+            </div>
+
+            {/* Empty state */}
+            {filteredSubjects.length === 0 && (
+                <div className="empty-state">
+                    <div className="empty-state-icon">📦</div>
+                    <div>{t('catalog_empty')}</div>
+                </div>
+            )}
+
+            {/* Subject groups */}
+            {filteredSubjects.map(group => {
+                const collapsed = collapsedSubjects.has(group.subject);
+                const groupTotalQty = group.items.reduce((s, it) => s + it.total_qty, 0);
+                const groupTotalAmount = group.items.reduce((s, it) => s + Number(it.total_amount), 0);
+                const groupDelivered = group.items.reduce((s, it) => s + it.delivered_qty, 0);
+                const deliveredPct = groupTotalQty > 0 ? Math.round((groupDelivered / groupTotalQty) * 100) : 0;
+
+                return (
+                    <div key={group.subject} className="glass-card" style={{ padding: 0, marginBottom: 16, overflow: 'hidden' }}>
+                        <div
+                            onClick={() => toggleSubject(group.subject)}
+                            style={{
+                                padding: '16px 24px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                cursor: 'pointer',
+                                background: 'rgba(0,0,0,0.02)',
+                            }}
+                        >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 16, fontWeight: 700 }}>
+                                <span style={{
+                                    display: 'inline-block',
+                                    fontSize: 12,
+                                    color: 'var(--color-text-muted)',
+                                    transform: collapsed ? 'rotate(-90deg)' : 'none',
+                                    transition: 'transform 0.2s',
+                                }}>
+                                    ▼
+                                </span>
+                                {group.subject}
+                            </div>
+                            <div style={{ display: 'flex', gap: 24, fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                <div><strong style={{ color: 'var(--color-text)' }}>{group.items.length}</strong> {t('catalog_sku_unit')}</div>
+                                <div><strong style={{ color: 'var(--color-text)' }}>{formatNumber(groupTotalQty, 0)}</strong> {t('unit_pcs')}</div>
+                                <div><strong style={{ color: 'var(--color-text)' }}>{formatNumber(groupTotalAmount, 0)} {sym}</strong></div>
+                                <div>{t('catalog_delivered_label')}: <strong style={{ color: 'var(--color-text)' }}>{deliveredPct}%</strong></div>
+                            </div>
+                        </div>
+                        {!collapsed && (
+                            <div style={{ overflowX: 'auto' }}>
+                                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                    <thead>
+                                        <tr>
+                                            <th style={catalogThStyle}>{t('catalog_col_barcode')}</th>
+                                            <th style={catalogThStyle}>{t('catalog_col_article')}</th>
+                                            <th style={catalogThStyle}>{t('catalog_col_size')}</th>
+                                            <th style={catalogThNumStyle}>{t('catalog_col_per_box')}</th>
+                                            <th style={catalogThNumStyle}>{t('catalog_col_weight')}</th>
+                                            <th style={catalogThNumStyle}>{t('catalog_col_total_qty')}</th>
+                                            <th style={catalogThNumStyle}>{t('catalog_col_last_price')}</th>
+                                            <th style={catalogThNumStyle}>{t('catalog_col_avg_price')}</th>
+                                            <th style={catalogThNumStyle}>{t('catalog_col_amount')}</th>
+                                            <th style={catalogThStyle}>{t('catalog_col_delivered')}</th>
+                                            <th style={catalogThNumStyle}>{t('catalog_col_orders_count')}</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {group.items.map(item => {
+                                            const expanded = expandedSku.has(item.barcode);
+                                            const deliveredPctItem = item.total_qty > 0
+                                                ? Math.round((item.delivered_qty / item.total_qty) * 100)
+                                                : 0;
+                                            return (
+                                                <React.Fragment key={item.barcode}>
+                                                    <tr
+                                                        onClick={() => toggleSku(item.barcode)}
+                                                        style={{
+                                                            cursor: 'pointer',
+                                                            borderTop: '1px solid var(--color-border)',
+                                                            background: expanded ? 'rgba(0, 113, 227, 0.04)' : undefined,
+                                                        }}
+                                                    >
+                                                        <td style={catalogTdMonoStyle}>{item.barcode}</td>
+                                                        <td style={catalogTdStyle}>{item.article_seller || '—'}</td>
+                                                        <td style={catalogTdStyle}>{item.box_size || '—'}</td>
+                                                        <td style={catalogTdNumStyle}>{item.pcs_per_box ?? '—'}</td>
+                                                        <td style={catalogTdNumStyle}>
+                                                            {item.weight_kg ? formatNumber(Number(item.weight_kg), 2) : '—'}
+                                                        </td>
+                                                        <td style={catalogTdNumStyle}>{formatNumber(item.total_qty, 0)}</td>
+                                                        <td style={catalogTdNumStyle}>
+                                                            {formatNumber(Number(item.last_price), 2)} {sym}
+                                                        </td>
+                                                        <td style={catalogTdNumStyle}>
+                                                            {formatNumber(Number(item.avg_price), 2)} {sym}
+                                                        </td>
+                                                        <td style={catalogTdNumStyle}>
+                                                            {formatNumber(Number(item.total_amount), 0)} {sym}
+                                                        </td>
+                                                        <td style={catalogTdStyle}>
+                                                            <div style={{
+                                                                display: 'inline-block',
+                                                                width: 120,
+                                                                height: 8,
+                                                                background: 'rgba(0,0,0,0.08)',
+                                                                borderRadius: 4,
+                                                                overflow: 'hidden',
+                                                                verticalAlign: 'middle',
+                                                                marginRight: 8,
+                                                            }}>
+                                                                <div style={{
+                                                                    width: `${deliveredPctItem}%`,
+                                                                    height: '100%',
+                                                                    background: 'var(--color-success)',
+                                                                    borderRadius: 4,
+                                                                }} />
+                                                            </div>
+                                                            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                                                {formatNumber(item.delivered_qty, 0)} / {formatNumber(item.total_qty, 0)}
+                                                            </span>
+                                                        </td>
+                                                        <td style={catalogTdNumStyle}>{item.orders_count}</td>
+                                                    </tr>
+                                                    {expanded && (
+                                                        <tr>
+                                                            <td colSpan={11} style={{
+                                                                padding: 0,
+                                                                background: 'rgba(0, 113, 227, 0.03)',
+                                                            }}>
+                                                                <div style={{ padding: '16px 24px' }}>
+                                                                    <div style={{
+                                                                        fontSize: 12,
+                                                                        fontWeight: 600,
+                                                                        textTransform: 'uppercase',
+                                                                        color: 'var(--color-text-muted)',
+                                                                        letterSpacing: '0.05em',
+                                                                        marginBottom: 8,
+                                                                    }}>
+                                                                        {t('catalog_history_title')} ({item.article_seller || item.barcode})
+                                                                    </div>
+                                                                    <div style={{
+                                                                        background: 'white',
+                                                                        borderRadius: 8,
+                                                                        overflow: 'hidden',
+                                                                        border: '1px solid var(--color-border)',
+                                                                    }}>
+                                                                        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                                                            <thead>
+                                                                                <tr>
+                                                                                    <th style={catalogSubThStyle}>{t('catalog_history_col_order')}</th>
+                                                                                    <th style={catalogSubThStyle}>{t('catalog_history_col_date')}</th>
+                                                                                    <th style={catalogSubThNumStyle}>{t('catalog_history_col_qty')}</th>
+                                                                                    <th style={catalogSubThNumStyle}>{t('catalog_history_col_price')}</th>
+                                                                                    <th style={catalogSubThNumStyle}>{t('catalog_history_col_amount')}</th>
+                                                                                    <th style={catalogSubThStyle}>{t('catalog_history_col_vehicle')}</th>
+                                                                                    <th style={catalogSubThStyle}>{t('catalog_history_col_status')}</th>
+                                                                                </tr>
+                                                                            </thead>
+                                                                            <tbody>
+                                                                                {item.order_history.map((h, idx) => (
+                                                                                    <tr key={`${h.factory_order_id}-${idx}`} style={{ borderTop: '1px solid var(--color-border)' }}>
+                                                                                        <td style={catalogSubTdStyle}>{h.order_number}</td>
+                                                                                        <td style={catalogSubTdStyle}>{formatDate(h.order_date)}</td>
+                                                                                        <td style={catalogSubTdNumStyle}>{formatNumber(h.qty, 0)}</td>
+                                                                                        <td style={catalogSubTdNumStyle}>{formatNumber(Number(h.price_cny), 2)} {sym}</td>
+                                                                                        <td style={catalogSubTdNumStyle}>{formatNumber(Number(h.amount), 0)} {sym}</td>
+                                                                                        <td style={catalogSubTdStyle}>{h.vehicle_order_no || '—'}</td>
+                                                                                        <td style={catalogSubTdStyle}><CatalogHistoryStatusBadge entry={h} /></td>
+                                                                                    </tr>
+                                                                                ))}
+                                                                            </tbody>
+                                                                        </table>
+                                                                    </div>
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    )}
+                                                </React.Fragment>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
+// ─── Catalog table style helpers ────────────────────────────────────────────
+const catalogThStyle: React.CSSProperties = {
+    padding: '12px 16px',
+    textAlign: 'left',
+    fontSize: 11,
+    fontWeight: 600,
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em',
+    color: 'var(--color-text-muted)',
+    background: 'rgba(0,0,0,0.015)',
+};
+const catalogThNumStyle: React.CSSProperties = { ...catalogThStyle, textAlign: 'right' };
+const catalogTdStyle: React.CSSProperties = { padding: '12px 16px', fontSize: 13, textAlign: 'left' };
+const catalogTdNumStyle: React.CSSProperties = {
+    padding: '12px 16px',
+    fontSize: 13,
+    textAlign: 'right',
+    fontVariantNumeric: 'tabular-nums',
+};
+const catalogTdMonoStyle: React.CSSProperties = {
+    padding: '12px 16px',
+    fontSize: 12,
+    fontFamily: "'SF Mono', Menlo, monospace",
+    textAlign: 'left',
+};
+const catalogSubThStyle: React.CSSProperties = {
+    padding: '10px 14px',
+    textAlign: 'left',
+    fontSize: 11,
+    fontWeight: 600,
+    color: 'var(--color-text-muted)',
+    background: 'rgba(0,0,0,0.015)',
+};
+const catalogSubThNumStyle: React.CSSProperties = { ...catalogSubThStyle, textAlign: 'right' };
+const catalogSubTdStyle: React.CSSProperties = { padding: '10px 14px', fontSize: 12, textAlign: 'left' };
+const catalogSubTdNumStyle: React.CSSProperties = {
+    padding: '10px 14px',
+    fontSize: 12,
+    textAlign: 'right',
+    fontVariantNumeric: 'tabular-nums',
+};
+
 function SuppliersTab() {
     const { t } = useT();
+    const router = useRouter();
+    const searchParams = useSearchParams();
     const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+    const [orders, setOrders] = useState<FactoryOrder[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [showForm, setShowForm] = useState(false);
@@ -1800,12 +2306,34 @@ function SuppliersTab() {
     const [form, setForm] = useState<SupplierFormState>(emptySupplierForm());
     const [submitting, setSubmitting] = useState(false);
 
+    // URL-sync for selected supplier (deeplink support)
+    const supplierParam = searchParams.get('supplier');
+    const selectedSupplierId = supplierParam ? Number(supplierParam) : null;
+
+    const openSupplierCatalog = useCallback((id: number) => {
+        const params = new URLSearchParams(searchParams.toString());
+        params.set('tab', 'suppliers');
+        params.set('supplier', String(id));
+        router.replace(`?${params.toString()}`, { scroll: false });
+    }, [router, searchParams]);
+
+    const closeSupplierCatalog = useCallback(() => {
+        const params = new URLSearchParams(searchParams.toString());
+        params.delete('supplier');
+        if (!params.get('tab')) params.set('tab', 'suppliers');
+        router.replace(`?${params.toString()}`, { scroll: false });
+    }, [router, searchParams]);
+
     const load = useCallback(async () => {
         setLoading(true);
         setError('');
         try {
-            const data = await api.getSuppliers();
-            setSuppliers(data);
+            const [suppliersData, ordersData] = await Promise.all([
+                api.getSuppliers(),
+                api.getFactoryOrders(),
+            ]);
+            setSuppliers(suppliersData);
+            setOrders(ordersData);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : t('msg_loading_error'));
         }
@@ -1813,6 +2341,47 @@ function SuppliersTab() {
     }, [t]);
 
     useEffect(() => { load(); }, [load]);
+
+    // Aggregate per-supplier stats from factory orders
+    const supplierStats = useMemo(() => {
+        const stats: Record<number, {
+            orders_count: number;
+            sku_count: number;
+            total_qty: number;
+            total_amount: number;
+        }> = {};
+        for (const order of orders) {
+            if (!order.supplier_id) continue;
+            const s = stats[order.supplier_id] ?? {
+                orders_count: 0,
+                sku_count: 0,
+                total_qty: 0,
+                total_amount: 0,
+            };
+            s.orders_count += 1;
+            const barcodes = new Set<string>();
+            for (const item of order.items || []) {
+                barcodes.add(item.barcode);
+                s.total_qty += item.qty;
+                s.total_amount += item.qty * Number(item.price_cny || 0);
+            }
+            // sku_count will be calculated across all orders for this supplier below
+            stats[order.supplier_id] = s;
+        }
+        // Second pass: compute unique barcodes per supplier
+        const barcodeMap: Record<number, Set<string>> = {};
+        for (const order of orders) {
+            if (!order.supplier_id) continue;
+            const set = barcodeMap[order.supplier_id] ?? new Set<string>();
+            for (const item of order.items || []) set.add(item.barcode);
+            barcodeMap[order.supplier_id] = set;
+        }
+        for (const sid of Object.keys(barcodeMap)) {
+            const idNum = Number(sid);
+            if (stats[idNum]) stats[idNum].sku_count = barcodeMap[idNum].size;
+        }
+        return stats;
+    }, [orders]);
 
     const openCreate = () => {
         setEditSupplier(null);
@@ -1880,6 +2449,11 @@ function SuppliersTab() {
         border: '1px solid var(--color-border)', background: 'var(--color-bg)',
         color: 'var(--color-text)', fontSize: 13,
     };
+
+    // Catalog view (deeplink supported)
+    if (selectedSupplierId != null) {
+        return <SupplierCatalogView supplierId={selectedSupplierId} onBack={closeSupplierCatalog} />;
+    }
 
     if (loading) {
         return (
@@ -2002,96 +2576,118 @@ function SuppliersTab() {
                 </div>
             )}
 
-            {/* Table */}
-            <div className="glass-card" style={{ overflow: 'hidden' }}>
-                <div style={{ padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--color-border)' }}>
-                    <h3 style={{ fontSize: 15, fontWeight: 600 }}>{t('suppliers_title')} ({suppliers.length})</h3>
-                    <button className="btn btn-primary btn-sm" onClick={openCreate}>
-                        {t('suppliers_btn_create')}
-                    </button>
-                </div>
+            {/* Title + create button */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>
+                    {t('suppliers_title')} ({suppliers.length})
+                </h3>
+                <button className="btn btn-primary btn-sm" onClick={openCreate}>
+                    {t('suppliers_btn_create')}
+                </button>
+            </div>
 
-                {suppliers.length === 0 ? (
+            {suppliers.length === 0 ? (
+                <div className="glass-card">
                     <div className="empty-state">
                         <div className="empty-state-icon">📋</div>
                         <div>{t('suppliers_empty')}</div>
                     </div>
-                ) : (
-                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                        <thead>
-                            <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                <th style={{ textAlign: 'left', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_name')}</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_country')}</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_currency')}</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_delivery_terms')}</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_note')}</th>
-                                <th style={{ textAlign: 'right', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500, width: 120 }}>{t('col_actions')}</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {suppliers.map(s => (
-                                <tr
-                                    key={s.id}
-                                    style={{ borderBottom: '1px solid var(--color-border)', transition: 'background 0.15s' }}
-                                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-secondary)')}
-                                    onMouseLeave={e => (e.currentTarget.style.background = '')}
-                                >
-                                    <td style={{ padding: '10px 16px', fontWeight: 600 }}>{s.name}</td>
-                                    <td style={{ padding: '10px 8px' }}>
-                                        <span style={{ fontSize: 16 }}>
-                                            {s.country === 'CHINA' ? '\uD83C\uDDE8\uD83C\uDDF3' : '\uD83C\uDDF7\uD83C\uDDFA'}
-                                        </span>
-                                        {' '}
-                                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                                            {s.country === 'CHINA' ? t('suppliers_form_country_china') : t('suppliers_form_country_russia')}
-                                        </span>
-                                    </td>
-                                    <td style={{ padding: '10px 8px' }}>
+                </div>
+            ) : (
+                <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+                    gap: 16,
+                }}>
+                    {suppliers.map(s => {
+                        const stats = supplierStats[s.id] ?? { orders_count: 0, sku_count: 0, total_qty: 0, total_amount: 0 };
+                        const sym = currencySymbol(s.currency);
+                        return (
+                            <div
+                                key={s.id}
+                                className="glass-card"
+                                style={{
+                                    padding: '20px 24px',
+                                    cursor: 'pointer',
+                                    position: 'relative',
+                                    transition: 'all 0.2s cubic-bezier(0.25, 1, 0.5, 1)',
+                                }}
+                                onClick={() => openSupplierCatalog(s.id)}
+                                onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = 'var(--shadow-glass-hover)'; }}
+                                onMouseLeave={e => { e.currentTarget.style.transform = ''; e.currentTarget.style.boxShadow = ''; }}
+                            >
+                                {/* Head: flag + name + currency badge + actions */}
+                                <div style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    marginBottom: 16,
+                                }}>
+                                    <div style={{ fontSize: 18, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
+                                        <span style={{ fontSize: 22 }}>{supplierFlag(s.country)}</span>
+                                        {s.name}
+                                    </div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                                         <span style={{
-                                            display: 'inline-block', padding: '2px 8px', borderRadius: 8,
-                                            fontSize: 12, fontWeight: 600,
-                                            background: s.currency === 'CNY' ? 'rgba(251,146,60,0.12)' : 'rgba(34,197,94,0.12)',
-                                            color: s.currency === 'CNY' ? '#ea580c' : '#16a34a',
+                                            fontSize: 11,
+                                            fontWeight: 600,
+                                            padding: '4px 8px',
+                                            background: 'rgba(0, 113, 227, 0.1)',
+                                            color: 'var(--color-accent)',
+                                            borderRadius: 24,
                                         }}>
-                                            {s.currency === 'CNY' ? '\u00A5 CNY' : '\u20BD RUB'}
+                                            {s.currency}
                                         </span>
-                                    </td>
-                                    <td style={{ padding: '10px 8px', color: 'var(--color-text-muted)' }}>
-                                        {s.delivery_days_min != null && s.delivery_days_max != null
-                                            ? `${s.delivery_days_min}–${s.delivery_days_max} ${t('unit_days')}`
-                                            : s.delivery_days_min != null
-                                                ? `${t('unit_from')} ${s.delivery_days_min} ${t('unit_days')}`
-                                                : s.delivery_days_max != null
-                                                    ? `${t('unit_to')} ${s.delivery_days_max} ${t('unit_days')}`
-                                                    : '\u2014'}
-                                    </td>
-                                    <td style={{ padding: '10px 8px', color: 'var(--color-text-muted)', fontSize: 12 }}>
-                                        {s.note || '\u2014'}
-                                    </td>
-                                    <td style={{ padding: '10px 16px', textAlign: 'right' }}>
-                                        <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
-                                            <button
-                                                className="btn btn-secondary btn-sm"
-                                                style={{ fontSize: 11, padding: '2px 8px' }}
-                                                onClick={() => openEdit(s)}
-                                            >
-                                                {t('btn_edit')}
-                                            </button>
-                                            <button
-                                                className="btn btn-danger btn-sm"
-                                                style={{ fontSize: 11, padding: '2px 8px' }}
-                                                onClick={() => handleDelete(s.id, s.name)}
-                                            >
-                                                {t('btn_delete')}
-                                            </button>
-                                        </div>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                )}
-            </div>
+                                    </div>
+                                </div>
+                                {/* Metrics rows */}
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 6 }}>
+                                    <span>{t('catalog_kpi_orders')}</span>
+                                    <strong style={{ color: 'var(--color-text)', fontWeight: 600 }}>{stats.orders_count}</strong>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 6 }}>
+                                    <span>SKU</span>
+                                    <strong style={{ color: 'var(--color-text)', fontWeight: 600 }}>{stats.sku_count}</strong>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 6 }}>
+                                    <span>{t('col_qty') || t('catalog_kpi_qty')}</span>
+                                    <strong style={{ color: 'var(--color-text)', fontWeight: 600 }}>
+                                        {formatNumber(stats.total_qty, 0)} {t('unit_pcs')}
+                                    </strong>
+                                </div>
+                                {/* Total amount */}
+                                <div style={{
+                                    marginTop: 12,
+                                    paddingTop: 12,
+                                    borderTop: '1px solid var(--color-border)',
+                                    fontSize: 20,
+                                    fontWeight: 700,
+                                    color: 'var(--color-success)',
+                                }}>
+                                    {formatNumber(stats.total_amount, 0)} {sym}
+                                </div>
+                                {/* Actions (edit/delete) — onClick stops card click */}
+                                <div style={{ display: 'flex', gap: 6, marginTop: 12, justifyContent: 'flex-end' }}>
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        style={{ fontSize: 11, padding: '4px 10px' }}
+                                        onClick={(e) => { e.stopPropagation(); openEdit(s); }}
+                                    >
+                                        {t('btn_edit')}
+                                    </button>
+                                    <button
+                                        className="btn btn-danger btn-sm"
+                                        style={{ fontSize: 11, padding: '4px 10px' }}
+                                        onClick={(e) => { e.stopPropagation(); handleDelete(s.id, s.name); }}
+                                    >
+                                        {t('btn_delete')}
+                                    </button>
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
         </>
     );
 }

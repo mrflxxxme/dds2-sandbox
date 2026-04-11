@@ -92,21 +92,38 @@ Prefix: `/api/v1/supply-chain`
 | POST | /vehicles/recalc-all | Пересчёт себестоимости ВСЕХ машин |
 | POST | /vehicles/{order_no}/recalc | Пересчёт себестоимости одной машины |
 | GET | /overview | Сводка по supply chain |
+| GET | /suppliers | Список поставщиков |
+| POST | /suppliers | Создать поставщика |
+| PUT | /suppliers/{id} | Обновить поставщика |
+| DELETE | /suppliers/{id} | Мягкое удаление |
+| GET | /suppliers/{id}/catalog | Ассортимент поставщика (группировка по subject, агрегация по barcode, кэш 300с) |
 
 ## Файлы
-- `models/supply_chain.py` — FactoryOrder, FactoryOrderItem
+- `models/supply_chain.py` — FactoryOrder, FactoryOrderItem, Supplier
 - `models/cost.py` — CostOrder (extended), CostOrderItem (extended)
 - `models/enums.py` — VehicleStatus
-- `schemas/supply_chain.py` — все схемы
+- `schemas/supply_chain.py` — все схемы, включая SupplierCatalog*
 - `services/supply_chain/factory_orders.py` — CRUD + split
 - `services/supply_chain/vehicle_delivery.py` — статусы + auto-receipt
+- `services/supply_chain/supplier_catalog.py` — агрегация ассортимента поставщика (группировка по subject, агрегация по barcode)
+- `services/supply_chain/supplier_service.py` — CRUD поставщиков
+- `services/warehouse_inbound.py` — auto-DELIVERED при accept_receipt (инвалидирует кэш supplier_catalog)
 - `routers/supply_chain.py` — API endpoints
 - `migrations/versions/sc01_add_supply_chain.py` — основная миграция
 - `migrations/versions/sc05_fix_missing_columns.py` — changed_by/changed_at в vehicle_status_history
 - `migrations/versions/sc06_add_dispatched_status.py` — DISPATCHED в enum VehicleStatus
 - `migrations/versions/sc07_cleanup_vehicle_status.py` — обнуление status у старых (не-vehicle) cost_orders
 
+### Кэш supplier_catalog
+- Префикс: `supply_chain:supplier_catalog:project_id={pid}:supplier_id={sid}`
+- TTL: 300 сек
+- Инвалидация (по `project_id`) при любой мутации, влияющей на ассортимент:
+  - `factory_orders.py`: create/update/delete, add_items, split_to_vehicles, update_item, delete_item
+  - `vehicle_delivery.py`: add_items_to_vehicle, remove_item_from_vehicle, delete_vehicle, update_vehicle_status
+  - `warehouse_inbound.py`: accept_receipt (если DISPATCHED → DELIVERED)
+
 ## Frontend
-- `types/api.ts` — FactoryOrder*, VehicleStatus, SupplyChainOverview, SplitItem
-- `lib/api/supply-chain.ts` — API клиент
-- `app/(main)/p/[slug]/supply-chain/page.tsx` — страница с 3 табами
+- `types/api.ts` — FactoryOrder*, VehicleStatus, SupplyChainOverview, SplitItem, SupplierCatalog*, SkuOrderHistoryEntry
+- `lib/api/supply-chain.ts` — API клиент (включая `getSupplierCatalog`)
+- `app/(main)/p/[slug]/supply-chain/page.tsx` — страница с 4 табами (SuppliersTab + SupplierCatalogView)
+- `app/(main)/p/[slug]/supply-chain/i18n.tsx` — переводы RU/ZH (catalog_*)

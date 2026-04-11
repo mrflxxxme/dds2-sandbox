@@ -238,6 +238,7 @@ async def accept_receipt(
     receipt.actual_date = date.today()
 
     # Auto-transition vehicle DISPATCHED → DELIVERED
+    vehicle_delivered = False
     if receipt.cost_order_id:
         from backend.models.cost import CostOrder
         from backend.models.enums import VehicleStatus
@@ -246,8 +247,16 @@ async def accept_receipt(
         vehicle = result.scalar_one_or_none()
         if vehicle and vehicle.status == VehicleStatus.DISPATCHED:
             vehicle.status = VehicleStatus.DELIVERED
+            vehicle_delivered = True
 
     await db.commit()
+
+    # Invalidate supplier catalog cache — delivered_qty depends on vehicle status
+    if vehicle_delivered:
+        from backend.cache import invalidate_cache
+
+        await invalidate_cache(f"supply_chain:supplier_catalog:project_id={project_id}")
+
     await db.refresh(receipt, ["items"])
     return receipt
 

@@ -77,9 +77,11 @@
 - Связи платежей с фактом: `services/planning/fact_links.py`
 
 ### Цепочка поставок (Supply Chain)
-- Пакет: `services/supply_chain/` (factory_orders.py, vehicle_delivery.py)
+- Пакет: `services/supply_chain/` (factory_orders.py, vehicle_delivery.py, supplier_service.py, supplier_catalog.py)
 - Заказы на производство: `services/supply_chain/factory_orders.py` — CRUD FactoryOrder, split_to_vehicles
 - Доставка (Vehicle/CostOrder): `services/supply_chain/vehicle_delivery.py` — CRUD транспортов, статусы (VehicleStatus), обзор цепочки
+- Поставщики: `services/supply_chain/supplier_service.py` — CRUD Supplier
+- Ассортимент поставщика: `services/supply_chain/supplier_catalog.py` — агрегация по subject + barcode с delivered_qty (кэш 300с, `get_supplier_catalog`)
 
 ### Мониторинг и здоровье
 - Метрики синхронизаций: `services/monitoring_service.py` — sync health, статус scheduler, обзор за 24ч

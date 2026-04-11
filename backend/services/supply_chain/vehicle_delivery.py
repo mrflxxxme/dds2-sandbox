@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from backend.cache import invalidate_cache
 from backend.models.cost import CostOrder, CostOrderItem
 from backend.models.enums import VehicleStatus
 from backend.models.planning import LeadTime
@@ -33,6 +34,11 @@ from backend.services.warehouse_stock_engine import _next_number, _resolve_barco
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
+
+
+async def _invalidate_supplier_catalog(project_id: int) -> None:
+    """Drop cached supplier catalog for this project after a vehicle mutation."""
+    await invalidate_cache(f"supply_chain:supplier_catalog:project_id={project_id}")
 
 
 def _safe_decimal(val: Decimal | None) -> Decimal | None:
@@ -286,6 +292,7 @@ async def add_items_to_vehicle(
     from backend.services.cost.items import recalculate_order_items
 
     await recalculate_order_items(db, project_id, order_no)
+    await _invalidate_supplier_catalog(project_id)
 
     return {"ok": True, "added": added}
 
@@ -373,6 +380,7 @@ async def remove_item_from_vehicle(
         from backend.services.cost.items import recalculate_order_items
 
         await recalculate_order_items(db, project_id, order_no)
+        await _invalidate_supplier_catalog(project_id)
 
         return {"ok": True, "removed": removed}
 
@@ -396,6 +404,7 @@ async def remove_item_from_vehicle(
     from backend.services.cost.items import recalculate_order_items
 
     await recalculate_order_items(db, project_id, order_no)
+    await _invalidate_supplier_catalog(project_id)
 
     return {"ok": True}
 
@@ -445,6 +454,7 @@ async def delete_vehicle(
     # Soft-delete the vehicle
     vehicle.soft_delete()
     await db.commit()
+    await _invalidate_supplier_catalog(project_id)
     return {"ok": True}
 
 
@@ -809,6 +819,9 @@ async def update_vehicle_status(
     # Auto-close factory orders if vehicle reached SHIPPED or above
     if data.status in _SHIPPED_OR_ABOVE:
         await _check_and_close_factory_orders_for_vehicle(db, project_id, vehicle)
+
+    # Invalidate supplier catalog cache — delivered_qty depends on vehicle status
+    await _invalidate_supplier_catalog(project_id)
 
     return result_data
 
