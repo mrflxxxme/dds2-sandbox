@@ -5,11 +5,17 @@ Tests pure logic functions without DB dependencies.
 """
 
 import calendar
+from datetime import date
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import text
 
-from backend.services.planning.brand_plan import _prev_month
+from backend.services.planning.brand_plan import (
+    _get_last_fact_date,
+    _prev_month,
+    get_plan_fact_brands,
+)
 
 
 class TestPrevMonth:
@@ -152,3 +158,136 @@ class TestEdgeCases:
         fact = Decimal("5000000")
         pct = float(fact / plan_adjusted * 100) if plan_adjusted > 0 else None
         assert pct is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Forecast uses last_fact_day, not today.day (regression)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Bug: the forecast denominator was `today.day`. In UTC containers or when WB
+# data lagged a day, this divided fact_mtd by a day with no data, producing an
+# off-by-one forecast (fact * 30 / 11 instead of fact * 30 / 10).
+#
+# Fix: current_day is now driven by MAX(COALESCE(sale_dt, rr_dt)) from
+# wb_finance_rows — the latest day with actual data.
+
+
+async def _insert_wb_row(db, project_id: int, brand: str, sale_dt: date, rrd_id: int, price: int):
+    """Insert a minimal wb_finance_rows row for a sale on a given date."""
+    await db.execute(
+        text(
+            """
+            INSERT INTO wb_finance_rows (
+                project_id, realizationreport_id, rrd_id,
+                date_from, date_to, sa_name, nm_id, brand_name,
+                sale_dt, rr_dt, doc_type_name, quantity,
+                retail_price_withdisc_rub, retail_amount, ppvz_for_pay,
+                ppvz_sales_commission, delivery_rub, penalty, additional_payment,
+                storage_fee, acceptance, deduction, ppvz_reward,
+                rebill_logistic_cost, ppvz_vw, ppvz_vw_nds, synced_at
+            ) VALUES (
+                :pid, 0, :rrd,
+                :sale_dt, :sale_dt, 'ART-1', 1, :brand,
+                :sale_dt, :sale_dt, 'Продажа', 1,
+                :price, :price, :price,
+                0, 0, 0, 0,
+                0, 0, 0, 0,
+                0, 0, 0, NOW()
+            )
+            """
+        ),
+        {"pid": project_id, "rrd": rrd_id, "sale_dt": sale_dt, "brand": brand, "price": price},
+    )
+
+
+class TestLastFactDateHelper:
+    """_get_last_fact_date returns the last day with actual WB data, or None."""
+
+    @pytest.mark.asyncio
+    async def test_returns_max_date_within_range(self, db_session, project):
+        month_start = date(2026, 4, 1)
+        month_end = date(2026, 4, 30)
+        await _insert_wb_row(db_session, project.id, "Brand-A", date(2026, 4, 5), 10001, 1000)
+        await _insert_wb_row(db_session, project.id, "Brand-A", date(2026, 4, 10), 10002, 1000)
+        await _insert_wb_row(db_session, project.id, "Brand-A", date(2026, 4, 7), 10003, 1000)
+        await db_session.commit()
+
+        last = await _get_last_fact_date(db_session, project.id, month_start, month_end)
+        assert last == date(2026, 4, 10)
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_facts(self, db_session, project):
+        last = await _get_last_fact_date(db_session, project.id, date(2026, 4, 1), date(2026, 4, 30))
+        assert last is None
+
+    @pytest.mark.asyncio
+    async def test_respects_project_id_isolation(self, db_session, project, other_project):
+        await _insert_wb_row(db_session, other_project.id, "Brand-X", date(2026, 4, 15), 20001, 1000)
+        await db_session.commit()
+
+        last = await _get_last_fact_date(db_session, project.id, date(2026, 4, 1), date(2026, 4, 30))
+        assert last is None
+
+
+class TestForecastCurrentDayFromData:
+    """get_plan_fact_brands anchors current_day on last WB data date, not today.day.
+
+    The key guarantee: even if today.day == 11, if data only reaches day 10,
+    forecast must be fact * 30 / 10, not fact * 30 / 11.
+    """
+
+    @pytest.mark.asyncio
+    async def test_current_day_from_last_fact_not_today(self, db_session, project, monkeypatch):
+        # Pretend "today" is 2026-04-11 so we hit the current-month branch
+        class _FakeDate(date):
+            @classmethod
+            def today(cls):
+                return date(2026, 4, 11)
+
+        monkeypatch.setattr("backend.services.planning.brand_plan.date", _FakeDate)
+
+        # Plan: 30M for April
+        await db_session.execute(
+            text(
+                "INSERT INTO brand_plans (project_id, brand, year, month, plan_amount, created_at) "
+                "VALUES (:pid, 'Brand-L', 2026, 4, 30000000, NOW())"
+            ),
+            {"pid": project.id},
+        )
+        # Facts total 10M, with last fact on the 10th (one day before "today")
+        await _insert_wb_row(db_session, project.id, "Brand-L", date(2026, 4, 3), 30001, 4000000)
+        await _insert_wb_row(db_session, project.id, "Brand-L", date(2026, 4, 10), 30002, 6000000)
+        await db_session.commit()
+
+        rows = await get_plan_fact_brands(db_session, project.id, 2026, 4)
+        assert len(rows) == 1
+        row = rows[0]
+
+        # Last fact day is the 10th, NOT today.day == 11
+        assert row["current_day"] == 10
+        assert row["fact_mtd"] == pytest.approx(10_000_000)
+        # Forecast = 10M * 30 / 10 = 30M (not 10M * 30 / 11 ~= 27.27M)
+        assert row["forecast"] == pytest.approx(30_000_000, rel=1e-6)
+
+    @pytest.mark.asyncio
+    async def test_no_data_yields_zero_current_day(self, db_session, project, monkeypatch):
+        class _FakeDate(date):
+            @classmethod
+            def today(cls):
+                return date(2026, 4, 11)
+
+        monkeypatch.setattr("backend.services.planning.brand_plan.date", _FakeDate)
+
+        await db_session.execute(
+            text(
+                "INSERT INTO brand_plans (project_id, brand, year, month, plan_amount, created_at) "
+                "VALUES (:pid, 'Brand-Z', 2026, 4, 50000000, NOW())"
+            ),
+            {"pid": project.id},
+        )
+        await db_session.commit()
+
+        rows = await get_plan_fact_brands(db_session, project.id, 2026, 4)
+        assert len(rows) == 1
+        assert rows[0]["current_day"] == 0
+        assert rows[0]["forecast"] == 0
