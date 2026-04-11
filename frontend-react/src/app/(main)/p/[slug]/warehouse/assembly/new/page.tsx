@@ -76,7 +76,9 @@ export default function AssemblyNewPage() {
         setLoading(true);
         try {
             const resp = await api.getFboSupplies({
-                status: 'ACTIVE,ON_DELIVERY,IN_PROGRESS',
+                // ACCEPTED included: users need to link assembly requests
+                // retroactively for supplies already accepted by WB.
+                status: 'ACTIVE,ON_DELIVERY,IN_PROGRESS,ACCEPTED',
                 search: fboSearchInput || undefined,
                 limit: 100,
                 exclude_with_assembly: true,

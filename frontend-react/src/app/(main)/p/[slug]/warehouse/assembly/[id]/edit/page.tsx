@@ -108,7 +108,7 @@ export default function AssemblyEditPage() {
     const loadFboSupplies = useCallback(async () => {
         try {
             const resp = await api.getFboSupplies({
-                status: 'ACTIVE,ON_DELIVERY,IN_PROGRESS',
+                status: 'ACTIVE,ON_DELIVERY,IN_PROGRESS,ACCEPTED',
                 search: fboSearchInput || undefined,
                 limit: 100,
             });
