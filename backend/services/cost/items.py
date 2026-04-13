@@ -108,6 +108,9 @@ async def upload_order_items(
         volume_m3 = safe_decimal(row.get("volume_m3", 0))
 
         nom = nom_map.get(bc)
+        # Fallback: if area_m2 not in Excel, use value from Nomenclature
+        if not area_m2 and nom and nom.area_m2:
+            area_m2 = nom.area_m2
         subject = nom.subject if nom else None
         article_seller = nom.article_seller if nom else None
         is_unrecognized = nom is None
@@ -221,13 +224,19 @@ async def recalculate_order_items(db: AsyncSession, project_id: int, order_no: s
         duty_rub_unit = Decimal(0)
         util_rub_unit = Decimal(0)
         subject = item.subject
+        # Fallback area_m2 from Nomenclature if not stored on item
+        area_m2 = item.area_m2
+        if not area_m2:
+            nom = nom_map.get(item.barcode)
+            if nom and nom.area_m2:
+                area_m2 = nom.area_m2
         if subject and subject in duty_map:
             rule = duty_map[subject]
             util_rub_unit = rule.util_collect_rub
             if rule.basis == DutyBasis.WEIGHT:
                 duty_rub_unit = (item.weight_kg or Decimal(0)) * Decimal(str(rule.rate)) * order.rate_eur
             elif rule.basis == DutyBasis.AREA:
-                duty_rub_unit = (item.area_m2 or Decimal(0)) * Decimal(str(rule.rate)) * order.rate_eur
+                duty_rub_unit = (area_m2 or Decimal(0)) * Decimal(str(rule.rate)) * order.rate_eur
             elif rule.basis == DutyBasis.INVOICE:
                 base = cost_rub_unit + delivery_rub_unit / 2
                 duty_rub_unit = base * Decimal(str(rule.rate)) / 100

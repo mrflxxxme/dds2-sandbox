@@ -21,6 +21,7 @@ from backend.schemas.common import (
 
 # Cost
 from backend.schemas.cost import (
+    BulkAreaUpdate,
     CostOrderCreate,
     CostOrderItemSchema,
     CostOrderSchema,
@@ -215,6 +216,7 @@ __all__ = [
     # Cost
     "NomenclatureSchema",
     "DutyRuleSchema",
+    "BulkAreaUpdate",
     "CostOrderItemSchema",
     "CostOrderSchema",
     "CostUploadResult",

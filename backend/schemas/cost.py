@@ -18,6 +18,7 @@ class NomenclatureSchema(BaseModel):
     article_wb: int | None = None
     imt_id: int | None = None
     volume_l: Decimal | None = None
+    area_m2: Decimal | None = None
     updated_at: datetime | None = None
 
 
@@ -81,6 +82,15 @@ class CostUploadResult(BaseModel):
     items_count: int
     recognized: int
     unrecognized: int
+
+
+class BulkAreaItem(BaseModel):
+    barcode: str
+    area_m2: Decimal
+
+
+class BulkAreaUpdate(BaseModel):
+    items: list[BulkAreaItem]
 
 
 class VatRateUpdate(BaseModel):

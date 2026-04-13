@@ -398,6 +398,10 @@ async def split_to_vehicles(
     if not order:
         raise ValueError("Factory order not found")
 
+    # Build nomenclature lookup for area_m2 / weight_kg
+    nom_result = await db.execute(select(Nomenclature).where(Nomenclature.project_id == project_id))
+    nom_map = {n.barcode: n for n in nom_result.scalars().all()}
+
     # Build lookup of items by id
     items_by_id: dict[int, FactoryOrderItem] = {item.id: item for item in order.items}
 
@@ -441,6 +445,7 @@ async def split_to_vehicles(
             await db.flush()
 
         # Create CostOrderItem linked to factory_order_item
+        nom = nom_map.get(fo_item.barcode)
         cost_item = CostOrderItem(
             project_id=project_id,
             order_no=vehicle.order_no,
@@ -449,6 +454,8 @@ async def split_to_vehicles(
             article_seller=fo_item.article_seller,
             qty=assignment.qty,
             price_cny=fo_item.price_cny,
+            weight_kg=fo_item.weight_kg,
+            area_m2=nom.area_m2 if nom else None,
             factory_order_item_id=fo_item.id,
         )
         db.add(cost_item)
