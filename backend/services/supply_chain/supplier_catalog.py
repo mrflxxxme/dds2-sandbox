@@ -90,7 +90,7 @@ async def _fetch_supplier_fois(db: AsyncSession, project_id: int, supplier_id: i
             "limit": _MAX_FOI_PER_SUPPLIER,
         },
     )
-    foi_list = foi_rows.mappings().all()
+    foi_list = list(foi_rows.mappings().all())
 
     if len(foi_list) >= _MAX_FOI_PER_SUPPLIER:
         logger.warning(
