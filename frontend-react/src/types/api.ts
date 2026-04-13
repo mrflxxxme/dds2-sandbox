@@ -1799,6 +1799,51 @@ export interface SupplierCatalogResponse {
   subjects: SupplierCatalogSubjectGroup[];
 }
 
+// ─── Shipment Matrix (Отгрузочная карта) ─────────────────────────────────────
+
+export interface ShipmentMatrixVehicle {
+  order_no: string;
+  status: string | null;
+  container_type: string | null;
+  ship_date: string | null;
+}
+
+export interface ShipmentMatrixItem {
+  barcode: string;
+  article_seller: string | null;
+  subject: string | null;
+  brand: string | null;
+  total_qty: number;
+  total_boxes: number;
+  pcs_per_box: number | null;
+  remaining_qty: number;
+  shipped_pct: string;
+  vehicle_allocations: Record<string, number>;
+}
+
+export interface ShipmentMatrixSubjectGroup {
+  subject: string;
+  items: ShipmentMatrixItem[];
+  total_qty: number;
+  total_boxes: number;
+  remaining_qty: number;
+  shipped_pct: string;
+}
+
+export interface ShipmentMatrixSummary {
+  total_qty: number;
+  total_boxes: number;
+  shipped_qty: number;
+  remaining_qty: number;
+}
+
+export interface ShipmentMatrixResponse {
+  supplier: SupplierCatalogSupplierInfo;
+  vehicles: ShipmentMatrixVehicle[];
+  summary: ShipmentMatrixSummary;
+  subjects: ShipmentMatrixSubjectGroup[];
+}
+
 // ─── AI Chat ──────────────────────────────────────────────────────────────────
 
 export interface AiConversation {

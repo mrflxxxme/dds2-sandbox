@@ -564,6 +564,15 @@ async def get_supplier_catalog_endpoint(
     return await supplier_catalog.get_supplier_catalog(db, project.id, supplier_id)
 
 
+@router.get("/suppliers/{supplier_id}/shipment-matrix", dependencies=[Depends(rate_limit_read_heavy)])
+async def get_shipment_matrix_endpoint(
+    supplier_id: int,
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+):
+    return await supplier_catalog.get_shipment_matrix(db, project.id, supplier_id)
+
+
 @router.get("/suppliers/{supplier_id}")
 async def get_supplier(
     supplier_id: int,

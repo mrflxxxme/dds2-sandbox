@@ -501,6 +501,52 @@ class SupplierCatalogResponse(BaseModel):
     subjects: list[SupplierCatalogSubjectGroup]
 
 
+# --- Shipment Matrix (Отгрузочная карта) ---
+
+
+class ShipmentMatrixVehicle(BaseModel):
+    order_no: str
+    status: str | None = None
+    container_type: str | None = None
+    ship_date: date | None = None
+
+
+class ShipmentMatrixItem(BaseModel):
+    barcode: str
+    article_seller: str | None = None
+    subject: str | None = None
+    brand: str | None = None
+    total_qty: int
+    total_boxes: int
+    pcs_per_box: int | None = None
+    remaining_qty: int
+    shipped_pct: Decimal
+    vehicle_allocations: dict[str, int]  # order_no → qty
+
+
+class ShipmentMatrixSubjectGroup(BaseModel):
+    subject: str
+    items: list[ShipmentMatrixItem]
+    total_qty: int
+    total_boxes: int
+    remaining_qty: int
+    shipped_pct: Decimal
+
+
+class ShipmentMatrixSummary(BaseModel):
+    total_qty: int
+    total_boxes: int
+    shipped_qty: int
+    remaining_qty: int
+
+
+class ShipmentMatrixResponse(BaseModel):
+    supplier: SupplierCatalogSupplierInfo
+    vehicles: list[ShipmentMatrixVehicle]
+    summary: ShipmentMatrixSummary
+    subjects: list[ShipmentMatrixSubjectGroup]
+
+
 # --- Vehicle Status History ---
 
 
