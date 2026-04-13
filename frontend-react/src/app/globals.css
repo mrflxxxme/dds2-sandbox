@@ -2106,6 +2106,165 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 .sc-fw-600 { font-weight: 600; }
 .sc-fw-700 { font-weight: 700; }
 
+/* ── Shipment Matrix (Отгрузочная карта) ─────────────────────────── */
+
+.sc-matrix-mode-toggle {
+    display: flex;
+    gap: 0;
+    background: rgba(0, 0, 0, 0.05);
+    border-radius: 12px;
+    padding: 3px;
+    backdrop-filter: blur(8px);
+}
+
+.sc-mode-btn {
+    padding: 8px 20px;
+    font-size: 13px;
+    font-weight: 500;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: all 0.25s cubic-bezier(0.25, 1, 0.5, 1);
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+}
+
+.sc-mode-btn:hover:not(.sc-mode-btn-active) {
+    color: var(--color-text);
+    background: rgba(255, 255, 255, 0.5);
+}
+
+.sc-mode-btn-active {
+    background: var(--color-accent);
+    color: white;
+    font-weight: 600;
+    box-shadow: 0 2px 8px rgba(0, 113, 227, 0.3);
+}
+
+.sc-matrix-unshipped-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--color-text-muted);
+    cursor: pointer;
+}
+
+.sc-matrix-unshipped-toggle input[type="checkbox"] {
+    accent-color: var(--color-accent);
+}
+
+.sc-matrix-wrap {
+    overflow: auto;
+    max-height: calc(100vh - 300px);
+    border-radius: 8px;
+}
+
+.sc-matrix-table {
+    width: max-content;
+    min-width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 13px;
+}
+
+.sc-matrix-th-fixed {
+    position: sticky;
+    z-index: 3;
+    background: rgba(248, 248, 248, 0.95);
+    backdrop-filter: blur(8px);
+    padding: 10px 12px;
+    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    border-bottom: 1px solid var(--color-border);
+}
+
+.sc-matrix-th-num {
+    padding: 10px 12px;
+    text-align: right;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    background: rgba(248, 248, 248, 0.95);
+    border-bottom: 1px solid var(--color-border);
+}
+
+.sc-matrix-th-vehicle {
+    padding: 8px 10px;
+    text-align: center;
+    min-width: 90px;
+    background: rgba(248, 248, 248, 0.95);
+    border-bottom: 1px solid var(--color-border);
+    border-left: 1px solid var(--color-border);
+}
+
+.sc-matrix-vehicle-header {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+}
+
+.sc-matrix-vehicle-name {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text);
+    white-space: nowrap;
+}
+
+.sc-matrix-vehicle-date {
+    font-size: 10px;
+    color: var(--color-text-muted);
+}
+
+.sc-matrix-td-fixed {
+    position: sticky;
+    z-index: 1;
+    background: white;
+    padding: 8px 12px;
+    font-size: 13px;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.sc-matrix-td-num {
+    padding: 8px 12px;
+    text-align: right;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.sc-matrix-cell-empty {
+    opacity: 0.3;
+}
+
+.sc-matrix-cell-partial {
+    background: rgba(0, 113, 227, 0.06);
+}
+
+.sc-matrix-cell-full {
+    background: rgba(52, 199, 89, 0.08);
+}
+
+.sc-matrix-summary-row {
+    background: rgba(0, 0, 0, 0.02);
+}
+
+.sc-matrix-summary-row td {
+    border-top: 2px solid var(--color-border);
+    border-bottom: none;
+}
+
+/* ── End Shipment Matrix ─────────────────────────────────────────── */
+
 .sc-tr-row {
     cursor: pointer;
     transition: background 0.15s;

@@ -46,6 +46,8 @@ import type {
     SupplierCatalogItem,
     SupplierCatalogSubjectGroup,
     SkuOrderHistoryEntry,
+    ShipmentMatrixResponse,
+    ShipmentMatrixSubjectGroup,
 } from '@/types/api';
 import { CONTAINERS } from '@/app/(main)/p/[slug]/container-loader/lib/packer';
 
@@ -1733,6 +1735,285 @@ const supplierFlag = (country: string): string =>
 
 const currencySymbol = (currency: string): string => (currency === 'RUB' ? '\u20BD' : '\u00A5');
 
+// ─── Shipment Matrix View ──────────────────────────────────────────────────
+
+function ShipmentMatrixView({ supplierId }: { supplierId: number }) {
+    const { t, lang } = useT();
+    const [matrix, setMatrix] = useState<ShipmentMatrixResponse | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [collapsedSubjects, setCollapsedSubjects] = useState<Set<string>>(new Set());
+    const [onlyUnshipped, setOnlyUnshipped] = useState(false);
+
+    const loadMatrix = useCallback(async () => {
+        setLoading(true);
+        setError(null);
+        try {
+            const data = await api.getShipmentMatrix(supplierId);
+            setMatrix(data);
+            if (data.subjects.length > 1) {
+                setCollapsedSubjects(new Set(data.subjects.slice(1).map(g => g.subject)));
+            } else {
+                setCollapsedSubjects(new Set());
+            }
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : t('msg_loading_error'));
+        }
+        setLoading(false);
+    }, [supplierId, t]);
+
+    useEffect(() => { loadMatrix(); }, [loadMatrix]);
+
+    const filteredSubjects = useMemo((): ShipmentMatrixSubjectGroup[] => {
+        if (!matrix) return [];
+        if (!onlyUnshipped) return matrix.subjects;
+        return matrix.subjects
+            .map(g => ({ ...g, items: g.items.filter(it => it.remaining_qty > 0) }))
+            .filter(g => g.items.length > 0);
+    }, [matrix, onlyUnshipped]);
+
+    const toggleSubject = (subject: string) => {
+        setCollapsedSubjects(prev => {
+            const next = new Set(prev);
+            if (next.has(subject)) next.delete(subject);
+            else next.add(subject);
+            return next;
+        });
+    };
+
+    const handleExport = useCallback(() => {
+        if (!matrix) return;
+        const rows = filteredSubjects.flatMap(g =>
+            g.items.map(it => {
+                const row: Record<string, unknown> = {
+                    [t('matrix_col_barcode')]: it.barcode,
+                    [t('matrix_col_article')]: it.article_seller || '',
+                    [t('matrix_col_total_qty')]: it.total_qty,
+                    [t('matrix_col_boxes')]: it.total_boxes,
+                    [t('matrix_col_remaining')]: it.remaining_qty,
+                    [t('matrix_col_pct')]: Number(it.shipped_pct),
+                };
+                matrix.vehicles.forEach(v => {
+                    row[v.order_no] = it.vehicle_allocations[v.order_no] || 0;
+                });
+                return row;
+            })
+        );
+        const filename = `${t('matrix_mode_shipment')}_${matrix.supplier.name}_${new Date().toISOString().slice(0, 10)}`;
+        exportToExcel(rows, filename);
+    }, [matrix, filteredSubjects, t]);
+
+    if (loading) {
+        return (
+            <div className="glass-card sc-loading-card">
+                <div className="spinner sc-spinner-center" />
+                {t('msg_loading')}
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="glass-card sc-error-card">
+                {error}
+                <button className="btn btn-secondary btn-sm sc-retry-btn" onClick={loadMatrix}>
+                    {t('btn_retry')}
+                </button>
+            </div>
+        );
+    }
+
+    if (!matrix || matrix.subjects.length === 0) {
+        return (
+            <div className="empty-state">
+                <div className="empty-state-icon">📦</div>
+                <div>{t('matrix_empty')}</div>
+            </div>
+        );
+    }
+
+    const vehicles = matrix.vehicles;
+    const summary = matrix.summary;
+    const shippedPct = summary.total_qty > 0
+        ? Math.round((summary.shipped_qty / summary.total_qty) * 100) : 0;
+
+    const statusBadge = (status: string | null) => {
+        const cls = status === 'DELIVERED' ? 'badge-success'
+            : status === 'DISPATCHED' ? 'badge-warning'
+            : status === 'CUSTOMS' ? 'badge-info'
+            : status === 'SHIPPED' ? 'badge-info'
+            : 'badge-secondary';
+        const label = status ? t(`status_${status.toLowerCase()}`) : '—';
+        return <span className={`badge ${cls}`} style={{ fontSize: 10 }}>{label}</span>;
+    };
+
+    return (
+        <div>
+            {/* KPI */}
+            <div className="stats-grid">
+                <div className="glass-card sc-catalog-kpi-card">
+                    <div className="sc-catalog-kpi-label">{t('matrix_kpi_total')}</div>
+                    <div className="sc-kpi-value-lg">{formatNumber(summary.total_qty, 0)}</div>
+                    <div className="sc-catalog-kpi-sub">{t('unit_pcs')}</div>
+                </div>
+                <div className="glass-card sc-catalog-kpi-card">
+                    <div className="sc-catalog-kpi-label">{t('matrix_kpi_shipped')}</div>
+                    <div className="sc-kpi-value-lg sc-color-success">{formatNumber(summary.shipped_qty, 0)}</div>
+                    <div className="sc-catalog-kpi-sub">{shippedPct}%</div>
+                </div>
+                <div className="glass-card sc-catalog-kpi-card">
+                    <div className="sc-catalog-kpi-label">{t('matrix_kpi_remaining')}</div>
+                    <div className="sc-kpi-value-lg sc-color-warning">{formatNumber(summary.remaining_qty, 0)}</div>
+                    <div className="sc-catalog-kpi-sub">{t('unit_pcs')}</div>
+                </div>
+                <div className="glass-card sc-catalog-kpi-card">
+                    <div className="sc-catalog-kpi-label">{t('matrix_kpi_boxes')}</div>
+                    <div className="sc-kpi-value-lg">{formatNumber(summary.total_boxes, 0)}</div>
+                </div>
+            </div>
+
+            {/* Toolbar */}
+            <div className="sc-catalog-toolbar">
+                <label className="sc-matrix-unshipped-toggle">
+                    <input
+                        type="checkbox"
+                        checked={onlyUnshipped}
+                        onChange={e => setOnlyUnshipped(e.target.checked)}
+                    />
+                    {t('matrix_filter_unshipped')}
+                </label>
+                <button className="btn btn-sm" onClick={handleExport} disabled={filteredSubjects.length === 0}>
+                    📥 Excel
+                </button>
+            </div>
+
+            {/* Subject groups */}
+            {filteredSubjects.map(group => {
+                const collapsed = collapsedSubjects.has(group.subject);
+                const country = matrix.supplier.country;
+
+                return (
+                    <div key={group.subject} className="glass-card sc-subject-card">
+                        <div onClick={() => toggleSubject(group.subject)} className="sc-subject-header">
+                            <div className="sc-subject-header-left">
+                                <span
+                                    className="sc-subject-chevron"
+                                    style={{ transform: collapsed ? 'rotate(-90deg)' : 'none' }}
+                                >
+                                    ▼
+                                </span>
+                                {translateSubject(group.subject, country, lang)}
+                            </div>
+                            <div className="sc-subject-stats">
+                                <div><strong className="sc-color-text">{group.items.length}</strong> SKU</div>
+                                <div><strong className="sc-color-text">{formatNumber(group.total_qty, 0)}</strong> {t('unit_pcs')}</div>
+                                <div>{t('matrix_col_remaining')}: <strong className="sc-color-warning">{formatNumber(group.remaining_qty, 0)}</strong></div>
+                                <div>{Number(group.shipped_pct).toFixed(0)}%</div>
+                            </div>
+                        </div>
+                        {!collapsed && (
+                            <div className="sc-matrix-wrap">
+                                <table className="sc-matrix-table">
+                                    <thead>
+                                        <tr>
+                                            <th className="sc-matrix-th-fixed" style={{ left: 0, minWidth: 140 }}>{t('matrix_col_barcode')}</th>
+                                            <th className="sc-matrix-th-fixed" style={{ left: 140, minWidth: 100 }}>{t('matrix_col_article')}</th>
+                                            <th className="sc-matrix-th-num" style={{ minWidth: 70 }}>{t('matrix_col_total_qty')}</th>
+                                            <th className="sc-matrix-th-num" style={{ minWidth: 60 }}>{t('matrix_col_boxes')}</th>
+                                            <th className="sc-matrix-th-num" style={{ minWidth: 70 }}>{t('matrix_col_remaining')}</th>
+                                            <th className="sc-matrix-th-num" style={{ minWidth: 70 }}>{t('matrix_col_pct')}</th>
+                                            {vehicles.map(v => (
+                                                <th key={v.order_no} className="sc-matrix-th-vehicle">
+                                                    <div className="sc-matrix-vehicle-header">
+                                                        <div className="sc-matrix-vehicle-name">{v.order_no}</div>
+                                                        {statusBadge(v.status)}
+                                                        {v.ship_date && (
+                                                            <div className="sc-matrix-vehicle-date">{formatDate(v.ship_date)}</div>
+                                                        )}
+                                                    </div>
+                                                </th>
+                                            ))}
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {group.items.map(item => {
+                                            const pct = Number(item.shipped_pct);
+                                            return (
+                                                <tr key={item.barcode} className="sc-tr-border">
+                                                    <td className="sc-matrix-td-fixed sc-catalog-td-mono" style={{ left: 0 }}>{item.barcode}</td>
+                                                    <td className="sc-matrix-td-fixed" style={{ left: 140 }}>{item.article_seller || '—'}</td>
+                                                    <td className="sc-matrix-td-num">{formatNumber(item.total_qty, 0)}</td>
+                                                    <td className="sc-matrix-td-num">{item.total_boxes || '—'}</td>
+                                                    <td className="sc-matrix-td-num" style={{
+                                                        color: item.remaining_qty > 0 ? 'var(--color-warning)' : 'var(--color-success)',
+                                                        fontWeight: item.remaining_qty > 0 ? 600 : 400,
+                                                    }}>{formatNumber(item.remaining_qty, 0)}</td>
+                                                    <td className="sc-matrix-td-num">
+                                                        <div className="sc-progress-mini">
+                                                            <div className="sc-progress-mini-track">
+                                                                <div style={{
+                                                                    width: `${pct}%`,
+                                                                    height: '100%',
+                                                                    background: pct >= 100 ? 'var(--color-success)' : 'var(--color-accent)',
+                                                                    borderRadius: 4,
+                                                                }} />
+                                                            </div>
+                                                            <span className="sc-progress-mini-count" style={{ fontSize: 11, minWidth: 32 }}>
+                                                                {pct.toFixed(0)}%
+                                                            </span>
+                                                        </div>
+                                                    </td>
+                                                    {vehicles.map(v => {
+                                                        const qty = item.vehicle_allocations[v.order_no] || 0;
+                                                        const cellClass = qty === 0
+                                                            ? 'sc-matrix-cell-empty'
+                                                            : qty >= item.total_qty
+                                                            ? 'sc-matrix-cell-full'
+                                                            : 'sc-matrix-cell-partial';
+                                                        return (
+                                                            <td key={v.order_no} className={`sc-matrix-td-num ${cellClass}`}>
+                                                                {qty > 0 ? formatNumber(qty, 0) : ''}
+                                                            </td>
+                                                        );
+                                                    })}
+                                                </tr>
+                                            );
+                                        })}
+                                        {/* Subject total row */}
+                                        <tr className="sc-matrix-summary-row">
+                                            <td className="sc-matrix-td-fixed" style={{ left: 0, fontWeight: 600 }} colSpan={2}>
+                                                {t('matrix_total_row')}
+                                            </td>
+                                            <td className="sc-matrix-td-num" style={{ fontWeight: 600 }}>{formatNumber(group.total_qty, 0)}</td>
+                                            <td className="sc-matrix-td-num" style={{ fontWeight: 600 }}>{formatNumber(group.total_boxes, 0)}</td>
+                                            <td className="sc-matrix-td-num" style={{ fontWeight: 600, color: 'var(--color-warning)' }}>
+                                                {formatNumber(group.remaining_qty, 0)}
+                                            </td>
+                                            <td className="sc-matrix-td-num" style={{ fontWeight: 600 }}>{Number(group.shipped_pct).toFixed(0)}%</td>
+                                            {vehicles.map(v => {
+                                                const colTotal = group.items.reduce(
+                                                    (s, it) => s + (it.vehicle_allocations[v.order_no] || 0), 0
+                                                );
+                                                return (
+                                                    <td key={v.order_no} className="sc-matrix-td-num" style={{ fontWeight: 600 }}>
+                                                        {colTotal > 0 ? formatNumber(colTotal, 0) : ''}
+                                                    </td>
+                                                );
+                                            })}
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
+// ─── Catalog History Badge ──────────────────────────────────────────────────
+
 function CatalogHistoryStatusBadge({ entry }: { entry: SkuOrderHistoryEntry }) {
     const { t } = useT();
     if (entry.is_delivered) {
@@ -1752,6 +2033,7 @@ function SupplierCatalogView({
     onBack: () => void;
 }) {
     const { t, lang } = useT();
+    const [mode, setMode] = useState<'catalog' | 'matrix'>('catalog');
     const [catalog, setCatalog] = useState<SupplierCatalogResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -1915,11 +2197,31 @@ function SupplierCatalogView({
                         {t('catalog_subtitle')}
                     </div>
                 </div>
-                <button className="btn btn-sm" onClick={handleExport} disabled={filteredSubjects.length === 0}>
-                    📥 Excel
-                </button>
+                <div className="sc-matrix-mode-toggle">
+                    <button
+                        className={`sc-mode-btn ${mode === 'catalog' ? 'sc-mode-btn-active' : ''}`}
+                        onClick={() => setMode('catalog')}
+                    >
+                        {t('matrix_mode_catalog')}
+                    </button>
+                    <button
+                        className={`sc-mode-btn ${mode === 'matrix' ? 'sc-mode-btn-active' : ''}`}
+                        onClick={() => setMode('matrix')}
+                    >
+                        {t('matrix_mode_shipment')}
+                    </button>
+                </div>
+                {mode === 'catalog' && (
+                    <button className="btn btn-sm" onClick={handleExport} disabled={filteredSubjects.length === 0}>
+                        📥 Excel
+                    </button>
+                )}
             </div>
 
+            {mode === 'matrix' ? (
+                <ShipmentMatrixView supplierId={supplierId} />
+            ) : (
+            <>
             {/* KPI — computed from filtered data */}
             {(() => {
                 const isFiltered = search || subjectFilter !== 'all' || brandFilter !== 'all' || statusFilter !== 'all';
@@ -2153,6 +2455,8 @@ function SupplierCatalogView({
                     </div>
                 );
             })}
+            </>
+            )}
         </div>
     );
 }

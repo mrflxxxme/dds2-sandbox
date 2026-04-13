@@ -390,6 +390,23 @@ const ru: TranslationDict = {
     vdetail_field_arrival: 'Ожидаемое прибытие',
     vdetail_field_customs_no: 'Номер ДТ',
     vdetail_field_delivery_cost: 'Перевозка',
+
+    // ── Shipment matrix ──
+    matrix_mode_catalog: 'Каталог',
+    matrix_mode_shipment: 'Отгрузочная карта',
+    matrix_col_barcode: 'Баркод',
+    matrix_col_article: 'Артикул',
+    matrix_col_total_qty: 'Всего, шт',
+    matrix_col_boxes: 'Коробок',
+    matrix_col_remaining: 'Остаток',
+    matrix_col_pct: 'Отгружено %',
+    matrix_kpi_total: 'Всего к отгрузке',
+    matrix_kpi_shipped: 'Отгружено',
+    matrix_kpi_remaining: 'Остаток',
+    matrix_kpi_boxes: 'Коробок',
+    matrix_filter_unshipped: 'Только неотгруженные',
+    matrix_empty: 'Нет данных по отгрузкам',
+    matrix_total_row: 'Итого',
 };
 
 const zh: TranslationDict = {
@@ -772,6 +789,23 @@ const zh: TranslationDict = {
     vdetail_field_arrival: '预计到达',
     vdetail_field_customs_no: '报关单号',
     vdetail_field_delivery_cost: '运费',
+
+    // ── Shipment matrix ──
+    matrix_mode_catalog: '目录',
+    matrix_mode_shipment: '出货单',
+    matrix_col_barcode: '条形码',
+    matrix_col_article: '编号',
+    matrix_col_total_qty: '总数量',
+    matrix_col_boxes: '箱数',
+    matrix_col_remaining: '剩余',
+    matrix_col_pct: '出货 %',
+    matrix_kpi_total: '总出货量',
+    matrix_kpi_shipped: '已出货',
+    matrix_kpi_remaining: '剩余',
+    matrix_kpi_boxes: '总箱数',
+    matrix_filter_unshipped: '仅未出货',
+    matrix_empty: '暂无出货数据',
+    matrix_total_row: '合计',
 };
 
 const translations: Record<Lang, TranslationDict> = { ru, zh };

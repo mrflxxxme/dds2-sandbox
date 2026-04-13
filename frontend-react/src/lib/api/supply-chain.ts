@@ -20,6 +20,7 @@ import type {
     VehicleStatusHistoryEntry,
     Supplier,
     SupplierCatalogResponse,
+    ShipmentMatrixResponse,
 } from '@/types/api';
 
 export function addSupplyChainMethods(api: ApiClient) {
@@ -172,6 +173,9 @@ export function addSupplyChainMethods(api: ApiClient) {
         },
         getSupplierCatalog(id: number) {
             return api.request<SupplierCatalogResponse>('GET', `/api/v1/supply-chain/suppliers/${id}/catalog`);
+        },
+        getShipmentMatrix(id: number) {
+            return api.request<ShipmentMatrixResponse>('GET', `/api/v1/supply-chain/suppliers/${id}/shipment-matrix`);
         },
 
         // ─── Vehicles by query (for order_no with slashes) ──────────

@@ -1,11 +1,13 @@
 """
 Supply Chain — Supplier catalog service.
 Returns all items ever ordered from a supplier, grouped by subject.
+Also provides a shipment matrix view (otgruzochnaya karta).
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal
@@ -17,6 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.cache import cached, invalidate_cache
 from backend.models.supply_chain import Supplier
 from backend.schemas.supply_chain import (
+    ShipmentMatrixItem,
+    ShipmentMatrixResponse,
+    ShipmentMatrixSubjectGroup,
+    ShipmentMatrixSummary,
+    ShipmentMatrixVehicle,
     SkuOrderHistoryEntry,
     SupplierCatalogItem,
     SupplierCatalogResponse,
@@ -28,44 +35,26 @@ from backend.schemas.supply_chain import (
 logger = logging.getLogger(__name__)
 
 _DELIVERED = "DELIVERED"
-# Safety cap for supplier catalog: ignore a supplier with an absurd number of
-# line-items to prevent OOM / PgBouncer statement-too-large errors. A single
-# real supplier rarely crosses a few thousand items over many years; the cap
-# exists purely as a DoS safeguard.
 _MAX_FOI_PER_SUPPLIER = 10000
 
 
-@cached(prefix="supply_chain:supplier_catalog", ttl=300)
-async def get_supplier_catalog(
-    db: AsyncSession,
-    project_id: int,
-    supplier_id: int,
-) -> dict:
-    """
-    Return all items ever ordered from a supplier, grouped by subject → barcode.
-
-    Uses two queries (no N+1):
-    1. All FactoryOrderItems for this supplier's orders.
-    2. All CostOrderItems linked to those factory order items.
-    """
-    # ── 1. Verify supplier exists in this project ─────────────────────────────
-    supplier_result = await db.execute(
+async def _verify_supplier(db: AsyncSession, project_id: int, supplier_id: int) -> Supplier:
+    """Fetch and verify supplier exists in the given project."""
+    result = await db.execute(
         select(Supplier).where(
             Supplier.id == supplier_id,
             Supplier.project_id == project_id,
             Supplier.is_deleted == False,  # noqa: E712
         )
     )
-    supplier = supplier_result.scalar_one_or_none()
+    supplier = result.scalar_one_or_none()
     if not supplier:
         raise HTTPException(status_code=404, detail="Supplier not found")
+    return supplier
 
-    # ── 2. Fetch all factory order items for this supplier ────────────────────
-    # LEFT JOIN nomenclature to enrich missing subject/article_seller (Bug fix:
-    # factory order detail page enriches in-memory via _enrich_items_from_nomenclature,
-    # but catalog used raw DB values — items with NULL subject showed "Без предмета").
-    # Also match orders by factory_name fallback when supplier_id is NULL (Bug fix:
-    # some orders were created without supplier_id but with matching factory_name).
+
+async def _fetch_supplier_fois(db: AsyncSession, project_id: int, supplier_id: int, supplier_name: str) -> list:
+    """Fetch all FactoryOrderItems for a supplier (shared by catalog & matrix)."""
     foi_rows = await db.execute(
         text("""
             SELECT
@@ -96,27 +85,28 @@ async def get_supplier_catalog(
         """),
         {
             "supplier_id": supplier_id,
-            "supplier_name": supplier.name,
+            "supplier_name": supplier_name,
             "project_id": project_id,
             "limit": _MAX_FOI_PER_SUPPLIER,
         },
     )
-    foi_list = foi_rows.mappings().all()
-
-    if not foi_list:
-        return _build_empty_response(supplier)
+    foi_list = list(foi_rows.mappings().all())
 
     if len(foi_list) >= _MAX_FOI_PER_SUPPLIER:
         logger.warning(
-            "Supplier catalog truncated at %d items (project_id=%d, supplier_id=%d) — " "consider pagination",
+            "Supplier catalog truncated at %d items (project_id=%d, supplier_id=%d)",
             _MAX_FOI_PER_SUPPLIER,
             project_id,
             supplier_id,
         )
 
-    foi_ids = [r["foi_id"] for r in foi_list]
+    return foi_list
 
-    # ── 3. Fetch CostOrderItems linked to those factory order items ───────────
+
+async def _fetch_coi_map(
+    db: AsyncSession, project_id: int, foi_ids: list[int]
+) -> dict[int, list[tuple[str | None, str | None, int]]]:
+    """Fetch CostOrderItems for given FOI ids. Returns foi_id → [(order_no, status, qty)]."""
     coi_rows = await db.execute(
         text("""
             SELECT
@@ -133,10 +123,35 @@ async def get_supplier_catalog(
         """),
         {"project_id": project_id, "foi_ids": foi_ids},
     )
-    # foi_id → list[(vehicle_order_no, vehicle_status, qty)]
     coi_map: dict[int, list[tuple[str | None, str | None, int]]] = defaultdict(list)
     for coi in coi_rows.mappings().all():
         coi_map[coi["factory_order_item_id"]].append((coi["vehicle_order_no"], coi["vehicle_status"], coi["qty"]))
+    return coi_map
+
+
+@cached(prefix="supply_chain:supplier_catalog", ttl=300)
+async def get_supplier_catalog(
+    db: AsyncSession,
+    project_id: int,
+    supplier_id: int,
+) -> dict:
+    """
+    Return all items ever ordered from a supplier, grouped by subject → barcode.
+
+    Uses two queries (no N+1):
+    1. All FactoryOrderItems for this supplier's orders.
+    2. All CostOrderItems linked to those factory order items.
+    """
+    supplier = await _verify_supplier(db, project_id, supplier_id)
+
+    foi_list = await _fetch_supplier_fois(db, project_id, supplier_id, supplier.name)
+
+    if not foi_list:
+        return _build_empty_response(supplier)
+
+    foi_ids = [r["foi_id"] for r in foi_list]
+
+    coi_map = await _fetch_coi_map(db, project_id, foi_ids)
 
     # ── 4. Aggregate in memory ─────────────────────────────────────────────────
     # subject → barcode → list of foi rows
@@ -317,6 +332,174 @@ def _build_empty_response(supplier: Supplier) -> dict:
     ).model_dump(mode="json")
 
 
+def _supplier_info(supplier: Supplier) -> SupplierCatalogSupplierInfo:
+    return SupplierCatalogSupplierInfo(
+        id=supplier.id,
+        name=supplier.name,
+        country=supplier.country,
+        currency=supplier.currency,
+    )
+
+
+# ── Shipment Matrix ─────────────────────────────────────────────────────────
+
+
+@cached(prefix="supply_chain:shipment_matrix", ttl=300)
+async def get_shipment_matrix(
+    db: AsyncSession,
+    project_id: int,
+    supplier_id: int,
+) -> dict:
+    """
+    Return a shipment matrix for a supplier: rows=barcodes grouped by subject,
+    columns=vehicles, cells=allocated qty.
+    """
+    supplier = await _verify_supplier(db, project_id, supplier_id)
+
+    foi_list = await _fetch_supplier_fois(db, project_id, supplier_id, supplier.name)
+
+    if not foi_list:
+        return ShipmentMatrixResponse(
+            supplier=_supplier_info(supplier),
+            vehicles=[],
+            summary=ShipmentMatrixSummary(total_qty=0, total_boxes=0, shipped_qty=0, remaining_qty=0),
+            subjects=[],
+        ).model_dump(mode="json")
+
+    foi_ids = [r["foi_id"] for r in foi_list]
+
+    # ── Enhanced COI query: also fetch container_type and ship_date ───────────
+    coi_rows = await db.execute(
+        text("""
+            SELECT
+                coi.factory_order_item_id,
+                co.order_no        AS vehicle_order_no,
+                co.status          AS vehicle_status,
+                co.container_type,
+                co.ship_date,
+                coi.qty
+            FROM cost_order_items coi
+            JOIN cost_orders co ON co.order_no = coi.order_no
+            WHERE co.project_id             = :project_id
+              AND co.is_deleted             = false
+              AND coi.is_deleted            = false
+              AND coi.factory_order_item_id = ANY(:foi_ids)
+        """),
+        {"project_id": project_id, "foi_ids": foi_ids},
+    )
+
+    # Build COI map and vehicles dict
+    coi_map: dict[int, list[tuple[str, int]]] = defaultdict(list)  # foi_id → [(order_no, qty)]
+    vehicles_dict: dict[str, ShipmentMatrixVehicle] = {}
+
+    for coi in coi_rows.mappings().all():
+        order_no = coi["vehicle_order_no"]
+        coi_map[coi["factory_order_item_id"]].append((order_no, coi["qty"]))
+        if order_no not in vehicles_dict:
+            vehicles_dict[order_no] = ShipmentMatrixVehicle(
+                order_no=order_no,
+                status=coi["vehicle_status"],
+                container_type=coi["container_type"],
+                ship_date=coi["ship_date"],
+            )
+
+    # ── Aggregate by subject → barcode ───────────────────────────────────────
+    subject_barcode: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+    for row in foi_list:
+        subject_key = row["subject"] if row["subject"] else "Без предмета"
+        subject_barcode[subject_key][row["barcode"]].append(row)
+
+    subjects: list[ShipmentMatrixSubjectGroup] = []
+    grand_total_qty = 0
+    grand_total_boxes = 0
+    grand_shipped_qty = 0
+
+    for subject_key in sorted(subject_barcode.keys()):
+        barcode_map = subject_barcode[subject_key]
+        items: list[ShipmentMatrixItem] = []
+        subj_total_qty = 0
+        subj_total_boxes = 0
+        subj_remaining = 0
+
+        for barcode in sorted(barcode_map.keys()):
+            rows = barcode_map[barcode]
+
+            total_qty = sum(int(r["qty"]) for r in rows)
+            pcs = rows[0]["pcs_per_box"]
+            pcs_per_box = int(pcs) if pcs else None
+            total_boxes = math.ceil(total_qty / pcs_per_box) if pcs_per_box and pcs_per_box > 0 else 0
+
+            # Accumulate vehicle allocations
+            allocations: dict[str, int] = defaultdict(int)
+            for r in rows:
+                for v_order_no, v_qty in coi_map.get(r["foi_id"], []):
+                    allocations[v_order_no] += v_qty
+
+            shipped_qty = sum(allocations.values())
+            remaining = total_qty - shipped_qty
+            pct = Decimal(str(round(shipped_qty / total_qty * 100, 1))) if total_qty > 0 else Decimal("0")
+
+            items.append(
+                ShipmentMatrixItem(
+                    barcode=barcode,
+                    article_seller=rows[0]["article_seller"],
+                    subject=rows[0]["subject"],
+                    brand=rows[0]["brand"],
+                    total_qty=total_qty,
+                    total_boxes=total_boxes,
+                    pcs_per_box=pcs_per_box,
+                    remaining_qty=remaining,
+                    shipped_pct=pct,
+                    vehicle_allocations=dict(allocations),
+                )
+            )
+
+            subj_total_qty += total_qty
+            subj_total_boxes += total_boxes
+            subj_remaining += remaining
+
+        subj_shipped = subj_total_qty - subj_remaining
+        subj_pct = Decimal(str(round(subj_shipped / subj_total_qty * 100, 1))) if subj_total_qty > 0 else Decimal("0")
+
+        subjects.append(
+            ShipmentMatrixSubjectGroup(
+                subject=subject_key,
+                items=items,
+                total_qty=subj_total_qty,
+                total_boxes=subj_total_boxes,
+                remaining_qty=subj_remaining,
+                shipped_pct=subj_pct,
+            )
+        )
+
+        grand_total_qty += subj_total_qty
+        grand_total_boxes += subj_total_boxes
+        grand_shipped_qty += subj_shipped
+
+    # Sort: most remaining first
+    subjects.sort(key=lambda s: s.remaining_qty, reverse=True)
+
+    # Sort vehicles by ship_date ASC (nulls last)
+    vehicles = sorted(
+        vehicles_dict.values(),
+        key=lambda v: v.ship_date or date.max,
+    )
+
+    response = ShipmentMatrixResponse(
+        supplier=_supplier_info(supplier),
+        vehicles=vehicles,
+        summary=ShipmentMatrixSummary(
+            total_qty=grand_total_qty,
+            total_boxes=grand_total_boxes,
+            shipped_qty=grand_shipped_qty,
+            remaining_qty=grand_total_qty - grand_shipped_qty,
+        ),
+        subjects=subjects,
+    )
+    return response.model_dump(mode="json")
+
+
 async def invalidate_supplier_catalog(project_id: int) -> None:
-    """Invalidate supplier catalog cache for a project."""
+    """Invalidate supplier catalog and shipment matrix cache for a project."""
     await invalidate_cache(f"supply_chain:supplier_catalog:project_id={project_id}")
+    await invalidate_cache(f"supply_chain:shipment_matrix:project_id={project_id}")

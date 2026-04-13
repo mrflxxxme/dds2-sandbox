@@ -394,6 +394,11 @@ async def recalculate_vehicle(
         return await vehicle_delivery.recalculate_vehicle(db, project.id, order_no)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        import logging
+
+        logging.getLogger("dds").exception("recalculate_vehicle %s failed", order_no)
+        raise HTTPException(500, f"Ошибка пересчёта: {e}") from e
 
 
 @router.post("/vehicles/{order_no}/items", dependencies=[Depends(rate_limit_write)])
@@ -562,6 +567,15 @@ async def get_supplier_catalog_endpoint(
     project: Project = Depends(get_current_project),
 ):
     return await supplier_catalog.get_supplier_catalog(db, project.id, supplier_id)
+
+
+@router.get("/suppliers/{supplier_id}/shipment-matrix", dependencies=[Depends(rate_limit_read_heavy)])
+async def get_shipment_matrix_endpoint(
+    supplier_id: int,
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+):
+    return await supplier_catalog.get_shipment_matrix(db, project.id, supplier_id)
 
 
 @router.get("/suppliers/{supplier_id}")
