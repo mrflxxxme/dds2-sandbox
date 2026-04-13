@@ -1885,9 +1885,21 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 
 .sc-subject-stats {
     display: flex;
+    align-items: center;
     gap: 24px;
     font-size: 13px;
     color: var(--color-text-muted);
+}
+
+.sc-subject-export-btn {
+    padding: 2px 8px;
+    font-size: 14px;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+}
+
+.sc-subject-export-btn:hover {
+    opacity: 1;
 }
 
 .sc-subject-table-wrap {

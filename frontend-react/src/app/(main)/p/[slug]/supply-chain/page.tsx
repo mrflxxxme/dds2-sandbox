@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel, calcTotalBoxesWithMix } from '@/lib/utils';
-import { LanguageProvider, useT, LanguageToggle, currencySymbol } from './i18n';
+import { LanguageProvider, useT, LanguageToggle, currencySymbol, translateSubject } from './i18n';
 
 /** Нормализация габаритов → "60x40x40" */
 const normalizeBoxSize = (s: string): string => s.trim().replace(/[×*,/\\]/g, 'x');
@@ -1757,7 +1757,8 @@ function SupplierCatalogView({
     const [error, setError] = useState<string | null>(null);
     const [search, setSearch] = useState('');
     const [subjectFilter, setSubjectFilter] = useState<string>('all');
-    const [onlyRemaining, setOnlyRemaining] = useState(false);
+    const [brandFilter, setBrandFilter] = useState<string>('all');
+    const [statusFilter, setStatusFilter] = useState<string>('all');
     const [expandedSku, setExpandedSku] = useState<Set<string>>(new Set());
     const [collapsedSubjects, setCollapsedSubjects] = useState<Set<string>>(new Set());
 
@@ -1781,6 +1782,14 @@ function SupplierCatalogView({
 
     useEffect(() => { loadCatalog(); }, [loadCatalog]);
 
+    // Unique brands for filter
+    const allBrands = useMemo(() => {
+        if (!catalog) return [];
+        const brands = new Set<string>();
+        catalog.subjects.forEach(g => g.items.forEach(it => { if (it.brand) brands.add(it.brand); }));
+        return [...brands].sort();
+    }, [catalog]);
+
     const filteredSubjects = useMemo((): SupplierCatalogSubjectGroup[] => {
         if (!catalog) return [];
         const q = search.trim().toLowerCase();
@@ -1788,25 +1797,29 @@ function SupplierCatalogView({
             .filter(g => subjectFilter === 'all' || g.subject === subjectFilter)
             .map(g => {
                 const items = g.items.filter(it => {
-                    if (onlyRemaining && it.delivered_qty >= it.total_qty) return false;
+                    if (statusFilter === 'production' && it.delivered_qty >= it.total_qty) return false;
+                    if (brandFilter !== 'all' && it.brand !== brandFilter) return false;
                     if (!q) return true;
                     return (
                         it.barcode.toLowerCase().includes(q) ||
                         (it.article_seller || '').toLowerCase().includes(q) ||
-                        (it.subject || '').toLowerCase().includes(q)
+                        (it.subject || '').toLowerCase().includes(q) ||
+                        (it.brand || '').toLowerCase().includes(q)
                     );
                 });
                 return { ...g, items };
             })
             .filter(g => g.items.length > 0);
-    }, [catalog, search, subjectFilter, onlyRemaining]);
+    }, [catalog, search, subjectFilter, brandFilter, statusFilter]);
 
-    const handleExport = useCallback(() => {
-        if (!catalog) return;
+    const buildExcelRows = useCallback((groups: SupplierCatalogSubjectGroup[]) => {
+        if (!catalog) return [];
         const sym = currencySymbol(catalog.supplier.currency);
-        const rows = filteredSubjects.flatMap(g =>
+        const country = catalog.supplier.country;
+        return groups.flatMap(g =>
             g.items.map(it => ({
-                [t('catalog_subject_empty')]: g.subject,
+                [t('catalog_subject_empty')]: translateSubject(g.subject, country),
+                [t('catalog_col_brand')]: it.brand || '',
                 [t('catalog_col_barcode')]: it.barcode,
                 [t('catalog_col_article')]: it.article_seller || '',
                 [t('catalog_col_size')]: it.box_size || '',
@@ -1820,9 +1833,23 @@ function SupplierCatalogView({
                 [t('catalog_col_orders_count')]: it.orders_count,
             }))
         );
+    }, [catalog, t]);
+
+    const handleExport = useCallback(() => {
+        if (!catalog) return;
+        const rows = buildExcelRows(filteredSubjects);
         const filename = `${t('catalog_excel_filename')}_${catalog.supplier.name}_${new Date().toISOString().slice(0, 10)}`;
         exportToExcel(rows, filename);
-    }, [catalog, filteredSubjects, t]);
+    }, [catalog, filteredSubjects, buildExcelRows, t]);
+
+    const handleExportSubject = useCallback((group: SupplierCatalogSubjectGroup) => {
+        if (!catalog) return;
+        const country = catalog.supplier.country;
+        const rows = buildExcelRows([group]);
+        const subjectName = translateSubject(group.subject, country);
+        const filename = `${subjectName}_${catalog.supplier.name}_${new Date().toISOString().slice(0, 10)}`;
+        exportToExcel(rows, filename);
+    }, [catalog, buildExcelRows]);
 
     const toggleSubject = (subject: string) => {
         setCollapsedSubjects(prev => {
@@ -1946,18 +1973,30 @@ function SupplierCatalogView({
                     <option value="all">{t('catalog_subject_all')}</option>
                     {catalog.subjects.map(g => (
                         <option key={g.subject} value={g.subject}>
-                            {g.subject}
+                            {translateSubject(g.subject, catalog.supplier.country)}
                         </option>
                     ))}
                 </select>
-                <label className="sc-catalog-checkbox-label">
-                    <input
-                        type="checkbox"
-                        checked={onlyRemaining}
-                        onChange={e => setOnlyRemaining(e.target.checked)}
-                    />
-                    {t('catalog_only_remaining')}
-                </label>
+                {allBrands.length > 1 && (
+                    <select
+                        value={brandFilter}
+                        onChange={e => setBrandFilter(e.target.value)}
+                        className="sc-catalog-filter-select"
+                    >
+                        <option value="all">{t('catalog_brand_all')}</option>
+                        {allBrands.map(b => (
+                            <option key={b} value={b}>{b}</option>
+                        ))}
+                    </select>
+                )}
+                <select
+                    value={statusFilter}
+                    onChange={e => setStatusFilter(e.target.value)}
+                    className="sc-catalog-filter-select"
+                >
+                    <option value="all">{t('catalog_status_filter_all')}</option>
+                    <option value="production">{t('catalog_status_filter_production')}</option>
+                </select>
             </div>
 
             {/* Empty state */}
@@ -1989,13 +2028,20 @@ function SupplierCatalogView({
                                 >
                                     ▼
                                 </span>
-                                {group.subject}
+                                {translateSubject(group.subject, catalog.supplier.country)}
                             </div>
                             <div className="sc-subject-stats">
                                 <div><strong className="sc-color-text">{group.items.length}</strong> {t('catalog_sku_unit')}</div>
                                 <div><strong className="sc-color-text">{formatNumber(groupTotalQty, 0)}</strong> {t('unit_pcs')}</div>
                                 <div><strong className="sc-color-text">{formatNumber(groupTotalAmount, 0)} {sym}</strong></div>
                                 <div>{t('catalog_delivered_label')}: <strong className="sc-color-text">{deliveredPct}%</strong></div>
+                                <button
+                                    className="btn btn-sm sc-subject-export-btn"
+                                    onClick={e => { e.stopPropagation(); handleExportSubject(group); }}
+                                    title="Excel"
+                                >
+                                    📥
+                                </button>
                             </div>
                         </div>
                         {!collapsed && (

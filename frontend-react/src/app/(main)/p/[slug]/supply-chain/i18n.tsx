@@ -253,10 +253,13 @@ const ru: TranslationDict = {
     catalog_kpi_sku: 'Уникальных SKU',
     catalog_kpi_qty: 'Кол-во всего',
     catalog_kpi_amount: 'Сумма заказов',
-    catalog_search_placeholder: '🔍 Поиск по баркоду, артикулу, предмету…',
+    catalog_search_placeholder: '🔍 Поиск по баркоду, артикулу, предмету, бренду…',
     catalog_subject_all: 'Все предметы',
-    catalog_only_remaining: 'Только с остатком на фабрике',
+    catalog_brand_all: 'Все бренды',
+    catalog_status_filter_all: 'Все товары',
+    catalog_status_filter_production: 'В производстве',
     catalog_col_barcode: 'Баркод',
+    catalog_col_brand: 'Бренд',
     catalog_col_article: 'Артикул',
     catalog_col_size: 'Размер',
     catalog_col_per_box: 'В кор.',
@@ -613,10 +616,13 @@ const zh: TranslationDict = {
     catalog_kpi_sku: '独立SKU',
     catalog_kpi_qty: '总数量',
     catalog_kpi_amount: '订单总额',
-    catalog_search_placeholder: '🔍 按条码、货号、品名搜索…',
+    catalog_search_placeholder: '🔍 按条码、货号、品名、品牌搜索…',
     catalog_subject_all: '全部品类',
-    catalog_only_remaining: '仅工厂待出货',
+    catalog_brand_all: '全部品牌',
+    catalog_status_filter_all: '全部商品',
+    catalog_status_filter_production: '生产中',
     catalog_col_barcode: '条码',
+    catalog_col_brand: '品牌',
     catalog_col_article: '货号',
     catalog_col_size: '尺寸',
     catalog_col_per_box: '每箱',
@@ -752,6 +758,42 @@ const I18nContext = createContext<I18nContextValue>({
 export function currencySymbol(currency?: string): string {
     if (currency === 'RUB') return '₽';
     return '¥';
+}
+
+/** Subject (category) translations: Russian → Chinese */
+const subjectZh: Record<string, string> = {
+    'Коврики для ванной': '浴室地垫',
+    'Ковры': '地毯',
+    'Наволочки декоративные': '装饰枕套',
+    'Одеяла': '被子',
+    'Пледы': '毛毯',
+    'Покрывала': '床盖',
+    'Чехлы для мебели': '家具罩',
+    'Шторы интерьерные': '窗帘',
+    'Шторы': '窗帘',
+    'Полотенца': '毛巾',
+    'Постельное бельё': '床上用品',
+    'Подушки': '枕头',
+    'Скатерти': '桌布',
+    'Салфетки': '餐巾',
+    'Матрасы': '床垫',
+    'Наматрасники': '床垫保护罩',
+    'Халаты': '浴袍',
+    'Тапочки': '拖鞋',
+    'Простыни': '床单',
+    'Пододеяльники': '被套',
+    'Наволочки': '枕套',
+    'Комплекты постельного белья': '床品套件',
+    'Занавески': '帘子',
+    'Дорожки настольные': '桌旗',
+    'Декоративные подушки': '装饰靠垫',
+    'Без предмета': '未分类',
+};
+
+/** Translate subject to Chinese for Chinese suppliers, else return as-is */
+export function translateSubject(subject: string, country?: string): string {
+    if (country === 'CHINA' && subjectZh[subject]) return subjectZh[subject];
+    return subject;
 }
 
 export function LanguageProvider({ children }: { children: React.ReactNode }) {
