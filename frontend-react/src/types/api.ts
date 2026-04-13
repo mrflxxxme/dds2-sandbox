@@ -1762,6 +1762,7 @@ export interface SupplierCatalogItem {
   orders_count: number;
   last_order_date: string | null;
   delivered_qty: number;
+  distributed_qty: number;
   order_history: SkuOrderHistoryEntry[];
 }
 
@@ -1771,6 +1772,7 @@ export interface SupplierCatalogSubjectGroup {
   total_qty: number;
   total_amount: string;
   delivered_qty: number;
+  distributed_qty: number;
   items: SupplierCatalogItem[];
 }
 

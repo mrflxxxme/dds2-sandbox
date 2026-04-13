@@ -329,8 +329,9 @@ function itemToEditRow(item: FactoryOrderItem): EditRow {
     };
 }
 
-function ItemsTable({ items, orderId, nomMap, onChanged, currency }: {
+function ItemsTable({ items, orderId, nomMap, onChanged, currency, showPasteSpecs, onTogglePasteSpecs }: {
     items: FactoryOrderItem[]; orderId: number; nomMap: Map<string, Nomenclature>; onChanged: () => void; currency?: string;
+    showPasteSpecs?: boolean; onTogglePasteSpecs?: () => void;
 }) {
     const cs = currencySymbol(currency);
     const { t } = useT();
@@ -484,6 +485,36 @@ function ItemsTable({ items, orderId, nomMap, onChanged, currency }: {
         setDeletingId(null);
     };
 
+    const [deletingSelected, setDeletingSelected] = useState(false);
+
+    const handleDeleteSelected = async () => {
+        const selectedItems = items.filter(i => selected.has(i.id));
+        const deletable = selectedItems.filter(i => i.assigned_qty === 0);
+        const notDeletable = selectedItems.length - deletable.length;
+
+        if (deletable.length === 0) {
+            alert(t('detail_delete_selected_error').replace('{count}', String(selectedItems.length)));
+            return;
+        }
+
+        const msg = t('detail_confirm_delete_selected').replace('{count}', String(deletable.length));
+        if (!confirm(notDeletable > 0 ? `${msg}\n\n${t('detail_delete_selected_error').replace('{count}', String(notDeletable))}` : msg)) return;
+
+        setDeletingSelected(true);
+        try {
+            await Promise.all(deletable.map(i => api.deleteFactoryOrderItem(orderId, i.id)));
+            setSelected(new Set());
+            if (editing) {
+                setEditing(false);
+                setEditRows([]);
+            }
+            onChanged();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : t('msg_delete_error'));
+        }
+        setDeletingSelected(false);
+    };
+
     const handleExport = () => {
         const rows = items.map(i => ({
             [t('col_barcode')]: i.barcode,
@@ -524,6 +555,12 @@ function ItemsTable({ items, orderId, nomMap, onChanged, currency }: {
                     {t('detail_items_title')} ({items.length})
                 </h3>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    {selected.size > 0 && !mixFormOpen && (
+                        <button className="btn btn-danger btn-sm" onClick={handleDeleteSelected}
+                            disabled={deletingSelected} style={{ fontSize: 12 }}>
+                            {deletingSelected ? '...' : `${t('detail_delete_selected')} (${selected.size})`}
+                        </button>
+                    )}
                     {!editing && selected.size >= 2 && !mixFormOpen && (
                         <button className="btn btn-primary btn-sm" onClick={handleOpenMixForm}
                             style={{ fontSize: 12 }}>
@@ -537,6 +574,15 @@ function ItemsTable({ items, orderId, nomMap, onChanged, currency }: {
                         </>
                     ) : (
                         <>
+                            {onTogglePasteSpecs && (
+                                <button
+                                    className={`btn btn-sm ${showPasteSpecs ? 'btn-secondary' : 'btn-primary'}`}
+                                    onClick={onTogglePasteSpecs}
+                                    style={{ fontSize: 12 }}
+                                >
+                                    {showPasteSpecs ? t('btn_close') : `📋 ${t('paste_specs_btn')}`}
+                                </button>
+                            )}
                             <button className="btn btn-secondary btn-sm" onClick={cancelBulkEdit}>{t('btn_cancel')}</button>
                             <button className="btn btn-primary btn-sm" onClick={handleSaveAll} disabled={saving}>
                                 {saving ? t('msg_saving') : t('btn_save')}
@@ -621,12 +667,10 @@ function ItemsTable({ items, orderId, nomMap, onChanged, currency }: {
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                     <thead>
                         <tr style={{ borderBottom: '2px solid var(--color-border)' }}>
-                            {!editing && (
-                                <th style={{ width: 32, textAlign: 'center', padding: '8px 2px' }}>
-                                    <input type="checkbox" checked={selected.size === items.length && items.length > 0}
-                                        onChange={toggleAll} style={{ cursor: 'pointer' }} />
-                                </th>
-                            )}
+                            <th style={{ width: 32, textAlign: 'center', padding: '8px 2px' }}>
+                                <input type="checkbox" checked={selected.size === items.length && items.length > 0}
+                                    onChange={toggleAll} style={{ cursor: 'pointer' }} />
+                            </th>
                             <th style={th}>{t('col_barcode')}</th>
                             <th style={th}>{t('detail_col_subject')}</th>
                             <th style={th}>{t('col_article')}</th>
@@ -649,7 +693,11 @@ function ItemsTable({ items, orderId, nomMap, onChanged, currency }: {
                             const priceCny = Number(row.price_cny) || 0;
                             const remaining = qty - assignedQty;
                             return (
-                                <tr key={row.id} style={{ borderBottom: '1px solid var(--color-border)', background: 'rgba(59,130,246,0.02)' }}>
+                                <tr key={row.id} style={{ borderBottom: '1px solid var(--color-border)', background: selected.has(row.id) ? 'rgba(255,59,48,0.04)' : 'rgba(59,130,246,0.02)' }}>
+                                    <td style={{ textAlign: 'center', padding: '4px 2px' }}>
+                                        <input type="checkbox" checked={selected.has(row.id)}
+                                            onChange={() => toggleSelect(row.id)} style={{ cursor: 'pointer' }} />
+                                    </td>
                                     <td style={td}><input value={row.barcode} onChange={e => updateRow(idx, 'barcode', e.target.value)} style={{ ...inp, width: 120, fontFamily: 'monospace', fontSize: 12 }} /></td>
                                     <td style={td}><span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{nomMap.get(row.barcode)?.subject || row.subject || '—'}</span></td>
                                     <td style={td}><span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{nomMap.get(row.barcode)?.article_seller || row.article_seller || '—'}</span></td>
@@ -755,7 +803,7 @@ function ItemsTable({ items, orderId, nomMap, onChanged, currency }: {
                     {items.length > 1 && (
                         <tfoot>
                             <tr style={{ borderTop: '2px solid var(--color-border)', fontWeight: 600 }}>
-                                <td colSpan={editing ? 3 : 4} style={{ ...td, fontSize: 12, color: 'var(--color-text-muted)' }}>{t('detail_total')}</td>
+                                <td colSpan={4} style={{ ...td, fontSize: 12, color: 'var(--color-text-muted)' }}>{t('detail_total')}</td>
                                 <td style={tdR}>{formatNumber(totalQty, 0)}</td>
                                 <td style={tdR}><MiniProgressBar qty={totalQty} assignedQty={totalAssigned} /></td>
                                 <td style={tdR} />
@@ -994,6 +1042,224 @@ function AddItemsSection({ orderId, nomMap, onAdded, alwaysOpen, onClose, curren
     );
 }
 
+
+// ─── Paste Specs Section (bulk update box_size, pcs_per_box, weight_kg) ──
+
+interface SpecsRow {
+    barcode: string; box_size: string; pcs_per_box: string; weight_kg: string;
+}
+
+const emptySpecsRow = (): SpecsRow => ({ barcode: '', box_size: '', pcs_per_box: '', weight_kg: '' });
+
+function PasteSpecsSection({ orderId, existingItems, onUpdated, onClose }: {
+    orderId: number; existingItems: FactoryOrderItem[]; onUpdated: () => void; onClose: () => void;
+}) {
+    const { t } = useT();
+    const [rows, setRows] = useState<SpecsRow[]>(() => Array.from({ length: 5 }, emptySpecsRow));
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState('');
+
+    const barcodeSet = useMemo(() => new Set(existingItems.map(i => i.barcode)), [existingItems]);
+
+    const updateRow = (idx: number, field: keyof SpecsRow, value: string) => {
+        setRows(prev => {
+            const next = [...prev];
+            next[idx] = { ...next[idx], [field]: field === 'box_size' ? normalizeBoxSize(value) : value };
+            return next;
+        });
+        if (idx === rows.length - 1) {
+            setRows(prev => [...prev, emptySpecsRow()]);
+        }
+    };
+
+    const handlePaste = (e: React.ClipboardEvent) => {
+        const text = e.clipboardData.getData('text/plain');
+        if (!text.includes('\t') && !text.includes('\n')) return;
+        e.preventDefault();
+        const lines = text.trim().split('\n').map(l => l.split('\t'));
+        const newRows: SpecsRow[] = [];
+        for (const cols of lines) {
+            if (cols.length < 1) continue;
+            const barcode = (cols[0] || '').trim();
+            if (!barcode) continue;
+            newRows.push({
+                barcode,
+                box_size: normalizeBoxSize(cols[1] || ''),
+                pcs_per_box: parseNum(cols[2] || ''),
+                weight_kg: parseNum(cols[3] || ''),
+            });
+        }
+        if (newRows.length > 0) {
+            setRows([...newRows, emptySpecsRow(), emptySpecsRow()]);
+        }
+    };
+
+    const filledRows = rows.filter(r => r.barcode.trim());
+    const matchedRows = filledRows.filter(r => barcodeSet.has(r.barcode.trim()));
+    const notFoundRows = filledRows.filter(r => !barcodeSet.has(r.barcode.trim()));
+    const canApply = matchedRows.length > 0;
+
+    const handleApply = async () => {
+        if (!canApply) return;
+        setSaving(true);
+        setError('');
+        try {
+            const updates = matchedRows.map(r => ({
+                barcode: r.barcode.trim(),
+                box_size: r.box_size.trim() || undefined,
+                pcs_per_box: parseInt(r.pcs_per_box) || undefined,
+                weight_kg: parseFloat(r.weight_kg) || undefined,
+            }));
+            await api.bulkUpdateItemSpecs(orderId, updates);
+            setRows(Array.from({ length: 5 }, emptySpecsRow));
+            onUpdated();
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setSaving(false);
+    };
+
+    const handleClear = () => {
+        setRows(Array.from({ length: 5 }, emptySpecsRow));
+        setError('');
+    };
+
+    const cellInp: React.CSSProperties = {
+        width: '100%', background: 'var(--color-bg)',
+        border: '1px solid var(--color-border)',
+        borderRadius: 8, padding: '8px 10px', fontSize: 13,
+        color: 'var(--color-text)',
+    };
+    const cellNum: React.CSSProperties = { ...cellInp, textAlign: 'right', width: 80 };
+    const thStyle: React.CSSProperties = {
+        textAlign: 'left', padding: '10px 6px', fontSize: 11, fontWeight: 600,
+        color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.3px',
+    };
+    const thR: React.CSSProperties = { ...thStyle, textAlign: 'right' };
+
+    return (
+        <div className="glass-card" style={{ padding: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <div>
+                    <div style={{ fontSize: 14, fontWeight: 600 }}>📋 {t('paste_specs_header')}</div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 2 }}>{t('paste_specs_sub')}</div>
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                    {filledRows.length > 0 && (
+                        <button className="btn btn-secondary btn-sm" onClick={handleClear}>{t('btn_clear')}</button>
+                    )}
+                    <button className="btn btn-secondary btn-sm" onClick={onClose}>{t('btn_cancel')}</button>
+                </div>
+            </div>
+
+            {error && (
+                <div style={{
+                    background: 'rgba(239,68,68,0.08)', color: 'var(--color-danger)',
+                    padding: '8px 12px', borderRadius: 8, fontSize: 12, marginBottom: 12,
+                }}>
+                    {error}
+                </div>
+            )}
+
+            {filledRows.length > 0 && (
+                <div style={{ display: 'flex', gap: 16, marginBottom: 12 }}>
+                    <div style={{ padding: '6px 14px', background: 'var(--color-bg)', borderRadius: 12 }}>
+                        <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--color-success)' }}>{matchedRows.length}</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{t('paste_specs_found')}</div>
+                    </div>
+                    {notFoundRows.length > 0 && (
+                        <div style={{ padding: '6px 14px', background: 'var(--color-bg)', borderRadius: 12 }}>
+                            <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--color-danger)' }}>{notFoundRows.length}</div>
+                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{t('paste_specs_nf_label')}</div>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            <div style={{ overflow: 'auto' }} onPaste={handlePaste}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <thead>
+                        <tr>
+                            <th style={{ ...thStyle, width: 36 }}>#</th>
+                            <th style={{ ...thStyle, width: '100%' }}>{t('col_barcode')}</th>
+                            <th style={thStyle}>{t('col_box_spec')}</th>
+                            <th style={thR}>{t('col_pcs_per_box')}</th>
+                            <th style={thR}>{t('col_weight_1pc')}</th>
+                            {filledRows.length > 0 && <th style={{ ...thStyle, width: 80 }}></th>}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows.map((row, i) => {
+                            const bc = row.barcode.trim();
+                            const matched = bc ? barcodeSet.has(bc) : undefined;
+                            const rowBg = matched === true
+                                ? 'rgba(52,199,89,0.06)'
+                                : matched === false
+                                    ? 'rgba(255,59,48,0.04)'
+                                    : undefined;
+                            return (
+                                <tr key={i} style={{ borderBottom: '1px solid var(--color-border)', background: rowBg }}>
+                                    <td style={{ padding: '6px', fontSize: 12, color: 'var(--color-text-dim)', textAlign: 'center' }}>
+                                        {i + 1}
+                                    </td>
+                                    <td style={{ padding: '4px' }}>
+                                        <input
+                                            value={row.barcode}
+                                            onChange={e => updateRow(i, 'barcode', e.target.value)}
+                                            placeholder={t('col_barcode')}
+                                            autoComplete="off"
+                                            style={{ ...cellInp, fontFamily: 'monospace' }}
+                                        />
+                                    </td>
+                                    <td style={{ padding: '4px' }}>
+                                        <input value={row.box_size}
+                                            onChange={e => updateRow(i, 'box_size', e.target.value)}
+                                            autoComplete="off" placeholder="60x40x30"
+                                            style={{ ...cellInp, width: 120 }} />
+                                    </td>
+                                    <td style={{ padding: '4px' }}>
+                                        <input type="number" value={row.pcs_per_box}
+                                            onChange={e => updateRow(i, 'pcs_per_box', e.target.value)}
+                                            min={0} autoComplete="off" style={cellNum} />
+                                    </td>
+                                    <td style={{ padding: '4px' }}>
+                                        <input type="number" step="0.01" value={row.weight_kg}
+                                            onChange={e => updateRow(i, 'weight_kg', e.target.value)}
+                                            min={0} autoComplete="off" style={cellNum} />
+                                    </td>
+                                    {filledRows.length > 0 && (
+                                        <td style={{ padding: '4px', textAlign: 'center' }}>
+                                            {matched === true && (
+                                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 24, fontSize: 11, fontWeight: 600, background: 'rgba(52,199,89,0.12)', color: '#248a3d' }}>
+                                                    ✓ {t('paste_specs_matched')}
+                                                </span>
+                                            )}
+                                            {matched === false && (
+                                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 24, fontSize: 11, fontWeight: 600, background: 'rgba(255,59,48,0.1)', color: '#d70015' }}>
+                                                    ✕ {t('paste_specs_not_found')}
+                                                </span>
+                                            )}
+                                        </td>
+                                    )}
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 12, justifyContent: 'flex-end' }}>
+                <button className="btn btn-primary" onClick={handleApply}
+                    disabled={!canApply || saving}
+                    style={{ fontSize: 14, padding: '10px 24px' }}>
+                    {saving ? '...' : `✓ ${t('paste_specs_apply')}${matchedRows.length > 0 ? ` (${matchedRows.length})` : ''}`}
+                </button>
+            </div>
+        </div>
+    );
+}
+
+
 // ─── Inner Content (needs LanguageProvider above) ────────────────────────
 
 function FactoryOrderDetailContent() {
@@ -1011,6 +1277,7 @@ function FactoryOrderDetailContent() {
     const [tab, setTab] = useState<'main' | 'history'>('main');
     const [itemFilter, setItemFilter] = useState<'all' | 'distributed' | 'undistributed'>('all');
     const [showAddItems, setShowAddItems] = useState(false);
+    const [showPasteSpecs, setShowPasteSpecs] = useState(false);
 
     const nomMap = useMemo(() => {
         const m = new Map<string, Nomenclature>();
@@ -1052,13 +1319,13 @@ function FactoryOrderDetailContent() {
     const distPctAll = totalQtyAll > 0 ? Math.round((totalAssignedAll / totalQtyAll) * 100) : 0;
 
     const filteredItems = itemFilter === 'distributed'
-        ? items.filter(i => i.assigned_qty >= i.qty && i.qty > 0)
+        ? items.filter(i => i.assigned_qty > 0)
         : itemFilter === 'undistributed'
-            ? items.filter(i => i.assigned_qty < i.qty)
+            ? items.filter(i => i.assigned_qty === 0)
             : items;
 
-    const distributedCount = items.filter(i => i.assigned_qty >= i.qty && i.qty > 0).length;
-    const undistributedCount = items.filter(i => i.assigned_qty < i.qty).length;
+    const distributedCount = items.filter(i => i.assigned_qty > 0).length;
+    const undistributedCount = items.filter(i => i.assigned_qty === 0).length;
 
     return (
         <div className="animate-in">
@@ -1155,6 +1422,18 @@ function FactoryOrderDetailContent() {
                         </div>
                     )}
 
+                    {/* Paste specs form (toggled from ItemsTable edit mode) */}
+                    {showPasteSpecs && (
+                        <div style={{ marginBottom: 16 }}>
+                            <PasteSpecsSection
+                                orderId={order.id}
+                                existingItems={items}
+                                onUpdated={() => { load(); setShowPasteSpecs(false); }}
+                                onClose={() => setShowPasteSpecs(false)}
+                            />
+                        </div>
+                    )}
+
                     <div className="glass-card" style={{ padding: 16 }}>
                         {filteredItems.length === 0 ? (
                             <div className="empty-state">
@@ -1168,7 +1447,8 @@ function FactoryOrderDetailContent() {
                                 </div>
                             </div>
                         ) : (
-                            <ItemsTable items={filteredItems} orderId={order.id} nomMap={nomMap} onChanged={load} currency={order.supplier?.currency} />
+                            <ItemsTable items={filteredItems} orderId={order.id} nomMap={nomMap} onChanged={load} currency={order.supplier?.currency}
+                                showPasteSpecs={showPasteSpecs} onTogglePasteSpecs={() => setShowPasteSpecs(v => !v)} />
                         )}
                     </div>
                 </>

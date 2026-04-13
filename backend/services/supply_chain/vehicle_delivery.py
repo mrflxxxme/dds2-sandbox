@@ -404,6 +404,63 @@ async def remove_item_from_vehicle(
     return {"ok": True}
 
 
+async def clear_all_vehicle_items(
+    db: AsyncSession,
+    project_id: int,
+    order_no: str,
+) -> dict:
+    """Remove ALL items from a FORMING vehicle and restore assigned_qty."""
+    result = await db.execute(
+        select(CostOrder)
+        .options(selectinload(CostOrder.items))
+        .where(
+            CostOrder.order_no == order_no,
+            CostOrder.project_id == project_id,
+            CostOrder.is_deleted == False,
+        )
+    )
+    vehicle = result.scalar_one_or_none()
+    if not vehicle:
+        raise ValueError(f"Vehicle {order_no} not found")
+
+    if vehicle.status != VehicleStatus.FORMING:
+        raise ValueError("Clear items allowed only for FORMING vehicles")
+
+    active_items = [item for item in vehicle.items if not item.is_deleted]
+    if not active_items:
+        return {"ok": True, "removed": 0}
+
+    # Restore assigned_qty on linked factory order items
+    fo_item_ids = [item.factory_order_item_id for item in active_items if item.factory_order_item_id]
+    fo_items_map: dict[int, FactoryOrderItem] = {}
+    if fo_item_ids:
+        fo_result = await db.execute(
+            select(FactoryOrderItem).where(
+                FactoryOrderItem.id.in_(fo_item_ids),
+                FactoryOrderItem.project_id == project_id,
+                FactoryOrderItem.is_deleted == False,
+            )
+        )
+        fo_items_map = {fi.id: fi for fi in fo_result.scalars().all()}
+
+    removed = 0
+    for cost_item in active_items:
+        if cost_item.factory_order_item_id and cost_item.factory_order_item_id in fo_items_map:
+            fo_item = fo_items_map[cost_item.factory_order_item_id]
+            fo_item.assigned_qty = max(0, fo_item.assigned_qty - cost_item.qty)
+        cost_item.soft_delete()
+        removed += 1
+
+    await db.commit()
+
+    from backend.services.cost.items import recalculate_order_items
+
+    await recalculate_order_items(db, project_id, order_no)
+    await _invalidate_supplier_catalog(project_id)
+
+    return {"ok": True, "removed": removed}
+
+
 async def delete_vehicle(
     db: AsyncSession,
     project_id: int,

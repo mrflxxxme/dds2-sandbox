@@ -505,6 +505,61 @@ async def update_item(
     return item
 
 
+async def bulk_update_items_specs(
+    db: AsyncSession,
+    project_id: int,
+    order_id: int,
+    updates: list[dict],
+) -> dict:
+    """Bulk update box_size/pcs_per_box/weight_kg for items matched by barcode.
+
+    Returns {ok, updated, not_found}.
+    """
+    order = await get_factory_order(db, project_id, order_id)
+    if not order:
+        raise ValueError("Factory order not found")
+
+    # Build barcode → item map (active items only)
+    barcode_map: dict[str, list[FactoryOrderItem]] = {}
+    for item in order.items:
+        if item.is_deleted:
+            continue
+        barcode_map.setdefault(item.barcode, []).append(item)
+
+    updated = 0
+    not_found: list[str] = []
+
+    for upd in updates:
+        barcode = upd.get("barcode", "").strip()
+        if not barcode:
+            continue
+
+        items = barcode_map.get(barcode)
+        if not items:
+            not_found.append(barcode)
+            continue
+
+        for item in items:
+            changed = False
+            if upd.get("box_size") is not None:
+                item.box_size = upd["box_size"]
+                changed = True
+            if upd.get("pcs_per_box") is not None:
+                item.pcs_per_box = upd["pcs_per_box"]
+                changed = True
+            if upd.get("weight_kg") is not None:
+                item.weight_kg = upd["weight_kg"]
+                changed = True
+            if changed:
+                updated += 1
+
+    if updated > 0:
+        await db.commit()
+        await _invalidate_supplier_catalog(project_id)
+
+    return {"ok": True, "updated": updated, "not_found": not_found}
+
+
 async def delete_item(
     db: AsyncSession,
     project_id: int,

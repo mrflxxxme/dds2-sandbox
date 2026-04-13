@@ -161,6 +161,7 @@ async def get_supplier_catalog(
         subj_total_qty = 0
         subj_total_amount = Decimal("0")
         subj_delivered_qty = 0
+        subj_distributed_qty = 0
 
         for barcode in sorted(barcode_map.keys()):
             rows = barcode_map[barcode]
@@ -171,6 +172,7 @@ async def get_supplier_catalog(
             last_order_date: date | None = None
             last_price = Decimal("0")
             delivered_qty = 0
+            distributed_qty = 0
             item_delivered_amount = Decimal("0")
 
             order_history: list[SkuOrderHistoryEntry] = []
@@ -196,7 +198,9 @@ async def get_supplier_catalog(
                 foi_vehicles = coi_map.get(r["foi_id"], [])
 
                 foi_delivered_qty = sum(v_qty for _, v_status, v_qty in foi_vehicles if v_status == _DELIVERED)
+                foi_distributed_qty = sum(v_qty for _, _, v_qty in foi_vehicles)
                 delivered_qty += foi_delivered_qty
+                distributed_qty += foi_distributed_qty
                 # Accumulate delivered amount using actual price_cny (not avg)
                 item_delivered_amount += price_cny * foi_delivered_qty
 
@@ -247,6 +251,7 @@ async def get_supplier_catalog(
                     orders_count=len(unique_fo_ids),
                     last_order_date=last_order_date,
                     delivered_qty=delivered_qty,
+                    distributed_qty=distributed_qty,
                     order_history=order_history,
                 )
             )
@@ -254,6 +259,7 @@ async def get_supplier_catalog(
             subj_total_qty += total_qty
             subj_total_amount += total_amount
             subj_delivered_qty += delivered_qty
+            subj_distributed_qty += distributed_qty
             grand_delivered_amount += item_delivered_amount
 
         subjects.append(
@@ -263,6 +269,7 @@ async def get_supplier_catalog(
                 total_qty=subj_total_qty,
                 total_amount=subj_total_amount,
                 delivered_qty=subj_delivered_qty,
+                distributed_qty=subj_distributed_qty,
                 items=items,
             )
         )

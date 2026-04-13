@@ -17,6 +17,7 @@ from backend.models import Project, User
 from backend.project_context import get_current_project
 from backend.schemas.supply_chain import (
     AddItemsToVehicleRequest,
+    BulkUpdateItemSpecs,
     FactoryOrderCreate,
     FactoryOrderHistorySchema,
     FactoryOrderItemCreate,
@@ -129,6 +130,20 @@ async def add_items_to_order(
         return {"ok": True, "added": len(created)}
     except ValueError as e:
         raise HTTPException(404, str(e)) from e
+
+
+@router.put("/factory-orders/{order_id}/items/bulk-specs", dependencies=[Depends(rate_limit_write)])
+async def bulk_update_item_specs(
+    order_id: int,
+    payload: list[BulkUpdateItemSpecs],
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        updates = [u.model_dump(exclude_unset=True) for u in payload]
+        return await factory_orders.bulk_update_items_specs(db, project.id, order_id, updates)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @router.put("/factory-orders/{order_id}/items/{item_id}", dependencies=[Depends(rate_limit_write)])
@@ -405,6 +420,18 @@ async def remove_item_from_vehicle(
         return await vehicle_delivery.remove_item_from_vehicle(db, project.id, order_no, item_id)
     except ValueError as e:
         raise HTTPException(404, str(e)) from e
+
+
+@router.delete("/vehicles/{order_no}/items", dependencies=[Depends(rate_limit_write)])
+async def clear_all_vehicle_items(
+    order_no: str,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await vehicle_delivery.clear_all_vehicle_items(db, project.id, order_no)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 # ─── Vehicle Documents ──────────────────────────────────────────────────────
