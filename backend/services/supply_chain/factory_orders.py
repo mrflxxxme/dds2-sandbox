@@ -306,33 +306,68 @@ async def add_items(
     if not order:
         raise ValueError("Factory order not found")
 
+    # Build barcode → existing item map for merge
+    existing_map: dict[str, FactoryOrderItem] = {}
+    for ei in order.items:
+        if not ei.is_deleted:
+            existing_map[ei.barcode] = ei
+
     created = []
+    merged = 0
     total_qty = 0
     for item_data in items:
-        item = FactoryOrderItem(
-            project_id=project_id,
-            factory_order_id=order.id,
-            barcode=item_data.barcode,
-            subject=item_data.subject,
-            article_seller=item_data.article_seller,
-            qty=item_data.qty,
-            assigned_qty=0,
-            price_cny=item_data.price_cny,
-            box_size=item_data.box_size,
-            pcs_per_box=item_data.pcs_per_box,
-            weight_kg=item_data.weight_kg,
-            note=item_data.note,
-        )
-        db.add(item)
-        created.append(item)
+        existing = existing_map.get(item_data.barcode)
+        if existing:
+            # Merge: increase qty, update price/specs if provided
+            existing.qty += item_data.qty
+            if item_data.price_cny:
+                existing.price_cny = item_data.price_cny
+            if item_data.box_size:
+                existing.box_size = item_data.box_size
+            if item_data.pcs_per_box:
+                existing.pcs_per_box = item_data.pcs_per_box
+            if item_data.weight_kg:
+                existing.weight_kg = item_data.weight_kg
+            if item_data.subject:
+                existing.subject = item_data.subject
+            if item_data.article_seller:
+                existing.article_seller = item_data.article_seller
+            created.append(existing)
+            merged += 1
+        else:
+            item = FactoryOrderItem(
+                project_id=project_id,
+                factory_order_id=order.id,
+                barcode=item_data.barcode,
+                subject=item_data.subject,
+                article_seller=item_data.article_seller,
+                qty=item_data.qty,
+                assigned_qty=0,
+                price_cny=item_data.price_cny,
+                box_size=item_data.box_size,
+                pcs_per_box=item_data.pcs_per_box,
+                weight_kg=item_data.weight_kg,
+                note=item_data.note,
+            )
+            db.add(item)
+            created.append(item)
+            existing_map[item_data.barcode] = item
         total_qty += item_data.qty
+
+    new_count = len(items) - merged
+    details_parts = []
+    if new_count > 0:
+        details_parts.append(f"добавлено {new_count} новых")
+    if merged > 0:
+        details_parts.append(f"обновлено {merged} существующих")
+    details_parts.append(f"({total_qty} шт.)")
 
     await _add_history(
         db,
         project_id,
         order.id,
         "items_added",
-        details=f"Добавлено {len(items)} позиций ({total_qty} шт.)",
+        details=f"Позиции: {', '.join(details_parts)}",
         changed_by=user_name,
     )
 
