@@ -9,7 +9,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.cache import invalidate_cache
 from backend.models.cost import CostOrder, CostOrderItem, Nomenclature
 from backend.models.enums import FactoryOrderStatus, VehicleStatus
 from backend.models.supply_chain import FactoryOrder, FactoryOrderHistory, FactoryOrderItem, Supplier
@@ -20,13 +19,10 @@ from backend.schemas.supply_chain import (
     FactoryOrderUpdate,
     SplitToVehiclesRequest,
 )
+from backend.services.supply_chain.supplier_catalog import invalidate_supplier_catalog as _invalidate_supplier_catalog
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
-
-
-async def _invalidate_supplier_catalog(project_id: int) -> None:
-    await invalidate_cache(f"supply_chain:supplier_catalog:project_id={project_id}")
 
 
 # ─── History helpers ──────────────────────────────────────────────────────────

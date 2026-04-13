@@ -10,7 +10,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.cache import invalidate_cache
 from backend.models.cost import CostOrder, CostOrderItem
 from backend.models.enums import VehicleStatus
 from backend.models.planning import LeadTime
@@ -30,15 +29,11 @@ from backend.schemas.supply_chain import (
     VehicleStatusUpdate,
     VehicleUpdate,
 )
+from backend.services.supply_chain.supplier_catalog import invalidate_supplier_catalog as _invalidate_supplier_catalog
 from backend.services.warehouse_stock_engine import _next_number, _resolve_barcode
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
-
-
-async def _invalidate_supplier_catalog(project_id: int) -> None:
-    """Drop cached supplier catalog for this project after a vehicle mutation."""
-    await invalidate_cache(f"supply_chain:supplier_catalog:project_id={project_id}")
 
 
 def _safe_decimal(val: Decimal | None) -> Decimal | None:
@@ -1024,8 +1019,10 @@ async def get_supply_chain_overview(db: AsyncSession, project_id: int) -> dict:
     # Total vehicles count
     total_vehicles = sum(vehicles_by_status.values())
 
-    # Total items in active (non-delivered) vehicles
-    active_statuses = [VehicleStatus.FORMING, VehicleStatus.SHIPPED, VehicleStatus.CUSTOMS]
+    # Total items in active (non-delivered) vehicles.
+    # FORMING is forming (not yet shipped), not "в пути".
+    # SHIPPED/CUSTOMS/DISPATCHED are in transit.
+    active_statuses = [VehicleStatus.FORMING, VehicleStatus.SHIPPED, VehicleStatus.CUSTOMS, VehicleStatus.DISPATCHED]
     items_result = await db.execute(
         select(func.coalesce(func.sum(CostOrderItem.qty), 0))
         .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)

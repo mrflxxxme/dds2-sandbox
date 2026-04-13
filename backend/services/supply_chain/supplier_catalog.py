@@ -157,6 +157,7 @@ async def get_supplier_catalog(
             last_order_date: date | None = None
             last_price = Decimal("0")
             delivered_qty = 0
+            item_delivered_amount = Decimal("0")
 
             order_history: list[SkuOrderHistoryEntry] = []
 
@@ -182,6 +183,8 @@ async def get_supplier_catalog(
 
                 foi_delivered_qty = sum(v_qty for _, v_status, v_qty in foi_vehicles if v_status == _DELIVERED)
                 delivered_qty += foi_delivered_qty
+                # Accumulate delivered amount using actual price_cny (not avg)
+                item_delivered_amount += price_cny * foi_delivered_qty
 
                 # Pick representative vehicle (first one found)
                 v_order_no: str | None = None
@@ -236,6 +239,7 @@ async def get_supplier_catalog(
             subj_total_qty += total_qty
             subj_total_amount += total_amount
             subj_delivered_qty += delivered_qty
+            grand_delivered_amount += item_delivered_amount
 
         subjects.append(
             SupplierCatalogSubjectGroup(
@@ -250,11 +254,6 @@ async def get_supplier_catalog(
 
         grand_total_qty += subj_total_qty
         grand_total_amount += subj_total_amount
-
-    # delivered_amount = sum(delivered_qty * avg_price) per item
-    for grp in subjects:
-        for item in grp.items:
-            grand_delivered_amount += item.avg_price * item.delivered_qty
 
     summary = SupplierCatalogSummary(
         orders_count=len(all_factory_order_ids),

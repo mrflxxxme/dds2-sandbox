@@ -97,16 +97,7 @@ function StatusBadge({ status }: { status: string }) {
     const label = labels[s] || status;
     const color = VEHICLE_STATUS_COLORS[s] || '#6b7280';
     return (
-        <span style={{
-            display: 'inline-block',
-            padding: '4px 12px',
-            borderRadius: 24,
-            fontSize: 12,
-            fontWeight: 600,
-            whiteSpace: 'nowrap',
-            color: '#fff',
-            background: color,
-        }}>
+        <span className="badge sc-badge-colored" style={{ background: color }}>
             {label}
         </span>
     );
@@ -132,16 +123,7 @@ function FactoryOrderStatusBadge({ status }: { status: string }) {
     const label = labels[status] || status;
     const color = FACTORY_ORDER_STATUS_COLORS[status] || '#6b7280';
     return (
-        <span style={{
-            display: 'inline-block',
-            padding: '4px 12px',
-            borderRadius: 24,
-            fontSize: 12,
-            fontWeight: 600,
-            whiteSpace: 'nowrap',
-            color: '#fff',
-            background: color,
-        }}>
+        <span className="badge sc-badge-colored" style={{ background: color }}>
             {label}
         </span>
     );
@@ -165,7 +147,7 @@ function SupplyChainContent() {
 
     return (
         <div className="animate-in">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div className="sc-page-header">
                 <PageHeader
                     title={t('page_title')}
                     subtitle={t('page_subtitle')}
@@ -237,29 +219,23 @@ function CreateFactoryOrderForm({ onClose, onDone }: { onClose: () => void; onDo
         setSubmitting(false);
     };
 
-    const inputStyle: React.CSSProperties = {
-        width: '100%', padding: '8px 12px', borderRadius: 8,
-        border: '1px solid var(--color-border)', background: 'var(--color-bg)',
-        color: 'var(--color-text)', fontSize: 13,
-    };
-
     return (
-        <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>{t('create_order_title')}</h3>
+        <div className="glass-card sc-form-card">
+            <div className="sc-form-header">
+                <h3 className="sc-form-title">{t('create_order_title')}</h3>
                 <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr', gap: 12 }}>
+            <div className="sc-form-grid-5">
                 <div>
-                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('create_order_number')}</label>
-                    <input value={form.order_number} onChange={e => setForm(f => ({ ...f, order_number: e.target.value }))} placeholder={t('create_order_number_placeholder')} style={inputStyle} autoFocus />
+                    <label className="sc-form-label">{t('create_order_number')}</label>
+                    <input value={form.order_number} onChange={e => setForm(f => ({ ...f, order_number: e.target.value }))} placeholder={t('create_order_number_placeholder')} className="sc-form-input" autoFocus />
                 </div>
                 <div>
-                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('create_order_supplier_select')}</label>
+                    <label className="sc-form-label">{t('create_order_supplier_select')}</label>
                     <select
                         value={form.supplier_id || ''}
                         onChange={e => handleSupplierChange(e.target.value ? Number(e.target.value) : undefined)}
-                        style={inputStyle}
+                        className="sc-form-input"
                     >
                         <option value="">{t('create_order_unselected')}</option>
                         {suppliers.map(s => (
@@ -270,19 +246,19 @@ function CreateFactoryOrderForm({ onClose, onDone }: { onClose: () => void; onDo
                     </select>
                 </div>
                 <div>
-                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('create_order_supplier_name')}</label>
-                    <input value={form.factory_name || ''} onChange={e => setForm(f => ({ ...f, factory_name: e.target.value || undefined }))} placeholder={t('create_order_supplier_placeholder')} style={inputStyle} />
+                    <label className="sc-form-label">{t('create_order_supplier_name')}</label>
+                    <input value={form.factory_name || ''} onChange={e => setForm(f => ({ ...f, factory_name: e.target.value || undefined }))} placeholder={t('create_order_supplier_placeholder')} className="sc-form-input" />
                 </div>
                 <div>
-                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('create_order_ready_date')}</label>
-                    <input type="date" value={form.expected_ready_date || ''} onChange={e => setForm(f => ({ ...f, expected_ready_date: e.target.value || undefined }))} style={inputStyle} />
+                    <label className="sc-form-label">{t('create_order_ready_date')}</label>
+                    <input type="date" value={form.expected_ready_date || ''} onChange={e => setForm(f => ({ ...f, expected_ready_date: e.target.value || undefined }))} className="sc-form-input" />
                 </div>
                 <div>
-                    <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('create_order_note')}</label>
-                    <input value={form.note || ''} onChange={e => setForm(f => ({ ...f, note: e.target.value || undefined }))} placeholder={t('create_order_note_placeholder')} style={inputStyle} />
+                    <label className="sc-form-label">{t('create_order_note')}</label>
+                    <input value={form.note || ''} onChange={e => setForm(f => ({ ...f, note: e.target.value || undefined }))} placeholder={t('create_order_note_placeholder')} className="sc-form-input" />
                 </div>
             </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
+            <div className="sc-form-footer">
                 <button className="btn btn-secondary btn-sm" onClick={onClose}>{t('btn_cancel')}</button>
                 <button className="btn btn-primary btn-sm" onClick={handleSubmit} disabled={!form.order_number.trim() || submitting}>
                     {submitting ? t('msg_creating') : t('btn_create')}
@@ -451,11 +427,11 @@ function FactoryOrdersTab() {
                 const assignedQty = items.reduce((s, i) => s + i.assigned_qty, 0);
                 const pct = totalQty > 0 ? Math.round((assignedQty / totalQty) * 100) : 0;
                 return (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <div style={{ flex: 1, background: 'var(--color-border)', borderRadius: 4, height: 6, minWidth: 60 }}>
+                    <div className="sc-progress-mini">
+                        <div className="sc-progress-mini-track">
                             <div style={{ width: `${pct}%`, background: pct === 100 ? '#22c55e' : '#3b82f6', borderRadius: 4, height: '100%' }} />
                         </div>
-                        <span style={{ fontSize: 11, whiteSpace: 'nowrap' }}>{assignedQty}/{totalQty}</span>
+                        <span className="sc-progress-mini-count">{assignedQty}/{totalQty}</span>
                     </div>
                 );
             },
@@ -465,17 +441,15 @@ function FactoryOrdersTab() {
         {
             key: 'actions', label: '', width: '180px',
             render: (_v: unknown, row: FactoryOrder) => (
-                <div style={{ display: 'flex', gap: 4 }} onClick={e => e.stopPropagation()}>
+                <div className="sc-actions-cell" onClick={e => e.stopPropagation()}>
                     <button
                         className="btn btn-secondary btn-sm"
-                        style={{ fontSize: 11, padding: '2px 8px' }}
                         onClick={() => setEditOrder(row)}
                     >
                         {t('btn_edit')}
                     </button>
                     <button
-                        className="btn btn-secondary btn-sm"
-                        style={{ fontSize: 11, padding: '2px 8px', color: 'var(--color-danger)' }}
+                        className="btn btn-secondary btn-sm sc-color-danger"
                         onClick={() => handleDelete(row.id)}
                     >
                         {t('btn_del')}
@@ -514,9 +488,9 @@ function FactoryOrdersTab() {
     return (
         <>
             {error && (
-                <div className="glass-card" style={{ padding: 16, color: 'var(--color-danger)', marginBottom: 16 }}>
+                <div className="glass-card sc-error-card">
                     {error}
-                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>{t('btn_retry')}</button>
+                    <button className="btn btn-secondary btn-sm sc-retry-btn" onClick={load}>{t('btn_retry')}</button>
                 </div>
             )}
 
@@ -530,36 +504,36 @@ function FactoryOrdersTab() {
 
             {/* KPI Summary */}
             {!loading && filteredOrders.length > 0 && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
-                    <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('kpi_orders')}</div>
-                        <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-accent)' }}>{filteredOrders.length}</div>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>{formatNumber(kpi.qty, 0)} {t('unit_pcs')}</div>
+                <div className="sc-kpi-grid-4">
+                    <div className="glass-card sc-kpi-card">
+                        <div className="sc-kpi-label">{t('kpi_orders')}</div>
+                        <div className="sc-kpi-value sc-color-accent">{filteredOrders.length}</div>
+                        <div className="sc-kpi-sub">{formatNumber(kpi.qty, 0)} {t('unit_pcs')}</div>
                     </div>
-                    <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('kpi_total_weight')}</div>
-                        <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-warning)' }}>{formatNumber(kpi.weight, 0)}</div>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>{t('unit_kg')}</div>
+                    <div className="glass-card sc-kpi-card">
+                        <div className="sc-kpi-label">{t('kpi_total_weight')}</div>
+                        <div className="sc-kpi-value sc-color-warning">{formatNumber(kpi.weight, 0)}</div>
+                        <div className="sc-kpi-sub">{t('unit_kg')}</div>
                     </div>
-                    <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('kpi_total_volume')}</div>
-                        <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-text)' }}>{formatNumber(kpi.volume, 1)}</div>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>{t('unit_m3')}</div>
+                    <div className="glass-card sc-kpi-card">
+                        <div className="sc-kpi-label">{t('kpi_total_volume')}</div>
+                        <div className="sc-kpi-value">{formatNumber(kpi.volume, 1)}</div>
+                        <div className="sc-kpi-sub">{t('unit_m3')}</div>
                     </div>
-                    <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('kpi_total_amount')}</div>
+                    <div className="glass-card sc-kpi-card">
+                        <div className="sc-kpi-label">{t('kpi_total_amount')}</div>
                         {kpi.sumCny > 0 && (
-                            <div style={{ fontSize: kpi.sumRub > 0 ? 18 : 24, fontWeight: 700, color: 'var(--color-success)' }}>
+                            <div className={`${kpi.sumRub > 0 ? 'sc-kpi-value-md' : 'sc-kpi-value'} sc-color-success sc-fw-700`}>
                                 {formatNumber(kpi.sumCny, 0)} {'\u00A5'}
                             </div>
                         )}
                         {kpi.sumRub > 0 && (
-                            <div style={{ fontSize: kpi.sumCny > 0 ? 18 : 24, fontWeight: 700, color: 'var(--color-success)' }}>
+                            <div className={`${kpi.sumCny > 0 ? 'sc-kpi-value-md' : 'sc-kpi-value'} sc-color-success sc-fw-700`}>
                                 {formatNumber(kpi.sumRub, 0)} {'\u20BD'}
                             </div>
                         )}
                         {kpi.sumCny === 0 && kpi.sumRub === 0 && (
-                            <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-text-muted)' }}>0</div>
+                            <div className="sc-kpi-value sc-color-text-muted">0</div>
                         )}
                     </div>
                 </div>
@@ -575,12 +549,12 @@ function FactoryOrdersTab() {
                 exportName="factory_orders"
                 onRowClick={(row) => handleRowClick(row)}
                 actions={
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <div className="sc-filter-bar">
                         {factoryNames.length > 1 && (
                             <select
                                 value={filterFactory}
                                 onChange={e => setFilterFactory(e.target.value)}
-                                style={{ padding: '6px 12px', borderRadius: 8, border: '1px solid var(--color-border)', background: 'var(--color-bg)', color: 'var(--color-text)', fontSize: 13 }}
+                                className="sc-filter-select"
                             >
                                 <option value="">{t('orders_filter_all')}</option>
                                 {factoryNames.map(name => (
@@ -691,24 +665,24 @@ function SplitToVehiclesModal({ orderId, orders, onClose, onDone }: SplitModalPr
 
     return (
         <div className="modal-overlay" onClick={onClose}>
-            <div className="modal-card" style={{ width: 800, maxWidth: '95vw', maxHeight: '85vh', overflow: 'auto' }}
+            <div className="modal-card sc-modal-card-wide"
                 onClick={e => e.stopPropagation()}>
                 <div className="modal-title">{t('split_title')}: {order?.order_number || `#${orderId}`}</div>
-                {error && <div className="auth-error" style={{ marginBottom: 12 }}>{error}</div>}
+                {error && <div className="auth-error sc-form-mb">{error}</div>}
 
                 {detailItems.length === 0 ? (
-                    <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                    <div className="sc-split-empty">
                         {t('split_empty')}
                     </div>
                 ) : (
-                    <table className="data-table" style={{ fontSize: 13, marginBottom: 16 }}>
+                    <table className="data-table sc-table-sm">
                         <thead>
                             <tr>
                                 <th>{t('col_barcode')}</th>
                                 <th>{t('col_article')}</th>
-                                <th style={{ textAlign: 'right' }}>{t('col_total')}</th>
-                                <th style={{ textAlign: 'right' }}>{t('col_distributed')}</th>
-                                <th style={{ textAlign: 'right' }}>{t('col_remaining')}</th>
+                                <th className="sc-th-right">{t('col_total')}</th>
+                                <th className="sc-th-right">{t('col_distributed')}</th>
+                                <th className="sc-th-right">{t('col_remaining')}</th>
                                 <th style={{ width: 100 }}>{t('col_qty')}</th>
                                 <th style={{ width: 160 }}>{t('col_vehicle_no')}</th>
                             </tr>
@@ -719,11 +693,11 @@ function SplitToVehiclesModal({ orderId, orders, onClose, onDone }: SplitModalPr
                                 const a = assignments[item.id] || { qty: '', vehicle: '' };
                                 return (
                                     <tr key={item.id} style={{ opacity: remaining === 0 ? 0.4 : 1 }}>
-                                        <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{item.barcode}</td>
+                                        <td className="sc-barcode-td">{item.barcode}</td>
                                         <td>{item.article_seller || '\u2014'}</td>
-                                        <td style={{ textAlign: 'right' }}>{item.qty}</td>
-                                        <td style={{ textAlign: 'right' }}>{item.assigned_qty}</td>
-                                        <td style={{ textAlign: 'right', fontWeight: 600, color: remaining > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
+                                        <td className="sc-td-right">{item.qty}</td>
+                                        <td className="sc-td-right">{item.assigned_qty}</td>
+                                        <td className="sc-remaining-danger" style={{ color: remaining > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
                                             {remaining}
                                         </td>
                                         <td>
@@ -735,12 +709,7 @@ function SplitToVehiclesModal({ orderId, orders, onClose, onDone }: SplitModalPr
                                                 onChange={e => updateAssignment(item.id, 'qty', e.target.value)}
                                                 disabled={remaining === 0}
                                                 placeholder="0"
-                                                style={{
-                                                    width: '100%', background: 'var(--color-bg)',
-                                                    border: '1px solid var(--color-border)',
-                                                    borderRadius: 6, padding: '4px 8px', fontSize: 13,
-                                                    color: 'var(--color-text)',
-                                                }}
+                                                className="sc-split-input"
                                             />
                                         </td>
                                         <td>
@@ -750,12 +719,7 @@ function SplitToVehiclesModal({ orderId, orders, onClose, onDone }: SplitModalPr
                                                 onChange={e => updateAssignment(item.id, 'vehicle', e.target.value)}
                                                 disabled={remaining === 0}
                                                 placeholder="AUTO-001"
-                                                style={{
-                                                    width: '100%', background: 'var(--color-bg)',
-                                                    border: '1px solid var(--color-border)',
-                                                    borderRadius: 6, padding: '4px 8px', fontSize: 13,
-                                                    color: 'var(--color-text)',
-                                                }}
+                                                className="sc-split-input"
                                             />
                                         </td>
                                     </tr>
@@ -765,7 +729,7 @@ function SplitToVehiclesModal({ orderId, orders, onClose, onDone }: SplitModalPr
                     </table>
                 )}
 
-                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <div className="sc-split-footer">
                     <button className="btn btn-secondary btn-sm" onClick={onClose} disabled={submitting}>
                         {t('btn_cancel')}
                     </button>
@@ -877,17 +841,10 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
         setSaving(false);
     };
 
-    const inputStyle: React.CSSProperties = {
-        width: '100%', background: 'var(--color-bg)',
-        border: '1px solid var(--color-border)',
-        borderRadius: 6, padding: '4px 6px', fontSize: 12,
-        color: 'var(--color-text)',
-    };
-
     return (
-        <div className="glass-card" style={{ marginTop: 8, padding: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                <h4 style={{ margin: 0, fontSize: 14 }}>
+        <div className="glass-card sc-items-section">
+            <div className="sc-items-header">
+                <h4 className="sc-items-title">
                     {t('items_title')} {order.order_number}
                 </h4>
                 <button className="btn btn-secondary btn-sm" onClick={onCollapse}>{t('items_collapse')}</button>
@@ -917,14 +874,14 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
                                 const rem = row.qty - row.assigned_qty;
                                 const pct = row.qty > 0 ? Math.round((row.assigned_qty / row.qty) * 100) : 0;
                                 return (
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 110 }}>
-                                        <span style={{ fontSize: 12, fontWeight: 600, color: pct === 100 ? 'var(--color-success)' : 'var(--color-primary)' }}>
+                                    <div className="sc-allocation-cell">
+                                        <span className="sc-allocation-count" style={{ color: pct === 100 ? 'var(--color-success)' : 'var(--color-primary)' }}>
                                             {row.assigned_qty} / {row.qty}
                                         </span>
                                         {pct === 100 ? (
-                                            <span style={{ fontSize: 11, color: 'var(--color-success)' }}>{t('orders_all_allocated')}</span>
+                                            <span className="sc-allocation-done">{t('orders_all_allocated')}</span>
                                         ) : rem > 0 ? (
-                                            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{t('orders_remaining')} {rem}</span>
+                                            <span className="sc-allocation-rem">{t('orders_remaining')} {rem}</span>
                                         ) : null}
                                     </div>
                                 );
@@ -937,25 +894,25 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
             )}
 
             {/* Add items section */}
-            <div style={{ marginTop: existingItems.length > 0 ? 16 : 0, borderTop: existingItems.length > 0 ? '1px solid var(--color-border)' : 'none', paddingTop: existingItems.length > 0 ? 16 : 0 }} onPaste={handlePaste}>
+            <div className={existingItems.length > 0 ? 'sc-items-add-divider' : ''} onPaste={handlePaste}>
                 {!showAddForm ? (
-                    <div style={{ textAlign: 'center', padding: existingItems.length > 0 ? 8 : 24 }}>
+                    <div className={existingItems.length > 0 ? 'sc-items-add-center-sm' : 'sc-items-add-center'}>
                         <button className="btn btn-primary btn-sm" onClick={() => setShowAddForm(true)}>
                             {t('items_add')}
                         </button>
                         {existingItems.length === 0 && (
-                            <div style={{ marginTop: 8, fontSize: 13, color: 'var(--color-text-muted)' }}>
+                            <div className="sc-items-paste-hint">
                                 {t('items_paste_hint')}
                             </div>
                         )}
                     </div>
                 ) : (
                     <>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                            <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-                                {t('items_paste_header')} <span style={{ fontSize: 11 }}>({t('items_paste_sub')})</span>
+                        <div className="sc-items-add-header">
+                            <div className="sc-items-add-hint">
+                                {t('items_paste_header')} <span className="sc-items-add-hint-sub">({t('items_paste_sub')})</span>
                             </div>
-                            <div style={{ display: 'flex', gap: 8 }}>
+                            <div className="sc-items-add-actions">
                                 <button className="btn btn-secondary btn-sm" onClick={() => { setShowAddForm(false); setRows(Array.from({ length: 5 }, emptyItemRow)); setError(''); }}>
                                     {t('btn_cancel')}
                                 </button>
@@ -967,12 +924,12 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
                             </div>
                         </div>
 
-                        {error && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 8 }}>{error}</div>}
+                        {error && <div className="sc-error-msg">{error}</div>}
 
-                        <table className="data-table" style={{ fontSize: 12, marginBottom: 0 }}>
+                        <table className="data-table sc-table-xs">
                             <thead>
                                 <tr>
-                                    <th style={{ width: 30, textAlign: 'center' }}>#</th>
+                                    <th className="sc-th-center" style={{ width: 30 }}>#</th>
                                     <th style={{ minWidth: 130 }}>{t('col_barcode')}</th>
                                     <th style={{ width: 70 }}>{t('col_qty')}</th>
                                     <th style={{ width: 80 }}>{t('col_price_cny')}</th>
@@ -984,13 +941,13 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
                             <tbody>
                                 {rows.map((row, i) => (
                                     <tr key={i}>
-                                        <td style={{ fontSize: 11, color: 'var(--color-text-muted)', textAlign: 'center' }}>{i + 1}</td>
-                                        <td><input value={row.barcode} onChange={e => updateRow(i, 'barcode', e.target.value)} placeholder="2037142812010" style={{ ...inputStyle, fontFamily: 'monospace' }} autoComplete="off" name={`b${i}`} /></td>
-                                        <td><input inputMode="numeric" value={row.qty} onChange={e => updateRow(i, 'qty', e.target.value)} placeholder="0" style={inputStyle} autoComplete="off" name={`q${i}`} /></td>
-                                        <td><input inputMode="decimal" value={row.price_cny} onChange={e => updateRow(i, 'price_cny', e.target.value)} placeholder="0" style={inputStyle} autoComplete="off" name={`p${i}`} /></td>
-                                        <td><input value={row.box_size} onChange={e => updateRow(i, 'box_size', e.target.value)} placeholder="60*50*40" style={inputStyle} autoComplete="off" name={`bs${i}`} /></td>
-                                        <td><input inputMode="numeric" value={row.pcs_per_box} onChange={e => updateRow(i, 'pcs_per_box', e.target.value)} placeholder="50" style={inputStyle} autoComplete="off" name={`pp${i}`} /></td>
-                                        <td><input inputMode="decimal" value={row.weight_kg} onChange={e => updateRow(i, 'weight_kg', e.target.value)} placeholder="8,5" style={inputStyle} autoComplete="off" name={`w${i}`} /></td>
+                                        <td className="sc-item-row-num">{i + 1}</td>
+                                        <td><input value={row.barcode} onChange={e => updateRow(i, 'barcode', e.target.value)} placeholder="2037142812010" className="sc-form-input-sm sc-form-input-mono" autoComplete="off" name={`b${i}`} /></td>
+                                        <td><input inputMode="numeric" value={row.qty} onChange={e => updateRow(i, 'qty', e.target.value)} placeholder="0" className="sc-form-input-sm" autoComplete="off" name={`q${i}`} /></td>
+                                        <td><input inputMode="decimal" value={row.price_cny} onChange={e => updateRow(i, 'price_cny', e.target.value)} placeholder="0" className="sc-form-input-sm" autoComplete="off" name={`p${i}`} /></td>
+                                        <td><input value={row.box_size} onChange={e => updateRow(i, 'box_size', e.target.value)} placeholder="60*50*40" className="sc-form-input-sm" autoComplete="off" name={`bs${i}`} /></td>
+                                        <td><input inputMode="numeric" value={row.pcs_per_box} onChange={e => updateRow(i, 'pcs_per_box', e.target.value)} placeholder="50" className="sc-form-input-sm" autoComplete="off" name={`pp${i}`} /></td>
+                                        <td><input inputMode="decimal" value={row.weight_kg} onChange={e => updateRow(i, 'weight_kg', e.target.value)} placeholder="8,5" className="sc-form-input-sm" autoComplete="off" name={`w${i}`} /></td>
                                     </tr>
                                 ))}
                             </tbody>
@@ -1009,10 +966,7 @@ function TransportBadge({ type }: { type?: string }) {
     const transportTypes = getTransportTypes(t);
     const tt = transportTypes[type || 'AUTO'] || transportTypes.AUTO;
     return (
-        <span style={{
-            display: 'inline-block', padding: '2px 8px', borderRadius: 8,
-            fontSize: 11, fontWeight: 600, color: '#fff', background: tt.color,
-        }}>
+        <span className="badge sc-transport-badge" style={{ background: tt.color }}>
             {tt.label}
         </span>
     );
@@ -1024,7 +978,7 @@ function VehicleTimeline({ status }: { status?: VehicleStatus }) {
     const steps = VEHICLE_STATUSES;
     const currentIdx = status ? steps.indexOf(status) : -1;
     return (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+        <div className="sc-timeline-row">
             {steps.map((s, i) => {
                 const done = i <= currentIdx;
                 const isCurrent = i === currentIdx;
@@ -1032,19 +986,18 @@ function VehicleTimeline({ status }: { status?: VehicleStatus }) {
                 return (
                     <React.Fragment key={s}>
                         {i > 0 && (
-                            <div style={{
-                                width: 32, height: 2,
+                            <div className="sc-timeline-connector" style={{
                                 background: done ? VEHICLE_STATUS_COLORS[steps[i]] : 'var(--color-border)',
                             }} />
                         )}
-                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                        <div className="sc-timeline-step">
                             <div style={{
                                 width: isCurrent ? 14 : 10, height: isCurrent ? 14 : 10,
                                 borderRadius: '50%', background: color,
                                 border: isCurrent ? `2px solid ${color}` : 'none',
                                 boxShadow: isCurrent ? `0 0 6px ${color}66` : 'none',
                             }} />
-                            <span style={{ fontSize: 10, color: done ? 'var(--color-text)' : 'var(--color-text-muted)', fontWeight: isCurrent ? 600 : 400 }}>
+                            <span className="sc-timeline-label" style={{ color: done ? 'var(--color-text)' : 'var(--color-text-muted)', fontWeight: isCurrent ? 600 : 400 }}>
                                 {statusLabels[s]}
                             </span>
                         </div>
@@ -1082,14 +1035,14 @@ function CapacityBar({ vehicle }: { vehicle: VehicleSchema }) {
     const color = pct > 85 ? '#22c55e' : pct > 60 ? '#f59e0b' : '#3b82f6';
 
     return (
-        <div style={{ marginTop: 8 }}>
-            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>
+        <div className="sc-capacity-bar-wrap">
+            <div className="sc-capacity-label">
                 {totalVol.toFixed(1)} / {containerVol.toFixed(1)} m{'\u00B3'} ({CONTAINERS[containerKey].name})
             </div>
-            <div style={{ height: 6, borderRadius: 3, background: 'var(--color-border)', overflow: 'hidden' }}>
+            <div className="sc-capacity-track">
                 <div style={{ height: '100%', width: `${pct}%`, background: color, borderRadius: 3, transition: 'width 0.3s' }} />
             </div>
-            <div style={{ fontSize: 11, color, fontWeight: 600, marginTop: 2 }}>{pct.toFixed(1)}%</div>
+            <div className="sc-capacity-pct" style={{ color }}>{pct.toFixed(1)}%</div>
         </div>
     );
 }
@@ -1129,55 +1082,55 @@ function VehicleDetail({ vehicle, onRefresh }: { vehicle: VehicleSchema; onRefre
     const cs = costPreview || vehicle.cost_summary;
 
     return (
-        <div style={{ padding: '16px 24px', background: 'var(--color-bg-secondary)', borderTop: '1px solid var(--color-border)' }}>
+        <div className="sc-vehicle-detail">
             {/* Timeline */}
-            <div style={{ marginBottom: 16 }}>
+            <div className="sc-vehicle-timeline">
                 <VehicleTimeline status={vehicle.status as VehicleStatus} />
             </div>
 
             {/* Summary row */}
-            <div style={{ display: 'flex', gap: 24, marginBottom: 16, fontSize: 13, color: 'var(--color-text-muted)', flexWrap: 'wrap' }}>
-                <span>{t('cost_container')}: <b style={{ color: 'var(--color-text)' }}>{containerLabel}</b></span>
+            <div className="sc-summary-row">
+                <span>{t('cost_container')}: <b className="sc-color-text">{containerLabel}</b></span>
                 {vehicle.delivery_cost_cny > 0 && (
                     <span>{t('cost_shipping')}: {formatNumber(vehicle.delivery_cost_cny)} {'\u00A5'} {'\u00D7'} {Number(vehicle.rate_cny).toFixed(2)} = {formatNumber(Number(vehicle.delivery_cost_cny) * Number(vehicle.rate_cny))} {'\u20BD'}</span>
                 )}
                 {vehicle.total_weight_kg && <span>{t('cost_weight')}: {formatNumber(vehicle.total_weight_kg)} kg</span>}
                 {vehicle.estimated_arrival_date && (
-                    <span>{t('cost_arrival')}: <b style={{ color: 'var(--color-text)' }}>{formatDate(vehicle.estimated_arrival_date)}</b></span>
+                    <span>{t('cost_arrival')}: <b className="sc-color-text">{formatDate(vehicle.estimated_arrival_date)}</b></span>
                 )}
                 {vehicle.invoice_no && <span>{t('cost_invoice')}: {vehicle.invoice_no}</span>}
             </div>
 
             {/* Cost summary */}
             {cs && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 16, padding: 12, background: 'var(--color-bg)', borderRadius: 10, border: '1px solid var(--color-border)' }}>
-                    <div style={{ textAlign: 'center' }}>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{t('cost_goods')}</div>
-                        <div style={{ fontSize: 14, fontWeight: 600 }}>{formatNumber(cs.total_cost_rub)} {'\u20BD'}</div>
+                <div className="sc-cost-grid">
+                    <div className="sc-cost-item">
+                        <div className="sc-cost-label">{t('cost_goods')}</div>
+                        <div className="sc-cost-value">{formatNumber(cs.total_cost_rub)} {'\u20BD'}</div>
                     </div>
-                    <div style={{ textAlign: 'center' }}>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{t('cost_delivery')}</div>
-                        <div style={{ fontSize: 14, fontWeight: 600 }}>{formatNumber(cs.total_delivery_rub)} {'\u20BD'}</div>
+                    <div className="sc-cost-item">
+                        <div className="sc-cost-label">{t('cost_delivery')}</div>
+                        <div className="sc-cost-value">{formatNumber(cs.total_delivery_rub)} {'\u20BD'}</div>
                     </div>
-                    <div style={{ textAlign: 'center' }}>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{t('cost_duty')}</div>
-                        <div style={{ fontSize: 14, fontWeight: 600 }}>{formatNumber(cs.total_duty_rub)} {'\u20BD'}</div>
+                    <div className="sc-cost-item">
+                        <div className="sc-cost-label">{t('cost_duty')}</div>
+                        <div className="sc-cost-value">{formatNumber(cs.total_duty_rub)} {'\u20BD'}</div>
                     </div>
-                    <div style={{ textAlign: 'center' }}>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{t('cost_vat')}</div>
-                        <div style={{ fontSize: 14, fontWeight: 600 }}>{formatNumber(cs.total_vat_rub)} {'\u20BD'}</div>
+                    <div className="sc-cost-item">
+                        <div className="sc-cost-label">{t('cost_vat')}</div>
+                        <div className="sc-cost-value">{formatNumber(cs.total_vat_rub)} {'\u20BD'}</div>
                     </div>
-                    <div style={{ textAlign: 'center' }}>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{t('cost_total')}</div>
-                        <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--color-primary)' }}>{formatNumber(cs.total_rub)} {'\u20BD'}</div>
+                    <div className="sc-cost-item">
+                        <div className="sc-cost-label">{t('cost_total')}</div>
+                        <div className="sc-cost-total-value">{formatNumber(cs.total_rub)} {'\u20BD'}</div>
                     </div>
                 </div>
             )}
 
             {/* Recalc button for FORMING */}
             {vehicle.status === 'FORMING' && vehicle.items.length > 0 && (
-                <div style={{ marginBottom: 12 }}>
-                    <button className="btn btn-secondary btn-sm" onClick={handleRecalc} disabled={recalcing} style={{ fontSize: 12 }}>
+                <div className="sc-recalc-row">
+                    <button className="btn btn-secondary btn-sm" onClick={handleRecalc} disabled={recalcing}>
                         {recalcing ? t('vehicle_items_recalcing') : t('vehicle_items_recalc')}
                     </button>
                 </div>
@@ -1188,33 +1141,34 @@ function VehicleDetail({ vehicle, onRefresh }: { vehicle: VehicleSchema; onRefre
 
             {/* Items table */}
             {vehicle.items.length > 0 ? (
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, marginTop: 12 }}>
+                <table className="sc-vehicle-items-table">
                     <thead>
-                        <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                            <th style={{ textAlign: 'left', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_from_order')}</th>
-                            <th style={{ textAlign: 'left', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_barcode')}</th>
-                            <th style={{ textAlign: 'left', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_article')}</th>
-                            <th style={{ textAlign: 'right', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_qty')}</th>
-                            <th style={{ textAlign: 'right', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_price_cny')}</th>
-                            <th style={{ textAlign: 'right', padding: '6px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_sum_cny')}</th>
-                            {vehicle.status === 'FORMING' && <th style={{ width: 40 }}></th>}
+                        <tr>
+                            <th className="sc-vehicle-items-th">{t('col_from_order')}</th>
+                            <th className="sc-vehicle-items-th">{t('col_barcode')}</th>
+                            <th className="sc-vehicle-items-th">{t('col_article')}</th>
+                            <th className="sc-vehicle-items-th-right">{t('col_qty')}</th>
+                            <th className="sc-vehicle-items-th-right">{t('col_price_cny')}</th>
+                            <th className="sc-vehicle-items-th-right">{t('col_sum_cny')}</th>
+                            {vehicle.status === 'FORMING' && <th className="sc-vehicle-items-th" style={{ width: 40 }}></th>}
                         </tr>
                     </thead>
                     <tbody>
                         {vehicle.items.map(item => (
-                            <tr key={item.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                <td style={{ padding: '6px 8px', color: 'var(--color-primary)' }}>{item.factory_order_number || '\u2014'}</td>
-                                <td style={{ padding: '6px 8px', fontFamily: 'monospace', fontSize: 12 }}>{item.barcode}</td>
-                                <td style={{ padding: '6px 8px' }}>{item.article_seller || item.subject || '\u2014'}</td>
-                                <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 600 }}>{formatNumber(item.qty)}</td>
-                                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(item.price_cny)}</td>
-                                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(item.qty * item.price_cny)}</td>
+                            <tr key={item.id}>
+                                <td className="sc-vehicle-items-td sc-text-primary">{item.factory_order_number || '\u2014'}</td>
+                                <td className="sc-vehicle-items-td-mono">{item.barcode}</td>
+                                <td className="sc-vehicle-items-td">{item.article_seller || item.subject || '\u2014'}</td>
+                                <td className="sc-vehicle-items-td-fw">{formatNumber(item.qty)}</td>
+                                <td className="sc-vehicle-items-td-right">{formatNumber(item.price_cny)}</td>
+                                <td className="sc-vehicle-items-td-right">{formatNumber(item.qty * item.price_cny)}</td>
                                 {vehicle.status === 'FORMING' && (
-                                    <td style={{ padding: '6px 8px', textAlign: 'center' }}>
+                                    <td className="sc-vehicle-items-td-center">
                                         <button
                                             onClick={() => handleRemoveItem(item.id)}
                                             disabled={removing === item.id}
-                                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-danger)', fontSize: 14, opacity: removing === item.id ? 0.3 : 0.6, padding: 2 }}
+                                            className="sc-vehicle-remove-btn"
+                                            style={{ opacity: removing === item.id ? 0.3 : 0.6 }}
                                             title={t('vehicle_items_remove')}
                                         >
                                             {'\u2716'}
@@ -1226,7 +1180,7 @@ function VehicleDetail({ vehicle, onRefresh }: { vehicle: VehicleSchema; onRefre
                     </tbody>
                 </table>
             ) : (
-                <div style={{ textAlign: 'center', padding: 20, opacity: 0.5, fontSize: 13 }}>{t('vehicle_items_empty')}</div>
+                <div className="sc-vehicle-empty">{t('vehicle_items_empty')}</div>
             )}
         </div>
     );
@@ -1271,49 +1225,49 @@ function AddItemsModal({ vehicle, onClose, onDone }: { vehicle: VehicleSchema; o
     };
 
     return (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)' }} onClick={onClose} />
-            <div style={{ position: 'relative', background: 'var(--color-bg)', borderRadius: 16, width: '90%', maxWidth: 720, maxHeight: '80vh', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+        <div className="sc-modal-overlay">
+            <div className="sc-modal-backdrop" onClick={onClose} />
+            <div className="sc-modal-dialog">
                 {/* Header */}
-                <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--color-border)' }}>
-                    <h3 style={{ fontSize: 16, fontWeight: 600 }}>{t('add_items_title')} {vehicle.order_no}</h3>
-                    <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 4 }}>{t('add_items_subtitle')}</p>
+                <div className="sc-modal-header">
+                    <h3 className="sc-modal-header-title">{t('add_items_title')} {vehicle.order_no}</h3>
+                    <p className="sc-modal-header-sub">{t('add_items_subtitle')}</p>
                 </div>
 
                 {/* Body */}
-                <div style={{ flex: 1, overflow: 'auto', padding: '16px 24px' }}>
+                <div className="sc-modal-body">
                     {loading ? (
-                        <div style={{ textAlign: 'center', padding: 32 }}><div className="spinner" style={{ margin: '0 auto' }} /></div>
+                        <div className="sc-modal-loading"><div className="spinner sc-spinner-center" /></div>
                     ) : groups.length === 0 ? (
-                        <div style={{ textAlign: 'center', padding: 32, opacity: 0.5 }}>{t('add_items_empty')}</div>
+                        <div className="sc-modal-empty">{t('add_items_empty')}</div>
                     ) : (
                         groups.map(group => (
-                            <div key={group.order_id} style={{ marginBottom: 20 }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                                    <span style={{ fontSize: 14 }}>{'\uD83D\uDCE6'}</span>
-                                    <span style={{ fontWeight: 600, fontSize: 14 }}>{group.order_number}</span>
-                                    {group.factory_name && <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{'\u2014'} {group.factory_name}</span>}
-                                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)', marginLeft: 'auto' }}>{group.items.length} {t('add_items_pos')}</span>
+                            <div key={group.order_id} className="sc-add-group">
+                                <div className="sc-add-group-header">
+                                    <span>{'\uD83D\uDCE6'}</span>
+                                    <span className="sc-add-group-name">{group.order_number}</span>
+                                    {group.factory_name && <span className="sc-add-group-factory">{'\u2014'} {group.factory_name}</span>}
+                                    <span className="sc-add-group-count">{group.items.length} {t('add_items_pos')}</span>
                                 </div>
-                                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                                <table className="sc-add-items-table">
                                     <thead>
-                                        <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                            <th style={{ textAlign: 'left', padding: '4px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_barcode')}</th>
-                                            <th style={{ textAlign: 'left', padding: '4px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_article')}</th>
-                                            <th style={{ textAlign: 'right', padding: '4px 8px', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('col_available')}</th>
-                                            <th style={{ textAlign: 'right', padding: '4px 8px', fontSize: 11, color: 'var(--color-text-muted)', width: 100 }}>{t('btn_add')}</th>
+                                        <tr>
+                                            <th className="sc-add-items-th">{t('col_barcode')}</th>
+                                            <th className="sc-add-items-th">{t('col_article')}</th>
+                                            <th className="sc-add-items-th-right">{t('col_available')}</th>
+                                            <th className="sc-add-items-th-right" style={{ width: 100 }}>{t('btn_add')}</th>
                                         </tr>
                                     </thead>
                                     <tbody>
                                         {group.items.map(item => (
-                                            <tr key={item.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                                <td style={{ padding: '6px 8px', fontFamily: 'monospace', fontSize: 12 }}>{item.barcode}</td>
-                                                <td style={{ padding: '6px 8px' }}>
+                                            <tr key={item.id}>
+                                                <td className="sc-add-items-td-mono">{item.barcode}</td>
+                                                <td className="sc-add-items-td">
                                                     {item.article_seller || '\u2014'}
-                                                    {item.subject && <span style={{ color: 'var(--color-text-muted)', fontSize: 11, marginLeft: 4 }}>{'\u2022'} {item.subject}</span>}
+                                                    {item.subject && <span className="sc-add-items-subject">{'\u2022'} {item.subject}</span>}
                                                 </td>
-                                                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(item.remaining_qty)}</td>
-                                                <td style={{ padding: '6px 8px', textAlign: 'right' }}>
+                                                <td className="sc-add-items-td-right">{formatNumber(item.remaining_qty)}</td>
+                                                <td className="sc-add-items-td-right">
                                                     <input
                                                         type="number"
                                                         min={0}
@@ -1324,10 +1278,7 @@ function AddItemsModal({ vehicle, onClose, onDone }: { vehicle: VehicleSchema; o
                                                             setSelected(prev => ({ ...prev, [item.id]: v }));
                                                         }}
                                                         placeholder="0"
-                                                        style={{
-                                                            width: 80, padding: '4px 8px', borderRadius: 6, textAlign: 'right',
-                                                            border: '1px solid var(--color-border)', background: 'var(--color-bg)', color: 'var(--color-text)', fontSize: 13,
-                                                        }}
+                                                        className="sc-add-items-qty-input"
                                                     />
                                                 </td>
                                             </tr>
@@ -1340,7 +1291,7 @@ function AddItemsModal({ vehicle, onClose, onDone }: { vehicle: VehicleSchema; o
                 </div>
 
                 {/* Footer */}
-                <div style={{ padding: '16px 24px', borderTop: '1px solid var(--color-border)', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                <div className="sc-modal-footer">
                     <button className="btn btn-secondary" onClick={onClose}>{t('btn_cancel')}</button>
                     <button
                         className="btn btn-primary"
@@ -1387,31 +1338,25 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
         setSubmitting(false);
     };
 
-    const inputStyle: React.CSSProperties = {
-        width: '100%', padding: '8px 12px', borderRadius: 8,
-        border: '1px solid var(--color-border)', background: 'var(--color-bg)',
-        color: 'var(--color-text)', fontSize: 13,
-    };
-
     const containerOptions = getContainerOptions(t);
 
     return (
-        <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>{t('vehicle_form_title')}</h3>
+        <div className="glass-card sc-form-card">
+            <div className="sc-form-header">
+                <h3 className="sc-form-title">{t('vehicle_form_title')}</h3>
                 <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div className="sc-form-col">
+                <div className="sc-form-grid-2">
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_number')}</label>
-                        <input value={form.order_no} onChange={e => setForm(f => ({ ...f, order_no: e.target.value }))} placeholder={t('vehicle_form_number_placeholder')} style={inputStyle} autoFocus />
+                        <label className="sc-form-label">{t('vehicle_form_number')}</label>
+                        <input value={form.order_no} onChange={e => setForm(f => ({ ...f, order_no: e.target.value }))} placeholder={t('vehicle_form_number_placeholder')} className="sc-form-input" autoFocus />
                     </div>
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6, display: 'block' }}>{t('vehicle_form_container_type')}</label>
-                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        <label className="sc-form-label">{t('vehicle_form_container_type')}</label>
+                        <div className="sc-form-container-btns">
                             {containerOptions.map(opt => {
-                                const selected = form.container_type === opt.key;
+                                const isSelected = form.container_type === opt.key;
                                 return (
                                     <button
                                         key={opt.key}
@@ -1419,9 +1364,9 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
                                         onClick={() => setForm(f => ({ ...f, container_type: opt.key }))}
                                         style={{
                                             padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 500,
-                                            border: selected ? '2px solid var(--color-primary)' : '1px solid var(--color-border)',
-                                            background: selected ? 'var(--color-primary-bg)' : 'var(--color-bg)',
-                                            color: selected ? 'var(--color-primary)' : 'var(--color-text)',
+                                            border: isSelected ? '2px solid var(--color-primary)' : '1px solid var(--color-border)',
+                                            background: isSelected ? 'var(--color-primary-bg)' : 'var(--color-bg)',
+                                            color: isSelected ? 'var(--color-primary)' : 'var(--color-text)',
                                             cursor: 'pointer', transition: 'all 0.15s',
                                         }}
                                     >
@@ -1433,59 +1378,59 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
                     </div>
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+                <div className="sc-form-grid-3">
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_pickup_date')}</label>
-                        <input type="date" value={form.ship_date || ''} onChange={e => setForm(f => ({ ...f, ship_date: e.target.value || undefined }))} style={inputStyle} />
+                        <label className="sc-form-label">{t('vehicle_form_pickup_date')}</label>
+                        <input type="date" value={form.ship_date || ''} onChange={e => setForm(f => ({ ...f, ship_date: e.target.value || undefined }))} className="sc-form-input" />
                     </div>
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_invoice')}</label>
-                        <input value={form.invoice_no || ''} onChange={e => setForm(f => ({ ...f, invoice_no: e.target.value || undefined }))} placeholder="CC20260011" style={inputStyle} />
+                        <label className="sc-form-label">{t('vehicle_form_invoice')}</label>
+                        <input value={form.invoice_no || ''} onChange={e => setForm(f => ({ ...f, invoice_no: e.target.value || undefined }))} placeholder="CC20260011" className="sc-form-input" />
                     </div>
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_order_no')}</label>
-                        <input value={form.payment_ref || ''} onChange={e => setForm(f => ({ ...f, payment_ref: e.target.value || undefined }))} placeholder="ENV-001" style={inputStyle} />
-                    </div>
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr', gap: 12 }}>
-                    <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_delivery_cny')}</label>
-                        <input type="number" value={form.delivery_cost_cny || ''} onChange={e => setForm(f => ({ ...f, delivery_cost_cny: parseFloat(e.target.value) || 0 }))} style={inputStyle} />
-                    </div>
-                    <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_delivery_usd')}</label>
-                        <input type="number" value={form.delivery_cost_usd || ''} onChange={e => setForm(f => ({ ...f, delivery_cost_usd: parseFloat(e.target.value) || 0 }))} style={inputStyle} />
-                    </div>
-                    <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_rate_cny')}</label>
-                        <input type="number" step="0.01" value={form.rate_cny || ''} onChange={e => setForm(f => ({ ...f, rate_cny: parseFloat(e.target.value) || 1 }))} style={inputStyle} />
-                    </div>
-                    <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_rate_usd')}</label>
-                        <input type="number" step="0.01" value={form.rate_usd || ''} onChange={e => setForm(f => ({ ...f, rate_usd: parseFloat(e.target.value) || 1 }))} style={inputStyle} />
-                    </div>
-                    <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_rate_eur')}</label>
-                        <input type="number" step="0.01" value={form.rate_eur || ''} onChange={e => setForm(f => ({ ...f, rate_eur: parseFloat(e.target.value) || 1 }))} style={inputStyle} />
+                        <label className="sc-form-label">{t('vehicle_form_order_no')}</label>
+                        <input value={form.payment_ref || ''} onChange={e => setForm(f => ({ ...f, payment_ref: e.target.value || undefined }))} placeholder="ENV-001" className="sc-form-input" />
                     </div>
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div className="sc-form-grid-5">
+                    <div>
+                        <label className="sc-form-label">{t('vehicle_form_delivery_cny')}</label>
+                        <input type="number" value={form.delivery_cost_cny || ''} onChange={e => setForm(f => ({ ...f, delivery_cost_cny: parseFloat(e.target.value) || 0 }))} className="sc-form-input" />
+                    </div>
+                    <div>
+                        <label className="sc-form-label">{t('vehicle_form_delivery_usd')}</label>
+                        <input type="number" value={form.delivery_cost_usd || ''} onChange={e => setForm(f => ({ ...f, delivery_cost_usd: parseFloat(e.target.value) || 0 }))} className="sc-form-input" />
+                    </div>
+                    <div>
+                        <label className="sc-form-label">{t('vehicle_form_rate_cny')}</label>
+                        <input type="number" step="0.01" value={form.rate_cny || ''} onChange={e => setForm(f => ({ ...f, rate_cny: parseFloat(e.target.value) || 1 }))} className="sc-form-input" />
+                    </div>
+                    <div>
+                        <label className="sc-form-label">{t('vehicle_form_rate_usd')}</label>
+                        <input type="number" step="0.01" value={form.rate_usd || ''} onChange={e => setForm(f => ({ ...f, rate_usd: parseFloat(e.target.value) || 1 }))} className="sc-form-input" />
+                    </div>
+                    <div>
+                        <label className="sc-form-label">{t('vehicle_form_rate_eur')}</label>
+                        <input type="number" step="0.01" value={form.rate_eur || ''} onChange={e => setForm(f => ({ ...f, rate_eur: parseFloat(e.target.value) || 1 }))} className="sc-form-input" />
+                    </div>
+                </div>
+                <div className="sc-form-grid-2">
                     {warehouses.length > 0 && (
                         <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_warehouse')}</label>
-                            <select value={form.target_warehouse_id || ''} onChange={e => setForm(f => ({ ...f, target_warehouse_id: e.target.value ? Number(e.target.value) : undefined }))} style={inputStyle}>
+                            <label className="sc-form-label">{t('vehicle_form_warehouse')}</label>
+                            <select value={form.target_warehouse_id || ''} onChange={e => setForm(f => ({ ...f, target_warehouse_id: e.target.value ? Number(e.target.value) : undefined }))} className="sc-form-input">
                                 <option value="">{t('create_order_unselected')}</option>
                                 {warehouses.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
                             </select>
                         </div>
                     )}
                     <div>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('vehicle_form_note')}</label>
-                        <input value={form.note || ''} onChange={e => setForm(f => ({ ...f, note: e.target.value }))} style={inputStyle} />
+                        <label className="sc-form-label">{t('vehicle_form_note')}</label>
+                        <input value={form.note || ''} onChange={e => setForm(f => ({ ...f, note: e.target.value }))} className="sc-form-input" />
                     </div>
                 </div>
             </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
+            <div className="sc-form-footer">
                 <button className="btn btn-secondary btn-sm" onClick={onClose}>{t('btn_cancel')}</button>
                 <button className="btn btn-primary btn-sm" onClick={handleSubmit} disabled={!form.order_no.trim() || submitting}>
                     {submitting ? t('msg_creating') : t('btn_create')}
@@ -1547,8 +1492,8 @@ function VehiclesTab() {
 
     if (loading) {
         return (
-            <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>
-                <div className="spinner" style={{ margin: '0 auto 12px' }} />
+            <div className="glass-card sc-loading-card">
+                <div className="spinner sc-spinner-center" />
                 {t('msg_loading')}
             </div>
         );
@@ -1557,9 +1502,9 @@ function VehiclesTab() {
     return (
         <>
             {error && (
-                <div className="glass-card" style={{ padding: 16, color: 'var(--color-danger)', marginBottom: 16 }}>
+                <div className="glass-card sc-error-card">
                     {error}
-                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>{t('btn_retry')}</button>
+                    <button className="btn btn-secondary btn-sm sc-retry-btn" onClick={load}>{t('btn_retry')}</button>
                 </div>
             )}
 
@@ -1571,11 +1516,11 @@ function VehiclesTab() {
                 />
             )}
 
-            <div className="glass-card" style={{ overflow: 'hidden' }}>
+            <div className="glass-card sc-vehicles-card">
                 {/* Header */}
-                <div style={{ padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--color-border)' }}>
-                    <h3 style={{ fontSize: 15, fontWeight: 600 }}>{t('vehicles_title')} ({vehicles.length})</h3>
-                    <div style={{ display: 'flex', gap: 8 }}>
+                <div className="sc-vehicles-header">
+                    <h3 className="sc-vehicles-header-title">{t('vehicles_title')} ({vehicles.length})</h3>
+                    <div className="sc-vehicles-header-actions">
                         <button className="btn btn-secondary btn-sm" onClick={load}>{t('btn_refresh')}</button>
                         <button className="btn btn-primary btn-sm" onClick={() => setShowCreate(v => !v)}>
                             {showCreate ? t('btn_close') : t('vehicles_btn_create')}
@@ -1584,26 +1529,26 @@ function VehiclesTab() {
                 </div>
 
                 {vehicles.length === 0 ? (
-                    <div style={{ padding: 40, textAlign: 'center', opacity: 0.5 }}>
-                        <div style={{ fontSize: 32, marginBottom: 8 }}>{'\uD83D\uDE9B'}</div>
+                    <div className="sc-vehicles-empty">
+                        <div className="sc-vehicles-empty-icon">{'\uD83D\uDE9B'}</div>
                         <div>{t('vehicles_empty')}</div>
                     </div>
                 ) : (
-                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                    <table className="sc-vehicles-table">
                         <thead>
-                            <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                <th style={{ textAlign: 'left', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('vehicles_title')}</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_order')}</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_status')}</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_container')}</th>
-                                <th style={{ textAlign: 'right', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_items')}</th>
-                                <th style={{ textAlign: 'right', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_qty')}</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_invoice')}</th>
-                                <th style={{ textAlign: 'right', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_weight')}</th>
-                                <th style={{ textAlign: 'right', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_cost')}</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_shipped_date')}</th>
-                                <th style={{ textAlign: 'left', padding: '10px 8px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500 }}>{t('col_arrival_date')}</th>
-                                <th style={{ textAlign: 'right', padding: '10px 16px', fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 500, width: 180 }}>{t('col_actions')}</th>
+                            <tr>
+                                <th className="sc-vehicles-th-first">{t('vehicles_title')}</th>
+                                <th className="sc-vehicles-th">{t('col_order')}</th>
+                                <th className="sc-vehicles-th">{t('col_status')}</th>
+                                <th className="sc-vehicles-th">{t('col_container')}</th>
+                                <th className="sc-vehicles-th-right">{t('col_items')}</th>
+                                <th className="sc-vehicles-th-right">{t('col_qty')}</th>
+                                <th className="sc-vehicles-th">{t('col_invoice')}</th>
+                                <th className="sc-vehicles-th-right">{t('col_weight')}</th>
+                                <th className="sc-vehicles-th-right">{t('col_cost')}</th>
+                                <th className="sc-vehicles-th">{t('col_shipped_date')}</th>
+                                <th className="sc-vehicles-th">{t('col_arrival_date')}</th>
+                                <th className="sc-vehicles-th-last">{t('col_actions')}</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -1613,25 +1558,25 @@ function VehiclesTab() {
                                     <tr
                                         key={v.order_no}
                                         onClick={() => openVehicle(v.order_no)}
-                                        style={{ borderBottom: '1px solid var(--color-border)', cursor: 'pointer', transition: 'background 0.15s' }}
+                                        className="sc-tr-row"
                                         onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-secondary)')}
                                         onMouseLeave={e => (e.currentTarget.style.background = '')}
                                     >
-                                        <td style={{ padding: '10px 16px', fontWeight: 600 }}>{v.order_no}</td>
-                                        <td style={{ padding: '10px 8px', fontSize: 12, color: v.payment_ref ? 'var(--color-text)' : 'var(--color-text-muted)' }}>{v.payment_ref || '\u2014'}</td>
-                                        <td style={{ padding: '10px 8px' }}><StatusBadge status={status} /></td>
-                                        <td style={{ padding: '10px 8px' }}>
-                                            <span style={{ fontSize: 12 }}>{getContainerOptions(t).find(c => c.key === v.container_type)?.label || v.transport_type || 'AUTO'}</span>
+                                        <td className="sc-vehicles-td-first">{v.order_no}</td>
+                                        <td className="sc-vehicles-td sc-text-muted-sm" style={{ color: v.payment_ref ? 'var(--color-text)' : 'var(--color-text-muted)' }}>{v.payment_ref || '\u2014'}</td>
+                                        <td className="sc-vehicles-td"><StatusBadge status={status} /></td>
+                                        <td className="sc-vehicles-td sc-text-muted-sm">
+                                            {getContainerOptions(t).find(c => c.key === v.container_type)?.label || v.transport_type || 'AUTO'}
                                         </td>
-                                        <td style={{ padding: '10px 8px', textAlign: 'right' }}>{v.items_count}</td>
-                                        <td style={{ padding: '10px 8px', textAlign: 'right' }}>{formatNumber(v.total_qty, 0)}</td>
-                                        <td style={{ padding: '10px 8px', fontSize: 12, color: v.invoice_no ? 'var(--color-text)' : 'var(--color-text-muted)' }}>{v.invoice_no || '\u2014'}</td>
-                                        <td style={{ padding: '10px 8px', textAlign: 'right' }}>{v.total_weight_kg ? formatNumber(Number(v.total_weight_kg), 0) + ' kg' : '\u2014'}</td>
-                                        <td style={{ padding: '10px 8px', textAlign: 'right' }}>{Number(v.total_cny) > 0 ? formatNumber(Number(v.total_cny), 0) + ' \u00A5' : '\u2014'}</td>
-                                        <td style={{ padding: '10px 8px' }}>{v.ship_date ? formatDate(v.ship_date) : '\u2014'}</td>
-                                        <td style={{ padding: '10px 8px' }}>{v.estimated_arrival_date ? formatDate(v.estimated_arrival_date) : '\u2014'}</td>
-                                        <td style={{ padding: '10px 16px', textAlign: 'right' }} onClick={e => e.stopPropagation()}>
-                                            <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'center' }}>
+                                        <td className="sc-vehicles-td-right">{v.items_count}</td>
+                                        <td className="sc-vehicles-td-right">{formatNumber(v.total_qty, 0)}</td>
+                                        <td className="sc-vehicles-td sc-text-muted-sm" style={{ color: v.invoice_no ? 'var(--color-text)' : 'var(--color-text-muted)' }}>{v.invoice_no || '\u2014'}</td>
+                                        <td className="sc-vehicles-td-right">{v.total_weight_kg ? formatNumber(Number(v.total_weight_kg), 0) + ' kg' : '\u2014'}</td>
+                                        <td className="sc-vehicles-td-right">{Number(v.total_cny) > 0 ? formatNumber(Number(v.total_cny), 0) + ' \u00A5' : '\u2014'}</td>
+                                        <td className="sc-vehicles-td">{v.ship_date ? formatDate(v.ship_date) : '\u2014'}</td>
+                                        <td className="sc-vehicles-td">{v.estimated_arrival_date ? formatDate(v.estimated_arrival_date) : '\u2014'}</td>
+                                        <td className="sc-vehicles-td-last" onClick={e => e.stopPropagation()}>
+                                            <div className="sc-vehicles-td-actions">
                                                 {NEXT_STATUS[status] && (
                                                     <button
                                                         onClick={e => handleStatusChange(e, v.order_no, NEXT_STATUS[status].status)}
@@ -1647,7 +1592,7 @@ function VehiclesTab() {
                                                         {NEXT_STATUS[status].label}
                                                     </button>
                                                 )}
-                                                <span style={{ fontSize: 12, color: 'var(--color-primary)', cursor: 'pointer' }} onClick={() => openVehicle(v.order_no)}>{t('vehicles_open')}</span>
+                                                <span className="sc-open-link" onClick={() => openVehicle(v.order_no)}>{t('vehicles_open')}</span>
                                             </div>
                                         </td>
                                     </tr>
@@ -1686,8 +1631,8 @@ function OverviewTab() {
 
     if (loading) {
         return (
-            <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>
-                <div className="spinner" style={{ margin: '0 auto 12px' }} />
+            <div className="glass-card sc-loading-card">
+                <div className="spinner sc-spinner-center" />
                 {t('msg_loading')}
             </div>
         );
@@ -1695,16 +1640,16 @@ function OverviewTab() {
 
     if (error) {
         return (
-            <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>
+            <div className="glass-card sc-error-card-lg">
                 {error}
-                <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>{t('btn_retry')}</button>
+                <button className="btn btn-secondary btn-sm sc-retry-btn" onClick={load}>{t('btn_retry')}</button>
             </div>
         );
     }
 
     if (!overview) {
         return (
-            <div className="glass-card" style={{ padding: 32, textAlign: 'center', opacity: 0.6 }}>
+            <div className="glass-card sc-empty-card">
                 {t('msg_no_data')}
             </div>
         );
@@ -1715,7 +1660,7 @@ function OverviewTab() {
     return (
         <div>
             {/* KPI Cards */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, marginBottom: 24 }}>
+            <div className="sc-overview-kpi-grid">
                 <KpiCard
                     label={t('kpi_factory_orders')}
                     value={overview.total_factory_orders}
@@ -1743,25 +1688,23 @@ function OverviewTab() {
             </div>
 
             {/* Status breakdown */}
-            <div className="glass-card" style={{ padding: 20 }}>
-                <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>{t('overview_status_title')}</h3>
+            <div className="glass-card sc-form-card">
+                <h3 className="sc-overview-status-title">{t('overview_status_title')}</h3>
                 {statusEntries.length === 0 ? (
-                    <div style={{ opacity: 0.5, textAlign: 'center', padding: 20 }}>{t('overview_no_status_data')}</div>
+                    <div className="sc-overview-empty">{t('overview_no_status_data')}</div>
                 ) : (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+                    <div className="sc-overview-status-grid">
                         {VEHICLE_STATUSES.map(status => {
                             const count = overview.vehicles_by_status[status] || 0;
                             const color = VEHICLE_STATUS_COLORS[status];
                             return (
-                                <div key={status} style={{
-                                    padding: 16,
-                                    borderRadius: 12,
-                                    border: `1px solid ${color}33`,
-                                    background: `${color}0a`,
-                                    textAlign: 'center',
-                                }}>
-                                    <div style={{ fontSize: 28, fontWeight: 700, color }}>{count}</div>
-                                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                                <div
+                                    key={status}
+                                    className="sc-overview-status-item"
+                                    style={{ border: `1px solid ${color}33`, background: `${color}0a` }}
+                                >
+                                    <div className="sc-overview-status-count" style={{ color }}>{count}</div>
+                                    <div className="sc-overview-status-label">
                                         {getVehicleStatusLabels(t)[status]}
                                     </div>
                                 </div>
@@ -1912,8 +1855,8 @@ function SupplierCatalogView({
 
     if (loading) {
         return (
-            <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>
-                <div className="spinner" style={{ margin: '0 auto 12px' }} />
+            <div className="glass-card sc-loading-card">
+                <div className="spinner sc-spinner-center" />
                 {t('msg_loading')}
             </div>
         );
@@ -1921,9 +1864,9 @@ function SupplierCatalogView({
 
     if (error) {
         return (
-            <div className="glass-card" style={{ padding: 16, color: 'var(--color-danger)' }}>
+            <div className="glass-card sc-error-card">
                 {error}
-                <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={loadCatalog}>
+                <button className="btn btn-secondary btn-sm sc-retry-btn" onClick={loadCatalog}>
                     {t('btn_retry')}
                 </button>
             </div>
@@ -1938,30 +1881,19 @@ function SupplierCatalogView({
     return (
         <div>
             {/* Header */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
+            <div className="sc-catalog-header">
                 <div>
-                    <button
-                        onClick={onBack}
-                        style={{
-                            background: 'none',
-                            border: 'none',
-                            color: 'var(--color-accent)',
-                            fontSize: 13,
-                            cursor: 'pointer',
-                            padding: 0,
-                            marginBottom: 8,
-                        }}
-                    >
+                    <button className="sc-catalog-back-btn" onClick={onBack}>
                         {t('catalog_back_to_list')}
                     </button>
-                    <h1 style={{ fontSize: 28, fontWeight: 700, letterSpacing: '-0.03em', margin: 0 }}>
-                        <span style={{ marginRight: 10 }}>{flag}</span>
+                    <h1 className="sc-catalog-title">
+                        <span className="sc-catalog-flag">{flag}</span>
                         {catalog.supplier.name}
-                        <span style={{ color: 'var(--color-text-muted)', fontWeight: 400, fontSize: 18, marginLeft: 10 }}>
+                        <span className="sc-catalog-currency">
                             · {catalog.supplier.currency}
                         </span>
                     </h1>
-                    <div style={{ fontSize: 15, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                    <div className="sc-catalog-subtitle">
                         {t('catalog_subtitle')}
                     </div>
                 </div>
@@ -1971,71 +1903,56 @@ function SupplierCatalogView({
             </div>
 
             {/* KPI */}
-            <div className="stats-grid" style={{ marginBottom: 24 }}>
-                <div className="glass-card" style={{ padding: '20px 24px' }}>
-                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+            <div className="stats-grid">
+                <div className="glass-card sc-catalog-kpi-card">
+                    <div className="sc-catalog-kpi-label">
                         {t('catalog_kpi_orders')}
                     </div>
-                    <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--color-accent)' }}>
+                    <div className="sc-kpi-value-lg sc-color-accent">
                         {catalog.summary.orders_count}
                     </div>
                 </div>
-                <div className="glass-card" style={{ padding: '20px 24px' }}>
-                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                <div className="glass-card sc-catalog-kpi-card">
+                    <div className="sc-catalog-kpi-label">
                         {t('catalog_kpi_sku')}
                     </div>
-                    <div style={{ fontSize: 28, fontWeight: 700 }}>{catalog.summary.sku_count}</div>
+                    <div className="sc-kpi-value-lg">{catalog.summary.sku_count}</div>
                 </div>
-                <div className="glass-card" style={{ padding: '20px 24px' }}>
-                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                <div className="glass-card sc-catalog-kpi-card">
+                    <div className="sc-catalog-kpi-label">
                         {t('catalog_kpi_qty')}
                     </div>
-                    <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--color-warning)' }}>
+                    <div className="sc-kpi-value-lg sc-color-warning">
                         {formatNumber(catalog.summary.total_qty, 0)}
                     </div>
-                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                    <div className="sc-catalog-kpi-sub">
                         {t('unit_pcs')}
                     </div>
                 </div>
-                <div className="glass-card" style={{ padding: '20px 24px' }}>
-                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                <div className="glass-card sc-catalog-kpi-card">
+                    <div className="sc-catalog-kpi-label">
                         {t('catalog_kpi_amount')}
                     </div>
-                    <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--color-success)' }}>
+                    <div className="sc-kpi-value-lg sc-color-success">
                         {formatNumber(Number(catalog.summary.total_amount), 0)}
                     </div>
-                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 4 }}>{sym}</div>
+                    <div className="sc-catalog-kpi-sub">{sym}</div>
                 </div>
             </div>
 
             {/* Toolbar */}
-            <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap', alignItems: 'center' }}>
+            <div className="sc-catalog-toolbar">
                 <input
                     type="text"
                     value={search}
                     onChange={e => setSearch(e.target.value)}
                     placeholder={t('catalog_search_placeholder')}
-                    style={{
-                        flex: 1,
-                        minWidth: 240,
-                        padding: '10px 14px',
-                        borderRadius: 12,
-                        border: '1px solid var(--color-border)',
-                        background: 'white',
-                        fontSize: 14,
-                    }}
+                    className="sc-catalog-search"
                 />
                 <select
                     value={subjectFilter}
                     onChange={e => setSubjectFilter(e.target.value)}
-                    style={{
-                        padding: '10px 14px',
-                        borderRadius: 12,
-                        border: '1px solid var(--color-border)',
-                        background: 'white',
-                        fontSize: 14,
-                        minWidth: 180,
-                    }}
+                    className="sc-catalog-filter-select"
                 >
                     <option value="all">{t('catalog_subject_all')}</option>
                     {catalog.subjects.map(g => (
@@ -2044,13 +1961,7 @@ function SupplierCatalogView({
                         </option>
                     ))}
                 </select>
-                <label style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    fontSize: 13,
-                    color: 'var(--color-text-muted)',
-                }}>
+                <label className="sc-catalog-checkbox-label">
                     <input
                         type="checkbox"
                         checked={onlyRemaining}
@@ -2077,53 +1988,43 @@ function SupplierCatalogView({
                 const deliveredPct = groupTotalQty > 0 ? Math.round((groupDelivered / groupTotalQty) * 100) : 0;
 
                 return (
-                    <div key={group.subject} className="glass-card" style={{ padding: 0, marginBottom: 16, overflow: 'hidden' }}>
+                    <div key={group.subject} className="glass-card sc-subject-card">
                         <div
                             onClick={() => toggleSubject(group.subject)}
-                            style={{
-                                padding: '16px 24px',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'space-between',
-                                cursor: 'pointer',
-                                background: 'rgba(0,0,0,0.02)',
-                            }}
+                            className="sc-subject-header"
                         >
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 16, fontWeight: 700 }}>
-                                <span style={{
-                                    display: 'inline-block',
-                                    fontSize: 12,
-                                    color: 'var(--color-text-muted)',
-                                    transform: collapsed ? 'rotate(-90deg)' : 'none',
-                                    transition: 'transform 0.2s',
-                                }}>
+                            <div className="sc-subject-header-left">
+                                <span
+                                    className="sc-subject-chevron"
+                                    style={{ transform: collapsed ? 'rotate(-90deg)' : 'none' }}
+                                >
                                     ▼
                                 </span>
                                 {group.subject}
                             </div>
-                            <div style={{ display: 'flex', gap: 24, fontSize: 13, color: 'var(--color-text-muted)' }}>
-                                <div><strong style={{ color: 'var(--color-text)' }}>{group.items.length}</strong> {t('catalog_sku_unit')}</div>
-                                <div><strong style={{ color: 'var(--color-text)' }}>{formatNumber(groupTotalQty, 0)}</strong> {t('unit_pcs')}</div>
-                                <div><strong style={{ color: 'var(--color-text)' }}>{formatNumber(groupTotalAmount, 0)} {sym}</strong></div>
-                                <div>{t('catalog_delivered_label')}: <strong style={{ color: 'var(--color-text)' }}>{deliveredPct}%</strong></div>
+                            <div className="sc-subject-stats">
+                                <div><strong className="sc-color-text">{group.items.length}</strong> {t('catalog_sku_unit')}</div>
+                                <div><strong className="sc-color-text">{formatNumber(groupTotalQty, 0)}</strong> {t('unit_pcs')}</div>
+                                <div><strong className="sc-color-text">{formatNumber(groupTotalAmount, 0)} {sym}</strong></div>
+                                <div>{t('catalog_delivered_label')}: <strong className="sc-color-text">{deliveredPct}%</strong></div>
                             </div>
                         </div>
                         {!collapsed && (
-                            <div style={{ overflowX: 'auto' }}>
-                                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                            <div className="sc-subject-table-wrap">
+                                <table className="sc-subject-table">
                                     <thead>
                                         <tr>
-                                            <th style={catalogThStyle}>{t('catalog_col_barcode')}</th>
-                                            <th style={catalogThStyle}>{t('catalog_col_article')}</th>
-                                            <th style={catalogThStyle}>{t('catalog_col_size')}</th>
-                                            <th style={catalogThNumStyle}>{t('catalog_col_per_box')}</th>
-                                            <th style={catalogThNumStyle}>{t('catalog_col_weight')}</th>
-                                            <th style={catalogThNumStyle}>{t('catalog_col_total_qty')}</th>
-                                            <th style={catalogThNumStyle}>{t('catalog_col_last_price')}</th>
-                                            <th style={catalogThNumStyle}>{t('catalog_col_avg_price')}</th>
-                                            <th style={catalogThNumStyle}>{t('catalog_col_amount')}</th>
-                                            <th style={catalogThStyle}>{t('catalog_col_delivered')}</th>
-                                            <th style={catalogThNumStyle}>{t('catalog_col_orders_count')}</th>
+                                            <th className="sc-catalog-th">{t('catalog_col_barcode')}</th>
+                                            <th className="sc-catalog-th">{t('catalog_col_article')}</th>
+                                            <th className="sc-catalog-th">{t('catalog_col_size')}</th>
+                                            <th className="sc-catalog-th-right">{t('catalog_col_per_box')}</th>
+                                            <th className="sc-catalog-th-right">{t('catalog_col_weight')}</th>
+                                            <th className="sc-catalog-th-right">{t('catalog_col_total_qty')}</th>
+                                            <th className="sc-catalog-th-right">{t('catalog_col_last_price')}</th>
+                                            <th className="sc-catalog-th-right">{t('catalog_col_avg_price')}</th>
+                                            <th className="sc-catalog-th-right">{t('catalog_col_amount')}</th>
+                                            <th className="sc-catalog-th">{t('catalog_col_delivered')}</th>
+                                            <th className="sc-catalog-th-right">{t('catalog_col_orders_count')}</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -2136,40 +2037,28 @@ function SupplierCatalogView({
                                                 <React.Fragment key={item.barcode}>
                                                     <tr
                                                         onClick={() => toggleSku(item.barcode)}
-                                                        style={{
-                                                            cursor: 'pointer',
-                                                            borderTop: '1px solid var(--color-border)',
-                                                            background: expanded ? 'rgba(0, 113, 227, 0.04)' : undefined,
-                                                        }}
+                                                        className="sc-tr-row sc-tr-border"
+                                                        style={{ background: expanded ? 'rgba(0, 113, 227, 0.04)' : undefined }}
                                                     >
-                                                        <td style={catalogTdMonoStyle}>{item.barcode}</td>
-                                                        <td style={catalogTdStyle}>{item.article_seller || '—'}</td>
-                                                        <td style={catalogTdStyle}>{item.box_size || '—'}</td>
-                                                        <td style={catalogTdNumStyle}>{item.pcs_per_box ?? '—'}</td>
-                                                        <td style={catalogTdNumStyle}>
+                                                        <td className="sc-catalog-td-mono">{item.barcode}</td>
+                                                        <td className="sc-catalog-td">{item.article_seller || '—'}</td>
+                                                        <td className="sc-catalog-td">{item.box_size || '—'}</td>
+                                                        <td className="sc-catalog-td-right">{item.pcs_per_box ?? '—'}</td>
+                                                        <td className="sc-catalog-td-right">
                                                             {item.weight_kg ? formatNumber(Number(item.weight_kg), 2) : '—'}
                                                         </td>
-                                                        <td style={catalogTdNumStyle}>{formatNumber(item.total_qty, 0)}</td>
-                                                        <td style={catalogTdNumStyle}>
+                                                        <td className="sc-catalog-td-right">{formatNumber(item.total_qty, 0)}</td>
+                                                        <td className="sc-catalog-td-right">
                                                             {formatNumber(Number(item.last_price), 2)} {sym}
                                                         </td>
-                                                        <td style={catalogTdNumStyle}>
+                                                        <td className="sc-catalog-td-right">
                                                             {formatNumber(Number(item.avg_price), 2)} {sym}
                                                         </td>
-                                                        <td style={catalogTdNumStyle}>
+                                                        <td className="sc-catalog-td-right">
                                                             {formatNumber(Number(item.total_amount), 0)} {sym}
                                                         </td>
-                                                        <td style={catalogTdStyle}>
-                                                            <div style={{
-                                                                display: 'inline-block',
-                                                                width: 120,
-                                                                height: 8,
-                                                                background: 'rgba(0,0,0,0.08)',
-                                                                borderRadius: 4,
-                                                                overflow: 'hidden',
-                                                                verticalAlign: 'middle',
-                                                                marginRight: 8,
-                                                            }}>
+                                                        <td className="sc-catalog-td">
+                                                            <div className="sc-delivered-bar-wrap">
                                                                 <div style={{
                                                                     width: `${deliveredPctItem}%`,
                                                                     height: '100%',
@@ -2177,57 +2066,42 @@ function SupplierCatalogView({
                                                                     borderRadius: 4,
                                                                 }} />
                                                             </div>
-                                                            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                                            <span className="sc-delivered-count">
                                                                 {formatNumber(item.delivered_qty, 0)} / {formatNumber(item.total_qty, 0)}
                                                             </span>
                                                         </td>
-                                                        <td style={catalogTdNumStyle}>{item.orders_count}</td>
+                                                        <td className="sc-catalog-td-right">{item.orders_count}</td>
                                                     </tr>
                                                     {expanded && (
                                                         <tr>
-                                                            <td colSpan={11} style={{
-                                                                padding: 0,
-                                                                background: 'rgba(0, 113, 227, 0.03)',
-                                                            }}>
-                                                                <div style={{ padding: '16px 24px' }}>
-                                                                    <div style={{
-                                                                        fontSize: 12,
-                                                                        fontWeight: 600,
-                                                                        textTransform: 'uppercase',
-                                                                        color: 'var(--color-text-muted)',
-                                                                        letterSpacing: '0.05em',
-                                                                        marginBottom: 8,
-                                                                    }}>
+                                                            <td colSpan={11} className="sc-sku-detail-td">
+                                                                <div className="sc-sku-detail-inner">
+                                                                    <div className="sc-sku-detail-label">
                                                                         {t('catalog_history_title')} ({item.article_seller || item.barcode})
                                                                     </div>
-                                                                    <div style={{
-                                                                        background: 'white',
-                                                                        borderRadius: 8,
-                                                                        overflow: 'hidden',
-                                                                        border: '1px solid var(--color-border)',
-                                                                    }}>
-                                                                        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                                                    <div className="sc-sku-detail-table-wrap">
+                                                                        <table className="sc-subject-table">
                                                                             <thead>
                                                                                 <tr>
-                                                                                    <th style={catalogSubThStyle}>{t('catalog_history_col_order')}</th>
-                                                                                    <th style={catalogSubThStyle}>{t('catalog_history_col_date')}</th>
-                                                                                    <th style={catalogSubThNumStyle}>{t('catalog_history_col_qty')}</th>
-                                                                                    <th style={catalogSubThNumStyle}>{t('catalog_history_col_price')}</th>
-                                                                                    <th style={catalogSubThNumStyle}>{t('catalog_history_col_amount')}</th>
-                                                                                    <th style={catalogSubThStyle}>{t('catalog_history_col_vehicle')}</th>
-                                                                                    <th style={catalogSubThStyle}>{t('catalog_history_col_status')}</th>
+                                                                                    <th className="sc-catalog-sub-th">{t('catalog_history_col_order')}</th>
+                                                                                    <th className="sc-catalog-sub-th">{t('catalog_history_col_date')}</th>
+                                                                                    <th className="sc-catalog-sub-th-right">{t('catalog_history_col_qty')}</th>
+                                                                                    <th className="sc-catalog-sub-th-right">{t('catalog_history_col_price')}</th>
+                                                                                    <th className="sc-catalog-sub-th-right">{t('catalog_history_col_amount')}</th>
+                                                                                    <th className="sc-catalog-sub-th">{t('catalog_history_col_vehicle')}</th>
+                                                                                    <th className="sc-catalog-sub-th">{t('catalog_history_col_status')}</th>
                                                                                 </tr>
                                                                             </thead>
                                                                             <tbody>
                                                                                 {item.order_history.map((h, idx) => (
-                                                                                    <tr key={`${h.factory_order_id}-${idx}`} style={{ borderTop: '1px solid var(--color-border)' }}>
-                                                                                        <td style={catalogSubTdStyle}>{h.order_number}</td>
-                                                                                        <td style={catalogSubTdStyle}>{formatDate(h.order_date)}</td>
-                                                                                        <td style={catalogSubTdNumStyle}>{formatNumber(h.qty, 0)}</td>
-                                                                                        <td style={catalogSubTdNumStyle}>{formatNumber(Number(h.price_cny), 2)} {sym}</td>
-                                                                                        <td style={catalogSubTdNumStyle}>{formatNumber(Number(h.amount), 0)} {sym}</td>
-                                                                                        <td style={catalogSubTdStyle}>{h.vehicle_order_no || '—'}</td>
-                                                                                        <td style={catalogSubTdStyle}><CatalogHistoryStatusBadge entry={h} /></td>
+                                                                                    <tr key={`${h.factory_order_id}-${idx}`} className="sc-tr-border">
+                                                                                        <td className="sc-catalog-sub-td">{h.order_number}</td>
+                                                                                        <td className="sc-catalog-sub-td">{formatDate(h.order_date)}</td>
+                                                                                        <td className="sc-catalog-sub-td-right">{formatNumber(h.qty, 0)}</td>
+                                                                                        <td className="sc-catalog-sub-td-right">{formatNumber(Number(h.price_cny), 2)} {sym}</td>
+                                                                                        <td className="sc-catalog-sub-td-right">{formatNumber(Number(h.amount), 0)} {sym}</td>
+                                                                                        <td className="sc-catalog-sub-td">{h.vehicle_order_no || '—'}</td>
+                                                                                        <td className="sc-catalog-sub-td"><CatalogHistoryStatusBadge entry={h} /></td>
                                                                                     </tr>
                                                                                 ))}
                                                                             </tbody>
@@ -2251,47 +2125,6 @@ function SupplierCatalogView({
     );
 }
 
-// ─── Catalog table style helpers ────────────────────────────────────────────
-const catalogThStyle: React.CSSProperties = {
-    padding: '12px 16px',
-    textAlign: 'left',
-    fontSize: 11,
-    fontWeight: 600,
-    textTransform: 'uppercase',
-    letterSpacing: '0.05em',
-    color: 'var(--color-text-muted)',
-    background: 'rgba(0,0,0,0.015)',
-};
-const catalogThNumStyle: React.CSSProperties = { ...catalogThStyle, textAlign: 'right' };
-const catalogTdStyle: React.CSSProperties = { padding: '12px 16px', fontSize: 13, textAlign: 'left' };
-const catalogTdNumStyle: React.CSSProperties = {
-    padding: '12px 16px',
-    fontSize: 13,
-    textAlign: 'right',
-    fontVariantNumeric: 'tabular-nums',
-};
-const catalogTdMonoStyle: React.CSSProperties = {
-    padding: '12px 16px',
-    fontSize: 12,
-    fontFamily: "'SF Mono', Menlo, monospace",
-    textAlign: 'left',
-};
-const catalogSubThStyle: React.CSSProperties = {
-    padding: '10px 14px',
-    textAlign: 'left',
-    fontSize: 11,
-    fontWeight: 600,
-    color: 'var(--color-text-muted)',
-    background: 'rgba(0,0,0,0.015)',
-};
-const catalogSubThNumStyle: React.CSSProperties = { ...catalogSubThStyle, textAlign: 'right' };
-const catalogSubTdStyle: React.CSSProperties = { padding: '10px 14px', fontSize: 12, textAlign: 'left' };
-const catalogSubTdNumStyle: React.CSSProperties = {
-    padding: '10px 14px',
-    fontSize: 12,
-    textAlign: 'right',
-    fontVariantNumeric: 'tabular-nums',
-};
 
 function SuppliersTab() {
     const { t } = useT();
@@ -2444,12 +2277,6 @@ function SuppliersTab() {
     const chinaCount = suppliers.filter(s => s.country === 'CHINA').length;
     const russiaCount = suppliers.filter(s => s.country === 'RUSSIA').length;
 
-    const inputStyle: React.CSSProperties = {
-        width: '100%', padding: '8px 12px', borderRadius: 8,
-        border: '1px solid var(--color-border)', background: 'var(--color-bg)',
-        color: 'var(--color-text)', fontSize: 13,
-    };
-
     // Catalog view (deeplink supported)
     if (selectedSupplierId != null) {
         return <SupplierCatalogView supplierId={selectedSupplierId} onBack={closeSupplierCatalog} />;
@@ -2457,8 +2284,8 @@ function SuppliersTab() {
 
     if (loading) {
         return (
-            <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>
-                <div className="spinner" style={{ margin: '0 auto 12px' }} />
+            <div className="glass-card sc-loading-card">
+                <div className="spinner sc-spinner-center" />
                 {t('msg_loading')}
             </div>
         );
@@ -2467,103 +2294,103 @@ function SuppliersTab() {
     return (
         <>
             {error && (
-                <div className="glass-card" style={{ padding: 16, color: 'var(--color-danger)', marginBottom: 16 }}>
+                <div className="glass-card sc-error-card">
                     {error}
-                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>{t('btn_retry')}</button>
+                    <button className="btn btn-secondary btn-sm sc-retry-btn" onClick={load}>{t('btn_retry')}</button>
                 </div>
             )}
 
             {/* KPI */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
-                <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('kpi_suppliers_total')}</div>
-                    <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--color-accent)' }}>{suppliers.length}</div>
+            <div className="sc-supplier-kpi-grid">
+                <div className="glass-card sc-kpi-card">
+                    <div className="sc-kpi-label">{t('kpi_suppliers_total')}</div>
+                    <div className="sc-kpi-value-lg sc-color-accent">{suppliers.length}</div>
                 </div>
-                <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('kpi_china')}</div>
-                    <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--color-warning)' }}>{chinaCount}</div>
-                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>CNY</div>
+                <div className="glass-card sc-kpi-card">
+                    <div className="sc-kpi-label">{t('kpi_china')}</div>
+                    <div className="sc-kpi-value-lg sc-color-warning">{chinaCount}</div>
+                    <div className="sc-kpi-sub">CNY</div>
                 </div>
-                <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{t('kpi_russia')}</div>
-                    <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--color-success)' }}>{russiaCount}</div>
-                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>RUB</div>
+                <div className="glass-card sc-kpi-card">
+                    <div className="sc-kpi-label">{t('kpi_russia')}</div>
+                    <div className="sc-kpi-value-lg sc-color-success">{russiaCount}</div>
+                    <div className="sc-kpi-sub">RUB</div>
                 </div>
             </div>
 
             {/* Create/Edit Form */}
             {showForm && (
-                <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                        <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>
+                <div className="glass-card sc-form-card">
+                    <div className="sc-form-header">
+                        <h3 className="sc-form-title">
                             {editSupplier ? t('suppliers_edit_title') : t('suppliers_new_title')}
                         </h3>
                         <button className="btn btn-secondary btn-sm" onClick={() => setShowForm(false)}>✕</button>
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr', gap: 12, marginBottom: 12 }}>
+                    <div className="sc-form-grid-2-1 sc-form-mb">
                         <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('suppliers_form_name')}</label>
+                            <label className="sc-form-label">{t('suppliers_form_name')}</label>
                             <input
                                 value={form.name}
                                 onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
                                 placeholder={t('suppliers_form_name_placeholder')}
-                                style={inputStyle}
+                                className="sc-form-input"
                                 autoFocus
                             />
                         </div>
                         <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('suppliers_form_country')}</label>
+                            <label className="sc-form-label">{t('suppliers_form_country')}</label>
                             <select
                                 value={form.country}
                                 onChange={e => handleCountryChange(e.target.value as 'CHINA' | 'RUSSIA')}
-                                style={inputStyle}
+                                className="sc-form-input"
                             >
                                 <option value="CHINA">{t('suppliers_form_country_china')}</option>
                                 <option value="RUSSIA">{t('suppliers_form_country_russia')}</option>
                             </select>
                         </div>
                         <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('suppliers_form_currency')}</label>
+                            <label className="sc-form-label">{t('suppliers_form_currency')}</label>
                             <select
                                 value={form.currency}
                                 onChange={e => setForm(f => ({ ...f, currency: e.target.value as 'CNY' | 'RUB' }))}
-                                style={inputStyle}
+                                className="sc-form-input"
                             >
                                 <option value="CNY">CNY (¥)</option>
                                 <option value="RUB">RUB (₽)</option>
                             </select>
                         </div>
                         <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('suppliers_form_min_days')}</label>
+                            <label className="sc-form-label">{t('suppliers_form_min_days')}</label>
                             <input
                                 type="number"
                                 value={form.delivery_days_min}
                                 onChange={e => setForm(f => ({ ...f, delivery_days_min: e.target.value }))}
                                 placeholder="30"
-                                style={inputStyle}
+                                className="sc-form-input"
                             />
                         </div>
                         <div>
-                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('suppliers_form_max_days')}</label>
+                            <label className="sc-form-label">{t('suppliers_form_max_days')}</label>
                             <input
                                 type="number"
                                 value={form.delivery_days_max}
                                 onChange={e => setForm(f => ({ ...f, delivery_days_max: e.target.value }))}
                                 placeholder="45"
-                                style={inputStyle}
+                                className="sc-form-input"
                             />
                         </div>
                     </div>
-                    <div style={{ marginBottom: 12 }}>
-                        <label style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'block' }}>{t('suppliers_form_note')}</label>
+                    <div className="sc-form-mb">
+                        <label className="sc-form-label">{t('suppliers_form_note')}</label>
                         <input
                             value={form.note}
                             onChange={e => setForm(f => ({ ...f, note: e.target.value }))}
                             placeholder={t('suppliers_form_note_placeholder')}
-                            style={inputStyle}
+                            className="sc-form-input"
                         />
                     </div>
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
+                    <div className="sc-form-footer-plain">
                         <button className="btn btn-secondary btn-sm" onClick={() => setShowForm(false)}>{t('btn_cancel')}</button>
                         <button
                             className="btn btn-primary btn-sm"
@@ -2577,8 +2404,8 @@ function SuppliersTab() {
             )}
 
             {/* Title + create button */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>
+            <div className="sc-title-row">
+                <h3 className="sc-section-title">
                     {t('suppliers_title')} ({suppliers.length})
                 </h3>
                 <button className="btn btn-primary btn-sm" onClick={openCreate}>
@@ -2594,90 +2421,57 @@ function SuppliersTab() {
                     </div>
                 </div>
             ) : (
-                <div style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
-                    gap: 16,
-                }}>
+                <div className="sc-supplier-grid">
                     {suppliers.map(s => {
                         const stats = supplierStats[s.id] ?? { orders_count: 0, sku_count: 0, total_qty: 0, total_amount: 0 };
                         const sym = currencySymbol(s.currency);
                         return (
                             <div
                                 key={s.id}
-                                className="glass-card"
-                                style={{
-                                    padding: '20px 24px',
-                                    cursor: 'pointer',
-                                    position: 'relative',
-                                    transition: 'all 0.2s cubic-bezier(0.25, 1, 0.5, 1)',
-                                }}
+                                className="glass-card sc-supplier-card"
                                 onClick={() => openSupplierCatalog(s.id)}
-                                onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = 'var(--shadow-glass-hover)'; }}
-                                onMouseLeave={e => { e.currentTarget.style.transform = ''; e.currentTarget.style.boxShadow = ''; }}
                             >
                                 {/* Head: flag + name + currency badge + actions */}
-                                <div style={{
-                                    display: 'flex',
-                                    justifyContent: 'space-between',
-                                    alignItems: 'center',
-                                    marginBottom: 16,
-                                }}>
-                                    <div style={{ fontSize: 18, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
-                                        <span style={{ fontSize: 22 }}>{supplierFlag(s.country)}</span>
+                                <div className="sc-supplier-head">
+                                    <div className="sc-supplier-name">
+                                        <span className="sc-supplier-flag">{supplierFlag(s.country)}</span>
                                         {s.name}
                                     </div>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                        <span style={{
-                                            fontSize: 11,
-                                            fontWeight: 600,
-                                            padding: '4px 8px',
-                                            background: 'rgba(0, 113, 227, 0.1)',
-                                            color: 'var(--color-accent)',
-                                            borderRadius: 24,
-                                        }}>
+                                    <div className="sc-supplier-head-right">
+                                        <span className="sc-supplier-currency-badge">
                                             {s.currency}
                                         </span>
                                     </div>
                                 </div>
                                 {/* Metrics rows */}
-                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 6 }}>
+                                <div className="sc-supplier-metric">
                                     <span>{t('catalog_kpi_orders')}</span>
-                                    <strong style={{ color: 'var(--color-text)', fontWeight: 600 }}>{stats.orders_count}</strong>
+                                    <strong className="sc-color-text sc-fw-600">{stats.orders_count}</strong>
                                 </div>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 6 }}>
+                                <div className="sc-supplier-metric">
                                     <span>SKU</span>
-                                    <strong style={{ color: 'var(--color-text)', fontWeight: 600 }}>{stats.sku_count}</strong>
+                                    <strong className="sc-color-text sc-fw-600">{stats.sku_count}</strong>
                                 </div>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 6 }}>
+                                <div className="sc-supplier-metric">
                                     <span>{t('col_qty') || t('catalog_kpi_qty')}</span>
-                                    <strong style={{ color: 'var(--color-text)', fontWeight: 600 }}>
+                                    <strong className="sc-color-text sc-fw-600">
                                         {formatNumber(stats.total_qty, 0)} {t('unit_pcs')}
                                     </strong>
                                 </div>
                                 {/* Total amount */}
-                                <div style={{
-                                    marginTop: 12,
-                                    paddingTop: 12,
-                                    borderTop: '1px solid var(--color-border)',
-                                    fontSize: 20,
-                                    fontWeight: 700,
-                                    color: 'var(--color-success)',
-                                }}>
+                                <div className="sc-supplier-amount">
                                     {formatNumber(stats.total_amount, 0)} {sym}
                                 </div>
                                 {/* Actions (edit/delete) — onClick stops card click */}
-                                <div style={{ display: 'flex', gap: 6, marginTop: 12, justifyContent: 'flex-end' }}>
+                                <div className="sc-supplier-actions">
                                     <button
                                         className="btn btn-secondary btn-sm"
-                                        style={{ fontSize: 11, padding: '4px 10px' }}
                                         onClick={(e) => { e.stopPropagation(); openEdit(s); }}
                                     >
                                         {t('btn_edit')}
                                     </button>
                                     <button
                                         className="btn btn-danger btn-sm"
-                                        style={{ fontSize: 11, padding: '4px 10px' }}
                                         onClick={(e) => { e.stopPropagation(); handleDelete(s.id, s.name); }}
                                     >
                                         {t('btn_delete')}

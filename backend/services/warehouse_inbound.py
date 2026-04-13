@@ -240,14 +240,36 @@ async def accept_receipt(
     # Auto-transition vehicle DISPATCHED → DELIVERED
     vehicle_delivered = False
     if receipt.cost_order_id:
-        from backend.models.cost import CostOrder
+        from backend.models.cost import CostOrder, CostOrderItem
         from backend.models.enums import VehicleStatus
+        from backend.models.supply_chain import FactoryOrderItem
 
         result = await db.execute(select(CostOrder).where(CostOrder.id == receipt.cost_order_id))
         vehicle = result.scalar_one_or_none()
         if vehicle and vehicle.status == VehicleStatus.DISPATCHED:
             vehicle.status = VehicleStatus.DELIVERED
             vehicle_delivered = True
+
+            # Mark linked FactoryOrderItems as delivered
+            foi_ids_result = await db.execute(
+                select(CostOrderItem.factory_order_item_id).where(
+                    CostOrderItem.order_no == vehicle.order_no,
+                    CostOrderItem.project_id == project_id,
+                    CostOrderItem.is_deleted == False,  # noqa: E712
+                    CostOrderItem.factory_order_item_id.isnot(None),
+                )
+            )
+            foi_ids = [row[0] for row in foi_ids_result.all()]
+            if foi_ids:
+                foi_result = await db.execute(
+                    select(FactoryOrderItem).where(
+                        FactoryOrderItem.id.in_(foi_ids),
+                        FactoryOrderItem.project_id == project_id,
+                        FactoryOrderItem.is_deleted == False,  # noqa: E712
+                    )
+                )
+                for foi in foi_result.scalars().all():
+                    foi.is_delivered = True
 
     await db.commit()
 

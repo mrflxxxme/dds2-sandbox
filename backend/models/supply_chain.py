@@ -10,6 +10,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
@@ -108,6 +109,7 @@ class FactoryOrderItem(Base, SoftDeleteMixin):
     mix_group_id: Mapped[str | None] = mapped_column(String(36), nullable=True, default=None)
     mix_box_size: Mapped[str | None] = mapped_column(String(50), nullable=True, default=None)
     mix_pcs_per_box: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    is_delivered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     factory_order: Mapped["FactoryOrder"] = relationship(back_populates="items")
 

@@ -154,6 +154,7 @@ class FactoryOrderItemSchema(BaseModel):
     mix_box_size: str | None = None
     mix_pcs_per_box: int | None = None
     remaining_qty: int | None = None  # computed: qty - assigned_qty
+    is_delivered: bool = False
 
 
 # --- FactoryOrder ---
