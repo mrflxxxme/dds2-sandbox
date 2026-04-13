@@ -61,13 +61,18 @@ async def get_supplier_catalog(
         raise HTTPException(status_code=404, detail="Supplier not found")
 
     # ── 2. Fetch all factory order items for this supplier ────────────────────
+    # LEFT JOIN nomenclature to enrich missing subject/article_seller (Bug fix:
+    # factory order detail page enriches in-memory via _enrich_items_from_nomenclature,
+    # but catalog used raw DB values — items with NULL subject showed "Без предмета").
+    # Also match orders by factory_name fallback when supplier_id is NULL (Bug fix:
+    # some orders were created without supplier_id but with matching factory_name).
     foi_rows = await db.execute(
         text("""
             SELECT
                 foi.id            AS foi_id,
                 foi.barcode,
-                foi.subject,
-                foi.article_seller,
+                COALESCE(foi.subject, n.subject)               AS subject,
+                COALESCE(foi.article_seller, n.article_seller) AS article_seller,
                 foi.qty,
                 foi.price_cny,
                 foi.box_size,
@@ -78,14 +83,22 @@ async def get_supplier_catalog(
                 fo.order_date
             FROM factory_order_items foi
             JOIN factory_orders fo ON fo.id = foi.factory_order_id
-            WHERE fo.supplier_id = :supplier_id
+            LEFT JOIN nomenclature n
+                   ON n.barcode = foi.barcode AND n.project_id = fo.project_id
+            WHERE (fo.supplier_id = :supplier_id
+                   OR (fo.supplier_id IS NULL AND fo.factory_name = :supplier_name))
               AND fo.project_id  = :project_id
               AND fo.is_deleted  = false
               AND foi.is_deleted = false
             ORDER BY fo.order_date DESC NULLS LAST, fo.id DESC
             LIMIT :limit
         """),
-        {"supplier_id": supplier_id, "project_id": project_id, "limit": _MAX_FOI_PER_SUPPLIER},
+        {
+            "supplier_id": supplier_id,
+            "supplier_name": supplier.name,
+            "project_id": project_id,
+            "limit": _MAX_FOI_PER_SUPPLIER,
+        },
     )
     foi_list = foi_rows.mappings().all()
 
