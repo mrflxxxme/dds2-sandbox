@@ -296,17 +296,6 @@ function FactoryOrdersTab() {
 
     useEffect(() => { load(); }, [load]);
 
-    const handleCreate = async (form: Record<string, any>) => {
-        const data: FactoryOrderCreate = {
-            order_number: form.order_number,
-            factory_name: form.factory_name || undefined,
-            expected_ready_date: form.expected_ready_date || undefined,
-            note: form.note || undefined,
-        };
-        await api.createFactoryOrder(data);
-        await load();
-    };
-
     const handleUpdate = async (form: Record<string, any>) => {
         if (!editOrder) return;
         await api.updateFactoryOrder(editOrder.id, {
