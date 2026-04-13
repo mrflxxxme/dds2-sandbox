@@ -185,6 +185,7 @@ async def update_vehicle(
 
     cost_fields = {"rate_cny", "rate_usd", "rate_eur", "delivery_cost_cny", "delivery_cost_usd"}
     needs_recalc = bool(cost_fields & set(update_data.keys()))
+    has_items = bool(vehicle.items)
 
     for field, value in update_data.items():
         if field == "container_type" and value:
@@ -195,7 +196,7 @@ async def update_vehicle(
 
     await db.commit()
 
-    if needs_recalc and vehicle.items:
+    if needs_recalc and has_items:
         from backend.services.cost.items import recalculate_order_items
 
         await recalculate_order_items(db, project_id, order_no)
@@ -265,6 +266,13 @@ async def add_items_to_vehicle(
                 subject = subject or nom.subject
                 article_seller = article_seller or nom.article_seller
 
+        # Calculate volume_m3 per unit from box dimensions
+        from backend.services.cost.helpers import parse_box_volume_m3
+
+        bs = fo_item.mix_box_size if fo_item.mix_group_id and fo_item.mix_box_size else fo_item.box_size
+        ppb = fo_item.mix_pcs_per_box if fo_item.mix_group_id and fo_item.mix_pcs_per_box else fo_item.pcs_per_box
+        vol_m3 = parse_box_volume_m3(bs, ppb)
+
         # Create CostOrderItem
         cost_item = CostOrderItem(
             project_id=project_id,
@@ -275,6 +283,7 @@ async def add_items_to_vehicle(
             qty=item_req.qty,
             price_cny=fo_item.price_cny,
             weight_kg=fo_item.weight_kg,
+            volume_m3=vol_m3 if vol_m3 > 0 else None,
             factory_order_item_id=fo_item.id,
         )
         db.add(cost_item)

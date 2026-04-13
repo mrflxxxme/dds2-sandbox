@@ -10,7 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.etl.cost_parsers import detect_and_normalize_excel
 from backend.models import CostOrder, CostOrderItem, DutyBasis, DutyRule, Nomenclature
-from backend.services.cost.helpers import DEFAULT_VAT_RATE, safe_decimal
+from backend.models.supply_chain import FactoryOrderItem
+from backend.services.cost.helpers import DEFAULT_VAT_RATE, parse_box_volume_m3, safe_decimal
 
 
 async def get_cost_order_items(db: AsyncSession, project_id: int, order_no: str):
@@ -199,6 +200,35 @@ async def recalculate_order_items(db: AsyncSession, project_id: int, order_no: s
         select(DutyRule).where(DutyRule.project_id == project_id, DutyRule.is_deleted == False)
     )
     duty_map = {r.subject: r for r in duty_result.scalars().all()}
+
+    # Backfill volume_m3 from FactoryOrderItem box dimensions for items missing it
+    fo_ids_need_vol = [
+        item.factory_order_item_id for item in items if item.factory_order_item_id and not item.volume_m3
+    ]
+    fo_box_map: dict[int, tuple] = {}
+    if fo_ids_need_vol:
+        fo_result = await db.execute(
+            select(
+                FactoryOrderItem.id,
+                FactoryOrderItem.box_size,
+                FactoryOrderItem.pcs_per_box,
+                FactoryOrderItem.mix_group_id,
+                FactoryOrderItem.mix_box_size,
+                FactoryOrderItem.mix_pcs_per_box,
+            ).where(FactoryOrderItem.id.in_(fo_ids_need_vol))
+        )
+        for row in fo_result:
+            fo_box_map[row[0]] = (row[1], row[2], row[3], row[4], row[5])
+
+    for item in items:
+        if not item.volume_m3 and item.factory_order_item_id:
+            fo_data = fo_box_map.get(item.factory_order_item_id)
+            if fo_data:
+                bs = fo_data[3] if fo_data[2] and fo_data[3] else fo_data[0]  # mix_box_size or box_size
+                ppb = fo_data[4] if fo_data[2] and fo_data[4] else fo_data[1]  # mix_pcs_per_box or pcs_per_box
+                vol = parse_box_volume_m3(bs, ppb)
+                if vol > 0:
+                    item.volume_m3 = vol
 
     # Calculate total volume for delivery split
     total_volume = sum(float(item.volume_m3 or 0) * int(item.qty or 1) for item in items)

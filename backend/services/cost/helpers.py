@@ -3,6 +3,7 @@ Cost — shared helpers and utilities.
 """
 
 import math
+import re
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -52,6 +53,23 @@ def safe_decimal(val) -> Decimal:
         return Decimal(str(f))
     except Exception:
         return Decimal(0)
+
+
+def parse_box_volume_m3(box_size: str | None, pcs_per_box: int | None) -> Decimal:
+    """Parse box dimensions '60x40x50' (cm) and return volume per unit in m³."""
+    if not box_size or not pcs_per_box or pcs_per_box <= 0:
+        return Decimal(0)
+    parts = re.split(r"[*xXхХ×]", box_size)  # noqa: RUF001
+    if len(parts) != 3:
+        return Decimal(0)
+    try:
+        dims = [float(p.strip()) for p in parts]
+    except (ValueError, TypeError):
+        return Decimal(0)
+    if not all(d > 0 for d in dims):
+        return Decimal(0)
+    box_vol_m3 = dims[0] * dims[1] * dims[2] / 1_000_000
+    return Decimal(str(round(box_vol_m3 / pcs_per_box, 6)))
 
 
 async def auto_link_customs_dt(order_no: str, dt_number: str, project_id: int, db: AsyncSession):
