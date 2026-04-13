@@ -1751,7 +1751,7 @@ function SupplierCatalogView({
     supplierId: number;
     onBack: () => void;
 }) {
-    const { t } = useT();
+    const { t, lang } = useT();
     const [catalog, setCatalog] = useState<SupplierCatalogResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -1797,7 +1797,9 @@ function SupplierCatalogView({
             .filter(g => subjectFilter === 'all' || g.subject === subjectFilter)
             .map(g => {
                 const items = g.items.filter(it => {
-                    if (statusFilter === 'production' && it.delivered_qty >= it.total_qty) return false;
+                    if (statusFilter === 'not_distributed' && it.distributed_qty > 0) return false;
+                    if (statusFilter === 'in_transit' && (it.distributed_qty === 0 || it.delivered_qty >= it.total_qty)) return false;
+                    if (statusFilter === 'delivered' && it.delivered_qty < it.total_qty) return false;
                     if (brandFilter !== 'all' && it.brand !== brandFilter) return false;
                     if (!q) return true;
                     return (
@@ -1818,7 +1820,7 @@ function SupplierCatalogView({
         const country = catalog.supplier.country;
         return groups.flatMap(g =>
             g.items.map(it => ({
-                [t('catalog_subject_empty')]: translateSubject(g.subject, country),
+                [t('catalog_subject_empty')]: translateSubject(g.subject, country, lang),
                 [t('catalog_col_brand')]: it.brand || '',
                 [t('catalog_col_barcode')]: it.barcode,
                 [t('catalog_col_article')]: it.article_seller || '',
@@ -1918,43 +1920,36 @@ function SupplierCatalogView({
                 </button>
             </div>
 
-            {/* KPI */}
-            <div className="stats-grid">
-                <div className="glass-card sc-catalog-kpi-card">
-                    <div className="sc-catalog-kpi-label">
-                        {t('catalog_kpi_orders')}
+            {/* KPI — computed from filtered data */}
+            {(() => {
+                const isFiltered = search || subjectFilter !== 'all' || brandFilter !== 'all' || statusFilter !== 'all';
+                const fSkuCount = isFiltered ? filteredSubjects.reduce((s, g) => s + g.items.length, 0) : catalog.summary.sku_count;
+                const fTotalQty = isFiltered ? filteredSubjects.reduce((s, g) => s + g.items.reduce((ss, it) => ss + it.total_qty, 0), 0) : catalog.summary.total_qty;
+                const fTotalAmount = isFiltered ? filteredSubjects.reduce((s, g) => s + g.items.reduce((ss, it) => ss + Number(it.total_amount), 0), 0) : Number(catalog.summary.total_amount);
+                const fOrdersCount = isFiltered ? new Set(filteredSubjects.flatMap(g => g.items.flatMap(it => it.order_history.map(h => h.order_number)))).size : catalog.summary.orders_count;
+                return (
+                    <div className="stats-grid">
+                        <div className="glass-card sc-catalog-kpi-card">
+                            <div className="sc-catalog-kpi-label">{t('catalog_kpi_orders')}</div>
+                            <div className="sc-kpi-value-lg sc-color-accent">{fOrdersCount}</div>
+                        </div>
+                        <div className="glass-card sc-catalog-kpi-card">
+                            <div className="sc-catalog-kpi-label">{t('catalog_kpi_sku')}</div>
+                            <div className="sc-kpi-value-lg">{fSkuCount}</div>
+                        </div>
+                        <div className="glass-card sc-catalog-kpi-card">
+                            <div className="sc-catalog-kpi-label">{t('catalog_kpi_qty')}</div>
+                            <div className="sc-kpi-value-lg sc-color-warning">{formatNumber(fTotalQty, 0)}</div>
+                            <div className="sc-catalog-kpi-sub">{t('unit_pcs')}</div>
+                        </div>
+                        <div className="glass-card sc-catalog-kpi-card">
+                            <div className="sc-catalog-kpi-label">{t('catalog_kpi_amount')}</div>
+                            <div className="sc-kpi-value-lg sc-color-success">{formatNumber(fTotalAmount, 0)}</div>
+                            <div className="sc-catalog-kpi-sub">{sym}</div>
+                        </div>
                     </div>
-                    <div className="sc-kpi-value-lg sc-color-accent">
-                        {catalog.summary.orders_count}
-                    </div>
-                </div>
-                <div className="glass-card sc-catalog-kpi-card">
-                    <div className="sc-catalog-kpi-label">
-                        {t('catalog_kpi_sku')}
-                    </div>
-                    <div className="sc-kpi-value-lg">{catalog.summary.sku_count}</div>
-                </div>
-                <div className="glass-card sc-catalog-kpi-card">
-                    <div className="sc-catalog-kpi-label">
-                        {t('catalog_kpi_qty')}
-                    </div>
-                    <div className="sc-kpi-value-lg sc-color-warning">
-                        {formatNumber(catalog.summary.total_qty, 0)}
-                    </div>
-                    <div className="sc-catalog-kpi-sub">
-                        {t('unit_pcs')}
-                    </div>
-                </div>
-                <div className="glass-card sc-catalog-kpi-card">
-                    <div className="sc-catalog-kpi-label">
-                        {t('catalog_kpi_amount')}
-                    </div>
-                    <div className="sc-kpi-value-lg sc-color-success">
-                        {formatNumber(Number(catalog.summary.total_amount), 0)}
-                    </div>
-                    <div className="sc-catalog-kpi-sub">{sym}</div>
-                </div>
-            </div>
+                );
+            })()}
 
             {/* Toolbar */}
             <div className="sc-catalog-toolbar">
@@ -1995,7 +1990,9 @@ function SupplierCatalogView({
                     className="sc-catalog-filter-select"
                 >
                     <option value="all">{t('catalog_status_filter_all')}</option>
-                    <option value="production">{t('catalog_status_filter_production')}</option>
+                    <option value="not_distributed">{t('catalog_status_filter_not_distributed')}</option>
+                    <option value="in_transit">{t('catalog_status_filter_in_transit')}</option>
+                    <option value="delivered">{t('catalog_status_filter_delivered')}</option>
                 </select>
             </div>
 
@@ -2028,7 +2025,7 @@ function SupplierCatalogView({
                                 >
                                     ▼
                                 </span>
-                                {translateSubject(group.subject, catalog.supplier.country)}
+                                {translateSubject(group.subject, catalog.supplier.country, lang)}
                             </div>
                             <div className="sc-subject-stats">
                                 <div><strong className="sc-color-text">{group.items.length}</strong> {t('catalog_sku_unit')}</div>

@@ -134,6 +134,15 @@ class FactoryOrderItemUpdate(BaseModel):
     mix_pcs_per_box: int | None = None
 
 
+class BulkUpdateItemSpecs(BaseModel):
+    """Bulk update box specs for items matched by barcode."""
+
+    barcode: str
+    box_size: str | None = None
+    pcs_per_box: int | None = None
+    weight_kg: Decimal | None = None
+
+
 class FactoryOrderItemSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -465,6 +474,7 @@ class SupplierCatalogItem(BaseModel):
     orders_count: int
     last_order_date: date | None = None
     delivered_qty: int
+    distributed_qty: int = 0
     order_history: list[SkuOrderHistoryEntry]
 
 
@@ -474,6 +484,7 @@ class SupplierCatalogSubjectGroup(BaseModel):
     total_qty: int
     total_amount: Decimal
     delivered_qty: int
+    distributed_qty: int = 0
     items: list[SupplierCatalogItem]
 
 

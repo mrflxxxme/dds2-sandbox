@@ -46,6 +46,9 @@ export function addSupplyChainMethods(api: ApiClient) {
             return api.request<{ ok: boolean; added: number }>('POST', `/api/v1/supply-chain/factory-orders/${orderId}/items`, items);
         },
 
+        bulkUpdateItemSpecs(orderId: number, updates: { barcode: string; box_size?: string; pcs_per_box?: number; weight_kg?: number }[]) {
+            return api.request<{ ok: boolean; updated: number; not_found: string[] }>('PUT', `/api/v1/supply-chain/factory-orders/${orderId}/items/bulk-specs`, updates);
+        },
         updateFactoryOrderItem(orderId: number, itemId: number, data: FactoryOrderItemUpdate) {
             return api.request<FactoryOrderItem>('PUT', `/api/v1/supply-chain/factory-orders/${orderId}/items/${itemId}`, data);
         },
@@ -102,6 +105,9 @@ export function addSupplyChainMethods(api: ApiClient) {
         },
         removeItemFromVehicle(orderNo: string, itemId: number) {
             return api.request<{ ok: boolean }>('DELETE', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items/${itemId}`);
+        },
+        clearAllVehicleItems(orderNo: string) {
+            return api.request<{ ok: boolean; removed: number }>('DELETE', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items`);
         },
         deleteVehicle(orderNo: string) {
             if (orderNo.includes('/')) {

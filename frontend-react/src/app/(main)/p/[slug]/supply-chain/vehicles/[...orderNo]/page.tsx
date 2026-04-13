@@ -479,6 +479,7 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
 }) {
     const { t } = useT();
     const [removingId, setRemovingId] = useState<number | null>(null);
+    const [clearingAll, setClearingAll] = useState(false);
     const [perUnit, setPerUnit] = useState(false); // false = total, true = per unit
     const [expandedId, setExpandedId] = useState<number | null>(null);
     const hasCosts = items.some(i => i.total_rub);
@@ -493,6 +494,18 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
             alert(e instanceof Error ? e.message : t('msg_error'));
         }
         setRemovingId(null);
+    };
+
+    const handleClearAll = async () => {
+        if (!confirm(t('vehicle_items_confirm_clear_all'))) return;
+        setClearingAll(true);
+        try {
+            await api.clearAllVehicleItems(vehicleOrderNo);
+            onRemoved();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : t('msg_error'));
+        }
+        setClearingAll(false);
     };
 
     const handleExport = () => {
@@ -549,7 +562,12 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
 
     return (
         <>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 8 }}>
+            {isForming && items.length > 0 && (
+                <button className="btn btn-danger btn-sm" onClick={handleClearAll} disabled={clearingAll} style={{ fontSize: 12 }}>
+                    {clearingAll ? '...' : t('vehicle_items_clear_all')}
+                </button>
+            )}
             <button className="btn btn-secondary btn-sm" onClick={handleExport} style={{ fontSize: 12 }}>
                 📊 Excel
             </button>
