@@ -94,6 +94,8 @@ const ru: TranslationDict = {
     col_category: 'Категория',
     col_price_cny: 'Цена ¥',
     col_sum_cny: 'Сумма ¥',
+    col_price: 'Цена',
+    col_sum: 'Сумма',
     col_box_spec: 'Коробка (см)',
     col_pcs_per_box: 'Шт/кор',
     col_weight_1pc: 'Вес (кг)',
@@ -414,6 +416,8 @@ const zh: TranslationDict = {
     col_category: '分类',
     col_price_cny: '单价 ¥',
     col_sum_cny: '金额 ¥',
+    col_price: '单价',
+    col_sum: '金额',
     col_box_spec: '箱规 (cm)',
     col_pcs_per_box: '件/箱',
     col_weight_1pc: '重量 (kg)',
@@ -667,6 +671,12 @@ const I18nContext = createContext<I18nContextValue>({
     setLang: () => {},
     t: (key) => key,
 });
+
+/** Currency symbol helper for supplier currency */
+export function currencySymbol(currency?: string): string {
+    if (currency === 'RUB') return '₽';
+    return '¥';
+}
 
 export function LanguageProvider({ children }: { children: React.ReactNode }) {
     const [lang, setLangState] = useState<Lang>('ru');

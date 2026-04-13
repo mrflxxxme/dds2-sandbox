@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel, calcTotalBoxesWithMix } from '@/lib/utils';
-import { LanguageProvider, useT, LanguageToggle } from './i18n';
+import { LanguageProvider, useT, LanguageToggle, currencySymbol } from './i18n';
 
 /** Нормализация габаритов → "60x40x40" */
 const normalizeBoxSize = (s: string): string => s.trim().replace(/[×*,/\\]/g, 'x');
@@ -898,8 +898,8 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
                         { key: 'subject', label: t('col_category'), render: (v: string | null) => v || '\u2014' },
                         { key: 'qty', label: t('col_qty'), align: 'right', render: (v: number) => formatNumber(v, 0) },
                         {
-                            key: 'price_cny', label: t('col_price_cny'), align: 'right',
-                            render: (v: unknown) => formatNumber(Number(v), 2) + ' \u00A5',
+                            key: 'price_cny', label: `${t('col_price')} ${currencySymbol(order.supplier?.currency)}`, align: 'right',
+                            render: (v: unknown) => formatNumber(Number(v), 2) + ' ' + currencySymbol(order.supplier?.currency),
                         },
                         { key: 'box_size', label: t('col_box_spec') },
                         { key: 'pcs_per_box', label: t('col_pcs_per_box'), align: 'right' },
@@ -971,7 +971,7 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
                                     <th style={{ width: 30, textAlign: 'center' }}>#</th>
                                     <th style={{ minWidth: 130 }}>{t('col_barcode')}</th>
                                     <th style={{ width: 70 }}>{t('col_qty')}</th>
-                                    <th style={{ width: 80 }}>{t('col_price_cny')}</th>
+                                    <th style={{ width: 80 }}>{t('col_price')} {currencySymbol(order.supplier?.currency)}</th>
                                     <th style={{ width: 120 }}>{t('col_box_spec')}</th>
                                     <th style={{ width: 65 }}>{t('col_pcs_per_box')}</th>
                                     <th style={{ width: 70 }}>{t('col_weight_1pc')}</th>
