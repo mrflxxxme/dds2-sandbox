@@ -21,6 +21,7 @@ from backend.schemas.wb_fbo import (
 )
 from backend.services import fbo_supply_service
 from backend.services.integrations_service import _get_wb_key
+from backend.utils.rate_limit import rate_limit_write
 
 logger = logging.getLogger("dds.routers.fbo_supplies")
 router = APIRouter(prefix="/warehouse/fbo-supplies", tags=["FBO Supplies"])
@@ -114,7 +115,7 @@ async def get_fbo_supply_items(
 # ─── Sync: full ────────────────────────────────────────────────────────────
 
 
-@router.post("/sync", response_model=FboSyncResultSchema)
+@router.post("/sync", response_model=FboSyncResultSchema, dependencies=[Depends(rate_limit_write)])
 async def sync_fbo_supplies(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -171,7 +172,7 @@ async def _enrich_in_background(project_id: int, api_key: str):
 # ─── Sync: statuses only ──────────────────────────────────────────────────
 
 
-@router.post("/sync-statuses", response_model=FboSyncResultSchema)
+@router.post("/sync-statuses", response_model=FboSyncResultSchema, dependencies=[Depends(rate_limit_write)])
 async def sync_fbo_statuses(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -196,7 +197,7 @@ async def sync_fbo_statuses(
 # ─── Link supply ↔ shipment ───────────────────────────────────────────────
 
 
-@router.post("/{supply_id}/link")
+@router.post("/{supply_id}/link", dependencies=[Depends(rate_limit_write)])
 async def link_supply(
     supply_id: int,
     payload: FboSupplyLinkRequest,
@@ -216,7 +217,7 @@ async def link_supply(
         raise HTTPException(400, str(e)) from None
 
 
-@router.delete("/{supply_id}/link")
+@router.delete("/{supply_id}/link", dependencies=[Depends(rate_limit_write)])
 async def unlink_supply(
     supply_id: int,
     project: Project = Depends(get_current_project),

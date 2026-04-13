@@ -59,11 +59,8 @@ class RateLimiter:
             if redis is None:
                 return  # Redis unavailable — skip rate limiting
 
-            # Use X-Forwarded-For when behind nginx/proxy, fall back to direct IP
-            forwarded = request.headers.get("X-Forwarded-For", "")
-            client_ip = (
-                forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "unknown")
-            )
+            # Use X-Real-IP set by nginx (trustworthy, not spoofable like X-Forwarded-For)
+            client_ip = request.headers.get("X-Real-IP") or (request.client.host if request.client else "unknown")
             key = f"rate_limit:{self.action}:{client_ip}"
 
             # Atomic INCR + set TTL only on first request of the window.
