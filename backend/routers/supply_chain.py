@@ -394,6 +394,11 @@ async def recalculate_vehicle(
         return await vehicle_delivery.recalculate_vehicle(db, project.id, order_no)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        import logging
+
+        logging.getLogger("dds").exception("recalculate_vehicle %s failed", order_no)
+        raise HTTPException(500, f"Ошибка пересчёта: {e}") from e
 
 
 @router.post("/vehicles/{order_no}/items", dependencies=[Depends(rate_limit_write)])
