@@ -1,5 +1,5 @@
 """
-Cost — Duty Rules CRUD.
+Cost — Duty Rules CRUD + Nomenclature area_m2.
 """
 
 from decimal import Decimal
@@ -7,7 +7,9 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.cache import invalidate_cache
 from backend.models import DutyRule
+from backend.models.cost import Nomenclature
 
 
 async def get_duty_rules(db: AsyncSession, project_id: int, limit: int = 500, offset: int = 0):
@@ -60,3 +62,28 @@ async def delete_duty_rule(db: AsyncSession, project_id: int, rule_id: int):
     rule.soft_delete()
     await db.commit()
     return True
+
+
+async def bulk_update_nomenclature_area(
+    db: AsyncSession,
+    project_id: int,
+    items: list[dict],
+) -> tuple[int, list[str]]:
+    """Update area_m2 for nomenclature items by barcode."""
+    result = await db.execute(select(Nomenclature).where(Nomenclature.project_id == project_id))
+    nom_map = {n.barcode: n for n in result.scalars().all()}
+
+    updated = 0
+    not_found: list[str] = []
+    for item in items:
+        bc = str(item["barcode"]).strip()
+        nom = nom_map.get(bc)
+        if nom:
+            nom.area_m2 = Decimal(str(item["area_m2"]))
+            updated += 1
+        else:
+            not_found.append(bc)
+
+    await db.commit()
+    await invalidate_cache(f"cost:project_id={project_id}")
+    return updated, not_found

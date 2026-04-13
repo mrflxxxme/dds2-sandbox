@@ -277,14 +277,16 @@ export interface Nomenclature {
   barcode?: string;
   subject?: string;
   volume_l?: number;
+  area_m2?: number | null;
 }
 
 export interface DutyRule {
   id: number;
-  category: string;
-  duty_rate: number;
-  vat_included: boolean;
+  subject: string;
   basis: string;
+  rate: number;
+  util_collect_rub: number;
+  note?: string | null;
 }
 
 export interface CostOrder {

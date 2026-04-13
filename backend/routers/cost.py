@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
-from backend.schemas import CostOrderCreate, DutyRuleSchema, VatRateUpdate
+from backend.schemas import BulkAreaUpdate, CostOrderCreate, DutyRuleSchema, VatRateUpdate
 from backend.services import cost as cost_service
 from backend.utils.rate_limit import rate_limit_import, rate_limit_write
 
@@ -36,9 +36,22 @@ async def get_nomenclature(
             "article_seller": n.article_seller,
             "article_wb": n.article_wb,
             "volume_l": float(n.volume_l or 0),
+            "area_m2": float(n.area_m2) if n.area_m2 else None,
         }
         for n in items
     ]
+
+
+@router.put("/nomenclature/bulk_area", dependencies=[Depends(rate_limit_write)])
+async def bulk_update_nomenclature_area(
+    payload: BulkAreaUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    updated, not_found = await cost_service.bulk_update_nomenclature_area(
+        db, project.id, [i.model_dump() for i in payload.items]
+    )
+    return {"ok": True, "updated": updated, "not_found": not_found}
 
 
 @router.post("/nomenclature/upload", dependencies=[Depends(rate_limit_import)])

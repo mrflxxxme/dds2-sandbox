@@ -37,6 +37,7 @@ class Nomenclature(Base):
     article_wb: Mapped[int | None] = mapped_column(Integer)
     imt_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     volume_l: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    area_m2: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     __table_args__ = (UniqueConstraint("project_id", "barcode", name="uq_nomenclature_project_barcode"),)

@@ -19,6 +19,9 @@ export function addCostMethods(api: ApiClient) {
         deleteDutyRule(id: number) { return api.request<MessageResponse>('DELETE', `/api/v1/cost/duty_rules/${id}`); },
         getVatRate() { return api.request<{ vat_rate: number }>('GET', '/api/v1/cost/vat_rate'); },
         setVatRate(vatRate: number) { return api.request<{ status: string; vat_rate: number }>('PUT', '/api/v1/cost/vat_rate', { vat_rate: vatRate }); },
+        bulkUpdateNomenclatureArea(items: { barcode: string; area_m2: number }[]) {
+            return api.request<{ ok: boolean; updated: number; not_found: string[] }>('PUT', '/api/v1/cost/nomenclature/bulk_area', { items });
+        },
         async uploadCostFile(orderNo: string, file: File) {
             const formData = new FormData();
             formData.append('file', file);
