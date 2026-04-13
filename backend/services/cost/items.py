@@ -120,10 +120,10 @@ async def upload_order_items(
 
         cost_rub_unit = price_cny * order.rate_cny
 
-        if total_volume > 0 and float(volume_m3) > 0:
-            delivery_rub_unit = Decimal(str(delivery_rub_total * float(volume_m3) / total_volume))
+        if total_volume > 0 and volume_m3 > 0:
+            delivery_rub_unit = delivery_rub_total * volume_m3 / Decimal(str(total_volume))
         elif total_qty_all > 0:
-            delivery_rub_unit = Decimal(str(delivery_rub_total / total_qty_all))
+            delivery_rub_unit = delivery_rub_total / total_qty_all
         else:
             delivery_rub_unit = Decimal(0)
 
@@ -248,11 +248,11 @@ async def recalculate_order_items(db: AsyncSession, project_id: int, order_no: s
     for item in items:
         cost_rub_unit = item.price_cny * order.rate_cny
 
-        vol = float(item.volume_m3 or 0)
+        vol = Decimal(str(float(item.volume_m3 or 0)))
         if total_volume > 0 and vol > 0:
-            delivery_rub_unit = Decimal(str(delivery_rub_total * vol / total_volume))
+            delivery_rub_unit = delivery_rub_total * vol / Decimal(str(total_volume))
         elif total_qty_all > 0:
-            delivery_rub_unit = Decimal(str(delivery_rub_total / total_qty_all))
+            delivery_rub_unit = delivery_rub_total / total_qty_all
         else:
             delivery_rub_unit = Decimal(0)
 
