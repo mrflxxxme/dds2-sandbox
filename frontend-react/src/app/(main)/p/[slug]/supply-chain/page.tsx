@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel, calcTotalBoxesWithMix } from '@/lib/utils';
-import { LanguageProvider, useT, LanguageToggle } from './i18n';
+import { LanguageProvider, useT, LanguageToggle, currencySymbol } from './i18n';
 
 /** Нормализация габаритов → "60x40x40" */
 const normalizeBoxSize = (s: string): string => s.trim().replace(/[×*,/\\]/g, 'x');
@@ -859,8 +859,8 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
                         { key: 'subject', label: t('col_category'), render: (v: string | null) => v || '\u2014' },
                         { key: 'qty', label: t('col_qty'), align: 'right', render: (v: number) => formatNumber(v, 0) },
                         {
-                            key: 'price_cny', label: t('col_price_cny'), align: 'right',
-                            render: (v: unknown) => formatNumber(Number(v), 2) + ' \u00A5',
+                            key: 'price_cny', label: `${t('col_price')} ${currencySymbol(order.supplier?.currency)}`, align: 'right',
+                            render: (v: unknown) => formatNumber(Number(v), 2) + ' ' + currencySymbol(order.supplier?.currency),
                         },
                         { key: 'box_size', label: t('col_box_spec') },
                         { key: 'pcs_per_box', label: t('col_pcs_per_box'), align: 'right' },
@@ -932,7 +932,7 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
                                     <th className="sc-th-center" style={{ width: 30 }}>#</th>
                                     <th style={{ minWidth: 130 }}>{t('col_barcode')}</th>
                                     <th style={{ width: 70 }}>{t('col_qty')}</th>
-                                    <th style={{ width: 80 }}>{t('col_price_cny')}</th>
+                                    <th style={{ width: 80 }}>{t('col_price')} {currencySymbol(order.supplier?.currency)}</th>
                                     <th style={{ width: 120 }}>{t('col_box_spec')}</th>
                                     <th style={{ width: 65 }}>{t('col_pcs_per_box')}</th>
                                     <th style={{ width: 70 }}>{t('col_weight_1pc')}</th>
@@ -2176,7 +2176,17 @@ function SuppliersTab() {
     useEffect(() => { load(); }, [load]);
 
     // Aggregate per-supplier stats from factory orders
+    // Match by supplier_id first, fallback to factory_name for orders without supplier_id
     const supplierStats = useMemo(() => {
+        const nameToId: Record<string, number> = {};
+        for (const s of suppliers) nameToId[s.name] = s.id;
+
+        const resolveSupplier = (order: { supplier_id?: number; factory_name?: string }): number | null => {
+            if (order.supplier_id) return order.supplier_id;
+            if (order.factory_name && nameToId[order.factory_name] != null) return nameToId[order.factory_name];
+            return null;
+        };
+
         const stats: Record<number, {
             orders_count: number;
             sku_count: number;
@@ -2184,37 +2194,36 @@ function SuppliersTab() {
             total_amount: number;
         }> = {};
         for (const order of orders) {
-            if (!order.supplier_id) continue;
-            const s = stats[order.supplier_id] ?? {
+            const sid = resolveSupplier(order);
+            if (!sid) continue;
+            const s = stats[sid] ?? {
                 orders_count: 0,
                 sku_count: 0,
                 total_qty: 0,
                 total_amount: 0,
             };
             s.orders_count += 1;
-            const barcodes = new Set<string>();
             for (const item of order.items || []) {
-                barcodes.add(item.barcode);
                 s.total_qty += item.qty;
                 s.total_amount += item.qty * Number(item.price_cny || 0);
             }
-            // sku_count will be calculated across all orders for this supplier below
-            stats[order.supplier_id] = s;
+            stats[sid] = s;
         }
         // Second pass: compute unique barcodes per supplier
         const barcodeMap: Record<number, Set<string>> = {};
         for (const order of orders) {
-            if (!order.supplier_id) continue;
-            const set = barcodeMap[order.supplier_id] ?? new Set<string>();
+            const sid = resolveSupplier(order);
+            if (!sid) continue;
+            const set = barcodeMap[sid] ?? new Set<string>();
             for (const item of order.items || []) set.add(item.barcode);
-            barcodeMap[order.supplier_id] = set;
+            barcodeMap[sid] = set;
         }
         for (const sid of Object.keys(barcodeMap)) {
             const idNum = Number(sid);
             if (stats[idNum]) stats[idNum].sku_count = barcodeMap[idNum].size;
         }
         return stats;
-    }, [orders]);
+    }, [orders, suppliers]);
 
     const openCreate = () => {
         setEditSupplier(null);

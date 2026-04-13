@@ -7,7 +7,7 @@ import { formatNumber, formatDate, formatDateTime, exportToExcel, calcTotalBoxes
 import PageHeader from '@/components/PageHeader';
 import BoxDetailCell, { BoxDetailExpandRow } from '@/components/BoxDetailCell';
 import type { FactoryOrder, FactoryOrderItem, FactoryOrderItemUpdate, FactoryOrderHistory, Nomenclature, Supplier } from '@/types/api';
-import { LanguageProvider, useT, LanguageToggle } from '../../i18n';
+import { LanguageProvider, useT, LanguageToggle, currencySymbol } from '../../i18n';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -269,7 +269,7 @@ function OrderInfoCard({ order, onUpdated }: { order: FactoryOrder; onUpdated: (
                             <SummaryKpi label={t('detail_kpi_qty')} value={`${formatNumber(totalQty, 0)} ${t('unit_pcs')}`} />
                             <SummaryKpi label={t('detail_kpi_boxes')} value={totalBoxes > 0 ? formatNumber(totalBoxes, 0) : '—'} />
                             <SummaryKpi label={t('detail_kpi_volume')} value={totalVolume > 0 ? `${formatNumber(totalVolume, 1)} m³` : '—'} />
-                            <SummaryKpi label={t('detail_kpi_amount')} value={totalCny > 0 ? `${formatNumber(totalCny, 0)} ¥` : '—'} accent />
+                            <SummaryKpi label={t('detail_kpi_amount')} value={totalCny > 0 ? `${formatNumber(totalCny, 0)} ${currencySymbol(order.supplier?.currency)}` : '—'} accent />
                         </div>
                         {/* Distribution progress */}
                         {totalQty > 0 && (
@@ -329,9 +329,10 @@ function itemToEditRow(item: FactoryOrderItem): EditRow {
     };
 }
 
-function ItemsTable({ items, orderId, nomMap, onChanged }: {
-    items: FactoryOrderItem[]; orderId: number; nomMap: Map<string, Nomenclature>; onChanged: () => void;
+function ItemsTable({ items, orderId, nomMap, onChanged, currency }: {
+    items: FactoryOrderItem[]; orderId: number; nomMap: Map<string, Nomenclature>; onChanged: () => void; currency?: string;
 }) {
+    const cs = currencySymbol(currency);
     const { t } = useT();
     const [editing, setEditing] = useState(false);
     const [editRows, setEditRows] = useState<EditRow[]>([]);
@@ -491,8 +492,8 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
             [t('col_qty')]: i.qty,
             [t('col_distributed')]: i.assigned_qty,
             [t('col_remaining')]: i.qty - i.assigned_qty,
-            [t('col_price_cny')]: Number(i.price_cny),
-            [t('col_sum_cny')]: i.qty * Number(i.price_cny),
+            [`${t('col_price')} ${cs}`]: Number(i.price_cny),
+            [`${t('col_sum')} ${cs}`]: i.qty * Number(i.price_cny),
             [t('col_box_spec')]: i.box_size || '',
             [t('col_pcs_per_box')]: i.pcs_per_box || '',
             [t('col_boxes')]: i.mix_group_id ? t('detail_col_mix') : (i.pcs_per_box && i.pcs_per_box > 0 ? Math.ceil(i.qty / i.pcs_per_box) : ''),
@@ -631,8 +632,8 @@ function ItemsTable({ items, orderId, nomMap, onChanged }: {
                             <th style={th}>{t('col_article')}</th>
                             <th style={thR}>{t('col_qty')}</th>
                             <th style={thR}>{t('col_progress')}</th>
-                            <th style={thR}>{t('col_price_cny')}</th>
-                            <th style={thR}>{t('col_sum_cny')}</th>
+                            <th style={thR}>{t('col_price')} {cs}</th>
+                            <th style={thR}>{t('col_sum')} {cs}</th>
                             <th style={th}>{t('col_box_spec')}</th>
                             <th style={thR}>{t('col_pcs_per_box')}</th>
                             <th style={thR}>{t('col_boxes')}</th>
@@ -781,11 +782,12 @@ const emptyPasteRow = (): PasteRow => ({
     box_size: '', pcs_per_box: '', weight_kg: '',
 });
 
-function AddItemsSection({ orderId, nomMap, onAdded, alwaysOpen, onClose }: {
+function AddItemsSection({ orderId, nomMap, onAdded, alwaysOpen, onClose, currency }: {
     orderId: number; nomMap: Map<string, Nomenclature>; onAdded: () => void;
-    alwaysOpen?: boolean; onClose?: () => void;
+    alwaysOpen?: boolean; onClose?: () => void; currency?: string;
 }) {
     const { t } = useT();
+    const cs = currencySymbol(currency);
     const [open, setOpen] = useState(false);
     const [rows, setRows] = useState<PasteRow[]>(() => Array.from({ length: 5 }, emptyPasteRow));
     const [saving, setSaving] = useState(false);
@@ -922,7 +924,7 @@ function AddItemsSection({ orderId, nomMap, onAdded, alwaysOpen, onClose }: {
                             <th style={{ ...thStyle, width: 36 }}>#</th>
                             <th style={{ ...thStyle, width: '100%' }}>{t('col_barcode')}</th>
                             <th style={thR}>{t('col_qty')}</th>
-                            <th style={thR}>{t('col_price_cny')}</th>
+                            <th style={thR}>{t('col_price')} {cs}</th>
                             <th style={thStyle}>{t('col_box_spec')}</th>
                             <th style={thR}>{t('col_pcs_per_box')}</th>
                             <th style={thR}>{t('col_weight_1pc')}</th>
@@ -1148,6 +1150,7 @@ function FactoryOrderDetailContent() {
                                 onAdded={() => { load(); setShowAddItems(false); }}
                                 alwaysOpen
                                 onClose={() => setShowAddItems(false)}
+                                currency={order.supplier?.currency}
                             />
                         </div>
                     )}
@@ -1165,7 +1168,7 @@ function FactoryOrderDetailContent() {
                                 </div>
                             </div>
                         ) : (
-                            <ItemsTable items={filteredItems} orderId={order.id} nomMap={nomMap} onChanged={load} />
+                            <ItemsTable items={filteredItems} orderId={order.id} nomMap={nomMap} onChanged={load} currency={order.supplier?.currency} />
                         )}
                     </div>
                 </>
