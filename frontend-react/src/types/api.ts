@@ -1751,6 +1751,7 @@ export interface SupplierCatalogItem {
   barcode: string;
   article_seller: string | null;
   subject: string | null;
+  brand: string | null;
   box_size: string | null;
   pcs_per_box: number | null;
   weight_kg: string | null;

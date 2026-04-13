@@ -454,6 +454,7 @@ class SupplierCatalogItem(BaseModel):
     barcode: str
     article_seller: str | None = None
     subject: str | None = None
+    brand: str | None = None
     box_size: str | None = None
     pcs_per_box: int | None = None
     weight_kg: Decimal | None = None
