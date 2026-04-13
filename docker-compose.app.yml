@@ -28,7 +28,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1536M
+          memory: 768M
     healthcheck:
       test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" ]
       interval: 10s
@@ -57,7 +57,7 @@ services:
       DB_POOL_SIZE: 5
       DB_MAX_OVERFLOW: 10
     entrypoint: ["./entrypoint-worker.sh"]
-    command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "120"]
+    command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "120", "--limit-max-requests", "5000"]
     stop_grace_period: 60s
     ports:
       - "10.0.0.2:8001:8000"
