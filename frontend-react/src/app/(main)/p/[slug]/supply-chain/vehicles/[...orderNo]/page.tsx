@@ -220,11 +220,11 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, wareh
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                 <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>{t('vdetail_vehicle')}</div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    {!editing && vehicle.items.length > 0 && (
+                        <RecalcButton orderNo={vehicle.order_no} onDone={onUpdated} />
+                    )}
                     {isForming && !editing && vehicle.items.length > 0 && (
-                        <>
-                            <RecalcButton orderNo={vehicle.order_no} onDone={onUpdated} />
-                            <ShipButton orderNo={vehicle.order_no} onDone={onUpdated} />
-                        </>
+                        <ShipButton orderNo={vehicle.order_no} onDone={onUpdated} />
                     )}
                     {vehicle.status === 'SHIPPED' && (
                         <StatusTransitionButton orderNo={vehicle.order_no} nextStatus="CUSTOMS" label={t('transition_to_customs')} icon="🏛" onDone={onUpdated} />
