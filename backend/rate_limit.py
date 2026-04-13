@@ -5,6 +5,15 @@ Limits:
 - Default: 300 requests per minute per IP
 - Sync endpoints (/sync): 10 requests per minute per IP
 - Import endpoints (/import): 20 requests per minute per IP
+
+Counter lifecycle:
+- INCR and EXPIRE are applied atomically via a Lua script.
+- EXPIRE is only set on the FIRST request of a window (when INCR returns 1),
+  so the TTL is not reset on every request. Otherwise a client making requests
+  more frequently than `window` seconds would cause the counter to live forever
+  and grow unbounded (see incident 2026-04-09: Prometheus /metrics scrape every
+  15s with window=60s accumulated ~10000 blocked requests over 43 hours and
+  eventually wedged uvicorn).
 """
 
 import json
@@ -22,13 +31,27 @@ RATE_LIMITS = {
     "import": (20, 60),
 }
 
-_SKIP_PATHS = {"/health", "/docs", "/openapi.json"}
-_SKIP_SUFFIXES = ("_progress", "/metrics")
+# Paths that bypass rate limiting entirely.
+# /metrics is scraped by Prometheus every 15s — it must never be rate-limited
+# or throttled, or monitoring breaks AND the counter grows unbounded in Redis.
+_SKIP_PATHS = {"/health", "/docs", "/openapi.json", "/metrics"}
+_SKIP_SUFFIXES = ("_progress",)
+
+# Atomic INCR + conditional EXPIRE.
+# EXPIRE only runs when INCR returned 1 (i.e. key was just created),
+# so the TTL is not reset on every request.
+_INCR_EXPIRE_LUA = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+"""
 
 
 def _get_limit_key(path: str) -> str:
     # Progress/status endpoints are read-only polling — use default limit
-    if path.endswith(tuple(_SKIP_SUFFIXES)):
+    if path.endswith(_SKIP_SUFFIXES):
         return "default"
     if "/sync" in path:
         return "sync"
@@ -76,11 +99,8 @@ class RateLimitMiddleware:
             redis = await get_redis()
             if redis is not None:
                 key = f"rl:{bucket}:{client_ip}"
-                pipe = redis.pipeline()
-                pipe.incr(key)
-                pipe.expire(key, window)
-                results = await pipe.execute()
-                current = results[0]
+                # Atomic: INCR + EXPIRE only on first request of the window.
+                current = await redis.eval(_INCR_EXPIRE_LUA, 1, key, window)
 
                 if current > max_requests:
                     logger.warning(

@@ -382,8 +382,11 @@ async def create_assembly_request(
         fbo_supply = fbo_result.scalar_one_or_none()
         if not fbo_supply:
             raise ValueError("FBO supply not found")
-        if fbo_supply.wb_status not in ("ACTIVE", "ON_DELIVERY", "IN_PROGRESS"):
-            raise ValueError("FBO supply must be ACTIVE, ON_DELIVERY or IN_PROGRESS")
+        # ACCEPTED is allowed: users need to retroactively register assembly
+        # requests for supplies that WB has already accepted (late onboarding).
+        # CANCELLED is still rejected — linking a cancelled supply makes no sense.
+        if fbo_supply.wb_status not in ("ACTIVE", "ON_DELIVERY", "IN_PROGRESS", "ACCEPTED"):
+            raise ValueError("FBO supply must be ACTIVE, ON_DELIVERY, IN_PROGRESS or ACCEPTED")
 
         # Check no active assembly request for this FBO supply
         existing_result = await db.execute(
@@ -495,8 +498,9 @@ async def update_assembly_request(
         fbo_supply = fbo_result.scalar_one_or_none()
         if not fbo_supply:
             raise ValueError("FBO supply not found")
-        if fbo_supply.wb_status not in ("ACTIVE", "ON_DELIVERY", "IN_PROGRESS"):
-            raise ValueError("FBO supply must be ACTIVE, ON_DELIVERY or IN_PROGRESS")
+        # Mirror create_assembly_request: ACCEPTED supplies may need late linking.
+        if fbo_supply.wb_status not in ("ACTIVE", "ON_DELIVERY", "IN_PROGRESS", "ACCEPTED"):
+            raise ValueError("FBO supply must be ACTIVE, ON_DELIVERY, IN_PROGRESS or ACCEPTED")
 
         # Check no other active assembly request for this FBO supply (except current)
         existing_result = await db.execute(

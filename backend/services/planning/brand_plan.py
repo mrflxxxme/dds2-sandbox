@@ -132,6 +132,30 @@ async def _get_month_fact_total(
     return sum(daily.values(), ZERO)
 
 
+async def _get_last_fact_date(
+    db: AsyncSession,
+    project_id: int,
+    start: date,
+    end: date,
+) -> date | None:
+    """Last date in [start, end] with any sale/return fact in wb_finance_rows.
+
+    Drives the forecast denominator: WB data lags a day or two, and if the
+    container runs in UTC the `date.today()` can race ahead of the data, so
+    dividing by the calendar day instead of the last day with data produces
+    an off-by-one forecast.
+    """
+    result = await db.execute(
+        text(
+            "SELECT MAX(COALESCE(sale_dt, rr_dt)) FROM wb_finance_rows "
+            "WHERE project_id = :pid "
+            "AND COALESCE(sale_dt, rr_dt) BETWEEN :start AND :end"
+        ),
+        {"pid": project_id, "start": start, "end": end},
+    )
+    return result.scalar()
+
+
 async def _get_plan_amount(
     db: AsyncSession,
     project_id: int,
@@ -181,7 +205,10 @@ async def get_plan_fact_daily(
 
     today = date.today()
     if today.year == year and today.month == month:
-        current_day = min(today.day, days_in_month)
+        # Current month: drive current_day by the last day with actual WB data,
+        # not today.day — WB data lags and may trail the calendar day.
+        last_fact_day = max((dt.day for dt in daily_fact), default=0)
+        current_day = min(last_fact_day, days_in_month) if last_fact_day else 0
     elif date(year, month, 1) < today:
         current_day = days_in_month
     else:
@@ -261,7 +288,12 @@ async def get_plan_fact_brands(
     days_in_month = calendar.monthrange(year, month)[1]
     today = date.today()
     if today.year == year and today.month == month:
-        current_day = min(today.day, days_in_month)
+        # Current month: anchor on the last day with actual WB data for the
+        # whole project — forecasts must not divide by days that have no facts.
+        start = date(year, month, 1)
+        end = date(year, month, days_in_month)
+        last_fact = await _get_last_fact_date(db, project_id, start, end)
+        current_day = last_fact.day if last_fact else 0
     elif date(year, month, 1) < today:
         current_day = days_in_month
     else:
@@ -343,13 +375,18 @@ async def get_plan_fact_daily_range(
     adjustment_prev = plan_prev - fact_prev if plan_prev > ZERO else ZERO
     plan_adjusted = max(ZERO, plan_total + adjustment_prev)
 
-    # Current day within the range
+    # Current day within the range. Anchor on last day with actual WB data
+    # in the range so the forecast denominator matches reality (WB lags by
+    # a day or two — dividing by the calendar day off-by-ones the forecast).
     if today >= last_end:
         current_day = total_days
     elif today < first_start:
         current_day = 0
+    elif daily_fact:
+        last_dt = max(daily_fact.keys())
+        current_day = (last_dt - first_start).days + 1
     else:
-        current_day = (today - first_start).days + 1
+        current_day = 0
 
     rows = []
     fact_cumulative = ZERO
@@ -444,12 +481,14 @@ async def get_plan_fact_brands_range(
     last_end = date(year_to, month_to, last_dim)
     total_days = (last_end - first_start).days + 1
 
+    # Current day: last WB data date in the range, fallback to calendar.
     if today >= last_end:
         current_day = total_days
     elif today < first_start:
         current_day = 0
     else:
-        current_day = (today - first_start).days + 1
+        last_fact = await _get_last_fact_date(db, project_id, first_start, last_end)
+        current_day = (last_fact - first_start).days + 1 if last_fact else 0
 
     prev_y, prev_m = _prev_month(year_from, month_from)
 

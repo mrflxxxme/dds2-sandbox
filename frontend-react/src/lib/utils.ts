@@ -2,11 +2,27 @@
  * Excel export utility — converts any data array to .xlsx download
  */
 export function exportToExcel(data: Record<string, any>[], filename: string) {
-    import('xlsx').then(XLSX => {
-        const ws = XLSX.utils.json_to_sheet(data);
-        const wb = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(wb, ws, 'Data');
-        XLSX.writeFile(wb, `${filename}.xlsx`);
+    import('exceljs').then(ExcelJS => {
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Data');
+
+        if (data.length === 0) return;
+
+        const headers = Object.keys(data[0]);
+        worksheet.columns = headers.map(key => ({ header: key, key }));
+        worksheet.addRows(data);
+
+        workbook.xlsx.writeBuffer().then(buffer => {
+            const blob = new Blob([buffer], {
+                type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `${filename}.xlsx`;
+            link.click();
+            URL.revokeObjectURL(url);
+        });
     });
 }
 

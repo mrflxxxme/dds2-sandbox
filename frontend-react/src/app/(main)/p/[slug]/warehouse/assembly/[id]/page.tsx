@@ -92,7 +92,7 @@ export default function AssemblyDetailPage() {
         setLoadingFboList(true);
         try {
             const resp = await api.getFboSupplies({
-                status: 'ACTIVE,ON_DELIVERY,IN_PROGRESS',
+                status: 'ACTIVE,ON_DELIVERY,IN_PROGRESS,ACCEPTED',
                 search: fboSearchInput || undefined,
                 limit: 100,
                 exclude_with_assembly: true,

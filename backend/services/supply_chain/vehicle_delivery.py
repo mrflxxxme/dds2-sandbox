@@ -29,6 +29,7 @@ from backend.schemas.supply_chain import (
     VehicleStatusUpdate,
     VehicleUpdate,
 )
+from backend.services.supply_chain.supplier_catalog import invalidate_supplier_catalog as _invalidate_supplier_catalog
 from backend.services.warehouse_stock_engine import _next_number, _resolve_barcode
 from backend.utils.time import utcnow
 
@@ -286,6 +287,7 @@ async def add_items_to_vehicle(
     from backend.services.cost.items import recalculate_order_items
 
     await recalculate_order_items(db, project_id, order_no)
+    await _invalidate_supplier_catalog(project_id)
 
     return {"ok": True, "added": added}
 
@@ -373,6 +375,7 @@ async def remove_item_from_vehicle(
         from backend.services.cost.items import recalculate_order_items
 
         await recalculate_order_items(db, project_id, order_no)
+        await _invalidate_supplier_catalog(project_id)
 
         return {"ok": True, "removed": removed}
 
@@ -396,6 +399,7 @@ async def remove_item_from_vehicle(
     from backend.services.cost.items import recalculate_order_items
 
     await recalculate_order_items(db, project_id, order_no)
+    await _invalidate_supplier_catalog(project_id)
 
     return {"ok": True}
 
@@ -445,6 +449,7 @@ async def delete_vehicle(
     # Soft-delete the vehicle
     vehicle.soft_delete()
     await db.commit()
+    await _invalidate_supplier_catalog(project_id)
     return {"ok": True}
 
 
@@ -810,6 +815,9 @@ async def update_vehicle_status(
     if data.status in _SHIPPED_OR_ABOVE:
         await _check_and_close_factory_orders_for_vehicle(db, project_id, vehicle)
 
+    # Invalidate supplier catalog cache — delivered_qty depends on vehicle status
+    await _invalidate_supplier_catalog(project_id)
+
     return result_data
 
 
@@ -1011,8 +1019,10 @@ async def get_supply_chain_overview(db: AsyncSession, project_id: int) -> dict:
     # Total vehicles count
     total_vehicles = sum(vehicles_by_status.values())
 
-    # Total items in active (non-delivered) vehicles
-    active_statuses = [VehicleStatus.FORMING, VehicleStatus.SHIPPED, VehicleStatus.CUSTOMS]
+    # Total items in active (non-delivered) vehicles.
+    # FORMING is forming (not yet shipped), not "в пути".
+    # SHIPPED/CUSTOMS/DISPATCHED are in transit.
+    active_statuses = [VehicleStatus.FORMING, VehicleStatus.SHIPPED, VehicleStatus.CUSTOMS, VehicleStatus.DISPATCHED]
     items_result = await db.execute(
         select(func.coalesce(func.sum(CostOrderItem.qty), 0))
         .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)

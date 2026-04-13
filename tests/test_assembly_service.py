@@ -326,6 +326,63 @@ class TestCreateAssemblyRequest:
         with pytest.raises(ValueError, match="already has an active assembly request"):
             await create_assembly_request(db_session, PROJECT_ID, payload)
 
+    async def test_create_allows_accepted_fbo_supply(self, db_session):
+        """Regression: ACCEPTED FBO supply must be linkable for retroactive entry.
+
+        Users reported they could not create an assembly request for a supply
+        that WB had already accepted (e.g. WB supply #38412181). Late onboarding
+        and backfilling historic records need this path open.
+        """
+        # Flip the seeded supply to ACCEPTED and expire identity map so the
+        # service re-reads the row instead of serving the fixture's cached object
+        await db_session.execute(
+            text(
+                "UPDATE wb_fbo_supplies SET wb_status = 'ACCEPTED' "
+                "WHERE project_id = :pid AND wb_supply_id = 'ASM-FBO-TEST-1'"
+            ),
+            {"pid": PROJECT_ID},
+        )
+        await db_session.commit()
+        db_session.expire_all()
+
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        fbo_id = await _get_fbo_supply_id(db_session)
+        payload = AssemblyRequestCreate(
+            warehouse_id=wh_id,
+            wb_fbo_supply_id=fbo_id,
+            pallets_count=2,
+            pallet_weight_kg=Decimal("150.00"),
+            items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=5)],
+        )
+        req = await create_assembly_request(db_session, PROJECT_ID, payload)
+        assert req.status == AssemblyStatus.PENDING
+        assert req.wb_fbo_supply_id == fbo_id
+
+    async def test_create_rejects_cancelled_fbo_supply(self, db_session):
+        """CANCELLED FBO supply still cannot be linked — linking a cancelled
+        supply would create a zombie assembly request."""
+        await db_session.execute(
+            text(
+                "UPDATE wb_fbo_supplies SET wb_status = 'CANCELLED' "
+                "WHERE project_id = :pid AND wb_supply_id = 'ASM-FBO-TEST-1'"
+            ),
+            {"pid": PROJECT_ID},
+        )
+        await db_session.commit()
+        db_session.expire_all()
+
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        fbo_id = await _get_fbo_supply_id(db_session)
+        payload = AssemblyRequestCreate(
+            warehouse_id=wh_id,
+            wb_fbo_supply_id=fbo_id,
+            pallets_count=1,
+            pallet_weight_kg=Decimal("100.00"),
+            items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=1)],
+        )
+        with pytest.raises(ValueError, match="ACTIVE, ON_DELIVERY, IN_PROGRESS or ACCEPTED"):
+            await create_assembly_request(db_session, PROJECT_ID, payload)
+
 
 @pytest.mark.asyncio
 class TestListAssemblyRequests:

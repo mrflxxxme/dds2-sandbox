@@ -40,6 +40,12 @@ async def get_supplier(db: AsyncSession, project_id: int, supplier_id: int) -> S
     return result.scalar_one_or_none()
 
 
+async def _invalidate_supplier_caches(project_id: int) -> None:
+    """Invalidate both supplier list and catalog caches for a project."""
+    await invalidate_cache(f"supply_chain:suppliers:{project_id}")
+    await invalidate_cache(f"supply_chain:supplier_catalog:project_id={project_id}")
+
+
 async def create_supplier(db: AsyncSession, project_id: int, data: SupplierCreate) -> Supplier:
     """Create a new supplier."""
     supplier = Supplier(
@@ -54,7 +60,7 @@ async def create_supplier(db: AsyncSession, project_id: int, data: SupplierCreat
     db.add(supplier)
     await db.commit()
     await db.refresh(supplier)
-    await invalidate_cache(f"supply_chain:suppliers:{project_id}")
+    await _invalidate_supplier_caches(project_id)
     return supplier
 
 
@@ -70,7 +76,7 @@ async def update_supplier(db: AsyncSession, project_id: int, supplier_id: int, d
 
     await db.commit()
     await db.refresh(supplier)
-    await invalidate_cache(f"supply_chain:suppliers:{project_id}")
+    await _invalidate_supplier_caches(project_id)
     return supplier
 
 
@@ -82,5 +88,5 @@ async def delete_supplier(db: AsyncSession, project_id: int, supplier_id: int) -
 
     supplier.soft_delete()
     await db.commit()
-    await invalidate_cache(f"supply_chain:suppliers:{project_id}")
+    await _invalidate_supplier_caches(project_id)
     return True

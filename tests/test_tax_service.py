@@ -4,6 +4,8 @@ Tests for tax_service — CRUD for project-level monthly tax rates.
 Uses DB fixtures from conftest_api.py.
 """
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -158,3 +160,28 @@ class TestSaveTaxRates:
 
         assert r2024["months"][0]["usn_rate"] == 6.0
         assert r2025["months"][0]["usn_rate"] == 15.0
+
+    @pytest.mark.asyncio
+    async def test_save_invalidates_report_caches(self, db_session: AsyncSession, project):
+        """Saving tax rates must invalidate BDR/ОПИУ/dashboard/funnel caches.
+
+        Regression: without invalidation, @cached(ttl=3600) on get_wb_bdr/get_opiu
+        kept old values for up to 1 hour after the user changed rates in settings.
+        """
+        months = [{"month": i, "usn_rate": 15, "nds_rate": 7, "cost_as_expense": True} for i in range(1, 13)]
+
+        with patch(
+            "backend.services.tax_service.invalidate_cache",
+            new_callable=AsyncMock,
+        ) as mock_inv:
+            await save_tax_rates(db_session, project.id, 2026, "usn_income_expense_vat", months)
+
+        # Exactly the 4 cache prefixes dictated by security.md for tax_rate mutation
+        assert mock_inv.await_count == 4
+        call_args = [c.args[0] for c in mock_inv.call_args_list]
+        assert any("reports:wb_bdr" in a for a in call_args)
+        assert any("reports:opiu" in a for a in call_args)
+        assert any("reports:dashboard" in a for a in call_args)
+        assert any("funnel" in a for a in call_args)
+        # Every key must be scoped to the mutating project
+        assert all(f"project_id={project.id}" in a for a in call_args)

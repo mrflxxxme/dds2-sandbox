@@ -195,9 +195,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend-react/package-lock.json
 
       - name: Install dependencies
-        run: cd frontend-react && npm ci --legacy-peer-deps
+        run: cd frontend-react && npm ci --legacy-peer-deps || npm ci --legacy-peer-deps
 
       - name: Run vitest
         run: cd frontend-react && npx vitest run

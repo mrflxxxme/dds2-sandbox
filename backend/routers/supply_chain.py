@@ -37,14 +37,14 @@ from backend.schemas.supply_chain import (
     VehicleStatusUpdate,
     VehicleUpdate,
 )
-from backend.services.supply_chain import factory_orders, supplier_service, vehicle_delivery
+from backend.services.supply_chain import factory_orders, supplier_catalog, supplier_service, vehicle_delivery
 from backend.services.supply_chain.vehicle_documents import (
     delete_document,
     download_document,
     list_documents,
     upload_document,
 )
-from backend.utils.rate_limit import rate_limit_write
+from backend.utils.rate_limit import rate_limit_read_heavy, rate_limit_write
 
 ALLOWED_DOC_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".csv", ".doc", ".docx", ".jpg", ".jpeg", ".png"}
 
@@ -526,6 +526,15 @@ async def list_suppliers(
 ):
     suppliers = await supplier_service.list_suppliers(db, project.id)
     return [SupplierSchema.model_validate(s) for s in suppliers]
+
+
+@router.get("/suppliers/{supplier_id}/catalog", dependencies=[Depends(rate_limit_read_heavy)])
+async def get_supplier_catalog_endpoint(
+    supplier_id: int,
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+):
+    return await supplier_catalog.get_supplier_catalog(db, project.id, supplier_id)
 
 
 @router.get("/suppliers/{supplier_id}")

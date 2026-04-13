@@ -154,6 +154,7 @@ class FactoryOrderItemSchema(BaseModel):
     mix_box_size: str | None = None
     mix_pcs_per_box: int | None = None
     remaining_qty: int | None = None  # computed: qty - assigned_qty
+    is_delivered: bool = False
 
 
 # --- FactoryOrder ---
@@ -424,6 +425,68 @@ class VehicleDocumentSchema(BaseModel):
     file_size: int = 0
     note: str | None = None
     created_at: datetime | None = None
+
+
+# --- Supplier Catalog ---
+
+
+class SupplierCatalogSummary(BaseModel):
+    orders_count: int
+    sku_count: int
+    total_qty: int
+    total_amount: Decimal
+    delivered_amount: Decimal
+
+
+class SkuOrderHistoryEntry(BaseModel):
+    factory_order_id: int
+    order_number: str
+    order_date: date | None = None
+    qty: int
+    price_cny: Decimal
+    amount: Decimal
+    vehicle_order_no: str | None = None
+    vehicle_status: str | None = None
+    is_delivered: bool
+
+
+class SupplierCatalogItem(BaseModel):
+    barcode: str
+    article_seller: str | None = None
+    subject: str | None = None
+    box_size: str | None = None
+    pcs_per_box: int | None = None
+    weight_kg: Decimal | None = None
+    total_qty: int
+    last_price: Decimal
+    avg_price: Decimal
+    total_amount: Decimal
+    orders_count: int
+    last_order_date: date | None = None
+    delivered_qty: int
+    order_history: list[SkuOrderHistoryEntry]
+
+
+class SupplierCatalogSubjectGroup(BaseModel):
+    subject: str
+    sku_count: int
+    total_qty: int
+    total_amount: Decimal
+    delivered_qty: int
+    items: list[SupplierCatalogItem]
+
+
+class SupplierCatalogSupplierInfo(BaseModel):
+    id: int
+    name: str
+    country: str
+    currency: str
+
+
+class SupplierCatalogResponse(BaseModel):
+    supplier: SupplierCatalogSupplierInfo
+    summary: SupplierCatalogSummary
+    subjects: list[SupplierCatalogSubjectGroup]
 
 
 # --- Vehicle Status History ---
