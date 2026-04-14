@@ -108,10 +108,37 @@ async def create_vehicle(
     project_id: int,
     data: VehicleCreate,
 ) -> VehicleSchema:
-    """Create a new vehicle (CostOrder) for forming."""
+    """Create a new vehicle (CostOrder) for forming.
+
+    For Russian vehicles (country=RUSSIA), we force a simple flat-RUB cost model:
+    no FX rates, no CNY/USD delivery, no invoice/DT/payment_ref, container_type=gazelle.
+    """
     from backend.services.warehouse_crud import get_or_create_transit_warehouse
 
-    transport_type = CONTAINER_TRANSPORT_MAP.get(data.container_type, "AUTO")
+    is_russia = data.country == "RUSSIA"
+
+    if is_russia:
+        container_type = "gazelle"
+        rate_cny = Decimal("1")
+        rate_usd = Decimal("1")
+        rate_eur = Decimal("1")
+        delivery_cost_cny = Decimal("0")
+        delivery_cost_usd = Decimal("0")
+        delivery_cost_rub = Decimal(str(data.delivery_cost_rub or 0))
+        invoice_no = None
+        payment_ref = None
+    else:
+        container_type = data.container_type
+        rate_cny = data.rate_cny
+        rate_usd = data.rate_usd
+        rate_eur = data.rate_eur
+        delivery_cost_cny = data.delivery_cost_cny
+        delivery_cost_usd = data.delivery_cost_usd
+        delivery_cost_rub = Decimal(str(data.delivery_cost_rub or 0))
+        invoice_no = data.invoice_no
+        payment_ref = data.payment_ref
+
+    transport_type = CONTAINER_TRANSPORT_MAP.get(container_type, "AUTO")
 
     target_wh_id = data.target_warehouse_id
     if not target_wh_id:
@@ -121,16 +148,18 @@ async def create_vehicle(
     vehicle = CostOrder(
         project_id=project_id,
         order_no=data.order_no,
-        container_type=data.container_type,
+        container_type=container_type,
         transport_type=transport_type,
-        delivery_cost_cny=data.delivery_cost_cny,
-        delivery_cost_usd=data.delivery_cost_usd,
-        rate_cny=data.rate_cny,
-        rate_usd=data.rate_usd,
-        rate_eur=data.rate_eur,
+        country=data.country,
+        delivery_cost_cny=delivery_cost_cny,
+        delivery_cost_usd=delivery_cost_usd,
+        delivery_cost_rub=delivery_cost_rub,
+        rate_cny=rate_cny,
+        rate_usd=rate_usd,
+        rate_eur=rate_eur,
         ship_date=data.ship_date,
-        invoice_no=data.invoice_no,
-        payment_ref=data.payment_ref,
+        invoice_no=invoice_no,
+        payment_ref=payment_ref,
         target_warehouse_id=target_wh_id,
         note=data.note,
         status=VehicleStatus.FORMING,
@@ -168,6 +197,7 @@ async def update_vehicle(
         "actual_ship_date",
         "delivery_cost_cny",
         "delivery_cost_usd",
+        "delivery_cost_rub",
         "ship_date",
         "estimated_arrival_date",
         "target_warehouse_id",
@@ -175,6 +205,7 @@ async def update_vehicle(
         "rate_usd",
         "rate_eur",
         "payment_ref",
+        "country",
     }
     update_data = data.model_dump(exclude_unset=True)
 
@@ -183,7 +214,29 @@ async def update_vehicle(
         if restricted:
             raise ValueError("Редактирование возможно только в статусе ФОРМИРОВАНИЕ")
 
-    cost_fields = {"rate_cny", "rate_usd", "rate_eur", "delivery_cost_cny", "delivery_cost_usd"}
+    # If country is being changed to RUSSIA, force RU defaults on the payload.
+    # If changed to CHINA, we do NOT touch any numeric field — user enters them.
+    new_country = update_data.get("country")
+    if new_country == "RUSSIA":
+        update_data["container_type"] = "gazelle"
+        update_data["rate_cny"] = Decimal("1")
+        update_data["rate_usd"] = Decimal("1")
+        update_data["rate_eur"] = Decimal("1")
+        update_data["delivery_cost_cny"] = Decimal("0")
+        update_data["delivery_cost_usd"] = Decimal("0")
+        update_data["invoice_no"] = None
+        update_data["dt_number"] = None
+        update_data["payment_ref"] = None
+
+    cost_fields = {
+        "rate_cny",
+        "rate_usd",
+        "rate_eur",
+        "delivery_cost_cny",
+        "delivery_cost_usd",
+        "delivery_cost_rub",
+        "country",
+    }
     needs_recalc = bool(cost_fields & set(update_data.keys()))
     has_items = bool(vehicle.items)
 

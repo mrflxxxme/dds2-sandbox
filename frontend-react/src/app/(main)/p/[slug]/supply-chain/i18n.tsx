@@ -37,8 +37,14 @@ const ru: TranslationDict = {
     container_20ft: '20 фут',
     container_40ft: '40 фут',
     container_40ft_hc: '40 фут HC',
+    container_gazelle: 'Газель',
     transport_auto: 'АВТО',
     transport_container: 'КОНТЕЙНЕР',
+
+    // ── Country ──
+    country_china: '🇨🇳 Китай',
+    country_russia: '🇷🇺 Россия',
+    vehicle_country: 'Страна поставщика',
 
     // ── Status transitions ──
     transition_to_customs: 'На таможню',
@@ -190,6 +196,8 @@ const ru: TranslationDict = {
     vehicle_form_order_no: 'Номер заказа',
     vehicle_form_delivery_cny: 'Перевозка ¥',
     vehicle_form_delivery_usd: 'Перевозка $',
+    vehicle_form_delivery_rub: 'Перевозка ₽',
+    vehicle_form_delivery_rub_hint: '0 = бесплатная доставка',
     vehicle_form_rate_cny: 'Курс ¥/₽',
     vehicle_form_rate_usd: 'Курс $/₽',
     vehicle_form_rate_eur: 'Курс €/₽',
@@ -436,8 +444,14 @@ const zh: TranslationDict = {
     container_20ft: '20英尺',
     container_40ft: '40英尺',
     container_40ft_hc: '40英尺 HC',
+    container_gazelle: '嘎斯车',
     transport_auto: '卡车',
     transport_container: '集装箱',
+
+    // ── Country ──
+    country_china: '🇨🇳 中国',
+    country_russia: '🇷🇺 俄罗斯',
+    vehicle_country: '供应商国家',
 
     // ── Status transitions ──
     transition_to_customs: '报关',
@@ -589,6 +603,8 @@ const zh: TranslationDict = {
     vehicle_form_order_no: '订单编号',
     vehicle_form_delivery_cny: '运费 ¥',
     vehicle_form_delivery_usd: '运费 $',
+    vehicle_form_delivery_rub: '运费 ₽',
+    vehicle_form_delivery_rub_hint: '0 = 免费送货',
     vehicle_form_rate_cny: '汇率 ¥/₽',
     vehicle_form_rate_usd: '汇率 $/₽',
     vehicle_form_rate_eur: '汇率 €/₽',

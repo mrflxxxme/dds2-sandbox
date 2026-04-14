@@ -259,14 +259,24 @@ class VehicleCreate(BaseModel):
 
     delivery_cost_cny: Decimal = Decimal("0")
     delivery_cost_usd: Decimal = Decimal("0")
+    delivery_cost_rub: Decimal = Decimal("0")
     rate_cny: Decimal = Decimal("12.5")
     rate_usd: Decimal = Decimal("92")
     rate_eur: Decimal = Decimal("98")
+    country: str = "CHINA"
     ship_date: date | None = None
     invoice_no: str | None = None
     payment_ref: str | None = None
     target_warehouse_id: int | None = None
     note: str | None = None
+
+    @field_validator("country")
+    @classmethod
+    def validate_country(cls, v: str) -> str:
+        if v not in ("CHINA", "RUSSIA"):
+            msg = "country must be CHINA or RUSSIA"
+            raise ValueError(msg)
+        return v
 
 
 class VehicleUpdate(BaseModel):
@@ -275,9 +285,11 @@ class VehicleUpdate(BaseModel):
     container_type: str | None = None
     delivery_cost_cny: Decimal | None = None
     delivery_cost_usd: Decimal | None = None
+    delivery_cost_rub: Decimal | None = None
     rate_cny: Decimal | None = None
     rate_usd: Decimal | None = None
     rate_eur: Decimal | None = None
+    country: str | None = None
     ship_date: date | None = None
     actual_ship_date: date | None = None
     estimated_arrival_date: date | None = None
@@ -286,6 +298,14 @@ class VehicleUpdate(BaseModel):
     dt_number: str | None = None
     target_warehouse_id: int | None = None
     note: str | None = None
+
+    @field_validator("country")
+    @classmethod
+    def validate_country(cls, v: str | None) -> str | None:
+        if v is not None and v not in ("CHINA", "RUSSIA"):
+            msg = "country must be CHINA or RUSSIA"
+            raise ValueError(msg)
+        return v
 
 
 class VehicleItemSchema(BaseModel):
@@ -345,9 +365,11 @@ class VehicleSchema(BaseModel):
     estimated_arrival_date: date | None = None
     delivery_cost_cny: Decimal = Decimal("0")
     delivery_cost_usd: Decimal = Decimal("0")
+    delivery_cost_rub: Decimal = Decimal("0")
     rate_cny: Decimal = Decimal("1")
     rate_usd: Decimal = Decimal("1")
     rate_eur: Decimal = Decimal("1")
+    country: str = "CHINA"
     invoice_no: str | None = None
     payment_ref: str | None = None
     note: str | None = None

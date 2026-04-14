@@ -945,6 +945,12 @@ export interface StockSummaryRow {
   total_available: number;
 }
 
+export interface TrendPeriodData {
+  avg_daily_qty: number;
+  revenue: number;
+  profit: number;
+}
+
 export interface UnifiedStockRow {
   nomenclature_id: number;
   barcode: string;
@@ -958,11 +964,17 @@ export interface UnifiedStockRow {
   total_own: number;
   total_wb: number;
   total: number;
+  factory_qty: number;
+  vehicle_forming_qty: number;
+  vehicle_transit_qty: number;
   avg_cost: number;
   avg_daily_revenue: number;
   avg_daily_profit: number;
   avg_price: number;
   avg_profit: number;
+  trend_7: TrendPeriodData;
+  trend_14: TrendPeriodData;
+  trend_30: TrendPeriodData;
   group_name?: string;
   items_count?: number;
   abc_class?: string;
@@ -1601,11 +1613,15 @@ export interface SplitItem {
   vehicle_order_no: string;
 }
 
+export type VehicleCountry = 'CHINA' | 'RUSSIA';
+
 export interface VehicleCreate {
   order_no: string;
   container_type?: string;
+  country?: VehicleCountry;
   delivery_cost_cny?: number;
   delivery_cost_usd?: number;
+  delivery_cost_rub?: number;
   rate_cny?: number;
   rate_usd?: number;
   rate_eur?: number;
@@ -1618,8 +1634,10 @@ export interface VehicleCreate {
 
 export interface VehicleUpdateData {
   container_type?: string;
+  country?: VehicleCountry;
   delivery_cost_cny?: number;
   delivery_cost_usd?: number;
+  delivery_cost_rub?: number;
   rate_cny?: number;
   rate_usd?: number;
   rate_eur?: number;
@@ -1662,16 +1680,19 @@ export interface VehicleSchema {
   status?: VehicleStatus;
   transport_type?: string;
   container_type?: string;
+  country?: VehicleCountry;
   ship_date?: string;
   actual_ship_date?: string;
   actual_arrival_date?: string;
   estimated_arrival_date?: string;
   delivery_cost_cny: number;
   delivery_cost_usd: number;
+  delivery_cost_rub?: number;
   rate_cny: number;
   rate_usd: number;
   rate_eur: number;
   invoice_no?: string;
+  payment_ref?: string;
   note?: string;
   dt_number?: string;
   target_warehouse_id?: number;
