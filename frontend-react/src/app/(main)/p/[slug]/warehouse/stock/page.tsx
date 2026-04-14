@@ -166,11 +166,14 @@ function WbDetailRow({ row, wbWarehouses, mode }: { row: UnifiedStockRow; wbWare
     );
 }
 
-function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
+function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandChange, isLoading }: {
     data: UnifiedStockRow[];
     onRefresh: () => void;
     groupBy: string;
     onGroupChange: (groupBy: string) => void;
+    brand: string;
+    onBrandChange: (brand: string) => void;
+    isLoading: boolean;
 }) {
     const [search, setSearch] = useState('');
     const [expanded, setExpanded] = useState<Set<number>>(new Set());
@@ -180,6 +183,8 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
     const [mode, setMode] = useState<'qty' | 'cost' | 'revenue' | 'profit'>('qty');
     const [variant, setVariant] = useState<1 | 2 | 3>(2);
     const [trendPeriod, setTrendPeriod] = useState<7 | 14 | 30>(14);
+    // Stock-cover filter: items with запас <= N days. 0 = no filter.
+    const [stockDaysFilter, setStockDaysFilter] = useState<0 | 7 | 30 | 60>(0);
     const isGrouped = groupBy !== 'sku' && groupBy !== 'abc';
 
     const getVariantTotal = useCallback((row: UnifiedStockRow): number => {
@@ -233,24 +238,53 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
         setSyncing(false);
     };
 
+    const stockDaysFor = useCallback((row: UnifiedStockRow): number => {
+        const trend = trendPeriod === 7 ? row.trend_7 : trendPeriod === 14 ? row.trend_14 : row.trend_30;
+        const daily = trend?.avg_daily_qty || 0;
+        if (daily <= 0) return Infinity;
+        return getVariantTotal(row) / daily;
+    }, [trendPeriod, getVariantTotal]);
+
     const filtered = useMemo(() => {
-        if (!search) return data;
-        const q = search.toLowerCase();
-        if (isGrouped) {
-            return data.filter(r =>
-                (r.group_name || '').toLowerCase().includes(q) ||
-                (r.children || []).some(c =>
-                    (c.barcode || '').toLowerCase().includes(q) ||
-                    (c.article_seller || '').toLowerCase().includes(q)
-                )
-            );
+        let rows = data;
+        if (search) {
+            const q = search.toLowerCase();
+            if (isGrouped) {
+                rows = rows.filter(r =>
+                    (r.group_name || '').toLowerCase().includes(q) ||
+                    (r.children || []).some(c =>
+                        (c.barcode || '').toLowerCase().includes(q) ||
+                        (c.article_seller || '').toLowerCase().includes(q)
+                    )
+                );
+            } else {
+                rows = rows.filter(r =>
+                    (r.barcode || '').toLowerCase().includes(q) ||
+                    (r.article_seller || '').toLowerCase().includes(q) ||
+                    (r.group_name || '').toLowerCase().includes(q)
+                );
+            }
         }
-        return data.filter(r =>
-            (r.barcode || '').toLowerCase().includes(q) ||
-            (r.article_seller || '').toLowerCase().includes(q) ||
-            (r.group_name || '').toLowerCase().includes(q)
-        );
-    }, [data, search, isGrouped]);
+        if (stockDaysFilter > 0) {
+            // Show items with запас <= N days AND sales > 0 (Infinity means no sales — exclude)
+            rows = rows.filter(r => {
+                const days = stockDaysFor(r);
+                return Number.isFinite(days) && days <= stockDaysFilter;
+            });
+        }
+        return rows;
+    }, [data, search, isGrouped, stockDaysFilter, stockDaysFor]);
+
+    const availableBrands = useMemo(() => {
+        const set = new Set<string>();
+        for (const row of data) {
+            if (row.brand) set.add(row.brand);
+            for (const child of row.children || []) {
+                if (child.brand) set.add(child.brand);
+            }
+        }
+        return Array.from(set).sort((a, b) => a.localeCompare(b, 'ru'));
+    }, [data]);
 
     const { ownWarehouses, wbWarehouses } = useMemo(() => {
         const ownSet = new Set<string>();
@@ -985,6 +1019,19 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                     <option value="tag">По якорям</option>
                     <option value="abc">ABC анализ</option>
                 </select>
+                {/* Brand filter */}
+                <select
+                    className="form-input"
+                    value={brand}
+                    onChange={e => onBrandChange(e.target.value)}
+                    title="Фильтр по бренду"
+                    style={{ maxWidth: 180 }}
+                >
+                    <option value="">Все бренды</option>
+                    {availableBrands.map(b => (
+                        <option key={b} value={b}>{b}</option>
+                    ))}
+                </select>
                 {/* Variant toggle */}
                 <div style={{ display: 'flex', border: '1px solid var(--color-border)', borderRadius: 8, overflow: 'hidden' }}>
                     {([
@@ -1040,9 +1087,34 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange }: {
                         >{d}д</button>
                     ))}
                 </div>
+                {/* Stock-cover filter: показать только товары с запасом ≤ N дней */}
+                <div
+                    title="Показать товары с запасом ≤ N дней (по выбранному тренду)"
+                    style={{ display: 'flex', border: '1px solid var(--color-border)', borderRadius: 8, overflow: 'hidden' }}
+                >
+                    {([
+                        { key: 0 as const, label: 'Все' },
+                        { key: 7 as const, label: '≤7д' },
+                        { key: 30 as const, label: '≤30д' },
+                        { key: 60 as const, label: '≤60д' },
+                    ]).map((btn, i) => (
+                        <button
+                            key={btn.key}
+                            onClick={() => setStockDaysFilter(btn.key)}
+                            title={btn.key === 0 ? 'Без фильтра по запасу' : `Запас ≤ ${btn.key} дней`}
+                            style={{
+                                padding: '6px 10px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
+                                borderLeft: i > 0 ? '1px solid var(--color-border)' : 'none',
+                                background: stockDaysFilter === btn.key ? 'var(--color-warning)' : 'var(--color-bg-card)',
+                                color: stockDaysFilter === btn.key ? '#fff' : 'var(--color-text)',
+                            }}
+                        >{btn.label}</button>
+                    ))}
+                </div>
                 <button className="btn btn-secondary btn-sm" onClick={handleSync} disabled={syncing}>
                     {syncing ? '\u23F3 Обновление...' : '\uD83D\uDD04 Обновить WB остатки'}
                 </button>
+                {isLoading && <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{'\u23F3'} Загрузка...</span>}
             </div>
 
             {filtered.length === 0 ? (
@@ -1128,17 +1200,31 @@ export default function StockSummaryPage() {
     const [summary, setSummary] = useState<StockSummaryRow[]>([]);
     const [unified, setUnified] = useState<UnifiedStockRow[]>([]);
     const [loading, setLoading] = useState(true);
+    const [unifiedLoading, setUnifiedLoading] = useState(false);
     const [error, setError] = useState('');
     const [unifiedGroupBy, setUnifiedGroupBy] = useState('sku');
+    const [brandFilter, setBrandFilter] = useState<string>('');
+
+    const fetchUnified = useCallback(async (gb: string, brand: string) => {
+        setUnifiedLoading(true);
+        try {
+            const un = await api.getUnifiedStock(gb, brand || undefined);
+            setUnified(un);
+        } catch { /* ignore */ }
+        setUnifiedLoading(false);
+    }, []);
 
     const handleGroupChange = useCallback(async (gb: string) => {
         setUnified([]);          // clear stale data BEFORE switching mode
         setUnifiedGroupBy(gb);
-        try {
-            const un = await api.getUnifiedStock(gb);
-            setUnified(un);
-        } catch { /* ignore */ }
-    }, []);
+        await fetchUnified(gb, brandFilter);
+    }, [fetchUnified, brandFilter]);
+
+    const handleBrandChange = useCallback(async (brand: string) => {
+        setUnified([]);
+        setBrandFilter(brand);
+        await fetchUnified(unifiedGroupBy, brand);
+    }, [fetchUnified, unifiedGroupBy]);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -1156,7 +1242,7 @@ export default function StockSummaryPage() {
             setError(e instanceof Error ? e.message : 'Ошибка');
         }
         setLoading(false);
-    }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    }, []);
 
     useEffect(() => { load(); }, [load]);
 
@@ -1185,7 +1271,15 @@ export default function StockSummaryPage() {
                 <SummaryTab warehouses={warehouses} summary={summary} />
             )}
             {tab === 'unified' && (
-                <UnifiedTab data={unified} onRefresh={load} groupBy={unifiedGroupBy} onGroupChange={handleGroupChange} />
+                <UnifiedTab
+                    data={unified}
+                    onRefresh={load}
+                    groupBy={unifiedGroupBy}
+                    onGroupChange={handleGroupChange}
+                    brand={brandFilter}
+                    onBrandChange={handleBrandChange}
+                    isLoading={unifiedLoading}
+                />
             )}
         </div>
     );

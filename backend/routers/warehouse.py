@@ -484,6 +484,7 @@ async def get_stock_summary(
 @router.get("/stock/unified")
 async def get_unified_stock(
     group_by: str = Query("sku", pattern="^(sku|brand|subject|imt|tag|abc)$"),
+    brand: str | None = Query(None, max_length=200),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -492,6 +493,7 @@ async def get_unified_stock(
         db,
         project.id,
         group_by=group_by,
+        brand=brand or None,
     )
 
 

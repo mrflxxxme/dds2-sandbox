@@ -42,9 +42,12 @@ export function addWarehouseMethods(api: ApiClient) {
         getWarehouseStock(warehouseId: number) { return api.request<WarehouseStockRow[]>('GET', `/api/v1/warehouse/${warehouseId}/stock`); },
         getStockMovements(warehouseId: number, limit = 200) { return api.request<StockMovement[]>('GET', `/api/v1/warehouse/${warehouseId}/movements?limit=${limit}`); },
         getStockSummary() { return api.request<StockSummaryRow[]>('GET', '/api/v1/warehouse/stock/summary'); },
-        getUnifiedStock(groupBy?: string) {
-            const q = groupBy ? `?group_by=${groupBy}` : '';
-            return api.request<UnifiedStockRow[]>('GET', `/api/v1/warehouse/stock/unified${q}`);
+        getUnifiedStock(groupBy?: string, brand?: string) {
+            const params = new URLSearchParams();
+            if (groupBy) params.set('group_by', groupBy);
+            if (brand) params.set('brand', brand);
+            const qs = params.toString();
+            return api.request<UnifiedStockRow[]>('GET', `/api/v1/warehouse/stock/unified${qs ? `?${qs}` : ''}`);
         },
         updateCostPrice(stockId: number, costPrice: number) { return api.request<WarehouseStockRow>('PUT', `/api/v1/warehouse/stock/${stockId}/cost-price`, { cost_price: costPrice }); },
 

@@ -28,7 +28,7 @@ ignore = [
 ]
 
 [lint.per-file-ignores]
-"tests/**/*.py" = ["S101", "S106", "T20", "RUF001", "E402"]  # assert, hardcoded pass, print, Cyrillic, late imports (TESTING=1 env setup before app import)
+"tests/**/*.py" = ["S101", "S106", "T20", "RUF001", "RUF002", "RUF003", "E402"]  # assert, hardcoded pass, print, Cyrillic in identifiers/docstrings/comments, late imports (TESTING=1 env setup before app import)
 "backend/alembic/**/*.py" = ["E402", "I001"]      # alembic auto-generated
 "backend/seeds/**/*.py" = ["T20", "S"]            # seed scripts can print
 "backend/routers/auth.py" = ["S110", "E712", "RUF001"]  # Redis pass-on-error, SQLAlchemy == True, Cyrillic strings
