@@ -208,7 +208,13 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, wareh
         background: 'var(--color-bg)', color: 'var(--color-text)', fontSize: 13, width: '100%',
     };
 
-    const deliveryCost = Number(vehicle.delivery_cost_cny) > 0
+    const isRussia = vehicle.country === 'RUSSIA';
+
+    const deliveryCost = isRussia
+        ? (Number(vehicle.delivery_cost_rub) > 0
+            ? `${formatNumber(Number(vehicle.delivery_cost_rub), 0)} ₽`
+            : '—')
+        : Number(vehicle.delivery_cost_cny) > 0
         ? `${formatNumber(Number(vehicle.delivery_cost_cny), 0)} ¥`
         : Number(vehicle.delivery_cost_usd) > 0
         ? `${formatNumber(Number(vehicle.delivery_cost_usd), 0)} $`
@@ -246,15 +252,21 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, wareh
                 </div>
             </div>
 
-            {/* Fields grid — 5 columns */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '10px 16px' }}>
+            {/* Fields grid — 5 columns (China) / 3 columns (Russia) */}
+            <div style={{ display: 'grid', gridTemplateColumns: isRussia ? 'repeat(3, 1fr)' : 'repeat(5, 1fr)', gap: '10px 16px' }}>
                 <InfoField label={t('vdetail_field_container')} value={containerLabel} />
-                <InfoField label={t('cost_invoice')} value={vehicle.invoice_no} editing={editing}
-                    input={<input value={form.invoice_no} onChange={e => setForm(f => ({ ...f, invoice_no: e.target.value }))} placeholder="CC20260011" style={editInput} />} />
-                <InfoField label={t('vehicle_form_order_no')} value={vehicle.payment_ref} editing={editing}
-                    input={<input value={form.payment_ref} onChange={e => setForm(f => ({ ...f, payment_ref: e.target.value }))} placeholder="ENV-001" style={editInput} />} />
-                <InfoField label={t('vdetail_field_customs_no')} value={vehicle.dt_number} editing={editing}
-                    input={<input value={form.dt_number} onChange={e => setForm(f => ({ ...f, dt_number: e.target.value }))} placeholder="—" style={editInput} />} />
+                {!isRussia && (
+                    <InfoField label={t('cost_invoice')} value={vehicle.invoice_no} editing={editing}
+                        input={<input value={form.invoice_no} onChange={e => setForm(f => ({ ...f, invoice_no: e.target.value }))} placeholder="CC20260011" style={editInput} />} />
+                )}
+                {!isRussia && (
+                    <InfoField label={t('vehicle_form_order_no')} value={vehicle.payment_ref} editing={editing}
+                        input={<input value={form.payment_ref} onChange={e => setForm(f => ({ ...f, payment_ref: e.target.value }))} placeholder="ENV-001" style={editInput} />} />
+                )}
+                {!isRussia && (
+                    <InfoField label={t('vdetail_field_customs_no')} value={vehicle.dt_number} editing={editing}
+                        input={<input value={form.dt_number} onChange={e => setForm(f => ({ ...f, dt_number: e.target.value }))} placeholder="—" style={editInput} />} />
+                )}
                 <InfoField label={t('vdetail_field_delivery_cost')} value={deliveryCost} editing={editing}
                     input={<input value={form.delivery_cost_cny} onChange={e => setForm(f => ({ ...f, delivery_cost_cny: e.target.value }))} placeholder="0" style={editInput} />} />
                 <InfoField label={t('vehicle_form_pickup_date')} value={vehicle.ship_date ? formatDate(vehicle.ship_date) : undefined} editing={editing}
@@ -270,12 +282,18 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, wareh
                             {warehouses.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
                         </select>
                     } />
-                <InfoField label={t('vehicle_form_rate_cny')} value={Number(vehicle.rate_cny) > 0 ? String(vehicle.rate_cny) : undefined} editing={editing}
-                    input={<input value={form.rate_cny} onChange={e => setForm(f => ({ ...f, rate_cny: e.target.value }))} placeholder="12.5" style={editInput} />} />
-                <InfoField label={t('vehicle_form_rate_usd')} value={Number(vehicle.rate_usd) > 0 ? String(vehicle.rate_usd) : undefined} editing={editing}
-                    input={<input value={form.rate_usd} onChange={e => setForm(f => ({ ...f, rate_usd: e.target.value }))} placeholder="92" style={editInput} />} />
-                <InfoField label={t('vehicle_form_rate_eur')} value={Number(vehicle.rate_eur) > 0 ? String(vehicle.rate_eur) : undefined} editing={editing}
-                    input={<input value={form.rate_eur} onChange={e => setForm(f => ({ ...f, rate_eur: e.target.value }))} placeholder="98" style={editInput} />} />
+                {!isRussia && (
+                    <InfoField label={t('vehicle_form_rate_cny')} value={Number(vehicle.rate_cny) > 0 ? String(vehicle.rate_cny) : undefined} editing={editing}
+                        input={<input value={form.rate_cny} onChange={e => setForm(f => ({ ...f, rate_cny: e.target.value }))} placeholder="12.5" style={editInput} />} />
+                )}
+                {!isRussia && (
+                    <InfoField label={t('vehicle_form_rate_usd')} value={Number(vehicle.rate_usd) > 0 ? String(vehicle.rate_usd) : undefined} editing={editing}
+                        input={<input value={form.rate_usd} onChange={e => setForm(f => ({ ...f, rate_usd: e.target.value }))} placeholder="92" style={editInput} />} />
+                )}
+                {!isRussia && (
+                    <InfoField label={t('vehicle_form_rate_eur')} value={Number(vehicle.rate_eur) > 0 ? String(vehicle.rate_eur) : undefined} editing={editing}
+                        input={<input value={form.rate_eur} onChange={e => setForm(f => ({ ...f, rate_eur: e.target.value }))} placeholder="98" style={editInput} />} />
+                )}
             </div>
 
             {/* Summary KPIs */}
@@ -284,7 +302,7 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, wareh
                 <SummaryKpi label={t('col_qty')} value={`${formatNumber(vehicle.total_qty, 0)} ${t('unit_pcs')}`} />
                 <SummaryKpi label={t('col_boxes')} value={totalBoxes > 0 ? String(totalBoxes) : '—'} />
                 <SummaryKpi label={t('cost_weight')} value={vehicle.total_weight_kg ? `${formatNumber(Number(vehicle.total_weight_kg), 0)} kg` : '—'} />
-                <SummaryKpi label={t('col_amount')} value={Number(vehicle.total_cny) > 0 ? `${formatNumber(Number(vehicle.total_cny), 0)} ¥` : '—'} accent />
+                <SummaryKpi label={t('col_amount')} value={Number(vehicle.total_cny) > 0 ? `${formatNumber(Number(vehicle.total_cny), 0)} ${isRussia ? '₽' : '¥'}` : '—'} accent />
             </div>
         </div>
     );
@@ -411,12 +429,16 @@ function VehicleDetailContent() {
                             <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
                                 <span style={{ fontSize: 16 }}>📊</span> {t('vdetail_tab_cost')}
                             </div>
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 12 }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: vehicle.country === 'RUSSIA' ? 'repeat(3, 1fr)' : 'repeat(5, 1fr)', gap: 12, marginBottom: 12 }}>
                                 <CostKpi label={`${t('col_qty')} (${t('unit_pcs')})`} value={formatNumber(vehicle.total_qty, 0)} />
                                 <CostKpi label={t('cost_goods')} value={`${formatNumber(Number(cs.total_cost_rub))} ₽`} color="var(--color-success)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_cost_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
                                 <CostKpi label={t('cost_delivery')} value={`${formatNumber(Number(cs.total_delivery_rub))} ₽`} color="var(--color-warning)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_delivery_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
-                                <CostKpi label={t('cost_duty')} value={`${formatNumber(Number(cs.total_duty_rub))} ₽`} color="var(--color-warning)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_duty_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
-                                <CostKpi label={t('cost_vat')} value={`${formatNumber(Number(cs.total_vat_rub))} ₽`} color="var(--color-danger)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_vat_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
+                                {vehicle.country !== 'RUSSIA' && (
+                                    <CostKpi label={t('cost_duty')} value={`${formatNumber(Number(cs.total_duty_rub))} ₽`} color="var(--color-warning)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_duty_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
+                                )}
+                                {vehicle.country !== 'RUSSIA' && (
+                                    <CostKpi label={t('cost_vat')} value={`${formatNumber(Number(cs.total_vat_rub))} ₽`} color="var(--color-danger)" pct={Number(cs.total_rub) > 0 ? `${((Number(cs.total_vat_rub) / Number(cs.total_rub)) * 100).toFixed(1)}%` : undefined} />
+                                )}
                             </div>
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
                                 <div style={{ padding: 16, borderRadius: 12, background: 'linear-gradient(135deg, rgba(255,182,193,0.15), rgba(255,105,180,0.08))', textAlign: 'center' }}>
