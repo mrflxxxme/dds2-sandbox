@@ -159,7 +159,7 @@ export default function TanStackDataTable({
                     )}
                     <div style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
                         {exportName && data.length > 0 && (
-                            <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, exportName)}>
+                            <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, exportName, columns)}>
                                 📥 Excel
                             </button>
                         )}

@@ -19,6 +19,8 @@ export interface Column {
     render?: (value: any, row: any, index: number) => React.ReactNode;
     /** Custom accessor for sorting when key doesn't match data shape */
     getValue?: (row: any) => any;
+    /** Custom accessor for Excel export — overrides getValue/key. Use for cells with React render or nested data. */
+    exportValue?: (row: any) => any;
     width?: string;
     sortable?: boolean;
 }
@@ -126,7 +128,7 @@ export default function DataTable({
                     {title && <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>{title}{data.length > 0 ? ` (${data.length})` : ''}</h3>}
                     <div style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
                         {exportName && data.length > 0 && (
-                            <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, exportName)}>
+                            <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, exportName, effectiveColumns)}>
                                 📥 Excel
                             </button>
                         )}
