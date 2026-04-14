@@ -268,6 +268,19 @@ def start_scheduler():
         misfire_grace_time=60,
     )
 
+    # Startup catch-up: run weekly finance sync 60s after start.
+    # Recovers from missed Mon weekly job (e.g. backend hang incident 2026-04-14).
+    # Job itself skips projects whose max_weekly_date already covers prev_sunday,
+    # so it's a safe no-op when nothing is missing.
+    _scheduler.add_job(
+        sync_all_projects_wb_finance,
+        trigger=DateTrigger(run_date=datetime.now(MSK) + timedelta(seconds=60)),
+        id="wb_finance_weekly_catchup",
+        name="WB finance weekly catch-up (startup)",
+        replace_existing=True,
+        misfire_grace_time=60,
+    )
+
     _scheduler.start()
     logger.info(
         "✅ Scheduler started — daily sync 3x/day + backfill + ad check + wb_finance weekly Mon + wb_finance daily Tue-Sun + prewarm 1h + AI digest 07:00 + finance catch-up"
