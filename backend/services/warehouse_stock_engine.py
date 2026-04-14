@@ -10,9 +10,11 @@ from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
-from backend.models.cost import Nomenclature
+from backend.models.cost import CostOrder, CostOrderItem, Nomenclature
+from backend.models.enums import VehicleStatus
 from backend.models.integrations import WbWarehouseStock
 from backend.models.refs import ImtAlias, ProductTag, ProductTagMap
+from backend.models.supply_chain import FactoryOrder, FactoryOrderItem
 from backend.models.warehouse import (
     MovementType,
     StockAdjustment,
@@ -363,25 +365,9 @@ async def get_stock_summary(db: AsyncSession, project_id: int) -> list[dict]:
 # ─── Unified Stock (own + WB + in-transit) ────────────────────────────────
 
 
-async def _load_bdr_metrics(
-    db: AsyncSession,
-    project_id: int,
-    nm_id_to_nom_id: dict[int, int],
-    cost_map: dict[int, float],
-) -> dict[int, dict]:
-    """Load BDR-style metrics per nomenclature_id from WB finance (last 30 days).
-
-    Profit formula (matches BDR):
-    profit = ppvz_net - logistics - storage - penalties - acceptance
-             - other_deductions - adv_sum - cost - tax
-    """
-    from backend.models.integrations import WbFunnelDaily
-
-    cutoff = utcnow().date() - timedelta(days=30)
+def _build_finance_query(project_id: int, cutoff):
     R = WbFinanceRow
-
-    # 1. Load finance aggregates per nm_id
-    finance_result = await db.execute(
+    return (
         select(
             R.nm_id,
             func.coalesce(
@@ -403,7 +389,6 @@ async def _load_bdr_metrics(
             func.coalesce(func.sum(R.storage_fee), Decimal("0")).label("storage"),
             func.coalesce(func.sum(R.penalty), Decimal("0")).label("penalties"),
             func.coalesce(func.sum(R.acceptance), Decimal("0")).label("acceptance"),
-            # Deductions: total and ad/loan split
             func.coalesce(func.sum(R.deduction), Decimal("0")).label("deductions_total"),
             func.coalesce(
                 func.sum(
@@ -437,9 +422,26 @@ async def _load_bdr_metrics(
         .group_by(R.nm_id)
         .limit(10000)
     )
+
+
+async def _compute_period_metrics(
+    db: AsyncSession,
+    project_id: int,
+    cutoff,
+    nm_id_to_nom_id: dict[int, int],
+    cost_map: dict[int, float],
+    usn_rate: Decimal,
+    nds_rate: Decimal,
+) -> dict[int, dict]:
+    """Compute per-nm period metrics: realization, profit, sale_qty, days_count.
+
+    Returns: {nom_id: {realization, total_profit, sale_qty, days_count, avg_price, avg_profit}}
+    """
+    from backend.models.integrations import WbFunnelDaily
+
+    finance_result = await db.execute(_build_finance_query(project_id, cutoff))
     finance_rows = finance_result.all()
 
-    # 2. Load adv_sum per nm_id from WbFunnelDaily
     adv_result = await db.execute(
         select(
             WbFunnelDaily.nm_id,
@@ -451,21 +453,14 @@ async def _load_bdr_metrics(
     )
     adv_map: dict[int, Decimal] = {r.nm_id: Decimal(str(r.adv_sum or 0)) for r in adv_result.all()}
 
-    # 3. Load tax rate
-    from backend.services.bdr_loaders import load_tax_settings
-
-    tax_settings = await load_tax_settings(db, project_id, cutoff, utcnow().date())
-    usn_rate = Decimal(str(tax_settings.get("usn_rate", 0))) / Decimal("100")
-    nds_rate = Decimal(str(tax_settings.get("nds_rate", 0))) / Decimal("100")
-
-    # 4. Build metrics per nomenclature_id
-    bdr_map: dict[int, dict] = {}
+    period_map: dict[int, dict] = {}
     for row in finance_rows:
         nom_id = nm_id_to_nom_id.get(row.nm_id)
         if nom_id is None:
             continue
-        days = max(row.days_count, 1)
-        sale_qty = max(int(row.sale_qty or 0), 1)
+        days = max(int(row.days_count or 0), 1)
+        sale_qty_raw = int(row.sale_qty or 0)
+        sale_qty = max(sale_qty_raw, 1)
         realization = Decimal(str(row.realization or 0))
         sales_amount = Decimal(str(row.sales_amount or 0))
         ppvz_net = Decimal(str(row.ppvz_net or 0))
@@ -478,14 +473,10 @@ async def _load_bdr_metrics(
         loan_deduction = Decimal(str(row.loan_deduction or 0))
         adv_sum = adv_map.get(row.nm_id, Decimal("0"))
         cost_per_unit = Decimal(str(cost_map.get(nom_id, 0)))
-        cost_total = cost_per_unit * sale_qty
+        cost_total = cost_per_unit * sale_qty_raw
 
-        # BDR profit formula (matches bdr_enrichment.py):
-        # to_pay = ppvz_net - logistics - storage - penalties - acceptance - deductions_total
-        # profit = to_pay + ad_deduction + loan_deduction - adv_sum - cost_total - tax
         to_pay = ppvz_net - logistics - storage - penalties - acceptance - deductions_total
 
-        # Tax: NDS + USN (same logic as bdr_enrichment.apply_tax_article)
         nds_sum = sales_amount * nds_rate / (1 + nds_rate) if nds_rate > 0 else Decimal("0")
         tax_base = sales_amount - nds_sum
         usn_sum = max(tax_base * usn_rate, Decimal("0")) if usn_rate > 0 else Decimal("0")
@@ -493,16 +484,268 @@ async def _load_bdr_metrics(
 
         total_profit = to_pay + ad_deduction + loan_deduction - adv_sum - cost_total - tax
 
-        avg_price = float(round(realization / sale_qty, 2))
-        avg_profit = float(round(total_profit / sale_qty, 2))
+        period_map[nom_id] = {
+            "realization": realization,
+            "total_profit": total_profit,
+            "sale_qty_raw": sale_qty_raw,
+            "sale_qty": sale_qty,
+            "days_count": days,
+            "avg_price": float(round(realization / sale_qty, 2)),
+            "avg_profit": float(round(total_profit / sale_qty, 2)),
+        }
+    return period_map
 
+
+async def _load_bdr_metrics(
+    db: AsyncSession,
+    project_id: int,
+    nm_id_to_nom_id: dict[int, int],
+    cost_map: dict[int, float],
+) -> dict[int, dict]:
+    """Load BDR-style metrics per nomenclature_id for 7/14/30-day periods.
+
+    Returns trend data per period + legacy avg_daily_revenue/profit/price/profit (30d) for compat.
+    """
+    from backend.services.bdr_loaders import load_tax_settings
+
+    today = utcnow().date()
+    cutoff_30 = today - timedelta(days=30)
+    cutoff_14 = today - timedelta(days=14)
+    cutoff_7 = today - timedelta(days=7)
+
+    tax_settings = await load_tax_settings(db, project_id, cutoff_30, today)
+    usn_rate = Decimal(str(tax_settings.get("usn_rate", 0))) / Decimal("100")
+    nds_rate = Decimal(str(tax_settings.get("nds_rate", 0))) / Decimal("100")
+
+    period_30 = await _compute_period_metrics(db, project_id, cutoff_30, nm_id_to_nom_id, cost_map, usn_rate, nds_rate)
+    period_14 = await _compute_period_metrics(db, project_id, cutoff_14, nm_id_to_nom_id, cost_map, usn_rate, nds_rate)
+    period_7 = await _compute_period_metrics(db, project_id, cutoff_7, nm_id_to_nom_id, cost_map, usn_rate, nds_rate)
+
+    def _trend(p: dict) -> dict:
+        if not p:
+            return {"avg_daily_qty": 0.0, "revenue": 0.0, "profit": 0.0}
+        return {
+            "avg_daily_qty": float(round(p["sale_qty_raw"] / p["days_count"], 2)),
+            "revenue": float(round(p["realization"], 2)),
+            "profit": float(round(p["total_profit"], 2)),
+        }
+
+    bdr_map: dict[int, dict] = {}
+    all_nom_ids = set(period_30.keys()) | set(period_14.keys()) | set(period_7.keys())
+    for nom_id in all_nom_ids:
+        p30 = period_30.get(nom_id)
+        p14 = period_14.get(nom_id)
+        p7 = period_7.get(nom_id)
+        legacy = p30 or {
+            "realization": Decimal("0"),
+            "total_profit": Decimal("0"),
+            "days_count": 1,
+            "avg_price": 0.0,
+            "avg_profit": 0.0,
+        }
         bdr_map[nom_id] = {
-            "avg_daily_revenue": float(round(realization / days, 2)),
-            "avg_daily_profit": float(round(total_profit / days, 2)),
-            "avg_price": avg_price,
-            "avg_profit": avg_profit,
+            "avg_daily_revenue": float(round(legacy["realization"] / legacy["days_count"], 2)),
+            "avg_daily_profit": float(round(legacy["total_profit"] / legacy["days_count"], 2)),
+            "avg_price": legacy["avg_price"],
+            "avg_profit": legacy["avg_profit"],
+            "trend_7": _trend(p7),
+            "trend_14": _trend(p14),
+            "trend_30": _trend(p30),
         }
     return bdr_map
+
+
+async def _load_category_markup_and_rate(db: AsyncSession, project_id: int) -> tuple[dict[str, float], float, float]:
+    """Compute weighted-avg markup factor per subject + avg CNY rate from shipped vehicles.
+
+    NOTE: CostOrderItem.total_rub is stored PER-UNIT (see services/cost/items.py L160-165).
+    markup = total_rub / (price_cny * rate_cny)  — both per unit
+    Subject is joined from Nomenclature (CostOrderItem.subject is often NULL in legacy data).
+    Rate is averaged across SHIPPED+CUSTOMS+DISPATCHED+DELIVERED vehicles, weighted by qty.
+
+    Returns: (markup_by_subject, global_avg_markup, avg_rate_cny)
+    Fallbacks if no data: markup=1.5, rate=12.5
+    """
+    result = await db.execute(
+        select(
+            func.coalesce(Nomenclature.subject, CostOrderItem.subject).label("subject"),
+            CostOrderItem.total_rub,
+            CostOrderItem.price_cny,
+            CostOrderItem.qty,
+            CostOrder.rate_cny,
+        )
+        .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)
+        .outerjoin(
+            Nomenclature,
+            (Nomenclature.barcode == CostOrderItem.barcode) & (Nomenclature.project_id == project_id),
+        )
+        .where(
+            CostOrder.project_id == project_id,
+            CostOrder.is_deleted.is_(False),
+            CostOrder.status.in_(
+                [
+                    VehicleStatus.SHIPPED,
+                    VehicleStatus.CUSTOMS,
+                    VehicleStatus.DISPATCHED,
+                    VehicleStatus.DELIVERED,
+                ]
+            ),
+            CostOrderItem.project_id == project_id,
+            CostOrderItem.is_deleted.is_(False),
+            CostOrderItem.total_rub.isnot(None),
+            CostOrderItem.price_cny.isnot(None),
+        )
+        .limit(50000)
+    )
+
+    subject_acc: dict[str, dict[str, float]] = {}
+    rate_weighted_sum = 0.0
+    rate_weight = 0.0
+
+    for row in result.all():
+        rate = float(row.rate_cny or 0)
+        price = float(row.price_cny or 0)
+        total_rub_per_unit = float(row.total_rub or 0)
+        qty = float(row.qty or 0)
+        if rate <= 0 or price <= 0 or total_rub_per_unit <= 0 or qty <= 0:
+            continue
+
+        per_unit_cost_cny = price * rate
+        if per_unit_cost_cny <= 0:
+            continue
+        markup = total_rub_per_unit / per_unit_cost_cny
+
+        rate_weighted_sum += rate * qty
+        rate_weight += qty
+
+        subject = row.subject or "Без категории"
+        if subject not in subject_acc:
+            subject_acc[subject] = {"weighted_markup": 0.0, "weight": 0.0}
+        subject_acc[subject]["weighted_markup"] += markup * qty
+        subject_acc[subject]["weight"] += qty
+
+    markup_by_subject: dict[str, float] = {}
+    for subject, acc in subject_acc.items():
+        if acc["weight"] > 0:
+            markup_by_subject[subject] = acc["weighted_markup"] / acc["weight"]
+
+    global_markup = sum(markup_by_subject.values()) / len(markup_by_subject) if markup_by_subject else 1.5
+    avg_rate = rate_weighted_sum / rate_weight if rate_weight > 0 else 12.5
+
+    return markup_by_subject, global_markup, avg_rate
+
+
+async def _load_factory_unit_costs(
+    db: AsyncSession,
+    project_id: int,
+    nom_map: dict[int, dict],
+    markup_by_subject: dict[str, float],
+    global_markup: float,
+    avg_rate: float,
+) -> dict[int, float]:
+    """Per-unit estimated cost (RUB) for ALL factory items.
+
+    cost_per_unit = price_cny * avg_rate * markup_by_subject[subject]
+
+    Always populated for items in active factory orders. Used both:
+    - As fallback for cost_map (when no historical cost exists)
+    - As factory column display value (always ≈ in frontend)
+    """
+    result = await db.execute(
+        select(
+            Nomenclature.id.label("nomenclature_id"),
+            func.avg(FactoryOrderItem.price_cny).label("avg_price_cny"),
+        )
+        .join(FactoryOrder, FactoryOrderItem.factory_order_id == FactoryOrder.id)
+        .join(
+            Nomenclature,
+            (Nomenclature.barcode == FactoryOrderItem.barcode) & (Nomenclature.project_id == project_id),
+        )
+        .where(
+            FactoryOrder.project_id == project_id,
+            FactoryOrder.is_deleted.is_(False),
+            FactoryOrder.status.notin_(["CLOSED"]),
+            FactoryOrderItem.project_id == project_id,
+            FactoryOrderItem.is_deleted.is_(False),
+            FactoryOrderItem.price_cny > 0,
+        )
+        .group_by(Nomenclature.id)
+        .limit(10000)
+    )
+
+    estimated: dict[int, float] = {}
+    for row in result.all():
+        nom_id = row.nomenclature_id
+        price_cny = float(row.avg_price_cny or 0)
+        if price_cny <= 0:
+            continue
+        info = nom_map.get(nom_id, {})
+        subject = info.get("subject") or ""
+        markup = markup_by_subject.get(subject, global_markup)
+        estimated[nom_id] = round(price_cny * avg_rate * markup, 2)
+
+    return estimated
+
+
+def _compute_category_bdr_averages(
+    bdr_map: dict[int, dict],
+    nom_map: dict[int, dict],
+) -> dict[str, dict]:
+    """Compute average revenue/profit per item per subject for new-item estimates.
+
+    Only counts items with actual sales (revenue > 0).
+    avg_daily_qty is NOT estimated — kept at 0 so frontend shows dash.
+    """
+    by_subject: dict[str, dict[str, float]] = {}
+    for nom_id, bdr in bdr_map.items():
+        info = nom_map.get(nom_id, {})
+        subject = info.get("subject")
+        if not subject:
+            continue
+        # Only count items with actual sales
+        rev_30 = (bdr.get("trend_30", {}) or {}).get("revenue", 0) or 0
+        if rev_30 <= 0:
+            continue
+        if subject not in by_subject:
+            by_subject[subject] = {
+                "items_count": 0.0,
+                "rev_7": 0.0,
+                "prof_7": 0.0,
+                "rev_14": 0.0,
+                "prof_14": 0.0,
+                "rev_30": 0.0,
+                "prof_30": 0.0,
+            }
+        s = by_subject[subject]
+        s["items_count"] += 1
+        for period in ("7", "14", "30"):
+            t = bdr.get(f"trend_{period}", {}) or {}
+            s[f"rev_{period}"] += float(t.get("revenue", 0) or 0)
+            s[f"prof_{period}"] += float(t.get("profit", 0) or 0)
+
+    result: dict[str, dict] = {}
+    for subject, s in by_subject.items():
+        n = s["items_count"]
+        if n == 0:
+            continue
+        result[subject] = {
+            "trend_7": {
+                "avg_daily_qty": 0.0,
+                "revenue": round(s["rev_7"] / n, 2),
+                "profit": round(s["prof_7"] / n, 2),
+            },
+            "trend_14": {
+                "avg_daily_qty": 0.0,
+                "revenue": round(s["rev_14"] / n, 2),
+                "profit": round(s["prof_14"] / n, 2),
+            },
+            "trend_30": {
+                "avg_daily_qty": 0.0,
+                "revenue": round(s["rev_30"] / n, 2),
+                "profit": round(s["prof_30"] / n, 2),
+            },
+        }
+    return result
 
 
 def _assign_abc(items: list[dict], value_key: str, abc_key: str) -> None:
@@ -740,6 +983,79 @@ async def get_unified_stock_summary(
     )
     in_transit_map: dict[int, int] = {row.nomenclature_id: int(row.qty or 0) for row in shipped_result.all()}
 
+    # 4b. Factory orders — remaining qty (not yet assigned to vehicles)
+    factory_result = await db.execute(
+        select(
+            Nomenclature.id.label("nomenclature_id"),
+            func.sum(FactoryOrderItem.qty - FactoryOrderItem.assigned_qty).label("remaining"),
+        )
+        .join(FactoryOrder, FactoryOrderItem.factory_order_id == FactoryOrder.id)
+        .join(
+            Nomenclature,
+            (Nomenclature.barcode == FactoryOrderItem.barcode) & (Nomenclature.project_id == project_id),
+        )
+        .where(
+            FactoryOrder.project_id == project_id,
+            FactoryOrder.is_deleted.is_(False),
+            FactoryOrder.status.notin_(["CLOSED"]),
+            FactoryOrderItem.project_id == project_id,
+            FactoryOrderItem.is_deleted.is_(False),
+        )
+        .group_by(Nomenclature.id)
+        .limit(10000)
+    )
+    factory_map: dict[int, int] = {row.nomenclature_id: max(int(row.remaining or 0), 0) for row in factory_result.all()}
+
+    # 4c. Vehicles being formed (FORMING) — items already assigned but not yet shipped
+    vehicle_forming_result = await db.execute(
+        select(
+            Nomenclature.id.label("nomenclature_id"),
+            func.sum(CostOrderItem.qty).label("qty"),
+        )
+        .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)
+        .join(
+            Nomenclature,
+            (Nomenclature.barcode == CostOrderItem.barcode) & (Nomenclature.project_id == project_id),
+        )
+        .where(
+            CostOrder.project_id == project_id,
+            CostOrder.is_deleted.is_(False),
+            CostOrder.status == VehicleStatus.FORMING,
+            CostOrderItem.project_id == project_id,
+            CostOrderItem.is_deleted.is_(False),
+        )
+        .group_by(Nomenclature.id)
+        .limit(10000)
+    )
+    vehicle_forming_map: dict[int, int] = {
+        row.nomenclature_id: int(row.qty or 0) for row in vehicle_forming_result.all()
+    }
+
+    # 4d. Vehicles in transit (SHIPPED, CUSTOMS, DISPATCHED — en route to warehouse)
+    vehicle_transit_result = await db.execute(
+        select(
+            Nomenclature.id.label("nomenclature_id"),
+            func.sum(CostOrderItem.qty).label("qty"),
+        )
+        .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)
+        .join(
+            Nomenclature,
+            (Nomenclature.barcode == CostOrderItem.barcode) & (Nomenclature.project_id == project_id),
+        )
+        .where(
+            CostOrder.project_id == project_id,
+            CostOrder.is_deleted.is_(False),
+            CostOrder.status.in_([VehicleStatus.SHIPPED, VehicleStatus.CUSTOMS, VehicleStatus.DISPATCHED]),
+            CostOrderItem.project_id == project_id,
+            CostOrderItem.is_deleted.is_(False),
+        )
+        .group_by(Nomenclature.id)
+        .limit(10000)
+    )
+    vehicle_transit_map: dict[int, int] = {
+        row.nomenclature_id: int(row.qty or 0) for row in vehicle_transit_result.all()
+    }
+
     # 5. Reserved from active assembly requests (all warehouses)
     wh_ids = {row.warehouse_id for row in own_rows}
     batch_reserved = await _get_reserved_map_batch(db, project_id, wh_ids)
@@ -755,6 +1071,9 @@ async def get_unified_stock_summary(
     for row in wb_rows:
         all_nom_ids.add(row.nomenclature_id)
     all_nom_ids.update(in_transit_map.keys())
+    all_nom_ids.update(factory_map.keys())
+    all_nom_ids.update(vehicle_forming_map.keys())
+    all_nom_ids.update(vehicle_transit_map.keys())
 
     nom_map: dict[int, dict] = {}
     nm_id_to_nom_id: dict[int, int] = {}  # article_wb -> nomenclature.id
@@ -812,6 +1131,21 @@ async def get_unified_stock_summary(
     # 7b. Load BDR daily metrics (avg_daily_revenue, avg_daily_profit)
     bdr_map = await _load_bdr_metrics(db, project_id, nm_id_to_nom_id, cost_map)
 
+    # 7c. Estimated per-unit cost for factory items (always computed via markup factor)
+    markup_by_subject, global_markup, avg_rate_cny = await _load_category_markup_and_rate(db, project_id)
+    factory_unit_costs = await _load_factory_unit_costs(
+        db, project_id, nom_map, markup_by_subject, global_markup, avg_rate_cny
+    )
+    # Use as cost_map fallback when no historical data exists
+    estimated_cost_set: set[int] = set()
+    for nom_id, est_cost in factory_unit_costs.items():
+        if nom_id not in cost_map and est_cost > 0:
+            cost_map[nom_id] = est_cost
+            estimated_cost_set.add(nom_id)
+
+    # 7d. Category-level BDR averages for new items without sales
+    category_bdr = _compute_category_bdr_averages(bdr_map, nom_map)
+
     # 8. Merge all by nomenclature_id
     unified: dict[int, dict] = {}
 
@@ -819,6 +1153,14 @@ async def get_unified_stock_summary(
         if nom_id not in unified:
             info = nom_map.get(nom_id, {})
             bdr = bdr_map.get(nom_id, {})
+            is_revenue_estimated = False
+            # Fallback to category averages if no sales for this item
+            has_sales = (bdr.get("trend_30", {}) or {}).get("revenue", 0) or 0
+            if has_sales <= 0:
+                subject = info.get("subject")
+                if subject and subject in category_bdr:
+                    bdr = {**bdr, **category_bdr[subject]}
+                    is_revenue_estimated = True
             unified[nom_id] = {
                 "nomenclature_id": nom_id,
                 "barcode": info.get("barcode", ""),
@@ -833,11 +1175,20 @@ async def get_unified_stock_summary(
                 "total_own": 0,
                 "total_wb": 0,
                 "total": 0,
+                "factory_qty": 0,
+                "vehicle_forming_qty": 0,
+                "vehicle_transit_qty": 0,
                 "avg_cost": cost_map.get(nom_id, 0),
+                "cost_factory_unit": factory_unit_costs.get(nom_id, 0),
+                "is_cost_estimated": nom_id in estimated_cost_set,
+                "is_revenue_estimated": is_revenue_estimated,
                 "avg_daily_revenue": bdr.get("avg_daily_revenue", 0),
                 "avg_daily_profit": bdr.get("avg_daily_profit", 0),
                 "avg_price": bdr.get("avg_price", 0),
                 "avg_profit": bdr.get("avg_profit", 0),
+                "trend_7": bdr.get("trend_7", {"avg_daily_qty": 0, "revenue": 0, "profit": 0}),
+                "trend_14": bdr.get("trend_14", {"avg_daily_qty": 0, "revenue": 0, "profit": 0}),
+                "trend_30": bdr.get("trend_30", {"avg_daily_qty": 0, "revenue": 0, "profit": 0}),
             }
         return unified[nom_id]
 
@@ -869,11 +1220,30 @@ async def get_unified_stock_summary(
         if nom_id in unified:
             unified[nom_id]["reserved"] = qty
 
-    # Compute totals
+    # Factory orders (remaining)
+    for nom_id, qty in factory_map.items():
+        entry = _ensure(nom_id)
+        entry["factory_qty"] = qty
+
+    # Vehicles (forming)
+    for nom_id, qty in vehicle_forming_map.items():
+        entry = _ensure(nom_id)
+        entry["vehicle_forming_qty"] = qty
+
+    # Vehicles (in transit)
+    for nom_id, qty in vehicle_transit_map.items():
+        entry = _ensure(nom_id)
+        entry["vehicle_transit_qty"] = qty
+
+    # Compute totals (own + wb + in_transit; supply chain is separate columns)
     for entry in unified.values():
         entry["total"] = entry["total_own"] + entry["total_wb"] + entry["in_transit"]
 
-    unified_list = [v for v in unified.values() if v["total"] > 0]
+    unified_list = [
+        v
+        for v in unified.values()
+        if v["total"] > 0 or v["factory_qty"] > 0 or v["vehicle_forming_qty"] > 0 or v["vehicle_transit_qty"] > 0
+    ]
 
     # 9. Grouping
     if group_by == "abc":
@@ -934,15 +1304,24 @@ async def _group_unified(
             "total_wb": 0,
             "in_transit": 0,
             "total": 0,
+            "factory_qty": 0,
+            "vehicle_forming_qty": 0,
+            "vehicle_transit_qty": 0,
             "avg_cost": 0.0,
+            "cost_factory_unit": 0.0,
             "avg_daily_revenue": 0.0,
             "avg_daily_profit": 0.0,
             "avg_price": 0.0,
             "avg_profit": 0.0,
             "warehouses": {},
             "wb_stocks": {},
+            "trend_7": {"avg_daily_qty": 0.0, "revenue": 0.0, "profit": 0.0},
+            "trend_14": {"avg_daily_qty": 0.0, "revenue": 0.0, "profit": 0.0},
+            "trend_30": {"avg_daily_qty": 0.0, "revenue": 0.0, "profit": 0.0},
             "_cost_sum": 0.0,
             "_cost_weight": 0,
+            "_cost_factory_sum": 0.0,
+            "_cost_factory_weight": 0,
             "_price_sum": 0.0,
             "_price_weight": 0,
             "_profit_sum": 0.0,
@@ -951,10 +1330,23 @@ async def _group_unified(
 
     def _accumulate(g: dict, row: dict) -> None:
         g["items_count"] += 1
-        for k in ("total_own", "total_wb", "in_transit", "total"):
-            g[k] += row[k]
+        for k in (
+            "total_own",
+            "total_wb",
+            "in_transit",
+            "total",
+            "factory_qty",
+            "vehicle_forming_qty",
+            "vehicle_transit_qty",
+        ):
+            g[k] += row.get(k, 0)
         g["avg_daily_revenue"] += row.get("avg_daily_revenue", 0)
         g["avg_daily_profit"] += row.get("avg_daily_profit", 0)
+        for period in ("trend_7", "trend_14", "trend_30"):
+            rp = row.get(period, {})
+            gp = g[period]
+            for key in ("avg_daily_qty", "revenue", "profit"):
+                gp[key] += rp.get(key, 0)
         t = row["total"]
         for field, s, w in [
             ("avg_cost", "_cost_sum", "_cost_weight"),
@@ -964,6 +1356,12 @@ async def _group_unified(
             if row.get(field) and t > 0:
                 g[s] += row[field] * t
                 g[w] += t
+        # cost_factory_unit weighted by factory_qty
+        fq = row.get("factory_qty", 0)
+        cfu = row.get("cost_factory_unit", 0)
+        if cfu and fq > 0:
+            g["_cost_factory_sum"] += cfu * fq
+            g["_cost_factory_weight"] += fq
         for wh_name, qty in row.get("warehouses", {}).items():
             g["warehouses"][wh_name] = g["warehouses"].get(wh_name, 0) + qty
         for wh_name, qty in row.get("wb_stocks", {}).items():
@@ -978,8 +1376,15 @@ async def _group_unified(
             if g[w] > 0:
                 g[field] = round(g[s] / g[w], 2)
             del g[s], g[w]
+        if g["_cost_factory_weight"] > 0:
+            g["cost_factory_unit"] = round(g["_cost_factory_sum"] / g["_cost_factory_weight"], 2)
+        del g["_cost_factory_sum"], g["_cost_factory_weight"]
         g["avg_daily_revenue"] = round(g["avg_daily_revenue"], 2)
         g["avg_daily_profit"] = round(g["avg_daily_profit"], 2)
+        for period in ("trend_7", "trend_14", "trend_30"):
+            gp = g[period]
+            for key in ("avg_daily_qty", "revenue", "profit"):
+                gp[key] = round(gp[key], 2)
 
     grouped: dict[str, dict] = {}
 

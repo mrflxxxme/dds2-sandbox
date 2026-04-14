@@ -968,6 +968,9 @@ export interface UnifiedStockRow {
   vehicle_forming_qty: number;
   vehicle_transit_qty: number;
   avg_cost: number;
+  cost_factory_unit?: number;
+  is_cost_estimated?: boolean;
+  is_revenue_estimated?: boolean;
   avg_daily_revenue: number;
   avg_daily_profit: number;
   avg_price: number;
