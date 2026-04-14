@@ -114,8 +114,12 @@ async def _compute_period(
     )
     revenue_rows = result.fetchall()
 
-    # 2. Cost components per subject (entire project — cost orders span periods)
-    cost_by_subject = await helpers.load_cost_components_by_subject(db, project_id)
+    # 2. Cost components per subject — weighted by actual sales in the period.
+    #    Per-article cost (weighted by purchase qty) * per-article sale qty in
+    #    [date_from, date_to], then summed by subject. Fixes the 2026-04-14 bug
+    #    where subject-level weighting by purchase qty inflated cost_total when
+    #    bulk-bought slow-sellers differed from sale mix.
+    cost_by_subject = await helpers.load_cost_components_by_subject(db, project_id, date_from, date_to)
 
     # 3. Ad spend per subject for the period
     ads_by_subject = await helpers.load_ads_by_subject(db, project_id, date_from, date_to)
