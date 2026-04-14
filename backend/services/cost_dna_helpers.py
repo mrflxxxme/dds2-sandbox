@@ -244,6 +244,7 @@ def compute_category_metrics(
     proj_total = 0.0
     margin_pct = None
     if has_cost:
+        assert cost_row is not None  # narrowed by has_cost
         qty_in_basket = cost_row["qty_total"]
         # Weighted avg per-unit cost components (cost_order_items qty-weighted)
         avg_factory = cost_row["factory_total"] / qty_in_basket
