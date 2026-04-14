@@ -131,3 +131,34 @@ groups:
         annotations:
           summary: "Last backup is older than 8 hours"
           description: "Бэкап не обновлялся {{ $value | humanizeDuration }}. Расписание — каждые 6ч."
+
+      # ─── Backend / Worker Liveness ──────────────────────────────────
+      # Added after incident 2026-04-14: backend hung 15h `unhealthy` with
+      # NO alert firing (existing rules only catch 5xx / slow / DB / host).
+      # These rules detect the same scenario in <5 min next time.
+      - alert: BackendScrapeDown
+        expr: up{job="fastapi"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backend /metrics scrape failing"
+          description: "Prometheus cannot scrape backend at {{ $labels.instance }} for > 2 min — backend container down or unresponsive."
+
+      - alert: WorkerScrapeDown
+        expr: up{job="worker"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker /metrics scrape failing"
+          description: "Prometheus cannot scrape worker at {{ $labels.instance }} for > 2 min — scheduler container down or unresponsive."
+
+      - alert: BackendNoUserTraffic
+        expr: sum(rate(http_requests_total{job="fastapi", handler!~"/health|/metrics"}[5m])) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backend serves no user traffic"
+          description: "0 user requests over 5 min while /metrics keeps responding — backend likely hung on a deadlock (Redis / DB / external API). Same pattern as incident 2026-04-14."
