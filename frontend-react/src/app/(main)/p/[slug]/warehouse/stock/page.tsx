@@ -48,6 +48,8 @@ function SummaryTab({
             key: `wh_${wh.id}`,
             label: wh.name,
             align: 'right',
+            getValue: (row: StockSummaryRow) => row.warehouses[wh.id] || 0,
+            exportValue: (row: StockSummaryRow) => row.warehouses[wh.id] || 0,
             render: (_: unknown, row: StockSummaryRow) => {
                 const qty = row.warehouses[wh.id] || 0;
                 const res = (row.reserved || {})[wh.id] || 0;

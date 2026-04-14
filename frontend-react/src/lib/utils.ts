@@ -1,16 +1,52 @@
+export interface ExcelExportColumn {
+    key: string;
+    label: string;
+    getValue?: (row: any) => any;
+    exportValue?: (row: any) => any;
+}
+
+function isPrimitive(v: unknown): boolean {
+    if (v == null) return true;
+    const t = typeof v;
+    return t === 'string' || t === 'number' || t === 'boolean' || v instanceof Date;
+}
+
 /**
- * Excel export utility — converts any data array to .xlsx download
+ * Excel export utility — converts any data array to .xlsx download.
+ * If `columns` is provided, uses column labels as headers and respects
+ * `exportValue`/`getValue` accessors so nested/computed cells export correctly.
  */
-export function exportToExcel(data: Record<string, any>[], filename: string) {
+export function exportToExcel(
+    data: Record<string, any>[],
+    filename: string,
+    columns?: ExcelExportColumn[],
+) {
     import('exceljs').then(ExcelJS => {
         const workbook = new ExcelJS.Workbook();
         const worksheet = workbook.addWorksheet('Data');
 
         if (data.length === 0) return;
 
-        const headers = Object.keys(data[0]);
-        worksheet.columns = headers.map(key => ({ header: key, key }));
-        worksheet.addRows(data);
+        if (columns && columns.length > 0) {
+            worksheet.columns = columns.map(c => ({ header: c.label, key: c.key }));
+            worksheet.addRows(
+                data.map(row => {
+                    const out: Record<string, any> = {};
+                    for (const c of columns) {
+                        let v: any;
+                        if (c.exportValue) v = c.exportValue(row);
+                        else if (c.getValue) v = c.getValue(row);
+                        else v = row[c.key];
+                        out[c.key] = isPrimitive(v) ? v : '';
+                    }
+                    return out;
+                }),
+            );
+        } else {
+            const headers = Object.keys(data[0]);
+            worksheet.columns = headers.map(key => ({ header: key, key }));
+            worksheet.addRows(data);
+        }
 
         workbook.xlsx.writeBuffer().then(buffer => {
             const blob = new Blob([buffer], {
