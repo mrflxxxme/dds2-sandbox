@@ -9,10 +9,8 @@ import os
 
 os.environ["TESTING"] = "1"  # Disable rate limiter before importing app
 
-import asyncio
 import uuid
 
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -22,18 +20,9 @@ from backend.config import settings
 from backend.database import get_db
 from backend.main import app
 
-# ─── Session-scoped event loop ────────────────────────────────────────────────
-
-
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create a session-scoped event loop for all async tests."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
 # ─── Test DB engine (session-scoped to avoid pool conflicts) ──────────────────
+# Loop scope is set to "session" in pytest.ini (asyncio_default_test_loop_scope),
+# so the module-level engine stays bound to one event loop for the whole test run.
 
 TEST_DATABASE_URL = settings.DATABASE_URL
 
