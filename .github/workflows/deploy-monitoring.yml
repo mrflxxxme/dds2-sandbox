@@ -47,6 +47,10 @@ jobs:
     name: Deploy Monitoring server
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # environment: production lets this job read secrets scoped to the
+    # `production` environment (where cd-production.yml stores its secrets),
+    # in addition to repo-level secrets. Without this, secrets added under
+    # Settings → Environments → production → Secrets are invisible here.
     environment: production
 
     steps:
