@@ -11,8 +11,11 @@ on:
       - 'migrations/**'
       - 'requirements-backend.txt'
       - 'docker-compose.yml'
+      - 'docker-compose.app.yml'
       - 'Dockerfile.backend'
       - 'frontend-react/**'
+      - '.github/workflows/**'
+      - 'infra/**'
   pull_request:
     branches: [main]
     paths:
@@ -21,6 +24,11 @@ on:
       - 'migrations/**'
       - 'requirements-backend.txt'
       - 'frontend-react/**'
+      - 'docker-compose.yml'
+      - 'docker-compose.app.yml'
+      - 'Dockerfile.backend'
+      - '.github/workflows/**'
+      - 'infra/**'
 
 jobs:
   conventions:

@@ -108,7 +108,10 @@ jobs:
             done
 
             echo "🔨 Building and restarting all services..."
-            docker compose -f docker-compose.app.yml up -d --build --remove-orphans --force-recreate backend worker frontend-react nginx
+            # autoheal added 2026-04-14: watches autoheal=true labels and restarts
+            # unhealthy containers (incident-2026-04-14 root cause was backend hung
+            # `unhealthy` 15h because restart: unless-stopped only handles exited).
+            docker compose -f docker-compose.app.yml up -d --build --remove-orphans --force-recreate backend worker frontend-react nginx autoheal
 
             echo "🗄️ Running migrations on Data server..."
             docker compose -f docker-compose.app.yml exec -T backend alembic upgrade head
