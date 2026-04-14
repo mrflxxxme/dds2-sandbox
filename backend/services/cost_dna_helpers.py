@@ -97,9 +97,14 @@ def build_revenue_by_subject_sql() -> str:
 # slow-sellers had a higher unit price than the fast-movers.
 
 
+# IMPORTANT: article_seller in cost_order_items is often stored in UPPERCASE
+# (imported from factory CSVs), while sa_name in wb_finance_rows is lowercase
+# (as WB API returns it). We LOWER() both sides of the SA-matching to join
+# cost with sales reliably. Without this, projects with mixed-case catalog
+# imports see cost_total=0 for most subjects.
 _PER_SA_COST_SQL = text("""
 SELECT
-    coi.article_seller AS sa,
+    LOWER(coi.article_seller) AS sa,
     SUM(coi.cost_rub * coi.qty) / NULLIF(SUM(coi.qty), 0) AS avg_factory,
     SUM(coi.duty_rub * coi.qty) / NULLIF(SUM(coi.qty), 0) AS avg_duty,
     SUM(coi.delivery_rub * coi.qty) / NULLIF(SUM(coi.qty), 0) AS avg_delivery,
@@ -115,13 +120,13 @@ WHERE co.project_id = :project_id
   AND coi.article_seller IS NOT NULL
   AND coi.article_seller != ''
   AND coi.total_rub IS NOT NULL
-GROUP BY coi.article_seller
+GROUP BY LOWER(coi.article_seller)
 """)
 
 
 _PER_SA_SALES_SQL = text("""
 SELECT
-    sa_name AS sa,
+    LOWER(sa_name) AS sa,
     MAX(NULLIF(subject_name, '')) AS subject,
     SUM(CASE WHEN doc_type_name = 'Продажа'
              AND supplier_oper_name IN ('Продажа', 'Возврат')
@@ -137,7 +142,7 @@ WHERE project_id = :project_id
   )
   AND sa_name IS NOT NULL
   AND sa_name != ''
-GROUP BY sa_name
+GROUP BY LOWER(sa_name)
 """)
 
 
