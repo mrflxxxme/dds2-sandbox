@@ -28,6 +28,8 @@ def _make_revenue_row(
     comm_ret=0,
     logistics=0,
     storage=0,
+    penalty=0,
+    acceptance=0,
     other_deduction=0,
     sale_qty=0,
     ret_qty=0,
@@ -45,6 +47,8 @@ def _make_revenue_row(
         comm_ret=comm_ret,
         logistics=logistics,
         storage=storage,
+        penalty=penalty,
+        acceptance=acceptance,
         other_deduction=other_deduction,
         sale_qty=sale_qty,
         ret_qty=ret_qty,
@@ -82,10 +86,12 @@ class TestComputeCategoryMetrics:
         """Full-data path: revenue, cost, tax, MP fees → margin == 100 - sum(components).
 
         Scenario:
-            retail=10000, sales_amount=9000, ppvz_net=7200 → commission=1800
+            retail=10000, sales_amount=9000, ppvz_net=7200
+            mp_commission   = revenue - ppvz_net    = 10000 - 7200 = 2800 -> 28% (incl. SPP)
+            opiu_commission = sales_amount - ppvz_net = 9000 - 7200 = 1800 (tax base)
             logistics=500, storage=200, adv=400, sale_qty=10
             cost per unit: factory=300, duty=60, delivery=40, vat=20 → total 420 * 10 = 4200
-            tax: usn=6%, nds=0% → 9000 * 0.06 = 540
+            tax (regime=usn_income, default): 9000 * 0.06 = 540
         """
         rev_row = _make_revenue_row(
             subject="Футболка",
@@ -109,7 +115,7 @@ class TestComputeCategoryMetrics:
             cost_total=4200.0,
             qty_total=10,
         )
-        tax_info = {"usn_rate": 6, "nds_rate": 0}
+        tax_info = {"usn_rate": 6, "nds_rate": 0, "tax_regime": "usn_income"}
 
         m = compute_category_metrics(rev_row, cost_row, adv_sum=400, tax_info=tax_info)
 
@@ -118,13 +124,13 @@ class TestComputeCategoryMetrics:
         assert m["has_cost_data"] is True
 
         # MP components (as % of revenue)
-        # commission = sales_amount - ppvz_net = 9000 - 7200 = 1800 → 18%
-        assert m["mp_commission_pct"] == 18.0
+        # mp_commission = revenue - ppvz_net = 10000 - 7200 = 2800 → 28% (включает СПП)
+        assert m["mp_commission_pct"] == 28.0
         assert m["mp_logistics_pct"] == 5.0  # 500 / 10000 * 100
         assert m["mp_storage_pct"] == 2.0  # 200 / 10000 * 100
         assert m["mp_advertising_pct"] == 4.0  # 400 / 10000 * 100
         assert m["mp_other_pct"] == 0.0
-        assert m["mp_total_pct"] == 29.0
+        assert m["mp_total_pct"] == 39.0
 
         # Cost components: weighted avg per unit * net_qty (10) / revenue
         assert m["cost_factory_pct"] == 30.0  # 3000/10000 * 100
@@ -133,11 +139,11 @@ class TestComputeCategoryMetrics:
         assert m["cost_vat_pct"] == 2.0
         assert m["cost_total_pct"] == 42.0
 
-        # Tax: 9000 * 0.06 = 540 → 5.4%
+        # Tax: regime=usn_income → expenses не вычитаются → 9000 * 0.06 = 540 → 5.4%
         assert m["tax_pct"] == 5.4
 
-        # Margin = 100 - 42 - 29 - 5.4 = 23.6
-        assert m["margin_pct"] == 23.6
+        # Margin = 100 - 42 - 39 - 5.4 = 13.6
+        assert m["margin_pct"] == 13.6
 
     def test_compute_category_metrics_no_cost_data(self):
         """cost_row=None → has_cost_data=False, all cost_*_pct=None, margin=None,
@@ -149,7 +155,7 @@ class TestComputeCategoryMetrics:
             logistics=250,
             sale_qty=5,
         )
-        tax_info = {"usn_rate": 6, "nds_rate": 0}
+        tax_info = {"usn_rate": 6, "nds_rate": 0, "tax_regime": "usn_income"}
 
         m = compute_category_metrics(rev_row, cost_row=None, adv_sum=100, tax_info=tax_info)
 
@@ -163,10 +169,11 @@ class TestComputeCategoryMetrics:
 
         # MP/tax still computed
         assert m["revenue"] == 5000.0
-        assert m["mp_commission_pct"] == round(900 / 5000 * 100, 2)  # 18.0
+        # mp_commission = revenue - ppvz_net = 5000 - 3600 = 1400 → 28%
+        assert m["mp_commission_pct"] == 28.0
         assert m["mp_logistics_pct"] == 5.0
         assert m["mp_advertising_pct"] == 2.0
-        # tax = 4500 * 0.06 = 270 → 5.4%
+        # tax (regime=usn_income) = 4500 * 0.06 = 270 → 5.4% of revenue
         assert m["tax_pct"] == 5.4
 
     def test_compute_category_metrics_zero_revenue(self):
@@ -216,7 +223,7 @@ class TestComputeCategoryMetrics:
         rev_row = _make_revenue_row(
             sale_retail=10000,
             sale_amount=9000,
-            ppvz_sale=8000,  # commission = 9000-8000 = 1000 → 10%
+            ppvz_sale=8000,  # mp_commission = revenue - ppvz_net = 10000 - 8000 = 2000 → 20%
             sale_qty=10,
         )
         tax_info = {"usn_rate": 0, "nds_rate": 0}
@@ -224,8 +231,8 @@ class TestComputeCategoryMetrics:
 
         # 750 / 10000 * 100 = 7.5
         assert m["mp_advertising_pct"] == 7.5
-        # mp_total includes adv
-        assert m["mp_total_pct"] == round(10.0 + 7.5, 2)  # commission + adv
+        # mp_total = commission(20) + adv(7.5)
+        assert m["mp_total_pct"] == 27.5
 
     def test_compute_category_metrics_net_qty_zero(self):
         """sale_qty == ret_qty → has_cost_data=False even if cost_row provided.
@@ -259,6 +266,8 @@ class TestComputeCategoryMetrics:
             ppvz_sale=720,
             logistics=50,
             storage=20,
+            penalty=10,
+            acceptance=5,
             sale_qty=2,
         )
         cost_row = _make_cost_row(
@@ -269,7 +278,10 @@ class TestComputeCategoryMetrics:
         assert "_sales_amount" in m
         assert "_logistics" in m
         assert "_storage" in m
-        assert "_commission" in m
+        assert "_mp_commission" in m
+        assert "_opiu_commission" in m
+        assert "_penalty" in m
+        assert "_acceptance" in m
         assert "_other_deduction" in m
         assert "_adv_sum" in m
         assert "_net_qty" in m
@@ -281,6 +293,12 @@ class TestComputeCategoryMetrics:
         # Exact value spot check
         assert m["_adv_sum"] == 50
         assert m["_net_qty"] == 2
+        # mp_commission = revenue - ppvz_net = 1000 - 720 = 280
+        assert m["_mp_commission"] == 280
+        # opiu_commission = sales - ppvz_net = 900 - 720 = 180
+        assert m["_opiu_commission"] == 180
+        assert m["_penalty"] == 10
+        assert m["_acceptance"] == 5
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -289,36 +307,130 @@ class TestComputeCategoryMetrics:
 
 
 class TestComputeTax:
-    """Simplified USN tax calculation used by Cost-DNA."""
+    """Tax calc — mirrors opiu_service._calc_tax + _tax_expenses_for."""
 
     def test_compute_tax_usn_income(self):
-        """usn_rate=6, nds_rate=0 → tax_total == sales * 0.06 (no NDS)."""
-        tax = _compute_tax(100000.0, {"usn_rate": 6, "nds_rate": 0})
+        """regime=usn_income, usn_rate=6, nds_rate=0 → tax = sales * 0.06 (expenses ignored)."""
+        tax = _compute_tax(100000.0, tax_info={"usn_rate": 6, "nds_rate": 0, "tax_regime": "usn_income"})
         assert tax == 6000.0
 
     def test_compute_tax_with_nds(self):
-        """usn_rate=6, nds_rate=20 → NDS extracted first, then USN on base.
+        """regime=usn_income, usn_rate=6, nds_rate=20 → NDS extracted first, then USN on base.
 
         nds  = 100000 * 0.20 / 1.20 = 16666.666...
         base = 100000 - 16666.666... = 83333.333...
         usn  = base * 0.06 ≈ 5000
         tot  = usn + nds ≈ 21666.666...
         """
-        tax = _compute_tax(100000.0, {"usn_rate": 6, "nds_rate": 20})
+        tax = _compute_tax(100000.0, tax_info={"usn_rate": 6, "nds_rate": 20, "tax_regime": "usn_income"})
         expected_nds = 100000 * 0.20 / 1.20
         expected_usn = (100000 - expected_nds) * 0.06
         assert abs(tax - (expected_nds + expected_usn)) < 1e-6
 
     def test_compute_tax_zero_rate(self):
         """usn_rate=0 → no tax whatsoever."""
-        tax = _compute_tax(50000.0, {"usn_rate": 0, "nds_rate": 0})
+        tax = _compute_tax(50000.0, tax_info={"usn_rate": 0, "nds_rate": 0})
         assert tax == 0.0
 
     def test_compute_tax_zero_income(self):
-        """income<=0 → tax is zero regardless of rate."""
-        assert _compute_tax(0.0, {"usn_rate": 6, "nds_rate": 0}) == 0.0
-        assert _compute_tax(-100.0, {"usn_rate": 6, "nds_rate": 0}) == 0.0
+        """sales_amount<=0 → tax is zero regardless of rate."""
+        assert _compute_tax(0.0, tax_info={"usn_rate": 6, "nds_rate": 0}) == 0.0
+        assert _compute_tax(-100.0, tax_info={"usn_rate": 6, "nds_rate": 0}) == 0.0
 
     def test_compute_tax_missing_keys(self):
         """Missing keys in tax_info should default to 0 (no crash)."""
-        assert _compute_tax(1000.0, {}) == 0.0
+        assert _compute_tax(1000.0, tax_info={}) == 0.0
+        assert _compute_tax(1000.0, tax_info=None) == 0.0
+
+    def test_compute_tax_usn_income_ignores_expenses(self):
+        """regime=usn_income → expenses are ignored, only sales matter."""
+        tax_with_exp = _compute_tax(
+            100000.0,
+            log=5000,
+            stor=2000,
+            opiu_comm=1000,
+            pen=500,
+            other_ded=300,
+            adv=4000,
+            cost_val=20000,
+            tax_info={"usn_rate": 6, "nds_rate": 0, "tax_regime": "usn_income", "cost_as_expense": True},
+        )
+        # regime=usn_income → expenses irrelevant → 100000 * 0.06 = 6000
+        assert tax_with_exp == 6000.0
+
+    def test_compute_tax_expense_vat_regime_no_cost(self):
+        """regime=usn_income_expense_vat, cost_as_expense=False → expenses subtract from base, cost не вычитается.
+
+        sales=100000, nds=7%, usn=15%
+        nds  = 100000 * 0.07 / 1.07 ≈ 6542.06
+        base = 100000 - 6542.06 = 93457.94
+        expenses = log(5000) + stor(2000) + opiu_comm(1000) + pen(500) + other(300) + adv(4000) = 12800
+        base -= 12800 = 80657.94
+        usn  = 80657.94 * 0.15 ≈ 12098.69
+        tax  = 6542.06 + 12098.69 ≈ 18640.75
+        """
+        tax = _compute_tax(
+            100000.0,
+            log=5000,
+            stor=2000,
+            opiu_comm=1000,
+            pen=500,
+            other_ded=300,
+            adv=4000,
+            cost_val=50000,  # игнорируется т.к. cost_as_expense=False
+            tax_info={
+                "usn_rate": 15,
+                "nds_rate": 7,
+                "tax_regime": "usn_income_expense_vat",
+                "cost_as_expense": False,
+            },
+        )
+        expected_nds = 100000 * 0.07 / 1.07
+        expected_base = (100000 - expected_nds) - 12800
+        expected_usn = expected_base * 0.15
+        assert abs(tax - (expected_nds + expected_usn)) < 1e-6
+
+    def test_compute_tax_expense_vat_regime_with_cost(self):
+        """regime=usn_income_expense_vat, cost_as_expense=True → cost ALSO subtracts from base."""
+        tax = _compute_tax(
+            100000.0,
+            log=5000,
+            stor=2000,
+            opiu_comm=1000,
+            pen=500,
+            other_ded=300,
+            adv=4000,
+            cost_val=50000,
+            tax_info={
+                "usn_rate": 15,
+                "nds_rate": 7,
+                "tax_regime": "usn_income_expense_vat",
+                "cost_as_expense": True,
+            },
+        )
+        expected_nds = 100000 * 0.07 / 1.07
+        expected_base = (100000 - expected_nds) - 12800 - 50000
+        expected_usn = max(expected_base * 0.15, 0)
+        assert abs(tax - (expected_nds + expected_usn)) < 1e-6
+
+    def test_compute_tax_expense_vat_negative_base_clamped_to_zero(self):
+        """If expenses > income then USN is clamped to 0, only NDS remains."""
+        tax = _compute_tax(
+            10000.0,
+            log=20000,  # расходы существенно больше выручки
+            stor=5000,
+            opiu_comm=3000,
+            pen=0,
+            other_ded=0,
+            adv=2000,
+            cost_val=5000,
+            tax_info={
+                "usn_rate": 15,
+                "nds_rate": 7,
+                "tax_regime": "usn_income_expense_vat",
+                "cost_as_expense": True,
+            },
+        )
+        expected_nds = 10000 * 0.07 / 1.07
+        # base уйдёт в минус, max(...,0) = 0 → tax = только НДС
+        assert abs(tax - expected_nds) < 1e-6
