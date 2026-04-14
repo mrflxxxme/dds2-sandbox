@@ -119,7 +119,7 @@ jobs:
             else
               echo "Only config changed — hot-reloading Prometheus"
               docker compose up -d --remove-orphans
-              if curl -sS -X POST http://localhost:9090/-/reload; then
+              if curl -sS -X POST http://10.0.0.3:9090/-/reload; then
                 echo "Prometheus reloaded successfully"
               else
                 echo "Hot-reload failed, falling back to restart"
@@ -138,14 +138,14 @@ jobs:
             # Wait for Prometheus to be ready (WAL replay can take 10-15s after restart).
             # Run 24387021986 failed because the previous fixed `sleep 3` was too short.
             for i in 1 2 3 4 5 6 7 8 9 10; do
-              if curl -sf http://localhost:9090/-/ready > /dev/null 2>&1; then
+              if curl -sf http://10.0.0.3:9090/-/ready > /dev/null 2>&1; then
                 echo "Prometheus ready after ${i}x3s"
                 break
               fi
               sleep 3
             done
             # Use grep instead of python json — avoids quoting issues over SSH
-            COUNT=$(curl -s http://localhost:9090/api/v1/rules \
+            COUNT=$(curl -s http://10.0.0.3:9090/api/v1/rules \
               | grep -oE '"name":"[A-Z][^"]+"' | wc -l)
             echo "Prometheus loaded $COUNT alert rules"
             if [ "$COUNT" -lt 10 ]; then
@@ -153,7 +153,7 @@ jobs:
               exit 1
             fi
             # Also check alertmanager is healthy (it has its own restart loop on bad config)
-            if ! curl -sf http://localhost:9093/-/ready > /dev/null 2>&1; then
+            if ! curl -sf http://10.0.0.3:9093/-/ready > /dev/null 2>&1; then
               echo "::error::Alertmanager is not ready — check 'docker logs monitoring-alertmanager-1'"
               exit 1
             fi
