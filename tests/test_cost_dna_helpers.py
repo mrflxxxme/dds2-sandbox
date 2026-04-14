@@ -637,3 +637,31 @@ class TestAggregateCostBySubjectSales:
         }
         result = _aggregate_cost_by_subject_sales(cost_per_sa, sales_per_sa)
         assert result == {}
+
+    def test_case_sensitive_sa_matching_from_caller(self):
+        """Pure helper trusts the caller to normalize SA keys.
+
+        Real catalogs have mixed case (cost import = UPPER, WB API = lower),
+        so `load_cost_components_by_subject` normalizes via `LOWER()` in SQL.
+        This test documents that the pure helper itself does NOT normalize —
+        the caller must provide already-normalized keys, otherwise cost gets
+        dropped silently.
+        """
+        cost_per_sa = {
+            "sa-a": {  # lowercase — as produced by LOWER() in SQL
+                "avg_factory": 100.0,
+                "avg_duty": 0.0,
+                "avg_delivery": 0.0,
+                "avg_vat": 0.0,
+                "avg_total": 100.0,
+            },
+        }
+        # Caller passes mismatched case → treated as no cost for SA-A
+        sales_per_sa_mismatched = {"SA-A": ("Ковры", 50)}
+        result_mismatched = _aggregate_cost_by_subject_sales(cost_per_sa, sales_per_sa_mismatched)
+        assert result_mismatched == {}
+
+        # Caller passes normalized case → cost picked up correctly
+        sales_per_sa_normalized = {"sa-a": ("Ковры", 50)}
+        result_normalized = _aggregate_cost_by_subject_sales(cost_per_sa, sales_per_sa_normalized)
+        assert result_normalized["Ковры"]["cost_total"] == 5000.0
