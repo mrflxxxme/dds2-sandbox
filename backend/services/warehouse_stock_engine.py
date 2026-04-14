@@ -365,8 +365,17 @@ async def get_stock_summary(db: AsyncSession, project_id: int) -> list[dict]:
 # ─── Unified Stock (own + WB + in-transit) ────────────────────────────────
 
 
-def _build_finance_query(project_id: int, cutoff):
+def _build_finance_query(project_id: int, cutoff, today):
+    """Build per-nm aggregation matching wb_bdr_helpers.build_bdr_aggregate_sql.
+
+    Filter mirrors BDR semantics:
+    - COALESCE(sale_dt, rr_dt) BETWEEN cutoff AND today  (both bounds, fallback to sale_dt)
+    - sale_qty/ret_qty are filtered by supplier_oper_name IN ('Продажа','Возврат')
+      so compensations/recharges don't inflate cost_total.
+    """
     R = WbFinanceRow
+    sale_op = R.supplier_oper_name.in_(["Продажа", "Возврат"])
+    effective_dt = func.coalesce(R.sale_dt, R.rr_dt)
     return (
         select(
             R.nm_id,
@@ -412,34 +421,93 @@ def _build_finance_query(project_id: int, cutoff):
                 Decimal("0"),
             ).label("loan_deduction"),
             func.coalesce(
-                func.sum(case((R.doc_type_name == "Продажа", R.quantity), else_=0))
-                - func.sum(case((R.doc_type_name == "Возврат", R.quantity), else_=0)),
+                func.sum(case(((R.doc_type_name == "Продажа") & sale_op, R.quantity), else_=0))
+                - func.sum(case(((R.doc_type_name == "Возврат") & sale_op, R.quantity), else_=0)),
                 0,
             ).label("sale_qty"),
-            func.count(func.distinct(R.rr_dt)).label("days_count"),
+            func.count(func.distinct(effective_dt)).label("days_count"),
         )
-        .where(R.project_id == project_id, R.rr_dt >= cutoff)
+        .where(
+            R.project_id == project_id,
+            effective_dt.between(cutoff, today),
+        )
         .group_by(R.nm_id)
         .limit(10000)
     )
+
+
+def _compute_tax_and_profit(
+    *,
+    sales_amount: Decimal,
+    to_pay: Decimal,
+    ppvz_net: Decimal,
+    logistics: Decimal,
+    storage: Decimal,
+    penalties: Decimal,
+    deductions_total: Decimal,
+    ad_deduction: Decimal,
+    loan_deduction: Decimal,
+    adv_sum: Decimal,
+    cost_total: Decimal,
+    usn_rate: Decimal,
+    nds_rate: Decimal,
+    regime: str,
+    cost_as_expense: bool,
+) -> tuple[Decimal, Decimal]:
+    """Pure-function tax+profit calc — mirrors bdr_enrichment.apply_tax_article.
+
+    Returns: (tax_total, total_profit).
+
+    For `usn_income_expense_vat` regime the USN tax base is reduced by all
+    operating expenses (and optionally cost). Otherwise USN is computed on
+    income net of НДС. The `to_pay` parameter is expected to already have
+    `deductions_total` subtracted, so ad/loan deductions are added back
+    when computing profit (same convention as BDR).
+    """
+    commission = sales_amount - ppvz_net
+    operating_deductions = deductions_total - ad_deduction - loan_deduction
+
+    nds_sum = sales_amount * nds_rate / (Decimal("1") + nds_rate) if nds_rate > 0 else Decimal("0")
+    tax_base = sales_amount - nds_sum
+    if regime == "usn_income_expense_vat":
+        expenses = (
+            abs(logistics) + abs(storage) + abs(commission) + abs(penalties) + abs(operating_deductions) + adv_sum
+        )
+        if cost_as_expense:
+            expenses += cost_total
+        tax_base = sales_amount - nds_sum - expenses
+    usn_sum = max(tax_base * usn_rate, Decimal("0")) if usn_rate > 0 else Decimal("0")
+    tax = nds_sum + usn_sum
+
+    total_profit = to_pay + ad_deduction + loan_deduction - adv_sum - cost_total - tax
+    return tax, total_profit
 
 
 async def _compute_period_metrics(
     db: AsyncSession,
     project_id: int,
     cutoff,
+    today,
     nm_id_to_nom_id: dict[int, int],
     cost_map: dict[int, float],
-    usn_rate: Decimal,
-    nds_rate: Decimal,
+    tax_info: dict,
 ) -> dict[int, dict]:
     """Compute per-nm period metrics: realization, profit, sale_qty, days_count.
+
+    Tax formula matches bdr_enrichment.apply_tax_article — for `usn_income_expense_vat`
+    regime expenses (logistics/storage/penalties/deductions/adv [+cost]) are subtracted
+    from the USN tax base; otherwise USN is computed on net income (income minus НДС).
 
     Returns: {nom_id: {realization, total_profit, sale_qty, days_count, avg_price, avg_profit}}
     """
     from backend.models.integrations import WbFunnelDaily
 
-    finance_result = await db.execute(_build_finance_query(project_id, cutoff))
+    usn_rate = Decimal(str(tax_info.get("usn_rate", 0))) / Decimal("100")
+    nds_rate = Decimal(str(tax_info.get("nds_rate", 0))) / Decimal("100")
+    regime = tax_info.get("tax_regime", "usn_income")
+    cost_as_expense = bool(tax_info.get("cost_as_expense", False))
+
+    finance_result = await db.execute(_build_finance_query(project_id, cutoff, today))
     finance_rows = finance_result.all()
 
     adv_result = await db.execute(
@@ -447,7 +515,11 @@ async def _compute_period_metrics(
             WbFunnelDaily.nm_id,
             func.coalesce(func.sum(WbFunnelDaily.adv_sum), Decimal("0")).label("adv_sum"),
         )
-        .where(WbFunnelDaily.project_id == project_id, WbFunnelDaily.date >= cutoff)
+        .where(
+            WbFunnelDaily.project_id == project_id,
+            WbFunnelDaily.date >= cutoff,
+            WbFunnelDaily.date <= today,
+        )
         .group_by(WbFunnelDaily.nm_id)
         .limit(10000)
     )
@@ -477,12 +549,23 @@ async def _compute_period_metrics(
 
         to_pay = ppvz_net - logistics - storage - penalties - acceptance - deductions_total
 
-        nds_sum = sales_amount * nds_rate / (1 + nds_rate) if nds_rate > 0 else Decimal("0")
-        tax_base = sales_amount - nds_sum
-        usn_sum = max(tax_base * usn_rate, Decimal("0")) if usn_rate > 0 else Decimal("0")
-        tax = nds_sum + usn_sum
-
-        total_profit = to_pay + ad_deduction + loan_deduction - adv_sum - cost_total - tax
+        _tax, total_profit = _compute_tax_and_profit(
+            sales_amount=sales_amount,
+            to_pay=to_pay,
+            ppvz_net=ppvz_net,
+            logistics=logistics,
+            storage=storage,
+            penalties=penalties,
+            deductions_total=deductions_total,
+            ad_deduction=ad_deduction,
+            loan_deduction=loan_deduction,
+            adv_sum=adv_sum,
+            cost_total=cost_total,
+            usn_rate=usn_rate,
+            nds_rate=nds_rate,
+            regime=regime,
+            cost_as_expense=cost_as_expense,
+        )
 
         period_map[nom_id] = {
             "realization": realization,
@@ -513,13 +596,15 @@ async def _load_bdr_metrics(
     cutoff_14 = today - timedelta(days=14)
     cutoff_7 = today - timedelta(days=7)
 
-    tax_settings = await load_tax_settings(db, project_id, cutoff_30, today)
-    usn_rate = Decimal(str(tax_settings.get("usn_rate", 0))) / Decimal("100")
-    nds_rate = Decimal(str(tax_settings.get("nds_rate", 0))) / Decimal("100")
+    # Use the period END (today) so the *current* tax regime is applied to the
+    # current snapshot — matches user intuition that "Налоги по апрелю" should
+    # affect today's analytics. load_tax_settings keys off d_from.month, so
+    # passing today picks the current-month rates.
+    tax_info = await load_tax_settings(db, project_id, today, today)
 
-    period_30 = await _compute_period_metrics(db, project_id, cutoff_30, nm_id_to_nom_id, cost_map, usn_rate, nds_rate)
-    period_14 = await _compute_period_metrics(db, project_id, cutoff_14, nm_id_to_nom_id, cost_map, usn_rate, nds_rate)
-    period_7 = await _compute_period_metrics(db, project_id, cutoff_7, nm_id_to_nom_id, cost_map, usn_rate, nds_rate)
+    period_30 = await _compute_period_metrics(db, project_id, cutoff_30, today, nm_id_to_nom_id, cost_map, tax_info)
+    period_14 = await _compute_period_metrics(db, project_id, cutoff_14, today, nm_id_to_nom_id, cost_map, tax_info)
+    period_7 = await _compute_period_metrics(db, project_id, cutoff_7, today, nm_id_to_nom_id, cost_map, tax_info)
 
     def _trend(p: dict) -> dict:
         if not p:
@@ -920,21 +1005,36 @@ async def get_unified_stock_summary(
     db: AsyncSession,
     project_id: int,
     group_by: str = "sku",
+    brand: str | None = None,
 ) -> list[dict]:
     """
     Unified stock across own warehouses, WB marketplace, and in-transit.
     Merges WarehouseStock + WbWarehouseStock + SHIPPED assembly items.
 
     group_by: sku | brand | subject | imt | tag | abc
+    brand: optional case-sensitive filter by Nomenclature.brand. When set, only
+        nomenclature rows for that brand contribute (own/WB/in-transit/factory).
     """
-    # 1. Own warehouse stock grouped by nomenclature_id
-    own_result = await db.execute(
-        select(WarehouseStock)
-        .where(
-            WarehouseStock.project_id == project_id,
+    # 0. If brand filter is set, resolve allowed nomenclature_ids first
+    allowed_nom_ids: set[int] | None = None
+    if brand:
+        brand_result = await db.execute(
+            select(Nomenclature.id)
+            .where(
+                Nomenclature.project_id == project_id,
+                Nomenclature.brand == brand,
+            )
+            .limit(50000)
         )
-        .limit(10000)
-    )
+        allowed_nom_ids = {r[0] for r in brand_result.all()}
+        if not allowed_nom_ids:
+            return []
+
+    # 1. Own warehouse stock grouped by nomenclature_id
+    own_query = select(WarehouseStock).where(WarehouseStock.project_id == project_id)
+    if allowed_nom_ids is not None:
+        own_query = own_query.where(WarehouseStock.nomenclature_id.in_(allowed_nom_ids))
+    own_result = await db.execute(own_query.limit(10000))
     own_rows = own_result.scalars().all()
 
     # 2. Warehouse id->name map
@@ -950,7 +1050,7 @@ async def get_unified_stock_summary(
 
     # 3. WB warehouse stock -- join with Nomenclature to get nomenclature_id
     #    Use quantity_full (includes in_way_to_client + in_way_from_client)
-    wb_result = await db.execute(
+    wb_query = (
         select(
             Nomenclature.id.label("nomenclature_id"),
             WbWarehouseStock.warehouse_name,
@@ -964,10 +1064,13 @@ async def get_unified_stock_summary(
         .group_by(Nomenclature.id, WbWarehouseStock.warehouse_name)
         .limit(10000)
     )
+    if allowed_nom_ids is not None:
+        wb_query = wb_query.where(Nomenclature.id.in_(allowed_nom_ids))
+    wb_result = await db.execute(wb_query)
     wb_rows = wb_result.all()
 
     # 4. In-transit (SHIPPED assembly request items) grouped by nomenclature_id
-    shipped_result = await db.execute(
+    shipped_query = (
         select(
             AssemblyRequestItem.nomenclature_id,
             func.sum(AssemblyRequestItem.quantity).label("qty"),
@@ -981,10 +1084,13 @@ async def get_unified_stock_summary(
         .group_by(AssemblyRequestItem.nomenclature_id)
         .limit(10000)
     )
+    if allowed_nom_ids is not None:
+        shipped_query = shipped_query.where(AssemblyRequestItem.nomenclature_id.in_(allowed_nom_ids))
+    shipped_result = await db.execute(shipped_query)
     in_transit_map: dict[int, int] = {row.nomenclature_id: int(row.qty or 0) for row in shipped_result.all()}
 
     # 4b. Factory orders — remaining qty (not yet assigned to vehicles)
-    factory_result = await db.execute(
+    factory_query = (
         select(
             Nomenclature.id.label("nomenclature_id"),
             func.sum(FactoryOrderItem.qty - FactoryOrderItem.assigned_qty).label("remaining"),
@@ -1004,10 +1110,13 @@ async def get_unified_stock_summary(
         .group_by(Nomenclature.id)
         .limit(10000)
     )
+    if allowed_nom_ids is not None:
+        factory_query = factory_query.where(Nomenclature.id.in_(allowed_nom_ids))
+    factory_result = await db.execute(factory_query)
     factory_map: dict[int, int] = {row.nomenclature_id: max(int(row.remaining or 0), 0) for row in factory_result.all()}
 
     # 4c. Vehicles being formed (FORMING) — items already assigned but not yet shipped
-    vehicle_forming_result = await db.execute(
+    vehicle_forming_query = (
         select(
             Nomenclature.id.label("nomenclature_id"),
             func.sum(CostOrderItem.qty).label("qty"),
@@ -1027,12 +1136,15 @@ async def get_unified_stock_summary(
         .group_by(Nomenclature.id)
         .limit(10000)
     )
+    if allowed_nom_ids is not None:
+        vehicle_forming_query = vehicle_forming_query.where(Nomenclature.id.in_(allowed_nom_ids))
+    vehicle_forming_result = await db.execute(vehicle_forming_query)
     vehicle_forming_map: dict[int, int] = {
         row.nomenclature_id: int(row.qty or 0) for row in vehicle_forming_result.all()
     }
 
     # 4d. Vehicles in transit (SHIPPED, CUSTOMS, DISPATCHED — en route to warehouse)
-    vehicle_transit_result = await db.execute(
+    vehicle_transit_query = (
         select(
             Nomenclature.id.label("nomenclature_id"),
             func.sum(CostOrderItem.qty).label("qty"),
@@ -1052,6 +1164,9 @@ async def get_unified_stock_summary(
         .group_by(Nomenclature.id)
         .limit(10000)
     )
+    if allowed_nom_ids is not None:
+        vehicle_transit_query = vehicle_transit_query.where(Nomenclature.id.in_(allowed_nom_ids))
+    vehicle_transit_result = await db.execute(vehicle_transit_query)
     vehicle_transit_map: dict[int, int] = {
         row.nomenclature_id: int(row.qty or 0) for row in vehicle_transit_result.all()
     }
