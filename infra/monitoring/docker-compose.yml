@@ -56,7 +56,12 @@ services:
       - GF_SERVER_ROOT_URL=https://app.vyatkin-wb.ru/grafana/
       - GF_SERVER_SERVE_FROM_SUB_PATH=true
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:?Set GRAFANA_PASSWORD in .env}
+      # Reads GF_SECURITY_ADMIN_PASSWORD from .env. Fallback default keeps
+      # `docker compose config` valid even if .env is missing — incident
+      # 2026-04-14: deploy-monitoring.yml run 24386558385 used rsync --delete
+      # which wiped .env on the monitoring server, and the previous strict
+      # ${GRAFANA_PASSWORD:?...} form blocked all subsequent compose commands.
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:-CHANGE_ME_IN_ENV}
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafanadata:/var/lib/grafana
