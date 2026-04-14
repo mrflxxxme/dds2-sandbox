@@ -61,6 +61,13 @@
 - LLM клиент: `services/ai/llm_client.py`
 - Синтезатор ответов: `services/ai/synthesizer.py`
 
+### AI Chat — web-интерфейс агентов
+- Router: `routers/ai_chat.py` — prefix `/ai`. CRUD conversations, SSE message streaming, file upload
+- Service: `services/ai_chat_service.py` — list/CRUD `AiConversation` и `AiMessage`
+- Schema: `schemas/ai_chat.py` — Pydantic для conversations, messages, file upload
+- Models: `models/ai_chat.py` — `AiConversation` с SoftDeleteMixin + `AiMessage` с JSONB полями `files`/`tools_used`
+- Передаёт запросы в `services/ai/orchestrator.ask` — собственной AI-логики не содержит
+
 ### Склад
 - CRUD: `services/warehouse_crud.py`
 - Сервис: `services/warehouse_service.py`, `warehouse_stock_service.py`, `warehouse_stock_engine.py`
@@ -110,9 +117,9 @@ from backend.models.mixins import SoftDeleteMixin
 | Что ищу | Где |
 |---------|-----|
 | Модель таблицы | `models/{domain}.py` + `models/__init__.py` |
-| API endpoint | `routers/` (assembly, auth, cost, fbo_supplies, funnel, import_txn, integrations, monitoring, planning, planning_customs, planning_wb_payouts, projects, refs, reports, reports_stock, reports_wb, supply_chain, telegram, telegram_miniapp, telegram_webhook, warehouse, ws) |
-| Бизнес-логика | `services/` (domain services + `project_settings_service.py` для мутаций настроек проекта). NB: `assembly/`, `fbo_supply/`, `supply_chain/` — пакеты (разбиты из монолитов) |
-| Pydantic schemas | `schemas/` (anomaly, assembly, auth, capital, common, cost, imports, integrations, monitoring, planning, refs, reports, supply_chain, tariff, tax, telegram, transactions, warehouse, wb_fbo) |
+| API endpoint | `routers/` (ai_chat, assembly, auth, cost, fbo_supplies, funnel, import_txn, integrations, monitoring, planning, planning_customs, planning_wb_payouts, projects, refs, reports, reports_stock, reports_wb, supply_chain, telegram, telegram_miniapp, telegram_webhook, warehouse, ws) |
+| Бизнес-логика | `services/` (domain services + `ai_chat_service.py` для web AI chat + `project_settings_service.py` для мутаций настроек проекта). NB: `assembly/`, `fbo_supply/`, `supply_chain/` — пакеты (разбиты из монолитов) |
+| Pydantic schemas | `schemas/` (ai_chat, anomaly, assembly, auth, capital, common, cost, imports, integrations, monitoring, planning, refs, reports, supply_chain, tariff, tax, telegram, transactions, warehouse, wb_fbo) |
 | Импорт файлов / ETL | `etl/` |
 | WB HTTP клиент | `integrations/wb_api.py` |
 | Telegram бот | `integrations/telegram_bot.py` |
@@ -137,6 +144,7 @@ from backend.models.mixins import SoftDeleteMixin
 | `Warehouse`, `WarehouseStock` | `models/warehouse.py` | Склад |
 | `WbFboSupply` | `models/wb_fbo.py` | FBO поставки |
 | `BrandNote`, `TelegramBotUser` | `models/telegram.py` | Telegram / AI память |
+| `AiConversation`, `AiMessage` | `models/ai_chat.py` | Web AI chat (история диалогов с агентами) |
 | `Account`, `CategoryRef` | `models/refs.py` | Справочники |
 | `FxRate` | `models/fx_rates.py` | Курсы валют |
 

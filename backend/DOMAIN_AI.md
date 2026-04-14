@@ -46,6 +46,24 @@ synthesizer.py — объединение ответов (если >1 агент
 - `services/ai/tools_legacy.py` — legacy tools (13 шт, для обратной совместимости)
 - `services/health_check_service.py` — health check данные (отправки, просрочки, кат.А, неликвид)
 
+### Web-интерфейс (ai_chat)
+Отдельный слой над orchestrator для веб-чата на странице `(main)/p/[slug]/ai-chat`.
+Сама бизнес-логика AI здесь НЕ реализуется — модуль только хранит историю и проксирует в `orchestrator.ask()`.
+
+- `models/ai_chat.py`:
+  - `AiConversation` (SoftDeleteMixin, TimestampMixin) — диалог. Поля: `project_id`, `user_id`, `brand` (опционально), `title` (default `"Новый чат"`), `created_at`.
+  - `AiMessage` — одно сообщение. Поля: `conversation_id` (FK с `ondelete="CASCADE"`), `role` (`user`/`assistant`), `content` (Text), `files` JSONB (`[{name, type, size, url}]`), `tools_used` JSONB, `tokens_used`, `created_at`. Без SoftDeleteMixin — каскадно удаляется с conversation.
+- `schemas/ai_chat.py` — `AiConversationCreate/Update/Schema/List`, `AiMessageCreate/Schema`, `AiFileUploadResponse`.
+- `services/ai_chat_service.py` — `list_conversations`, CRUD conversations и messages. Все запросы фильтруют по `project_id` + `user_id` + `is_deleted == False`.
+- `routers/ai_chat.py` (prefix `/ai`):
+  - CRUD conversations (с `Depends(get_current_user)` и `get_current_project`).
+  - `POST /ai/conversations/{id}/messages` — стримит ответ агента через `StreamingResponse` (SSE).
+  - `POST /ai/upload` — file upload (картинки/документы для контекста), возвращает URL.
+  - Все write endpoints под `Depends(rate_limit_write)`.
+  - Внутри вызывает `from backend.services.ai.orchestrator import ask as orchestrator_ask`.
+- Подключён в `backend/main.py` (`app.include_router(ai_chat.router)`).
+- Frontend: `frontend-react/src/app/(main)/p/[slug]/ai-chat/page.tsx` + `lib/api/ai-chat.ts`.
+
 ## 7 агентов
 
 | Агент | Роль | Типичные вопросы |

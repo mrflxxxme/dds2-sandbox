@@ -57,11 +57,11 @@ Model → Alembic migration → Schema → Service → Router → Test
 
 ## Архитектура frontend
 ```
-src/app/(main)/p/[slug]/ — основное приложение (21 страниц: dds, import, txn, inbox, reports, planning, cost, funnel, trends, refs, settings, opiu, orders, plan-fact, team, monitoring, bulk-cost, container-loader, order-geography, warehouse, supply-chain)
+src/app/(main)/p/[slug]/ — основное приложение (22 страниц: dds, import, txn, inbox, reports, planning, cost, funnel, trends, refs, settings, opiu, orders, plan-fact, team, monitoring, bulk-cost, container-loader, order-geography, warehouse, supply-chain, ai-chat)
 src/app/(tma)/tma/[slug]/ — Telegram Mini App (capital, chat, funnel, pnl, pulse, warehouse)
-src/lib/api/ — модульный API клиент (client.ts + 14 доменных файлов, JWT auth + auto-refresh)
+src/lib/api/ — модульный API клиент (client.ts + 15 доменных файлов, JWT auth + auto-refresh)
 src/lib/utils.ts — formatNumber, formatDate, exportToExcel
-src/components/ — DataTable, FormModal, KpiCard, PageGuard, PageHeader, TabLayout, TanStackDataTable, Toast
+src/components/ — DataTable, FormModal, KpiCard, PageGuard, PageHeader, TabLayout, TanStackDataTable, Toast, BoxDetailCell
 src/types/api.ts — TypeScript интерфейсы
 ```
 
@@ -77,7 +77,8 @@ src/types/api.ts — TypeScript интерфейсы
 | Домен | Gotchas | Ключевые файлы |
 |-------|---------|----------------|
 | Транзакции | deduplicate by txn_id; VTB/WB парсеры | etl/, transactions_service |
-| Отчёты | кэш 300s; invalidate_project_reports(); ОПИУ+БДР синхронизировать | reports/, opiu_service, wb_bdr_service |
+| Отчёты | кэш 300s; invalidate_project_reports(); ОПИУ+БДР синхронизировать; Cost-DNA — per-category revenue decomposition | reports/, opiu_service, wb_bdr_service, cost_dna_service |
+| AI Chat (web) | CRUD conversations, SSE streaming, file upload; вызывает orchestrator из AI домена | routers/ai_chat, ai_chat_service, models/ai_chat |
 | Планирование | plan_items привязаны к category; cashflow = txn+plan | planning/, routers/planning |
 | Себестоимость | FIFO; duty per container; cost_price = себест + пошлина + логистика | cost/, cost_parsers, cost_parser_helpers |
 | Склад | FBO vs FBS; stock_date ≠ report_date; остатки WB daily sync | warehouse_*, fbo_supply_service |
@@ -117,6 +118,22 @@ src/types/api.ts — TypeScript интерфейсы
 | Data-сервер (PG, Redis, MinIO) | вручную (нет workflow) | Data (10.0.0.1) |
 - Monitoring деплой требует secrets `MON_HOST` / `MON_USER` / `MON_SSH_KEY` / `MON_PATH`
 - Hot-reload Prometheus через `POST /-/reload` (требует `--web.enable-lifecycle`)
+
+## Operational workflows (.github/workflows/)
+| Workflow | Триггер | Назначение |
+|---|---|---|
+| `test.yml` | push / PR | Tests (pytest + vitest) |
+| `security.yml` | push / PR / manual | pip-audit, Trivy, Snyk |
+| `auto-pr.yml` | push в `dev` | автоматический PR `dev → main` |
+| `auto-merge.yml` | green CI на auto-PR | авто-merge при зелёном CI |
+| `cd-production.yml` | merge в `main` | деплой на app-сервер |
+| `deploy-monitoring.yml` | изменения `infra/monitoring/**` | rsync на monitoring-сервер (без `--delete`, исключает `.env` — см. P-incident 2026-04-14) |
+| `server-cleanup.yml` | **cron** `0 3 * * 0` (вс 03:00 UTC) + manual | еженедельная очистка диска app-сервера |
+| `server-diagnose.yml` | manual | диагностика прод-сервера (логи, ресурсы) |
+| `server-fix.yml` | manual | оперативные фиксы (рестарт сервисов, чистка кэша) |
+| `server-restart.yml` | manual | рестарт прод-контейнеров |
+| `check-sync-log.yml` | manual | диагностика WB sync_log |
+| `manual-funnel-sync.yml` | manual | принудительный пересинк WB funnel |
 
 ## Среды
 | Среда | Ветка | URL |
