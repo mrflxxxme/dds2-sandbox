@@ -28,6 +28,7 @@
 - ДДС: `services/reports/dds.py`
 - БДР: `services/wb_bdr_service.py` (+ `bdr_loaders.py`, `bdr_enrichment.py`, `wb_bdr_helpers.py`)
 - ОПИУ: `services/opiu_service.py` (+ `opiu_helpers.py`)
+- ДНК Себестоимости: `services/cost_dna_service.py` (+ `cost_dna_helpers.py`)
 - Dashboard: `services/reports/dashboard.py`
 - Balance: `services/reports/balance.py`
 - ВСЕГДА: `invalidate_cache()` после изменений

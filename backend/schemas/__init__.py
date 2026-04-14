@@ -89,6 +89,9 @@ from backend.schemas.refs import (
 from backend.schemas.reports import (
     BalanceDailyRow,
     BalanceRow,
+    CostDnaCategory,
+    CostDnaResponse,
+    CostDnaTotals,
     DashboardBalances,
     DdsMonthRow,
     FxControlRow,
@@ -195,6 +198,9 @@ __all__ = [
     "IncomeDailyRow",
     "IncomeByCategoryRow",
     "DashboardBalances",
+    "CostDnaCategory",
+    "CostDnaTotals",
+    "CostDnaResponse",
     # Planning
     "OrderSchema",
     "LeadTimeSchema",

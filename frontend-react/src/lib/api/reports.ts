@@ -3,6 +3,7 @@ import { ApiClient } from './client';
 import type {
     DdsMonthRow, Transaction, DDSPnLResponse, CostHistoryResponse,
     WbStocksResponse, WbStocksArticlesResponse, WbStockHistoryResponse,
+    CostDnaResponse,
 } from '@/types/api';
 
 export function addReportMethods(api: ApiClient) {
@@ -115,6 +116,9 @@ export function addReportMethods(api: ApiClient) {
             if (brand) params.set('brand', brand);
             const qs = params.toString();
             return api.request<CostHistoryResponse>('GET', `/api/v1/reports/cost_history${qs ? '?' + qs : ''}`);
+        },
+        getCostDna(periodDays: number = 30) {
+            return api.request<CostDnaResponse>('GET', `/api/v1/reports/cost_dna?period_days=${periodDays}`);
         },
         getBalanceDaily(account: string, currency: string, start: string, end: string) {
             return api.request<Array<{ date: string; balance: number }>>('GET', `/api/v1/reports/balance_daily?account=${encodeURIComponent(account)}&currency=${currency}&date_from=${start}&date_to=${end}`);

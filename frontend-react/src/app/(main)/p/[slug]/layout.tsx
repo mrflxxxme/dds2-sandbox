@@ -17,6 +17,7 @@ const navGroups = [
             { href: '/inbox', label: 'INBOX — Неразнесённые', icon: '🔴', pageKey: 'inbox' },
             { href: '/reports', label: 'Отчёты', icon: '📈', pageKey: 'reports' },
             { href: '/cost', label: 'Себестоимость', icon: '💰', pageKey: 'cost' },
+            { href: '/reports/cost-dna', label: 'ДНК себестоимости', icon: '🧬', pageKey: 'reports' },
             { href: '/refs', label: 'Справочники', icon: '📋', pageKey: 'refs' },
         ],
     },

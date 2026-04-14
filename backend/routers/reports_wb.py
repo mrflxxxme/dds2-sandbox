@@ -241,3 +241,22 @@ async def get_cost_history(
         article_search=article,
         brand_filter=brand,
     )
+
+
+@router.get("/cost_dna")
+async def get_cost_dna(
+    period_days: int = Query(30, description="Rolling period: 30 or 60 days back from yesterday"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cost-DNA report: per-category (subject) decomposition of revenue
+    into cost components, marketplace fees, taxes, and margin.
+
+    Used as forecasting tool to compare prognosis cost vs realization,
+    and as fallback for new SKUs without cost data.
+    """
+    from backend.services import cost_dna_service
+
+    if period_days not in (30, 60):
+        period_days = 30
+    return await cost_dna_service.get_cost_dna(db, project.id, period_days)

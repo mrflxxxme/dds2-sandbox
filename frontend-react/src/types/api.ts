@@ -1055,6 +1055,63 @@ export interface WbStockHistoryResponse {
   warehouses: string[];
 }
 
+// ─── Cost DNA (разложение рубля выручки по категориям) ─────────────────────
+
+export interface CostDnaCategory {
+  category: string;        // subject_name
+  revenue: number;
+  revenue_share_pct: number;
+  // Cost components — null if no cost_orders for category
+  cost_factory_pct: number | null;
+  cost_duty_pct: number | null;
+  cost_delivery_pct: number | null;
+  cost_vat_pct: number | null;
+  cost_total_pct: number | null;
+  has_cost_data: boolean;
+  // Marketplace fees as % of revenue
+  mp_commission_pct: number;
+  mp_logistics_pct: number;
+  mp_storage_pct: number;
+  mp_advertising_pct: number;
+  mp_other_pct: number;
+  mp_total_pct: number;
+  tax_pct: number;
+  // Margin (null if no cost data)
+  margin_pct: number | null;
+  margin_pct_prev: number | null;
+  margin_trend: 'up' | 'down' | null;
+}
+
+export interface CostDnaTotals {
+  revenue: number;
+  cost_factory_pct: number;
+  cost_duty_pct: number;
+  cost_delivery_pct: number;
+  cost_vat_pct: number;
+  cost_total_pct: number;
+  mp_commission_pct: number;
+  mp_logistics_pct: number;
+  mp_storage_pct: number;
+  mp_advertising_pct: number;
+  mp_other_pct: number;
+  mp_total_pct: number;
+  tax_pct: number;
+  margin_pct: number;
+  margin_pct_prev: number | null;
+  margin_trend: 'up' | 'down' | null;
+}
+
+export interface CostDnaResponse {
+  period_days: 30 | 60;
+  date_from: string;        // YYYY-MM-DD
+  date_to: string;          // yesterday
+  prev_date_from: string;
+  prev_date_to: string;
+  categories: CostDnaCategory[];
+  totals: CostDnaTotals;
+  has_tax_settings: boolean;
+}
+
 export interface ChartTooltipProps {
   active?: boolean;
   payload?: ChartTooltipPayloadItem[];
