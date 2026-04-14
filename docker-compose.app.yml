@@ -1,4 +1,4 @@
-# DDS App Server (Production) — Backend, Frontend, Nginx, Worker, Certbot
+# DDS App Server (Production) — Backend, Frontend, Nginx, Worker, Certbot, Autoheal
 #
 # Runs on: production (130.49.150.69, 10.0.0.2 via WireGuard)
 # Connects to Data server (10.0.0.1) for DB, Redis, MinIO
@@ -25,6 +25,8 @@ services:
       DDS_ENV: production
     ports:
       - "10.0.0.2:8000:8000"
+    volumes:
+      - ai_memory:/data
     deploy:
       resources:
         limits:
@@ -35,6 +37,8 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    labels:
+      autoheal: "true"
     networks:
       - app
 
@@ -61,6 +65,8 @@ services:
     stop_grace_period: 60s
     ports:
       - "10.0.0.2:8001:8000"
+    volumes:
+      - ai_memory:/data
     deploy:
       resources:
         limits:
@@ -72,6 +78,8 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    labels:
+      autoheal: "true"
     networks:
       - app
 
@@ -93,6 +101,8 @@ services:
       timeout: 5s
       retries: 3
     restart: unless-stopped
+    labels:
+      autoheal: "true"
     networks:
       - app
 
@@ -120,6 +130,8 @@ services:
       timeout: 5s
       retries: 3
     restart: unless-stopped
+    labels:
+      autoheal: "true"
     networks:
       - app
 
@@ -133,9 +145,29 @@ services:
     networks:
       - app
 
+  # Auto-restart unhealthy containers (incident 2026-04-14: backend hung 15h
+  # because restart: unless-stopped only restarts exited containers, not unhealthy).
+  # Triggers `docker restart` on any container with label autoheal=true.
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: dds-autoheal
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: 30
+      AUTOHEAL_START_PERIOD: 300
+      AUTOHEAL_DEFAULT_STOP_TIMEOUT: 30
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      resources:
+        limits:
+          memory: 32M
+    restart: unless-stopped
+
 volumes:
   certbot-webroot:
   certbot-certs:
+  ai_memory:
 
 networks:
   app:
