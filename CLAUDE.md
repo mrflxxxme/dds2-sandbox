@@ -109,6 +109,15 @@ src/types/api.ts — TypeScript интерфейсы
 - **Branch protection `main`**: require Tests + Security Audit, strict
 - Установка хуков: `make setup` | Экстренный пропуск: `git push --no-verify`
 
+## Деплой по серверам (3-серверная архитектура)
+| Что меняется | Workflow | Куда |
+|---|---|---|
+| `backend/`, `frontend-react/`, `Dockerfile.backend`, `docker-compose.app.yml` | `cd-production.yml` | App-сервер (130.49.150.69) |
+| `infra/monitoring/**` (alert_rules, prometheus, grafana, alertmanager) | `deploy-monitoring.yml` | Monitoring (10.0.0.3) |
+| Data-сервер (PG, Redis, MinIO) | вручную (нет workflow) | Data (10.0.0.1) |
+- Monitoring деплой требует secrets `MON_HOST` / `MON_USER` / `MON_SSH_KEY` / `MON_PATH`
+- Hot-reload Prometheus через `POST /-/reload` (требует `--web.enable-lifecycle`)
+
 ## Среды
 | Среда | Ветка | URL |
 |-------|-------|-----|

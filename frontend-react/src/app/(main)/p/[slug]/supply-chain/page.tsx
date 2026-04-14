@@ -1303,9 +1303,11 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
     const { t } = useT();
     const [form, setForm] = useState<VehicleCreate>({
         order_no: '',
+        country: 'CHINA',
         container_type: 'truck1',
         delivery_cost_cny: 0,
         delivery_cost_usd: 0,
+        delivery_cost_rub: 0,
         rate_cny: 12.5,
         rate_usd: 92,
         rate_eur: 98,
@@ -1330,6 +1332,37 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
     };
 
     const containerOptions = getContainerOptions(t);
+    const isRussia = form.country === 'RUSSIA';
+
+    const setChina = () => setForm(f => ({
+        ...f,
+        country: 'CHINA',
+        container_type: 'truck1',
+        rate_cny: 12.5,
+        rate_usd: 92,
+        rate_eur: 98,
+    }));
+
+    const setRussia = () => setForm(f => ({
+        ...f,
+        country: 'RUSSIA',
+        container_type: 'gazelle',
+        delivery_cost_cny: 0,
+        delivery_cost_usd: 0,
+        rate_cny: 1,
+        rate_usd: 1,
+        rate_eur: 1,
+        invoice_no: undefined,
+        payment_ref: undefined,
+    }));
+
+    const countryBtnStyle = (active: boolean): React.CSSProperties => ({
+        padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 500,
+        border: active ? '2px solid var(--color-primary)' : '1px solid var(--color-border)',
+        background: active ? 'var(--color-primary-bg)' : 'var(--color-bg)',
+        color: active ? 'var(--color-primary)' : 'var(--color-text)',
+        cursor: 'pointer', transition: 'all 0.15s',
+    });
 
     return (
         <div className="glass-card sc-form-card">
@@ -1338,6 +1371,19 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
                 <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
             </div>
             <div className="sc-form-col">
+                {/* Country selector */}
+                <div>
+                    <label className="sc-form-label">{t('vehicle_country')}</label>
+                    <div className="sc-form-container-btns">
+                        <button type="button" onClick={setChina} style={countryBtnStyle(!isRussia)}>
+                            {t('country_china')}
+                        </button>
+                        <button type="button" onClick={setRussia} style={countryBtnStyle(isRussia)}>
+                            {t('country_russia')}
+                        </button>
+                    </div>
+                </div>
+
                 <div className="sc-form-grid-2">
                     <div>
                         <label className="sc-form-label">{t('vehicle_form_number')}</label>
@@ -1345,66 +1391,108 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
                     </div>
                     <div>
                         <label className="sc-form-label">{t('vehicle_form_container_type')}</label>
-                        <div className="sc-form-container-btns">
-                            {containerOptions.map(opt => {
-                                const isSelected = form.container_type === opt.key;
-                                return (
-                                    <button
-                                        key={opt.key}
-                                        type="button"
-                                        onClick={() => setForm(f => ({ ...f, container_type: opt.key }))}
-                                        style={{
-                                            padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 500,
-                                            border: isSelected ? '2px solid var(--color-primary)' : '1px solid var(--color-border)',
-                                            background: isSelected ? 'var(--color-primary-bg)' : 'var(--color-bg)',
-                                            color: isSelected ? 'var(--color-primary)' : 'var(--color-text)',
-                                            cursor: 'pointer', transition: 'all 0.15s',
-                                        }}
-                                    >
-                                        {opt.label}
-                                    </button>
-                                );
-                            })}
-                        </div>
+                        {isRussia ? (
+                            <div className="sc-form-container-btns">
+                                <button
+                                    type="button"
+                                    style={{
+                                        padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 500,
+                                        border: '2px solid var(--color-primary)',
+                                        background: 'var(--color-primary-bg)',
+                                        color: 'var(--color-primary)',
+                                        cursor: 'default',
+                                    }}
+                                >
+                                    {t('container_gazelle')}
+                                </button>
+                            </div>
+                        ) : (
+                            <div className="sc-form-container-btns">
+                                {containerOptions.map(opt => {
+                                    const isSelected = form.container_type === opt.key;
+                                    return (
+                                        <button
+                                            key={opt.key}
+                                            type="button"
+                                            onClick={() => setForm(f => ({ ...f, container_type: opt.key }))}
+                                            style={{
+                                                padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 500,
+                                                border: isSelected ? '2px solid var(--color-primary)' : '1px solid var(--color-border)',
+                                                background: isSelected ? 'var(--color-primary-bg)' : 'var(--color-bg)',
+                                                color: isSelected ? 'var(--color-primary)' : 'var(--color-text)',
+                                                cursor: 'pointer', transition: 'all 0.15s',
+                                            }}
+                                        >
+                                            {opt.label}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        )}
                     </div>
                 </div>
 
-                <div className="sc-form-grid-3">
-                    <div>
-                        <label className="sc-form-label">{t('vehicle_form_pickup_date')}</label>
-                        <input type="date" value={form.ship_date || ''} onChange={e => setForm(f => ({ ...f, ship_date: e.target.value || undefined }))} className="sc-form-input" />
+                {isRussia ? (
+                    <div className="sc-form-grid-2">
+                        <div>
+                            <label className="sc-form-label">{t('vehicle_form_pickup_date')}</label>
+                            <input type="date" value={form.ship_date || ''} onChange={e => setForm(f => ({ ...f, ship_date: e.target.value || undefined }))} className="sc-form-input" />
+                        </div>
+                        <div>
+                            <label className="sc-form-label">{t('vehicle_form_delivery_rub')}</label>
+                            <input
+                                type="number"
+                                min="0"
+                                value={form.delivery_cost_rub ?? ''}
+                                onChange={e => setForm(f => ({ ...f, delivery_cost_rub: parseFloat(e.target.value) || 0 }))}
+                                className="sc-form-input"
+                            />
+                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                                {t('vehicle_form_delivery_rub_hint')}
+                            </div>
+                        </div>
                     </div>
-                    <div>
-                        <label className="sc-form-label">{t('vehicle_form_invoice')}</label>
-                        <input value={form.invoice_no || ''} onChange={e => setForm(f => ({ ...f, invoice_no: e.target.value || undefined }))} placeholder="CC20260011" className="sc-form-input" />
-                    </div>
-                    <div>
-                        <label className="sc-form-label">{t('vehicle_form_order_no')}</label>
-                        <input value={form.payment_ref || ''} onChange={e => setForm(f => ({ ...f, payment_ref: e.target.value || undefined }))} placeholder="ENV-001" className="sc-form-input" />
-                    </div>
-                </div>
-                <div className="sc-form-grid-5">
-                    <div>
-                        <label className="sc-form-label">{t('vehicle_form_delivery_cny')}</label>
-                        <input type="number" value={form.delivery_cost_cny || ''} onChange={e => setForm(f => ({ ...f, delivery_cost_cny: parseFloat(e.target.value) || 0 }))} className="sc-form-input" />
-                    </div>
-                    <div>
-                        <label className="sc-form-label">{t('vehicle_form_delivery_usd')}</label>
-                        <input type="number" value={form.delivery_cost_usd || ''} onChange={e => setForm(f => ({ ...f, delivery_cost_usd: parseFloat(e.target.value) || 0 }))} className="sc-form-input" />
-                    </div>
-                    <div>
-                        <label className="sc-form-label">{t('vehicle_form_rate_cny')}</label>
-                        <input type="number" step="0.01" value={form.rate_cny || ''} onChange={e => setForm(f => ({ ...f, rate_cny: parseFloat(e.target.value) || 1 }))} className="sc-form-input" />
-                    </div>
-                    <div>
-                        <label className="sc-form-label">{t('vehicle_form_rate_usd')}</label>
-                        <input type="number" step="0.01" value={form.rate_usd || ''} onChange={e => setForm(f => ({ ...f, rate_usd: parseFloat(e.target.value) || 1 }))} className="sc-form-input" />
-                    </div>
-                    <div>
-                        <label className="sc-form-label">{t('vehicle_form_rate_eur')}</label>
-                        <input type="number" step="0.01" value={form.rate_eur || ''} onChange={e => setForm(f => ({ ...f, rate_eur: parseFloat(e.target.value) || 1 }))} className="sc-form-input" />
-                    </div>
-                </div>
+                ) : (
+                    <>
+                        <div className="sc-form-grid-3">
+                            <div>
+                                <label className="sc-form-label">{t('vehicle_form_pickup_date')}</label>
+                                <input type="date" value={form.ship_date || ''} onChange={e => setForm(f => ({ ...f, ship_date: e.target.value || undefined }))} className="sc-form-input" />
+                            </div>
+                            <div>
+                                <label className="sc-form-label">{t('vehicle_form_invoice')}</label>
+                                <input value={form.invoice_no || ''} onChange={e => setForm(f => ({ ...f, invoice_no: e.target.value || undefined }))} placeholder="CC20260011" className="sc-form-input" />
+                            </div>
+                            <div>
+                                <label className="sc-form-label">{t('vehicle_form_order_no')}</label>
+                                <input value={form.payment_ref || ''} onChange={e => setForm(f => ({ ...f, payment_ref: e.target.value || undefined }))} placeholder="ENV-001" className="sc-form-input" />
+                            </div>
+                        </div>
+                        <div className="sc-form-grid-5">
+                            <div>
+                                <label className="sc-form-label">{t('vehicle_form_delivery_cny')}</label>
+                                <input type="number" value={form.delivery_cost_cny || ''} onChange={e => setForm(f => ({ ...f, delivery_cost_cny: parseFloat(e.target.value) || 0 }))} className="sc-form-input" />
+                            </div>
+                            <div>
+                                <label className="sc-form-label">{t('vehicle_form_delivery_usd')}</label>
+                                <input type="number" value={form.delivery_cost_usd || ''} onChange={e => setForm(f => ({ ...f, delivery_cost_usd: parseFloat(e.target.value) || 0 }))} className="sc-form-input" />
+                            </div>
+                            <div>
+                                <label className="sc-form-label">{t('vehicle_form_rate_cny')}</label>
+                                <input type="number" step="0.01" value={form.rate_cny || ''} onChange={e => setForm(f => ({ ...f, rate_cny: parseFloat(e.target.value) || 1 }))} className="sc-form-input" />
+                            </div>
+                            <div>
+                                <label className="sc-form-label">{t('vehicle_form_rate_usd')}</label>
+                                <input type="number" step="0.01" value={form.rate_usd || ''} onChange={e => setForm(f => ({ ...f, rate_usd: parseFloat(e.target.value) || 1 }))} className="sc-form-input" />
+                            </div>
+                            <div>
+                                <label className="sc-form-label">{t('vehicle_form_rate_eur')}</label>
+                                <input type="number" step="0.01" value={form.rate_eur || ''} onChange={e => setForm(f => ({ ...f, rate_eur: parseFloat(e.target.value) || 1 }))} className="sc-form-input" />
+                            </div>
+                        </div>
+                    </>
+                )}
+
                 <div className="sc-form-grid-2">
                     {warehouses.length > 0 && (
                         <div>

@@ -74,13 +74,20 @@ async def get_wb_bdr_available_weeks(
 
 @router.get("/wb_bdr/sync_status")
 async def get_wb_bdr_sync_status(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get WB finance data sync status for the project."""
+    """Get WB finance data sync status for the project.
+
+    If date_from/date_to provided, also returns period_rows and is_period_covered
+    so the UI can show real coverage for the selected period instead of just
+    "any data exists".
+    """
     from backend.services.wb_finance_sync import get_sync_status
 
-    return await get_sync_status(db, project.id)
+    return await get_sync_status(db, project.id, date_from=date_from, date_to=date_to)
 
 
 @router.get("/opiu")

@@ -96,8 +96,12 @@ export function addReportMethods(api: ApiClient) {
             if (groupBy) url += `&group_by=${encodeURIComponent(groupBy)}`;
             return api.request<any>('GET', url);
         },
-        getWbBdrSyncStatus() {
-            return api.request<any>('GET', `/api/v1/reports/wb_bdr/sync_status`);
+        getWbBdrSyncStatus(dateFrom?: string, dateTo?: string) {
+            let url = `/api/v1/reports/wb_bdr/sync_status`;
+            if (dateFrom && dateTo) {
+                url += `?date_from=${dateFrom}&date_to=${dateTo}`;
+            }
+            return api.request<any>('GET', url);
         },
         getWbBdrAvailableWeeks() {
             return api.request<{ available_dates: string[] }>('GET', `/api/v1/reports/wb_bdr/available_weeks`);

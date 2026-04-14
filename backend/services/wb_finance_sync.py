@@ -215,9 +215,17 @@ async def _upsert_batch(db: AsyncSession, batch: list[dict]) -> None:
     await db.execute(stmt)
 
 
-async def get_sync_status(db: AsyncSession, project_id: int) -> dict:
-    """Get sync status for frontend badge display."""
-    # Last sync
+async def get_sync_status(
+    db: AsyncSession,
+    project_id: int,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> dict:
+    """Get sync status for frontend badge display.
+
+    If date_from/date_to passed, also returns period_rows and is_period_covered
+    so the UI can show "synced" only when the requested period is actually covered.
+    """
     last = await db.execute(
         select(WbFinanceSyncLog)
         .where(WbFinanceSyncLog.project_id == project_id)
@@ -226,15 +234,27 @@ async def get_sync_status(db: AsyncSession, project_id: int) -> dict:
     )
     last_row = last.scalar_one_or_none()
 
-    # Date range coverage
     coverage = await db.execute(
         select(
-            func.min(WbFinanceRow.date_from).label("min_date"),
-            func.max(WbFinanceRow.date_to).label("max_date"),
+            func.min(WbFinanceRow.rr_dt).label("min_date"),
+            func.max(WbFinanceRow.rr_dt).label("max_date"),
             func.count(WbFinanceRow.id).label("total_rows"),
         ).where(WbFinanceRow.project_id == project_id)
     )
     cov = coverage.one()
+
+    period_rows: int | None = None
+    is_period_covered: bool | None = None
+    if date_from is not None and date_to is not None:
+        period_count = await db.execute(
+            select(func.count(WbFinanceRow.id)).where(
+                WbFinanceRow.project_id == project_id,
+                WbFinanceRow.rr_dt >= date_from,
+                WbFinanceRow.rr_dt <= date_to,
+            )
+        )
+        period_rows = period_count.scalar() or 0
+        is_period_covered = cov.max_date is not None and cov.max_date >= date_to and period_rows > 0
 
     return {
         "last_sync": last_row.synced_at.isoformat() if last_row else None,
@@ -244,6 +264,8 @@ async def get_sync_status(db: AsyncSession, project_id: int) -> dict:
         "coverage_from": cov.min_date.isoformat() if cov.min_date else None,
         "coverage_to": cov.max_date.isoformat() if cov.max_date else None,
         "total_rows": cov.total_rows or 0,
+        "period_rows": period_rows,
+        "is_period_covered": is_period_covered,
     }
 
 

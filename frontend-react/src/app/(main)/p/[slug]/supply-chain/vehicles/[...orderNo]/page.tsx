@@ -366,10 +366,15 @@ function VehicleDetailContent() {
                 <button className="btn btn-secondary btn-sm" onClick={goBack} style={{ fontSize: 13 }}>
                     {t('vdetail_back')}
                 </button>
-                <div style={{ flex: 1 }}>
+                <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 10 }}>
                     <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>
                         {t('vdetail_vehicle')} {vehicle.order_no}
                     </h1>
+                    {vehicle.country === 'RUSSIA' && (
+                        <span className="badge badge-info" style={{ fontSize: 12 }}>
+                            {t('country_russia')}
+                        </span>
+                    )}
                 </div>
                 <LanguageToggle />
                 {isForming && (
@@ -422,8 +427,17 @@ function VehicleDetailContent() {
                                         {formatNumber(Number(cs.total_rub))} ₽
                                     </div>
                                 </div>
-                                <CostKpi label={t('vehicle_form_rate_cny')} value={String(vehicle.rate_cny)} />
-                                <CostKpi label={t('vehicle_form_delivery_cny')} value={Number(vehicle.delivery_cost_cny) > 0 ? `${formatNumber(Number(vehicle.delivery_cost_cny), 0)}` : '—'} />
+                                {vehicle.country === 'RUSSIA' ? (
+                                    <>
+                                        <CostKpi label={t('vehicle_form_delivery_rub')} value={`${formatNumber(Number(vehicle.delivery_cost_rub || 0), 0)} ₽`} />
+                                        <CostKpi label={t('vehicle_country')} value={t('country_russia')} />
+                                    </>
+                                ) : (
+                                    <>
+                                        <CostKpi label={t('vehicle_form_rate_cny')} value={String(vehicle.rate_cny)} />
+                                        <CostKpi label={t('vehicle_form_delivery_cny')} value={Number(vehicle.delivery_cost_cny) > 0 ? `${formatNumber(Number(vehicle.delivery_cost_cny), 0)}` : '—'} />
+                                    </>
+                                )}
                                 <CostKpi label={t('cost_weight')} value={vehicle.total_weight_kg ? `${formatNumber(Number(vehicle.total_weight_kg), 0)} kg` : '—'} />
                             </div>
                         </div>

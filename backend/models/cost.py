@@ -68,6 +68,8 @@ class CostOrder(Base, SoftDeleteMixin):
     transport_type: Mapped[str | None] = mapped_column(String(30), default="AUTO")
     delivery_cost_cny: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
     delivery_cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
+    delivery_cost_rub: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0, server_default="0")
+    country: Mapped[str] = mapped_column(String(10), nullable=False, default="CHINA", server_default="CHINA")
     rate_cny: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=1)
     rate_eur: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=1)
     rate_usd: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=1)

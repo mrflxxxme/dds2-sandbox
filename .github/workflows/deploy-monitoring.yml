@@ -1,0 +1,136 @@
+# CD — Deploy monitoring stack to Monitoring server (10.0.0.3)
+#
+# Background: cd-production.yml only deploys the App and Data servers.
+# The Monitoring server (Prometheus, Alertmanager, Grafana, exporters) was
+# never wired into CI — for ~25 days it ran whatever migrate-to-3-servers.sh
+# initially scp'd, and never picked up new alert rules from the repo.
+# Incident 2026-04-14 confirmed this: 8 alert rules existed in the repo
+# but were missing from the live Prometheus.
+#
+# This workflow ssh's into the monitoring server, syncs files from
+# infra/monitoring/ via rsync, and either hot-reloads Prometheus
+# (POST /-/reload — needs --web.enable-lifecycle) or restarts containers
+# when docker-compose itself changed.
+#
+# Required GitHub Secrets (must be added before first run):
+#   MON_HOST     — Monitoring server public IP (or hostname reachable from runner)
+#   MON_USER     — SSH user (typically root)
+#   MON_SSH_KEY  — private SSH key with access to MON_HOST
+#   MON_PATH     — path to monitoring deploy dir (typically /opt/dds_monitoring)
+
+name: Deploy Monitoring
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/monitoring/**'
+      - '.github/workflows/deploy-monitoring.yml'
+  workflow_dispatch:
+    inputs:
+      force_restart:
+        description: 'Restart Prometheus instead of hot-reload'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+# Only one monitoring deploy at a time
+concurrency:
+  group: deploy-monitoring
+  cancel-in-progress: false
+
+jobs:
+  deploy-monitoring:
+    name: Deploy Monitoring server
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Verify required secrets are present
+        run: |
+          missing=""
+          [ -z "${{ secrets.MON_HOST }}" ]    && missing="$missing MON_HOST"
+          [ -z "${{ secrets.MON_USER }}" ]    && missing="$missing MON_USER"
+          [ -z "${{ secrets.MON_SSH_KEY }}" ] && missing="$missing MON_SSH_KEY"
+          [ -z "${{ secrets.MON_PATH }}" ]    && missing="$missing MON_PATH"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required secrets:$missing"
+            echo "Add them in repo Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+          echo "All MON_* secrets present"
+
+      - name: Sync infra/monitoring → MON_HOST via rsync
+        uses: burnett01/rsync-deployments@7.0.1
+        with:
+          switches: -avz --delete --exclude='grafana/data' --exclude='*.swp'
+          path: infra/monitoring/
+          remote_path: ${{ secrets.MON_PATH }}/
+          remote_host: ${{ secrets.MON_HOST }}
+          remote_user: ${{ secrets.MON_USER }}
+          remote_key: ${{ secrets.MON_SSH_KEY }}
+
+      - name: Detect what changed and reload/restart accordingly
+        uses: appleboy/ssh-action@v1
+        env:
+          FORCE_RESTART: ${{ github.event.inputs.force_restart || 'false' }}
+        with:
+          host: ${{ secrets.MON_HOST }}
+          username: ${{ secrets.MON_USER }}
+          key: ${{ secrets.MON_SSH_KEY }}
+          envs: FORCE_RESTART
+          script-stop: true
+          script: |
+            set -e
+            cd ${{ secrets.MON_PATH }}
+
+            echo "Files in $(pwd):"
+            ls -la *.yml 2>/dev/null || true
+
+            # docker-compose.yml change requires up -d (restart);
+            # otherwise just hot-reload Prometheus to pick up new alert rules.
+            COMPOSE_CHANGED=$(find docker-compose.yml -newer /tmp/.last-mon-deploy 2>/dev/null || echo "")
+            touch /tmp/.last-mon-deploy
+
+            if [ "$FORCE_RESTART" = "true" ] || [ -n "$COMPOSE_CHANGED" ]; then
+              echo "docker-compose.yml changed (or force_restart) — running up -d --build"
+              docker compose up -d --build
+              sleep 5
+            else
+              echo "Only config changed — hot-reloading Prometheus"
+              docker compose up -d --remove-orphans
+              if curl -sS -X POST http://localhost:9090/-/reload; then
+                echo "Prometheus reloaded successfully"
+              else
+                echo "Hot-reload failed, falling back to restart"
+                docker compose restart prometheus
+              fi
+            fi
+
+      - name: Verify alerts loaded
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.MON_HOST }}
+          username: ${{ secrets.MON_USER }}
+          key: ${{ secrets.MON_SSH_KEY }}
+          script: |
+            set -e
+            sleep 3
+            COUNT=$(curl -s http://localhost:9090/api/v1/rules \
+              | python3 -c 'import sys,json; d=json.load(sys.stdin); print(sum(len(g["rules"]) for g in d["data"]["groups"]))')
+            echo "Prometheus loaded $COUNT alert rules"
+            if [ "$COUNT" -lt 10 ]; then
+              echo "::warning::Only $COUNT rules loaded — expected ≥10. Check alert_rules.yml syntax."
+            fi
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::Monitoring deploy failed. SSH to MON_HOST and check 'docker compose logs prometheus'."

@@ -118,9 +118,9 @@ export function WbBdr() {
     const [expandedAbc, setExpandedAbc] = useState<Record<string, boolean>>({});
 
     React.useEffect(() => {
-        api.getWbBdrSyncStatus().then(setSyncStatus).catch(() => {});
+        api.getWbBdrSyncStatus(dateFrom, dateTo).then(setSyncStatus).catch(() => {});
         api.getWbBdrAvailableWeeks().then(r => setAvailableDates(r.available_dates || [])).catch(() => {});
-    }, []);
+    }, [dateFrom, dateTo]);
 
     const loadData = React.useCallback(async () => {
         setLoading(true); setError('');
@@ -128,6 +128,9 @@ export function WbBdr() {
             const res = await api.getWbBdr(dateFrom, dateTo, brand || undefined, articleSearch || undefined, groupBy !== 'article' ? groupBy : undefined);
             setData(res);
             if (res?.sync_status) setSyncStatus(res.sync_status);
+            else {
+                api.getWbBdrSyncStatus(dateFrom, dateTo).then(setSyncStatus).catch(() => {});
+            }
         } catch (e: any) { setError(e.message || 'Ошибка загрузки'); }
         finally { setLoading(false); }
     }, [dateFrom, dateTo, brand, articleSearch, groupBy]);
@@ -287,7 +290,10 @@ export function WbBdr() {
     const syncTime = syncStatus?.last_sync
         ? new Date(syncStatus.last_sync).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
         : null;
-    const isAllSynced = syncStatus?.total_rows > 0;
+    // Real coverage: trust backend's is_period_covered when date range is known.
+    // Fallback to legacy total_rows>0 only if backend didn't return the new field.
+    const isAllSynced = syncStatus?.is_period_covered === true
+        || (syncStatus?.is_period_covered == null && syncStatus?.total_rows > 0);
 
     return (
         <div>
@@ -298,7 +304,12 @@ export function WbBdr() {
                     {syncStatus?.last_status === 'OK' && <span style={{ color: '#22c55e' }}>● авто</span>}
                     {syncStatus?.last_status === 'ERROR' && <span style={{ color: '#f43f5e' }}>● ошибка</span>}
                     {isAllSynced && <span style={{ color: '#22c55e' }}>✅ Все дни синхронизированы</span>}
-                    {!isAllSynced && syncTime && <span style={{ color: '#eab308' }}>⚠️ Нет данных</span>}
+                    {!isAllSynced && syncTime && (
+                        <span style={{ color: '#eab308' }}>
+                            ⚠️ Нет данных за период
+                            {syncStatus?.coverage_to && ` (есть до ${new Date(syncStatus.coverage_to).toLocaleDateString('ru-RU')})`}
+                        </span>
+                    )}
                 </div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                     {taxInfo?.tax_regime && (
