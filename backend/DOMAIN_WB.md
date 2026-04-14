@@ -94,6 +94,14 @@
 - `transactions` — WB-выплаты матчатся с транзакциями
 - `reports (wb_bdr, opiu)` — строятся на wb_finance_rows
 
+## Review-deduction enrichment (Списания за отзыв)
+- WB API возвращает строки удержаний за отзывы с **пустыми** товарными полями: `nm_id=0`, `sa_name=''`, `brand_name=''`, `subject_name=''`. Идентификатор товара зашит ТОЛЬКО внутри текста `bonus_type_name`: `"Списание за отзыв XXX: акция №N, товар N"`.
+- `services/wb_finance_helpers.py::parse_review_target` — регэксп извлекает nm_id из текста (только префикс `Списание за отзыв`).
+- `services/wb_finance_sync.py::_upsert_batch` перед вставкой собирает уникальные nm_id и подтягивает `(brand, subject, sa_name)` через `_load_nm_meta` — DISTINCT ON по `wb_finance_rows` того же товара (свежая продажная строка). Без зависимости от `nomenclature` (он у многих проектов пуст).
+- Результат: BDR/OPIU/Cost-DNA автоматически разносят «Прочие удержания» по бренду/категории/артикулу. Сумма не меняется, появляется только разрез.
+- Бэкфил исторических данных: `python -m scripts.backfill_review_deductions` (опции `--project-id`, `--dry-run`).
+- При добавлении нового типа удержаний с nm_id внутри текста — расширить регэксп `_REVIEW_TARGET_RE` или добавить аналогичный helper.
+
 ## Cache Invalidation
 После WB sync: `await invalidate_cache("reports:opiu")`, `await invalidate_cache("reports:wb_bdr")`, `await invalidate_cache("reports:dashboard")`
 НИКОГДА не сбрасывать все ключи разом — worker starvation!

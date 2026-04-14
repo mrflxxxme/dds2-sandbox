@@ -11,12 +11,16 @@ import logging
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.wb_finance import WbFinanceRow, WbFinanceSyncLog
 from backend.services.integrations_service import _get_wb_key
+from backend.services.wb_finance_helpers import (
+    collect_review_nm_ids,
+    enrich_review_rows,
+)
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.wb_finance_sync")
@@ -100,12 +104,12 @@ async def sync_wb_finance(
                 batch.append(_row_to_values(row, project_id))
 
                 if len(batch) >= BATCH_SIZE:
-                    await _upsert_batch(db, batch)
+                    await _upsert_batch(db, batch, project_id)
                     total_synced += len(batch)
                     batch = []
 
             if batch:
-                await _upsert_batch(db, batch)
+                await _upsert_batch(db, batch, project_id)
                 total_synced += len(batch)
 
             # Commit after each page — data is safe
@@ -204,8 +208,50 @@ def _row_to_values(row: dict, project_id: int) -> dict:
     return values
 
 
-async def _upsert_batch(db: AsyncSession, batch: list[dict]) -> None:
-    """Bulk upsert a batch of rows using ON CONFLICT DO UPDATE."""
+async def _load_nm_meta(db: AsyncSession, project_id: int, nm_ids: set[int]) -> dict[int, dict]:
+    """Подтянуть последние известные {brand_name, subject_name, sa_name} по nm_id.
+
+    Источник — сама `wb_finance_rows`: для каждого nm_id берём DISTINCT ON свежую
+    продажную строку с непустым `subject_name`. Это даёт значения, согласованные
+    с остальными агрегациями (BDR/OPIU/Cost-DNA), без зависимости от справочника
+    `nomenclature` (он может быть пуст/устаревший).
+    """
+    if not nm_ids:
+        return {}
+    sql = text("""
+        SELECT DISTINCT ON (nm_id)
+            nm_id, brand_name, subject_name, sa_name
+        FROM wb_finance_rows
+        WHERE project_id = :project_id
+          AND nm_id = ANY(:nm_ids)
+          AND subject_name IS NOT NULL
+          AND subject_name != ''
+        ORDER BY nm_id, sale_dt DESC NULLS LAST, rr_dt DESC NULLS LAST
+    """)
+    result = await db.execute(sql, {"project_id": project_id, "nm_ids": list(nm_ids)})
+    return {
+        row.nm_id: {
+            "brand_name": row.brand_name or "",
+            "subject_name": row.subject_name or "",
+            "sa_name": row.sa_name or "",
+        }
+        for row in result
+    }
+
+
+async def _upsert_batch(db: AsyncSession, batch: list[dict], project_id: int) -> None:
+    """Bulk upsert a batch of rows using ON CONFLICT DO UPDATE.
+
+    Перед upsert обогащаем строки-удержания за отзывы (см. `wb_finance_helpers`):
+    извлекаем `nm_id` из `bonus_type_name` и подтягиваем `brand/subject/sa_name`
+    из той же таблицы. Без этого «Прочие удержания» в БДР/ОПИУ не разносятся
+    по артикулам.
+    """
+    review_nm_ids = collect_review_nm_ids(batch)
+    if review_nm_ids:
+        nm_meta = await _load_nm_meta(db, project_id, review_nm_ids)
+        enrich_review_rows(batch, nm_meta)
+
     stmt = pg_insert(WbFinanceRow).values(batch)
     update_cols = {k: stmt.excluded[k] for k in batch[0].keys() if k not in ("project_id", "rrd_id")}
     stmt = stmt.on_conflict_do_update(
