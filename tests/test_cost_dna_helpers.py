@@ -8,7 +8,11 @@ No DB required — all inputs are built manually.
 from decimal import Decimal
 from types import SimpleNamespace
 
-from backend.services.cost_dna_helpers import _compute_tax, compute_category_metrics
+from backend.services.cost_dna_helpers import (
+    _aggregate_cost_by_subject_sales,
+    _compute_tax,
+    compute_category_metrics,
+)
 
 D = Decimal
 
@@ -434,3 +438,202 @@ class TestComputeTax:
         expected_nds = 10000 * 0.07 / 1.07
         # base уйдёт в минус, max(...,0) = 0 → tax = только НДС
         assert abs(tax - expected_nds) < 1e-6
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tests: _aggregate_cost_by_subject_sales
+# Pure helper used by load_cost_components_by_subject.
+# Weights per-article cost by actual SALE quantity (not purchase quantity) —
+# fixes the bug where Cost-DNA inflated cost_total when purchase-mix differed
+# from sale-mix (see DOMAIN_REPORTS.md "Cost-DNA weighted by sales" section).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestAggregateCostBySubjectSales:
+    """Pure-function tests for sales-weighted cost aggregation per subject."""
+
+    def test_simple_two_articles_one_subject(self):
+        """Two SA in one subject, weighted by sales qty (not purchase qty).
+
+        SA-A: cost_per_unit=100, sold=50 → contributes 5000 ₽ × qty=50
+        SA-B: cost_per_unit=200, sold=10 → contributes 2000 ₽ × qty=10
+
+        Expected per-subject:
+            factory_total = 5000 + 2000 = 7000 (since only 'factory' populated)
+            cost_total    = 7000
+            qty_total     = 60
+            implied avg   = 7000 / 60 = 116.67 ₽/шт (weighted by sales)
+        """
+        cost_per_sa = {
+            "SA-A": {
+                "avg_factory": 100.0,
+                "avg_duty": 0.0,
+                "avg_delivery": 0.0,
+                "avg_vat": 0.0,
+                "avg_total": 100.0,
+            },
+            "SA-B": {
+                "avg_factory": 200.0,
+                "avg_duty": 0.0,
+                "avg_delivery": 0.0,
+                "avg_vat": 0.0,
+                "avg_total": 200.0,
+            },
+        }
+        sales_per_sa = {"SA-A": ("Ковры", 50), "SA-B": ("Ковры", 10)}
+
+        result = _aggregate_cost_by_subject_sales(cost_per_sa, sales_per_sa)
+
+        assert "Ковры" in result
+        assert result["Ковры"]["factory_total"] == 7000.0
+        assert result["Ковры"]["cost_total"] == 7000.0
+        assert result["Ковры"]["qty_total"] == 60
+        assert result["Ковры"]["duty_total"] == 0.0
+        assert result["Ковры"]["delivery_total"] == 0.0
+        assert result["Ковры"]["vat_total"] == 0.0
+
+    def test_demonstrates_fix_vs_purchase_weighted(self):
+        """Regression test for the bug: purchase-weighted vs sales-weighted.
+
+        Purchase mix: SA-A (cheap) 100 шт закупки, SA-B (dear) 900 шт закупки
+        Sales mix:    SA-A 90 шт продаж, SA-B 10 шт продаж
+
+        cost_per_unit SA-A = 100 ₽, SA-B = 1000 ₽
+
+        Old algo (weighted by purchases): 100*100+1000*900 / 1000 = 910 ₽/шт
+        Old applied to 100 sold units:    91000 ₽
+
+        New algo (weighted by sales):     100*90+1000*10 / 100 = 190 ₽/шт
+        New applied to 100 sold units:    19000 ₽
+
+        Difference: 72000 ₽ — bug where purchase-heavy items dominate.
+        """
+        cost_per_sa = {
+            "SA-A": {
+                "avg_factory": 100.0,
+                "avg_duty": 0.0,
+                "avg_delivery": 0.0,
+                "avg_vat": 0.0,
+                "avg_total": 100.0,
+            },
+            "SA-B": {
+                "avg_factory": 1000.0,
+                "avg_duty": 0.0,
+                "avg_delivery": 0.0,
+                "avg_vat": 0.0,
+                "avg_total": 1000.0,
+            },
+        }
+        sales_per_sa = {
+            "SA-A": ("Тест", 90),
+            "SA-B": ("Тест", 10),
+        }
+        result = _aggregate_cost_by_subject_sales(cost_per_sa, sales_per_sa)
+
+        # Sales-weighted: 90 × 100 + 10 × 1000 = 9000 + 10000 = 19000
+        assert result["Тест"]["cost_total"] == 19000.0
+        assert result["Тест"]["qty_total"] == 100
+        # Implied avg-per-unit: 190 ₽/шт (not 910 as the old algo would yield)
+        implied_avg = result["Тест"]["cost_total"] / result["Тест"]["qty_total"]
+        assert abs(implied_avg - 190.0) < 1e-9
+
+    def test_multiple_subjects_isolated(self):
+        """Different SA in different subjects are aggregated independently."""
+        cost_per_sa = {
+            "SA-A": {
+                "avg_factory": 100.0,
+                "avg_duty": 10.0,
+                "avg_delivery": 5.0,
+                "avg_vat": 2.0,
+                "avg_total": 117.0,
+            },
+            "SA-B": {
+                "avg_factory": 200.0,
+                "avg_duty": 20.0,
+                "avg_delivery": 10.0,
+                "avg_vat": 4.0,
+                "avg_total": 234.0,
+            },
+        }
+        sales_per_sa = {
+            "SA-A": ("Ковры", 10),
+            "SA-B": ("Пледы", 20),
+        }
+        result = _aggregate_cost_by_subject_sales(cost_per_sa, sales_per_sa)
+
+        assert result["Ковры"]["factory_total"] == 1000.0
+        assert result["Ковры"]["cost_total"] == 1170.0
+        assert result["Ковры"]["duty_total"] == 100.0
+        assert result["Ковры"]["delivery_total"] == 50.0
+        assert result["Ковры"]["vat_total"] == 20.0
+        assert result["Ковры"]["qty_total"] == 10
+
+        assert result["Пледы"]["factory_total"] == 4000.0
+        assert result["Пледы"]["cost_total"] == 4680.0
+        assert result["Пледы"]["qty_total"] == 20
+
+    def test_sa_without_cost_data_skipped(self):
+        """If SA has sales but no cost_per_sa entry, it's skipped (not NULL-cast to 0)."""
+        cost_per_sa = {
+            "SA-A": {
+                "avg_factory": 100.0,
+                "avg_duty": 0.0,
+                "avg_delivery": 0.0,
+                "avg_vat": 0.0,
+                "avg_total": 100.0,
+            },
+        }
+        sales_per_sa = {
+            "SA-A": ("Ковры", 50),
+            "SA-UNKNOWN": ("Ковры", 30),  # no cost → skipped
+        }
+        result = _aggregate_cost_by_subject_sales(cost_per_sa, sales_per_sa)
+
+        # Only SA-A contributes to qty_total; SA-UNKNOWN is skipped
+        assert result["Ковры"]["cost_total"] == 5000.0
+        assert result["Ковры"]["qty_total"] == 50
+
+    def test_zero_sales_excluded(self):
+        """SA with zero or negative net sales qty doesn't contribute."""
+        cost_per_sa = {
+            "SA-A": {
+                "avg_factory": 100.0,
+                "avg_duty": 0.0,
+                "avg_delivery": 0.0,
+                "avg_vat": 0.0,
+                "avg_total": 100.0,
+            },
+            "SA-B": {
+                "avg_factory": 500.0,
+                "avg_duty": 0.0,
+                "avg_delivery": 0.0,
+                "avg_vat": 0.0,
+                "avg_total": 500.0,
+            },
+        }
+        sales_per_sa = {
+            "SA-A": ("Ковры", 10),
+            "SA-B": ("Ковры", 0),  # zero sales → excluded
+            "SA-C": ("Ковры", -5),  # negative (net returns) → excluded
+        }
+        result = _aggregate_cost_by_subject_sales(cost_per_sa, sales_per_sa)
+
+        assert result["Ковры"]["cost_total"] == 1000.0
+        assert result["Ковры"]["qty_total"] == 10
+
+    def test_empty_inputs(self):
+        """Empty dicts → empty result."""
+        assert _aggregate_cost_by_subject_sales({}, {}) == {}
+
+    def test_subject_with_no_cost_data_absent(self):
+        """Subject where NO article has cost → not included in output.
+
+        compute_category_metrics handles this as "no cost data" (margin=None).
+        """
+        cost_per_sa: dict[str, dict[str, float]] = {}
+        sales_per_sa = {
+            "SA-A": ("Ковры", 100),
+            "SA-B": ("Пледы", 50),
+        }
+        result = _aggregate_cost_by_subject_sales(cost_per_sa, sales_per_sa)
+        assert result == {}

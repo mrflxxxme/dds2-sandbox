@@ -4,18 +4,22 @@ Cost-DNA helpers — SQL builders, loaders, and per-category metric computation.
 Pure functions and DB loaders for the Cost-DNA report. Pattern follows
 ``wb_bdr_helpers.py`` and ``bdr_loaders.py``.
 
-Phase 2 teammate fills out the function bodies. Phase 1 (Lead) provides
-the public contract so router/service stubs compile.
+Cost-per-subject aggregation: per-article weighted-average cost (from
+cost_order_items, weighted by purchase qty) is multiplied by per-article
+net sale qty in the report period, then summed per subject. This fixes
+a bug where cost_total was inflated when the purchase mix differed from
+the sale mix (bulk buys of a slow-moving expensive SKU would dominate
+the subject average). See ``_aggregate_cost_by_subject_sales``.
 """
 
 from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import CostOrder, CostOrderItem, Nomenclature, WbFunnelDaily
+from backend.models import WbFunnelDaily
 
 D = Decimal
 ZERO = D("0")
@@ -80,66 +84,172 @@ def build_revenue_by_subject_sql() -> str:
 
 # ─── Cost components per subject ─────────────────────────────────────────────
 #
-# Source: cost_order_items (joined to nomenclature for subject lookup).
-# Fields are PER-UNIT (cost_rub, delivery_rub, duty_rub, vat_rub, util_rub, total_rub).
-# Weighted aggregation: SUM(field * qty) / SUM(qty) gives weighted_avg per unit.
-# We return totals (not avg) so the service can divide by revenue for %-of-revenue.
+# Algorithm (fixed 2026-04-14):
+#   1. Per-article weighted-average cost components from cost_order_items
+#      (weight = purchase qty). This gives a stable cost-per-unit for each SA.
+#   2. Per-article net sale qty from wb_finance_rows over the report period
+#      (with subject linkage taken from the same rows — the canonical source
+#      of SA→subject mapping for the period).
+#   3. Aggregate per subject: cost_total = Σ (cost_per_unit_sa * sale_qty_sa).
+#
+# This replaces the old algorithm that weighted by purchase qty at the
+# subject level, which inflated cost for subjects where bulk-bought
+# slow-sellers had a higher unit price than the fast-movers.
 
 
-async def load_cost_components_by_subject(db: AsyncSession, project_id: int) -> dict[str, dict[str, float]]:
-    """Load cost components totaled by subject from cost_order_items.
+_PER_SA_COST_SQL = text("""
+SELECT
+    coi.article_seller AS sa,
+    SUM(coi.cost_rub * coi.qty) / NULLIF(SUM(coi.qty), 0) AS avg_factory,
+    SUM(coi.duty_rub * coi.qty) / NULLIF(SUM(coi.qty), 0) AS avg_duty,
+    SUM(coi.delivery_rub * coi.qty) / NULLIF(SUM(coi.qty), 0) AS avg_delivery,
+    SUM((COALESCE(coi.vat_rub, 0) + COALESCE(coi.util_rub, 0)) * coi.qty)
+        / NULLIF(SUM(coi.qty), 0) AS avg_vat,
+    SUM(coi.total_rub * coi.qty) / NULLIF(SUM(coi.qty), 0) AS avg_total
+FROM cost_order_items coi
+JOIN cost_orders co ON co.order_no = coi.order_no AND co.project_id = coi.project_id
+WHERE co.project_id = :project_id
+  AND co.is_deleted = false
+  AND coi.is_deleted = false
+  AND coi.qty > 0
+  AND coi.article_seller IS NOT NULL
+  AND coi.article_seller != ''
+  AND coi.total_rub IS NOT NULL
+GROUP BY coi.article_seller
+""")
+
+
+_PER_SA_SALES_SQL = text("""
+SELECT
+    sa_name AS sa,
+    MAX(NULLIF(subject_name, '')) AS subject,
+    SUM(CASE WHEN doc_type_name = 'Продажа'
+             AND supplier_oper_name IN ('Продажа', 'Возврат')
+             THEN quantity ELSE 0 END)
+    - SUM(CASE WHEN doc_type_name = 'Возврат'
+               AND supplier_oper_name IN ('Продажа', 'Возврат')
+               THEN quantity ELSE 0 END) AS net_qty
+FROM wb_finance_rows
+WHERE project_id = :project_id
+  AND (
+    COALESCE(sale_dt, rr_dt) BETWEEN :date_from AND :date_to
+    OR (sale_dt IS NULL AND rr_dt IS NULL AND date_from >= :date_from AND date_to <= :date_to)
+  )
+  AND sa_name IS NOT NULL
+  AND sa_name != ''
+GROUP BY sa_name
+""")
+
+
+def _aggregate_cost_by_subject_sales(
+    cost_per_sa: dict[str, dict[str, float]],
+    sales_per_sa: dict[str, tuple[str | None, int]],
+) -> dict[str, dict[str, float]]:
+    """Aggregate per-article cost * per-article sale qty into per-subject totals.
+
+    Args:
+        cost_per_sa: {sa_name: {avg_factory, avg_duty, avg_delivery, avg_vat, avg_total}}
+            — per-article weighted average cost components (₽/unit).
+        sales_per_sa: {sa_name: (subject, net_qty)} — per-article net sale qty
+            in the report period plus the subject it was sold under.
 
     Returns:
+        {subject_name: {factory_total, duty_total, delivery_total, vat_total,
+                        cost_total, qty_total}} — ₽ totals and the total net
+        sale qty of articles with known cost.
+
+    Behaviour:
+        - SA with sales but no cost entry is skipped (subject doesn't get
+          phantom zero contribution).
+        - SA with zero/negative net qty (net returns) is excluded.
+        - SA without a subject tag (None or empty) is excluded.
+        - A subject with zero articles having cost data is absent from the
+          result (compute_category_metrics will treat it as has_cost_data=False).
+
+    Pure function — unit-testable without DB.
+    """
+    out: dict[str, dict[str, float]] = {}
+    for sa, (subject, net_qty) in sales_per_sa.items():
+        if not subject or net_qty <= 0:
+            continue
+        cost = cost_per_sa.get(sa)
+        if cost is None:
+            continue
+        bucket = out.setdefault(
+            subject,
+            {
+                "factory_total": 0.0,
+                "duty_total": 0.0,
+                "delivery_total": 0.0,
+                "vat_total": 0.0,
+                "cost_total": 0.0,
+                "qty_total": 0,
+            },
+        )
+        bucket["factory_total"] += cost.get("avg_factory", 0.0) * net_qty
+        bucket["duty_total"] += cost.get("avg_duty", 0.0) * net_qty
+        bucket["delivery_total"] += cost.get("avg_delivery", 0.0) * net_qty
+        bucket["vat_total"] += cost.get("avg_vat", 0.0) * net_qty
+        bucket["cost_total"] += cost.get("avg_total", 0.0) * net_qty
+        bucket["qty_total"] += net_qty
+    return out
+
+
+async def load_cost_components_by_subject(
+    db: AsyncSession,
+    project_id: int,
+    date_from: date,
+    date_to: date,
+) -> dict[str, dict[str, float]]:
+    """Load per-subject cost components weighted by actual sale qty.
+
+    Args:
+        db: Async session.
+        project_id: Project scope.
+        date_from: Period start (inclusive).
+        date_to: Period end (inclusive).
+
+    Returns:
+        Same shape as before:
         { subject_name: {
-            "factory_total": float,  # SUM(cost_rub * qty)
-            "duty_total": float,     # SUM(duty_rub * qty)
-            "delivery_total": float, # SUM(delivery_rub * qty)
-            "vat_total": float,      # SUM((vat_rub + util_rub) * qty)
-            "cost_total": float,     # SUM(total_rub * qty)
-            "qty_total": int,
+            "factory_total": float,   # Σ (avg_factory_sa * net_sale_qty_sa)
+            "duty_total": float,
+            "delivery_total": float,
+            "vat_total": float,       # (vat_rub + util_rub) aggregated
+            "cost_total": float,      # Σ (avg_total_sa * net_sale_qty_sa)
+            "qty_total": int,         # Σ net_sale_qty_sa (only SA with known cost)
         } }
 
-    Subject is taken from Nomenclature (lookup by barcode + project_id).
-    Items without a matching nomenclature row are skipped (no subject to group by).
+    The caller (``compute_category_metrics``) computes:
+        avg_per_unit = factory_total / qty_total
+        proj_factory = avg_per_unit * net_qty_from_revenue_sql
+    When all subject's SA have cost, qty_total == net_qty_from_revenue_sql, so
+    proj_factory == factory_total exactly. When some SA have no cost, the
+    average is projected onto all sales (fallback behaviour unchanged).
     """
-    result = await db.execute(
-        select(
-            Nomenclature.subject.label("subject"),
-            func.sum(CostOrderItem.cost_rub * CostOrderItem.qty).label("factory_total"),
-            func.sum(CostOrderItem.duty_rub * CostOrderItem.qty).label("duty_total"),
-            func.sum(CostOrderItem.delivery_rub * CostOrderItem.qty).label("delivery_total"),
-            func.sum(
-                (func.coalesce(CostOrderItem.vat_rub, 0) + func.coalesce(CostOrderItem.util_rub, 0)) * CostOrderItem.qty
-            ).label("vat_total"),
-            func.sum(CostOrderItem.total_rub * CostOrderItem.qty).label("cost_total"),
-            func.sum(CostOrderItem.qty).label("qty_total"),
-        )
-        .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)
-        .join(
-            Nomenclature,
-            (Nomenclature.barcode == CostOrderItem.barcode) & (Nomenclature.project_id == CostOrderItem.project_id),
-        )
-        .where(
-            CostOrder.project_id == project_id,
-            CostOrder.is_deleted == False,  # noqa: E712 — SQLAlchemy column comparison
-            CostOrderItem.is_deleted == False,  # noqa: E712
-            CostOrderItem.qty > 0,
-            Nomenclature.subject.isnot(None),
-            Nomenclature.subject != "",
-        )
-        .group_by(Nomenclature.subject)
-    )
-    out: dict[str, dict[str, float]] = {}
-    for r in result:
-        out[r.subject] = {
-            "factory_total": float(r.factory_total or 0),
-            "duty_total": float(r.duty_total or 0),
-            "delivery_total": float(r.delivery_total or 0),
-            "vat_total": float(r.vat_total or 0),
-            "cost_total": float(r.cost_total or 0),
-            "qty_total": int(r.qty_total or 0),
+    # Step 1: per-article weighted average cost from cost_order_items
+    cost_result = await db.execute(_PER_SA_COST_SQL, {"project_id": project_id})
+    cost_per_sa: dict[str, dict[str, float]] = {}
+    for row in cost_result:
+        cost_per_sa[row.sa] = {
+            "avg_factory": float(row.avg_factory or 0),
+            "avg_duty": float(row.avg_duty or 0),
+            "avg_delivery": float(row.avg_delivery or 0),
+            "avg_vat": float(row.avg_vat or 0),
+            "avg_total": float(row.avg_total or 0),
         }
-    return out
+
+    # Step 2: per-article net sale qty in period + subject tag
+    sales_result = await db.execute(
+        _PER_SA_SALES_SQL,
+        {"project_id": project_id, "date_from": date_from, "date_to": date_to},
+    )
+    sales_per_sa: dict[str, tuple[str | None, int]] = {}
+    for row in sales_result:
+        sales_per_sa[row.sa] = (row.subject, int(row.net_qty or 0))
+
+    # Step 3: pure Python aggregation
+    return _aggregate_cost_by_subject_sales(cost_per_sa, sales_per_sa)
 
 
 # ─── Ads per subject (from wb_funnel_daily) ──────────────────────────────────
