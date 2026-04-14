@@ -146,3 +146,12 @@ if len(data) > app_settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
 ## P23: Soft-delete родителя без cascade на дочерние с SoftDeleteMixin
 **НЕПРАВИЛЬНО:** `factory_order.soft_delete()` без soft_delete на FactoryOrderItem → orphaned items видны в запросах
 **ПРАВИЛЬНО:** при soft_delete родителя — soft_delete все дочерние записи тоже. Модели с SoftDeleteMixin: FactoryOrderItem, CostOrderItem (добавлены 2026-04-09, commit 5158ed4)
+
+## P24: uvicorn `--workers N>1` + `--limit-max-requests` race condition (incident 2026-04-14)
+**НЕПРАВИЛЬНО:** `uvicorn ... --workers 2 --limit-max-requests 5000` в `Dockerfile.backend` — оба воркера достигают лимита одновременно, второй не поднимается, контейнер остаётся `running` с одним зависшим воркером.
+**ПРАВИЛЬНО:** `--workers 1` для uvicorn (uvicorn НЕ поддерживает `--max-requests-jitter`, рандомизирующий момент рестарта). Для масштабирования по CPU — gunicorn с `uvicorn.workers.UvicornWorker` + `--max-requests-jitter 500`.
+
+**Бонус-грабли инфры (тот же инцидент):**
+- `restart: unless-stopped` рестартит ТОЛЬКО `exited` контейнеры — `unhealthy` не трогает. Решение: контейнер `willfarrell/autoheal` (есть в `docker-compose.app.yml`) рестартит unhealthy через 30s по лейблу `autoheal: "true"`.
+- Алерты на `error rate` / `slow responses` НЕ срабатывают если backend жив для `/health` и `/metrics`, но мёртв для пользователей (504 от nginx, до backend не доходит). Решение: `BackendNoUserTraffic` алерт в `infra/monitoring/alert_rules.yml`.
+- Deploy workflow `docker compose up -d ... A B C` не запустит сервис D из compose, даже с `--remove-orphans`. Все нужные сервисы (включая `autoheal`) должны быть в списке `cd-production.yml`.
