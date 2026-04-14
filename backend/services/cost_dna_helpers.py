@@ -46,8 +46,13 @@ SELECT
     COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_sales_commission ELSE 0 END), 0) AS comm_ret,
     COALESCE(SUM(delivery_rub), 0) AS logistics,
     COALESCE(SUM(storage_fee), 0) AS storage,
+    COALESCE(SUM(penalty), 0) AS penalty,
+    COALESCE(SUM(acceptance), 0) AS acceptance,
+    -- "Прочие удержания": всё кроме рекламы (учитывается отдельно из wb_funnel_daily.adv_sum)
+    -- и кредитов (финансовая операция, не операционный расход).
     COALESCE(SUM(CASE WHEN deduction != 0
-        AND bonus_type_name LIKE '%%отзыв%%'
+        AND NOT (bonus_type_name LIKE '%%Продвижение%%' OR bonus_type_name LIKE '%%Медиа%%')
+        AND NOT (LOWER(bonus_type_name) LIKE '%%кредит%%' OR LOWER(bonus_type_name) LIKE '%%заём%%')
         THEN deduction ELSE 0 END), 0) AS other_deduction,
     -- Net units sold for cost-per-unit projection
     COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа'
@@ -183,16 +188,21 @@ def compute_category_metrics(
     which the service computes after aggregating across all categories).
 
     Key formulas:
-        revenue       = sale_retail - ret_retail
-        sales_amount  = sale_amount - ret_amount  (tax base)
-        commission    = sales_amount - (ppvz_sale - ppvz_ret)  (TrueStats)
-        net_qty       = sale_qty - ret_qty  (units actually sold during period)
-        weighted_avg_unit_cost = SUM(component * qty) / SUM(qty)  (per cost_order_items)
-        projected_cost_rub = weighted_avg_unit_cost * net_qty
-        cost_*_pct    = projected_cost_*_rub / revenue * 100   (None if no cost data)
-        mp_*_pct      = mp_* / revenue * 100
-        tax_pct       = tax_total / revenue * 100  (apply_tax simplified per-subject)
-        margin_pct    = 100 - cost_total_pct - mp_total_pct - tax_pct  (None if no cost)
+        revenue           = sale_retail - ret_retail              (база 100% — цена полки до СПП)
+        sales_amount      = sale_amount - ret_amount              (после СПП, то что заплатил покупатель)
+        ppvz_net          = ppvz_sale - ppvz_ret
+        mp_commission     = revenue - ppvz_net                    (для отображения; включает СПП)
+        opiu_commission   = sales_amount - ppvz_net               (для расчёта налога; без СПП)
+        net_qty           = sale_qty - ret_qty
+        weighted_avg_unit_cost = SUM(component * qty) / SUM(qty)
+        projected_cost_rub     = weighted_avg_unit_cost * net_qty
+        cost_*_pct        = projected_cost_*_rub / revenue * 100  (None если нет cost data)
+        mp_other          = penalty + acceptance + other_deduction
+        tax_total         = _compute_tax(sales_amount, expenses, cost_val, tax_info)
+                            где expenses = log + storage + |opiu_commission| + penalty
+                                            + |other_deduction| + adv  (как в opiu_service)
+        tax_pct           = tax_total / revenue * 100
+        margin_pct        = 100 - cost_total_pct - mp_total_pct - tax_pct  (None если нет cost)
     """
     sale_retail = D(str(revenue_row.sale_retail))
     ret_retail = D(str(revenue_row.ret_retail))
@@ -202,6 +212,8 @@ def compute_category_metrics(
     ppvz_ret = D(str(revenue_row.ppvz_ret))
     logistics = D(str(revenue_row.logistics))
     storage = D(str(revenue_row.storage))
+    penalty = D(str(getattr(revenue_row, "penalty", 0) or 0))
+    acceptance = D(str(getattr(revenue_row, "acceptance", 0) or 0))
     other_deduction = D(str(revenue_row.other_deduction))
     sale_qty = int(revenue_row.sale_qty or 0)
     ret_qty = int(revenue_row.ret_qty or 0)
@@ -210,7 +222,9 @@ def compute_category_metrics(
     revenue = sale_retail - ret_retail
     sales_amount = sale_amount - ret_amount
     ppvz_net = ppvz_sale - ppvz_ret
-    commission = sales_amount - ppvz_net  # TrueStats formula
+    mp_commission = revenue - ppvz_net  # для отображения — включает СПП
+    opiu_commission = sales_amount - ppvz_net  # для налога — без СПП (как в opiu_service)
+    mp_other_combined = penalty + acceptance + other_deduction
 
     if revenue <= 0:
         return _empty_category_metrics(revenue_row, sales_amount)
@@ -219,16 +233,12 @@ def compute_category_metrics(
     sales_f = float(sales_amount)
 
     # MP fees as % of revenue (use abs() — WB stores fees as negatives sometimes)
-    mp_commission_pct = abs(float(commission)) / rev_f * 100
+    mp_commission_pct = abs(float(mp_commission)) / rev_f * 100
     mp_logistics_pct = abs(float(logistics)) / rev_f * 100
     mp_storage_pct = abs(float(storage)) / rev_f * 100
     mp_advertising_pct = adv_sum / rev_f * 100 if adv_sum else 0
-    mp_other_pct = abs(float(other_deduction)) / rev_f * 100
+    mp_other_pct = abs(float(mp_other_combined)) / rev_f * 100
     mp_total_pct = mp_commission_pct + mp_logistics_pct + mp_storage_pct + mp_advertising_pct + mp_other_pct
-
-    # Tax (simplified per-subject — apply_tax with usn_income regime)
-    tax_total = _compute_tax(sales_f, tax_info)
-    tax_pct = tax_total / rev_f * 100 if rev_f else 0
 
     # Cost components — weighted average per-unit * net units sold
     has_cost = cost_row is not None and cost_row.get("qty_total", 0) > 0 and net_qty > 0
@@ -246,12 +256,10 @@ def compute_category_metrics(
     if has_cost:
         assert cost_row is not None  # narrowed by has_cost
         qty_in_basket = cost_row["qty_total"]
-        # Weighted avg per-unit cost components (cost_order_items qty-weighted)
         avg_factory = cost_row["factory_total"] / qty_in_basket
         avg_duty = cost_row["duty_total"] / qty_in_basket
         avg_delivery = cost_row["delivery_total"] / qty_in_basket
         avg_vat = cost_row["vat_total"] / qty_in_basket
-        # Project onto units actually sold during period
         proj_factory = avg_factory * net_qty
         proj_duty = avg_duty * net_qty
         proj_delivery = avg_delivery * net_qty
@@ -263,7 +271,24 @@ def compute_category_metrics(
         cost_delivery_pct = proj_delivery / rev_f * 100
         cost_vat_pct = proj_vat / rev_f * 100
         cost_total_pct = proj_total / rev_f * 100
-        margin_pct = 100 - cost_total_pct - mp_total_pct - tax_pct
+
+    # Tax — full ОПИУ logic (regime / cost_as_expense / expenses).
+    # expenses зеркалят opiu_service._tax_expenses_for: log + stor + opiu_comm + pen + other + adv (+ cost).
+    tax_total = _compute_tax(
+        sales_amount=sales_f,
+        log=float(logistics),
+        stor=float(storage),
+        opiu_comm=float(opiu_commission),
+        pen=float(penalty),
+        other_ded=float(other_deduction),
+        adv=adv_sum,
+        cost_val=proj_total,
+        tax_info=tax_info,
+    )
+    tax_pct = tax_total / rev_f * 100 if rev_f else 0
+
+    if has_cost:
+        margin_pct = 100 - (cost_total_pct or 0) - mp_total_pct - tax_pct
 
     return {
         "category": revenue_row.subject,
@@ -287,7 +312,10 @@ def compute_category_metrics(
         "_sales_amount": sales_f,
         "_logistics": float(logistics),
         "_storage": float(storage),
-        "_commission": float(commission),
+        "_mp_commission": float(mp_commission),
+        "_opiu_commission": float(opiu_commission),
+        "_penalty": float(penalty),
+        "_acceptance": float(acceptance),
         "_other_deduction": float(other_deduction),
         "_adv_sum": adv_sum,
         "_net_qty": net_qty,
@@ -321,7 +349,10 @@ def _empty_category_metrics(revenue_row: Any, sales_amount: Decimal) -> dict:
         "_sales_amount": float(sales_amount),
         "_logistics": 0,
         "_storage": 0,
-        "_commission": 0,
+        "_mp_commission": 0,
+        "_opiu_commission": 0,
+        "_penalty": 0,
+        "_acceptance": 0,
         "_other_deduction": 0,
         "_adv_sum": 0,
         "_net_qty": 0,
@@ -333,16 +364,49 @@ def _empty_category_metrics(revenue_row: Any, sales_amount: Decimal) -> dict:
     }
 
 
-def _compute_tax(income: float, tax_info: dict) -> float:
-    """Simplified tax calc per category.
+def _compute_tax(
+    sales_amount: float,
+    log: float = 0,
+    stor: float = 0,
+    opiu_comm: float = 0,
+    pen: float = 0,
+    other_ded: float = 0,
+    adv: float = 0,
+    cost_val: float = 0,
+    tax_info: dict | None = None,
+) -> float:
+    """Tax calc - mirrors opiu_service._calc_tax + _tax_expenses_for.
 
-    Uses USN income regime: tax = income * usn_rate (after VAT extraction).
-    For full apply_tax with expense regime see backend/services/bdr_enrichment.py::apply_tax.
+    Honours the project tax_regime from tax_info:
+        - usn_income              -> USN on (sales - NDS), expenses ignored
+        - usn_income_expense_vat  -> USN on (sales - NDS - expenses), plus NDS
+
+    expenses = |log| + |stor| + |opiu_comm| + |pen| + |other_ded| + |adv|
+               + (|cost_val| if cost_as_expense)
+
+    opiu_comm is the OPIU-style commission (sales_amount - ppvz_net), without
+    the SPP discount. SPP is not a deductible expense for the tax authority,
+    so it stays out of the tax base. For display in "Marketplace / Commission"
+    a separate variable mp_commission = revenue - ppvz_net is used (which DOES
+    include SPP).
     """
-    usn_rate = float(tax_info.get("usn_rate", 0)) / 100
-    nds_rate = float(tax_info.get("nds_rate", 0)) / 100
-    if income <= 0 or usn_rate <= 0:
+    info = tax_info or {}
+    usn_rate = float(info.get("usn_rate", 0) or 0) / 100
+    nds_rate = float(info.get("nds_rate", 0) or 0) / 100
+    regime = info.get("tax_regime", "usn_income")
+    cost_as_expense = bool(info.get("cost_as_expense", False))
+
+    if sales_amount <= 0:
         return 0.0
-    nds_sum = income * nds_rate / (1 + nds_rate) if nds_rate > 0 else 0
-    base = income - nds_sum
-    return max(base * usn_rate, 0) + nds_sum
+
+    nds_sum = sales_amount * nds_rate / (1 + nds_rate) if nds_rate > 0 else 0.0
+    base = sales_amount - nds_sum
+
+    if regime == "usn_income_expense_vat":
+        expenses = abs(log) + abs(stor) + abs(opiu_comm) + abs(pen) + abs(other_ded) + abs(adv)
+        if cost_as_expense:
+            expenses += abs(cost_val)
+        base -= expenses
+
+    usn_sum = max(base * usn_rate, 0) if usn_rate > 0 else 0.0
+    return nds_sum + usn_sum

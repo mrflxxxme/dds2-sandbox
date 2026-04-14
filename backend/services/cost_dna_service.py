@@ -170,8 +170,12 @@ def _aggregate_totals(categories: list[dict], tax_info: dict) -> dict:
 
     sum_logistics = sum(c["_logistics"] for c in categories)
     sum_storage = sum(c["_storage"] for c in categories)
-    sum_commission = sum(c["_commission"] for c in categories)
-    sum_other = sum(c["_other_deduction"] for c in categories)
+    sum_mp_commission = sum(c["_mp_commission"] for c in categories)
+    sum_opiu_commission = sum(c["_opiu_commission"] for c in categories)
+    sum_penalty = sum(c["_penalty"] for c in categories)
+    sum_acceptance = sum(c["_acceptance"] for c in categories)
+    sum_other_deduction = sum(c["_other_deduction"] for c in categories)
+    sum_other_combined = sum_penalty + sum_acceptance + sum_other_deduction
     sum_adv = sum(c["_adv_sum"] for c in categories)
     sum_sales = sum(c["_sales_amount"] for c in categories)
 
@@ -185,11 +189,11 @@ def _aggregate_totals(categories: list[dict], tax_info: dict) -> dict:
     rev = total_revenue
 
     # MP %
-    mp_commission_pct = abs(sum_commission) / rev * 100
+    mp_commission_pct = abs(sum_mp_commission) / rev * 100
     mp_logistics_pct = abs(sum_logistics) / rev * 100
     mp_storage_pct = abs(sum_storage) / rev * 100
     mp_advertising_pct = sum_adv / rev * 100
-    mp_other_pct = abs(sum_other) / rev * 100
+    mp_other_pct = abs(sum_other_combined) / rev * 100
     mp_total_pct = mp_commission_pct + mp_logistics_pct + mp_storage_pct + mp_advertising_pct + mp_other_pct
 
     # Cost % — projected RUB / total revenue (covers categories with cost data only;
@@ -200,10 +204,20 @@ def _aggregate_totals(categories: list[dict], tax_info: dict) -> dict:
     cost_vat_pct = sum_proj_vat / rev * 100
     cost_total_pct = sum_proj_cost / rev * 100
 
-    # Tax — single calculation on aggregated sales
+    # Tax — full ОПИУ logic on aggregated sales + expenses (+ projected cost if cost_as_expense)
     from backend.services.cost_dna_helpers import _compute_tax
 
-    tax_total_rub = _compute_tax(sum_sales, tax_info)
+    tax_total_rub = _compute_tax(
+        sales_amount=sum_sales,
+        log=sum_logistics,
+        stor=sum_storage,
+        opiu_comm=sum_opiu_commission,
+        pen=sum_penalty,
+        other_ded=sum_other_deduction,
+        adv=sum_adv,
+        cost_val=sum_proj_cost,
+        tax_info=tax_info,
+    )
     tax_pct = tax_total_rub / rev * 100 if rev else 0
 
     margin_pct = 100 - cost_total_pct - mp_total_pct - tax_pct
