@@ -130,3 +130,5 @@ src/types/api.ts — TypeScript интерфейсы
 - f-string в SQL, Float для денег, `datetime.utcnow()`
 - Бизнес-логика в роутере, `.scalars().all()` без `.limit()`
 - `except Exception` без `asyncio.CancelledError` в scheduler jobs
+- `uvicorn --workers >1` + `--limit-max-requests` (race condition — см. P24)
+- Расчёт на `restart: unless-stopped` для unhealthy (он только для exited — нужен `autoheal`)

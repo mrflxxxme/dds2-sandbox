@@ -313,6 +313,24 @@ else
 fi
 echo ""
 
+# ─── 18. uvicorn --workers >1 in Dockerfile.backend (race condition) ─
+# Incident 2026-04-14: --workers 2 + --limit-max-requests 5000 race condition
+# made backend hang `unhealthy` for 15h. uvicorn lacks --max-requests-jitter,
+# so multiple workers restart simultaneously. See P24 in docs/KNOWN_PITFALLS.md.
+echo "── Check 18: uvicorn --workers >1 in Dockerfile.backend ──"
+if [ -f Dockerfile.backend ]; then
+    FOUND=$(grep -E -- '"--workers", "[2-9]"' Dockerfile.backend 2>/dev/null || true)
+    if [ -n "$FOUND" ]; then
+        error "Dockerfile.backend uses uvicorn --workers >1 — race condition with --limit-max-requests (incident 2026-04-14, P24). Use --workers 1 or switch to gunicorn."
+        echo "$FOUND"
+    else
+        ok "Dockerfile.backend uvicorn workers ≤ 1"
+    fi
+else
+    ok "Dockerfile.backend not found (skipped)"
+fi
+echo ""
+
 # ─── Summary ─────────────────────────────────────────────────────────
 echo "═══════════════════════════════════════════════════════"
 if [ "$ERRORS" -gt 0 ]; then
