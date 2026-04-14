@@ -1,6 +1,20 @@
 # Alertmanager Configuration — routes Prometheus alerts to Telegram
 #
-# Requires env vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+# !!! TEMPLATE ONLY — NOT USED IN CI DEPLOY !!!
+#
+# alertmanager v0.27.0 does NOT interpolate ${ENV_VAR} syntax in this file.
+# `chat_id` is parsed as int64 directly, so a literal "${TELEGRAM_CHAT_ID}"
+# string fails YAML unmarshal and puts the container in a restart loop.
+# (Incident 2026-04-14 — run 24387021986 of deploy-monitoring.yml.)
+#
+# The actual production alertmanager.yml lives ONLY on the monitoring server
+# at /opt/dds_monitoring/monitoring/alertmanager.yml with credentials
+# hardcoded. It is excluded from rsync deploy via --exclude='alertmanager.yml'
+# in .github/workflows/deploy-monitoring.yml.
+#
+# To set up a new monitoring server, copy this file to alertmanager.yml on
+# the server and replace ${TELEGRAM_BOT_TOKEN} / ${TELEGRAM_CHAT_ID} with
+# literal values.
 
 global:
   resolve_timeout: 5m

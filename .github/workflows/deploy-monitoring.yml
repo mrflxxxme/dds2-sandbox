@@ -75,12 +75,16 @@ jobs:
         uses: burnett01/rsync-deployments@7.0.1
         with:
           # NEVER use --delete here. The remote dir holds files that don't
-          # exist in the repo: .env (secrets), alert_rules.yml.bak-*, grafana/data,
-          # and any other operator artifacts. Run 24386558385 of this workflow
-          # used --delete and wiped the prod .env file. Recovery: cat env vars
-          # from running containers via `docker inspect`.
-          # Also exclude .env explicitly as belt-and-suspenders.
-          switches: -avz --exclude='.env' --exclude='*.bak-*' --exclude='grafana/data' --exclude='*.swp'
+          # exist in the repo: .env (secrets), alertmanager.yml (hardcoded
+          # Telegram credentials — alertmanager v0.27.0 cannot interpolate
+          # env vars in this file, so credentials must live on the server),
+          # alert_rules.yml.bak-*, grafana/data, and any other operator
+          # artifacts. Run 24386558385 used --delete and wiped prod .env.
+          # Run 24387021986 (without --delete) overwrote alertmanager.yml
+          # with a templated version and put it in restart loop until
+          # credentials were hardcoded back. So we exclude alertmanager.yml
+          # explicitly — the .example template lives in the repo for docs.
+          switches: -avz --exclude='.env' --exclude='*.bak-*' --exclude='grafana/data' --exclude='*.swp' --exclude='alertmanager.yml'
           path: infra/monitoring/
           remote_path: ${{ secrets.MON_PATH }}/
           remote_host: ${{ secrets.MON_HOST }}
@@ -131,15 +135,29 @@ jobs:
           key: ${{ secrets.MON_SSH_KEY }}
           script: |
             set -e
-            sleep 3
+            # Wait for Prometheus to be ready (WAL replay can take 10-15s after restart).
+            # Run 24387021986 failed because the previous fixed `sleep 3` was too short.
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+              if curl -sf http://localhost:9090/-/ready > /dev/null 2>&1; then
+                echo "Prometheus ready after ${i}x3s"
+                break
+              fi
+              sleep 3
+            done
             # Use grep instead of python json — avoids quoting issues over SSH
             COUNT=$(curl -s http://localhost:9090/api/v1/rules \
               | grep -oE '"name":"[A-Z][^"]+"' | wc -l)
             echo "Prometheus loaded $COUNT alert rules"
             if [ "$COUNT" -lt 10 ]; then
-              echo "::warning::Only $COUNT rules loaded — expected ≥10. Check alert_rules.yml syntax."
+              echo "::error::Only $COUNT rules loaded — expected ≥10. Check alert_rules.yml syntax."
               exit 1
             fi
+            # Also check alertmanager is healthy (it has its own restart loop on bad config)
+            if ! curl -sf http://localhost:9093/-/ready > /dev/null 2>&1; then
+              echo "::error::Alertmanager is not ready — check 'docker logs monitoring-alertmanager-1'"
+              exit 1
+            fi
+            echo "Alertmanager ready"
 
       - name: Notify on failure
         if: failure()
