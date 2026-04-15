@@ -2312,6 +2312,198 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 .sc-matrix-summary-row td {
     border-top: 2px solid var(--color-border);
     border-bottom: none;
+    position: sticky;
+    bottom: 0;
+    background: rgba(250, 250, 250, 0.98);
+    backdrop-filter: blur(8px);
+    z-index: 2;
+}
+
+/* ── Shipment Matrix: filter bar ─────────────────────────────────── */
+
+.sc-matrix-card {
+    overflow: hidden;
+    margin-top: 16px;
+}
+
+.sc-matrix-filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 18px;
+    margin-top: 16px;
+    margin-bottom: 0;
+}
+
+.sc-matrix-search-input {
+    flex: 1 1 260px;
+    min-width: 200px;
+    padding: 8px 14px;
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.6);
+    font-size: 13px;
+    color: var(--color-text);
+    outline: none;
+    transition: border-color 0.15s;
+}
+.sc-matrix-search-input:focus {
+    border-color: var(--color-accent);
+    background: #fff;
+}
+.sc-matrix-search-input::placeholder {
+    color: var(--color-text-muted);
+}
+
+.sc-matrix-dropdown-wrap {
+    position: relative;
+}
+
+.sc-matrix-dropdown-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.6);
+    font-size: 13px;
+    color: var(--color-text);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s;
+}
+.sc-matrix-dropdown-btn:hover {
+    border-color: var(--color-text-muted);
+}
+.sc-matrix-dropdown-btn-active {
+    border-color: var(--color-accent);
+    background: rgba(0, 113, 227, 0.08);
+    color: var(--color-accent);
+    font-weight: 600;
+}
+
+.sc-dropdown-chevron {
+    font-size: 10px;
+    opacity: 0.6;
+}
+
+.sc-matrix-dropdown-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 50;
+    min-width: 240px;
+    max-height: 360px;
+    overflow-y: auto;
+    padding: 6px;
+    background: #fff;
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    box-shadow: var(--shadow-glass-hover);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.sc-matrix-dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    font-size: 13px;
+    color: var(--color-text);
+    cursor: pointer;
+    transition: background 0.1s;
+}
+.sc-matrix-dropdown-item:hover {
+    background: rgba(0, 113, 227, 0.06);
+}
+.sc-matrix-dropdown-item input[type="checkbox"] {
+    accent-color: var(--color-accent);
+    cursor: pointer;
+}
+
+.sc-matrix-dropdown-empty {
+    padding: 12px;
+    text-align: center;
+    color: var(--color-text-muted);
+    font-size: 12px;
+}
+
+.sc-matrix-dropdown-clear {
+    margin-top: 4px;
+    padding: 8px 10px;
+    border: none;
+    border-top: 1px solid var(--color-border);
+    background: transparent;
+    color: var(--color-danger);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: left;
+    border-radius: 0 0 8px 8px;
+}
+.sc-matrix-dropdown-clear:hover {
+    background: rgba(255, 59, 48, 0.06);
+}
+
+.sc-matrix-excel-btn {
+    margin-left: auto;
+}
+
+/* ── Shipment Matrix: sticky header, sortable, clickable vehicle ─── */
+
+.sc-matrix-table-sticky thead tr th {
+    position: sticky;
+    top: 0;
+    z-index: 4;
+}
+
+.sc-matrix-th-sortable {
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.12s;
+}
+.sc-matrix-th-sortable:hover {
+    background: rgba(0, 113, 227, 0.06);
+}
+
+.sc-sort-indicator {
+    margin-left: 4px;
+    font-size: 10px;
+    opacity: 0.4;
+    transition: opacity 0.15s;
+}
+.sc-sort-indicator.sc-sort-active {
+    opacity: 1;
+    color: var(--color-accent);
+}
+
+.sc-matrix-th-vehicle-clickable {
+    cursor: pointer;
+    transition: background 0.12s;
+}
+.sc-matrix-th-vehicle-clickable:hover {
+    background: rgba(0, 113, 227, 0.1);
+}
+.sc-matrix-th-vehicle-clickable:hover .sc-matrix-vehicle-name {
+    color: var(--color-accent);
+    text-decoration: underline;
+}
+
+.sc-matrix-td-priority {
+    position: relative;
+    padding-left: 14px !important;
+}
+
+.sc-matrix-td {
+    padding: 8px 12px;
+    font-size: 13px;
+    color: var(--color-text);
+    border-bottom: 1px solid var(--color-border);
 }
 
 /* ── End Shipment Matrix ─────────────────────────────────────────── */

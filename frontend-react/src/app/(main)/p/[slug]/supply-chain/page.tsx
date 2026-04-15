@@ -47,7 +47,6 @@ import type {
     SupplierCatalogSubjectGroup,
     SkuOrderHistoryEntry,
     ShipmentMatrixResponse,
-    ShipmentMatrixSubjectGroup,
 } from '@/types/api';
 import { CONTAINERS } from '@/app/(main)/p/[slug]/container-loader/lib/packer';
 
@@ -1774,17 +1773,31 @@ const emptySupplierForm = (): SupplierFormState => ({
 const supplierFlag = (country: string): string =>
     country === 'CHINA' ? '\uD83C\uDDE8\uD83C\uDDF3' : '\uD83C\uDDF7\uD83C\uDDFA';
 
-const currencySymbol = (currency: string): string => (currency === 'RUB' ? '\u20BD' : '\u00A5');
-
 // ─── Shipment Matrix View ──────────────────────────────────────────────────
+
+type MatrixSortKey = 'barcode' | 'article_seller' | 'subject' | 'brand' | 'total_qty' | 'total_boxes' | 'remaining_qty' | 'shipped_pct';
 
 function ShipmentMatrixView({ supplierId }: { supplierId: number }) {
     const { t, lang } = useT();
+    const params = useParams();
+    const router = useRouter();
+    const slug = params.slug as string;
+
     const [matrix, setMatrix] = useState<ShipmentMatrixResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [collapsedSubjects, setCollapsedSubjects] = useState<Set<string>>(new Set());
+
+    // Filters
+    const [search, setSearch] = useState('');
     const [onlyUnshipped, setOnlyUnshipped] = useState(false);
+    const [selectedSubjects, setSelectedSubjects] = useState<string[]>([]);
+    const [selectedBrands, setSelectedBrands] = useState<string[]>([]);
+    const [subjectsOpen, setSubjectsOpen] = useState(false);
+    const [brandsOpen, setBrandsOpen] = useState(false);
+
+    // Sorting
+    const [sortKey, setSortKey] = useState<MatrixSortKey>('remaining_qty');
+    const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
     const loadMatrix = useCallback(async () => {
         setLoading(true);
@@ -1792,11 +1805,6 @@ function ShipmentMatrixView({ supplierId }: { supplierId: number }) {
         try {
             const data = await api.getShipmentMatrix(supplierId);
             setMatrix(data);
-            if (data.subjects.length > 1) {
-                setCollapsedSubjects(new Set(data.subjects.slice(1).map(g => g.subject)));
-            } else {
-                setCollapsedSubjects(new Set());
-            }
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : t('msg_loading_error'));
         }
@@ -1805,44 +1813,129 @@ function ShipmentMatrixView({ supplierId }: { supplierId: number }) {
 
     useEffect(() => { loadMatrix(); }, [loadMatrix]);
 
-    const filteredSubjects = useMemo((): ShipmentMatrixSubjectGroup[] => {
+    // Flatten subjects into one list
+    const allItems = useMemo((): ShipmentMatrixItem[] => {
         if (!matrix) return [];
-        if (!onlyUnshipped) return matrix.subjects;
-        return matrix.subjects
-            .map(g => ({ ...g, items: g.items.filter(it => it.remaining_qty > 0) }))
-            .filter(g => g.items.length > 0);
-    }, [matrix, onlyUnshipped]);
+        return matrix.subjects.flatMap(s => s.items);
+    }, [matrix]);
 
-    const toggleSubject = (subject: string) => {
-        setCollapsedSubjects(prev => {
-            const next = new Set(prev);
-            if (next.has(subject)) next.delete(subject);
-            else next.add(subject);
-            return next;
+    // Unique subjects and brands for dropdowns
+    const allSubjectKeys = useMemo(() => {
+        const set = new Set<string>();
+        for (const it of allItems) if (it.subject) set.add(it.subject);
+        return Array.from(set).sort();
+    }, [allItems]);
+
+    const allBrandsList = useMemo(() => {
+        const set = new Set<string>();
+        for (const it of allItems) if (it.brand) set.add(it.brand);
+        return Array.from(set).sort();
+    }, [allItems]);
+
+    // Apply filters + sort
+    const filteredItems = useMemo(() => {
+        let list = allItems;
+
+        if (search.trim()) {
+            const q = search.trim().toLowerCase();
+            list = list.filter(it =>
+                it.barcode.toLowerCase().includes(q) ||
+                (it.article_seller || '').toLowerCase().includes(q)
+            );
+        }
+        if (selectedSubjects.length > 0) {
+            const set = new Set(selectedSubjects);
+            list = list.filter(it => it.subject && set.has(it.subject));
+        }
+        if (selectedBrands.length > 0) {
+            const set = new Set(selectedBrands);
+            list = list.filter(it => it.brand && set.has(it.brand));
+        }
+        if (onlyUnshipped) {
+            list = list.filter(it => it.remaining_qty > 0);
+        }
+
+        const sorted = [...list].sort((a, b) => {
+            const av = a[sortKey];
+            const bv = b[sortKey];
+            const an: number | string = sortKey === 'shipped_pct' ? Number(av ?? 0) : (av ?? '') as number | string;
+            const bn: number | string = sortKey === 'shipped_pct' ? Number(bv ?? 0) : (bv ?? '') as number | string;
+            if (typeof an === 'string' && typeof bn === 'string') {
+                return sortDir === 'asc' ? an.localeCompare(bn) : bn.localeCompare(an);
+            }
+            return sortDir === 'asc' ? (an as number) - (bn as number) : (bn as number) - (an as number);
         });
+        return sorted;
+    }, [allItems, search, selectedSubjects, selectedBrands, onlyUnshipped, sortKey, sortDir]);
+
+    // KPI recomputed for filtered set
+    const filteredSummary = useMemo(() => {
+        let totalQty = 0, inVehicles = 0, reallyShipped = 0, remaining = 0, boxes = 0;
+        for (const it of filteredItems) {
+            totalQty += it.total_qty;
+            inVehicles += (it.total_qty - it.remaining_qty);
+            reallyShipped += it.really_shipped_qty;
+            remaining += it.remaining_qty;
+            boxes += it.total_boxes;
+        }
+        return { totalQty, inVehicles, reallyShipped, remaining, boxes };
+    }, [filteredItems]);
+
+    const openVehicle = useCallback((orderNo: string) => {
+        const encoded = orderNo.split('/').map(encodeURIComponent).join('/');
+        router.push(`/p/${slug}/supply-chain/vehicles/${encoded}`);
+    }, [router, slug]);
+
+    const setSort = (key: MatrixSortKey) => {
+        if (sortKey === key) {
+            setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+        } else {
+            setSortKey(key);
+            setSortDir('desc');
+        }
+    };
+
+    const toggleSubjectFilter = (s: string) => {
+        setSelectedSubjects(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
+    };
+    const toggleBrandFilter = (b: string) => {
+        setSelectedBrands(prev => prev.includes(b) ? prev.filter(x => x !== b) : [...prev, b]);
+    };
+
+    // Цветная полоска приоритета: красная = 0% + заказ старше 30 дней, жёлтая = частично, зелёная = 100%
+    const getPriorityColor = (item: ShipmentMatrixItem): string => {
+        const pct = Number(item.shipped_pct);
+        if (pct >= 100) return 'var(--color-success)';
+        if (pct > 0) return 'var(--color-warning)';
+        if (item.latest_order_date) {
+            const ageDays = (Date.now() - new Date(item.latest_order_date).getTime()) / 86400000;
+            if (ageDays > 30) return 'var(--color-danger)';
+        }
+        return 'var(--color-text-dim)';
     };
 
     const handleExport = useCallback(() => {
         if (!matrix) return;
-        const rows = filteredSubjects.flatMap(g =>
-            g.items.map(it => {
-                const row: Record<string, unknown> = {
-                    [t('matrix_col_barcode')]: it.barcode,
-                    [t('matrix_col_article')]: it.article_seller || '',
-                    [t('matrix_col_total_qty')]: it.total_qty,
-                    [t('matrix_col_boxes')]: it.total_boxes,
-                    [t('matrix_col_remaining')]: it.remaining_qty,
-                    [t('matrix_col_pct')]: Number(it.shipped_pct),
-                };
-                matrix.vehicles.forEach(v => {
-                    row[v.order_no] = it.vehicle_allocations[v.order_no] || 0;
-                });
-                return row;
-            })
-        );
+        const country = matrix.supplier.country;
+        const rows = filteredItems.map(it => {
+            const row: Record<string, unknown> = {
+                [t('matrix_col_barcode')]: it.barcode,
+                [t('matrix_col_article')]: it.article_seller || '',
+                [t('matrix_col_subject')]: it.subject ? translateSubject(it.subject, country, lang) : '',
+                [t('matrix_col_brand')]: it.brand || '',
+                [t('matrix_col_total_qty')]: it.total_qty,
+                [t('matrix_col_boxes')]: it.total_boxes,
+                [t('matrix_col_remaining')]: it.remaining_qty,
+                [t('matrix_col_pct')]: Number(it.shipped_pct),
+            };
+            matrix.vehicles.forEach(v => {
+                row[v.order_no] = it.vehicle_allocations[v.order_no] || 0;
+            });
+            return row;
+        });
         const filename = `${t('matrix_mode_shipment')}_${matrix.supplier.name}_${new Date().toISOString().slice(0, 10)}`;
         exportToExcel(rows, filename);
-    }, [matrix, filteredSubjects, t]);
+    }, [matrix, filteredItems, t, lang]);
 
     if (loading) {
         return (
@@ -1852,7 +1945,6 @@ function ShipmentMatrixView({ supplierId }: { supplierId: number }) {
             </div>
         );
     }
-
     if (error) {
         return (
             <div className="glass-card sc-error-card">
@@ -1863,8 +1955,7 @@ function ShipmentMatrixView({ supplierId }: { supplierId: number }) {
             </div>
         );
     }
-
-    if (!matrix || matrix.subjects.length === 0) {
+    if (!matrix || allItems.length === 0) {
         return (
             <div className="empty-state">
                 <div className="empty-state-icon">📦</div>
@@ -1874,9 +1965,8 @@ function ShipmentMatrixView({ supplierId }: { supplierId: number }) {
     }
 
     const vehicles = matrix.vehicles;
-    const summary = matrix.summary;
-    const shippedPct = summary.total_qty > 0
-        ? Math.round((summary.shipped_qty / summary.total_qty) * 100) : 0;
+    const totalAll = matrix.summary.total_qty;
+    const isFiltered = filteredItems.length !== allItems.length;
 
     const statusBadge = (status: string | null) => {
         const cls = status === 'DELIVERED' ? 'badge-success'
@@ -1888,33 +1978,127 @@ function ShipmentMatrixView({ supplierId }: { supplierId: number }) {
         return <span className={`badge ${cls}`} style={{ fontSize: 10 }}>{label}</span>;
     };
 
+    const sortIndicator = (key: MatrixSortKey) => {
+        if (sortKey !== key) return <span className="sc-sort-indicator">⇅</span>;
+        return <span className="sc-sort-indicator sc-sort-active">{sortDir === 'asc' ? '↑' : '↓'}</span>;
+    };
+
+    const reallyShippedPct = filteredSummary.totalQty > 0
+        ? Math.round((filteredSummary.reallyShipped / filteredSummary.totalQty) * 100) : 0;
+    const inVehiclesPct = filteredSummary.totalQty > 0
+        ? Math.round((filteredSummary.inVehicles / filteredSummary.totalQty) * 100) : 0;
+
     return (
         <div>
-            {/* KPI */}
+            {/* KPI — recomputed for filtered set */}
             <div className="stats-grid">
                 <div className="glass-card sc-catalog-kpi-card">
                     <div className="sc-catalog-kpi-label">{t('matrix_kpi_total')}</div>
-                    <div className="sc-kpi-value-lg">{formatNumber(summary.total_qty, 0)}</div>
-                    <div className="sc-catalog-kpi-sub">{t('unit_pcs')}</div>
+                    <div className="sc-kpi-value-lg">{formatNumber(filteredSummary.totalQty, 0)}</div>
+                    <div className="sc-catalog-kpi-sub">
+                        {isFiltered ? t('matrix_of_total').replace('{total}', formatNumber(totalAll, 0)) : t('unit_pcs')}
+                    </div>
                 </div>
                 <div className="glass-card sc-catalog-kpi-card">
-                    <div className="sc-catalog-kpi-label">{t('matrix_kpi_shipped')}</div>
-                    <div className="sc-kpi-value-lg sc-color-success">{formatNumber(summary.shipped_qty, 0)}</div>
-                    <div className="sc-catalog-kpi-sub">{shippedPct}%</div>
+                    <div className="sc-catalog-kpi-label">{t('matrix_kpi_in_vehicles')}</div>
+                    <div className="sc-kpi-value-lg sc-color-accent">{formatNumber(filteredSummary.inVehicles, 0)}</div>
+                    <div className="sc-catalog-kpi-sub">{inVehiclesPct}%</div>
+                </div>
+                <div className="glass-card sc-catalog-kpi-card">
+                    <div className="sc-catalog-kpi-label">{t('matrix_kpi_really_shipped')}</div>
+                    <div className="sc-kpi-value-lg sc-color-success">{formatNumber(filteredSummary.reallyShipped, 0)}</div>
+                    <div className="sc-catalog-kpi-sub">{reallyShippedPct}%</div>
                 </div>
                 <div className="glass-card sc-catalog-kpi-card">
                     <div className="sc-catalog-kpi-label">{t('matrix_kpi_remaining')}</div>
-                    <div className="sc-kpi-value-lg sc-color-warning">{formatNumber(summary.remaining_qty, 0)}</div>
+                    <div className="sc-kpi-value-lg sc-color-warning">{formatNumber(filteredSummary.remaining, 0)}</div>
                     <div className="sc-catalog-kpi-sub">{t('unit_pcs')}</div>
-                </div>
-                <div className="glass-card sc-catalog-kpi-card">
-                    <div className="sc-catalog-kpi-label">{t('matrix_kpi_boxes')}</div>
-                    <div className="sc-kpi-value-lg">{formatNumber(summary.total_boxes, 0)}</div>
                 </div>
             </div>
 
-            {/* Toolbar */}
-            <div className="sc-catalog-toolbar">
+            {/* Filter bar */}
+            <div className="sc-matrix-filter-bar glass-card">
+                <input
+                    type="text"
+                    className="sc-matrix-search-input"
+                    placeholder={t('matrix_filter_search')}
+                    value={search}
+                    onChange={e => setSearch(e.target.value)}
+                />
+                <div className="sc-matrix-dropdown-wrap">
+                    <button
+                        type="button"
+                        className={`sc-matrix-dropdown-btn${selectedSubjects.length > 0 ? ' sc-matrix-dropdown-btn-active' : ''}`}
+                        onClick={() => { setSubjectsOpen(v => !v); setBrandsOpen(false); }}
+                    >
+                        {selectedSubjects.length === 0
+                            ? t('matrix_filter_subjects_all')
+                            : t('matrix_filter_subjects_count').replace('{count}', String(selectedSubjects.length))}
+                        <span className="sc-dropdown-chevron">▾</span>
+                    </button>
+                    {subjectsOpen && (
+                        <div className="sc-matrix-dropdown-menu">
+                            {allSubjectKeys.length === 0 ? (
+                                <div className="sc-matrix-dropdown-empty">—</div>
+                            ) : allSubjectKeys.map(s => (
+                                <label key={s} className="sc-matrix-dropdown-item">
+                                    <input
+                                        type="checkbox"
+                                        checked={selectedSubjects.includes(s)}
+                                        onChange={() => toggleSubjectFilter(s)}
+                                    />
+                                    {translateSubject(s, matrix.supplier.country, lang)}
+                                </label>
+                            ))}
+                            {selectedSubjects.length > 0 && (
+                                <button
+                                    type="button"
+                                    className="sc-matrix-dropdown-clear"
+                                    onClick={() => setSelectedSubjects([])}
+                                >
+                                    ✕ {t('filter_all')}
+                                </button>
+                            )}
+                        </div>
+                    )}
+                </div>
+                <div className="sc-matrix-dropdown-wrap">
+                    <button
+                        type="button"
+                        className={`sc-matrix-dropdown-btn${selectedBrands.length > 0 ? ' sc-matrix-dropdown-btn-active' : ''}`}
+                        onClick={() => { setBrandsOpen(v => !v); setSubjectsOpen(false); }}
+                    >
+                        {selectedBrands.length === 0
+                            ? t('matrix_filter_brands_all')
+                            : t('matrix_filter_brands_count').replace('{count}', String(selectedBrands.length))}
+                        <span className="sc-dropdown-chevron">▾</span>
+                    </button>
+                    {brandsOpen && (
+                        <div className="sc-matrix-dropdown-menu">
+                            {allBrandsList.length === 0 ? (
+                                <div className="sc-matrix-dropdown-empty">—</div>
+                            ) : allBrandsList.map(b => (
+                                <label key={b} className="sc-matrix-dropdown-item">
+                                    <input
+                                        type="checkbox"
+                                        checked={selectedBrands.includes(b)}
+                                        onChange={() => toggleBrandFilter(b)}
+                                    />
+                                    {b}
+                                </label>
+                            ))}
+                            {selectedBrands.length > 0 && (
+                                <button
+                                    type="button"
+                                    className="sc-matrix-dropdown-clear"
+                                    onClick={() => setSelectedBrands([])}
+                                >
+                                    ✕ {t('filter_all')}
+                                </button>
+                            )}
+                        </div>
+                    )}
+                </div>
                 <label className="sc-matrix-unshipped-toggle">
                     <input
                         type="checkbox"
@@ -1923,132 +2107,160 @@ function ShipmentMatrixView({ supplierId }: { supplierId: number }) {
                     />
                     {t('matrix_filter_unshipped')}
                 </label>
-                <button className="btn btn-sm" onClick={handleExport} disabled={filteredSubjects.length === 0}>
+                <button
+                    className="btn btn-sm sc-matrix-excel-btn"
+                    onClick={handleExport}
+                    disabled={filteredItems.length === 0}
+                >
                     📥 Excel
                 </button>
             </div>
 
-            {/* Subject groups */}
-            {filteredSubjects.map(group => {
-                const collapsed = collapsedSubjects.has(group.subject);
-                const country = matrix.supplier.country;
-
-                return (
-                    <div key={group.subject} className="glass-card sc-subject-card">
-                        <div onClick={() => toggleSubject(group.subject)} className="sc-subject-header">
-                            <div className="sc-subject-header-left">
-                                <span
-                                    className="sc-subject-chevron"
-                                    style={{ transform: collapsed ? 'rotate(-90deg)' : 'none' }}
-                                >
-                                    ▼
-                                </span>
-                                {translateSubject(group.subject, country, lang)}
-                            </div>
-                            <div className="sc-subject-stats">
-                                <div><strong className="sc-color-text">{group.items.length}</strong> SKU</div>
-                                <div><strong className="sc-color-text">{formatNumber(group.total_qty, 0)}</strong> {t('unit_pcs')}</div>
-                                <div>{t('matrix_col_remaining')}: <strong className="sc-color-warning">{formatNumber(group.remaining_qty, 0)}</strong></div>
-                                <div>{Number(group.shipped_pct).toFixed(0)}%</div>
-                            </div>
-                        </div>
-                        {!collapsed && (
-                            <div className="sc-matrix-wrap">
-                                <table className="sc-matrix-table">
-                                    <thead>
-                                        <tr>
-                                            <th className="sc-matrix-th-fixed" style={{ left: 0, minWidth: 140 }}>{t('matrix_col_barcode')}</th>
-                                            <th className="sc-matrix-th-fixed" style={{ left: 140, minWidth: 100 }}>{t('matrix_col_article')}</th>
-                                            <th className="sc-matrix-th-num" style={{ minWidth: 70 }}>{t('matrix_col_total_qty')}</th>
-                                            <th className="sc-matrix-th-num" style={{ minWidth: 60 }}>{t('matrix_col_boxes')}</th>
-                                            <th className="sc-matrix-th-num" style={{ minWidth: 70 }}>{t('matrix_col_remaining')}</th>
-                                            <th className="sc-matrix-th-num" style={{ minWidth: 70 }}>{t('matrix_col_pct')}</th>
-                                            {vehicles.map(v => (
-                                                <th key={v.order_no} className="sc-matrix-th-vehicle">
-                                                    <div className="sc-matrix-vehicle-header">
-                                                        <div className="sc-matrix-vehicle-name">{v.order_no}</div>
-                                                        {statusBadge(v.status)}
-                                                        {v.ship_date && (
-                                                            <div className="sc-matrix-vehicle-date">{formatDate(v.ship_date)}</div>
-                                                        )}
+            {/* Table */}
+            <div className="glass-card sc-matrix-card">
+                {filteredItems.length === 0 ? (
+                    <div className="empty-state">
+                        <div className="empty-state-icon">🔍</div>
+                        <div>{t('matrix_empty_filtered')}</div>
+                    </div>
+                ) : (
+                    <div className="sc-matrix-wrap">
+                        <table className="sc-matrix-table sc-matrix-table-sticky">
+                            <thead>
+                                <tr>
+                                    <th className="sc-matrix-th-fixed sc-matrix-th-sortable" style={{ left: 0, minWidth: 150 }} onClick={() => setSort('barcode')}>
+                                        {t('matrix_col_barcode')} {sortIndicator('barcode')}
+                                    </th>
+                                    <th className="sc-matrix-th-fixed sc-matrix-th-sortable" style={{ left: 150, minWidth: 110 }} onClick={() => setSort('article_seller')}>
+                                        {t('matrix_col_article')} {sortIndicator('article_seller')}
+                                    </th>
+                                    <th className="sc-matrix-th-sortable" style={{ minWidth: 110 }} onClick={() => setSort('subject')}>
+                                        {t('matrix_col_subject')} {sortIndicator('subject')}
+                                    </th>
+                                    <th className="sc-matrix-th-sortable" style={{ minWidth: 90 }} onClick={() => setSort('brand')}>
+                                        {t('matrix_col_brand')} {sortIndicator('brand')}
+                                    </th>
+                                    <th className="sc-matrix-th-num sc-matrix-th-sortable" style={{ minWidth: 80 }} onClick={() => setSort('total_qty')}>
+                                        {t('matrix_col_total_qty')} {sortIndicator('total_qty')}
+                                    </th>
+                                    <th className="sc-matrix-th-num sc-matrix-th-sortable" style={{ minWidth: 70 }} onClick={() => setSort('total_boxes')}>
+                                        {t('matrix_col_boxes')} {sortIndicator('total_boxes')}
+                                    </th>
+                                    <th className="sc-matrix-th-num sc-matrix-th-sortable" style={{ minWidth: 80 }} onClick={() => setSort('remaining_qty')}>
+                                        {t('matrix_col_remaining')} {sortIndicator('remaining_qty')}
+                                    </th>
+                                    <th className="sc-matrix-th-num sc-matrix-th-sortable" style={{ minWidth: 110 }} onClick={() => setSort('shipped_pct')}>
+                                        {t('matrix_col_pct')} {sortIndicator('shipped_pct')}
+                                    </th>
+                                    {vehicles.map(v => (
+                                        <th
+                                            key={v.order_no}
+                                            className="sc-matrix-th-vehicle sc-matrix-th-vehicle-clickable"
+                                            onClick={() => openVehicle(v.order_no)}
+                                            title={t('matrix_click_vehicle_hint')}
+                                        >
+                                            <div className="sc-matrix-vehicle-header">
+                                                <div className="sc-matrix-vehicle-name">{v.order_no}</div>
+                                                {statusBadge(v.status)}
+                                                {v.ship_date && (
+                                                    <div className="sc-matrix-vehicle-date">{formatDate(v.ship_date)}</div>
+                                                )}
+                                            </div>
+                                        </th>
+                                    ))}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {filteredItems.map(item => {
+                                    const pct = Number(item.shipped_pct);
+                                    const priorityColor = getPriorityColor(item);
+                                    return (
+                                        <tr key={item.barcode} className="sc-tr-border">
+                                            <td className="sc-matrix-td-fixed sc-catalog-td-mono sc-matrix-td-priority"
+                                                style={{ left: 0, borderLeft: `3px solid ${priorityColor}` }}>
+                                                {item.barcode}
+                                            </td>
+                                            <td className="sc-matrix-td-fixed" style={{ left: 150 }}>
+                                                {item.article_seller || '—'}
+                                            </td>
+                                            <td className="sc-matrix-td">
+                                                {item.subject
+                                                    ? translateSubject(item.subject, matrix.supplier.country, lang)
+                                                    : '—'}
+                                            </td>
+                                            <td className="sc-matrix-td">{item.brand || '—'}</td>
+                                            <td className="sc-matrix-td-num">{formatNumber(item.total_qty, 0)}</td>
+                                            <td className="sc-matrix-td-num">{item.total_boxes || '—'}</td>
+                                            <td className="sc-matrix-td-num" style={{
+                                                color: item.remaining_qty > 0 ? 'var(--color-warning)' : 'var(--color-success)',
+                                                fontWeight: item.remaining_qty > 0 ? 600 : 400,
+                                            }}>{formatNumber(item.remaining_qty, 0)}</td>
+                                            <td className="sc-matrix-td-num">
+                                                <div className="sc-progress-mini">
+                                                    <div className="sc-progress-mini-track">
+                                                        <div style={{
+                                                            width: `${pct}%`,
+                                                            height: '100%',
+                                                            background: pct >= 100 ? 'var(--color-success)' : 'var(--color-accent)',
+                                                            borderRadius: 4,
+                                                        }} />
                                                     </div>
-                                                </th>
-                                            ))}
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {group.items.map(item => {
-                                            const pct = Number(item.shipped_pct);
-                                            return (
-                                                <tr key={item.barcode} className="sc-tr-border">
-                                                    <td className="sc-matrix-td-fixed sc-catalog-td-mono" style={{ left: 0 }}>{item.barcode}</td>
-                                                    <td className="sc-matrix-td-fixed" style={{ left: 140 }}>{item.article_seller || '—'}</td>
-                                                    <td className="sc-matrix-td-num">{formatNumber(item.total_qty, 0)}</td>
-                                                    <td className="sc-matrix-td-num">{item.total_boxes || '—'}</td>
-                                                    <td className="sc-matrix-td-num" style={{
-                                                        color: item.remaining_qty > 0 ? 'var(--color-warning)' : 'var(--color-success)',
-                                                        fontWeight: item.remaining_qty > 0 ? 600 : 400,
-                                                    }}>{formatNumber(item.remaining_qty, 0)}</td>
-                                                    <td className="sc-matrix-td-num">
-                                                        <div className="sc-progress-mini">
-                                                            <div className="sc-progress-mini-track">
-                                                                <div style={{
-                                                                    width: `${pct}%`,
-                                                                    height: '100%',
-                                                                    background: pct >= 100 ? 'var(--color-success)' : 'var(--color-accent)',
-                                                                    borderRadius: 4,
-                                                                }} />
-                                                            </div>
-                                                            <span className="sc-progress-mini-count" style={{ fontSize: 11, minWidth: 32 }}>
-                                                                {pct.toFixed(0)}%
-                                                            </span>
-                                                        </div>
-                                                    </td>
-                                                    {vehicles.map(v => {
-                                                        const qty = item.vehicle_allocations[v.order_no] || 0;
-                                                        const cellClass = qty === 0
-                                                            ? 'sc-matrix-cell-empty'
-                                                            : qty >= item.total_qty
-                                                            ? 'sc-matrix-cell-full'
-                                                            : 'sc-matrix-cell-partial';
-                                                        return (
-                                                            <td key={v.order_no} className={`sc-matrix-td-num ${cellClass}`}>
-                                                                {qty > 0 ? formatNumber(qty, 0) : ''}
-                                                            </td>
-                                                        );
-                                                    })}
-                                                </tr>
-                                            );
-                                        })}
-                                        {/* Subject total row */}
-                                        <tr className="sc-matrix-summary-row">
-                                            <td className="sc-matrix-td-fixed" style={{ left: 0, fontWeight: 600 }} colSpan={2}>
-                                                {t('matrix_total_row')}
+                                                    <span className="sc-progress-mini-count" style={{ fontSize: 11, minWidth: 32 }}>
+                                                        {pct.toFixed(0)}%
+                                                    </span>
+                                                </div>
                                             </td>
-                                            <td className="sc-matrix-td-num" style={{ fontWeight: 600 }}>{formatNumber(group.total_qty, 0)}</td>
-                                            <td className="sc-matrix-td-num" style={{ fontWeight: 600 }}>{formatNumber(group.total_boxes, 0)}</td>
-                                            <td className="sc-matrix-td-num" style={{ fontWeight: 600, color: 'var(--color-warning)' }}>
-                                                {formatNumber(group.remaining_qty, 0)}
-                                            </td>
-                                            <td className="sc-matrix-td-num" style={{ fontWeight: 600 }}>{Number(group.shipped_pct).toFixed(0)}%</td>
                                             {vehicles.map(v => {
-                                                const colTotal = group.items.reduce(
-                                                    (s, it) => s + (it.vehicle_allocations[v.order_no] || 0), 0
-                                                );
+                                                const qty = item.vehicle_allocations[v.order_no] || 0;
+                                                const cellClass = qty === 0
+                                                    ? 'sc-matrix-cell-empty'
+                                                    : qty >= item.total_qty
+                                                    ? 'sc-matrix-cell-full'
+                                                    : 'sc-matrix-cell-partial';
                                                 return (
-                                                    <td key={v.order_no} className="sc-matrix-td-num" style={{ fontWeight: 600 }}>
-                                                        {colTotal > 0 ? formatNumber(colTotal, 0) : ''}
+                                                    <td key={v.order_no} className={`sc-matrix-td-num ${cellClass}`}>
+                                                        {qty > 0 ? formatNumber(qty, 0) : ''}
                                                     </td>
                                                 );
                                             })}
                                         </tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                        )}
+                                    );
+                                })}
+                                {/* Grand total row */}
+                                <tr className="sc-matrix-summary-row">
+                                    <td className="sc-matrix-td-fixed" style={{ left: 0, fontWeight: 600 }} colSpan={4}>
+                                        {t('matrix_total_row')}
+                                    </td>
+                                    <td className="sc-matrix-td-num" style={{ fontWeight: 600 }}>
+                                        {formatNumber(filteredSummary.totalQty, 0)}
+                                    </td>
+                                    <td className="sc-matrix-td-num" style={{ fontWeight: 600 }}>
+                                        {formatNumber(filteredSummary.boxes, 0)}
+                                    </td>
+                                    <td className="sc-matrix-td-num" style={{ fontWeight: 600, color: 'var(--color-warning)' }}>
+                                        {formatNumber(filteredSummary.remaining, 0)}
+                                    </td>
+                                    <td className="sc-matrix-td-num" style={{ fontWeight: 600 }}>
+                                        {filteredSummary.totalQty > 0
+                                            ? Math.round((filteredSummary.inVehicles / filteredSummary.totalQty) * 100)
+                                            : 0}%
+                                    </td>
+                                    {vehicles.map(v => {
+                                        const colTotal = filteredItems.reduce(
+                                            (s, it) => s + (it.vehicle_allocations[v.order_no] || 0), 0
+                                        );
+                                        return (
+                                            <td key={v.order_no} className="sc-matrix-td-num" style={{ fontWeight: 600 }}>
+                                                {colTotal > 0 ? formatNumber(colTotal, 0) : ''}
+                                            </td>
+                                        );
+                                    })}
+                                </tr>
+                            </tbody>
+                        </table>
                     </div>
-                );
-            })}
+                )}
+            </div>
         </div>
     );
 }

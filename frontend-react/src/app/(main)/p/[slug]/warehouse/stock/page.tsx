@@ -168,7 +168,7 @@ function WbDetailRow({ row, wbWarehouses, mode }: { row: UnifiedStockRow; wbWare
     );
 }
 
-function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandChange, isLoading }: {
+function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandChange, isLoading, includeForecast, onForecastChange }: {
     data: UnifiedStockRow[];
     onRefresh: () => void;
     groupBy: string;
@@ -176,6 +176,8 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
     brand: string;
     onBrandChange: (brand: string) => void;
     isLoading: boolean;
+    includeForecast: boolean;
+    onForecastChange: (v: boolean) => void;
 }) {
     const [search, setSearch] = useState('');
     const [expanded, setExpanded] = useState<Set<number>>(new Set());
@@ -187,6 +189,18 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
     const [trendPeriod, setTrendPeriod] = useState<7 | 14 | 30>(14);
     // Stock-cover filter: items with запас <= N days. 0 = no filter.
     const [stockDaysFilter, setStockDaysFilter] = useState<0 | 7 | 30 | 60>(0);
+    // Новинки KPI breakdown — null=collapsed, 'category'/'brand'=which grouping to show
+    const [noveltyBreakdown, setNoveltyBreakdown] = useState<null | 'category' | 'brand'>(null);
+    // Per-group expansion inside the breakdown table — keys = group names
+    const [expandedNoveltyGroups, setExpandedNoveltyGroups] = useState<Set<string>>(new Set());
+    const toggleNoveltyGroup = useCallback((key: string) => {
+        setExpandedNoveltyGroups(prev => {
+            const next = new Set(prev);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            return next;
+        });
+    }, []);
     const isGrouped = groupBy !== 'sku' && groupBy !== 'abc';
 
     const getVariantTotal = useCallback((row: UnifiedStockRow): number => {
@@ -289,6 +303,99 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         }
         return rows;
     }, [data, search, isGrouped, stockDaysFilter, stockDaysFor]);
+
+    // «Новинки» KPI — aggregates SKUs flagged as novelties by the backend
+    // (no sales recorded in the last 60 days). Counts ALL current and incoming
+    // quantity (shelf own + WB + in-transit + factory + vehicles) since none
+    // of it has been sold yet — it's all "potential". Flattens grouped views
+    // to SKU level so numbers are identical regardless of «Группировка» mode.
+    // Also produces per-category and per-brand breakdowns (sorted by revenue
+    // potential desc) for the optional expandable section in the card.
+    const noveltyKpi = useMemo(() => {
+        const collected: UnifiedStockRow[] = [];
+        const walk = (rows: UnifiedStockRow[]) => {
+            for (const r of rows) {
+                if (r.children && r.children.length > 0) {
+                    walk(r.children);
+                } else {
+                    collected.push(r);
+                }
+            }
+        };
+        walk(data);
+        let skuCount = 0;
+        let qtyTotal = 0;
+        let costTotal = 0;
+        let revenuePotential = 0;
+        let profitPotential = 0;
+        type NoveltyItem = {
+            nomenclature_id: number;
+            article_seller: string | null;
+            barcode: string;
+            qty: number;
+            cost: number;
+            revenue: number;
+            profit: number;
+        };
+        type GroupRow = {
+            key: string;
+            skuCount: number;
+            qty: number;
+            cost: number;
+            revenue: number;
+            profit: number;
+            items: NoveltyItem[];
+        };
+        const byCategoryMap = new Map<string, GroupRow>();
+        const byBrandMap = new Map<string, GroupRow>();
+        const bump = (map: Map<string, GroupRow>, key: string, item: NoveltyItem) => {
+            let g = map.get(key);
+            if (!g) {
+                g = { key, skuCount: 0, qty: 0, cost: 0, revenue: 0, profit: 0, items: [] };
+                map.set(key, g);
+            }
+            g.skuCount += 1;
+            g.qty += item.qty;
+            g.cost += item.cost;
+            g.revenue += item.revenue;
+            g.profit += item.profit;
+            g.items.push(item);
+        };
+        for (const r of collected) {
+            if (!r.is_novelty) continue;
+            const available = (r.total_own || 0) + (r.total_wb || 0) + (r.in_transit || 0);
+            const incoming = (r.factory_qty || 0) + (r.vehicle_forming_qty || 0) + (r.vehicle_transit_qty || 0);
+            const qty = available + incoming;
+            if (qty <= 0) continue;
+            skuCount += 1;
+            qtyTotal += qty;
+            const unitCost = r.avg_cost || r.cost_factory_unit || 0;
+            const cost = qty * unitCost;
+            const revenue = qty * (r.novelty_unit_revenue || 0);
+            const profit = qty * (r.novelty_unit_profit || 0);
+            costTotal += cost;
+            revenuePotential += revenue;
+            profitPotential += profit;
+            const item: NoveltyItem = {
+                nomenclature_id: r.nomenclature_id,
+                article_seller: r.article_seller,
+                barcode: r.barcode || '',
+                qty,
+                cost,
+                revenue,
+                profit,
+            };
+            bump(byCategoryMap, r.subject || 'Без категории', item);
+            bump(byBrandMap, r.brand || 'Без бренда', item);
+        }
+        const sortByRevenueDesc = <T extends { revenue: number }>(a: T, b: T) => b.revenue - a.revenue;
+        // Sort children inside each group too — top earners first.
+        for (const g of byCategoryMap.values()) g.items.sort(sortByRevenueDesc);
+        for (const g of byBrandMap.values()) g.items.sort(sortByRevenueDesc);
+        const byCategory = Array.from(byCategoryMap.values()).sort(sortByRevenueDesc);
+        const byBrand = Array.from(byBrandMap.values()).sort(sortByRevenueDesc);
+        return { skuCount, qtyTotal, costTotal, revenuePotential, profitPotential, byCategory, byBrand };
+    }, [data]);
 
     const availableBrands = useMemo(() => {
         const set = new Set<string>();
@@ -1012,6 +1119,157 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                 )}
             </div>
 
+            {/* Новинки KPI — SKUs with no sales in last 60 days */}
+            {noveltyKpi.skuCount > 0 && (
+                <div
+                    className="glass-card"
+                    style={{ padding: 16, marginBottom: 16 }}
+                    title="Новинка = товар без единой продажи за последние 60 дней (новый артикул или давно не продававшийся). Учитываются остатки везде: свой склад + WB + в пути + фабрика + машины."
+                >
+                    <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                                {'\u{1F4E6}'} Новинки
+                            </span>
+                            <span style={{ fontSize: 20, fontWeight: 700 }}>
+                                {formatNumber(noveltyKpi.skuCount, 0)} SKU
+                            </span>
+                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                {formatNumber(noveltyKpi.qtyTotal, 0)} шт суммарно
+                            </span>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                                Себестоимость
+                            </span>
+                            <span style={{ fontSize: 20, fontWeight: 700 }} title="Сумма себестоимости по всем новинкам: склад + WB + в пути + фабрика + машины">
+                                {formatNumber(noveltyKpi.costTotal)} {'\u20BD'}
+                            </span>
+                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                заморожено в новинках
+                            </span>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                                Потенциал выручки
+                            </span>
+                            <span
+                                style={{ fontSize: 20, fontWeight: 700, color: 'var(--color-accent)' }}
+                                title="qty × средняя цена продажи в категории (за 30д). Оценка: если новинки продадутся как средний товар их категории, они принесут столько выручки."
+                            >
+                                {'\u2248'} {formatNumber(noveltyKpi.revenuePotential)} {'\u20BD'}
+                            </span>
+                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                оценка по категории
+                            </span>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                                Ожидаемая прибыль
+                            </span>
+                            <span
+                                style={{ fontSize: 20, fontWeight: 700, color: noveltyKpi.profitPotential >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}
+                                title="qty × средняя прибыль на единицу в категории (после комиссии/логистики/налога). Оценка."
+                            >
+                                {'\u2248'} {formatNumber(noveltyKpi.profitPotential)} {'\u20BD'}
+                            </span>
+                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                {noveltyKpi.revenuePotential > 0
+                                    ? `${formatNumber((noveltyKpi.profitPotential / noveltyKpi.revenuePotential) * 100, 1)}% маржи`
+                                    : '\u2014'}
+                            </span>
+                        </div>
+                        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+                            <div style={{ display: 'flex', border: '1px solid var(--color-border)', borderRadius: 8, overflow: 'hidden' }}>
+                                {([
+                                    { key: 'category' as const, label: 'По категории' },
+                                    { key: 'brand' as const, label: 'По бренду' },
+                                ]).map((btn, i) => {
+                                    const isActive = noveltyBreakdown === btn.key;
+                                    return (
+                                        <button
+                                            key={btn.key}
+                                            onClick={() => {
+                                                setNoveltyBreakdown(isActive ? null : btn.key);
+                                                setExpandedNoveltyGroups(new Set());  // reset expansions on grouping change
+                                            }}
+                                            style={{
+                                                padding: '6px 12px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
+                                                borderLeft: i > 0 ? '1px solid var(--color-border)' : 'none',
+                                                background: isActive ? 'var(--color-accent)' : 'var(--color-bg-card)',
+                                                color: isActive ? '#fff' : 'var(--color-text)',
+                                            }}
+                                        >{btn.label}</button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Breakdown table — only rendered when a grouping is selected */}
+                    {noveltyBreakdown && (
+                        <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--color-border)' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                                <thead>
+                                    <tr style={{ textAlign: 'left', color: 'var(--color-text-muted)', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                                        <th style={{ padding: '6px 8px' }}>{noveltyBreakdown === 'category' ? 'Категория' : 'Бренд'}</th>
+                                        <th style={{ padding: '6px 8px', textAlign: 'right' }}>SKU</th>
+                                        <th style={{ padding: '6px 8px', textAlign: 'right' }}>Шт</th>
+                                        <th style={{ padding: '6px 8px', textAlign: 'right' }}>Себест., ₽</th>
+                                        <th style={{ padding: '6px 8px', textAlign: 'right' }}>Потенциал, ₽</th>
+                                        <th style={{ padding: '6px 8px', textAlign: 'right' }}>Прибыль, ₽</th>
+                                        <th style={{ padding: '6px 8px', textAlign: 'right' }}>Маржа %</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {(noveltyBreakdown === 'category' ? noveltyKpi.byCategory : noveltyKpi.byBrand).map((g) => {
+                                        const isOpen = expandedNoveltyGroups.has(g.key);
+                                        return (
+                                            <React.Fragment key={g.key}>
+                                                <tr
+                                                    onClick={() => toggleNoveltyGroup(g.key)}
+                                                    style={{ borderTop: '1px solid var(--color-border)', cursor: 'pointer', userSelect: 'none' }}
+                                                    title="Клик — показать товары в этой группе"
+                                                >
+                                                    <td style={{ padding: '6px 8px', fontWeight: 500 }}>
+                                                        <span style={{ display: 'inline-block', width: 16, color: 'var(--color-text-muted)' }}>{isOpen ? '\u25BE' : '\u25B8'}</span>
+                                                        {g.key}
+                                                    </td>
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(g.skuCount, 0)}</td>
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(g.qty, 0)}</td>
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(g.cost)}</td>
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--color-accent)', fontWeight: 600 }}>{'\u2248'}&nbsp;{formatNumber(g.revenue)}</td>
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: g.profit >= 0 ? 'var(--color-success)' : 'var(--color-danger)', fontWeight: 600 }}>{'\u2248'}&nbsp;{formatNumber(g.profit)}</td>
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--color-text-muted)' }}>
+                                                        {g.revenue > 0 ? `${formatNumber((g.profit / g.revenue) * 100, 1)}%` : '\u2014'}
+                                                    </td>
+                                                </tr>
+                                                {isOpen && g.items.map((item) => (
+                                                    <tr key={`${g.key}__${item.nomenclature_id}`} style={{ background: 'rgba(0,0,0,0.02)', fontSize: 12 }}>
+                                                        <td style={{ padding: '5px 8px 5px 32px', color: 'var(--color-text)' }}>
+                                                            <div style={{ fontWeight: 500 }}>{item.article_seller || '\u2014'}</div>
+                                                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{item.barcode || '\u2014'}</div>
+                                                        </td>
+                                                        <td style={{ padding: '5px 8px', textAlign: 'right', color: 'var(--color-text-muted)' }}>{'\u2014'}</td>
+                                                        <td style={{ padding: '5px 8px', textAlign: 'right' }}>{formatNumber(item.qty, 0)}</td>
+                                                        <td style={{ padding: '5px 8px', textAlign: 'right' }}>{formatNumber(item.cost)}</td>
+                                                        <td style={{ padding: '5px 8px', textAlign: 'right', color: 'var(--color-accent)' }}>{'\u2248'}&nbsp;{formatNumber(item.revenue)}</td>
+                                                        <td style={{ padding: '5px 8px', textAlign: 'right', color: item.profit >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>{'\u2248'}&nbsp;{formatNumber(item.profit)}</td>
+                                                        <td style={{ padding: '5px 8px', textAlign: 'right', color: 'var(--color-text-muted)' }}>
+                                                            {item.revenue > 0 ? `${formatNumber((item.profit / item.revenue) * 100, 1)}%` : '\u2014'}
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </React.Fragment>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                </div>
+            )}
+
             {/* Search + Grouping + Mode toggle + Refresh */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
                 <input
@@ -1102,6 +1360,43 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                         >{d}д</button>
                     ))}
                 </div>
+                {/* Fact / Forecast toggle */}
+                <div
+                    title="Факт — суммы сходятся с БДР. С прогнозом — для товаров в пути (фабрика / машины) подставляется средняя реализация категории."
+                    style={{ display: 'flex', border: '1px solid var(--color-border)', borderRadius: 8, overflow: 'hidden' }}
+                >
+                    {([
+                        { key: false, label: 'Факт' },
+                        { key: true, label: 'С прогнозом' },
+                    ] as const).map((btn, i) => (
+                        <button
+                            key={String(btn.key)}
+                            onClick={() => onForecastChange(btn.key)}
+                            style={{
+                                padding: '6px 12px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
+                                borderLeft: i > 0 ? '1px solid var(--color-border)' : 'none',
+                                background: includeForecast === btn.key ? 'var(--color-accent)' : 'var(--color-bg-card)',
+                                color: includeForecast === btn.key ? '#fff' : 'var(--color-text)',
+                            }}
+                        >{btn.label}</button>
+                    ))}
+                </div>
+                {includeForecast && (
+                    <span
+                        title="В итоги включена оценка по товарам в пути (фабрика / машины) по средней реализации категории. Суммы НЕ совпадают с БДР."
+                        style={{
+                            fontSize: 11,
+                            fontWeight: 600,
+                            padding: '3px 10px',
+                            borderRadius: 12,
+                            background: 'rgba(255, 159, 10, 0.12)',
+                            color: 'var(--color-warning)',
+                            whiteSpace: 'nowrap',
+                        }}
+                    >
+                        {'\u26A0'} Прогноз включён
+                    </span>
+                )}
                 {activePeriodDates && (
                     <span
                         title={`Реализация и прибыль рассчитаны за период ${formatDate(activePeriodDates.from)} — ${formatDate(activePeriodDates.to)}. Окно заканчивается вчерашним днём (за сегодня данных WB ещё нет).`}
@@ -1234,11 +1529,12 @@ export default function StockSummaryPage() {
     const [error, setError] = useState('');
     const [unifiedGroupBy, setUnifiedGroupBy] = useState('sku');
     const [brandFilter, setBrandFilter] = useState<string>('');
+    const [includeForecast, setIncludeForecast] = useState<boolean>(false);
 
-    const fetchUnified = useCallback(async (gb: string, brand: string) => {
+    const fetchUnified = useCallback(async (gb: string, brand: string, forecast: boolean) => {
         setUnifiedLoading(true);
         try {
-            const un = await api.getUnifiedStock(gb, brand || undefined);
+            const un = await api.getUnifiedStock(gb, brand || undefined, forecast);
             setUnified(un);
         } catch { /* ignore */ }
         setUnifiedLoading(false);
@@ -1247,14 +1543,20 @@ export default function StockSummaryPage() {
     const handleGroupChange = useCallback(async (gb: string) => {
         setUnified([]);          // clear stale data BEFORE switching mode
         setUnifiedGroupBy(gb);
-        await fetchUnified(gb, brandFilter);
-    }, [fetchUnified, brandFilter]);
+        await fetchUnified(gb, brandFilter, includeForecast);
+    }, [fetchUnified, brandFilter, includeForecast]);
 
     const handleBrandChange = useCallback(async (brand: string) => {
         setUnified([]);
         setBrandFilter(brand);
-        await fetchUnified(unifiedGroupBy, brand);
-    }, [fetchUnified, unifiedGroupBy]);
+        await fetchUnified(unifiedGroupBy, brand, includeForecast);
+    }, [fetchUnified, unifiedGroupBy, includeForecast]);
+
+    const handleForecastChange = useCallback(async (forecast: boolean) => {
+        setUnified([]);
+        setIncludeForecast(forecast);
+        await fetchUnified(unifiedGroupBy, brandFilter, forecast);
+    }, [fetchUnified, unifiedGroupBy, brandFilter]);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -1263,7 +1565,7 @@ export default function StockSummaryPage() {
             const [wh, sm, un] = await Promise.all([
                 api.getWarehouses(),
                 api.getStockSummary(),
-                api.getUnifiedStock('sku'),
+                api.getUnifiedStock('sku', undefined, false),
             ]);
             setWarehouses(wh);
             setSummary(sm);
@@ -1309,6 +1611,8 @@ export default function StockSummaryPage() {
                     brand={brandFilter}
                     onBrandChange={handleBrandChange}
                     isLoading={unifiedLoading}
+                    includeForecast={includeForecast}
+                    onForecastChange={handleForecastChange}
                 />
             )}
         </div>

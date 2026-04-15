@@ -485,15 +485,22 @@ async def get_stock_summary(
 async def get_unified_stock(
     group_by: str = Query("sku", pattern="^(sku|brand|subject|imt|tag|abc)$"),
     brand: str | None = Query(None, max_length=200),
+    include_forecast: bool = Query(False),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Unified stock: own warehouses + WB + in-transit. Supports grouping."""
+    """Unified stock: own warehouses + WB + in-transit. Supports grouping.
+
+    include_forecast=False (default) — realization matches БДР (fact-only).
+    include_forecast=True — items that are en route (factory/vehicle) but not
+    yet physically on shelf get an estimated revenue from the category average.
+    """
     return await warehouse_service.get_unified_stock_summary(
         db,
         project.id,
         group_by=group_by,
         brand=brand or None,
+        include_forecast=include_forecast,
     )
 
 

@@ -543,6 +543,10 @@ class ShipmentMatrixItem(BaseModel):
     pcs_per_box: int | None = None
     remaining_qty: int
     shipped_pct: Decimal
+    # qty уехавших в машинах со статусом >= SHIPPED (реально отгружено с фабрики)  # noqa: RUF003
+    really_shipped_qty: int = 0
+    # самая свежая дата заказа — для расчёта «возраста» и приоритета в UI
+    latest_order_date: date | None = None
     vehicle_allocations: dict[str, int]  # order_no → qty
 
 
@@ -558,7 +562,8 @@ class ShipmentMatrixSubjectGroup(BaseModel):
 class ShipmentMatrixSummary(BaseModel):
     total_qty: int
     total_boxes: int
-    shipped_qty: int
+    shipped_qty: int  # разложено в машины (включая FORMING)
+    really_shipped_qty: int = 0  # реально уехало (машины >= SHIPPED)
     remaining_qty: int
 
 
