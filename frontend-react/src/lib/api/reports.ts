@@ -117,8 +117,15 @@ export function addReportMethods(api: ApiClient) {
             const qs = params.toString();
             return api.request<CostHistoryResponse>('GET', `/api/v1/reports/cost_history${qs ? '?' + qs : ''}`);
         },
-        getCostDna(periodDays: number = 30) {
-            return api.request<CostDnaResponse>('GET', `/api/v1/reports/cost_dna?period_days=${periodDays}`);
+        getCostDna(params: { periodDays?: number; dateFrom?: string; dateTo?: string } = {}) {
+            const q = new URLSearchParams();
+            if (params.dateFrom && params.dateTo) {
+                q.set('date_from', params.dateFrom);
+                q.set('date_to', params.dateTo);
+            } else {
+                q.set('period_days', String(params.periodDays ?? 30));
+            }
+            return api.request<CostDnaResponse>('GET', `/api/v1/reports/cost_dna?${q.toString()}`);
         },
         getBalanceDaily(account: string, currency: string, start: string, end: string) {
             return api.request<Array<{ date: string; balance: number }>>('GET', `/api/v1/reports/balance_daily?account=${encodeURIComponent(account)}&currency=${currency}&date_from=${start}&date_to=${end}`);

@@ -1102,9 +1102,9 @@ export interface CostDnaTotals {
 }
 
 export interface CostDnaResponse {
-  period_days: 30 | 60;
+  period_days: number;      // span in days: legacy preset 30/60 OR custom 1–365
   date_from: string;        // YYYY-MM-DD
-  date_to: string;          // yesterday
+  date_to: string;          // yesterday (legacy preset) or custom end
   prev_date_from: string;
   prev_date_to: string;
   categories: CostDnaCategory[];
