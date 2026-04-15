@@ -170,26 +170,49 @@ DRAFT → IN_TRANSIT → COMPLETED
 
 Объединённый вид: свои склады + WB + в пути (SHIPPED сборки).
 
-### Endpoint: `GET /warehouse/stock/unified?group_by={mode}`
+### Endpoint: `GET /warehouse/stock/unified?group_by={mode}&brand={name}`
 
-**Функция:** `warehouse_stock_engine.get_unified_stock_summary(db, project_id, group_by)`
+**Функция:** `warehouse_stock_engine.get_unified_stock_summary(db, project_id, group_by, brand=None)`
 
-**group_by:** sku (default) | brand | subject | imt | tag | abc
+**Параметры:**
+- `group_by`: sku (default) | brand | subject | imt | tag | abc
+- `brand`: опциональный фильтр по бренду (max 200 символов) — применяется после агрегации
 
 **Данные из:**
 1. `WarehouseStock` — свои склады (quantity)
 2. `WbWarehouseStock` — WB склады (quantity_full, включая к/от клиента)
 3. `AssemblyRequest` items status=SHIPPED — в пути к WB
 4. `AssemblyRequest` items PENDING→VEHICLE_ASSIGNED — зарезервировано (на нашем складе)
-5. `WbFinanceRow` — avg_daily_revenue/profit (средняя за 30 дней)
+5. `WbFinanceRow` — реализация, профит, sale_qty за period (rolling trend window)
 6. `CostOrderItem` → `load_avg_costs()` — средняя себестоимость
+7. `wb_funnel_daily.adv_sum` — рекламные расходы за тот же период
 
 **Группировки:**
 - `brand` — двухуровневая: бренд → категории → артикулы (children)
 - `subject/imt/tag` — одноуровневая: группа → артикулы (children)
 - `abc` — per-SKU с A/B/C бейджем по avg_daily_revenue
 
-**Фронт:** 4 режима отображения — шт / себестоимость / реализация / прибыль.
+**Фронт:** 4 режима отображения — шт / себестоимость / реализация / прибыль. Плюс фильтры по бренду и `stock_days` (max дней остатков до включения позиции).
+
+### БДР parity (фикс 2026-04-15)
+`_build_finance_query` зеркалирует фильтры `services/wb_bdr_helpers.build_bdr_aggregate_sql` — иначе Unified Stock и БДР показывают разную реализацию для одного периода:
+- `COALESCE(sale_dt, rr_dt) BETWEEN cutoff AND today` ИЛИ `sale_dt/rr_dt IS NULL AND date_from >= cutoff AND date_to <= today`
+- Исключает `LOWER(sa_name) = 'неопознанный товар'` — как БДР
+- `sale_qty`/`ret_qty` фильтруются по `supplier_oper_name IN ('Продажа','Возврат')` — компенсации/ре-начисления не считаются продажами
+- `wb_funnel_daily` ограничен сверху `today` (раньше был только нижний предел cutoff → «убегал» вперёд)
+
+При любых изменениях `_build_finance_query`/`_compute_period_metrics` в `warehouse_stock_engine.py` — прогнать `tests/test_warehouse_unified_stock_bdr_parity.py`.
+
+### Tax formula (фикс 2026-04-15)
+`_compute_tax_and_profit` — pure-function расчёта налога и прибыли, зеркалирующая `bdr_enrichment.apply_tax_article`. Принимает `tax_info` dict от `load_tax_settings` и поддерживает регим `usn_income_expense_vat` (с опцией `cost_as_expense`), иначе USN считается на net income (income − НДС). Регим берётся из `project_settings` — не захардкожен.
+
+### Trend window (фикс 2026-04-15)
+`_compute_trend_cutoffs(today)` якорит rolling окна 7/14/30 дней к **вчерашнему** дню, а не сегодняшнему — чтобы неполный текущий день не размывал тренды. На фронте период показан в UI (раньше пользователь видел цифру без указания от какого дня).
+
+### Общие правила
+- `get_unified_stock_summary()` принимает `today` и прокидывает его во все под-запросы → один запрос, одна «сегодняшняя» точка.
+- Tax regime / rate меняется в `project_settings` → инвалидировать кэш отчётов (tax_service → `invalidate_project_reports`).
+- Helpers покрыты `tests/test_warehouse_stock_engine_helpers.py` (pure-function) — сохраняй их без DB чтобы не замедлять suite.
 
 ## WB остатки (отдельная система)
 

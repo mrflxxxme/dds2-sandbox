@@ -147,6 +147,18 @@ if len(data) > app_settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
 **НЕПРАВИЛЬНО:** `factory_order.soft_delete()` без soft_delete на FactoryOrderItem → orphaned items видны в запросах
 **ПРАВИЛЬНО:** при soft_delete родителя — soft_delete все дочерние записи тоже. Модели с SoftDeleteMixin: FactoryOrderItem, CostOrderItem (добавлены 2026-04-09, commit 5158ed4)
 
+## P25: Cost-DNA / @cached — kwargs которые пересчитываются внутри функции
+**НЕПРАВИЛЬНО:** `@cached` функция делает `today = date.today()` внутри → cache key не содержит дату, rolling snapshot тихо дрейфует через полночь (bug 2026-04-15).
+**ПРАВИЛЬНО:** «точку во времени» пинит роутер и передаёт в kwargs (`snapshot_date=utcnow().date()`). Все аргументы, которые влияют на результат — должны быть в сигнатуре `get_cost_dna(..., snapshot_date, date_from, date_to)`, чтобы `cache.py:69-82` связал их с ключом. То же правило для любых rolling отчётов.
+
+## P26: SA name JOIN — case mismatch между cost и sales источниками
+**НЕПРАВИЛЬНО:** `cost_order_items.article_seller = wb_finance_rows.sa_name` — CSV-импорты закупа часто в UPPERCASE, WB API возвращает lowercase → JOIN пустой, cost_total=0 (bug 2026-04-14 в Cost-DNA).
+**ПРАВИЛЬНО:** `LOWER(article_seller) = LOWER(sa_name)` ОБЕ стороны. Применяй везде где cost_order_items джоинится с wb_finance_rows (cost_dna_helpers, warehouse_stock_engine, opiu/bdr).
+
+## P27: Unified Stock vs БДР — фильтры должны быть идентичны
+**НЕПРАВИЛЬНО:** `warehouse_stock_engine._build_finance_query` использует свой набор фильтров (`rr_dt >= cutoff`, нет exclusion «Неопознанный товар»). БДР (`wb_bdr_helpers`) использует другой — цифры реализации расходятся, пользователь видит разные суммы в двух отчётах на тот же период (bug 2026-04-15).
+**ПРАВИЛЬНО:** при любом изменении фильтров БДР → обновить зеркало в `warehouse_stock_engine.py` И прогнать `tests/test_warehouse_unified_stock_bdr_parity.py`. Лучший путь — вынести фильтр в общий helper.
+
 ## P24: uvicorn `--workers N>1` + `--limit-max-requests` race condition (incident 2026-04-14)
 **НЕПРАВИЛЬНО:** `uvicorn ... --workers 2 --limit-max-requests 5000` в `Dockerfile.backend` — оба воркера достигают лимита одновременно, второй не поднимается, контейнер остаётся `running` с одним зависшим воркером.
 **ПРАВИЛЬНО:** `--workers 1` для uvicorn (uvicorn НЕ поддерживает `--max-requests-jitter`, рандомизирующий момент рестарта). Для масштабирования по CPU — gunicorn с `uvicorn.workers.UvicornWorker` + `--max-requests-jitter 500`.
