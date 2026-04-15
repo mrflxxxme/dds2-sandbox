@@ -6,7 +6,7 @@ import logging
 from datetime import timedelta
 from decimal import Decimal
 
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
@@ -368,14 +368,27 @@ async def get_stock_summary(db: AsyncSession, project_id: int) -> list[dict]:
 def _build_finance_query(project_id: int, cutoff, today):
     """Build per-nm aggregation matching wb_bdr_helpers.build_bdr_aggregate_sql.
 
-    Filter mirrors BDR semantics:
-    - COALESCE(sale_dt, rr_dt) BETWEEN cutoff AND today  (both bounds, fallback to sale_dt)
-    - sale_qty/ret_qty are filtered by supplier_oper_name IN ('Продажа','Возврат')
-      so compensations/recharges don't inflate cost_total.
+    Filter mirrors BDR semantics (see wb_bdr_helpers._DATE_FILTER):
+    - COALESCE(sale_dt, rr_dt) BETWEEN cutoff AND today, OR
+    - sale_dt IS NULL AND rr_dt IS NULL AND the row's own date_from/date_to
+      window is entirely inside [cutoff, today].
+    Also excludes sa_name='Неопознанный товар' the way BDR does so the two
+    reports cannot drift on realization totals.
+    sale_qty/ret_qty are filtered by supplier_oper_name IN ('Продажа','Возврат')
+    so compensations/recharges don't inflate cost_total.
     """
     R = WbFinanceRow
     sale_op = R.supplier_oper_name.in_(["Продажа", "Возврат"])
     effective_dt = func.coalesce(R.sale_dt, R.rr_dt)
+    date_filter = or_(
+        effective_dt.between(cutoff, today),
+        and_(
+            R.sale_dt.is_(None),
+            R.rr_dt.is_(None),
+            R.date_from >= cutoff,
+            R.date_to <= today,
+        ),
+    )
     return (
         select(
             R.nm_id,
@@ -429,7 +442,8 @@ def _build_finance_query(project_id: int, cutoff, today):
         )
         .where(
             R.project_id == project_id,
-            effective_dt.between(cutoff, today),
+            date_filter,
+            func.lower(func.coalesce(R.sa_name, "")) != "неопознанный товар",
         )
         .group_by(R.nm_id)
         .limit(10000)
