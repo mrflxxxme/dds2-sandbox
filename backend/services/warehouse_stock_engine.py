@@ -632,15 +632,20 @@ async def _load_bdr_metrics(
 
     anchor, cutoff_30, cutoff_14, cutoff_7 = _compute_trend_cutoffs(utcnow().date())
 
-    # Use the period END (anchor = yesterday) so the *current* tax regime is
-    # applied to the current snapshot — matches user intuition that "Налоги по
-    # апрелю" should affect today's analytics. load_tax_settings keys off
-    # d_from.month, so passing anchor picks the current-month rates.
-    tax_info = await load_tax_settings(db, project_id, anchor, anchor)
+    # Load tax_info per-period using the period START month — matches BDR
+    # which keys `load_tax_settings` off `d_from.month`. If we key off the
+    # window END (anchor=yesterday) we can land on a "current" month whose
+    # rates are still placeholder zeros, while BDR for the same period uses
+    # the prior month's real rates — profits diverge by the whole tax amount.
+    # Seen in production 2026-04-15: March rates 15%/7%, April rates 0%/0%,
+    # BDR profit ~32M vs Unified ~43M (delta == sum of BDR tax per article).
+    tax_info_30 = await load_tax_settings(db, project_id, cutoff_30, anchor)
+    tax_info_14 = await load_tax_settings(db, project_id, cutoff_14, anchor)
+    tax_info_7 = await load_tax_settings(db, project_id, cutoff_7, anchor)
 
-    period_30 = await _compute_period_metrics(db, project_id, cutoff_30, anchor, nm_id_to_nom_id, cost_map, tax_info)
-    period_14 = await _compute_period_metrics(db, project_id, cutoff_14, anchor, nm_id_to_nom_id, cost_map, tax_info)
-    period_7 = await _compute_period_metrics(db, project_id, cutoff_7, anchor, nm_id_to_nom_id, cost_map, tax_info)
+    period_30 = await _compute_period_metrics(db, project_id, cutoff_30, anchor, nm_id_to_nom_id, cost_map, tax_info_30)
+    period_14 = await _compute_period_metrics(db, project_id, cutoff_14, anchor, nm_id_to_nom_id, cost_map, tax_info_14)
+    period_7 = await _compute_period_metrics(db, project_id, cutoff_7, anchor, nm_id_to_nom_id, cost_map, tax_info_7)
 
     def _trend(p: dict | None, period_from: date, period_to: date) -> dict:
         base = {
@@ -648,10 +653,11 @@ async def _load_bdr_metrics(
             "date_to": period_to.isoformat(),
         }
         if not p:
-            return {**base, "avg_daily_qty": 0.0, "revenue": 0.0, "profit": 0.0}
+            return {**base, "avg_daily_qty": 0.0, "sale_qty": 0.0, "revenue": 0.0, "profit": 0.0}
         return {
             **base,
             "avg_daily_qty": float(round(p["sale_qty_raw"] / p["days_count"], 2)),
+            "sale_qty": float(p["sale_qty_raw"]),
             "revenue": float(round(p["realization"], 2)),
             "profit": float(round(p["total_profit"], 2)),
         }
@@ -821,6 +827,13 @@ def _compute_category_bdr_averages(
 
     Only counts items with actual sales (revenue > 0).
     avg_daily_qty is NOT estimated — kept at 0 so frontend shows dash.
+
+    Additionally exposes ``unit_revenue_30`` / ``unit_profit_30`` — qty-weighted
+    per-piece avg computed as ``sum(revenue_30) / sum(sale_qty_30)`` across
+    items with sales in the 30-day window. These drive the «Новинки» KPI
+    card: for an incoming SKU we estimate revenue as ``qty_incoming *
+    unit_revenue_30`` of its subject (matches intuition «обычная цена продажи
+    в этой категории»).
     """
     by_subject: dict[str, dict[str, float]] = {}
     for nom_id, bdr in bdr_map.items():
@@ -841,6 +854,7 @@ def _compute_category_bdr_averages(
                 "prof_14": 0.0,
                 "rev_30": 0.0,
                 "prof_30": 0.0,
+                "qty_30": 0.0,
             }
         s = by_subject[subject]
         s["items_count"] += 1
@@ -848,12 +862,17 @@ def _compute_category_bdr_averages(
             t = bdr.get(f"trend_{period}", {}) or {}
             s[f"rev_{period}"] += float(t.get("revenue", 0) or 0)
             s[f"prof_{period}"] += float(t.get("profit", 0) or 0)
+        t30 = bdr.get("trend_30", {}) or {}
+        s["qty_30"] += float(t30.get("sale_qty", 0) or 0)
 
     result: dict[str, dict] = {}
     for subject, s in by_subject.items():
         n = s["items_count"]
         if n == 0:
             continue
+        qty_30 = s["qty_30"]
+        unit_revenue_30 = round(s["rev_30"] / qty_30, 2) if qty_30 > 0 else 0.0
+        unit_profit_30 = round(s["prof_30"] / qty_30, 2) if qty_30 > 0 else 0.0
         result[subject] = {
             "trend_7": {
                 "avg_daily_qty": 0.0,
@@ -870,8 +889,49 @@ def _compute_category_bdr_averages(
                 "revenue": round(s["rev_30"] / n, 2),
                 "profit": round(s["prof_30"] / n, 2),
             },
+            "unit_revenue_30": unit_revenue_30,
+            "unit_profit_30": unit_profit_30,
         }
     return result
+
+
+def _apply_forecast_fallback(unified: dict[int, dict], category_bdr: dict[str, dict]) -> None:
+    """Estimate revenue/profit for items en route but not yet physically on shelf.
+
+    Runs only when ``include_forecast=True``. Applies to entries that satisfy
+    ALL of:
+      * ``trend_30.revenue <= 0`` — no real sales in the period;
+      * ``total_own + total_wb == 0`` — nothing currently on shelf;
+      * ``factory_qty + vehicle_forming_qty + vehicle_transit_qty > 0`` — item
+        is en route via factory or a vehicle;
+      * subject is present in ``category_bdr`` (i.e. the category has sales
+        history to base the estimate on).
+
+    Existing shelf stock without recent sales is NEVER estimated — zero stays
+    zero so «Факт» mode matches БДР copeck-for-copeck.
+
+    Mutates ``unified`` in place. ``is_revenue_estimated`` is set to True for
+    every entry that gets a category-average trend — the frontend uses this
+    flag to show the «≈» prefix.
+    """
+    for entry in unified.values():
+        trend_30 = entry.get("trend_30") or {}
+        if (trend_30.get("revenue") or 0) > 0:
+            continue
+        if (entry.get("total_own", 0) + entry.get("total_wb", 0)) > 0:
+            continue
+        incoming = (
+            entry.get("factory_qty", 0) + entry.get("vehicle_forming_qty", 0) + entry.get("vehicle_transit_qty", 0)
+        )
+        if incoming <= 0:
+            continue
+        subject = entry.get("subject")
+        if not subject or subject not in category_bdr:
+            continue
+        cat = category_bdr[subject]
+        for period in ("trend_7", "trend_14", "trend_30"):
+            entry[period] = {**entry.get(period, {}), **cat.get(period, {})}
+        entry["is_revenue_estimated"] = True
 
 
 def _assign_abc(items: list[dict], value_key: str, abc_key: str) -> None:
@@ -1047,6 +1107,7 @@ async def get_unified_stock_summary(
     project_id: int,
     group_by: str = "sku",
     brand: str | None = None,
+    include_forecast: bool = False,
 ) -> list[dict]:
     """
     Unified stock across own warehouses, WB marketplace, and in-transit.
@@ -1055,6 +1116,11 @@ async def get_unified_stock_summary(
     group_by: sku | brand | subject | imt | tag | abc
     brand: optional case-sensitive filter by Nomenclature.brand. When set, only
         nomenclature rows for that brand contribute (own/WB/in-transit/factory).
+    include_forecast: when False (default) realization/profit reflect ONLY real
+        WB sales — totals match БДР copeck-for-copeck. When True, items that are
+        en route but not yet physically in stock (factory/vehicle SHIPPED/FORMING)
+        get an estimated revenue/profit from the category average. Shelf stock
+        without sales is NEVER estimated — zero stays zero.
     """
     # 0. If brand filter is set, resolve allowed nomenclature_ids first
     allowed_nom_ids: set[int] | None = None
@@ -1302,6 +1368,27 @@ async def get_unified_stock_summary(
     # 7d. Category-level BDR averages for new items without sales
     category_bdr = _compute_category_bdr_averages(bdr_map, nom_map)
 
+    # 7e. «Новинка» detection — SKU with no sales in the last 60 days.
+    # A truly new product for the warehouse: either it's a brand-new listing
+    # or an item that hasn't moved in 2+ months. Used by the Новинки KPI card
+    # so the user can track expected revenue/cost of incoming + on-shelf new
+    # items separately from the bulk of ongoing catalog.
+    novelty_cutoff_dt = utcnow().date() - timedelta(days=60)
+    sold_result = await db.execute(
+        select(WbFinanceRow.nm_id)
+        .distinct()
+        .where(
+            WbFinanceRow.project_id == project_id,
+            func.coalesce(WbFinanceRow.sale_dt, WbFinanceRow.rr_dt) >= novelty_cutoff_dt,
+            WbFinanceRow.doc_type_name == "Продажа",
+            WbFinanceRow.supplier_oper_name.in_(["Продажа", "Возврат"]),
+            WbFinanceRow.nm_id.isnot(None),
+            WbFinanceRow.nm_id != 0,
+        )
+        .limit(50000)
+    )
+    sold_last_60d: set[int] = {int(r[0]) for r in sold_result.all() if r[0]}
+
     # 8. Merge all by nomenclature_id
     unified: dict[int, dict] = {}
 
@@ -1309,14 +1396,11 @@ async def get_unified_stock_summary(
         if nom_id not in unified:
             info = nom_map.get(nom_id, {})
             bdr = bdr_map.get(nom_id, {})
+            # Forecast fallback is applied post-hoc (see block below) — keep
+            # `_ensure` free of estimation so default totals match БДР exactly.
             is_revenue_estimated = False
-            # Fallback to category averages if no sales for this item
-            has_sales = (bdr.get("trend_30", {}) or {}).get("revenue", 0) or 0
-            if has_sales <= 0:
-                subject = info.get("subject")
-                if subject and subject in category_bdr:
-                    bdr = {**bdr, **category_bdr[subject]}
-                    is_revenue_estimated = True
+            subject = info.get("subject")
+            cat_ref = category_bdr.get(subject, {}) if subject else {}
             unified[nom_id] = {
                 "nomenclature_id": nom_id,
                 "barcode": info.get("barcode", ""),
@@ -1345,6 +1429,16 @@ async def get_unified_stock_summary(
                 "trend_7": bdr.get("trend_7", {"avg_daily_qty": 0, "revenue": 0, "profit": 0}),
                 "trend_14": bdr.get("trend_14", {"avg_daily_qty": 0, "revenue": 0, "profit": 0}),
                 "trend_30": bdr.get("trend_30", {"avg_daily_qty": 0, "revenue": 0, "profit": 0}),
+                # Reference per-unit price/profit drawn from the item's subject
+                # average. Drives the «Новинки» KPI card — frontend multiplies
+                # by available + incoming qty for items flagged `is_novelty`.
+                "novelty_unit_revenue": float(cat_ref.get("unit_revenue_30", 0)),
+                "novelty_unit_profit": float(cat_ref.get("unit_profit_30", 0)),
+                # «Новинка» = no sales recorded in the last 60 days. Includes
+                # brand-new listings AND items that went silent for 2+ months.
+                # Mapped from `nm_id` → `article_wb`. Items with no `article_wb`
+                # (no WB card) default to False — can't tell if they were sold.
+                "is_novelty": bool(info.get("article_wb") and int(info["article_wb"]) not in sold_last_60d),
             }
         return unified[nom_id]
 
@@ -1394,6 +1488,14 @@ async def get_unified_stock_summary(
     # Compute totals (own + wb + in_transit; supply chain is separate columns)
     for entry in unified.values():
         entry["total"] = entry["total_own"] + entry["total_wb"] + entry["in_transit"]
+
+    # Narrowed forecast fallback — only runs in forecast mode. Estimates
+    # revenue/profit for items that are en route but not yet physically in
+    # stock (factory/vehicle FORMING/SHIPPED/CUSTOMS/DISPATCHED). Existing
+    # shelf stock without sales stays at zero. Default mode leaves everything
+    # untouched so group totals match БДР.
+    if include_forecast:
+        _apply_forecast_fallback(unified, category_bdr)
 
     unified_list = [
         v

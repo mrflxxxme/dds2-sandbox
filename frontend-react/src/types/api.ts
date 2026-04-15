@@ -987,6 +987,9 @@ export interface UnifiedStockRow {
   // had no sales in the 30-day window.
   novelty_unit_revenue?: number;
   novelty_unit_profit?: number;
+  // «Новинка» flag — true when the SKU has had no sales in the last 60 days.
+  // Drives the Новинки KPI card filter. Backend computes from wb_finance_rows.
+  is_novelty?: boolean;
   group_name?: string;
   items_count?: number;
   abc_class?: string;
@@ -1908,6 +1911,8 @@ export interface ShipmentMatrixItem {
   pcs_per_box: number | null;
   remaining_qty: number;
   shipped_pct: string;
+  really_shipped_qty: number;
+  latest_order_date: string | null;
   vehicle_allocations: Record<string, number>;
 }
 
@@ -1924,6 +1929,7 @@ export interface ShipmentMatrixSummary {
   total_qty: number;
   total_boxes: number;
   shipped_qty: number;
+  really_shipped_qty: number;
   remaining_qty: number;
 }
 
