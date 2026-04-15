@@ -26,29 +26,71 @@ from backend.cache import cached
 from backend.schemas.reports import CostDnaCategory, CostDnaResponse, CostDnaTotals
 from backend.services import cost_dna_helpers as helpers
 from backend.services.bdr_loaders import load_tax_settings
+from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.cost_dna")
 
+# Maximum allowed range for custom periods (1 год) — защита от тяжёлых запросов
+_MAX_PERIOD_DAYS = 365
+
 
 @cached(prefix="reports:cost_dna", ttl=300)
-async def get_cost_dna(db: AsyncSession, project_id: int, period_days: int) -> dict:
+async def get_cost_dna(
+    db: AsyncSession,
+    project_id: int,
+    period_days: int = 30,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    snapshot_date: date | None = None,
+) -> dict:
     """
     Compute Cost-DNA report for a project.
 
     Args:
         db: Async DB session.
         project_id: Project ID for multi-tenant filter.
-        period_days: Rolling period (30 or 60 days back from yesterday).
+        period_days: Rolling period (30 or 60) used when date_from/date_to are not
+            provided. When custom dates are passed this value is recomputed from
+            the range and used only for response metadata.
+        date_from: Optional custom period start (inclusive). When both date_from
+            and date_to are provided, the rolling-from-yesterday default is
+            ignored and this exact range is used.
+        date_to: Optional custom period end (inclusive).
+        snapshot_date: "Today" anchor for computing the default rolling period.
+            Must be passed by the router (pinned to request time) so that the
+            cache key is stable within a day and changes at the day boundary.
+            Defaults to utcnow().date() for internal/test callers.
 
     Returns:
         CostDnaResponse as dict (Pydantic .model_dump() — for cache serialization).
-    """
-    if period_days not in (30, 60):
-        period_days = 30
 
-    yesterday = date.today() - timedelta(days=1)
-    date_to = yesterday
-    date_from = yesterday - timedelta(days=period_days - 1)
+    Note:
+        ``snapshot_date``, ``date_from``, ``date_to`` are part of the function
+        signature *specifically* so they participate in the @cached key
+        (cache.py:69-82 binds all kwargs to the key). Without this, the rolling
+        default would be computed from utcnow() at exec time and the cached
+        snapshot would silently drift across day boundaries / out-of-sync with
+        the latest WB sync (bug found 2026-04-15).
+    """
+    if snapshot_date is None:
+        snapshot_date = utcnow().date()
+
+    if date_from is not None and date_to is not None:
+        # Custom range takes precedence; period_days derived from actual span
+        if date_from > date_to:
+            raise ValueError("date_from must be <= date_to")
+        span = (date_to - date_from).days + 1
+        if span > _MAX_PERIOD_DAYS:
+            raise ValueError(f"period too long: {span} days (max {_MAX_PERIOD_DAYS})")
+        period_days = span
+    else:
+        # Legacy rolling default: [yesterday - (period_days - 1) ... yesterday]
+        if period_days not in (30, 60):
+            period_days = 30
+        yesterday = snapshot_date - timedelta(days=1)
+        date_to = yesterday
+        date_from = yesterday - timedelta(days=period_days - 1)
+
     prev_date_to = date_from - timedelta(days=1)
     prev_date_from = prev_date_to - timedelta(days=period_days - 1)
 

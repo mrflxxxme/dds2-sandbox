@@ -109,3 +109,61 @@ async def test_cost_dna_unauthenticated_rejected(client):
     """No JWT → 401/403/422 (separate test — does not need DB session)."""
     resp = await client.get("/api/v1/reports/cost_dna?period_days=30")
     assert resp.status_code in (401, 403, 422)
+
+
+@pytest.mark.asyncio
+async def test_cost_dna_custom_date_range_smoke(client, auth_headers):
+    """Custom date_from/date_to period (added 2026-04-15 for BDR alignment):
+    1) valid range → echoed back verbatim, period_days equals span
+    2) only date_from → 422 (both required)
+    3) date_from > date_to → 422
+    4) span > 365 days → 422
+    """
+    # one isolated project — reuse single fixture cycle
+    resp = await client.post(
+        "/api/v1/projects",
+        json={"name": "Cost-DNA custom range"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    project = resp.json()
+    headers = {**auth_headers, "X-Project-Id": str(project["id"])}
+
+    # --- (1) valid custom range ---------------------------------------------
+    d_from = "2026-03-12"
+    d_to = "2026-04-12"
+    resp = await client.get(
+        f"/api/v1/reports/cost_dna?date_from={d_from}&date_to={d_to}",
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["date_from"] == d_from
+    assert data["date_to"] == d_to
+    # 12 марта + 31 день = 12 апреля → span = 32 дня (inclusive)
+    assert data["period_days"] == 32
+    # prev_date_to = date_from - 1 day = 2026-03-11
+    assert data["prev_date_to"] == "2026-03-11"
+    # prev_date_from = prev_date_to - (period_days-1) = 2026-03-11 - 31 = 2026-02-08
+    assert data["prev_date_from"] == "2026-02-08"
+
+    # --- (2) only date_from → 422 ------------------------------------------
+    resp = await client.get(
+        f"/api/v1/reports/cost_dna?date_from={d_from}",
+        headers=headers,
+    )
+    assert resp.status_code == 422
+
+    # --- (3) reversed range → 422 ------------------------------------------
+    resp = await client.get(
+        f"/api/v1/reports/cost_dna?date_from={d_to}&date_to={d_from}",
+        headers=headers,
+    )
+    assert resp.status_code == 422
+
+    # --- (4) too long → 422 ------------------------------------------------
+    resp = await client.get(
+        "/api/v1/reports/cost_dna?date_from=2024-01-01&date_to=2026-04-14",
+        headers=headers,
+    )
+    assert resp.status_code == 422

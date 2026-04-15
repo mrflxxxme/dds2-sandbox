@@ -245,7 +245,11 @@ async def get_cost_history(
 
 @router.get("/cost_dna")
 async def get_cost_dna(
-    period_days: int = Query(30, description="Rolling period: 30 or 60 days back from yesterday"),
+    period_days: int = Query(
+        30, description="Rolling period in days (used when date_from/date_to are absent). Default 30."
+    ),
+    date_from: date | None = Query(None, description="Custom period start (inclusive). Requires date_to."),
+    date_to: date | None = Query(None, description="Custom period end (inclusive). Requires date_from."),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -254,9 +258,38 @@ async def get_cost_dna(
 
     Used as forecasting tool to compare prognosis cost vs realization,
     and as fallback for new SKUs without cost data.
+
+    Period selection:
+      - If neither date_from nor date_to is provided → rolling ``period_days``
+        back from yesterday (legacy behaviour; only 30 / 60 accepted).
+      - If both date_from and date_to are provided → use the custom range
+        (up to 365 days). This lets the user align Cost-DNA period with
+        BDR for direct comparison.
     """
     from backend.services import cost_dna_service
+    from backend.utils.time import utcnow
 
-    if period_days not in (30, 60):
-        period_days = 30
-    return await cost_dna_service.get_cost_dna(db, project.id, period_days)
+    if (date_from is None) != (date_to is None):
+        raise HTTPException(status_code=422, detail="date_from and date_to must be provided together")
+
+    if date_from is not None and date_to is not None:
+        if date_from > date_to:
+            raise HTTPException(status_code=422, detail="date_from must be <= date_to")
+        span = (date_to - date_from).days + 1
+        if span > 365:
+            raise HTTPException(status_code=422, detail=f"period too long: {span} days (max 365)")
+    else:
+        if period_days not in (30, 60):
+            period_days = 30
+
+    # Pin snapshot_date so it enters the cache key — prevents silent drift
+    # across day boundaries when the rolling default is used (bug 2026-04-15).
+    snapshot_date = utcnow().date()
+    return await cost_dna_service.get_cost_dna(
+        db,
+        project.id,
+        period_days=period_days,
+        date_from=date_from,
+        date_to=date_to,
+        snapshot_date=snapshot_date,
+    )

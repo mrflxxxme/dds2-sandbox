@@ -7,7 +7,29 @@ import PageHeader from '@/components/PageHeader';
 import PageGuard from '@/components/PageGuard';
 import type { CostDnaResponse, CostDnaCategory, CostDnaTotals } from '@/types/api';
 
-type PeriodDays = 30 | 60;
+/** Quick-pick period presets (days). Custom range via date inputs. */
+const PRESETS = [7, 14, 30, 60] as const;
+
+/** Format Date → YYYY-MM-DD in local TZ (no UTC shift — matches <input type="date">) */
+function ymd(d: Date): string {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+}
+
+function addDays(d: Date, n: number): Date {
+    const r = new Date(d);
+    r.setDate(r.getDate() + n);
+    return r;
+}
+
+/** Rolling window: [yesterday - (days-1) ... yesterday] — same math as backend legacy default */
+function defaultDates(days: number): { from: string; to: string } {
+    const yesterday = addDays(new Date(), -1);
+    const from = addDays(yesterday, -(days - 1));
+    return { from: ymd(from), to: ymd(yesterday) };
+}
 
 /** Arrow + color for margin trend */
 function MarginTrendArrow({ trend }: { trend: 'up' | 'down' | null }) {
@@ -102,16 +124,25 @@ const thBase: React.CSSProperties = {
 };
 
 export default function CostDnaPage() {
-    const [periodDays, setPeriodDays] = useState<PeriodDays>(30);
+    const initial = defaultDates(30);
+    const [dateFrom, setDateFrom] = useState<string>(initial.from);
+    const [dateTo, setDateTo] = useState<string>(initial.to);
     const [data, setData] = useState<CostDnaResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
     const loadData = useCallback(async () => {
+        // client-side guards to avoid round-trips on obviously invalid input
+        if (!dateFrom || !dateTo) return;
+        if (dateFrom > dateTo) {
+            setError('Дата "от" не может быть позже даты "до"');
+            setLoading(false);
+            return;
+        }
         try {
             setLoading(true);
             setError(null);
-            const res = await api.getCostDna(periodDays);
+            const res = await api.getCostDna({ dateFrom, dateTo });
             setData(res);
         } catch (e: unknown) {
             const msg = e instanceof Error ? e.message : 'Ошибка загрузки';
@@ -119,18 +150,47 @@ export default function CostDnaPage() {
         } finally {
             setLoading(false);
         }
-    }, [periodDays]);
+    }, [dateFrom, dateTo]);
 
     useEffect(() => {
         loadData();
     }, [loadData]);
 
+    const applyPreset = useCallback((days: number) => {
+        const { from, to } = defaultDates(days);
+        setDateFrom(from);
+        setDateTo(to);
+    }, []);
+
+    /** Which preset matches current range (for button highlighting) */
+    const activePreset: number | null = (() => {
+        const yesterday = defaultDates(30).to;
+        if (dateTo !== yesterday) return null;
+        for (const d of PRESETS) {
+            if (dateFrom === defaultDates(d).from) return d;
+        }
+        return null;
+    })();
+
     const handleExport = useCallback(() => {
         if (!data) return;
-        exportToExcel(buildExcelRows(data), `cost_dna_${periodDays}d_${data.date_from}_${data.date_to}`);
-    }, [data, periodDays]);
+        exportToExcel(
+            buildExcelRows(data),
+            `cost_dna_${data.period_days}d_${data.date_from}_${data.date_to}`,
+        );
+    }, [data]);
 
-    /** Period toolbar */
+    /** Period toolbar — presets + custom date range (BDR-compatible) */
+    const dateInputStyle: React.CSSProperties = {
+        padding: '6px 10px',
+        fontSize: 13,
+        borderRadius: 8,
+        border: '1px solid var(--color-border)',
+        background: 'var(--color-bg-card)',
+        color: 'var(--color-text)',
+        fontFamily: 'inherit',
+    };
+
     const toolbar = (
         <div
             className="glass-card"
@@ -144,18 +204,35 @@ export default function CostDnaPage() {
             }}
         >
             <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>Период:</span>
-            {([30, 60] as PeriodDays[]).map((d) => (
+            {PRESETS.map((d) => (
                 <button
                     key={d}
-                    onClick={() => setPeriodDays(d)}
-                    className={`btn btn-sm ${periodDays === d ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => applyPreset(d)}
+                    className={`btn btn-sm ${activePreset === d ? 'btn-primary' : 'btn-secondary'}`}
                 >
                     {d} дней
                 </button>
             ))}
+            <input
+                type="date"
+                value={dateFrom}
+                max={dateTo || undefined}
+                onChange={(e) => setDateFrom(e.target.value)}
+                style={dateInputStyle}
+                aria-label="Дата от"
+            />
+            <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>—</span>
+            <input
+                type="date"
+                value={dateTo}
+                min={dateFrom || undefined}
+                onChange={(e) => setDateTo(e.target.value)}
+                style={dateInputStyle}
+                aria-label="Дата до"
+            />
             {data && (
                 <span style={{ fontSize: 12, color: 'var(--color-text-dim)', marginLeft: 'auto' }}>
-                    {data.date_from} — {data.date_to}
+                    {data.period_days} д.
                 </span>
             )}
         </div>
