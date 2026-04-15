@@ -41,13 +41,11 @@ const calcVolumeM3 = (boxSize: string, qty: number, pcsPerBox: number | null): n
 
 const getFoStatusLabels = (t: (k: string) => string): Record<string, string> => ({
     FORMING: t('factory_status_forming'),
-    READY: t('factory_status_ready'),
     DISTRIBUTED: t('factory_status_distributed'),
 });
 
 const FO_STATUS_COLORS: Record<string, string> = {
     FORMING: 'var(--color-text-muted)',
-    READY: 'var(--color-warning)',
     DISTRIBUTED: 'var(--color-success)',
 };
 

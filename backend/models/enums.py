@@ -32,8 +32,7 @@ class DutyBasis(str, enum.Enum):
 
 
 class FactoryOrderStatus(str, enum.Enum):
-    FORMING = "FORMING"  # формируется (позиции добавляются)
-    READY = "READY"  # готов к распределению
+    FORMING = "FORMING"  # формируется (позиции добавляются / не всё распределено)
     DISTRIBUTED = "DISTRIBUTED"  # полностью распределён по машинам
     CLOSED = "CLOSED"  # all vehicles with items >= SHIPPED
 

@@ -8,8 +8,10 @@ from decimal import Decimal
 
 import pytest
 
-from backend.models.enums import VehicleStatus
+from backend.models.enums import FactoryOrderStatus, VehicleStatus
 from backend.schemas.supply_chain import (
+    AddItemsToVehicleRequest,
+    AddItemToVehicle,
     FactoryOrderCreate,
     FactoryOrderItemCreate,
     SplitItem,
@@ -20,14 +22,19 @@ from backend.schemas.supply_chain import (
 )
 from backend.services.supply_chain.factory_orders import (
     create_factory_order,
+    get_factory_order,
     split_to_vehicles,
 )
 from backend.services.supply_chain.vehicle_delivery import (
+    add_items_to_vehicle,
+    clear_all_vehicle_items,
     create_vehicle,
+    delete_vehicle,
     get_available_items,
     get_supply_chain_overview,
     get_vehicle,
     list_vehicles,
+    remove_item_from_vehicle,
     update_vehicle,
     update_vehicle_status,
 )
@@ -292,3 +299,144 @@ class TestGetAvailableItems:
         available = await get_available_items(db_session, project.id)
         found = [g for g in available if g["order_id"] == order.id]
         assert found[0]["items"][0]["remaining_qty"] == 40
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Auto-transition of FactoryOrder.status from vehicle-side mutations
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFactoryOrderAutoStatus:
+    """Verify FactoryOrder.status reacts to add/remove/clear/delete from vehicle side."""
+
+    @pytest.mark.asyncio
+    async def test_add_items_to_vehicle_transitions_to_distributed(self, db_session, project):
+        order = await _create_factory_order_with_items(db_session, project.id, [("BC-AS1", 50)])
+        assert order.status == FactoryOrderStatus.FORMING.value
+        item_id = order.items[0].id
+
+        vehicle = await create_vehicle(db_session, project.id, VehicleCreate(order_no=f"V-{_uid()}"))
+        await add_items_to_vehicle(
+            db_session,
+            project.id,
+            vehicle.order_no,
+            AddItemsToVehicleRequest(items=[AddItemToVehicle(factory_order_item_id=item_id, qty=50)]),
+        )
+
+        refreshed = await get_factory_order(db_session, project.id, order.id)
+        assert refreshed.status == FactoryOrderStatus.DISTRIBUTED.value
+
+    @pytest.mark.asyncio
+    async def test_add_partial_items_stays_in_forming(self, db_session, project):
+        order = await _create_factory_order_with_items(db_session, project.id, [("BC-AS2", 100)])
+        item_id = order.items[0].id
+
+        vehicle = await create_vehicle(db_session, project.id, VehicleCreate(order_no=f"V-{_uid()}"))
+        await add_items_to_vehicle(
+            db_session,
+            project.id,
+            vehicle.order_no,
+            AddItemsToVehicleRequest(items=[AddItemToVehicle(factory_order_item_id=item_id, qty=40)]),
+        )
+
+        refreshed = await get_factory_order(db_session, project.id, order.id)
+        assert refreshed.status == FactoryOrderStatus.FORMING.value
+
+    @pytest.mark.asyncio
+    async def test_remove_item_from_vehicle_reverts_to_forming(self, db_session, project):
+        order = await _create_factory_order_with_items(db_session, project.id, [("BC-AS3", 30)])
+        item_id = order.items[0].id
+        vehicle_no = f"V-{_uid()}"
+
+        await split_to_vehicles(
+            db_session,
+            project.id,
+            order.id,
+            SplitToVehiclesRequest(
+                assignments=[SplitItem(factory_order_item_id=item_id, qty=30, vehicle_order_no=vehicle_no)]
+            ),
+        )
+        refreshed = await get_factory_order(db_session, project.id, order.id)
+        assert refreshed.status == FactoryOrderStatus.DISTRIBUTED.value
+
+        # Remove the single CostOrderItem from the vehicle → should roll back to FORMING
+        vehicle = await get_vehicle(db_session, project.id, vehicle_no)
+        cost_item_id = vehicle.items[0].id
+        await remove_item_from_vehicle(db_session, project.id, vehicle_no, cost_item_id)
+
+        refreshed = await get_factory_order(db_session, project.id, order.id)
+        assert refreshed.status == FactoryOrderStatus.FORMING.value
+
+    @pytest.mark.asyncio
+    async def test_clear_all_vehicle_items_reverts_to_forming(self, db_session, project):
+        order = await _create_factory_order_with_items(db_session, project.id, [("BC-AS4", 20)])
+        item_id = order.items[0].id
+        vehicle_no = f"V-{_uid()}"
+
+        await split_to_vehicles(
+            db_session,
+            project.id,
+            order.id,
+            SplitToVehiclesRequest(
+                assignments=[SplitItem(factory_order_item_id=item_id, qty=20, vehicle_order_no=vehicle_no)]
+            ),
+        )
+        assert (
+            await get_factory_order(db_session, project.id, order.id)
+        ).status == FactoryOrderStatus.DISTRIBUTED.value
+
+        await clear_all_vehicle_items(db_session, project.id, vehicle_no)
+
+        refreshed = await get_factory_order(db_session, project.id, order.id)
+        assert refreshed.status == FactoryOrderStatus.FORMING.value
+
+    @pytest.mark.asyncio
+    async def test_delete_vehicle_reverts_to_forming(self, db_session, project):
+        order = await _create_factory_order_with_items(db_session, project.id, [("BC-AS5", 15)])
+        item_id = order.items[0].id
+        vehicle_no = f"V-{_uid()}"
+
+        await split_to_vehicles(
+            db_session,
+            project.id,
+            order.id,
+            SplitToVehiclesRequest(
+                assignments=[SplitItem(factory_order_item_id=item_id, qty=15, vehicle_order_no=vehicle_no)]
+            ),
+        )
+        assert (
+            await get_factory_order(db_session, project.id, order.id)
+        ).status == FactoryOrderStatus.DISTRIBUTED.value
+
+        await delete_vehicle(db_session, project.id, vehicle_no)
+
+        refreshed = await get_factory_order(db_session, project.id, order.id)
+        assert refreshed.status == FactoryOrderStatus.FORMING.value
+
+    @pytest.mark.asyncio
+    async def test_closed_order_status_not_modified(self, db_session, project):
+        """CLOSED is a final status — auto-transition must never roll it back."""
+        order = await _create_factory_order_with_items(db_session, project.id, [("BC-AS6", 10)])
+        item_id = order.items[0].id
+        vehicle_no = f"V-{_uid()}"
+
+        await split_to_vehicles(
+            db_session,
+            project.id,
+            order.id,
+            SplitToVehiclesRequest(
+                assignments=[SplitItem(factory_order_item_id=item_id, qty=10, vehicle_order_no=vehicle_no)]
+            ),
+        )
+
+        # Force CLOSED manually
+        fo = await get_factory_order(db_session, project.id, order.id)
+        fo.status = FactoryOrderStatus.CLOSED.value
+        await db_session.commit()
+
+        # Now remove the item from the vehicle — CLOSED must remain
+        vehicle = await get_vehicle(db_session, project.id, vehicle_no)
+        await remove_item_from_vehicle(db_session, project.id, vehicle_no, vehicle.items[0].id)
+
+        refreshed = await get_factory_order(db_session, project.id, order.id)
+        assert refreshed.status == FactoryOrderStatus.CLOSED.value

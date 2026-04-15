@@ -29,6 +29,7 @@ from backend.schemas.supply_chain import (
     VehicleStatusUpdate,
     VehicleUpdate,
 )
+from backend.services.supply_chain.factory_orders import refresh_factory_order_statuses
 from backend.services.supply_chain.supplier_catalog import invalidate_supplier_catalog as _invalidate_supplier_catalog
 from backend.services.warehouse_stock_engine import _next_number, _resolve_barcode
 from backend.utils.time import utcnow
@@ -281,6 +282,7 @@ async def add_items_to_vehicle(
         raise ValueError(f"Vehicle {order_no} not found")
 
     added = 0
+    affected_fo_ids: set[int] = set()
     for item_req in data.items:
         # Get factory order item
         fo_item_result = await db.execute(
@@ -301,6 +303,8 @@ async def add_items_to_vehicle(
         remaining = fo_item.qty - fo_item.assigned_qty
         if item_req.qty > remaining:
             raise ValueError(f"Cannot assign {item_req.qty} of {fo_item.barcode}: " f"only {remaining} remaining")
+
+        affected_fo_ids.add(fo_item.factory_order_id)
 
         # Resolve subject/article from Nomenclature if missing on factory order item
         subject = fo_item.subject
@@ -349,6 +353,7 @@ async def add_items_to_vehicle(
     from backend.services.cost.items import recalculate_order_items
 
     await recalculate_order_items(db, project_id, order_no)
+    await refresh_factory_order_statuses(db, project_id, affected_fo_ids)
     await _invalidate_supplier_catalog(project_id)
 
     return {"ok": True, "added": added}
@@ -425,10 +430,12 @@ async def remove_item_from_vehicle(
         fo_items_map = {fi.id: fi for fi in fo_restore_result.scalars().all()}
 
         removed = 0
+        affected_fo_ids: set[int] = set()
         for mix_ci in mix_cost_items:
             if mix_ci.factory_order_item_id and mix_ci.factory_order_item_id in fo_items_map:
                 fi = fo_items_map[mix_ci.factory_order_item_id]
                 fi.assigned_qty = max(0, fi.assigned_qty - mix_ci.qty)
+                affected_fo_ids.add(fi.factory_order_id)
             mix_ci.soft_delete()
             removed += 1
 
@@ -437,11 +444,13 @@ async def remove_item_from_vehicle(
         from backend.services.cost.items import recalculate_order_items
 
         await recalculate_order_items(db, project_id, order_no)
+        await refresh_factory_order_statuses(db, project_id, affected_fo_ids)
         await _invalidate_supplier_catalog(project_id)
 
         return {"ok": True, "removed": removed}
 
     # Single-item removal (not in a mix group)
+    affected_fo_ids_single: set[int] = set()
     if cost_item.factory_order_item_id:
         fo_item_result2 = await db.execute(
             select(FactoryOrderItem).where(
@@ -453,6 +462,7 @@ async def remove_item_from_vehicle(
         fo_item2 = fo_item_result2.scalar_one_or_none()
         if fo_item2:
             fo_item2.assigned_qty = max(0, fo_item2.assigned_qty - cost_item.qty)
+            affected_fo_ids_single.add(fo_item2.factory_order_id)
 
     cost_item.soft_delete()
     await db.commit()
@@ -461,6 +471,7 @@ async def remove_item_from_vehicle(
     from backend.services.cost.items import recalculate_order_items
 
     await recalculate_order_items(db, project_id, order_no)
+    await refresh_factory_order_statuses(db, project_id, affected_fo_ids_single)
     await _invalidate_supplier_catalog(project_id)
 
     return {"ok": True}
@@ -506,10 +517,12 @@ async def clear_all_vehicle_items(
         fo_items_map = {fi.id: fi for fi in fo_result.scalars().all()}
 
     removed = 0
+    affected_fo_ids: set[int] = set()
     for cost_item in active_items:
         if cost_item.factory_order_item_id and cost_item.factory_order_item_id in fo_items_map:
             fo_item = fo_items_map[cost_item.factory_order_item_id]
             fo_item.assigned_qty = max(0, fo_item.assigned_qty - cost_item.qty)
+            affected_fo_ids.add(fo_item.factory_order_id)
         cost_item.soft_delete()
         removed += 1
 
@@ -518,6 +531,7 @@ async def clear_all_vehicle_items(
     from backend.services.cost.items import recalculate_order_items
 
     await recalculate_order_items(db, project_id, order_no)
+    await refresh_factory_order_statuses(db, project_id, affected_fo_ids)
     await _invalidate_supplier_catalog(project_id)
 
     return {"ok": True, "removed": removed}
@@ -546,6 +560,7 @@ async def delete_vehicle(
         raise ValueError("Удалить можно только машину в статусе FORMING")
 
     # Restore assigned_qty on linked factory order items
+    affected_fo_ids: set[int] = set()
     fo_item_ids = [item.factory_order_item_id for item in vehicle.items if item.factory_order_item_id]
     if fo_item_ids:
         fo_result = await db.execute(
@@ -560,6 +575,7 @@ async def delete_vehicle(
             if cost_item.factory_order_item_id and cost_item.factory_order_item_id in fo_items_map:
                 fo_item = fo_items_map[cost_item.factory_order_item_id]
                 fo_item.assigned_qty = max(0, fo_item.assigned_qty - cost_item.qty)
+                affected_fo_ids.add(fo_item.factory_order_id)
 
     # Soft-delete CostOrderItems when removing vehicle
     for cost_item in list(vehicle.items):
@@ -568,6 +584,7 @@ async def delete_vehicle(
     # Soft-delete the vehicle
     vehicle.soft_delete()
     await db.commit()
+    await refresh_factory_order_statuses(db, project_id, affected_fo_ids)
     await _invalidate_supplier_catalog(project_id)
     return {"ok": True}
 

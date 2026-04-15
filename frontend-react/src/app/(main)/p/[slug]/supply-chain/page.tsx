@@ -107,14 +107,12 @@ function StatusBadge({ status }: { status: string }) {
 
 const getFactoryOrderStatusLabels = (t: TFn): Record<string, string> => ({
     FORMING: t('factory_status_forming'),
-    READY: t('factory_status_ready'),
     DISTRIBUTED: t('factory_status_distributed'),
     CLOSED: t('factory_status_closed'),
 });
 
 const FACTORY_ORDER_STATUS_COLORS: Record<string, string> = {
     FORMING: '#6b7280',
-    READY: '#f59e0b',
     DISTRIBUTED: '#3b82f6',
     CLOSED: '#22c55e',
 };
@@ -144,7 +142,9 @@ export default function SupplyChainPage() {
 function SupplyChainContent() {
     const { t } = useT();
     const searchParams = useSearchParams();
-    const initialTab = searchParams.get('tab') || 'orders';
+    // Legacy 'overview' tab URL param redirects to merged 'suppliers' tab
+    const rawInitialTab = searchParams.get('tab') || 'orders';
+    const initialTab = rawInitialTab === 'overview' ? 'suppliers' : rawInitialTab;
     const [tab, setTab] = useState(initialTab);
 
     return (
@@ -161,7 +161,6 @@ function SupplyChainContent() {
                 tabs={[
                     { key: 'orders', label: t('tab_orders') },
                     { key: 'vehicles', label: t('tab_vehicles') },
-                    { key: 'overview', label: t('tab_overview') },
                     { key: 'suppliers', label: t('tab_suppliers') },
                 ]}
                 active={tab}
@@ -169,7 +168,6 @@ function SupplyChainContent() {
             />
             {tab === 'orders' && <FactoryOrdersTab />}
             {tab === 'vehicles' && <VehiclesTab />}
-            {tab === 'overview' && <OverviewTab />}
             {tab === 'suppliers' && <SuppliersTab />}
         </div>
     );
@@ -1530,6 +1528,7 @@ function VehiclesTab() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [showCreate, setShowCreate] = useState(false);
+    const [statusFilter, setStatusFilter] = useState<VehicleStatus[]>([]);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -1544,6 +1543,30 @@ function VehiclesTab() {
     }, [t]);
 
     useEffect(() => { load(); }, [load]);
+
+    const statusCounts = useMemo(() => {
+        const counts: Record<VehicleStatus, number> = {
+            FORMING: 0, SHIPPED: 0, CUSTOMS: 0, DISPATCHED: 0, DELIVERED: 0,
+        };
+        for (const v of vehicles) {
+            const s = v.status as VehicleStatus;
+            if (s in counts) counts[s] += 1;
+        }
+        return counts;
+    }, [vehicles]);
+
+    const filteredVehicles = useMemo(() => {
+        if (statusFilter.length === 0) return vehicles;
+        const set = new Set(statusFilter);
+        return vehicles.filter(v => set.has(v.status as VehicleStatus));
+    }, [vehicles, statusFilter]);
+
+    const toggleStatus = (status: VehicleStatus) => {
+        setStatusFilter(prev =>
+            prev.includes(status) ? prev.filter(s => s !== status) : [...prev, status]
+        );
+    };
+    const clearStatusFilter = () => setStatusFilter([]);
 
     const openVehicle = (orderNo: string) => {
         // For order_no with slashes, encode each segment separately so Next.js catch-all route works
@@ -1598,7 +1621,9 @@ function VehiclesTab() {
             <div className="glass-card sc-vehicles-card">
                 {/* Header */}
                 <div className="sc-vehicles-header">
-                    <h3 className="sc-vehicles-header-title">{t('vehicles_title')} ({vehicles.length})</h3>
+                    <h3 className="sc-vehicles-header-title">
+                        {t('vehicles_title')} ({statusFilter.length > 0 ? `${filteredVehicles.length} / ${vehicles.length}` : vehicles.length})
+                    </h3>
                     <div className="sc-vehicles-header-actions">
                         <button className="btn btn-secondary btn-sm" onClick={load}>{t('btn_refresh')}</button>
                         <button className="btn btn-primary btn-sm" onClick={() => setShowCreate(v => !v)}>
@@ -1607,10 +1632,48 @@ function VehiclesTab() {
                     </div>
                 </div>
 
+                {/* Status filter pills */}
+                {vehicles.length > 0 && (
+                    <div className="sc-vehicles-filter-row">
+                        <button
+                            type="button"
+                            className={`sc-status-pill${statusFilter.length === 0 ? ' sc-status-pill-active' : ''}`}
+                            onClick={clearStatusFilter}
+                        >
+                            {t('filter_all')} <span className="sc-status-pill-count">{vehicles.length}</span>
+                        </button>
+                        {VEHICLE_STATUSES.map(status => {
+                            const count = statusCounts[status];
+                            const active = statusFilter.includes(status);
+                            const color = VEHICLE_STATUS_COLORS[status];
+                            return (
+                                <button
+                                    key={status}
+                                    type="button"
+                                    onClick={() => toggleStatus(status)}
+                                    className={`sc-status-pill${active ? ' sc-status-pill-active' : ''}`}
+                                    style={active ? {
+                                        borderColor: color,
+                                        background: `${color}14`,
+                                        color,
+                                    } : undefined}
+                                >
+                                    {getVehicleStatusLabels(t)[status]} <span className="sc-status-pill-count">{count}</span>
+                                </button>
+                            );
+                        })}
+                    </div>
+                )}
+
                 {vehicles.length === 0 ? (
                     <div className="sc-vehicles-empty">
                         <div className="sc-vehicles-empty-icon">{'\uD83D\uDE9B'}</div>
                         <div>{t('vehicles_empty')}</div>
+                    </div>
+                ) : filteredVehicles.length === 0 ? (
+                    <div className="sc-vehicles-empty">
+                        <div className="sc-vehicles-empty-icon">🔍</div>
+                        <div>{t('vehicles_filter_empty')}</div>
                     </div>
                 ) : (
                     <table className="sc-vehicles-table">
@@ -1631,7 +1694,7 @@ function VehiclesTab() {
                             </tr>
                         </thead>
                         <tbody>
-                            {vehicles.map(v => {
+                            {filteredVehicles.map(v => {
                                 const status = v.status as VehicleStatus;
                                 return (
                                     <tr
@@ -1686,117 +1749,7 @@ function VehiclesTab() {
     );
 }
 
-// ─── Tab 3: Overview ────────────────────────────────────────────────────────
-
-function OverviewTab() {
-    const { t } = useT();
-    const [overview, setOverview] = useState<SupplyChainOverview | null>(null);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState('');
-
-    const load = useCallback(async () => {
-        setLoading(true);
-        setError('');
-        try {
-            const data = await api.getSupplyChainOverview();
-            setOverview(data);
-        } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : t('msg_loading_error'));
-        }
-        setLoading(false);
-    }, [t]);
-
-    useEffect(() => { load(); }, [load]);
-
-    if (loading) {
-        return (
-            <div className="glass-card sc-loading-card">
-                <div className="spinner sc-spinner-center" />
-                {t('msg_loading')}
-            </div>
-        );
-    }
-
-    if (error) {
-        return (
-            <div className="glass-card sc-error-card-lg">
-                {error}
-                <button className="btn btn-secondary btn-sm sc-retry-btn" onClick={load}>{t('btn_retry')}</button>
-            </div>
-        );
-    }
-
-    if (!overview) {
-        return (
-            <div className="glass-card sc-empty-card">
-                {t('msg_no_data')}
-            </div>
-        );
-    }
-
-    const statusEntries = Object.entries(overview.vehicles_by_status);
-
-    return (
-        <div>
-            {/* KPI Cards */}
-            <div className="sc-overview-kpi-grid">
-                <KpiCard
-                    label={t('kpi_factory_orders')}
-                    value={overview.total_factory_orders}
-                    icon="📦"
-                    color="var(--color-accent)"
-                />
-                <KpiCard
-                    label={t('kpi_vehicles')}
-                    value={overview.total_vehicles}
-                    icon="🚛"
-                    color="var(--color-info, #3b82f6)"
-                />
-                <KpiCard
-                    label={t('kpi_items')}
-                    value={overview.total_items}
-                    icon="📋"
-                    color="var(--color-warning)"
-                />
-                <KpiCard
-                    label={t('kpi_sum_cny')}
-                    value={formatNumber(overview.total_amount_cny) + ' \u00A5'}
-                    icon="💰"
-                    color="var(--color-success)"
-                />
-            </div>
-
-            {/* Status breakdown */}
-            <div className="glass-card sc-form-card">
-                <h3 className="sc-overview-status-title">{t('overview_status_title')}</h3>
-                {statusEntries.length === 0 ? (
-                    <div className="sc-overview-empty">{t('overview_no_status_data')}</div>
-                ) : (
-                    <div className="sc-overview-status-grid">
-                        {VEHICLE_STATUSES.map(status => {
-                            const count = overview.vehicles_by_status[status] || 0;
-                            const color = VEHICLE_STATUS_COLORS[status];
-                            return (
-                                <div
-                                    key={status}
-                                    className="sc-overview-status-item"
-                                    style={{ border: `1px solid ${color}33`, background: `${color}0a` }}
-                                >
-                                    <div className="sc-overview-status-count" style={{ color }}>{count}</div>
-                                    <div className="sc-overview-status-label">
-                                        {getVehicleStatusLabels(t)[status]}
-                                    </div>
-                                </div>
-                            );
-                        })}
-                    </div>
-                )}
-            </div>
-        </div>
-    );
-}
-
-// ─── Tab 4: Suppliers ────────────────────────────────────────────────────────
+// ─── Tab 3: Suppliers (merged with former Overview) ─────────────────────────
 
 interface SupplierFormState {
     name: string;
@@ -2556,6 +2509,7 @@ function SuppliersTab() {
     const searchParams = useSearchParams();
     const [suppliers, setSuppliers] = useState<Supplier[]>([]);
     const [orders, setOrders] = useState<FactoryOrder[]>([]);
+    const [overview, setOverview] = useState<SupplyChainOverview | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [showForm, setShowForm] = useState(false);
@@ -2585,12 +2539,14 @@ function SuppliersTab() {
         setLoading(true);
         setError('');
         try {
-            const [suppliersData, ordersData] = await Promise.all([
+            const [suppliersData, ordersData, overviewData] = await Promise.all([
                 api.getSuppliers(),
                 api.getFactoryOrders(),
+                api.getSupplyChainOverview(),
             ]);
             setSuppliers(suppliersData);
             setOrders(ordersData);
+            setOverview(overviewData);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : t('msg_loading_error'));
         }
@@ -2733,7 +2689,62 @@ function SuppliersTab() {
                 </div>
             )}
 
-            {/* KPI */}
+            {/* Overview KPI (merged from former Overview tab) */}
+            {overview && (
+                <div className="sc-overview-kpi-grid">
+                    <KpiCard
+                        label={t('kpi_factory_orders')}
+                        value={overview.total_factory_orders}
+                        icon="📦"
+                        color="var(--color-accent)"
+                    />
+                    <KpiCard
+                        label={t('kpi_vehicles')}
+                        value={overview.total_vehicles}
+                        icon="🚛"
+                        color="var(--color-info, #3b82f6)"
+                    />
+                    <KpiCard
+                        label={t('kpi_items')}
+                        value={overview.total_items}
+                        icon="📋"
+                        color="var(--color-warning)"
+                    />
+                    <KpiCard
+                        label={t('kpi_sum_cny')}
+                        value={formatNumber(overview.total_amount_cny) + ' \u00A5'}
+                        icon="💰"
+                        color="var(--color-success)"
+                    />
+                </div>
+            )}
+
+            {/* Vehicles by status (merged from former Overview tab) */}
+            {overview && (
+                <div className="glass-card sc-form-card">
+                    <h3 className="sc-overview-status-title">{t('overview_status_title')}</h3>
+                    <div className="sc-overview-status-grid">
+                        {VEHICLE_STATUSES.map(status => {
+                            const count = overview.vehicles_by_status[status] || 0;
+                            const color = VEHICLE_STATUS_COLORS[status];
+                            return (
+                                <div
+                                    key={status}
+                                    className="sc-overview-status-item"
+                                    style={{ border: `1px solid ${color}33`, background: `${color}0a` }}
+                                >
+                                    <div className="sc-overview-status-count" style={{ color }}>{count}</div>
+                                    <div className="sc-overview-status-label">
+                                        {getVehicleStatusLabels(t)[status]}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+
+            {/* Suppliers summary KPI */}
             <div className="sc-supplier-kpi-grid">
                 <div className="glass-card sc-kpi-card">
                     <div className="sc-kpi-label">{t('kpi_suppliers_total')}</div>

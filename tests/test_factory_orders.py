@@ -23,6 +23,7 @@ from backend.services.supply_chain.factory_orders import (
     get_factory_orders,
     split_to_vehicles,
     update_factory_order,
+    update_factory_order_status,
 )
 
 
@@ -276,3 +277,28 @@ class TestSplitToVehicles:
                 999999,
                 SplitToVehiclesRequest(assignments=[]),
             )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# update_factory_order_status — READY removal
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestUpdateFactoryOrderStatus:
+    @pytest.mark.asyncio
+    async def test_rejects_ready_status(self, db_session, project):
+        """READY was removed from FactoryOrderStatus — it must no longer be accepted."""
+        data = FactoryOrderCreate(order_number=f"FO-{_uid()}", factory_name="X")
+        order = await create_factory_order(db_session, project.id, data)
+
+        with pytest.raises(ValueError, match="READY"):
+            await update_factory_order_status(db_session, project.id, order.id, "READY")
+
+    @pytest.mark.asyncio
+    async def test_accepts_valid_statuses(self, db_session, project):
+        data = FactoryOrderCreate(order_number=f"FO-{_uid()}", factory_name="X")
+        order = await create_factory_order(db_session, project.id, data)
+
+        updated = await update_factory_order_status(db_session, project.id, order.id, "DISTRIBUTED")
+        assert updated is not None
+        assert updated.status == "DISTRIBUTED"
