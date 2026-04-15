@@ -23,7 +23,51 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
 
-from backend.services.warehouse_stock_engine import _build_finance_query
+from backend.services.warehouse_stock_engine import (
+    _build_finance_query,
+    _compute_trend_cutoffs,
+)
+
+# ─── Test 0: trend window anchor (yesterday, not today) ──────────────────────
+
+
+class TestTrendCutoffs:
+    """WB finance data for today is not yet available — trend windows must end
+    at yesterday, matching the Cost-DNA fix in PR #158. Otherwise avg_daily_*
+    metrics are skewed by one empty day and cannot be compared to БДР.
+    """
+
+    def test_anchor_is_yesterday(self):
+        today = date(2026, 4, 15)
+        anchor, _c30, _c14, _c7 = _compute_trend_cutoffs(today)
+        assert anchor == date(2026, 4, 14), "trend anchor must be yesterday (today - 1)"
+
+    def test_window_30_is_exactly_30_days(self):
+        today = date(2026, 4, 15)
+        anchor, c30, _c14, _c7 = _compute_trend_cutoffs(today)
+        span = (anchor - c30).days + 1  # inclusive
+        assert span == 30, f"30-day window must cover 30 days inclusive, got {span}"
+
+    def test_window_14_is_exactly_14_days(self):
+        today = date(2026, 4, 15)
+        anchor, _c30, c14, _c7 = _compute_trend_cutoffs(today)
+        assert (anchor - c14).days + 1 == 14
+
+    def test_window_7_is_exactly_7_days(self):
+        today = date(2026, 4, 15)
+        anchor, _c30, _c14, c7 = _compute_trend_cutoffs(today)
+        assert (anchor - c7).days + 1 == 7
+
+    def test_windows_share_anchor(self):
+        """All three cutoffs end at the same anchor (yesterday)."""
+        today = date(2026, 4, 15)
+        anchor, c30, c14, c7 = _compute_trend_cutoffs(today)
+        assert c30 < c14 < c7 < anchor
+        assert anchor == date(2026, 4, 14)
+        assert c30 == date(2026, 3, 16)
+        assert c14 == date(2026, 4, 1)
+        assert c7 == date(2026, 4, 8)
+
 
 # ─── Test 1: SQL compilation contract (pure-function, no DB) ──────────────────
 

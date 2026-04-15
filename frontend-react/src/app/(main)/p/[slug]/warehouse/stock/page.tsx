@@ -1,7 +1,7 @@
 'use client';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
-import { formatNumber } from '@/lib/utils';
+import { formatDate, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import TabLayout from '@/components/TabLayout';
 import type { Warehouse, StockSummaryRow, UnifiedStockRow, TrendPeriodData } from '@/types/api';
@@ -197,9 +197,10 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
     }, [variant]);
 
     const getTrendData = useCallback((row: UnifiedStockRow): TrendPeriodData => {
-        if (trendPeriod === 7) return row.trend_7 || { avg_daily_qty: 0, revenue: 0, profit: 0 };
-        if (trendPeriod === 14) return row.trend_14 || { avg_daily_qty: 0, revenue: 0, profit: 0 };
-        return row.trend_30 || { avg_daily_qty: 0, revenue: 0, profit: 0 };
+        const empty: TrendPeriodData = { avg_daily_qty: 0, revenue: 0, profit: 0, date_from: '', date_to: '' };
+        if (trendPeriod === 7) return row.trend_7 || empty;
+        if (trendPeriod === 14) return row.trend_14 || empty;
+        return row.trend_30 || empty;
     }, [trendPeriod]);
 
     // Column visibility based on selected variant
@@ -246,6 +247,18 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         if (daily <= 0) return Infinity;
         return getVariantTotal(row) / daily;
     }, [trendPeriod, getVariantTotal]);
+
+    // Dates of the active trend window — taken from the first row (backend
+    // returns the same window on every row, so row 0 is canonical). Used to
+    // show "С 17.03 по 14.04" label so the user knows exactly which period
+    // the realization/profit numbers cover.
+    const activePeriodDates = useMemo(() => {
+        if (!data.length) return null;
+        const first = data[0];
+        const trend = trendPeriod === 7 ? first.trend_7 : trendPeriod === 14 ? first.trend_14 : first.trend_30;
+        if (!trend?.date_from || !trend?.date_to) return null;
+        return { from: trend.date_from, to: trend.date_to };
+    }, [data, trendPeriod]);
 
     const filtered = useMemo(() => {
         let rows = data;
@@ -1089,6 +1102,21 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                         >{d}д</button>
                     ))}
                 </div>
+                {activePeriodDates && (
+                    <span
+                        title={`Реализация и прибыль рассчитаны за период ${formatDate(activePeriodDates.from)} — ${formatDate(activePeriodDates.to)}. Окно заканчивается вчерашним днём (за сегодня данных WB ещё нет).`}
+                        style={{
+                            fontSize: 12,
+                            color: 'var(--color-text-muted)',
+                            whiteSpace: 'nowrap',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                        }}
+                    >
+                        {'\u{1F4C5}'} {formatDate(activePeriodDates.from)} {'\u2014'} {formatDate(activePeriodDates.to)}
+                    </span>
+                )}
                 {/* Stock-cover filter: показать только товары с запасом ≤ N дней */}
                 <div
                     title="Показать товары с запасом ≤ N дней (по выбранному тренду)"

@@ -3,7 +3,7 @@ Warehouse stock engine — stock balance updates, movements, adjustments, summar
 """
 
 import logging
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import and_, case, func, or_, select
@@ -593,6 +593,29 @@ async def _compute_period_metrics(
     return period_map
 
 
+def _compute_trend_cutoffs(today_date: date) -> tuple[date, date, date, date]:
+    """Compute 7/14/30-day trend window anchored at yesterday.
+
+    WB finance data for the current day is not yet available (the day is not
+    over), so the trend window must end at ``yesterday``. This matches the
+    Cost-DNA fix in PR #158 (`cost_dna_service.get_cost_dna` uses the same
+    anchor) so unified-stock and Cost-DNA stay on the same period grid.
+
+    Returns:
+        ``(anchor, cutoff_30, cutoff_14, cutoff_7)`` where ``anchor`` is the
+        last day of the window (inclusive, = yesterday), and each cutoff is
+        the first day of its window (inclusive). Ranges are exactly 30/14/7
+        calendar days: ``[cutoff, anchor]``.
+    """
+    anchor = today_date - timedelta(days=1)
+    return (
+        anchor,
+        anchor - timedelta(days=29),  # 30 days inclusive
+        anchor - timedelta(days=13),  # 14 days inclusive
+        anchor - timedelta(days=6),  # 7 days inclusive
+    )
+
+
 async def _load_bdr_metrics(
     db: AsyncSession,
     project_id: int,
@@ -602,28 +625,32 @@ async def _load_bdr_metrics(
     """Load BDR-style metrics per nomenclature_id for 7/14/30-day periods.
 
     Returns trend data per period + legacy avg_daily_revenue/profit/price/profit (30d) for compat.
+    Each trend period payload includes ``date_from``/``date_to`` so the UI can
+    label exactly which window was computed.
     """
     from backend.services.bdr_loaders import load_tax_settings
 
-    today = utcnow().date()
-    cutoff_30 = today - timedelta(days=30)
-    cutoff_14 = today - timedelta(days=14)
-    cutoff_7 = today - timedelta(days=7)
+    anchor, cutoff_30, cutoff_14, cutoff_7 = _compute_trend_cutoffs(utcnow().date())
 
-    # Use the period END (today) so the *current* tax regime is applied to the
-    # current snapshot — matches user intuition that "Налоги по апрелю" should
-    # affect today's analytics. load_tax_settings keys off d_from.month, so
-    # passing today picks the current-month rates.
-    tax_info = await load_tax_settings(db, project_id, today, today)
+    # Use the period END (anchor = yesterday) so the *current* tax regime is
+    # applied to the current snapshot — matches user intuition that "Налоги по
+    # апрелю" should affect today's analytics. load_tax_settings keys off
+    # d_from.month, so passing anchor picks the current-month rates.
+    tax_info = await load_tax_settings(db, project_id, anchor, anchor)
 
-    period_30 = await _compute_period_metrics(db, project_id, cutoff_30, today, nm_id_to_nom_id, cost_map, tax_info)
-    period_14 = await _compute_period_metrics(db, project_id, cutoff_14, today, nm_id_to_nom_id, cost_map, tax_info)
-    period_7 = await _compute_period_metrics(db, project_id, cutoff_7, today, nm_id_to_nom_id, cost_map, tax_info)
+    period_30 = await _compute_period_metrics(db, project_id, cutoff_30, anchor, nm_id_to_nom_id, cost_map, tax_info)
+    period_14 = await _compute_period_metrics(db, project_id, cutoff_14, anchor, nm_id_to_nom_id, cost_map, tax_info)
+    period_7 = await _compute_period_metrics(db, project_id, cutoff_7, anchor, nm_id_to_nom_id, cost_map, tax_info)
 
-    def _trend(p: dict) -> dict:
+    def _trend(p: dict | None, period_from: date, period_to: date) -> dict:
+        base = {
+            "date_from": period_from.isoformat(),
+            "date_to": period_to.isoformat(),
+        }
         if not p:
-            return {"avg_daily_qty": 0.0, "revenue": 0.0, "profit": 0.0}
+            return {**base, "avg_daily_qty": 0.0, "revenue": 0.0, "profit": 0.0}
         return {
+            **base,
             "avg_daily_qty": float(round(p["sale_qty_raw"] / p["days_count"], 2)),
             "revenue": float(round(p["realization"], 2)),
             "profit": float(round(p["total_profit"], 2)),
@@ -647,9 +674,9 @@ async def _load_bdr_metrics(
             "avg_daily_profit": float(round(legacy["total_profit"] / legacy["days_count"], 2)),
             "avg_price": legacy["avg_price"],
             "avg_profit": legacy["avg_profit"],
-            "trend_7": _trend(p7),
-            "trend_14": _trend(p14),
-            "trend_30": _trend(p30),
+            "trend_7": _trend(p7, cutoff_7, anchor),
+            "trend_14": _trend(p14, cutoff_14, anchor),
+            "trend_30": _trend(p30, cutoff_30, anchor),
         }
     return bdr_map
 
