@@ -8,6 +8,8 @@
 - `services/reports/queries.py` — общие SQL-запросы
 - `services/wb_bdr_service.py` — WB БДР (бюджет доходов и расходов)
 - `services/opiu_service.py` — ОПИУ (отчёт о прибылях и убытках)
+- `services/cost_dna_service.py` — Cost-DNA (декомпозиция выручки по категориям)
+- `services/cost_dna_helpers.py` — SQL builders и per-subject агрегации для Cost-DNA
 - `services/bdr_enrichment.py` — обогащение БДР данными
 - `services/bdr_loaders.py` — загрузчики данных для БДР
 - `services/fx_service.py` — курсы валют
@@ -24,6 +26,8 @@
 - `schemas/reports.py`
 - `tests/test_api_reports.py`, `tests/test_wb_bdr_service.py`, `tests/test_opiu_service.py`, `tests/test_fx_service.py`
 - `tests/test_stock_analytics_service.py`, `tests/test_warehouse_stocks.py`, `tests/test_warehouse_geo.py`, `tests/test_order_geography.py`
+- `tests/test_cost_dna_helpers.py`, `tests/test_reports_cost_dna.py` — Cost-DNA unit + API
+- `tests/test_warehouse_unified_stock_bdr_parity.py` — гарантирует что Unified Stock и БДР не расходятся по реализации
 
 ## Tables (read-only, кроме fx_rates и tax_rates)
 - `transactions` — источник данных (ЧТЕНИЕ)
@@ -50,6 +54,16 @@
 - Себестоимость = cost_price * qty
 - Налог = % от выручки (6% по умолчанию, настраивается)
 
+### Cost-DNA (декомпозиция выручки по категориям)
+- **Endpoint:** `GET /reports/cost_dna` (`routers/reports_wb.py`) — возвращает per-subject разбор каждого рубля выручки: себестоимость (factory/duty/delivery/VAT) + комиссии WB (commission/logistics/storage/adv/other) + налоги + маржа.
+- **Период:** либо rolling (`period_days=30|60` от вчерашнего дня), либо custom `date_from`/`date_to` (оба обязательны, max 365 дней) — custom range нужен для прямого сравнения с БДР.
+- **Выручка / WB-fees:** `wb_finance_rows GROUP BY subject_name` (пустой subject игнорируется — ≈408k строк).
+- **Ad spend:** `wb_funnel_daily.adv_sum GROUP BY subject` — тот же паттерн что в БДР/ОПИУ.
+- **Cost aggregation (фикс 2026-04-14):** per-article weighted cost из `cost_order_items` (weight = purchase qty) умножается на per-article net sale qty из `wb_finance_rows` за период, потом суммируется по subject. Старый алгоритм (weight = purchase qty на subject-уровне) завышал себестоимость, если закупочный микс не совпадал с продажным.
+- **SA join (фикс 2026-04-14):** `LOWER(article_seller)` в `cost_order_items` ↔ `LOWER(sa_name)` в `wb_finance_rows` — CSV-импорты часто хранят SA в UPPERCASE, WB API — в lowercase. Без LOWER проекты с mixed-case каталогом видели cost_total=0.
+- **Commission + Tax:** совпадают с правилами OPIU (`opiu_service.py`) — меняешь там → меняй здесь синхронно.
+- **Cache key (фикс 2026-04-15):** `snapshot_date`, `date_from`, `date_to` ОБЯЗАНЫ быть в kwargs `get_cost_dna(...)` — иначе `@cached` не включит их в ключ и rolling snapshot будет тихо дрейфовать через полночь. Router (`reports_wb.py`) пиннит `snapshot_date=utcnow().date()` в момент запроса.
+
 ### FX
 - Курсы извлекаются из конвертационных транзакций ВТБ (backfill)
 - PnL использует AVG rate за год (ИЗВЕСТНЫЙ БАГ — нужен daily rate)
@@ -72,4 +86,5 @@ reports:dds_month:project_id={pid}:year={y}:month={m}:currency={c}
 reports:dashboard:project_id={pid}:date_from={d1}:date_to={d2}
 reports:opiu:project_id={pid}:...
 reports:wb_bdr:project_id={pid}:...
+reports:cost_dna:project_id={pid}:period_days={n}:date_from={d1}:date_to={d2}:snapshot_date={s}
 ```
