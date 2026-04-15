@@ -949,6 +949,8 @@ export interface TrendPeriodData {
   avg_daily_qty: number;
   revenue: number;
   profit: number;
+  date_from: string;  // ISO YYYY-MM-DD — first day of the trend window (inclusive)
+  date_to: string;    // ISO YYYY-MM-DD — last day of the trend window (= yesterday, inclusive)
 }
 
 export interface UnifiedStockRow {
