@@ -35,6 +35,9 @@ from backend.schemas.supply_chain import (
 logger = logging.getLogger(__name__)
 
 _DELIVERED = "DELIVERED"
+# Статусы машин, которые считаются «реально отгруженными с фабрики»  # noqa: RUF003
+# (в отличие от FORMING — которые ещё наполняются)
+_REALLY_SHIPPED_STATUSES = frozenset({"SHIPPED", "CUSTOMS", "DISPATCHED", "DELIVERED"})
 _MAX_FOI_PER_SUPPLIER = 10000
 
 
@@ -362,7 +365,9 @@ async def get_shipment_matrix(
         return ShipmentMatrixResponse(
             supplier=_supplier_info(supplier),
             vehicles=[],
-            summary=ShipmentMatrixSummary(total_qty=0, total_boxes=0, shipped_qty=0, remaining_qty=0),
+            summary=ShipmentMatrixSummary(
+                total_qty=0, total_boxes=0, shipped_qty=0, really_shipped_qty=0, remaining_qty=0
+            ),
             subjects=[],
         ).model_dump(mode="json")
 
@@ -391,6 +396,7 @@ async def get_shipment_matrix(
     # Build COI map and vehicles dict
     coi_map: dict[int, list[tuple[str, int]]] = defaultdict(list)  # foi_id → [(order_no, qty)]
     vehicles_dict: dict[str, ShipmentMatrixVehicle] = {}
+    vehicle_status_map: dict[str, str | None] = {}  # order_no → status (для really_shipped подсчёта)
 
     for coi in coi_rows.mappings().all():
         order_no = coi["vehicle_order_no"]
@@ -402,6 +408,7 @@ async def get_shipment_matrix(
                 container_type=coi["container_type"],
                 ship_date=coi["ship_date"],
             )
+            vehicle_status_map[order_no] = coi["vehicle_status"]
 
     # ── Aggregate by subject → barcode ───────────────────────────────────────
     subject_barcode: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
@@ -413,6 +420,7 @@ async def get_shipment_matrix(
     grand_total_qty = 0
     grand_total_boxes = 0
     grand_shipped_qty = 0
+    grand_really_shipped_qty = 0
 
     for subject_key in sorted(subject_barcode.keys()):
         barcode_map = subject_barcode[subject_key]
@@ -429,11 +437,18 @@ async def get_shipment_matrix(
             pcs_per_box = int(pcs) if pcs else None
             total_boxes = math.ceil(total_qty / pcs_per_box) if pcs_per_box and pcs_per_box > 0 else 0
 
-            # Accumulate vehicle allocations
+            # Latest order date across all rows (для UI приоритизации по возрасту)
+            order_dates = [r["order_date"] for r in rows if r["order_date"] is not None]
+            latest_order_date = max(order_dates) if order_dates else None
+
+            # Accumulate vehicle allocations + really_shipped (машина >= SHIPPED)
             allocations: dict[str, int] = defaultdict(int)
+            really_shipped = 0
             for r in rows:
                 for v_order_no, v_qty in coi_map.get(r["foi_id"], []):
                     allocations[v_order_no] += v_qty
+                    if vehicle_status_map.get(v_order_no) in _REALLY_SHIPPED_STATUSES:
+                        really_shipped += v_qty
 
             shipped_qty = sum(allocations.values())
             remaining = total_qty - shipped_qty
@@ -450,6 +465,8 @@ async def get_shipment_matrix(
                     pcs_per_box=pcs_per_box,
                     remaining_qty=remaining,
                     shipped_pct=pct,
+                    really_shipped_qty=really_shipped,
+                    latest_order_date=latest_order_date,
                     vehicle_allocations=dict(allocations),
                 )
             )
@@ -457,6 +474,7 @@ async def get_shipment_matrix(
             subj_total_qty += total_qty
             subj_total_boxes += total_boxes
             subj_remaining += remaining
+            grand_really_shipped_qty += really_shipped
 
         subj_shipped = subj_total_qty - subj_remaining
         subj_pct = Decimal(str(round(subj_shipped / subj_total_qty * 100, 1))) if subj_total_qty > 0 else Decimal("0")
@@ -492,6 +510,7 @@ async def get_shipment_matrix(
             total_qty=grand_total_qty,
             total_boxes=grand_total_boxes,
             shipped_qty=grand_shipped_qty,
+            really_shipped_qty=grand_really_shipped_qty,
             remaining_qty=grand_total_qty - grand_shipped_qty,
         ),
         subjects=subjects,
