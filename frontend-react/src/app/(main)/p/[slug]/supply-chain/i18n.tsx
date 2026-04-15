@@ -16,8 +16,11 @@ const ru: TranslationDict = {
     page_subtitle: 'Фабричные заказы, машины, обзор',
     tab_orders: '📦 Фабричные заказы',
     tab_vehicles: '🚛 Машины',
-    tab_overview: '📊 Обзор',
-    tab_suppliers: '📋 Поставщики',
+    tab_suppliers: '📊 Обзор',
+
+    // ── Shared filter ──
+    filter_all: 'Все',
+    vehicles_filter_empty: 'Нет машин с выбранными статусами',
 
     // ── Shared status labels ──
     status_forming: 'Формируется',
@@ -27,7 +30,6 @@ const ru: TranslationDict = {
     status_delivered: 'Принята',
 
     factory_status_forming: 'Формируется',
-    factory_status_ready: 'Готов',
     factory_status_distributed: 'Распределён',
     factory_status_closed: 'Закрыт',
 
@@ -423,8 +425,11 @@ const zh: TranslationDict = {
     page_subtitle: '工厂订单、车辆、概览',
     tab_orders: '📦 工厂订单',
     tab_vehicles: '🚛 车辆',
-    tab_overview: '📊 概览',
-    tab_suppliers: '📋 供应商',
+    tab_suppliers: '📊 概览',
+
+    // ── Shared filter ──
+    filter_all: '全部',
+    vehicles_filter_empty: '没有符合所选状态的车辆',
 
     // ── Shared status labels ──
     status_forming: '组装中',
@@ -434,7 +439,6 @@ const zh: TranslationDict = {
     status_delivered: '已签收',
 
     factory_status_forming: '组装中',
-    factory_status_ready: '已就绪',
     factory_status_distributed: '已分配',
     factory_status_closed: '已关闭',
 

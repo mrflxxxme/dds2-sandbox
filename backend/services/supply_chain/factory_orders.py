@@ -54,19 +54,31 @@ async def _add_history(
 
 
 def _compute_status(order: FactoryOrder) -> str:
-    """Compute status based on distribution progress."""
-    items = order.items or []
+    """Compute status based on distribution progress.
+
+    - No items or not fully distributed → FORMING
+    - All items fully assigned to vehicles → DISTRIBUTED
+    - Was DISTRIBUTED but assigned_qty dropped below qty → FORMING (reverse)
+    - CLOSED is final — never modified here
+    """
+    items = [i for i in (order.items or []) if not i.is_deleted]
     if not items:
         return FactoryOrderStatus.FORMING.value
     total_qty = sum(i.qty for i in items)
     total_assigned = sum(i.assigned_qty for i in items)
-    if total_qty > 0 and total_assigned >= total_qty:
+    fully_distributed = total_qty > 0 and total_assigned >= total_qty
+
+    if order.status == FactoryOrderStatus.CLOSED.value:
+        return order.status
+    if fully_distributed:
         return FactoryOrderStatus.DISTRIBUTED.value
+    if order.status == FactoryOrderStatus.DISTRIBUTED.value:
+        return FactoryOrderStatus.FORMING.value
     return order.status
 
 
 async def _maybe_update_status(db: AsyncSession, order: FactoryOrder, changed_by: str | None = None) -> None:
-    """Auto-transition status to DISTRIBUTED if all items are assigned."""
+    """Auto-transition status based on distribution progress (both directions)."""
     new_status = _compute_status(order)
     if new_status != order.status:
         old_status = order.status
@@ -81,6 +93,41 @@ async def _maybe_update_status(db: AsyncSession, order: FactoryOrder, changed_by
             details=f"Автосмена статуса: {old_status} → {new_status}",
             changed_by=changed_by,
         )
+
+
+async def refresh_factory_order_statuses(
+    db: AsyncSession,
+    project_id: int,
+    factory_order_ids: set[int] | list[int],
+    changed_by: str | None = None,
+) -> None:
+    """Re-compute and persist status for given factory orders.
+
+    Used after vehicle-side mutations (add_items_to_vehicle, remove_item_from_vehicle,
+    clear_all_vehicle_items, delete_vehicle) to keep FactoryOrder.status in sync
+    with assigned_qty. Commits only if any status actually changed.
+    """
+    ids = sorted({int(i) for i in factory_order_ids if i is not None})
+    if not ids:
+        return
+    result = await db.execute(
+        select(FactoryOrder)
+        .options(selectinload(FactoryOrder.items))
+        .where(
+            FactoryOrder.id.in_(ids),
+            FactoryOrder.project_id == project_id,
+            FactoryOrder.is_deleted == False,  # noqa: E712
+        )
+        .limit(200)
+    )
+    changed = False
+    for order in result.scalars().all():
+        old_status = order.status
+        await _maybe_update_status(db, order, changed_by=changed_by)
+        if order.status != old_status:
+            changed = True
+    if changed:
+        await db.commit()
 
 
 async def get_factory_order_history(

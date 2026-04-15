@@ -947,6 +947,7 @@ export interface StockSummaryRow {
 
 export interface TrendPeriodData {
   avg_daily_qty: number;
+  sale_qty?: number;  // total units sold in the window (added 2026-04-15 for novelty KPI)
   revenue: number;
   profit: number;
   date_from: string;  // ISO YYYY-MM-DD — first day of the trend window (inclusive)
@@ -980,6 +981,12 @@ export interface UnifiedStockRow {
   trend_7: TrendPeriodData;
   trend_14: TrendPeriodData;
   trend_30: TrendPeriodData;
+  // Per-unit price/profit drawn from the item's subject (category) average —
+  // used by the «Новинки» KPI card to estimate revenue on SKUs that are in
+  // transit but have no sales history yet. Always present; 0 if the category
+  // had no sales in the 30-day window.
+  novelty_unit_revenue?: number;
+  novelty_unit_profit?: number;
   group_name?: string;
   items_count?: number;
   abc_class?: string;
@@ -1587,7 +1594,7 @@ export interface FactoryOrderItem {
   remaining_qty?: number;
 }
 
-export type FactoryOrderStatus = 'FORMING' | 'READY' | 'DISTRIBUTED' | 'CLOSED';
+export type FactoryOrderStatus = 'FORMING' | 'DISTRIBUTED' | 'CLOSED';
 
 export interface FactoryOrder {
   id: number;
