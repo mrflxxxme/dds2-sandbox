@@ -6,6 +6,8 @@ import type {
     AssemblyRequest,
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
+    DefectBulkOperation,
+    DefectBulkResponse,
     DefectOperation,
     DeliveryTimesResponse,
     DeliveryTimesUpdate,
@@ -89,6 +91,21 @@ export function addWarehouseMethods(api: ApiClient) {
         receiveDefect(warehouseId: number, data: DefectOperation) { return api.request<MessageResponse>('POST', `/api/v1/warehouse/${warehouseId}/defects/receive`, data); },
         writeoffDefect(warehouseId: number, data: DefectOperation) { return api.request<MessageResponse>('POST', `/api/v1/warehouse/${warehouseId}/defects/writeoff`, data); },
         recoverDefect(warehouseId: number, data: DefectOperation) { return api.request<MessageResponse>('POST', `/api/v1/warehouse/${warehouseId}/defects/recover`, data); },
+        markDefectBulk(warehouseId: number, data: DefectBulkOperation) {
+            return api.request<DefectBulkResponse>('POST', `/api/v1/warehouse/${warehouseId}/defects/mark-bulk`, data);
+        },
+        receiveDefectBulk(warehouseId: number, data: DefectBulkOperation) {
+            return api.request<DefectBulkResponse>('POST', `/api/v1/warehouse/${warehouseId}/defects/receive-bulk`, data);
+        },
+        writeoffDefectBulk(warehouseId: number, data: DefectBulkOperation) {
+            return api.request<DefectBulkResponse>('POST', `/api/v1/warehouse/${warehouseId}/defects/writeoff-bulk`, data);
+        },
+        recoverDefectBulk(warehouseId: number, data: DefectBulkOperation) {
+            return api.request<DefectBulkResponse>('POST', `/api/v1/warehouse/${warehouseId}/defects/recover-bulk`, data);
+        },
+        deleteDefectMovement(warehouseId: number, movementId: number) {
+            return api.request<MessageResponse>('DELETE', `/api/v1/warehouse/${warehouseId}/defects/movements/${movementId}`);
+        },
         getDefectSummary() { return api.request<WarehouseStockRow[]>('GET', '/api/v1/warehouse/defects/summary'); },
 
         // ─── Adjustments ─────────────────────────────────────────────

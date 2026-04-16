@@ -488,7 +488,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             variantTotal, variantMoney,
             trendDailySum, bdrRevenueSum, bdrProfitSum, defectSum, defectMoney,
         };
-    }, [filtered, mode, variant, getVariantTotal]);
+    }, [filtered, mode, variant, getVariantTotal, getTrendData]);
 
     // Multiplier: qty=1, cost=avg_cost, revenue=qty*avg_price, profit=qty*avg_profit
     /** Get numeric sort value for a cell (used by TanStack sorting) */

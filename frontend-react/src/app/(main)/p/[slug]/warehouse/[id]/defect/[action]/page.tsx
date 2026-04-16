@@ -3,34 +3,36 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
-import type { Nomenclature } from '@/types/api';
+import type { DefectBulkOperation, DefectBulkResponse, Nomenclature } from '@/types/api';
 
 /* ─── Action config ──────────────────────────────────────────────────────── */
 
-const ACTION_CONFIG: Record<string, { title: string; subtitle: string; btnLabel: string; apiMethod: string }> = {
+type BulkMethodName = 'markDefectBulk' | 'receiveDefectBulk' | 'writeoffDefectBulk' | 'recoverDefectBulk';
+
+const ACTION_CONFIG: Record<string, { title: string; subtitle: string; btnLabel: string; apiMethod: BulkMethodName }> = {
     mark: {
         title: 'Отметить брак',
         subtitle: 'Перевести годный товар в статус бракованного',
         btnLabel: 'Отметить как брак',
-        apiMethod: 'markDefect',
+        apiMethod: 'markDefectBulk',
     },
     receive: {
         title: 'Принять брак',
         subtitle: 'Оприходовать бракованный товар извне (возвраты WB, от покупателей)',
         btnLabel: 'Принять брак',
-        apiMethod: 'receiveDefect',
+        apiMethod: 'receiveDefectBulk',
     },
     writeoff: {
         title: 'Списать брак',
         subtitle: 'Списать бракованный товар (уничтожение, утилизация)',
         btnLabel: 'Списать',
-        apiMethod: 'writeoffDefect',
+        apiMethod: 'writeoffDefectBulk',
     },
     recover: {
         title: 'Восстановить из брака',
         subtitle: 'Вернуть товар в годный (после ремонта, пересортировки)',
         btnLabel: 'Восстановить',
-        apiMethod: 'recoverDefect',
+        apiMethod: 'recoverDefectBulk',
     },
 };
 
@@ -72,7 +74,6 @@ export default function DefectActionPage() {
     const [search, setSearch] = useState('');
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
-    const [successCount, setSuccessCount] = useState(0);
 
     const nom = useNomLookup(nomenclature);
 
@@ -169,32 +170,35 @@ export default function DefectActionPage() {
         if (!reason.trim()) { setError('Укажите причину'); return; }
         setSaving(true);
         setError('');
-        setSuccessCount(0);
 
-        const apiMethod = (api as Record<string, Function>)[config.apiMethod];
-        let processed = 0;
-        const errors: string[] = [];
+        const payload: DefectBulkOperation = {
+            reason: reason.trim(),
+            items: filledRows.map(r => ({
+                barcode: r.barcode.trim(),
+                quantity: parseInt(r.quantity) || 0,
+            })),
+        };
 
-        for (const row of filledRows) {
-            try {
-                await apiMethod(warehouseId, {
-                    barcode: row.barcode.trim(),
-                    quantity: parseInt(row.quantity) || 0,
-                    reason: reason.trim(),
-                });
-                processed++;
-                setSuccessCount(processed);
-            } catch (e: unknown) {
-                errors.push(`${row.barcode}: ${e instanceof Error ? e.message : 'ошибка'}`);
+        const apiMethod = api[config.apiMethod].bind(api) as (
+            warehouseId: number,
+            data: DefectBulkOperation,
+        ) => Promise<DefectBulkResponse>;
+
+        try {
+            const response = await apiMethod(warehouseId, payload);
+            setSaving(false);
+
+            if (response.status === 'ok') {
+                router.push(`/p/${slug}/warehouse/${warehouseId}?tab=defects`);
+                return;
             }
-        }
 
-        setSaving(false);
-
-        if (errors.length > 0) {
-            setError(`Обработано ${processed}/${filledRows.length}. Ошибки:\n${errors.join('\n')}`);
-        } else {
-            router.push(`/p/${slug}/warehouse/${warehouseId}?tab=defects`);
+            const total = filledRows.length;
+            const errorLines = response.errors.map(e => `${e.barcode}: ${e.error}`).join('\n');
+            setError(`Обработано ${response.processed}/${total}. Ошибки:\n${errorLines}`);
+        } catch (e: unknown) {
+            setSaving(false);
+            setError(e instanceof Error ? e.message : 'Ошибка при сохранении');
         }
     };
 
@@ -219,7 +223,7 @@ export default function DefectActionPage() {
                 <div style={{ display: 'flex', gap: 8 }}>
                     <button className="btn btn-secondary" onClick={goBack}>Отмена</button>
                     <button className="btn btn-primary" onClick={handleSubmit} disabled={saving || filledRows.length === 0}>
-                        {saving ? `Обработка ${successCount}/${filledRows.length}...` : `${config.btnLabel} (${filledRows.length} поз.)`}
+                        {saving ? 'Обработка...' : `${config.btnLabel} (${filledRows.length} поз.)`}
                     </button>
                 </div>
             </div>
@@ -363,7 +367,7 @@ export default function DefectActionPage() {
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 20, paddingBottom: 20 }}>
                 <button className="btn btn-secondary" onClick={goBack}>Отмена</button>
                 <button className="btn btn-primary" onClick={handleSubmit} disabled={saving || filledRows.length === 0}>
-                    {saving ? `Обработка ${successCount}/${filledRows.length}...` : `${config.btnLabel} (${filledRows.length} поз.)`}
+                    {saving ? 'Обработка...' : `${config.btnLabel} (${filledRows.length} поз.)`}
                 </button>
             </div>
         </div>

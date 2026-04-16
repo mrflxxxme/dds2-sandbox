@@ -260,6 +260,23 @@ class DefectOperationCreate(BaseModel):
     reason: str
 
 
+class DefectBulkItem(BaseModel):
+    barcode: str
+    quantity: int
+
+
+class DefectBulkOperation(BaseModel):
+    reason: str
+    items: list[DefectBulkItem]
+
+
+class DefectBulkResponse(BaseModel):
+    status: str  # "ok" | "partial" | "error"
+    processed: int
+    failed: int
+    errors: list[dict]  # [{barcode, error}]
+
+
 # ─── Delivery Times (Время доставки до WB) ──────────────────────────────
 
 
