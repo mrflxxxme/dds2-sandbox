@@ -944,6 +944,25 @@ export interface DefectOperation {
   reason: string;
 }
 
+export interface DefectBulkItem {
+  barcode: string;
+  quantity: number;
+}
+export interface DefectBulkOperation {
+  reason: string;
+  items: DefectBulkItem[];
+}
+export interface DefectBulkError {
+  barcode: string;
+  error: string;
+}
+export interface DefectBulkResponse {
+  status: 'ok' | 'partial' | 'error';
+  processed: number;
+  failed: number;
+  errors: DefectBulkError[];
+}
+
 export interface StockSummaryRow {
   nomenclature_id: number;
   barcode: string;

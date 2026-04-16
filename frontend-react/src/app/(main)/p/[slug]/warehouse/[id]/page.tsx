@@ -241,6 +241,7 @@ function ExpectedVehicles({ warehouseId, slug }: { warehouseId: number; slug: st
 function AllTab({ warehouseId }: { warehouseId: number }) {
     const [movements, setMovements] = useState<StockMovement[]>([]);
     const [loading, setLoading] = useState(true);
+    const [deletingId, setDeletingId] = useState<number | null>(null);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -252,6 +253,22 @@ function AllTab({ warehouseId }: { warehouseId: number }) {
     }, [warehouseId]);
 
     useEffect(() => { load(); }, [load]);
+
+    const DEFECT_TYPES = new Set(['DEFECT_MARK', 'DEFECT_RECEIVE', 'DEFECT_WRITEOFF', 'DEFECT_RECOVER']);
+
+    const handleDelete = async (m: StockMovement) => {
+        if (!DEFECT_TYPES.has(m.movement_type)) return;
+        if (!confirm('Удалить движение?')) return;
+        setDeletingId(m.id);
+        try {
+            await api.deleteDefectMovement(warehouseId, m.id);
+            await load();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка удаления');
+        } finally {
+            setDeletingId(null);
+        }
+    };
 
     const movementTypeLabel: Record<string, string> = {
         INBOUND: 'Приёмка',
@@ -298,6 +315,24 @@ function AllTab({ warehouseId }: { warehouseId: number }) {
         },
         { key: 'reference_type', label: 'Документ' },
         { key: 'comment', label: 'Комментарий' },
+        {
+            key: 'id', label: '', align: 'center',
+            render: (_v: number, row: StockMovement) => {
+                if (!DEFECT_TYPES.has(row.movement_type)) return null;
+                const isDeleting = deletingId === row.id;
+                return (
+                    <button
+                        className="btn btn-sm btn-danger"
+                        onClick={() => handleDelete(row)}
+                        disabled={isDeleting}
+                        title="Удалить движение"
+                        style={{ padding: '2px 8px', fontSize: 14, lineHeight: 1 }}
+                    >
+                        {isDeleting ? '...' : '×'}
+                    </button>
+                );
+            },
+        },
     ];
 
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;

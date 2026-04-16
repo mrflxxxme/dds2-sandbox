@@ -10,6 +10,8 @@ from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.warehouse import (
     CostPriceUpdate,
+    DefectBulkOperation,
+    DefectBulkResponse,
     DefectOperationCreate,
     DeliveryTimesUpdate,
     InboundReceiptCreate,
@@ -535,6 +537,95 @@ async def recover_defect(
     """Restore defective goods to good stock (repaired)."""
     try:
         return await warehouse_defect.recover_defect(db, project.id, warehouse_id, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post(
+    "/{warehouse_id}/defects/mark-bulk",
+    response_model=DefectBulkResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def mark_defect_bulk(
+    warehouse_id: int,
+    payload: DefectBulkOperation,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk: mark existing good stock as defective (one request, N items)."""
+    try:
+        return await warehouse_defect.mark_defect_bulk(db, project.id, warehouse_id, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post(
+    "/{warehouse_id}/defects/receive-bulk",
+    response_model=DefectBulkResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def receive_defect_bulk(
+    warehouse_id: int,
+    payload: DefectBulkOperation,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk: receive defective goods from outside (WB returns, etc.)."""
+    try:
+        return await warehouse_defect.receive_defect_bulk(db, project.id, warehouse_id, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post(
+    "/{warehouse_id}/defects/writeoff-bulk",
+    response_model=DefectBulkResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def writeoff_defect_bulk(
+    warehouse_id: int,
+    payload: DefectBulkOperation,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk: write off (destroy) defective goods."""
+    try:
+        return await warehouse_defect.writeoff_defect_bulk(db, project.id, warehouse_id, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post(
+    "/{warehouse_id}/defects/recover-bulk",
+    response_model=DefectBulkResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def recover_defect_bulk(
+    warehouse_id: int,
+    payload: DefectBulkOperation,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk: restore defective goods to good stock (repaired)."""
+    try:
+        return await warehouse_defect.recover_defect_bulk(db, project.id, warehouse_id, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.delete(
+    "/{warehouse_id}/defects/movements/{movement_id}",
+    dependencies=[Depends(rate_limit_write)],
+)
+async def delete_defect_movement(
+    warehouse_id: int,
+    movement_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Hard-delete a defect stock movement and revert its stock effect."""
+    try:
+        return await warehouse_defect.delete_defect_movement(db, project.id, warehouse_id, movement_id)
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
 
