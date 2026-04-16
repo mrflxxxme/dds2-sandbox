@@ -256,8 +256,51 @@ async def delete_cost_order(db: AsyncSession, project_id: int, order_no: str):
     order = result.scalar_one_or_none()
     if not order:
         return None
+
+    # If order has supply-chain linkages (CostOrderItems with factory_order_item_id),
+    # restore assigned_qty on FactoryOrderItems and soft-delete CostOrderItems
+    from backend.models.supply_chain import FactoryOrderItem
+
+    coi_result = await db.execute(
+        select(CostOrderItem).where(
+            CostOrderItem.order_no == order_no,
+            CostOrderItem.project_id == project_id,
+            CostOrderItem.is_deleted == False,
+        )
+    )
+    cost_items = list(coi_result.scalars().all())
+
+    fo_item_ids = [ci.factory_order_item_id for ci in cost_items if ci.factory_order_item_id]
+    affected_fo_ids: set[int] = set()
+    if fo_item_ids:
+        fo_result = await db.execute(
+            select(FactoryOrderItem).where(
+                FactoryOrderItem.id.in_(fo_item_ids),
+                FactoryOrderItem.project_id == project_id,
+                FactoryOrderItem.is_deleted == False,
+            )
+        )
+        fo_items_map = {fi.id: fi for fi in fo_result.scalars().all()}
+        for ci in cost_items:
+            if ci.factory_order_item_id and ci.factory_order_item_id in fo_items_map:
+                fo_item = fo_items_map[ci.factory_order_item_id]
+                fo_item.assigned_qty = max(0, fo_item.assigned_qty - ci.qty)
+                affected_fo_ids.add(fo_item.factory_order_id)
+
+    for ci in cost_items:
+        ci.soft_delete()  # no-soft-delete-check
+
     order.soft_delete()
     await db.commit()
+
+    # Refresh factory order statuses if any were affected
+    if affected_fo_ids:
+        from backend.services.supply_chain.factory_orders import refresh_factory_order_statuses
+        from backend.services.supply_chain.supplier_catalog import invalidate_supplier_catalog
+
+        await refresh_factory_order_statuses(db, project_id, affected_fo_ids)
+        await invalidate_supplier_catalog(project_id)
+
     await invalidate_project_reports(project_id)
     import asyncio
 
