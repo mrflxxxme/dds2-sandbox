@@ -14,7 +14,7 @@
     },
     "postgres": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://readonly_agent:readonly_dds_2026@localhost:5434/dds_db"]
+      "args": ["-y", "@anthropic-ai/mcp-server-postgres", "$POSTGRES_MCP_URL"]
     },
     "github": {
       "command": "npx",

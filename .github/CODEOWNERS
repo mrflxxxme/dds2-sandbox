@@ -1,0 +1,14 @@
+# Default owner
+* @paalso
+
+# Backend
+/backend/ @paalso
+/migrations/ @paalso
+
+# Frontend
+/frontend-react/ @paalso
+
+# Infrastructure
+/.github/ @paalso
+/infra/ @paalso
+/docker-compose*.yml @paalso
