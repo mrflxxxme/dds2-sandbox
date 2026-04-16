@@ -8,10 +8,11 @@ Joins nomenclature for WB article (article_wb) and brand.
 
 import logging
 
-from sqlalchemy import select, text as sa_text
+from sqlalchemy import or_, select, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import CostOrder, CostOrderItem
+from backend.models.enums import VehicleStatus
 
 logger = logging.getLogger("dds.cost_history")
 
@@ -35,11 +36,16 @@ async def get_cost_history(
     }
     """
     # 1. Get all active orders, sorted by ship_date
+    #    Exclude FORMING — data not finalised yet (prices/qty may change)
     orders_q = (
         select(CostOrder)
         .where(
             CostOrder.project_id == project_id,
             CostOrder.is_deleted == False,
+            or_(
+                CostOrder.status.is_(None),
+                CostOrder.status != VehicleStatus.FORMING,
+            ),
         )
         .order_by(CostOrder.ship_date.desc(), CostOrder.order_no.desc())
     )
