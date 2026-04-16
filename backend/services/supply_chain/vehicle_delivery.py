@@ -559,9 +559,13 @@ async def delete_vehicle(
     if vehicle.status != VehicleStatus.FORMING:
         raise ValueError("Удалить можно только машину в статусе FORMING")
 
+    # Only process active (non-deleted) items — items removed earlier via
+    # remove_items_from_vehicle already had their assigned_qty restored.
+    active_items = [item for item in vehicle.items if not item.is_deleted]
+
     # Restore assigned_qty on linked factory order items
     affected_fo_ids: set[int] = set()
-    fo_item_ids = [item.factory_order_item_id for item in vehicle.items if item.factory_order_item_id]
+    fo_item_ids = [item.factory_order_item_id for item in active_items if item.factory_order_item_id]
     if fo_item_ids:
         fo_result = await db.execute(
             select(FactoryOrderItem).where(
@@ -571,14 +575,14 @@ async def delete_vehicle(
             )
         )
         fo_items_map = {fi.id: fi for fi in fo_result.scalars().all()}
-        for cost_item in vehicle.items:
+        for cost_item in active_items:
             if cost_item.factory_order_item_id and cost_item.factory_order_item_id in fo_items_map:
                 fo_item = fo_items_map[cost_item.factory_order_item_id]
                 fo_item.assigned_qty = max(0, fo_item.assigned_qty - cost_item.qty)
                 affected_fo_ids.add(fo_item.factory_order_id)
 
     # Soft-delete CostOrderItems when removing vehicle
-    for cost_item in list(vehicle.items):
+    for cost_item in active_items:
         cost_item.soft_delete()  # no-soft-delete-check
 
     # Soft-delete the vehicle
