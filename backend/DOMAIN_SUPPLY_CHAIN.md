@@ -23,6 +23,13 @@
 ### Enum VehicleStatus
 FORMING | IN_TRANSIT | CUSTOMS | DISPATCHED | DELIVERED
 
+### Enum FactoryOrderStatus
+FORMING | DISTRIBUTED | CLOSED
+- `FORMING` — не всё распределено по машинам (часть `assigned_qty < qty`)
+- `DISTRIBUTED` — все позиции полностью распределены (`assigned_qty == qty` для всех items)
+- `CLOSED` — все машины с позициями этого заказа имеют статус ≥ SHIPPED
+- Legacy `READY` удалён (sc14) — сбивал операторов («Готов» при 1% распределении)
+
 ## Поток данных
 1. Создаётся FactoryOrder с items (qty, barcode, price_cny)
 2. Items распределяются по машинам (split_to_vehicles):
@@ -31,6 +38,17 @@ FORMING | IN_TRANSIT | CUSTOMS | DISPATCHED | DELIVERED
    - Обновляется assigned_qty на FactoryOrderItem
 3. Машина меняет статусы: FORMING → IN_TRANSIT → CUSTOMS → DELIVERED
 4. При DELIVERED + target_warehouse_id → auto-create InboundReceipt
+
+## Автопересчёт статусов FactoryOrder (фикс 2026-04-15)
+`factory_orders.refresh_factory_order_statuses(db, project_id, factory_order_ids)` — единая точка, которая симметрично двигает FactoryOrder.status между FORMING ↔ DISTRIBUTED на основе фактического `assigned_qty`. **CLOSED не откатывается** (terminal state).
+
+Вызывается **после** каждой мутации со стороны машины — не только `split_to_vehicles`:
+- `vehicle_delivery.add_items_to_vehicle` — добавили в машину → возможно DISTRIBUTED
+- `vehicle_delivery.remove_item_from_vehicle` — вернули qty заказу → возможно откат в FORMING
+- `vehicle_delivery.clear_vehicle_items` / `delete_vehicle` — массовый возврат
+- `factory_orders.split_to_vehicles` — первичное распределение
+
+Ручной `update_factory_order_status` **отвергает READY** (422) — миграция sc14 удалила значение из enum.
 
 ## Расчёт себестоимости и автопересчёт
 **НЕ ТРОГАТЬ** — `services/cost/items.py` работает с CostOrder/CostOrderItem как раньше.
@@ -97,6 +115,18 @@ Prefix: `/api/v1/supply-chain`
 | PUT | /suppliers/{id} | Обновить поставщика |
 | DELETE | /suppliers/{id} | Мягкое удаление |
 | GET | /suppliers/{id}/catalog | Ассортимент поставщика (группировка по subject, агрегация по barcode, кэш 300с) |
+| GET | /suppliers/{id}/shipment-matrix | Отгрузочная карта: плоская таблица позиций × машин, с `really_shipped_qty` и `latest_order_date` |
+
+### Отгрузочная карта (shipment_matrix, фикс 2026-04-15)
+`supplier_catalog.build_shipment_matrix(...)` возвращает `ShipmentMatrixSummary` + flat items (без группировки по subject — фронт фильтрует сам).
+
+Ключевые поля `ShipmentMatrixItem`:
+- `shipped_qty` — qty разложенное по машинам любых статусов (включая FORMING)
+- `really_shipped_qty` — qty **только** по машинам со статусом ≥ SHIPPED (константа `_REALLY_SHIPPED_STATUSES`). Решает путаницу «разложено в корзинку ≠ реально уехало с фабрики»
+- `latest_order_date` — max `fo.order_date` по всем FactoryOrder-ам этого barcode; фронт использует для color priority bar (0% и >30 дней = красный, 0% но свежий = серый)
+- `vehicle_allocations: dict[order_no, qty]` — колонки таблицы
+
+`ShipmentMatrixSummary` дублирует `shipped_qty` и `really_shipped_qty` на уровне totals — для KPI-карточек.
 
 ## Файлы
 - `models/supply_chain.py` — FactoryOrder, FactoryOrderItem, Supplier
@@ -113,6 +143,8 @@ Prefix: `/api/v1/supply-chain`
 - `migrations/versions/sc05_fix_missing_columns.py` — changed_by/changed_at в vehicle_status_history
 - `migrations/versions/sc06_add_dispatched_status.py` — DISPATCHED в enum VehicleStatus
 - `migrations/versions/sc07_cleanup_vehicle_status.py` — обнуление status у старых (не-vehicle) cost_orders
+- `migrations/versions/sc13_fix_factory_order_statuses.py` — пересчёт FactoryOrder.status по фактическому assigned_qty (с записью в factory_order_history)
+- `migrations/versions/sc14_drop_factory_order_ready.py` — удаление READY из enum FactoryOrderStatus (данные → FORMING/DISTRIBUTED)
 
 ### Кэш supplier_catalog
 - Префикс: `supply_chain:supplier_catalog:project_id={pid}:supplier_id={sid}`
@@ -123,7 +155,7 @@ Prefix: `/api/v1/supply-chain`
   - `warehouse_inbound.py`: accept_receipt (если DISPATCHED → DELIVERED)
 
 ## Frontend
-- `types/api.ts` — FactoryOrder*, VehicleStatus, SupplyChainOverview, SplitItem, SupplierCatalog*, SkuOrderHistoryEntry
-- `lib/api/supply-chain.ts` — API клиент (включая `getSupplierCatalog`)
-- `app/(main)/p/[slug]/supply-chain/page.tsx` — страница с 4 табами (SuppliersTab + SupplierCatalogView)
-- `app/(main)/p/[slug]/supply-chain/i18n.tsx` — переводы RU/ZH (catalog_*)
+- `types/api.ts` — FactoryOrder*, VehicleStatus, SupplyChainOverview, SplitItem, SupplierCatalog*, ShipmentMatrix*, SkuOrderHistoryEntry
+- `lib/api/supply-chain.ts` — API клиент (включая `getSupplierCatalog`, `getShipmentMatrix`)
+- `app/(main)/p/[slug]/supply-chain/page.tsx` — страница: «📊 Обзор» (merged с Поставщиками: KPI + машины по статусам + карточки поставщиков), VehiclesTab (multi-select pill-фильтры по статусам со счётчиками), SupplierCatalogView, ShipmentMatrixView (плоская таблица с фильтром/сортировкой/sticky). Legacy `?tab=overview` → redirect на `suppliers`
+- `app/(main)/p/[slug]/supply-chain/i18n.tsx` — переводы RU/ZH (catalog_*, shipment_*)

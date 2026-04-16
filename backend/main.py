@@ -564,6 +564,16 @@ async def health():
     return {"status": "ok" if all_ok else "degraded", "checks": checks, "scheduler_ok": scheduler_ok}
 
 
+@app.get("/api/v1/ping")
+async def ping():
+    """Synthetic heartbeat endpoint for BackendNoUserTraffic alert.
+
+    Unlike /health, this endpoint is NOT excluded from http_requests_total,
+    so scheduler heartbeat hits generate traffic that prevents false alerts.
+    """
+    return {"ok": True}
+
+
 @app.post("/api/v1/seed", dependencies=[Depends(require_admin)])
 async def seed_data():
     """Seed default accounts, lead times, etc. from the Excel files."""

@@ -159,6 +159,12 @@ if len(data) > app_settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
 **НЕПРАВИЛЬНО:** `warehouse_stock_engine._build_finance_query` использует свой набор фильтров (`rr_dt >= cutoff`, нет exclusion «Неопознанный товар»). БДР (`wb_bdr_helpers`) использует другой — цифры реализации расходятся, пользователь видит разные суммы в двух отчётах на тот же период (bug 2026-04-15).
 **ПРАВИЛЬНО:** при любом изменении фильтров БДР → обновить зеркало в `warehouse_stock_engine.py` И прогнать `tests/test_warehouse_unified_stock_bdr_parity.py`. Лучший путь — вынести фильтр в общий helper.
 
+## P28: load_tax_settings(cutoff, anchor) — cutoff это START окна, не anchor
+**НЕПРАВИЛЬНО:** `load_tax_settings(db, project_id, anchor, anchor)` в rolling отчётах — при плейсхолдерных tax rate текущего месяца функция возвращает nil/zero rate, и маржа считается **без налога**. Unified Stock показал 35.94% vs БДР 26.69% при тех же данных (bug 2026-04-15).
+**ПРАВИЛЬНО:** `load_tax_settings(db, project_id, cutoff_X, anchor)` — первый аргумент это **начало** окна (cutoff_7/14/30), второй — anchor (вчера). БДР использует тот же pattern (cutoff = первое число периода). Стало 26.78% vs 26.69%, дельта 0.09 п.п.
+- Regression guard: `tests/test_warehouse_tax_cutoff_parity.py`
+- Правило: rolling окно = один период, и налоговая настройка должна быть снята с **начала** периода, иначе новые месячные placeholder-rate-ы отравляют расчёт
+
 ## P24: uvicorn `--workers N>1` + `--limit-max-requests` race condition (incident 2026-04-14)
 **НЕПРАВИЛЬНО:** `uvicorn ... --workers 2 --limit-max-requests 5000` в `Dockerfile.backend` — оба воркера достигают лимита одновременно, второй не поднимается, контейнер остаётся `running` с одним зависшим воркером.
 **ПРАВИЛЬНО:** `--workers 1` для uvicorn (uvicorn НЕ поддерживает `--max-requests-jitter`, рандомизирующий момент рестарта). Для масштабирования по CPU — gunicorn с `uvicorn.workers.UvicornWorker` + `--max-requests-jitter 500`.
