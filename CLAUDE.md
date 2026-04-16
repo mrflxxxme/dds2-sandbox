@@ -95,6 +95,8 @@ src/types/api.ts — TypeScript интерфейсы
 - **Грабли** → `docs/KNOWN_PITFALLS.md` (ошибки которые агенты повторяют)
 - **Worktrees** → `scripts/worktree-start.sh` / `worktree-finish.sh` (параллельная работа)
 - **Runbooks** → `.claude/runbooks/common-scenarios.md` (пошаговые сценарии: endpoint, страница, баг, миграция)
+- **Ревью** → `REVIEW.md` (чеклист для AI и human ревью)
+- **Статус** → `/status` (быстрая диагностика: git, docker, health, миграции)
 
 ## Git
 - Коммиты: `feat:` / `fix:` / `infra:` / `refactor:` / `test:` (русский или англ.)
@@ -122,8 +124,9 @@ src/types/api.ts — TypeScript интерфейсы
 ## Operational workflows (.github/workflows/)
 | Workflow | Триггер | Назначение |
 |---|---|---|
-| `test.yml` | push / PR | Tests (pytest + vitest) |
-| `security.yml` | push / PR / manual | pip-audit, Trivy, Snyk |
+| `test.yml` | push / PR | Tests (pytest + vitest + Playwright E2E) |
+| `security.yml` | push / PR / manual | pip-audit, Trivy, Snyk, npm audit |
+| `claude-review.yml` | PR / `@claude` comment | Claude Code AI-ревью PR |
 | `auto-pr.yml` | push в `dev` | автоматический PR `dev → main` |
 | `auto-merge.yml` | green CI на auto-PR | авто-merge при зелёном CI |
 | `cd-production.yml` | merge в `main` | деплой на app-сервер |
