@@ -72,6 +72,7 @@
 - CRUD: `services/warehouse_crud.py`
 - Сервис: `services/warehouse_service.py`, `warehouse_stock_service.py`, `warehouse_stock_engine.py`
 - Входящие/исходящие: `services/warehouse_inbound.py`, `services/warehouse_outbound.py`
+- Брак (дефекты): `services/warehouse_defect.py`
 - Расчёт потребности: `services/warehouse_need_service.py`
 - Прогноз остатков: `services/stock_forecast_service.py` — прогноз выбытия по трендам продаж (wb / wb_rf / wb_rf_transit), светофор
 - FBO поставки WB: `services/fbo_supply_service.py`

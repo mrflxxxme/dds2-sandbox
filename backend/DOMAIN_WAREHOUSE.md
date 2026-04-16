@@ -66,7 +66,7 @@ async def _update_stock(
 - `ReceiptStatus` — DRAFT, EXPECTED, ACCEPTED, CANCELLED
 - `OutboundStatus` — DRAFT, SHIPPED, DELIVERED, CANCELLED
 - `TransferStatus` — DRAFT, IN_TRANSIT, COMPLETED
-- `MovementType` — INBOUND, INBOUND_CANCEL, OUTBOUND, OUTBOUND_CANCEL, TRANSFER_IN, TRANSFER_OUT, INBOUND_EDIT, ADJUSTMENT
+- `MovementType` — INBOUND, INBOUND_CANCEL, OUTBOUND, OUTBOUND_CANCEL, TRANSFER_IN, TRANSFER_OUT, INBOUND_EDIT, ADJUSTMENT, DEFECT_MARK, DEFECT_RECEIVE, DEFECT_WRITEOFF, DEFECT_RECOVER, DEFECT_TRANSFER_OUT, DEFECT_TRANSFER_IN
 
 ## Статусные модели
 
@@ -92,6 +92,24 @@ DRAFT → IN_TRANSIT → COMPLETED
   source: qty -= delta, TRANSFER_OUT    target: qty += delta, TRANSFER_IN
   target: in_transit += delta           target: in_transit -= delta
 ```
+
+### Брак (Defective Goods)
+```
+DEFECT_MARK:      qty -= delta, defect_qty += delta  (пометить годный → брак)
+DEFECT_RECEIVE:   defect_qty += delta                 (приёмка брака извне)
+DEFECT_WRITEOFF:  defect_qty -= delta                 (списание)
+DEFECT_RECOVER:   qty += delta, defect_qty -= delta   (восстановление после ремонта)
+DEFECT_TRANSFER:  через StockTransfer.is_defect=True, DRAFT → IN_TRANSIT → COMPLETED
+                  source: defect_qty -= delta, DEFECT_TRANSFER_OUT
+                  target: defect_qty += delta, DEFECT_TRANSFER_IN
+                  target: defect_in_transit += delta (send) / -= delta (complete)
+```
+
+- `defect_quantity` — отдельный счётчик в WarehouseStock, НЕ учитывается в `available`
+- `defect_in_transit` — аналог `in_transit` для бракованных перемещений
+- Assembly validation использует `quantity` → брак автоматически исключён из отгрузок
+- Все операции проходят через `_update_stock(defect_delta=...)` — один аудит-лог
+- Сервис: `warehouse_defect.py` (mark, receive, writeoff, recover, get_defect_stock, get_defect_summary)
 
 ## При Accept Receipt (DRAFT|EXPECTED → ACCEPTED)
 
@@ -249,6 +267,7 @@ Regression guard: `tests/test_warehouse_tax_cutoff_parity.py`. При любом
 | services/warehouse_service.py | Re-export (59 строк) |
 | services/warehouse_crud.py | CRUD складов (241 строка) |
 | services/warehouse_inbound.py | Приёмка (254 строки) |
+| services/warehouse_defect.py | Управление браком (mark, receive, writeoff, recover) |
 | services/warehouse_outbound.py | Отгрузка + перемещения (365 строк) |
 | services/warehouse_stock_engine.py | Движения + остатки + единые остатки (~760 строк) |
 | services/fbo_supply_service.py | FBO синхронизация + авто-доставка (882 строки — нужен рефакторинг) |

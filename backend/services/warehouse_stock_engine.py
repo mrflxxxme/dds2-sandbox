@@ -91,12 +91,14 @@ async def _update_stock(
     reference_type: str,
     reference_id: int | None = None,
     comment: str | None = None,
+    defect_delta: int = 0,
 ) -> None:
     """
     Update warehouse_stock balance and create stock_movement in one go.
 
-    delta: positive = inbound, negative = outbound.
-    Raises ValueError if resulting quantity < 0.
+    delta: positive = inbound, negative = outbound (for quantity).
+    defect_delta: positive = add defect, negative = remove defect (for defect_quantity).
+    Raises ValueError if resulting quantity or defect_quantity < 0.
     """
     # 1. Get or create WarehouseStock row
     result = await db.execute(
@@ -116,16 +118,26 @@ async def _update_stock(
             barcode=barcode,
             quantity=0,
             in_transit=0,
+            defect_quantity=0,
+            defect_in_transit=0,
         )
         db.add(stock)
         await db.flush()
 
-    # 2. Check non-negative constraint
+    # 2. Check non-negative constraints
     new_qty = stock.quantity + delta
     if new_qty < 0:
         raise ValueError(f"Insufficient stock for barcode {barcode}: " f"have {stock.quantity}, need {abs(delta)}")
 
+    new_defect = stock.defect_quantity + defect_delta
+    if new_defect < 0:
+        raise ValueError(
+            f"Insufficient defect stock for barcode {barcode}: "
+            f"have {stock.defect_quantity}, need {abs(defect_delta)}"
+        )
+
     stock.quantity = new_qty
+    stock.defect_quantity = new_defect
     stock.updated_at = utcnow()
 
     # 3. Create movement record (audit log)
@@ -136,6 +148,7 @@ async def _update_stock(
         barcode=barcode,
         movement_type=movement_type,
         quantity=delta,
+        defect_delta=defect_delta,
         reference_type=reference_type,
         reference_id=reference_id,
         comment=comment,
@@ -215,7 +228,7 @@ async def get_warehouse_stock(db: AsyncSession, project_id: int, warehouse_id: i
         .where(
             WarehouseStock.project_id == project_id,
             WarehouseStock.warehouse_id == warehouse_id,
-            WarehouseStock.quantity > 0,
+            or_(WarehouseStock.quantity > 0, WarehouseStock.defect_quantity > 0),
         )
         .order_by(WarehouseStock.barcode)
     )
@@ -236,6 +249,8 @@ async def get_warehouse_stock(db: AsyncSession, project_id: int, warehouse_id: i
                 "barcode": row.barcode,
                 "quantity": row.quantity,
                 "in_transit": row.in_transit,
+                "defect_quantity": row.defect_quantity,
+                "defect_in_transit": row.defect_in_transit,
                 "cost_price": row.cost_price,
                 "updated_at": row.updated_at,
                 "reserved": reserved,
@@ -341,6 +356,7 @@ async def get_stock_summary(db: AsyncSession, project_id: int) -> list[dict]:
                 "total_in_transit": 0,
                 "total_reserved": 0,
                 "total_available": 0,
+                "total_defect": 0,
             }
         entry = summary[key]
         if row.quantity > 0:
@@ -349,6 +365,8 @@ async def get_stock_summary(db: AsyncSession, project_id: int) -> list[dict]:
         if row.in_transit > 0:
             entry["in_transit"][row.warehouse_id] = row.in_transit
             entry["total_in_transit"] += row.in_transit
+        if row.defect_quantity > 0:
+            entry["total_defect"] += row.defect_quantity
         # Reserved from assembly requests
         res = all_reserved.get(row.warehouse_id, {}).get(row.nomenclature_id, 0)
         if res > 0:
@@ -359,7 +377,7 @@ async def get_stock_summary(db: AsyncSession, project_id: int) -> list[dict]:
     for entry in summary.values():
         entry["total_available"] = max(0, entry["total"] - entry["total_reserved"])
 
-    return [v for v in summary.values() if v["total"] > 0 or v["total_in_transit"] > 0]
+    return [v for v in summary.values() if v["total"] > 0 or v["total_in_transit"] > 0 or v["total_defect"] > 0]
 
 
 # ─── Unified Stock (own + WB + in-transit) ────────────────────────────────
@@ -1414,6 +1432,7 @@ async def get_unified_stock_summary(
                 "reserved": 0,
                 "total_own": 0,
                 "total_wb": 0,
+                "total_defect": 0,
                 "total": 0,
                 "factory_qty": 0,
                 "vehicle_forming_qty": 0,
@@ -1444,12 +1463,15 @@ async def get_unified_stock_summary(
 
     # Own warehouse stock
     for row in own_rows:
-        if row.quantity <= 0:
+        if row.quantity <= 0 and row.defect_quantity <= 0:
             continue
         entry = _ensure(row.nomenclature_id)
         wh_name = wh_name_map.get(row.warehouse_id, str(row.warehouse_id))
-        entry["warehouses"][wh_name] = entry["warehouses"].get(wh_name, 0) + row.quantity
-        entry["total_own"] += row.quantity
+        if row.quantity > 0:
+            entry["warehouses"][wh_name] = entry["warehouses"].get(wh_name, 0) + row.quantity
+            entry["total_own"] += row.quantity
+        if row.defect_quantity > 0:
+            entry["total_defect"] += row.defect_quantity
 
     # WB stock
     for row in wb_rows:

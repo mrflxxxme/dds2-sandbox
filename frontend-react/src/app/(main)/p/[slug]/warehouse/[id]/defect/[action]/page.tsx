@@ -3,79 +3,98 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
-import type { Nomenclature, Warehouse } from '@/types/api';
+import type { Nomenclature } from '@/types/api';
 
-/* ─── Nomenclature lookup helper ──────────────────────────────────────────── */
+/* ─── Action config ──────────────────────────────────────────────────────── */
+
+const ACTION_CONFIG: Record<string, { title: string; subtitle: string; btnLabel: string; apiMethod: string }> = {
+    mark: {
+        title: 'Отметить брак',
+        subtitle: 'Перевести годный товар в статус бракованного',
+        btnLabel: 'Отметить как брак',
+        apiMethod: 'markDefect',
+    },
+    receive: {
+        title: 'Принять брак',
+        subtitle: 'Оприходовать бракованный товар извне (возвраты WB, от покупателей)',
+        btnLabel: 'Принять брак',
+        apiMethod: 'receiveDefect',
+    },
+    writeoff: {
+        title: 'Списать брак',
+        subtitle: 'Списать бракованный товар (уничтожение, утилизация)',
+        btnLabel: 'Списать',
+        apiMethod: 'writeoffDefect',
+    },
+    recover: {
+        title: 'Восстановить из брака',
+        subtitle: 'Вернуть товар в годный (после ремонта, пересортировки)',
+        btnLabel: 'Восстановить',
+        apiMethod: 'recoverDefect',
+    },
+};
+
+/* ─── Nomenclature lookup ────────────────────────────────────────────────── */
 
 function useNomLookup(nomenclature: Nomenclature[]) {
     return useMemo(() => {
         const byBarcode = new Map<string, Nomenclature>();
-        nomenclature.forEach(n => {
-            if (n.barcode) byBarcode.set(n.barcode, n);
-        });
+        nomenclature.forEach(n => { if (n.barcode) byBarcode.set(n.barcode, n); });
         const resolve = (barcode: string): Nomenclature | undefined => byBarcode.get(barcode);
         const label = (n: Nomenclature): string => n.article_seller || n.subject || n.name || `nmId: ${n.article_wb}`;
-        return { resolve, label };
+        return { resolve, label, byBarcode };
     }, [nomenclature]);
 }
 
 /* ─── Types ───────────────────────────────────────────────────────────────── */
 
-interface ItemRow {
-    barcode: string;
-    quantity: string;
-}
-
-const emptyItemRow = (): ItemRow => ({ barcode: '', quantity: '' });
+interface ItemRow { barcode: string; quantity: string }
+const emptyRow = (): ItemRow => ({ barcode: '', quantity: '' });
 
 /* ─── Page ────────────────────────────────────────────────────────────────── */
 
-export default function NewTransferPage() {
+export default function DefectActionPage() {
     const params = useParams();
     const router = useRouter();
     const slug = params.slug as string;
-    const fromWarehouseId = Number(params.id);
+    const warehouseId = Number(params.id);
+    const action = params.action as string;
 
-    const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+    const config = ACTION_CONFIG[action];
+
     const [nomenclature, setNomenclature] = useState<Nomenclature[]>([]);
-    const [fromName, setFromName] = useState('');
+    const [warehouseName, setWarehouseName] = useState('');
     const [loading, setLoading] = useState(true);
+    const [defectMap, setDefectMap] = useState<Record<string, number>>({});
 
-    const [toWarehouseId, setToWarehouseId] = useState<number | ''>('');
-    const [formComment, setFormComment] = useState('');
-    const [isDefect, setIsDefect] = useState(false);
-    const [defectReason, setDefectReason] = useState('');
-    const [rows, setRows] = useState<ItemRow[]>(() => Array.from({ length: 8 }, emptyItemRow));
+    const [reason, setReason] = useState('');
+    const [rows, setRows] = useState<ItemRow[]>(() => Array.from({ length: 8 }, emptyRow));
     const [search, setSearch] = useState('');
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
-    const [stockMap, setStockMap] = useState<Record<string, number>>({});
-    const [defectMap, setDefectMap] = useState<Record<string, number>>({});
+    const [successCount, setSuccessCount] = useState(0);
 
     const nom = useNomLookup(nomenclature);
 
     const loadData = useCallback(async () => {
         setLoading(true);
         try {
-            const [whs, nomData, whStock, defectStock] = await Promise.all([
+            const [whs, nomData, defectStock] = await Promise.all([
                 api.getWarehouses(),
                 api.getNomenclature(),
-                api.getWarehouseStock(fromWarehouseId),
-                api.getDefectStock(fromWarehouseId),
+                api.getDefectStock(warehouseId),
             ]);
-            setWarehouses(whs);
-            const wh = whs.find(w => w.id === fromWarehouseId);
-            setFromName(wh?.name || `Склад #${fromWarehouseId}`);
+            const wh = whs.find(w => w.id === warehouseId);
+            setWarehouseName(wh?.name || `Склад #${warehouseId}`);
             setNomenclature(nomData);
-            const sm: Record<string, number> = {};
-            whStock.forEach((r: { barcode: string; quantity: number }) => { sm[r.barcode] = r.quantity; });
-            setStockMap(sm);
             const dm: Record<string, number> = {};
-            defectStock.forEach((r: { barcode: string; defect_quantity: number }) => { dm[r.barcode] = r.defect_quantity; });
+            defectStock.forEach((r: { barcode: string; defect_quantity: number }) => {
+                dm[r.barcode] = r.defect_quantity;
+            });
             setDefectMap(dm);
         } catch { /* ignore */ }
         setLoading(false);
-    }, [fromWarehouseId]);
+    }, [warehouseId]);
 
     useEffect(() => { loadData(); }, [loadData]);
 
@@ -88,7 +107,7 @@ export default function NewTransferPage() {
             return next;
         });
         if (idx === rows.length - 1 && value.trim()) {
-            setRows(prev => [...prev, emptyItemRow()]);
+            setRows(prev => [...prev, emptyRow()]);
         }
     };
 
@@ -108,7 +127,7 @@ export default function NewTransferPage() {
             const qty = cols[1].trim().replace(',', '.').replace(/[^\d]/g, '');
             if (barcode && qty) newRows.push({ barcode, quantity: qty });
         }
-        if (newRows.length > 0) setRows([...newRows, emptyItemRow(), emptyItemRow()]);
+        if (newRows.length > 0) setRows([...newRows, emptyRow(), emptyRow()]);
     };
 
     const addFromSearch = (n: Nomenclature) => {
@@ -132,7 +151,6 @@ export default function NewTransferPage() {
 
     const filledRows = rows.filter(r => r.barcode.trim() && r.quantity.trim());
     const totalQty = filledRows.reduce((s, r) => s + (parseInt(r.quantity) || 0), 0);
-    const otherWarehouses = warehouses.filter(w => w.id !== fromWarehouseId && w.is_active);
 
     const filteredNom = search.trim()
         ? nomenclature.filter(n => {
@@ -146,40 +164,45 @@ export default function NewTransferPage() {
 
     /* ─── Submit ──────────────────────────────────────────────────────────── */
 
-    const handleCreate = async () => {
-        if (!toWarehouseId) { setError('Выберите склад назначения'); return; }
+    const handleSubmit = async () => {
         if (filledRows.length === 0) { setError('Добавьте хотя бы одну позицию'); return; }
+        if (!reason.trim()) { setError('Укажите причину'); return; }
         setSaving(true);
         setError('');
-        try {
-            const items = filledRows.map(r => ({
-                barcode: r.barcode.trim(),
-                quantity: parseInt(r.quantity) || 0,
-            }));
-            const transfer = await api.createTransfer({
-                from_warehouse_id: fromWarehouseId,
-                to_warehouse_id: Number(toWarehouseId),
-                comment: formComment.trim() || undefined,
-                is_defect: isDefect || undefined,
-                defect_reason: isDefect && defectReason.trim() ? defectReason.trim() : undefined,
-                items,
-            });
-            if (isDefect && transfer?.id) {
-                // Auto-send defect transfer (source deducted immediately)
-                // Destination must accept via "Принять" on Брак tab
-                await api.sendTransfer(transfer.id);
+        setSuccessCount(0);
+
+        const apiMethod = (api as Record<string, Function>)[config.apiMethod];
+        let processed = 0;
+        const errors: string[] = [];
+
+        for (const row of filledRows) {
+            try {
+                await apiMethod(warehouseId, {
+                    barcode: row.barcode.trim(),
+                    quantity: parseInt(row.quantity) || 0,
+                    reason: reason.trim(),
+                });
+                processed++;
+                setSuccessCount(processed);
+            } catch (e: unknown) {
+                errors.push(`${row.barcode}: ${e instanceof Error ? e.message : 'ошибка'}`);
             }
-            router.push(`/p/${slug}/warehouse/${fromWarehouseId}`);
-        } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка');
         }
+
         setSaving(false);
+
+        if (errors.length > 0) {
+            setError(`Обработано ${processed}/${filledRows.length}. Ошибки:\n${errors.join('\n')}`);
+        } else {
+            router.push(`/p/${slug}/warehouse/${warehouseId}?tab=defects`);
+        }
     };
 
-    const goBack = () => router.push(`/p/${slug}/warehouse/${fromWarehouseId}`);
+    const goBack = () => router.push(`/p/${slug}/warehouse/${warehouseId}?tab=defects`);
 
     /* ─── Render ──────────────────────────────────────────────────────────── */
 
+    if (!config) return <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-danger)' }}>Неизвестная операция: {action}</div>;
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
 
     return (
@@ -187,84 +210,38 @@ export default function NewTransferPage() {
             {/* Header */}
             <div className="page-header">
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                    <button
-                        onClick={goBack}
-                        className="btn btn-secondary"
-                        style={{ padding: '6px 12px', fontSize: 18, lineHeight: 1 }}
-                        title="Назад"
-                    >&larr;</button>
+                    <button onClick={goBack} className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: 18, lineHeight: 1 }} title="Назад">&larr;</button>
                     <div>
-                        <h1 className="page-title">Новое перемещение</h1>
-                        <p className="page-subtitle">Со склада: {fromName}</p>
+                        <h1 className="page-title">{config.title}</h1>
+                        <p className="page-subtitle">{warehouseName} — {config.subtitle}</p>
                     </div>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
                     <button className="btn btn-secondary" onClick={goBack}>Отмена</button>
-                    <button
-                        className="btn btn-primary"
-                        onClick={handleCreate}
-                        disabled={saving || filledRows.length === 0 || !toWarehouseId}
-                    >
-                        {saving ? 'Сохранение...' : 'Создать перемещение'}
+                    <button className="btn btn-primary" onClick={handleSubmit} disabled={saving || filledRows.length === 0}>
+                        {saving ? `Обработка ${successCount}/${filledRows.length}...` : `${config.btnLabel} (${filledRows.length} поз.)`}
                     </button>
                 </div>
             </div>
 
             {error && (
-                <div style={{
-                    color: 'var(--color-danger)', background: 'rgba(239,68,68,0.06)',
-                    padding: '10px 16px', borderRadius: 8, marginBottom: 16, fontSize: 13,
-                }}>
+                <div style={{ color: 'var(--color-danger)', background: 'rgba(239,68,68,0.06)', padding: '10px 16px', borderRadius: 8, marginBottom: 16, fontSize: 13, whiteSpace: 'pre-line' }}>
                     {error}
                 </div>
             )}
 
-            {/* Parameters */}
+            {/* Reason */}
             <div className="glass-card" style={{ padding: 20, marginBottom: 20 }}>
-                <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Параметры перемещения</div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
-                    <div className="form-group" style={{ margin: 0 }}>
-                        <label className="form-label">Откуда</label>
-                        <input className="form-input" value={fromName} disabled style={{ background: 'var(--color-hover)' }} />
-                    </div>
-                    <div className="form-group" style={{ margin: 0 }}>
-                        <label className="form-label">Куда *</label>
-                        <select
-                            className="form-input"
-                            value={toWarehouseId}
-                            onChange={e => setToWarehouseId(e.target.value ? Number(e.target.value) : '')}
-                        >
-                            <option value="">Выберите склад...</option>
-                            {otherWarehouses.map(w => (
-                                <option key={w.id} value={w.id}>{w.name}</option>
-                            ))}
-                        </select>
-                    </div>
-                    <div className="form-group" style={{ margin: 0 }}>
-                        <label className="form-label">Комментарий</label>
-                        <input className="form-input" value={formComment} onChange={e => setFormComment(e.target.value)} placeholder="Примечание..." />
-                    </div>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginTop: 16 }}>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 14 }}>
-                        <input
-                            type="checkbox"
-                            checked={isDefect}
-                            onChange={e => setIsDefect(e.target.checked)}
-                            style={{ width: 16, height: 16, cursor: 'pointer' }}
-                        />
-                        Перемещение брака
-                    </label>
-                    {isDefect && (
-                        <div className="form-group" style={{ margin: 0, flex: 1 }}>
-                            <input
-                                className="form-input"
-                                value={defectReason}
-                                onChange={e => setDefectReason(e.target.value)}
-                                placeholder="Причина брака..."
-                            />
-                        </div>
-                    )}
+                <div className="form-group" style={{ margin: 0 }}>
+                    <label className="form-label">Причина *</label>
+                    <textarea
+                        className="form-input"
+                        value={reason}
+                        onChange={e => setReason(e.target.value)}
+                        placeholder="Укажите причину (обязательно)..."
+                        rows={2}
+                        style={{ resize: 'vertical' }}
+                    />
                 </div>
             </div>
 
@@ -303,26 +280,20 @@ export default function NewTransferPage() {
                         </div>
                     )}
                 </div>
-
                 <span style={{ fontSize: 13, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>
                     {filledRows.length} позиций, {formatNumber(totalQty)} шт.
                 </span>
             </div>
 
             {/* Items table */}
-            <div
-                className="glass-card"
-                style={{ overflow: 'auto', padding: 0 }}
-                onPaste={handlePaste}
-            >
-                {/* TODO: migrate to TanStackDataTable — has inline form inputs (barcode input, quantity input, paste handler) */}
+            <div className="glass-card" style={{ overflow: 'auto', padding: 0 }} onPaste={handlePaste}>
                 <table className="data-table" style={{ marginBottom: 0 }}>
                     <thead>
                         <tr>
                             <th style={{ width: 40, textAlign: 'center' }}>#</th>
                             <th style={{ minWidth: 220 }}>ТОВАР</th>
                             <th style={{ minWidth: 160 }}>ШК (БАРКОД)</th>
-                            <th style={{ width: 100, textAlign: 'right' }}>{isDefect ? 'В БРАКЕ' : 'НА СКЛАДЕ'}</th>
+                            <th style={{ width: 100, textAlign: 'right' }}>В БРАКЕ</th>
                             <th style={{ width: 120, textAlign: 'right' }}>КОЛИЧЕСТВО</th>
                             <th style={{ width: 50 }}></th>
                         </tr>
@@ -337,7 +308,7 @@ export default function NewTransferPage() {
                                         {row.barcode.trim() ? i + 1 : ''}
                                     </td>
                                     <td style={{ fontSize: 13, color: n ? 'var(--color-text)' : unknown ? '#ef4444' : 'var(--color-text-muted)' }}>
-                                        {n ? nom.label(n) : (unknown ? '(не найден)' : '\u2014')}
+                                        {n ? nom.label(n) : (unknown ? '(не найден)' : '—')}
                                     </td>
                                     <td>
                                         <input
@@ -345,15 +316,14 @@ export default function NewTransferPage() {
                                             onChange={e => updateRow(i, 'barcode', e.target.value)}
                                             placeholder="Введите баркод..."
                                             style={{
-                                                width: '100%', background: 'transparent',
-                                                border: 'none', padding: '8px 4px', fontSize: 13,
+                                                width: '100%', background: 'transparent', border: 'none',
+                                                padding: '8px 4px', fontSize: 13, outline: 'none',
                                                 color: unknown ? '#ef4444' : 'var(--color-text)',
-                                                outline: 'none',
                                             }}
                                         />
                                     </td>
-                                    <td style={{ textAlign: 'right', fontSize: 13, fontWeight: 600, color: isDefect ? 'var(--color-warning)' : 'var(--color-text)' }}>
-                                        {row.barcode.trim() ? formatNumber((isDefect ? defectMap : stockMap)[row.barcode.trim()] || 0) : ''}
+                                    <td style={{ textAlign: 'right', fontSize: 13, color: 'var(--color-warning)', fontWeight: 600 }}>
+                                        {row.barcode.trim() ? formatNumber(defectMap[row.barcode.trim()] || 0) : ''}
                                     </td>
                                     <td>
                                         <input
@@ -361,11 +331,11 @@ export default function NewTransferPage() {
                                             value={row.quantity}
                                             onChange={e => updateRow(i, 'quantity', e.target.value)}
                                             placeholder="0"
+                                            min="1"
                                             style={{
-                                                width: '100%', background: 'transparent',
-                                                border: 'none', padding: '8px 4px', fontSize: 13,
-                                                textAlign: 'right', color: 'var(--color-text)',
-                                                outline: 'none',
+                                                width: '100%', background: 'transparent', border: 'none',
+                                                padding: '8px 4px', fontSize: 13, textAlign: 'right',
+                                                color: 'var(--color-text)', outline: 'none',
                                             }}
                                         />
                                     </td>
@@ -373,12 +343,9 @@ export default function NewTransferPage() {
                                         {row.barcode.trim() && (
                                             <button
                                                 onClick={() => removeRow(i)}
-                                                style={{
-                                                    background: 'none', border: 'none', cursor: 'pointer',
-                                                    color: 'var(--color-text-muted)', fontSize: 16, padding: '4px 6px',
-                                                }}
+                                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)', fontSize: 16, padding: '4px 6px' }}
                                                 title="Удалить строку"
-                                            >{'\u00D7'}</button>
+                                            >×</button>
                                         )}
                                     </td>
                                 </tr>
@@ -395,12 +362,8 @@ export default function NewTransferPage() {
             {/* Bottom action bar */}
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 20, paddingBottom: 20 }}>
                 <button className="btn btn-secondary" onClick={goBack}>Отмена</button>
-                <button
-                    className="btn btn-primary"
-                    onClick={handleCreate}
-                    disabled={saving || filledRows.length === 0 || !toWarehouseId}
-                >
-                    {saving ? 'Сохранение...' : `Создать перемещение (${filledRows.length} поз.)`}
+                <button className="btn btn-primary" onClick={handleSubmit} disabled={saving || filledRows.length === 0}>
+                    {saving ? `Обработка ${successCount}/${filledRows.length}...` : `${config.btnLabel} (${filledRows.length} поз.)`}
                 </button>
             </div>
         </div>

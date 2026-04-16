@@ -60,6 +60,14 @@ function SummaryTab({
 
     cols.push(
         {
+            key: 'total_defect',
+            label: 'Брак',
+            align: 'right',
+            render: (v: number) => v > 0
+                ? <span style={{ color: 'var(--color-warning)', fontWeight: 600 }}>{formatNumber(v, 0)}</span>
+                : '\u2014',
+        },
+        {
             key: 'total_in_transit',
             label: 'В пути',
             align: 'right',
@@ -427,6 +435,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         let factoryTotal = 0, vehicleFormingTotal = 0, vehicleTransitTotal = 0;
         let factoryMoney = 0, vehicleFormingMoney = 0, vehicleTransitMoney = 0;
         let variantTotal = 0, variantMoney = 0;
+        let trendDailySum = 0, bdrRevenueSum = 0, bdrProfitSum = 0, defectSum = 0, defectMoney = 0;
         for (const row of filtered) {
             let multiplier = 0;
             if (mode === 'cost') multiplier = row.avg_cost || 0;
@@ -436,6 +445,11 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             const factoryMultiplier = mode === 'cost'
                 ? (row.cost_factory_unit || row.avg_cost || 0)
                 : multiplier;
+            trendDailySum += getTrendData(row).avg_daily_qty || 0;
+            bdrRevenueSum += getTrendData(row).revenue || 0;
+            bdrProfitSum += getTrendData(row).profit || 0;
+            defectSum += row.total_defect || 0;
+            defectMoney += (row.total_defect || 0) * multiplier;
             ownTotal += row.total_own || 0;
             wbTotal += row.total_wb || 0;
             inTransit += row.in_transit || 0;
@@ -472,6 +486,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             factoryTotal, vehicleFormingTotal, vehicleTransitTotal,
             factoryMoney, vehicleFormingMoney, vehicleTransitMoney,
             variantTotal, variantMoney,
+            trendDailySum, bdrRevenueSum, bdrProfitSum, defectSum, defectMoney,
         };
     }, [filtered, mode, variant, getVariantTotal]);
 
@@ -619,6 +634,19 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                 const est = row.is_revenue_estimated;
                 const prefix = est ? '\u2248\u00A0' : '';
                 return <span style={{ color, fontWeight: 600, opacity: est ? 0.7 : 1 }} title={est ? 'Оценка по средней марже категории' : undefined}>{prefix}{formatNumber(margin, 1)}%</span>;
+            },
+        });
+        c.push({
+            key: 'total_defect',
+            label: 'Брак',
+            align: 'right',
+            sortable: true,
+            getValue: (row: UnifiedStockRow) => getSortVal(row.total_defect || 0, row),
+            render: (_: unknown, row: UnifiedStockRow) => {
+                const v = row.total_defect || 0;
+                if (v <= 0) return '\u2014';
+                const val = fmtVal(v, row);
+                return <span style={{ color: 'var(--color-warning)', fontWeight: 600 }}>{val}</span>;
             },
         });
         c.push({
@@ -1467,10 +1495,21 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                             <td>Итого</td>
                             <td />
                             {groupBy === 'abc' && <td />}
-                            {/* Sales metrics — moved to front */}
-                            <td />
-                            <td />
-                            <td />
+                            {/* Sales metrics */}
+                            <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{formatNumber(totals.trendDailySum, 1)}</td>
+                            <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{formatNumber(totals.bdrRevenueSum)}{'\u00A0\u20BD'}</td>
+                            <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                {totals.bdrRevenueSum > 0
+                                    ? <span style={{ color: totals.bdrProfitSum >= 0 ? 'var(--color-success)' : 'var(--color-danger)', fontWeight: 600 }}>
+                                        {formatNumber((totals.bdrProfitSum / totals.bdrRevenueSum) * 100, 1)}%
+                                      </span>
+                                    : '\u2014'}
+                            </td>
+                            <td style={{ textAlign: 'right', color: totals.defectSum > 0 ? 'var(--color-warning)' : undefined, fontWeight: 600, whiteSpace: 'nowrap' }}>
+                                {totals.defectSum > 0
+                                    ? (mode === 'qty' ? formatNumber(totals.defectSum, 0) : formatNumber(totals.defectMoney) + '\u00A0\u20BD')
+                                    : '\u2014'}
+                            </td>
                             <td />
                             <td style={{ textAlign: 'right', color: 'var(--color-accent)', whiteSpace: 'nowrap' }}>
                                 {mode === 'qty' ? formatNumber(totals.variantTotal, 0) : formatNumber(totals.variantMoney) + '\u00A0\u20BD'}

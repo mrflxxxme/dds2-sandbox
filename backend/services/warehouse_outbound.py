@@ -244,6 +244,8 @@ async def create_transfer(db: AsyncSession, project_id: int, payload: dict) -> S
         number=number,
         status=TransferStatus.DRAFT,
         comment=payload.get("comment"),
+        is_defect=payload.get("is_defect", False),
+        defect_reason=payload.get("defect_reason"),
     )
     db.add(transfer)
     await db.flush()
@@ -281,19 +283,36 @@ async def send_transfer(db: AsyncSession, project_id: int, transfer_id: int) -> 
     if not transfer.items:
         raise ValueError("Cannot send transfer with no items")
 
+    is_defect = transfer.is_defect
+
     for item in transfer.items:
-        # Deduct from source warehouse
-        await _update_stock(
-            db,
-            project_id=project_id,
-            warehouse_id=transfer.from_warehouse_id,
-            nomenclature_id=item.nomenclature_id,
-            barcode=item.barcode,
-            delta=-item.quantity,
-            movement_type=MovementType.TRANSFER_OUT,
-            reference_type="TRANSFER",
-            reference_id=transfer.id,
-        )
+        if is_defect:
+            # Deduct from source defect stock
+            await _update_stock(
+                db,
+                project_id=project_id,
+                warehouse_id=transfer.from_warehouse_id,
+                nomenclature_id=item.nomenclature_id,
+                barcode=item.barcode,
+                delta=0,
+                defect_delta=-item.quantity,
+                movement_type=MovementType.DEFECT_TRANSFER_OUT,
+                reference_type="TRANSFER",
+                reference_id=transfer.id,
+            )
+        else:
+            # Deduct from source warehouse (normal)
+            await _update_stock(
+                db,
+                project_id=project_id,
+                warehouse_id=transfer.from_warehouse_id,
+                nomenclature_id=item.nomenclature_id,
+                barcode=item.barcode,
+                delta=-item.quantity,
+                movement_type=MovementType.TRANSFER_OUT,
+                reference_type="TRANSFER",
+                reference_id=transfer.id,
+            )
 
         # Mark as in_transit on destination
         result = await db.execute(
@@ -312,11 +331,16 @@ async def send_transfer(db: AsyncSession, project_id: int, transfer_id: int) -> 
                 barcode=item.barcode,
                 quantity=0,
                 in_transit=0,
+                defect_quantity=0,
+                defect_in_transit=0,
             )
             db.add(target_stock)
             await db.flush()
 
-        target_stock.in_transit += item.quantity
+        if is_defect:
+            target_stock.defect_in_transit += item.quantity
+        else:
+            target_stock.in_transit += item.quantity
         target_stock.updated_at = utcnow()
 
     transfer.status = TransferStatus.IN_TRANSIT
@@ -338,19 +362,36 @@ async def complete_transfer(db: AsyncSession, project_id: int, transfer_id: int)
     if transfer.status != TransferStatus.IN_TRANSIT:
         raise ValueError(f"Cannot complete in status {transfer.status}")
 
+    is_defect = transfer.is_defect
+
     for item in transfer.items:
-        # Add to destination stock
-        await _update_stock(
-            db,
-            project_id=project_id,
-            warehouse_id=transfer.to_warehouse_id,
-            nomenclature_id=item.nomenclature_id,
-            barcode=item.barcode,
-            delta=item.quantity,
-            movement_type=MovementType.TRANSFER_IN,
-            reference_type="TRANSFER",
-            reference_id=transfer.id,
-        )
+        if is_defect:
+            # Add to destination defect stock
+            await _update_stock(
+                db,
+                project_id=project_id,
+                warehouse_id=transfer.to_warehouse_id,
+                nomenclature_id=item.nomenclature_id,
+                barcode=item.barcode,
+                delta=0,
+                defect_delta=item.quantity,
+                movement_type=MovementType.DEFECT_TRANSFER_IN,
+                reference_type="TRANSFER",
+                reference_id=transfer.id,
+            )
+        else:
+            # Add to destination stock (normal)
+            await _update_stock(
+                db,
+                project_id=project_id,
+                warehouse_id=transfer.to_warehouse_id,
+                nomenclature_id=item.nomenclature_id,
+                barcode=item.barcode,
+                delta=item.quantity,
+                movement_type=MovementType.TRANSFER_IN,
+                reference_type="TRANSFER",
+                reference_id=transfer.id,
+            )
 
         # Decrease in_transit
         result = await db.execute(
@@ -362,7 +403,10 @@ async def complete_transfer(db: AsyncSession, project_id: int, transfer_id: int)
         )
         target_stock = result.scalar_one_or_none()
         if target_stock:
-            target_stock.in_transit = max(0, target_stock.in_transit - item.quantity)
+            if is_defect:
+                target_stock.defect_in_transit = max(0, target_stock.defect_in_transit - item.quantity)
+            else:
+                target_stock.in_transit = max(0, target_stock.in_transit - item.quantity)
             target_stock.updated_at = utcnow()
 
     transfer.status = TransferStatus.COMPLETED

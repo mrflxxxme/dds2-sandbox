@@ -900,6 +900,8 @@ export interface StockTransfer {
   number: string;
   status: 'DRAFT' | 'IN_TRANSIT' | 'COMPLETED';
   comment?: string;
+  is_defect: boolean;
+  defect_reason?: string;
   created_at?: string;
   updated_at?: string;
   items: StockTransferItem[];
@@ -913,6 +915,7 @@ export interface StockMovement {
   barcode: string;
   movement_type: string;
   quantity: number;
+  defect_delta: number;
   reference_type: string;
   reference_id?: number;
   comment?: string;
@@ -927,10 +930,18 @@ export interface WarehouseStockRow {
   barcode: string;
   quantity: number;
   in_transit: number;
+  defect_quantity: number;
+  defect_in_transit: number;
   cost_price?: number;
   updated_at?: string;
   reserved: number;
   available: number;
+}
+
+export interface DefectOperation {
+  barcode: string;
+  quantity: number;
+  reason: string;
 }
 
 export interface StockSummaryRow {
@@ -966,6 +977,7 @@ export interface UnifiedStockRow {
   reserved: number;
   total_own: number;
   total_wb: number;
+  total_defect: number;
   total: number;
   factory_qty: number;
   vehicle_forming_qty: number;

@@ -6,6 +6,7 @@ import type {
     AssemblyRequest,
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
+    DefectOperation,
     DeliveryTimesResponse,
     DeliveryTimesUpdate,
     FboSyncResult,
@@ -76,11 +77,19 @@ export function addWarehouseMethods(api: ApiClient) {
 
         // ─── Stock Transfers ─────────────────────────────────────────
         getTransfers(inTransitOnly = false) { return api.request<StockTransfer[]>('GET', `/api/v1/warehouse/transfers?in_transit=${inTransitOnly}`); },
-        createTransfer(data: { from_warehouse_id: number; to_warehouse_id: number; comment?: string; items: { barcode: string; quantity: number }[] }) {
+        createTransfer(data: { from_warehouse_id: number; to_warehouse_id: number; comment?: string; is_defect?: boolean; defect_reason?: string; items: { barcode: string; quantity: number }[] }) {
             return api.request<StockTransfer>('POST', '/api/v1/warehouse/transfers', data);
         },
         sendTransfer(transferId: number) { return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/send`); },
         completeTransfer(transferId: number) { return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/complete`); },
+
+        // ─── Defects ─────────────────────────────────────────────────
+        getDefectStock(warehouseId: number) { return api.request<WarehouseStockRow[]>('GET', `/api/v1/warehouse/${warehouseId}/defects`); },
+        markDefect(warehouseId: number, data: DefectOperation) { return api.request<MessageResponse>('POST', `/api/v1/warehouse/${warehouseId}/defects/mark`, data); },
+        receiveDefect(warehouseId: number, data: DefectOperation) { return api.request<MessageResponse>('POST', `/api/v1/warehouse/${warehouseId}/defects/receive`, data); },
+        writeoffDefect(warehouseId: number, data: DefectOperation) { return api.request<MessageResponse>('POST', `/api/v1/warehouse/${warehouseId}/defects/writeoff`, data); },
+        recoverDefect(warehouseId: number, data: DefectOperation) { return api.request<MessageResponse>('POST', `/api/v1/warehouse/${warehouseId}/defects/recover`, data); },
+        getDefectSummary() { return api.request<WarehouseStockRow[]>('GET', '/api/v1/warehouse/defects/summary'); },
 
         // ─── Adjustments ─────────────────────────────────────────────
         createAdjustment(warehouseId: number, data: { barcode: string; delta: number; reason: string }) {
