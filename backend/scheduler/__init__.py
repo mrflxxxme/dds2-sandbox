@@ -30,6 +30,7 @@ from backend.scheduler.jobs.funnel import (
     sync_nomenclature_all_projects,
 )
 from backend.scheduler.jobs.health_check import health_monitor
+from backend.scheduler.jobs.heartbeat import heartbeat_ping
 from backend.scheduler.jobs.prewarm import prewarm_all_reports, prewarm_project  # noqa: F401
 from backend.scheduler.jobs.wb_finance import (
     sync_all_projects_wb_finance,
@@ -181,6 +182,16 @@ def start_scheduler():
         name="Health monitor (disk, backups, stuck syncs)",
         replace_existing=True,
         misfire_grace_time=600,
+    )
+
+    # Heartbeat: every 2 min — prevents false BackendNoUserTraffic alerts at night
+    _scheduler.add_job(
+        heartbeat_ping,
+        trigger=IntervalTrigger(minutes=2),
+        id="heartbeat_ping",
+        name="Backend heartbeat ping (every 2min)",
+        replace_existing=True,
+        misfire_grace_time=60,
     )
 
     # FBO supplies sync + statuses: every 30 min
