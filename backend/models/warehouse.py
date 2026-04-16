@@ -62,6 +62,13 @@ class MovementType(str, enum.Enum):
     TRANSFER_OUT = "TRANSFER_OUT"
     INBOUND_EDIT = "INBOUND_EDIT"
     ADJUSTMENT = "ADJUSTMENT"
+    # Defective goods (брак)
+    DEFECT_MARK = "DEFECT_MARK"
+    DEFECT_RECEIVE = "DEFECT_RECEIVE"
+    DEFECT_WRITEOFF = "DEFECT_WRITEOFF"
+    DEFECT_RECOVER = "DEFECT_RECOVER"
+    DEFECT_TRANSFER_OUT = "DEFECT_TRANSFER_OUT"
+    DEFECT_TRANSFER_IN = "DEFECT_TRANSFER_IN"
 
 
 # ─── Warehouse ──────────────────────────────────────────────────────────────
@@ -206,6 +213,8 @@ class StockTransfer(Base, TimestampMixin, SoftDeleteMixin):
     number: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default=TransferStatus.DRAFT, nullable=False)
     comment: Mapped[str | None] = mapped_column(Text)
+    is_defect: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    defect_reason: Mapped[str | None] = mapped_column(Text)
 
     # Relationships
     items: Mapped[list["StockTransferItem"]] = relationship(
@@ -251,6 +260,7 @@ class StockMovement(Base):
     barcode: Mapped[str] = mapped_column(String(50), nullable=False)
     movement_type: Mapped[str] = mapped_column(String(20), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)  # +приход / -расход
+    defect_delta: Mapped[int] = mapped_column(Integer, default=0)  # +приход / -расход дефектов
     reference_type: Mapped[str] = mapped_column(String(30), nullable=False)  # RECEIPT/SHIPMENT/TRANSFER/ADJUSTMENT
     reference_id: Mapped[int | None] = mapped_column(Integer)
     comment: Mapped[str | None] = mapped_column(Text)
@@ -277,6 +287,8 @@ class WarehouseStock(Base):
     barcode: Mapped[str] = mapped_column(String(50), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, default=0)
     in_transit: Mapped[int] = mapped_column(Integer, default=0)
+    defect_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    defect_in_transit: Mapped[int] = mapped_column(Integer, default=0)
     cost_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

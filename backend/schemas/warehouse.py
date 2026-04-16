@@ -166,6 +166,8 @@ class StockTransferCreate(BaseModel):
     from_warehouse_id: int
     to_warehouse_id: int
     comment: str | None = None
+    is_defect: bool = False
+    defect_reason: str | None = None
     items: list[StockTransferItemCreate] = []
 
 
@@ -178,6 +180,8 @@ class StockTransferSchema(BaseModel):
     number: str
     status: str
     comment: str | None = None
+    is_defect: bool = False
+    defect_reason: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
     items: list[StockTransferItemSchema] = []
@@ -195,6 +199,7 @@ class StockMovementSchema(BaseModel):
     barcode: str
     movement_type: str
     quantity: int
+    defect_delta: int = 0
     reference_type: str
     reference_id: int | None = None
     comment: str | None = None
@@ -213,6 +218,8 @@ class WarehouseStockSchema(BaseModel):
     barcode: str
     quantity: int
     in_transit: int = 0
+    defect_quantity: int = 0
+    defect_in_transit: int = 0
     cost_price: Decimal | None = None
     updated_at: datetime | None = None
     reserved: int = 0
@@ -242,6 +249,15 @@ class StockAdjustmentSchema(BaseModel):
     delta: int
     reason: str
     created_at: datetime | None = None
+
+
+# ─── Defect Operations (Брак) ────────────────────────────────────────────
+
+
+class DefectOperationCreate(BaseModel):
+    barcode: str
+    quantity: int
+    reason: str
 
 
 # ─── Delivery Times (Время доставки до WB) ──────────────────────────────

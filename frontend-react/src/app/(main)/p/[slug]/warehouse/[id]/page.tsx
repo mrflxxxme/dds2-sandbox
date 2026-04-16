@@ -6,7 +6,7 @@ import { formatNumber, formatDate } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type {
     Warehouse, InboundReceipt, OutboundShipment,
-    WarehouseStockRow, StockMovement, DeliveryTimesResponse,
+    WarehouseStockRow, StockMovement, StockTransfer, DeliveryTimesResponse,
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 
@@ -17,7 +17,7 @@ export default function WarehouseDetailPage() {
     const router = useRouter();
     const slug = params.slug as string;
     const warehouseId = Number(params.id);
-    const [tab, setTab] = useState<'all' | 'receipts' | 'shipments' | 'stock' | 'delivery'>('receipts');
+    const [tab, setTab] = useState<'all' | 'receipts' | 'shipments' | 'stock' | 'defects' | 'delivery'>('receipts');
     const [warehouse, setWarehouse] = useState<Warehouse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -25,6 +25,7 @@ export default function WarehouseDetailPage() {
     // Counts for tab badges
     const [receiptCount, setReceiptCount] = useState(0);
     const [shipmentCount, setShipmentCount] = useState(0);
+    const [defectCount, setDefectCount] = useState(0);
 
     // No modals — all create/detail views are separate pages
 
@@ -53,6 +54,7 @@ export default function WarehouseDetailPage() {
         { key: 'receipts' as const, label: 'Приёмки', count: receiptCount },
         ...(isFulfillment ? [{ key: 'shipments' as const, label: 'Отгрузки', count: shipmentCount }] : []),
         { key: 'stock' as const, label: 'Остатки и статистика' },
+        { key: 'defects' as const, label: 'Брак', count: defectCount },
         { key: 'delivery' as const, label: 'Время доставки' },
         { key: 'all' as const, label: 'История движений' },
     ];
@@ -103,11 +105,12 @@ export default function WarehouseDetailPage() {
                         {'count' in t && t.count !== undefined && (
                             <span style={{
                                 marginLeft: 6,
-                                fontSize: 12,
-                                background: tab === t.key ? 'var(--color-primary)' : 'var(--color-border)',
-                                color: tab === t.key ? '#fff' : 'var(--color-text-muted)',
+                                fontSize: 11,
+                                background: 'rgba(0,0,0,0.1)',
+                                color: 'var(--color-text)',
                                 borderRadius: 10,
-                                padding: '1px 7px',
+                                padding: '2px 7px',
+                                fontWeight: 600,
                             }}>
                                 {t.count}
                             </span>
@@ -131,6 +134,7 @@ export default function WarehouseDetailPage() {
                 />
             )}
             {tab === 'stock' && <StockTab warehouseId={warehouseId} />}
+            {tab === 'defects' && <DefectsTab warehouseId={warehouseId} onCountChange={setDefectCount} />}
             {tab === 'delivery' && <DeliveryTab warehouseId={warehouseId} />}
         </div>
     );
@@ -258,6 +262,12 @@ function AllTab({ warehouseId }: { warehouseId: number }) {
         TRANSFER_IN: 'Перемещение (вход)',
         TRANSFER_OUT: 'Перемещение (выход)',
         ADJUSTMENT: 'Корректировка',
+        DEFECT_MARK: 'Отметка брака',
+        DEFECT_RECEIVE: 'Приёмка брака',
+        DEFECT_WRITEOFF: 'Списание брака',
+        DEFECT_RECOVER: 'Восстановление',
+        DEFECT_TRANSFER_OUT: 'Брак: перемещение (выход)',
+        DEFECT_TRANSFER_IN: 'Брак: перемещение (вход)',
     };
 
     const cols: Column[] = [
@@ -274,6 +284,17 @@ function AllTab({ warehouseId }: { warehouseId: number }) {
                     {v > 0 ? '+' : ''}{v}
                 </span>
             ),
+        },
+        {
+            key: 'defect_delta', label: 'Брак', align: 'right',
+            render: (v: number) => {
+                if (!v) return <span style={{ color: 'var(--color-text-muted)' }}>{'\u2014'}</span>;
+                return (
+                    <span style={{ color: v > 0 ? 'var(--color-warning)' : 'var(--color-success)', fontWeight: 600 }}>
+                        {v > 0 ? '+' : ''}{v}
+                    </span>
+                );
+            },
         },
         { key: 'reference_type', label: 'Документ' },
         { key: 'comment', label: 'Комментарий' },
@@ -302,21 +323,41 @@ function ReceiptsTab({ warehouseId, onCountChange }: {
     const router = useRouter();
     const slug = params.slug as string;
     const [receipts, setReceipts] = useState<InboundReceipt[]>([]);
+    const [incomingDefects, setIncomingDefects] = useState<StockTransfer[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    const [accepting, setAccepting] = useState<number | null>(null);
 
     const load = useCallback(async () => {
         setLoading(true);
         setError('');
         try {
-            const r = await api.getReceipts(warehouseId);
+            const [r, transfers] = await Promise.all([
+                api.getReceipts(warehouseId),
+                api.getTransfers(true),
+            ]);
             setReceipts(r);
-            onCountChange(r.length);
+            const incoming = transfers.filter((t: StockTransfer) =>
+                t.is_defect && t.to_warehouse_id === warehouseId && t.status === 'IN_TRANSIT'
+            );
+            setIncomingDefects(incoming);
+            onCountChange(r.length + incoming.length);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
         }
         setLoading(false);
     }, [warehouseId, onCountChange]);
+
+    const handleAcceptDefect = async (transferId: number) => {
+        setAccepting(transferId);
+        try {
+            await api.completeTransfer(transferId);
+            await load();
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setAccepting(null);
+    };
 
     useEffect(() => { load(); }, [load]);
 
@@ -358,6 +399,38 @@ function ReceiptsTab({ warehouseId, onCountChange }: {
     return (
         <>
             {error && <div style={{ color: 'var(--color-danger)', marginBottom: 12 }}>{error}</div>}
+
+            {/* Incoming defect transfers */}
+            {incomingDefects.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Входящие перемещения брака</div>
+                    {incomingDefects.map(t => (
+                        <div key={t.id} className="glass-card" style={{
+                            padding: 16, marginBottom: 8,
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                            border: '1px solid var(--color-warning)',
+                        }}>
+                            <div>
+                                <div style={{ fontWeight: 600 }}>{t.number}</div>
+                                <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                    {t.items?.length || 0} поз., {formatNumber(t.items?.reduce((s, i) => s + i.quantity, 0) || 0)} шт.
+                                    {t.defect_reason ? ` — ${t.defect_reason}` : ''}
+                                </div>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span className="badge badge-warning">Брак в пути</span>
+                                <button
+                                    className="btn btn-success btn-sm"
+                                    onClick={() => handleAcceptDefect(t.id)}
+                                    disabled={accepting === t.id}
+                                >
+                                    {accepting === t.id ? 'Принятие...' : 'Принять'}
+                                </button>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
 
             <TanStackDataTable
                 columns={cols}
@@ -475,6 +548,7 @@ function StockTab({ warehouseId }: { warehouseId: number }) {
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
 
     const totalQty = stock.reduce((s, r) => s + r.quantity, 0);
+    const totalDefect = stock.reduce((s, r) => s + (r.defect_quantity || 0), 0);
     const totalCost = stock.reduce((s, r) => s + (r.cost_price || 0) * r.quantity, 0);
     const totalReserved = stock.reduce((s, r) => s + (r.reserved || 0), 0);
     const totalAvailable = stock.reduce((s, r) => s + (r.available || 0), 0);
@@ -482,6 +556,14 @@ function StockTab({ warehouseId }: { warehouseId: number }) {
     const cols: Column[] = [
         { key: 'barcode', label: 'ШК' },
         { key: 'quantity', label: 'Кол-во', align: 'right', format: 'number' },
+        {
+            key: 'defect_quantity', label: 'Брак', align: 'right',
+            render: (v: number) => (
+                <span style={{ color: v > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)', fontWeight: v > 0 ? 600 : 400 }}>
+                    {formatNumber(v, 0)}
+                </span>
+            ),
+        },
         { key: 'reserved', label: 'Зарезерв.', align: 'right', format: 'number' },
         { key: 'available', label: 'Доступно', align: 'right', format: 'number' },
         { key: 'in_transit', label: 'В пути', align: 'right', format: 'number' },
@@ -493,7 +575,7 @@ function StockTab({ warehouseId }: { warehouseId: number }) {
         <>
             {error && <div style={{ color: 'var(--color-danger)', marginBottom: 12 }}>{error}</div>}
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 20 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 12 }}>
                 <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
                     <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Позиций</div>
                     <div style={{ fontSize: 24, fontWeight: 700 }}>{stock.length}</div>
@@ -506,9 +588,15 @@ function StockTab({ warehouseId }: { warehouseId: number }) {
                     <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Зарезервировано</div>
                     <div style={{ fontSize: 24, fontWeight: 700, color: totalReserved > 0 ? 'var(--color-warning)' : undefined }}>{formatNumber(totalReserved)}</div>
                 </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 20 }}>
                 <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
                     <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Доступно</div>
                     <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-success)' }}>{formatNumber(totalAvailable)}</div>
+                </div>
+                <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Брак</div>
+                    <div style={{ fontSize: 24, fontWeight: 700, color: totalDefect > 0 ? 'var(--color-warning)' : undefined }}>{formatNumber(totalDefect)}</div>
                 </div>
                 <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
                     <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Себестоимость</div>
@@ -547,6 +635,127 @@ function StockTab({ warehouseId }: { warehouseId: number }) {
                     </div>
                 </div>
             )}
+        </>
+    );
+}
+
+/* ─── Tab: Брак (Defects) ──────────────────────────────────────────────── */
+
+function DefectsTab({ warehouseId, onCountChange }: {
+    warehouseId: number;
+    onCountChange: (n: number) => void;
+}) {
+    const params = useParams();
+    const router = useRouter();
+    const slug = params.slug as string;
+
+    const [stock, setStock] = useState<Record<string, unknown>[]>([]);
+    const [outgoingTransfers, setOutgoingTransfers] = useState<StockTransfer[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+
+    const load = useCallback(async () => {
+        setLoading(true);
+        setError('');
+        try {
+            const [defects, nomData, transfers] = await Promise.all([
+                api.getDefectStock(warehouseId),
+                api.getNomenclature(),
+                api.getTransfers(true),
+            ]);
+            const nomByBarcode = new Map(nomData.map(n => [n.barcode, n]));
+            const enriched = defects.map((r: WarehouseStockRow) => {
+                const n = nomByBarcode.get(r.barcode);
+                return { ...r, article_seller: n?.article_seller || '', subject: n?.subject || '' };
+            });
+            setStock(enriched);
+            // Outgoing: defect transfers FROM this warehouse (sent, waiting accept)
+            const outgoing = transfers.filter((t: StockTransfer) =>
+                t.is_defect && t.from_warehouse_id === warehouseId && t.status === 'IN_TRANSIT'
+            );
+            setOutgoingTransfers(outgoing);
+            onCountChange(enriched.length);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setLoading(false);
+    }, [warehouseId, onCountChange]);
+
+    useEffect(() => { load(); }, [load]);
+
+    if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
+
+    const totalDefectItems = stock.length;
+    const totalDefectQty = stock.reduce((s, r) => s + (Number(r.defect_quantity) || 0), 0);
+    const defectUrl = (action: string) => `/p/${slug}/warehouse/${warehouseId}/defect/${action}`;
+
+    const cols: Column[] = [
+        { key: 'article_seller', label: 'Артикул' },
+        { key: 'barcode', label: 'ШК' },
+        {
+            key: 'defect_quantity', label: 'Кол-во брака', align: 'right',
+            render: (v: number) => (
+                <span style={{ color: v > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)', fontWeight: 600 }}>
+                    {formatNumber(v, 0)}
+                </span>
+            ),
+        },
+        {
+            key: 'defect_in_transit', label: 'Брак в пути', align: 'right',
+            render: (v: number) => (
+                <span style={{ color: v > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)', fontWeight: v > 0 ? 600 : 400 }}>
+                    {formatNumber(v, 0)}
+                </span>
+            ),
+        },
+        { key: 'updated_at', label: 'Обновлено', format: 'date' },
+    ];
+
+    return (
+        <>
+            {error && <div style={{ color: 'var(--color-danger)', marginBottom: 12 }}>{error}</div>}
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12, marginBottom: 20 }}>
+                <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Позиций с браком</div>
+                    <div style={{ fontSize: 24, fontWeight: 700, color: totalDefectItems > 0 ? 'var(--color-warning)' : undefined }}>{totalDefectItems}</div>
+                </div>
+                <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Всего бракованных штук</div>
+                    <div style={{ fontSize: 24, fontWeight: 700, color: totalDefectQty > 0 ? 'var(--color-warning)' : undefined }}>{formatNumber(totalDefectQty)}</div>
+                </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+                <button className="btn btn-secondary btn-sm" onClick={() => router.push(defectUrl('mark'))}>Отметить брак</button>
+                <button className="btn btn-secondary btn-sm" onClick={() => router.push(defectUrl('receive'))}>Принять брак</button>
+                <button className="btn btn-secondary btn-sm" onClick={() => router.push(defectUrl('writeoff'))}>Списать</button>
+                <button className="btn btn-secondary btn-sm" onClick={() => router.push(defectUrl('recover'))}>Восстановить</button>
+            </div>
+
+            {/* Outgoing defect transfers (sent from this warehouse) */}
+            {outgoingTransfers.length > 0 && (
+                <div style={{ marginBottom: 20 }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Исходящие перемещения брака</div>
+                    {outgoingTransfers.map(t => (
+                        <div key={t.id} className="glass-card" style={{
+                            padding: 16, marginBottom: 8,
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        }}>
+                            <div>
+                                <div style={{ fontWeight: 600 }}>{t.number}</div>
+                                <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                    {t.items?.length || 0} поз., {formatNumber(t.items?.reduce((s, i) => s + i.quantity, 0) || 0)} шт.
+                                    {t.defect_reason ? ` — ${t.defect_reason}` : ''}
+                                </div>
+                            </div>
+                            <span className="badge badge-warning">Ожидает приёмки</span>
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            <TanStackDataTable columns={cols} data={stock} emptyText="Нет бракованных товаров" emptyIcon="📋" exportName="defect_stock" />
         </>
     );
 }

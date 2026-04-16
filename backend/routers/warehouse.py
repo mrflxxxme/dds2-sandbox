@@ -10,6 +10,7 @@ from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.warehouse import (
     CostPriceUpdate,
+    DefectOperationCreate,
     DeliveryTimesUpdate,
     InboundReceiptCreate,
     InboundReceiptSchema,
@@ -27,7 +28,7 @@ from backend.schemas.warehouse import (
     WarehouseStockSchema,
     WarehouseUpdate,
 )
-from backend.services import warehouse_service
+from backend.services import warehouse_defect, warehouse_service
 from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/warehouse", tags=["Warehouse"])
@@ -467,6 +468,84 @@ async def create_adjustment(
         return StockAdjustmentSchema.model_validate(adj)
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
+
+
+# ─── Defective Goods (Брак) ──────────────────────────────────────────────
+
+
+@router.get("/{warehouse_id}/defects")
+async def get_defect_stock(
+    warehouse_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get defective stock for a warehouse."""
+    return await warehouse_defect.get_defect_stock(db, project.id, warehouse_id)
+
+
+@router.post("/{warehouse_id}/defects/mark", dependencies=[Depends(rate_limit_write)])
+async def mark_defect(
+    warehouse_id: int,
+    payload: DefectOperationCreate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark existing good stock as defective."""
+    try:
+        return await warehouse_defect.mark_defect(db, project.id, warehouse_id, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post("/{warehouse_id}/defects/receive", dependencies=[Depends(rate_limit_write)])
+async def receive_defect(
+    warehouse_id: int,
+    payload: DefectOperationCreate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Receive defective goods from outside (WB returns, etc.)."""
+    try:
+        return await warehouse_defect.receive_defect(db, project.id, warehouse_id, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post("/{warehouse_id}/defects/writeoff", dependencies=[Depends(rate_limit_write)])
+async def writeoff_defect(
+    warehouse_id: int,
+    payload: DefectOperationCreate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Write off (destroy) defective goods."""
+    try:
+        return await warehouse_defect.writeoff_defect(db, project.id, warehouse_id, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post("/{warehouse_id}/defects/recover", dependencies=[Depends(rate_limit_write)])
+async def recover_defect(
+    warehouse_id: int,
+    payload: DefectOperationCreate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Restore defective goods to good stock (repaired)."""
+    try:
+        return await warehouse_defect.recover_defect(db, project.id, warehouse_id, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.get("/defects/summary")
+async def get_defect_summary(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Summary defective stock across all warehouses."""
+    return await warehouse_defect.get_defect_summary(db, project.id)
 
 
 # ─── Summary & Cost Price ────────────────────────────────────────────────
