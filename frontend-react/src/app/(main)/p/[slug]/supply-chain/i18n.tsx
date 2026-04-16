@@ -271,7 +271,7 @@ const ru: TranslationDict = {
     catalog_status_filter_all: 'Все товары',
     catalog_status_filter_not_distributed: 'Не распределено',
     catalog_status_filter_in_transit: 'В пути',
-    catalog_status_filter_delivered: 'Доставлено',
+    catalog_status_filter_delivered: 'Отгружено',
     catalog_col_barcode: 'Баркод',
     catalog_col_brand: 'Бренд',
     catalog_col_article: 'Артикул',
@@ -282,7 +282,7 @@ const ru: TranslationDict = {
     catalog_col_last_price: 'Посл. цена',
     catalog_col_avg_price: 'Ср. цена',
     catalog_col_amount: 'Сумма',
-    catalog_col_delivered: 'Доставлено',
+    catalog_col_delivered: 'Отгружено',
     catalog_col_orders_count: 'Заказов',
     catalog_subject_empty: 'Без предмета',
     catalog_sku_unit: 'SKU',
@@ -298,7 +298,7 @@ const ru: TranslationDict = {
     catalog_status_in_transit: 'В пути',
     catalog_status_at_factory: 'На фабрике',
     catalog_empty: 'У поставщика пока нет заказов',
-    catalog_delivered_label: 'Доставлено',
+    catalog_delivered_label: 'Отгружено',
     catalog_excel_filename: 'Ассортимент',
 
     // ── Factory order detail (factory-orders/[id]) ──
@@ -692,7 +692,7 @@ const zh: TranslationDict = {
     catalog_status_filter_all: '全部商品',
     catalog_status_filter_not_distributed: '未分配',
     catalog_status_filter_in_transit: '在途中',
-    catalog_status_filter_delivered: '已送达',
+    catalog_status_filter_delivered: '已发货',
     catalog_col_barcode: '条码',
     catalog_col_brand: '品牌',
     catalog_col_article: '货号',
@@ -703,7 +703,7 @@ const zh: TranslationDict = {
     catalog_col_last_price: '最新单价',
     catalog_col_avg_price: '均价',
     catalog_col_amount: '金额',
-    catalog_col_delivered: '已送达',
+    catalog_col_delivered: '已发货',
     catalog_col_orders_count: '订单数',
     catalog_subject_empty: '未分类',
     catalog_sku_unit: 'SKU',
@@ -719,7 +719,7 @@ const zh: TranslationDict = {
     catalog_status_in_transit: '在途',
     catalog_status_at_factory: '工厂中',
     catalog_empty: '该供应商暂无订单',
-    catalog_delivered_label: '已送达',
+    catalog_delivered_label: '已发货',
     catalog_excel_filename: '供应商品项',
 
     // ── Factory order detail (factory-orders/[id]) ──

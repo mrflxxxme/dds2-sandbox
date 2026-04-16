@@ -2286,7 +2286,7 @@ function SupplierCatalogView({
     onBack: () => void;
 }) {
     const { t, lang } = useT();
-    const [mode, setMode] = useState<'catalog' | 'matrix'>('catalog');
+    const [mode, setMode] = useState<'catalog' | 'matrix'>('matrix');
     const [catalog, setCatalog] = useState<SupplierCatalogResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
