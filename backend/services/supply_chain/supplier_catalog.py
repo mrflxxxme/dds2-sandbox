@@ -215,7 +215,9 @@ async def get_supplier_catalog(
                 # Vehicle info for this foi
                 foi_vehicles = coi_map.get(r["foi_id"], [])
 
-                foi_delivered_qty = sum(v_qty for _, v_status, v_qty in foi_vehicles if v_status == _DELIVERED)
+                foi_delivered_qty = sum(
+                    v_qty for _, v_status, v_qty in foi_vehicles if v_status in _REALLY_SHIPPED_STATUSES
+                )
                 foi_distributed_qty = sum(v_qty for _, _, v_qty in foi_vehicles)
                 delivered_qty += foi_delivered_qty
                 distributed_qty += foi_distributed_qty
@@ -228,7 +230,7 @@ async def get_supplier_catalog(
                 foi_is_delivered = False
                 if foi_vehicles:
                     v_order_no, v_status, _ = foi_vehicles[0]
-                    foi_is_delivered = any(v_st == _DELIVERED for _, v_st, _ in foi_vehicles)
+                    foi_is_delivered = any(v_st in _REALLY_SHIPPED_STATUSES for _, v_st, _ in foi_vehicles)
 
                 order_history.append(
                     SkuOrderHistoryEntry(

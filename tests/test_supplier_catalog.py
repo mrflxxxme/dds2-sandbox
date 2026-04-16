@@ -188,9 +188,9 @@ async def test_supplier_catalog_deleted_item_excluded(client, auth_headers):
 @pytest.mark.asyncio
 async def test_supplier_catalog_delivered_qty(client, auth_headers):
     """
-    CostOrderItem linked to a vehicle shows delivered_qty=0 before delivery.
-    Full DELIVERED transition requires InboundReceipt; we verify the tracking
-    logic by confirming delivered_qty stays 0 when status is SHIPPED/CUSTOMS/DISPATCHED.
+    CostOrderItem linked to a vehicle tracks delivered_qty based on vehicle status.
+    Items in vehicles with status SHIPPED/CUSTOMS/DISPATCHED/DELIVERED count as
+    delivered (shipped from factory). FORMING vehicles do not count.
     """
     headers = await _make_project(client, auth_headers)
     supplier = await _make_supplier(client, headers)
@@ -241,7 +241,7 @@ async def test_supplier_catalog_delivered_qty(client, auth_headers):
     assert hist["vehicle_order_no"] == vehicle_no
     assert hist["is_delivered"] is False
 
-    # Transition to SHIPPED — still not delivered
+    # Transition to SHIPPED — now counts as delivered (shipped from factory)
     sr = await client.put(
         f"/api/v1/supply-chain/vehicles/{vehicle_no}/status",
         json={"status": "SHIPPED"},
@@ -251,9 +251,9 @@ async def test_supplier_catalog_delivered_qty(client, auth_headers):
 
     resp2 = await client.get(f"/api/v1/supply-chain/suppliers/{sid}/catalog", headers=headers)
     data2 = resp2.json()
-    assert data2["subjects"][0]["items"][0]["delivered_qty"] == 0
-    # summary delivered_amount should be 0
-    assert float(data2["summary"]["delivered_amount"]) == pytest.approx(0.0)
+    assert data2["subjects"][0]["items"][0]["delivered_qty"] == 30
+    # summary delivered_amount = 30 items × 30.00 CNY = 900.00
+    assert float(data2["summary"]["delivered_amount"]) == pytest.approx(900.0)
 
 
 # ─── Empty supplier ───────────────────────────────────────────────────────────
