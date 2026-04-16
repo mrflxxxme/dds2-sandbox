@@ -170,13 +170,14 @@ DRAFT → IN_TRANSIT → COMPLETED
 
 Объединённый вид: свои склады + WB + в пути (SHIPPED сборки).
 
-### Endpoint: `GET /warehouse/stock/unified?group_by={mode}&brand={name}`
+### Endpoint: `GET /warehouse/stock/unified?group_by={mode}&brand={name}&include_forecast={bool}`
 
-**Функция:** `warehouse_stock_engine.get_unified_stock_summary(db, project_id, group_by, brand=None)`
+**Функция:** `warehouse_stock_engine.get_unified_stock_summary(db, project_id, group_by, brand=None, include_forecast=False)`
 
 **Параметры:**
 - `group_by`: sku (default) | brand | subject | imt | tag | abc
 - `brand`: опциональный фильтр по бренду (max 200 символов) — применяется после агрегации
+- `include_forecast` (фикс 2026-04-15): `False` (default) = Факт, сходится с БДР копейка-в-копейку. `True` = «С прогнозом»: для товаров в пути (factory/vehicle) но ещё не на полке оценивает выручку по qty-weighted средней категории. **Узкий fallback** — только incoming без стока (залежавшийся сток больше не раздувает итоги)
 
 **Данные из:**
 1. `WarehouseStock` — свои склады (quantity)
@@ -192,7 +193,18 @@ DRAFT → IN_TRANSIT → COMPLETED
 - `subject/imt/tag` — одноуровневая: группа → артикулы (children)
 - `abc` — per-SKU с A/B/C бейджем по avg_daily_revenue
 
-**Фронт:** 4 режима отображения — шт / себестоимость / реализация / прибыль. Плюс фильтры по бренду и `stock_days` (max дней остатков до включения позиции).
+**Фронт:** 4 режима отображения — шт / себестоимость / реализация / прибыль. Плюс фильтры по бренду, `stock_days` (max дней остатков до включения позиции) и Факт/Прогноз тоггл.
+
+### Карточка «📦 Новинки» (фикс 2026-04-15)
+Показывает товары без единой продажи за 60 дней (no_sale_window). Вычисляется в `get_unified_stock_summary` рядом с основной выборкой.
+
+- **SKU count** — сколько уникальных позиций
+- **Qty** — суммарный остаток в штуках
+- **Frozen cost** — замороженная себестоимость (`sum(qty * avg_cost)`)
+- **Potential revenue/profit** — qty-weighted per-unit из средних по категории (тот же `_load_category_averages` что и forecast)
+- **Раскрытие** — По категории / По бренду → артикулы с баркодами
+
+Category averages считаются one-shot в `get_unified_stock_summary` и переиспользуются: novelty KPI и forecast fallback идут от одних и тех же чисел — расхождение между вкладками гарантированно = 0.
 
 ### БДР parity (фикс 2026-04-15)
 `_build_finance_query` зеркалирует фильтры `services/wb_bdr_helpers.build_bdr_aggregate_sql` — иначе Unified Stock и БДР показывают разную реализацию для одного периода:
@@ -205,6 +217,11 @@ DRAFT → IN_TRANSIT → COMPLETED
 
 ### Tax formula (фикс 2026-04-15)
 `_compute_tax_and_profit` — pure-function расчёта налога и прибыли, зеркалирующая `bdr_enrichment.apply_tax_article`. Принимает `tax_info` dict от `load_tax_settings` и поддерживает регим `usn_income_expense_vat` (с опцией `cost_as_expense`), иначе USN считается на net income (income − НДС). Регим берётся из `project_settings` — не захардкожен.
+
+### Tax cutoff parity (фикс 2026-04-15, вторая итерация)
+`load_tax_settings(db, project_id, cutoff_X, anchor)` — **первый параметр (cutoff) это начало окна**, не anchor. Было `load_tax_settings(anchor, anchor)` → при плейсхолдерных рейтах текущего месяца Unified Stock считал маржу **без налога**: 35.94% vs БДР 26.69%. Стало `load_tax_settings(cutoff_X, anchor)` → 26.78% vs 26.69%, дельта 0.09 п.п. (остаточная разница — SKU распроданные в 0 без рефила, их нет в остатках by design).
+
+Regression guard: `tests/test_warehouse_tax_cutoff_parity.py`. При любом изменении cutoff/anchor логики в `_compute_period_metrics` — прогнать тест. См. `KNOWN_PITFALLS.md P28`.
 
 ### Trend window (фикс 2026-04-15)
 `_compute_trend_cutoffs(today)` якорит rolling окна 7/14/30 дней к **вчерашнему** дню, а не сегодняшнему — чтобы неполный текущий день не размывал тренды. На фронте период показан в UI (раньше пользователь видел цифру без указания от какого дня).
