@@ -190,7 +190,7 @@ async def delete_defect_movement(
         barcode=movement.barcode,
         delta=-movement.quantity,
         defect_delta=-movement.defect_delta,
-        movement_type=movement.movement_type,
+        movement_type=MovementType(movement.movement_type),
         reference_type="DEFECT_REVERT",
         reference_id=movement.id,
         comment=f"Revert movement #{movement.id}",
