@@ -80,6 +80,13 @@ FORMING | DISTRIBUTED | CLOSED
 5. Доступные позиции (GET /vehicles/available-items) — FactoryOrderItems с remaining_qty > 0
 6. Расчёт загрузки — box_size из FactoryOrderItem + CONTAINERS из container-loader
 
+### Синхронизация цен (фикс 2026-04-17)
+Цена в `CostOrderItem.price_cny` — снимок на момент добавления в машину (копируется из `FactoryOrderItem.price_cny`). Связь односторонняя: обновление цены в заказе после добавления **не каскадирует** в машины.
+
+Два инструмента:
+1. **Ресинк из заказа в машину** — кнопка «🔄 Пересинхр. цены» на странице машины. Preview показывает расхождения (qty × old→new, Δ сумма), apply обновляет `CostOrderItem.price_cny` + `recalculate_order_items` + `invalidate_project_reports`. Работает для любого статуса (для не-FORMING — предупреждение о пересчёте БДР).
+2. **Переписать в заказе из paste** — при добавлении товара через paste обязательна колонка Цена ¥. Если введённая цена ≠ `FactoryOrderItem.price_cny`, модалка предлагает: «использовать цены заказа» (paste игнорируется) ИЛИ «переписать в заказе и добавить» (bulk-price endpoint → FOI обновляется → history `price_updated` → новые CostOrderItem создаются с уже новой ценой). Не трогает `CostOrderItem` других машин.
+
 ### Кросс-заказный поиск (paste mode)
 При вставке баркодов из буфера — поиск идёт по ВСЕМ фабричным заказам (не только выбранному).
 - `allItemMap` строится из всех AvailableItemGroups (FIFO: первый заказ приоритетнее)
@@ -98,12 +105,15 @@ Prefix: `/api/v1/supply-chain`
 | PUT | /factory-orders/{id} | Обновить заказ |
 | DELETE | /factory-orders/{id} | Мягкое удаление |
 | POST | /factory-orders/{id}/items | Добавить позиции |
+| PUT | /factory-orders/items/bulk-price | Массовое обновление `FactoryOrderItem.price_cny` + history `price_updated` |
 | POST | /factory-orders/{id}/split-to-vehicles | Разбить на машины |
 | GET | /vehicles | Список машин с items и агрегацией |
 | GET | /vehicles/{order_no} | Детали машины |
 | POST | /vehicles | Создать машину |
 | PUT | /vehicles/{order_no}/status | Изменить статус машины |
 | POST | /vehicles/{order_no}/items | Добавить товар в машину |
+| GET | /vehicles/{order_no}/price-resync/preview | Превью расхождений цен `CostOrderItem.price_cny` vs `FactoryOrderItem.price_cny` |
+| POST | /vehicles/{order_no}/price-resync | Синк цен в CostOrderItem из связанного FactoryOrderItem + recalc + invalidate reports |
 | DELETE | /vehicles/{order_no} | Удалить машину (только FORMING) |
 | DELETE | /vehicles/{order_no}/items/{id} | Удалить товар из машины |
 | GET | /vehicles/available-items | Доступные позиции для добавления |
