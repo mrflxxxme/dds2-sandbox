@@ -13,8 +13,9 @@ bash scripts/check_docs.sh                        # Проверка актуа�
 make test-fast                                    # Параллельные тесты (xdist)
 make test-changed                                 # Только изменённые тесты (testmon)
 make test-unit                                    # Только unit-тесты
-cd frontend-react && npx vitest run              # Frontend тесты
-cd frontend-react && npx playwright test          # E2E тесты (73)
+cd frontend-react && npx vitest run                                # Frontend тесты
+cd frontend-react && npx playwright test tests/e2e/smoke.spec.ts   # Smoke (27 страниц, ~2 мин)
+cd frontend-react && npx playwright test                           # Все E2E (73 теста, локально/debug)
 ```
 
 ## Железные правила (нарушение = баг)
@@ -124,7 +125,8 @@ src/types/api.ts — TypeScript интерфейсы
 ## Operational workflows (.github/workflows/)
 | Workflow | Триггер | Назначение |
 |---|---|---|
-| `test.yml` | push / PR | Tests (pytest + vitest + Playwright E2E) |
+| `test.yml` | push / PR | Tests (pytest + vitest, без E2E — E2E вынесен в nightly) |
+| `e2e-nightly.yml` | **cron** `0 3 * * *` (ежедневно 03:00 UTC) + manual | Smoke E2E (27 страниц не крашатся) — не блокирует deploy |
 | `security.yml` | push / PR / manual | pip-audit, Trivy, Snyk, npm audit |
 | `claude-review.yml` | PR / `@claude` comment | Claude Code AI-ревью PR |
 | `auto-pr.yml` | push в `dev` | автоматический PR `dev → main` |
