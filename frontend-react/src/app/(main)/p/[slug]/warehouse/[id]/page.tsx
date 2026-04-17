@@ -7,6 +7,7 @@ import TanStackDataTable from '@/components/TanStackDataTable';
 import type {
     Warehouse, InboundReceipt, OutboundShipment,
     WarehouseStockRow, StockMovement, StockTransfer, DeliveryTimesResponse,
+    DefectMarkOperation,
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 
@@ -350,6 +351,23 @@ function AllTab({ warehouseId }: { warehouseId: number }) {
 
 /* ─── Tab: Приёмки ──────────────────────────────────────────────────────── */
 
+type UnifiedDoc = {
+    docType: 'receipt' | 'mark';
+    id: number;
+    number: string;
+    status: string;
+    is_defect: boolean;
+    is_mark: boolean;
+    positions: number;
+    total_qty: number;
+    actual_qty: number | null;
+    planned_date: string | null;
+    reason: string;
+    created_at: string | null;
+    receipt?: InboundReceipt;
+    mark?: DefectMarkOperation;
+};
+
 function ReceiptsTab({ warehouseId, onCountChange }: {
     warehouseId: number;
     onCountChange: (n: number) => void;
@@ -357,7 +375,7 @@ function ReceiptsTab({ warehouseId, onCountChange }: {
     const params = useParams();
     const router = useRouter();
     const slug = params.slug as string;
-    const [receipts, setReceipts] = useState<InboundReceipt[]>([]);
+    const [docs, setDocs] = useState<UnifiedDoc[]>([]);
     const [incomingDefects, setIncomingDefects] = useState<StockTransfer[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -367,16 +385,59 @@ function ReceiptsTab({ warehouseId, onCountChange }: {
         setLoading(true);
         setError('');
         try {
-            const [r, transfers] = await Promise.all([
+            const [r, transfers, marks] = await Promise.all([
                 api.getReceipts(warehouseId),
                 api.getTransfers(true),
+                api.getDefectMarkOperations(warehouseId),
             ]);
-            setReceipts(r);
+            const receiptDocs: UnifiedDoc[] = r.map((x: InboundReceipt) => {
+                const expected = x.items.reduce((s, it: any) => s + (it.expected_qty || 0), 0);
+                const actual = x.items.reduce((s, it: any) => s + (it.actual_qty || 0), 0);
+                return {
+                    docType: 'receipt',
+                    id: x.id,
+                    number: x.number,
+                    status: x.status,
+                    is_defect: !!x.is_defect,
+                    is_mark: false,
+                    positions: x.items.length,
+                    total_qty: expected,
+                    actual_qty: x.status === 'ACCEPTED' ? actual : null,
+                    planned_date: x.planned_date || null,
+                    reason: (x.is_defect ? x.defect_reason : x.comment) || '—',
+                    created_at: x.created_at || null,
+                    receipt: x,
+                };
+            });
+            const markDocs: UnifiedDoc[] = marks.map((m: DefectMarkOperation) => {
+                const total = m.items.reduce((s, it) => s + it.quantity, 0);
+                return {
+                    docType: 'mark',
+                    id: m.id,
+                    number: m.number,
+                    status: m.status,
+                    is_defect: true,
+                    is_mark: true,
+                    positions: m.items.length,
+                    total_qty: total,
+                    actual_qty: m.status === 'ACCEPTED' ? total : null,
+                    planned_date: null,
+                    reason: m.reason || '—',
+                    created_at: m.created_at || null,
+                    mark: m,
+                };
+            });
+            const unified = [...receiptDocs, ...markDocs].sort((a, b) => {
+                const ta = a.created_at ? Date.parse(a.created_at) : 0;
+                const tb = b.created_at ? Date.parse(b.created_at) : 0;
+                return tb - ta;
+            });
+            setDocs(unified);
             const incoming = transfers.filter((t: StockTransfer) =>
                 t.is_defect && t.to_warehouse_id === warehouseId && t.status === 'IN_TRANSIT'
             );
             setIncomingDefects(incoming);
-            onCountChange(r.length + incoming.length);
+            onCountChange(unified.length + incoming.length);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
         }
@@ -412,32 +473,33 @@ function ReceiptsTab({ warehouseId, onCountChange }: {
     const cols: Column[] = [
         {
             key: 'number', label: '№',
-            render: (v: string, row: InboundReceipt) => (
+            render: (v: string, row: UnifiedDoc) => (
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                     <span style={{ fontWeight: 600 }}>{v}</span>
-                    {row.is_defect && <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>Брак</span>}
+                    {row.is_mark && <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>Пометка брака</span>}
+                    {row.is_defect && !row.is_mark && <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>Брак</span>}
                 </span>
             ),
         },
         { key: 'status', label: 'Статус', render: (v: string) => statusBadge(v) },
         {
-            key: 'items', label: 'Позиции',
-            render: (_: unknown, row: InboundReceipt) => {
-                const expected = row.items.reduce((s: number, it: any) => s + (it.expected_qty || 0), 0);
-                const actual = row.items.reduce((s: number, it: any) => s + (it.actual_qty || 0), 0);
-                const accepted = row.status === 'ACCEPTED';
-                return (
-                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-                        {row.items.length} поз., {formatNumber(expected, 0)} ожид.
-                        {accepted && <span style={{ color: actual < expected ? '#b45309' : 'var(--color-success)', fontWeight: 600 }}> / {formatNumber(actual, 0)} факт</span>}
-                    </span>
-                );
-            },
+            key: 'positions', label: 'Позиции',
+            render: (_: unknown, row: UnifiedDoc) => (
+                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                    {row.positions} поз., {formatNumber(row.total_qty, 0)} {row.docType === 'mark' ? 'шт.' : 'ожид.'}
+                    {row.docType === 'receipt' && row.actual_qty !== null && (
+                        <span style={{ color: row.actual_qty < row.total_qty ? '#b45309' : 'var(--color-success)', fontWeight: 600 }}> / {formatNumber(row.actual_qty, 0)} факт</span>
+                    )}
+                </span>
+            ),
         },
-        { key: 'planned_date', label: 'Плановая дата', format: 'date' },
         {
-            key: 'comment', label: 'Комментарий / причина',
-            render: (v: string | undefined, row: InboundReceipt) => row.is_defect ? (row.defect_reason || '—') : (v || '—'),
+            key: 'planned_date', label: 'Плановая дата',
+            render: (_: unknown, row: UnifiedDoc) => row.planned_date ? formatDate(row.planned_date) : '—',
+        },
+        {
+            key: 'reason', label: 'Комментарий / причина',
+            render: (v: string) => v || '—',
         },
         { key: 'created_at', label: 'Создана', format: 'date' },
     ];
@@ -480,10 +542,16 @@ function ReceiptsTab({ warehouseId, onCountChange }: {
 
             <TanStackDataTable
                 columns={cols}
-                data={receipts}
-                emptyText="Нет приёмок"
+                data={docs}
+                emptyText="Нет документов"
                 emptyIcon="📥"
-                onRowClick={(row) => router.push(`/p/${slug}/warehouse/${warehouseId}/receipt/${row.id}`)}
+                onRowClick={(row: UnifiedDoc) => {
+                    if (row.docType === 'receipt') {
+                        router.push(`/p/${slug}/warehouse/${warehouseId}/receipt/${row.id}`);
+                    } else if (row.docType === 'mark') {
+                        router.push(`/p/${slug}/warehouse/${warehouseId}/mark-operation/${row.id}`);
+                    }
+                }}
             />
         </>
     );

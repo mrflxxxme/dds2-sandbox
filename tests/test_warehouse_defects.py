@@ -112,7 +112,7 @@ async def _stock(db_session, project, wh, barcode, qty):
 class TestMarkDefect:
     @pytest.mark.asyncio
     async def test_mark_defect_happy_path(self, db_session, project, wh, bc):
-        """stock 100, mark 30 -> qty=70, defect=30."""
+        """stock 100, mark 30 -> qty=70, defect=30, creates DM-N document."""
         await _stock(db_session, project, wh, bc, 100)
 
         result = await mark_defect(
@@ -122,7 +122,9 @@ class TestMarkDefect:
             {"barcode": bc, "quantity": 30, "reason": "damaged packaging"},
         )
         assert result["status"] == "ok"
-        assert result["operation"] == "mark_defect"
+        assert result["processed"] == 1
+        assert result["operation_id"] is not None
+        assert result["number"].startswith("DM-")
 
         stock = await get_warehouse_stock(db_session, project.id, wh.id)
         found = [s for s in stock if s["barcode"] == bc]
@@ -132,16 +134,26 @@ class TestMarkDefect:
 
     @pytest.mark.asyncio
     async def test_mark_defect_insufficient(self, db_session, project, wh, bc):
-        """stock 10, mark 20 -> ValueError."""
+        """stock 10, mark 20 -> status=error, no document created, stock unchanged."""
         await _stock(db_session, project, wh, bc, 10)
 
-        with pytest.raises(ValueError, match="Insufficient stock"):
-            await mark_defect(
-                db_session,
-                project.id,
-                wh.id,
-                {"barcode": bc, "quantity": 20},
-            )
+        result = await mark_defect(
+            db_session,
+            project.id,
+            wh.id,
+            {"barcode": bc, "quantity": 20, "reason": "test"},
+        )
+        assert result["status"] == "error"
+        assert result["processed"] == 0
+        assert result["failed"] == 1
+        assert result["operation_id"] is None
+        assert "Insufficient stock" in result["errors"][0]["error"]
+
+        # Stock unchanged
+        stock = await get_warehouse_stock(db_session, project.id, wh.id)
+        found = [s for s in stock if s["barcode"] == bc]
+        assert found[0]["quantity"] == 10
+        assert found[0]["defect_quantity"] == 0
 
     @pytest.mark.asyncio
     async def test_mark_defect_creates_movement(self, db_session, project, wh, bc):
