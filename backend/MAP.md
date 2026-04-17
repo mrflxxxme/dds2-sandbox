@@ -72,7 +72,8 @@
 - CRUD: `services/warehouse_crud.py`
 - Сервис: `services/warehouse_service.py`, `warehouse_stock_service.py`, `warehouse_stock_engine.py`
 - Входящие/исходящие: `services/warehouse_inbound.py`, `services/warehouse_outbound.py`
-- Брак (дефекты): `services/warehouse_defect.py`
+- Брак (дефекты): `services/warehouse_defect.py` — receive/writeoff создают InboundReceipt/OutboundShipment с is_defect=true; mark/recover — только stock_movements
+- Cleanup legacy defect (одноразово): `scripts/cleanup_legacy_defect.py --dry-run | --commit`
 - Расчёт потребности: `services/warehouse_need_service.py`
 - Прогноз остатков: `services/stock_forecast_service.py` — прогноз выбытия по трендам продаж (wb / wb_rf / wb_rf_transit), светофор
 - FBO поставки WB: `services/fbo_supply_service.py`
