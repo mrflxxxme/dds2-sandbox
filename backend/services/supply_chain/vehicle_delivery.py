@@ -25,6 +25,8 @@ from backend.schemas.supply_chain import (
     VehicleCostSummary,
     VehicleCreate,
     VehicleItemSchema,
+    VehiclePriceResyncItem,
+    VehiclePriceResyncPreview,
     VehicleSchema,
     VehicleStatusUpdate,
     VehicleUpdate,
@@ -1041,6 +1043,126 @@ async def recalculate_vehicle(
         total_vat_rub=total_vat,
         total_rub=total_rub,
     )
+
+
+async def _load_resync_candidates(
+    db: AsyncSession,
+    project_id: int,
+    order_no: str,
+) -> tuple[CostOrder, list[CostOrderItem], dict[int, Decimal], int]:
+    """Load vehicle + linked cost items + current FactoryOrderItem prices.
+
+    Returns (vehicle, linked_cost_items, fo_price_map, unlinked_count).
+    Raises ValueError if vehicle not found.
+    """
+    veh_result = await db.execute(
+        select(CostOrder).where(
+            CostOrder.order_no == order_no,
+            CostOrder.project_id == project_id,
+            CostOrder.is_deleted == False,
+        )
+    )
+    vehicle = veh_result.scalar_one_or_none()
+    if not vehicle:
+        raise ValueError(f"Vehicle {order_no} not found")
+
+    items_result = await db.execute(
+        select(CostOrderItem).where(
+            CostOrderItem.order_no == order_no,
+            CostOrderItem.project_id == project_id,
+            CostOrderItem.is_deleted == False,
+        )
+    )
+    all_items = list(items_result.scalars().all())
+    linked = [i for i in all_items if i.factory_order_item_id]
+    unlinked = len(all_items) - len(linked)
+
+    fo_price_map: dict[int, Decimal] = {}
+    if linked:
+        fo_ids = [i.factory_order_item_id for i in linked if i.factory_order_item_id]
+        fo_result = await db.execute(
+            select(FactoryOrderItem.id, FactoryOrderItem.price_cny).where(
+                FactoryOrderItem.id.in_(fo_ids),
+                FactoryOrderItem.project_id == project_id,
+                FactoryOrderItem.is_deleted == False,
+            )
+        )
+        for row in fo_result:
+            fo_price_map[row[0]] = row[1]
+
+    return vehicle, linked, fo_price_map, unlinked
+
+
+async def preview_price_resync(
+    db: AsyncSession,
+    project_id: int,
+    order_no: str,
+) -> VehiclePriceResyncPreview:
+    """Preview items whose price_cny differs from the linked FactoryOrderItem."""
+    vehicle, linked, fo_price_map, unlinked = await _load_resync_candidates(db, project_id, order_no)
+
+    changed: list[VehiclePriceResyncItem] = []
+    sum_delta = Decimal("0")
+    for ci in linked:
+        foi_price = fo_price_map.get(ci.factory_order_item_id or 0)
+        if foi_price is None:
+            continue
+        if ci.price_cny == foi_price:
+            continue
+        delta = (foi_price - ci.price_cny) * Decimal(str(ci.qty))
+        sum_delta += delta
+        changed.append(
+            VehiclePriceResyncItem(
+                cost_item_id=ci.id,
+                barcode=ci.barcode,
+                article_seller=ci.article_seller,
+                subject=ci.subject,
+                qty=ci.qty,
+                old_price_cny=ci.price_cny,
+                new_price_cny=foi_price,
+                delta_sum_cny=delta,
+            )
+        )
+
+    return VehiclePriceResyncPreview(
+        vehicle_status=vehicle.status,
+        total_items=len(linked),
+        unlinked_items=unlinked,
+        changed_items=len(changed),
+        sum_delta_cny=sum_delta,
+        items=changed,
+    )
+
+
+async def apply_price_resync(
+    db: AsyncSession,
+    project_id: int,
+    order_no: str,
+) -> dict:
+    """Apply resync: copy FactoryOrderItem.price_cny into linked CostOrderItem and recalc."""
+    _vehicle, linked, fo_price_map, _unlinked = await _load_resync_candidates(db, project_id, order_no)
+
+    applied = 0
+    for ci in linked:
+        foi_price = fo_price_map.get(ci.factory_order_item_id or 0)
+        if foi_price is None or ci.price_cny == foi_price:
+            continue
+        ci.price_cny = foi_price
+        applied += 1
+
+    if applied == 0:
+        return {"applied": 0}
+
+    await db.commit()
+
+    from backend.cache import invalidate_project_reports
+    from backend.services.cost.items import recalculate_order_items
+
+    await recalculate_order_items(db, project_id, order_no)
+    await _invalidate_supplier_catalog(project_id)
+    await invalidate_project_reports(project_id)
+
+    return {"applied": applied}
 
 
 async def recalculate_all_vehicles(

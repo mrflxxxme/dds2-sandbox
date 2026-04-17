@@ -555,6 +555,62 @@ async def test_recalc_vehicle(client, auth_headers):
     assert float(data["total_cost_rub"]) > 0
 
 
+# ─── Bulk price update ───────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_bulk_update_item_prices(client, auth_headers):
+    """PUT /factory-orders/items/bulk-price updates prices across orders and logs history."""
+    headers = await _project_headers(client, auth_headers)
+
+    # Create order with two items
+    resp = await client.post(
+        "/api/v1/supply-chain/factory-orders",
+        json={
+            "order_number": "FO-BP-1",
+            "items": [
+                {"barcode": "BP-BC-1", "qty": 100, "price_cny": "10.00"},
+                {"barcode": "BP-BC-2", "qty": 50, "price_cny": "20.00"},
+            ],
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    order = resp.json()
+    item1_id = order["items"][0]["id"]
+    item2_id = order["items"][1]["id"]
+
+    # Bulk update: change item1 price, leave item2 unchanged
+    resp = await client.put(
+        "/api/v1/supply-chain/factory-orders/items/bulk-price",
+        json={
+            "items": [
+                {"factory_order_item_id": item1_id, "new_price_cny": "17.50"},
+                {"factory_order_item_id": item2_id, "new_price_cny": "20.00"},  # no-op
+                {"factory_order_item_id": 99999999, "new_price_cny": "1.00"},  # not_found
+            ],
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["updated"] == 1
+    assert 99999999 in data["not_found"]
+
+    # Verify price persisted
+    resp = await client.get(f"/api/v1/supply-chain/factory-orders/{order['id']}", headers=headers)
+    assert resp.status_code == 200
+    items_by_id = {i["id"]: i for i in resp.json()["items"]}
+    assert float(items_by_id[item1_id]["price_cny"]) == 17.50
+    assert float(items_by_id[item2_id]["price_cny"]) == 20.00
+
+    # History contains a price_updated entry
+    resp = await client.get(f"/api/v1/supply-chain/factory-orders/{order['id']}/history", headers=headers)
+    assert resp.status_code == 200
+    events = [h["event_type"] for h in resp.json()]
+    assert "price_updated" in events
+
+
 # ─── Auth Required ───────────────────────────────────────────────────────────
 
 

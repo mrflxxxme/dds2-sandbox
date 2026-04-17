@@ -1810,6 +1810,30 @@ export interface VehicleSchema {
   cost_summary?: VehicleCostSummary;
 }
 
+export interface VehiclePriceResyncItem {
+  cost_item_id: number;
+  barcode: string;
+  article_seller?: string | null;
+  subject?: string | null;
+  qty: number;
+  old_price_cny: number;
+  new_price_cny: number;
+  delta_sum_cny: number;
+}
+
+export interface VehiclePriceResyncPreview {
+  vehicle_status?: string | null;
+  total_items: number;
+  unlinked_items: number;
+  changed_items: number;
+  sum_delta_cny: number;
+  items: VehiclePriceResyncItem[];
+}
+
+export interface VehiclePriceResyncApplyResult {
+  applied: number;
+}
+
 export interface AvailableItemGroup {
   order_id: number;
   order_number: string;

@@ -27,6 +27,7 @@ from backend.services.supply_chain.factory_orders import (
 )
 from backend.services.supply_chain.vehicle_delivery import (
     add_items_to_vehicle,
+    apply_price_resync,
     clear_all_vehicle_items,
     create_vehicle,
     delete_vehicle,
@@ -34,6 +35,7 @@ from backend.services.supply_chain.vehicle_delivery import (
     get_supply_chain_overview,
     get_vehicle,
     list_vehicles,
+    preview_price_resync,
     remove_item_from_vehicle,
     update_vehicle,
     update_vehicle_status,
@@ -440,3 +442,89 @@ class TestFactoryOrderAutoStatus:
 
         refreshed = await get_factory_order(db_session, project.id, order.id)
         assert refreshed.status == FactoryOrderStatus.CLOSED.value
+
+
+class TestPriceResync:
+    """Resync CostOrderItem.price_cny from linked FactoryOrderItem.price_cny."""
+
+    @pytest.mark.asyncio
+    async def test_preview_detects_price_diff(self, db_session, project):
+        order = await _create_factory_order_with_items(db_session, project.id, [("BC-RS1", 100)])
+        item_id = order.items[0].id
+        vehicle = await create_vehicle(db_session, project.id, VehicleCreate(order_no=f"V-{_uid()}"))
+        await add_items_to_vehicle(
+            db_session,
+            project.id,
+            vehicle.order_no,
+            AddItemsToVehicleRequest(items=[AddItemToVehicle(factory_order_item_id=item_id, qty=100)]),
+        )
+
+        # Change factory order item price after assignment
+        order.items[0].price_cny = Decimal("25.5")
+        await db_session.commit()
+
+        preview = await preview_price_resync(db_session, project.id, vehicle.order_no)
+        assert preview.total_items == 1
+        assert preview.changed_items == 1
+        assert preview.items[0].old_price_cny == Decimal("10")
+        assert preview.items[0].new_price_cny == Decimal("25.5")
+        # Delta: (25.5 - 10) * 100 = 1550
+        assert preview.items[0].delta_sum_cny == Decimal("1550")
+        assert preview.sum_delta_cny == Decimal("1550")
+
+    @pytest.mark.asyncio
+    async def test_preview_empty_when_prices_match(self, db_session, project):
+        order = await _create_factory_order_with_items(db_session, project.id, [("BC-RS2", 50)])
+        item_id = order.items[0].id
+        vehicle = await create_vehicle(db_session, project.id, VehicleCreate(order_no=f"V-{_uid()}"))
+        await add_items_to_vehicle(
+            db_session,
+            project.id,
+            vehicle.order_no,
+            AddItemsToVehicleRequest(items=[AddItemToVehicle(factory_order_item_id=item_id, qty=50)]),
+        )
+
+        preview = await preview_price_resync(db_session, project.id, vehicle.order_no)
+        assert preview.changed_items == 0
+        assert preview.sum_delta_cny == Decimal("0")
+
+    @pytest.mark.asyncio
+    async def test_apply_updates_price_and_returns_count(self, db_session, project):
+        order = await _create_factory_order_with_items(db_session, project.id, [("BC-RS3", 40)])
+        item_id = order.items[0].id
+        vehicle = await create_vehicle(db_session, project.id, VehicleCreate(order_no=f"V-{_uid()}"))
+        await add_items_to_vehicle(
+            db_session,
+            project.id,
+            vehicle.order_no,
+            AddItemsToVehicleRequest(items=[AddItemToVehicle(factory_order_item_id=item_id, qty=40)]),
+        )
+
+        order.items[0].price_cny = Decimal("33")
+        await db_session.commit()
+
+        result = await apply_price_resync(db_session, project.id, vehicle.order_no)
+        assert result["applied"] == 1
+
+        refreshed = await get_vehicle(db_session, project.id, vehicle.order_no)
+        assert refreshed.items[0].price_cny == Decimal("33")
+
+    @pytest.mark.asyncio
+    async def test_apply_noop_when_no_changes(self, db_session, project):
+        order = await _create_factory_order_with_items(db_session, project.id, [("BC-RS4", 10)])
+        item_id = order.items[0].id
+        vehicle = await create_vehicle(db_session, project.id, VehicleCreate(order_no=f"V-{_uid()}"))
+        await add_items_to_vehicle(
+            db_session,
+            project.id,
+            vehicle.order_no,
+            AddItemsToVehicleRequest(items=[AddItemToVehicle(factory_order_item_id=item_id, qty=10)]),
+        )
+
+        result = await apply_price_resync(db_session, project.id, vehicle.order_no)
+        assert result["applied"] == 0
+
+    @pytest.mark.asyncio
+    async def test_preview_unknown_vehicle_raises(self, db_session, project):
+        with pytest.raises(ValueError):
+            await preview_price_resync(db_session, project.id, "V-DOES-NOT-EXIST")
