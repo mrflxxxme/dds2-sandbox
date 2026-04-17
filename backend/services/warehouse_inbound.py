@@ -28,9 +28,14 @@ logger = logging.getLogger(__name__)
 # ─── Inbound Receipts (Приёмка) ────────────────────────────────────────────
 
 
-async def list_receipts(db: AsyncSession, project_id: int, warehouse_id: int) -> list:
-    """List receipts for a warehouse."""
-    result = await db.execute(
+async def list_receipts(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    include_defect: bool = True,
+) -> list:
+    """List receipts for a warehouse. Includes defect receipts by default (rendered with 'Брак' badge)."""
+    query = (
         select(InboundReceipt)
         .options(selectinload(InboundReceipt.items))
         .where(
@@ -38,9 +43,11 @@ async def list_receipts(db: AsyncSession, project_id: int, warehouse_id: int) ->
             InboundReceipt.warehouse_id == warehouse_id,
             InboundReceipt.is_deleted == False,  # noqa: E712
         )
-        .order_by(InboundReceipt.id.desc())
-        .limit(500)
     )
+    if not include_defect:
+        query = query.where(InboundReceipt.is_defect.is_(False))
+    query = query.order_by(InboundReceipt.id.desc()).limit(500)
+    result = await db.execute(query)
     return list(result.scalars().all())
 
 
@@ -295,17 +302,24 @@ async def cancel_receipt(db: AsyncSession, project_id: int, receipt_id: int) -> 
     if receipt.status != InboundStatus.ACCEPTED:
         raise ValueError(f"Can only cancel ACCEPTED receipts, got {receipt.status}")
 
-    # Reverse stock for each item
+    # Reverse stock for each item. For defect receipts — rollback defect_quantity.
     for item in receipt.items:
         if item.actual_qty <= 0:
             continue
+        if receipt.is_defect:
+            delta = 0
+            defect_delta = -item.actual_qty
+        else:
+            delta = -item.actual_qty
+            defect_delta = 0
         await _update_stock(
             db,
             project_id=project_id,
             warehouse_id=receipt.warehouse_id,
             nomenclature_id=item.nomenclature_id,
             barcode=item.barcode,
-            delta=-item.actual_qty,
+            delta=delta,
+            defect_delta=defect_delta,
             movement_type=MovementType.INBOUND_CANCEL,
             reference_type="RECEIPT",
             reference_id=receipt.id,

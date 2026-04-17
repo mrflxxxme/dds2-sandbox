@@ -112,6 +112,8 @@ class InboundReceipt(Base, TimestampMixin, SoftDeleteMixin):
     comment: Mapped[str | None] = mapped_column(Text)
     tags: Mapped[str | None] = mapped_column(Text)  # JSON array
     cost_order_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("cost_orders.id"))
+    is_defect: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    defect_reason: Mapped[str | None] = mapped_column(Text)
 
     # Relationships
     warehouse: Mapped["Warehouse"] = relationship(back_populates="receipts")
@@ -164,6 +166,8 @@ class OutboundShipment(Base, TimestampMixin, SoftDeleteMixin):
     wb_supply_id: Mapped[str | None] = mapped_column(String(100))
     shipped_date: Mapped[date | None] = mapped_column(Date)
     comment: Mapped[str | None] = mapped_column(Text)
+    is_defect: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    defect_reason: Mapped[str | None] = mapped_column(Text)
 
     # Relationships
     warehouse: Mapped["Warehouse"] = relationship(back_populates="shipments")

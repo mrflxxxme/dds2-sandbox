@@ -79,6 +79,8 @@ class InboundReceiptCreate(BaseModel):
     planned_date: date | None = None
     comment: str | None = None
     tags: str | None = None  # JSON array string
+    is_defect: bool = False
+    defect_reason: str | None = None
     items: list[InboundReceiptItemCreate] = []
 
 
@@ -86,6 +88,7 @@ class InboundReceiptUpdate(BaseModel):
     planned_date: date | None = None
     comment: str | None = None
     tags: str | None = None
+    defect_reason: str | None = None
     items: list[InboundReceiptItemCreate] | None = None
 
 
@@ -101,6 +104,8 @@ class InboundReceiptSchema(BaseModel):
     comment: str | None = None
     tags: str | None = None
     cost_order_id: int | None = None
+    is_defect: bool = False
+    defect_reason: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
     items: list[InboundReceiptItemSchema] = []
@@ -126,6 +131,8 @@ class OutboundShipmentItemSchema(BaseModel):
 class OutboundShipmentCreate(BaseModel):
     destination: str | None = None
     comment: str | None = None
+    is_defect: bool = False
+    defect_reason: str | None = None
     items: list[OutboundShipmentItemCreate] = []
 
 
@@ -140,6 +147,8 @@ class OutboundShipmentSchema(BaseModel):
     wb_supply_id: str | None = None
     shipped_date: date | None = None
     comment: str | None = None
+    is_defect: bool = False
+    defect_reason: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
     items: list[OutboundShipmentItemSchema] = []
@@ -275,6 +284,10 @@ class DefectBulkResponse(BaseModel):
     processed: int
     failed: int
     errors: list[dict]  # [{barcode, error}]
+    # Optional: set when the bulk op produced a document (receive → receipt, writeoff → shipment)
+    receipt_id: int | None = None
+    shipment_id: int | None = None
+    number: str | None = None
 
 
 # ─── Delivery Times (Время доставки до WB) ──────────────────────────────

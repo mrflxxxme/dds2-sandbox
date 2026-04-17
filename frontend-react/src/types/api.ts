@@ -856,6 +856,8 @@ export interface InboundReceipt {
   comment?: string;
   tags?: string;
   cost_order_id?: number;
+  is_defect?: boolean;
+  defect_reason?: string;
   created_at?: string;
   updated_at?: string;
   items: InboundReceiptItem[];
@@ -879,6 +881,8 @@ export interface OutboundShipment {
   wb_supply_id?: string;
   shipped_date?: string;
   comment?: string;
+  is_defect?: boolean;
+  defect_reason?: string;
   created_at?: string;
   updated_at?: string;
   items: OutboundShipmentItem[];

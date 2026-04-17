@@ -135,9 +135,12 @@ export default function ReceiptDetailPage() {
                         style={{ padding: '6px 12px', fontSize: 18, lineHeight: 1 }}
                     >&larr;</button>
                     <div>
-                        <h1 className="page-title">Приёмка {receipt.number}</h1>
+                        <h1 className="page-title">{receipt.is_defect ? 'Приёмка брака' : 'Приёмка'} {receipt.number}</h1>
                         <p className="page-subtitle" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                             {statusBadge(receipt.status)}
+                            {receipt.is_defect && (
+                                <span className="badge badge-warning" style={{ fontSize: 12 }}>Брак</span>
+                            )}
                         </p>
                     </div>
                 </div>
@@ -190,6 +193,12 @@ export default function ReceiptDetailPage() {
                         <div style={{ gridColumn: '1 / -1' }}>
                             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Комментарий</div>
                             <div>{receipt.comment}</div>
+                        </div>
+                    )}
+                    {receipt.is_defect && receipt.defect_reason && (
+                        <div style={{ gridColumn: '1 / -1' }}>
+                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Причина (брак)</div>
+                            <div>{receipt.defect_reason}</div>
                         </div>
                     )}
                 </div>

@@ -34,9 +34,14 @@ logger = logging.getLogger(__name__)
 # ─── Outbound Shipments (Отгрузка) ────────────────────────────────────────
 
 
-async def list_shipments(db: AsyncSession, project_id: int, warehouse_id: int) -> list:
-    """List shipments for a warehouse."""
-    result = await db.execute(
+async def list_shipments(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    include_defect: bool = False,
+) -> list:
+    """List shipments for a warehouse. By default excludes defect writeoff shipments."""
+    query = (
         select(OutboundShipment)
         .options(selectinload(OutboundShipment.items))
         .where(
@@ -44,9 +49,11 @@ async def list_shipments(db: AsyncSession, project_id: int, warehouse_id: int) -
             OutboundShipment.warehouse_id == warehouse_id,
             OutboundShipment.is_deleted == False,  # noqa: E712
         )
-        .order_by(OutboundShipment.id.desc())
-        .limit(500)
     )
+    if not include_defect:
+        query = query.where(OutboundShipment.is_defect.is_(False))
+    query = query.order_by(OutboundShipment.id.desc()).limit(500)
+    result = await db.execute(query)
     return list(result.scalars().all())
 
 
@@ -168,14 +175,22 @@ async def cancel_shipment(db: AsyncSession, project_id: int, shipment_id: int) -
     if shipment.status != OutboundStatus.SHIPPED:
         raise ValueError(f"Can only cancel SHIPPED shipments, got {shipment.status}")
 
+    # For defect writeoff shipments — return defect_quantity, not good stock.
     for item in shipment.items:
+        if shipment.is_defect:
+            delta = 0
+            defect_delta = item.quantity
+        else:
+            delta = item.quantity
+            defect_delta = 0
         await _update_stock(
             db,
             project_id=project_id,
             warehouse_id=shipment.warehouse_id,
             nomenclature_id=item.nomenclature_id,
             barcode=item.barcode,
-            delta=item.quantity,
+            delta=delta,
+            defect_delta=defect_delta,
             movement_type=MovementType.OUTBOUND_CANCEL,
             reference_type="SHIPMENT",
             reference_id=shipment.id,
