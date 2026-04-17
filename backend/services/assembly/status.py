@@ -64,7 +64,10 @@ async def _log_status_change(
 
 
 async def start_assembly(db: AsyncSession, project_id: int, request_id: int) -> AssemblyRequest:
-    """PENDING -> IN_PROGRESS. No side effects."""
+    """PENDING -> IN_PROGRESS, or READY -> IN_PROGRESS (reopen).
+
+    When reopening from READY, clear actual_ready_date (it will be set again on mark_ready).
+    """
     from .crud import get_assembly_request
 
     req = await get_assembly_request(db, project_id, request_id)
@@ -74,7 +77,10 @@ async def start_assembly(db: AsyncSession, project_id: int, request_id: int) -> 
     _check_transition(AssemblyStatus(req.status), AssemblyStatus.IN_PROGRESS)
     old = req.status
     req.status = AssemblyStatus.IN_PROGRESS
-    await _log_status_change(db, project_id, req.id, old, AssemblyStatus.IN_PROGRESS)
+    if AssemblyStatus(old) == AssemblyStatus.READY:
+        req.actual_ready_date = None
+    comment = "Возврат в сборку" if AssemblyStatus(old) == AssemblyStatus.READY else None
+    await _log_status_change(db, project_id, req.id, old, AssemblyStatus.IN_PROGRESS, comment=comment)
     await db.commit()
     await db.refresh(req)
     return req
