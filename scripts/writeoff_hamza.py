@@ -74,11 +74,9 @@ async def main(project_id: int | None, project_slug: str | None, commit: bool) -
             return 1
 
         wh = warehouses[0]
-        print(f"Warehouse: id={wh.id} name={wh.name!r} type={wh.warehouse_type.name}")
-        if wh.warehouse_type != WarehouseType.FULFILLMENT:
-            print(
-                f"ERROR: warehouse is {wh.warehouse_type.name}, OutboundShipment requires FULFILLMENT", file=sys.stderr
-            )
+        print(f"Warehouse: id={wh.id} name={wh.name!r} type={wh.warehouse_type}")
+        if wh.warehouse_type != WarehouseType.FULFILLMENT.value:
+            print(f"ERROR: warehouse is {wh.warehouse_type}, OutboundShipment requires FULFILLMENT", file=sys.stderr)
             return 1
 
         barcodes = [b for b, _ in ITEMS]
@@ -128,12 +126,10 @@ async def main(project_id: int | None, project_slug: str | None, commit: bool) -
             "items": [{"barcode": b, "quantity": q} for b, q in ITEMS],
         }
         shipment = await create_shipment(db, project_id, wh.id, payload)
-        print(f"\nCreated shipment: id={shipment.id} number={shipment.number} status={shipment.status.name}")
+        print(f"\nCreated shipment: id={shipment.id} number={shipment.number} status={shipment.status}")
 
         shipped = await ship_shipment(db, project_id, shipment.id)
-        print(
-            f"Shipped: id={shipped.id} number={shipped.number} status={shipped.status.name} date={shipped.shipped_date}"
-        )
+        print(f"Shipped: id={shipped.id} number={shipped.number} status={shipped.status} date={shipped.shipped_date}")
         print(f"Total written off: {total_qty} units")
         return 0
 
