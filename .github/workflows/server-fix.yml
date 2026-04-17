@@ -12,6 +12,8 @@ on:
           - fix-minio-permissions
           - restart-worker
           - show-env
+          - writeoff-hamza-dry-run
+          - writeoff-hamza-commit
 
 jobs:
   fix:
@@ -75,6 +77,18 @@ jobs:
                 echo ""
                 echo "=== Container status ==="
                 docker compose -f docker-compose.app.yml ps --format "table {{.Name}}\t{{.Status}}" 2>/dev/null
+                ;;
+
+              writeoff-hamza-dry-run)
+                echo "=== DRY-RUN: writeoff stock at warehouse Хамза ==="
+                docker compose -f docker-compose.app.yml exec -T backend \
+                  python scripts/writeoff_hamza.py --project-slug default --dry-run
+                ;;
+
+              writeoff-hamza-commit)
+                echo "=== COMMIT: writeoff stock at warehouse Хамза ==="
+                docker compose -f docker-compose.app.yml exec -T backend \
+                  python scripts/writeoff_hamza.py --project-slug default --commit
                 ;;
             esac
 
