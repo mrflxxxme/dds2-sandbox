@@ -47,9 +47,11 @@ NEVER use inline interfaces or `any`.
 - Imports: `@/lib/api`, `@/types/api`, `@/components/*`, `@/lib/utils`
 
 ## Testing
-- Unit: `npx vitest run` (files in `src/__tests__/`)
-- E2E: `npx playwright test` (11 spec files in `tests/e2e/`)
+- Unit: `npx vitest run` (files in `src/__tests__/`, 42 tests)
+- E2E smoke (CI nightly): `npx playwright test tests/e2e/smoke.spec.ts` — 27 страниц не крашатся, ~2 мин
+- E2E full (только локально / debug): `npx playwright test` — 73 теста в 11 spec-файлах
 - Config: `vitest.config.ts`, `playwright.config.ts`
+- E2E **НЕ блокирует** PR/merge/deploy — только nightly-сигнал. Блокирующие: pytest (1368) + vitest (42)
 
 ## New endpoint checklist
 1. Add TypeScript interface in `src/types/api.ts`
