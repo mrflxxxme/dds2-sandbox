@@ -32,6 +32,7 @@
    = Себестоимость единицы
 3. **DutyRule basis:** weight (кг), volume (л), amount (% от стоимости)
 4. **Cost parsers:** 5 форматов Excel — каждый со своей структурой колонок
+5. **Cost history avg_cost:** средняя себестоимость SKU = **взвешенная по qty**: `Σ(total_rub × qty) / Σ(qty)` (см. `cost_history_service.py:116-118`). До 2026-04-17 считалась простым средним по партиям — давала искажение при партиях разного размера.
 
 ## Known Issues & Gotchas
 - ~~`cost_parsers.py` — 465 строк~~ — **ИСПРАВЛЕНО** (разбит на cost_parsers.py 76 строк + cost_parser_helpers.py 408 строк)
