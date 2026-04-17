@@ -21,10 +21,10 @@ function useNomLookup(nomenclature: Nomenclature[]) {
 
 /* ─── Status badge ────────────────────────────────────────────────────────── */
 
-function statusBadge(s: string) {
+function statusBadge(s: string, isDefect = false) {
     const map: Record<string, { label: string; bg: string; color: string }> = {
         DRAFT: { label: 'Черновик', bg: 'rgba(0,0,0,0.06)', color: 'var(--color-text-muted)' },
-        SHIPPED: { label: 'Отгружена', bg: 'rgba(245,158,11,0.1)', color: '#b45309' },
+        SHIPPED: { label: isDefect ? 'Списана' : 'Отгружена', bg: 'rgba(245,158,11,0.1)', color: '#b45309' },
         DELIVERED: { label: 'Доставлена', bg: 'rgba(34,197,94,0.1)', color: '#16a34a' },
         CANCELLED: { label: 'Отменена', bg: 'rgba(239,68,68,0.1)', color: '#dc2626' },
     };
@@ -108,9 +108,12 @@ export default function ShipmentDetailPage() {
                         style={{ padding: '6px 12px', fontSize: 18, lineHeight: 1 }}
                     >&larr;</button>
                     <div>
-                        <h1 className="page-title">Отгрузка {shipment.number}</h1>
+                        <h1 className="page-title">{shipment.is_defect ? 'Списание брака' : 'Отгрузка'} {shipment.number}</h1>
                         <p className="page-subtitle" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            {statusBadge(shipment.status)}
+                            {statusBadge(shipment.status, shipment.is_defect)}
+                            {shipment.is_defect && (
+                                <span className="badge badge-warning" style={{ fontSize: 12 }}>Брак</span>
+                            )}
                         </p>
                     </div>
                 </div>
@@ -144,7 +147,7 @@ export default function ShipmentDetailPage() {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16 }}>
                     <div>
                         <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Статус</div>
-                        <div>{statusBadge(shipment.status)}</div>
+                        <div>{statusBadge(shipment.status, shipment.is_defect)}</div>
                     </div>
                     {shipment.destination && (
                         <div>
@@ -172,6 +175,12 @@ export default function ShipmentDetailPage() {
                         <div style={{ gridColumn: '1 / -1' }}>
                             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Комментарий</div>
                             <div>{shipment.comment}</div>
+                        </div>
+                    )}
+                    {shipment.is_defect && shipment.defect_reason && (
+                        <div style={{ gridColumn: '1 / -1' }}>
+                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Причина (брак)</div>
+                            <div>{shipment.defect_reason}</div>
                         </div>
                     )}
                 </div>

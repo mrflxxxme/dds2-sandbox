@@ -1,27 +1,45 @@
 """
 Warehouse defect management — mark, receive, writeoff, recover defective goods.
+
+receive_defect_bulk → creates InboundReceipt(is_defect=true, status=ACCEPTED) document.
+writeoff_defect_bulk → creates OutboundShipment(is_defect=true, status=SHIPPED) document.
+mark_defect_bulk / recover_defect_bulk → internal stock rebalance (no document).
 """
 
 import logging
+from datetime import date
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from backend.models.warehouse import MovementType, StockMovement, WarehouseStock
+from backend.models.warehouse import (
+    InboundReceipt,
+    InboundReceiptItem,
+    InboundStatus,
+    MovementType,
+    OutboundShipment,
+    OutboundShipmentItem,
+    OutboundStatus,
+    StockMovement,
+    WarehouseStock,
+)
 from backend.services.warehouse_crud import get_warehouse
-from backend.services.warehouse_stock_engine import _resolve_barcode, _update_stock
+from backend.services.warehouse_stock_engine import (
+    _next_number,
+    _resolve_barcode,
+    _resolve_barcodes_batch,
+    _update_stock,
+)
 
 logger = logging.getLogger(__name__)
 
 
-# ─── Bulk defect operation config ────────────────────────────────────────
+# ─── Bulk defect operation config (mark / recover — no document) ──────────
 
 _BULK_CONFIG: dict[str, tuple[MovementType, int, int]] = {
     # operation -> (movement_type, delta_sign, defect_delta_sign)
-    # final delta = sign * quantity
     "mark": (MovementType.DEFECT_MARK, -1, 1),
-    "receive": (MovementType.DEFECT_RECEIVE, 0, 1),
-    "writeoff": (MovementType.DEFECT_WRITEOFF, 0, -1),
     "recover": (MovementType.DEFECT_RECOVER, 1, -1),
 }
 
@@ -41,15 +59,10 @@ async def _bulk_defect_op(
     operation: str,
 ) -> dict:
     """
-    Shared bulk-defect executor.
+    Shared bulk executor for mark/recover (no document created).
 
-    - Validates warehouse once (not per-item).
-    - Iterates items; each item runs inside a nested savepoint so a single
-      failure (bad barcode, insufficient stock, etc.) does not abort the
-      whole batch.
-    - Commits the outer transaction once at the end.
-
-    Returns: {status, processed, failed, errors}
+    Each item runs in a nested savepoint — a single failure does not abort the batch.
+    Returns: {status, processed, failed, errors}.
     """
     wh = await get_warehouse(db, project_id, warehouse_id)
     if not wh:
@@ -92,7 +105,7 @@ async def _bulk_defect_op(
             processed += 1
         except ValueError as e:
             errors.append({"barcode": barcode, "error": str(e)})
-        except Exception as e:  # — bulk op: collect and continue
+        except Exception as e:
             logger.exception("bulk defect %s failed for barcode %s", operation, barcode)
             errors.append({"barcode": barcode, "error": str(e)})
 
@@ -124,26 +137,6 @@ async def mark_defect_bulk(
     return await _bulk_defect_op(db, project_id, warehouse_id, payload, "mark")
 
 
-async def receive_defect_bulk(
-    db: AsyncSession,
-    project_id: int,
-    warehouse_id: int,
-    payload: dict,
-) -> dict:
-    """Bulk: receive defective goods from outside (WB returns, etc.)."""
-    return await _bulk_defect_op(db, project_id, warehouse_id, payload, "receive")
-
-
-async def writeoff_defect_bulk(
-    db: AsyncSession,
-    project_id: int,
-    warehouse_id: int,
-    payload: dict,
-) -> dict:
-    """Bulk: write off (destroy) defective goods."""
-    return await _bulk_defect_op(db, project_id, warehouse_id, payload, "writeoff")
-
-
 async def recover_defect_bulk(
     db: AsyncSession,
     project_id: int,
@@ -154,6 +147,193 @@ async def recover_defect_bulk(
     return await _bulk_defect_op(db, project_id, warehouse_id, payload, "recover")
 
 
+# ─── Document-creating operations (receive / writeoff) ────────────────────
+
+
+def _prepare_valid_items(items: list) -> tuple[list[dict], list[dict]]:
+    """Normalize items, separate valid from invalid. Returns (valid, errors)."""
+    valid: list[dict] = []
+    errors: list[dict] = []
+    for item in items:
+        if isinstance(item, dict):
+            barcode = item.get("barcode")
+            qty = item.get("quantity")
+        else:
+            barcode = getattr(item, "barcode", None)
+            qty = getattr(item, "quantity", None)
+        if not barcode or not qty or qty <= 0:
+            errors.append({"barcode": barcode or "", "error": "Invalid barcode or quantity"})
+            continue
+        valid.append({"barcode": barcode, "quantity": int(qty)})
+    return valid, errors
+
+
+async def receive_defect_bulk(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    payload: dict,
+) -> dict:
+    """
+    Receive defective goods → InboundReceipt(is_defect=true, status=ACCEPTED).
+    All-or-nothing: any barcode/stock failure rolls back the whole document.
+    """
+    wh = await get_warehouse(db, project_id, warehouse_id)
+    if not wh:
+        raise ValueError("Warehouse not found")
+
+    reason = (payload.get("reason") or "").strip()
+    if not reason:
+        raise ValueError("Reason is required")
+
+    valid_items, errors = _prepare_valid_items(payload.get("items") or [])
+    if not valid_items:
+        return {
+            "status": "error",
+            "processed": 0,
+            "failed": len(errors),
+            "errors": errors,
+            "receipt_id": None,
+        }
+
+    barcode_map = await _resolve_barcodes_batch(db, project_id, [i["barcode"] for i in valid_items])
+
+    number = await _next_number(db, project_id, "IN", InboundReceipt)
+    receipt = InboundReceipt(
+        project_id=project_id,
+        warehouse_id=warehouse_id,
+        number=number,
+        status=InboundStatus.ACCEPTED,
+        actual_date=date.today(),
+        is_defect=True,
+        defect_reason=reason,
+    )
+    db.add(receipt)
+    await db.flush()
+
+    for data in valid_items:
+        nom = barcode_map[data["barcode"]]
+        qty = data["quantity"]
+        db.add(
+            InboundReceiptItem(
+                project_id=project_id,
+                receipt_id=receipt.id,
+                nomenclature_id=nom.id,
+                barcode=data["barcode"],
+                expected_qty=qty,
+                actual_qty=qty,
+            )
+        )
+        await _update_stock(
+            db,
+            project_id=project_id,
+            warehouse_id=warehouse_id,
+            nomenclature_id=nom.id,
+            barcode=data["barcode"],
+            delta=0,
+            defect_delta=qty,
+            movement_type=MovementType.DEFECT_RECEIVE,
+            reference_type="RECEIPT",
+            reference_id=receipt.id,
+            comment=reason,
+        )
+
+    await db.commit()
+
+    return {
+        "status": "ok" if not errors else "partial",
+        "processed": len(valid_items),
+        "failed": len(errors),
+        "errors": errors,
+        "receipt_id": receipt.id,
+        "number": receipt.number,
+    }
+
+
+async def writeoff_defect_bulk(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    payload: dict,
+) -> dict:
+    """
+    Write off defective goods → OutboundShipment(is_defect=true, status=SHIPPED).
+    Deducts defect_quantity for each item. All-or-nothing.
+    """
+    wh = await get_warehouse(db, project_id, warehouse_id)
+    if not wh:
+        raise ValueError("Warehouse not found")
+
+    reason = (payload.get("reason") or "").strip()
+    if not reason:
+        raise ValueError("Reason is required")
+
+    valid_items, errors = _prepare_valid_items(payload.get("items") or [])
+    if not valid_items:
+        return {
+            "status": "error",
+            "processed": 0,
+            "failed": len(errors),
+            "errors": errors,
+            "shipment_id": None,
+        }
+
+    barcode_map = await _resolve_barcodes_batch(db, project_id, [i["barcode"] for i in valid_items])
+
+    number = await _next_number(db, project_id, "OUT", OutboundShipment)
+    shipment = OutboundShipment(
+        project_id=project_id,
+        warehouse_id=warehouse_id,
+        number=number,
+        status=OutboundStatus.SHIPPED,
+        shipped_date=date.today(),
+        is_defect=True,
+        defect_reason=reason,
+    )
+    db.add(shipment)
+    await db.flush()
+
+    for data in valid_items:
+        nom = barcode_map[data["barcode"]]
+        qty = data["quantity"]
+        db.add(
+            OutboundShipmentItem(
+                project_id=project_id,
+                shipment_id=shipment.id,
+                nomenclature_id=nom.id,
+                barcode=data["barcode"],
+                quantity=qty,
+            )
+        )
+        await _update_stock(
+            db,
+            project_id=project_id,
+            warehouse_id=warehouse_id,
+            nomenclature_id=nom.id,
+            barcode=data["barcode"],
+            delta=0,
+            defect_delta=-qty,
+            movement_type=MovementType.DEFECT_WRITEOFF,
+            reference_type="SHIPMENT",
+            reference_id=shipment.id,
+            comment=reason,
+        )
+
+    await db.commit()
+
+    return {
+        "status": "ok" if not errors else "partial",
+        "processed": len(valid_items),
+        "failed": len(errors),
+        "errors": errors,
+        "shipment_id": shipment.id,
+        "number": shipment.number,
+    }
+
+
+# ─── Legacy per-item movement deletion (for old DEFECT_* without document) ─
+
+
 async def delete_defect_movement(
     db: AsyncSession,
     project_id: int,
@@ -162,10 +342,7 @@ async def delete_defect_movement(
 ) -> dict:
     """
     Hard-delete a defect stock movement and revert its stock effect.
-
-    Only DEFECT_* movements are deletable here (transit/receipt/shipment audit
-    records stay untouched). StockMovement has no SoftDeleteMixin, so hard
-    delete is intentional.
+    Used for legacy movements that weren't created as part of a receipt/shipment document.
     """
     result = await db.execute(
         select(StockMovement).where(
@@ -181,7 +358,6 @@ async def delete_defect_movement(
     if movement.movement_type not in _DEFECT_MOVEMENT_TYPES:
         raise ValueError(f"Cannot delete movement of type {movement.movement_type}")
 
-    # Inverse adjustment — same engine path so balance checks apply.
     await _update_stock(
         db,
         project_id=project_id,
@@ -205,22 +381,20 @@ async def delete_defect_movement(
     return {"status": "ok", "reverted": reverted_type, "quantity": qty}
 
 
+# ─── Single-item endpoints (backward compat) ──────────────────────────────
+
+
 async def mark_defect(
     db: AsyncSession,
     project_id: int,
     warehouse_id: int,
     payload: dict,
 ) -> dict:
-    """
-    Mark existing good stock as defective.
-    quantity -= qty, defect_quantity += qty.
-    """
     wh = await get_warehouse(db, project_id, warehouse_id)
     if not wh:
         raise ValueError("Warehouse not found")
 
     nom = await _resolve_barcode(db, project_id, payload["barcode"])
-
     await _update_stock(
         db,
         project_id=project_id,
@@ -233,7 +407,6 @@ async def mark_defect(
         reference_type="DEFECT",
         comment=payload.get("reason"),
     )
-
     await db.commit()
     return {"status": "ok", "operation": "mark_defect", "barcode": payload["barcode"], "quantity": payload["quantity"]}
 
@@ -244,36 +417,16 @@ async def receive_defect(
     warehouse_id: int,
     payload: dict,
 ) -> dict:
-    """
-    Receive defective goods from outside (WB returns, etc.).
-    defect_quantity += qty. quantity unchanged.
-    """
-    wh = await get_warehouse(db, project_id, warehouse_id)
-    if not wh:
-        raise ValueError("Warehouse not found")
-
-    nom = await _resolve_barcode(db, project_id, payload["barcode"])
-
-    await _update_stock(
+    """Single-item receive: creates a 1-item InboundReceipt document."""
+    return await receive_defect_bulk(
         db,
-        project_id=project_id,
-        warehouse_id=warehouse_id,
-        nomenclature_id=nom.id,
-        barcode=payload["barcode"],
-        delta=0,
-        defect_delta=payload["quantity"],
-        movement_type=MovementType.DEFECT_RECEIVE,
-        reference_type="DEFECT",
-        comment=payload.get("reason"),
+        project_id,
+        warehouse_id,
+        {
+            "reason": payload.get("reason") or "—",
+            "items": [{"barcode": payload["barcode"], "quantity": payload["quantity"]}],
+        },
     )
-
-    await db.commit()
-    return {
-        "status": "ok",
-        "operation": "receive_defect",
-        "barcode": payload["barcode"],
-        "quantity": payload["quantity"],
-    }
 
 
 async def writeoff_defect(
@@ -282,36 +435,16 @@ async def writeoff_defect(
     warehouse_id: int,
     payload: dict,
 ) -> dict:
-    """
-    Write off (destroy) defective goods.
-    defect_quantity -= qty.
-    """
-    wh = await get_warehouse(db, project_id, warehouse_id)
-    if not wh:
-        raise ValueError("Warehouse not found")
-
-    nom = await _resolve_barcode(db, project_id, payload["barcode"])
-
-    await _update_stock(
+    """Single-item writeoff: creates a 1-item OutboundShipment document."""
+    return await writeoff_defect_bulk(
         db,
-        project_id=project_id,
-        warehouse_id=warehouse_id,
-        nomenclature_id=nom.id,
-        barcode=payload["barcode"],
-        delta=0,
-        defect_delta=-payload["quantity"],
-        movement_type=MovementType.DEFECT_WRITEOFF,
-        reference_type="DEFECT",
-        comment=payload.get("reason"),
+        project_id,
+        warehouse_id,
+        {
+            "reason": payload.get("reason") or "—",
+            "items": [{"barcode": payload["barcode"], "quantity": payload["quantity"]}],
+        },
     )
-
-    await db.commit()
-    return {
-        "status": "ok",
-        "operation": "writeoff_defect",
-        "barcode": payload["barcode"],
-        "quantity": payload["quantity"],
-    }
 
 
 async def recover_defect(
@@ -320,16 +453,11 @@ async def recover_defect(
     warehouse_id: int,
     payload: dict,
 ) -> dict:
-    """
-    Restore defective goods to good stock (repaired).
-    defect_quantity -= qty, quantity += qty.
-    """
     wh = await get_warehouse(db, project_id, warehouse_id)
     if not wh:
         raise ValueError("Warehouse not found")
 
     nom = await _resolve_barcode(db, project_id, payload["barcode"])
-
     await _update_stock(
         db,
         project_id=project_id,
@@ -342,7 +470,6 @@ async def recover_defect(
         reference_type="DEFECT",
         comment=payload.get("reason"),
     )
-
     await db.commit()
     return {
         "status": "ok",
@@ -350,6 +477,9 @@ async def recover_defect(
         "barcode": payload["barcode"],
         "quantity": payload["quantity"],
     }
+
+
+# ─── Queries ──────────────────────────────────────────────────────────────
 
 
 async def get_defect_stock(
@@ -383,6 +513,48 @@ async def get_defect_stock(
         }
         for row in rows
     ]
+
+
+async def get_defect_receipts(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+) -> list[InboundReceipt]:
+    """List defect receipts for a warehouse."""
+    result = await db.execute(
+        select(InboundReceipt)
+        .options(selectinload(InboundReceipt.items))
+        .where(
+            InboundReceipt.project_id == project_id,
+            InboundReceipt.warehouse_id == warehouse_id,
+            InboundReceipt.is_defect.is_(True),
+            InboundReceipt.is_deleted == False,  # noqa: E712
+        )
+        .order_by(InboundReceipt.id.desc())
+        .limit(500)
+    )
+    return list(result.scalars().all())
+
+
+async def get_defect_shipments(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+) -> list[OutboundShipment]:
+    """List defect writeoff shipments for a warehouse."""
+    result = await db.execute(
+        select(OutboundShipment)
+        .options(selectinload(OutboundShipment.items))
+        .where(
+            OutboundShipment.project_id == project_id,
+            OutboundShipment.warehouse_id == warehouse_id,
+            OutboundShipment.is_defect.is_(True),
+            OutboundShipment.is_deleted == False,  # noqa: E712
+        )
+        .order_by(OutboundShipment.id.desc())
+        .limit(500)
+    )
+    return list(result.scalars().all())
 
 
 async def get_defect_summary(

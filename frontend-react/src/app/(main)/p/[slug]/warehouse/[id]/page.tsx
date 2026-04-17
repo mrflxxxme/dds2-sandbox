@@ -410,7 +410,15 @@ function ReceiptsTab({ warehouseId, onCountChange }: {
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
 
     const cols: Column[] = [
-        { key: 'number', label: '№' },
+        {
+            key: 'number', label: '№',
+            render: (v: string, row: InboundReceipt) => (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontWeight: 600 }}>{v}</span>
+                    {row.is_defect && <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>Брак</span>}
+                </span>
+            ),
+        },
         { key: 'status', label: 'Статус', render: (v: string) => statusBadge(v) },
         {
             key: 'items', label: 'Позиции',
@@ -427,7 +435,10 @@ function ReceiptsTab({ warehouseId, onCountChange }: {
             },
         },
         { key: 'planned_date', label: 'Плановая дата', format: 'date' },
-        { key: 'comment', label: 'Комментарий' },
+        {
+            key: 'comment', label: 'Комментарий / причина',
+            render: (v: string | undefined, row: InboundReceipt) => row.is_defect ? (row.defect_reason || '—') : (v || '—'),
+        },
         { key: 'created_at', label: 'Создана', format: 'date' },
     ];
 
@@ -686,6 +697,7 @@ function DefectsTab({ warehouseId, onCountChange }: {
 
     const [stock, setStock] = useState<Record<string, unknown>[]>([]);
     const [outgoingTransfers, setOutgoingTransfers] = useState<StockTransfer[]>([]);
+    const [defectShipments, setDefectShipments] = useState<OutboundShipment[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
@@ -693,10 +705,11 @@ function DefectsTab({ warehouseId, onCountChange }: {
         setLoading(true);
         setError('');
         try {
-            const [defects, nomData, transfers] = await Promise.all([
+            const [defects, nomData, transfers, shipments] = await Promise.all([
                 api.getDefectStock(warehouseId),
                 api.getNomenclature(),
                 api.getTransfers(true),
+                api.getDefectShipments(warehouseId),
             ]);
             const nomByBarcode = new Map(nomData.map(n => [n.barcode, n]));
             const enriched = defects.map((r: WarehouseStockRow) => {
@@ -704,11 +717,11 @@ function DefectsTab({ warehouseId, onCountChange }: {
                 return { ...r, article_seller: n?.article_seller || '', subject: n?.subject || '' };
             });
             setStock(enriched);
-            // Outgoing: defect transfers FROM this warehouse (sent, waiting accept)
             const outgoing = transfers.filter((t: StockTransfer) =>
                 t.is_defect && t.from_warehouse_id === warehouseId && t.status === 'IN_TRANSIT'
             );
             setOutgoingTransfers(outgoing);
+            setDefectShipments(shipments);
             onCountChange(enriched.length);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
@@ -723,6 +736,20 @@ function DefectsTab({ warehouseId, onCountChange }: {
     const totalDefectItems = stock.length;
     const totalDefectQty = stock.reduce((s, r) => s + (Number(r.defect_quantity) || 0), 0);
     const defectUrl = (action: string) => `/p/${slug}/warehouse/${warehouseId}/defect/${action}`;
+
+    const docStatusBadge = (s: string) => {
+        const map: Record<string, { label: string; bg: string; color: string }> = {
+            ACCEPTED: { label: 'Принята', bg: 'rgba(34,197,94,0.1)', color: '#16a34a' },
+            CANCELLED: { label: 'Отменена', bg: 'rgba(239,68,68,0.1)', color: '#dc2626' },
+            SHIPPED: { label: 'Списана', bg: 'rgba(34,197,94,0.1)', color: '#16a34a' },
+            DELIVERED: { label: 'Списана', bg: 'rgba(34,197,94,0.1)', color: '#16a34a' },
+            DRAFT: { label: 'Черновик', bg: 'rgba(0,0,0,0.06)', color: 'var(--color-text-muted)' },
+            EXPECTED: { label: 'Ожидается', bg: 'rgba(245,158,11,0.1)', color: '#b45309' },
+        };
+        const { label, bg, color } = map[s] || { label: s, bg: 'transparent', color: 'inherit' };
+        return <span style={{ color, background: bg, padding: '2px 8px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>{label}</span>;
+    };
+
 
     const cols: Column[] = [
         { key: 'article_seller', label: 'Артикул' },
@@ -767,6 +794,48 @@ function DefectsTab({ warehouseId, onCountChange }: {
                 <button className="btn btn-secondary btn-sm" onClick={() => router.push(defectUrl('writeoff'))}>Списать</button>
                 <button className="btn btn-secondary btn-sm" onClick={() => router.push(defectUrl('recover'))}>Восстановить</button>
             </div>
+
+            {/* Defect writeoff shipments (списания брака — документы) */}
+            {defectShipments.length > 0 && (
+                <div style={{ marginBottom: 20 }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>
+                        Списания брака <span style={{ color: 'var(--color-text-muted)', fontWeight: 400 }}>({defectShipments.length})</span>
+                    </div>
+                    <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
+                        <table className="data-table" style={{ marginBottom: 0 }}>
+                            <thead>
+                                <tr>
+                                    <th>№</th>
+                                    <th>Статус</th>
+                                    <th>Позиции</th>
+                                    <th>Причина</th>
+                                    <th style={{ textAlign: 'right' }}>Создана</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {defectShipments.map(s => {
+                                    const qty = (s.items || []).reduce((a, i) => a + (i.quantity || 0), 0);
+                                    return (
+                                        <tr
+                                            key={s.id}
+                                            onClick={() => router.push(`/p/${slug}/warehouse/${warehouseId}/shipment/${s.id}`)}
+                                            style={{ cursor: 'pointer' }}
+                                        >
+                                            <td style={{ fontWeight: 600 }}>{s.number}</td>
+                                            <td>{docStatusBadge(s.status)}</td>
+                                            <td>{(s.items || []).length} поз., {formatNumber(qty)} шт.</td>
+                                            <td style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>{s.defect_reason || '—'}</td>
+                                            <td style={{ textAlign: 'right', color: 'var(--color-text-muted)', fontSize: 13 }}>
+                                                {formatDate(s.shipped_date || s.created_at)}
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            )}
 
             {/* Outgoing defect transfers (sent from this warehouse) */}
             {outgoingTransfers.length > 0 && (

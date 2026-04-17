@@ -181,7 +181,8 @@ class TestReceiveDefect:
             {"barcode": bc, "quantity": 10, "reason": "WB return"},
         )
         assert result["status"] == "ok"
-        assert result["operation"] == "receive_defect"
+        assert result["processed"] == 1
+        assert result["receipt_id"] is not None
 
         stock = await get_warehouse_stock(db_session, project.id, wh.id)
         found = [s for s in stock if s["barcode"] == bc]
@@ -230,7 +231,8 @@ class TestWriteoffDefect:
             {"barcode": bc, "quantity": 30, "reason": "unsalvageable"},
         )
         assert result["status"] == "ok"
-        assert result["operation"] == "writeoff_defect"
+        assert result["processed"] == 1
+        assert result["shipment_id"] is not None
 
         stock = await get_warehouse_stock(db_session, project.id, wh.id)
         found = [s for s in stock if s["barcode"] == bc]

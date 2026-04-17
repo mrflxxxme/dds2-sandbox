@@ -639,6 +639,28 @@ async def get_defect_summary(
     return await warehouse_defect.get_defect_summary(db, project.id)
 
 
+@router.get("/{warehouse_id}/defect-receipts")
+async def list_defect_receipts(
+    warehouse_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """List defect receipts (InboundReceipt with is_defect=true) for a warehouse."""
+    rows = await warehouse_defect.get_defect_receipts(db, project.id, warehouse_id)
+    return [InboundReceiptSchema.model_validate(r) for r in rows]
+
+
+@router.get("/{warehouse_id}/defect-shipments")
+async def list_defect_shipments(
+    warehouse_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """List defect writeoff shipments (OutboundShipment with is_defect=true) for a warehouse."""
+    rows = await warehouse_defect.get_defect_shipments(db, project.id, warehouse_id)
+    return [OutboundShipmentSchema.model_validate(r) for r in rows]
+
+
 # ─── Summary & Cost Price ────────────────────────────────────────────────
 
 

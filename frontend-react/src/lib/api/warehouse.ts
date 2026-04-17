@@ -107,6 +107,8 @@ export function addWarehouseMethods(api: ApiClient) {
             return api.request<MessageResponse>('DELETE', `/api/v1/warehouse/${warehouseId}/defects/movements/${movementId}`);
         },
         getDefectSummary() { return api.request<WarehouseStockRow[]>('GET', '/api/v1/warehouse/defects/summary'); },
+        getDefectReceipts(warehouseId: number) { return api.request<InboundReceipt[]>('GET', `/api/v1/warehouse/${warehouseId}/defect-receipts`); },
+        getDefectShipments(warehouseId: number) { return api.request<OutboundShipment[]>('GET', `/api/v1/warehouse/${warehouseId}/defect-shipments`); },
 
         // ─── Adjustments ─────────────────────────────────────────────
         createAdjustment(warehouseId: number, data: { barcode: string; delta: number; reason: string }) {
