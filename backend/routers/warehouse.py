@@ -12,6 +12,7 @@ from backend.schemas.warehouse import (
     CostPriceUpdate,
     DefectBulkOperation,
     DefectBulkResponse,
+    DefectMarkOperationSchema,
     DefectOperationCreate,
     DeliveryTimesUpdate,
     InboundReceiptCreate,
@@ -659,6 +660,46 @@ async def list_defect_shipments(
     """List defect writeoff shipments (OutboundShipment with is_defect=true) for a warehouse."""
     rows = await warehouse_defect.get_defect_shipments(db, project.id, warehouse_id)
     return [OutboundShipmentSchema.model_validate(r) for r in rows]
+
+
+@router.get("/{warehouse_id}/defect-mark-operations")
+async def list_defect_mark_operations(
+    warehouse_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """List mark-as-defect operations (DM-N) for a warehouse."""
+    rows = await warehouse_defect.list_mark_operations(db, project.id, warehouse_id)
+    return [DefectMarkOperationSchema.model_validate(r) for r in rows]
+
+
+@router.get("/defect-mark-operations/{operation_id}")
+async def get_defect_mark_operation(
+    operation_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get a single mark-as-defect operation by id."""
+    op = await warehouse_defect.get_mark_operation(db, project.id, operation_id)
+    if op is None:
+        raise HTTPException(status_code=404, detail="Operation not found")
+    return DefectMarkOperationSchema.model_validate(op)
+
+
+@router.post(
+    "/defect-mark-operations/{operation_id}/cancel",
+    dependencies=[Depends(rate_limit_write)],
+)
+async def cancel_defect_mark_operation(
+    operation_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel a DM-N operation: revert each item (defect → back to good)."""
+    try:
+        return await warehouse_defect.cancel_mark_operation(db, project.id, operation_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 # ─── Summary & Cost Price ────────────────────────────────────────────────

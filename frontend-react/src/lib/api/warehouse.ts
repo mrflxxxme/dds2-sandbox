@@ -8,6 +8,8 @@ import type {
     AssemblyRequestUpdate,
     DefectBulkOperation,
     DefectBulkResponse,
+    DefectMarkCancelResponse,
+    DefectMarkOperation,
     DefectOperation,
     DeliveryTimesResponse,
     DeliveryTimesUpdate,
@@ -109,6 +111,15 @@ export function addWarehouseMethods(api: ApiClient) {
         getDefectSummary() { return api.request<WarehouseStockRow[]>('GET', '/api/v1/warehouse/defects/summary'); },
         getDefectReceipts(warehouseId: number) { return api.request<InboundReceipt[]>('GET', `/api/v1/warehouse/${warehouseId}/defect-receipts`); },
         getDefectShipments(warehouseId: number) { return api.request<OutboundShipment[]>('GET', `/api/v1/warehouse/${warehouseId}/defect-shipments`); },
+        getDefectMarkOperations(warehouseId: number) {
+            return api.request<DefectMarkOperation[]>('GET', `/api/v1/warehouse/${warehouseId}/defect-mark-operations`);
+        },
+        getDefectMarkOperation(operationId: number) {
+            return api.request<DefectMarkOperation>('GET', `/api/v1/warehouse/defect-mark-operations/${operationId}`);
+        },
+        cancelDefectMarkOperation(operationId: number) {
+            return api.request<DefectMarkCancelResponse>('POST', `/api/v1/warehouse/defect-mark-operations/${operationId}/cancel`);
+        },
 
         // ─── Adjustments ─────────────────────────────────────────────
         createAdjustment(warehouseId: number, data: { barcode: string; delta: number; reason: string }) {

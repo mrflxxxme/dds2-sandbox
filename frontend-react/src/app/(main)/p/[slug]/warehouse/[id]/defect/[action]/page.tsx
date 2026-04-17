@@ -68,22 +68,26 @@ export default function DefectActionPage() {
     const [warehouseName, setWarehouseName] = useState('');
     const [loading, setLoading] = useState(true);
     const [defectMap, setDefectMap] = useState<Record<string, number>>({});
+    const [stockMap, setStockMap] = useState<Record<string, number>>({});
 
     const [reason, setReason] = useState('');
     const [rows, setRows] = useState<ItemRow[]>(() => Array.from({ length: 8 }, emptyRow));
     const [search, setSearch] = useState('');
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
+    const [missingItems, setMissingItems] = useState<{ barcode: string; quantity: number }[]>([]);
+    const [receiving, setReceiving] = useState(false);
 
     const nom = useNomLookup(nomenclature);
 
     const loadData = useCallback(async () => {
         setLoading(true);
         try {
-            const [whs, nomData, defectStock] = await Promise.all([
+            const [whs, nomData, defectStock, fullStock] = await Promise.all([
                 api.getWarehouses(),
                 api.getNomenclature(),
                 api.getDefectStock(warehouseId),
+                api.getWarehouseStock(warehouseId),
             ]);
             const wh = whs.find(w => w.id === warehouseId);
             setWarehouseName(wh?.name || `Склад #${warehouseId}`);
@@ -93,6 +97,9 @@ export default function DefectActionPage() {
                 dm[r.barcode] = r.defect_quantity;
             });
             setDefectMap(dm);
+            const sm: Record<string, number> = {};
+            fullStock.forEach((r) => { sm[r.barcode] = r.quantity; });
+            setStockMap(sm);
         } catch { /* ignore */ }
         setLoading(false);
     }, [warehouseId]);
@@ -170,6 +177,7 @@ export default function DefectActionPage() {
         if (!reason.trim()) { setError('Укажите причину'); return; }
         setSaving(true);
         setError('');
+        setMissingItems([]);
 
         const payload: DefectBulkOperation = {
             reason: reason.trim(),
@@ -196,9 +204,40 @@ export default function DefectActionPage() {
             const total = filledRows.length;
             const errorLines = response.errors.map(e => `${e.barcode}: ${e.error}`).join('\n');
             setError(`Обработано ${response.processed}/${total}. Ошибки:\n${errorLines}`);
+
+            if (action === 'mark') {
+                const errorBarcodes = new Set(response.errors.map(e => e.barcode));
+                const missing = filledRows
+                    .filter(r => errorBarcodes.has(r.barcode.trim()))
+                    .map(r => ({ barcode: r.barcode.trim(), quantity: parseInt(r.quantity) || 0 }));
+                setMissingItems(missing);
+            }
         } catch (e: unknown) {
             setSaving(false);
             setError(e instanceof Error ? e.message : 'Ошибка при сохранении');
+        }
+    };
+
+    const handleReceiveMissing = async () => {
+        if (missingItems.length === 0) return;
+        if (!reason.trim()) { setError('Укажите причину'); return; }
+        setReceiving(true);
+        try {
+            const response = await api.receiveDefectBulk(warehouseId, {
+                reason: reason.trim(),
+                items: missingItems,
+            });
+            setReceiving(false);
+
+            if (response.status === 'ok') {
+                router.push(`/p/${slug}/warehouse/${warehouseId}?tab=defects`);
+                return;
+            }
+            const errorLines = response.errors.map(e => `${e.barcode}: ${e.error}`).join('\n');
+            setError(`Принято ${response.processed}/${missingItems.length}. Ошибки:\n${errorLines}`);
+        } catch (e: unknown) {
+            setReceiving(false);
+            setError(e instanceof Error ? e.message : 'Ошибка при приёмке');
         }
     };
 
@@ -231,6 +270,31 @@ export default function DefectActionPage() {
             {error && (
                 <div style={{ color: 'var(--color-danger)', background: 'rgba(239,68,68,0.06)', padding: '10px 16px', borderRadius: 8, marginBottom: 16, fontSize: 13, whiteSpace: 'pre-line' }}>
                     {error}
+                </div>
+            )}
+
+            {action === 'mark' && missingItems.length > 0 && (
+                <div style={{
+                    background: 'rgba(255,159,10,0.08)',
+                    border: '1px solid rgba(255,159,10,0.3)',
+                    padding: '12px 16px', borderRadius: 8, marginBottom: 16,
+                    display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+                }}>
+                    <div style={{ flex: 1, fontSize: 13 }}>
+                        <div style={{ fontWeight: 600, color: 'var(--color-text)' }}>
+                            {missingItems.length} позиций не нашлось на складе
+                        </div>
+                        <div style={{ color: 'var(--color-text-muted)', marginTop: 4 }}>
+                            Принять их на склад сразу как брак (создаст приход с отметкой брака)?
+                        </div>
+                    </div>
+                    <button
+                        className="btn btn-primary"
+                        onClick={handleReceiveMissing}
+                        disabled={receiving}
+                    >
+                        {receiving ? 'Приёмка...' : `Принять как брак (${missingItems.length} поз.)`}
+                    </button>
                 </div>
             )}
 
@@ -297,6 +361,7 @@ export default function DefectActionPage() {
                             <th style={{ width: 40, textAlign: 'center' }}>#</th>
                             <th style={{ minWidth: 220 }}>ТОВАР</th>
                             <th style={{ minWidth: 160 }}>ШК (БАРКОД)</th>
+                            <th style={{ width: 100, textAlign: 'right' }}>НА СКЛАДЕ</th>
                             <th style={{ width: 100, textAlign: 'right' }}>В БРАКЕ</th>
                             <th style={{ width: 120, textAlign: 'right' }}>КОЛИЧЕСТВО</th>
                             <th style={{ width: 50 }}></th>
@@ -304,12 +369,17 @@ export default function DefectActionPage() {
                     </thead>
                     <tbody>
                         {rows.map((row, i) => {
-                            const n = row.barcode.trim() ? nom.resolve(row.barcode.trim()) : undefined;
-                            const unknown = row.barcode.trim() && !n;
+                            const barcode = row.barcode.trim();
+                            const qty = parseInt(row.quantity) || 0;
+                            const n = barcode ? nom.resolve(barcode) : undefined;
+                            const unknown = barcode && !n;
+                            const stockQty = barcode ? (stockMap[barcode] || 0) : 0;
+                            const notEnough = action === 'mark' && barcode && qty > 0 && qty > stockQty;
+                            const rowBg = unknown ? 'rgba(239,68,68,0.04)' : notEnough ? 'rgba(255,159,10,0.06)' : undefined;
                             return (
-                                <tr key={i} style={{ background: unknown ? 'rgba(239,68,68,0.04)' : undefined }}>
+                                <tr key={i} style={{ background: rowBg }}>
                                     <td style={{ textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 12 }}>
-                                        {row.barcode.trim() ? i + 1 : ''}
+                                        {barcode ? i + 1 : ''}
                                     </td>
                                     <td style={{ fontSize: 13, color: n ? 'var(--color-text)' : unknown ? '#ef4444' : 'var(--color-text-muted)' }}>
                                         {n ? nom.label(n) : (unknown ? '(не найден)' : '—')}
@@ -326,8 +396,11 @@ export default function DefectActionPage() {
                                             }}
                                         />
                                     </td>
+                                    <td style={{ textAlign: 'right', fontSize: 13, color: notEnough ? 'var(--color-danger)' : 'var(--color-text-muted)', fontWeight: notEnough ? 600 : 400 }}>
+                                        {barcode ? formatNumber(stockQty) : ''}
+                                    </td>
                                     <td style={{ textAlign: 'right', fontSize: 13, color: 'var(--color-warning)', fontWeight: 600 }}>
-                                        {row.barcode.trim() ? formatNumber(defectMap[row.barcode.trim()] || 0) : ''}
+                                        {barcode ? formatNumber(defectMap[barcode] || 0) : ''}
                                     </td>
                                     <td>
                                         <input
@@ -339,12 +412,13 @@ export default function DefectActionPage() {
                                             style={{
                                                 width: '100%', background: 'transparent', border: 'none',
                                                 padding: '8px 4px', fontSize: 13, textAlign: 'right',
-                                                color: 'var(--color-text)', outline: 'none',
+                                                color: notEnough ? 'var(--color-danger)' : 'var(--color-text)', outline: 'none',
+                                                fontWeight: notEnough ? 600 : 400,
                                             }}
                                         />
                                     </td>
                                     <td>
-                                        {row.barcode.trim() && (
+                                        {barcode && (
                                             <button
                                                 onClick={() => removeRow(i)}
                                                 style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)', fontSize: 16, padding: '4px 6px' }}

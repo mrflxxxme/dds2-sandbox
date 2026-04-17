@@ -53,6 +53,11 @@ class TransferStatus(str, enum.Enum):
     COMPLETED = "COMPLETED"
 
 
+class DefectMarkStatus(str, enum.Enum):
+    ACCEPTED = "ACCEPTED"
+    CANCELLED = "CANCELLED"
+
+
 class MovementType(str, enum.Enum):
     INBOUND = "INBOUND"
     INBOUND_CANCEL = "INBOUND_CANCEL"
@@ -248,6 +253,52 @@ class StockTransferItem(Base):
         Index("ix_stock_transfer_items_project_id", "project_id"),
         Index("ix_stock_transfer_items_transfer_id", "transfer_id"),
         Index("ix_stock_transfer_items_nomenclature_id", "nomenclature_id"),
+    )
+
+
+# ─── Defect Mark Operation (Пометка годных как брак) ─────────────────────
+
+
+class DefectMarkOperation(Base, TimestampMixin, SoftDeleteMixin):
+    __tablename__ = "defect_mark_operations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    warehouse_id: Mapped[int] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=False)
+    number: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default=DefectMarkStatus.ACCEPTED, nullable=False)
+    actual_date: Mapped[date | None] = mapped_column(Date)
+    reason: Mapped[str | None] = mapped_column(Text)
+
+    items: Mapped[list["DefectMarkOperationItem"]] = relationship(
+        back_populates="operation",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("ix_defect_mark_operations_project_id", "project_id"),
+        Index("ix_defect_mark_operations_warehouse_id", "warehouse_id"),
+    )
+
+
+class DefectMarkOperationItem(Base):
+    __tablename__ = "defect_mark_operation_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    operation_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("defect_mark_operations.id", ondelete="CASCADE"), nullable=False
+    )
+    nomenclature_id: Mapped[int] = mapped_column(Integer, ForeignKey("nomenclature.id"), nullable=False)
+    barcode: Mapped[str] = mapped_column(String(50), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    operation: Mapped["DefectMarkOperation"] = relationship(back_populates="items")
+
+    __table_args__ = (
+        Index("ix_defect_mark_operation_items_project_id", "project_id"),
+        Index("ix_defect_mark_operation_items_operation_id", "operation_id"),
+        Index("ix_defect_mark_operation_items_nomenclature_id", "nomenclature_id"),
     )
 
 

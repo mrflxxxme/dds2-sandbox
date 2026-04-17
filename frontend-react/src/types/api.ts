@@ -965,6 +965,38 @@ export interface DefectBulkResponse {
   processed: number;
   failed: number;
   errors: DefectBulkError[];
+  operation_id?: number | null;
+  receipt_id?: number | null;
+  shipment_id?: number | null;
+  number?: string | null;
+}
+
+export interface DefectMarkOperationItem {
+  id: number;
+  operation_id: number;
+  nomenclature_id: number;
+  barcode: string;
+  quantity: number;
+}
+
+export interface DefectMarkOperation {
+  id: number;
+  project_id: number;
+  warehouse_id: number;
+  number: string;
+  status: 'ACCEPTED' | 'CANCELLED';
+  actual_date?: string | null;
+  reason?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  items: DefectMarkOperationItem[];
+}
+
+export interface DefectMarkCancelResponse {
+  status: string;
+  operation_id: number;
+  number: string;
+  reverted_items: number;
 }
 
 export interface StockSummaryRow {

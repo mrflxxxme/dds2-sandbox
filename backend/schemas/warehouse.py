@@ -284,10 +284,34 @@ class DefectBulkResponse(BaseModel):
     processed: int
     failed: int
     errors: list[dict]  # [{barcode, error}]
-    # Optional: set when the bulk op produced a document (receive → receipt, writeoff → shipment)
+    # Optional: set when the bulk op produced a document (mark → operation, receive → receipt, writeoff → shipment)
+    operation_id: int | None = None
     receipt_id: int | None = None
     shipment_id: int | None = None
     number: str | None = None
+
+
+class DefectMarkOperationItemSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    operation_id: int
+    nomenclature_id: int
+    barcode: str
+    quantity: int
+
+
+class DefectMarkOperationSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    project_id: int
+    warehouse_id: int
+    number: str
+    status: str
+    actual_date: date | None = None
+    reason: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    items: list[DefectMarkOperationItemSchema] = []
 
 
 # ─── Delivery Times (Время доставки до WB) ──────────────────────────────

@@ -1,9 +1,10 @@
 """
 Warehouse defect management — mark, receive, writeoff, recover defective goods.
 
+mark_defect_bulk → creates DefectMarkOperation(status=ACCEPTED) document (DM-N).
 receive_defect_bulk → creates InboundReceipt(is_defect=true, status=ACCEPTED) document.
 writeoff_defect_bulk → creates OutboundShipment(is_defect=true, status=SHIPPED) document.
-mark_defect_bulk / recover_defect_bulk → internal stock rebalance (no document).
+recover_defect_bulk → internal stock rebalance (no document).
 """
 
 import logging
@@ -14,6 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.models.warehouse import (
+    DefectMarkOperation,
+    DefectMarkOperationItem,
+    DefectMarkStatus,
     InboundReceipt,
     InboundReceiptItem,
     InboundStatus,
@@ -39,7 +43,6 @@ logger = logging.getLogger(__name__)
 
 _BULK_CONFIG: dict[str, tuple[MovementType, int, int]] = {
     # operation -> (movement_type, delta_sign, defect_delta_sign)
-    "mark": (MovementType.DEFECT_MARK, -1, 1),
     "recover": (MovementType.DEFECT_RECOVER, 1, -1),
 }
 
@@ -127,24 +130,207 @@ async def _bulk_defect_op(
     }
 
 
-async def mark_defect_bulk(
-    db: AsyncSession,
-    project_id: int,
-    warehouse_id: int,
-    payload: dict,
-) -> dict:
-    """Bulk: mark existing good stock as defective."""
-    return await _bulk_defect_op(db, project_id, warehouse_id, payload, "mark")
-
-
 async def recover_defect_bulk(
     db: AsyncSession,
     project_id: int,
     warehouse_id: int,
     payload: dict,
 ) -> dict:
-    """Bulk: restore defective goods to good stock (repaired)."""
+    """Bulk: restore defective goods to good stock (repaired). No document (per-item audit only)."""
     return await _bulk_defect_op(db, project_id, warehouse_id, payload, "recover")
+
+
+async def mark_defect_bulk(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    payload: dict,
+) -> dict:
+    """
+    Mark good stock as defective → creates DefectMarkOperation(status=ACCEPTED) document (DM-N).
+
+    Each item in a nested savepoint — a single failure does not abort the batch.
+    If nothing succeeds, no document is created.
+    Returns: {status, processed, failed, errors, operation_id?, number?}.
+    """
+    wh = await get_warehouse(db, project_id, warehouse_id)
+    if not wh:
+        raise ValueError("Warehouse not found")
+
+    reason = (payload.get("reason") or "").strip() or None
+    valid_items, errors = _prepare_valid_items(payload.get("items") or [])
+    if not valid_items:
+        return {
+            "status": "error",
+            "processed": 0,
+            "failed": len(errors),
+            "errors": errors,
+            "operation_id": None,
+        }
+
+    number = await _next_number(db, project_id, "DM", DefectMarkOperation)
+    operation = DefectMarkOperation(
+        project_id=project_id,
+        warehouse_id=warehouse_id,
+        number=number,
+        status=DefectMarkStatus.ACCEPTED,
+        actual_date=date.today(),
+        reason=reason,
+    )
+    db.add(operation)
+    await db.flush()
+
+    processed_items: list[dict] = []
+    for data in valid_items:
+        barcode = data["barcode"]
+        qty = data["quantity"]
+        try:
+            async with db.begin_nested():
+                nom = await _resolve_barcode(db, project_id, barcode)
+                await _update_stock(
+                    db,
+                    project_id=project_id,
+                    warehouse_id=warehouse_id,
+                    nomenclature_id=nom.id,
+                    barcode=barcode,
+                    delta=-qty,
+                    defect_delta=qty,
+                    movement_type=MovementType.DEFECT_MARK,
+                    reference_type="MARK_OP",
+                    reference_id=operation.id,
+                    comment=reason,
+                )
+                db.add(
+                    DefectMarkOperationItem(
+                        project_id=project_id,
+                        operation_id=operation.id,
+                        nomenclature_id=nom.id,
+                        barcode=barcode,
+                        quantity=qty,
+                    )
+                )
+            processed_items.append({"barcode": barcode, "quantity": qty})
+        except ValueError as e:
+            errors.append({"barcode": barcode, "error": str(e)})
+        except Exception as e:
+            logger.exception("bulk mark defect failed for barcode %s", barcode)
+            errors.append({"barcode": barcode, "error": str(e)})
+
+    if not processed_items:
+        # Nothing applied — drop the empty document
+        await db.delete(operation)
+        await db.commit()
+        return {
+            "status": "error",
+            "processed": 0,
+            "failed": len(errors),
+            "errors": errors,
+            "operation_id": None,
+        }
+
+    await db.commit()
+    await db.refresh(operation)
+
+    failed = len(errors)
+    status = "ok" if failed == 0 else "partial"
+
+    return {
+        "status": status,
+        "processed": len(processed_items),
+        "failed": failed,
+        "errors": errors,
+        "operation_id": operation.id,
+        "number": operation.number,
+    }
+
+
+async def list_mark_operations(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+) -> list[DefectMarkOperation]:
+    """List defect-mark operations (DM-N) for a warehouse."""
+    result = await db.execute(
+        select(DefectMarkOperation)
+        .options(selectinload(DefectMarkOperation.items))
+        .where(
+            DefectMarkOperation.project_id == project_id,
+            DefectMarkOperation.warehouse_id == warehouse_id,
+            DefectMarkOperation.is_deleted == False,  # noqa: E712
+        )
+        .order_by(DefectMarkOperation.id.desc())
+        .limit(500)
+    )
+    return list(result.scalars().all())
+
+
+async def get_mark_operation(
+    db: AsyncSession,
+    project_id: int,
+    operation_id: int,
+) -> DefectMarkOperation | None:
+    """Fetch a single DefectMarkOperation by id."""
+    result = await db.execute(
+        select(DefectMarkOperation)
+        .options(selectinload(DefectMarkOperation.items))
+        .where(
+            DefectMarkOperation.id == operation_id,
+            DefectMarkOperation.project_id == project_id,
+            DefectMarkOperation.is_deleted == False,  # noqa: E712
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def cancel_mark_operation(
+    db: AsyncSession,
+    project_id: int,
+    operation_id: int,
+) -> dict:
+    """
+    Cancel a DefectMarkOperation: revert each item (defect → back to good).
+    Status ACCEPTED → CANCELLED. Idempotent guard: cannot cancel CANCELLED.
+    """
+    result = await db.execute(
+        select(DefectMarkOperation)
+        .options(selectinload(DefectMarkOperation.items))
+        .where(
+            DefectMarkOperation.id == operation_id,
+            DefectMarkOperation.project_id == project_id,
+            DefectMarkOperation.is_deleted == False,  # noqa: E712
+        )
+    )
+    operation = result.scalar_one_or_none()
+    if operation is None:
+        raise ValueError("Operation not found")
+
+    if operation.status != DefectMarkStatus.ACCEPTED:
+        raise ValueError(f"Cannot cancel operation in status {operation.status}")
+
+    for item in operation.items:
+        await _update_stock(
+            db,
+            project_id=project_id,
+            warehouse_id=operation.warehouse_id,
+            nomenclature_id=item.nomenclature_id,
+            barcode=item.barcode,
+            delta=item.quantity,
+            defect_delta=-item.quantity,
+            movement_type=MovementType.DEFECT_RECOVER,
+            reference_type="MARK_OP_CANCEL",
+            reference_id=operation.id,
+            comment=f"Отмена {operation.number}",
+        )
+
+    operation.status = DefectMarkStatus.CANCELLED
+    await db.commit()
+
+    return {
+        "status": "ok",
+        "operation_id": operation.id,
+        "number": operation.number,
+        "reverted_items": len(operation.items),
+    }
 
 
 # ─── Document-creating operations (receive / writeoff) ────────────────────
@@ -390,25 +576,16 @@ async def mark_defect(
     warehouse_id: int,
     payload: dict,
 ) -> dict:
-    wh = await get_warehouse(db, project_id, warehouse_id)
-    if not wh:
-        raise ValueError("Warehouse not found")
-
-    nom = await _resolve_barcode(db, project_id, payload["barcode"])
-    await _update_stock(
+    """Single-item mark: creates a 1-item DefectMarkOperation document."""
+    return await mark_defect_bulk(
         db,
-        project_id=project_id,
-        warehouse_id=warehouse_id,
-        nomenclature_id=nom.id,
-        barcode=payload["barcode"],
-        delta=-payload["quantity"],
-        defect_delta=payload["quantity"],
-        movement_type=MovementType.DEFECT_MARK,
-        reference_type="DEFECT",
-        comment=payload.get("reason"),
+        project_id,
+        warehouse_id,
+        {
+            "reason": payload.get("reason") or "—",
+            "items": [{"barcode": payload["barcode"], "quantity": payload["quantity"]}],
+        },
     )
-    await db.commit()
-    return {"status": "ok", "operation": "mark_defect", "barcode": payload["barcode"], "quantity": payload["quantity"]}
 
 
 async def receive_defect(

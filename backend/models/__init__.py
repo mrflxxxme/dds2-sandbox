@@ -133,6 +133,9 @@ from backend.models.transactions import (
 
 # Warehouse
 from backend.models.warehouse import (
+    DefectMarkOperation,
+    DefectMarkOperationItem,
+    DefectMarkStatus,
     InboundReceipt,
     InboundReceiptItem,
     InboundStatus,
@@ -266,6 +269,9 @@ __all__ = [
     "WarehouseStock",
     "StockAdjustment",
     "WarehouseDeliveryTime",
+    "DefectMarkOperation",
+    "DefectMarkOperationItem",
+    "DefectMarkStatus",
     # WB Order Cancel Stats
     "WbOrderCancelDaily",
     # WB FBO Supplies
