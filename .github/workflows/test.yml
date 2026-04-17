@@ -323,8 +323,27 @@ jobs:
       - name: Run Alembic migrations
         run: docker compose exec -T backend alembic upgrade head
 
+      - name: Seed E2E test user (admin/admin12345)
+        run: |
+          # E2E global-setup логинится под этим пользователем — создаём через /register
+          # (REGISTER_ENABLED=true в .env). Пароль >= MIN_PASSWORD_LENGTH (8).
+          # Если пользователь уже существует (400) — не падаем.
+          HTTP_CODE=$(curl -s -o /tmp/register.out -w "%{http_code}" \
+            -X POST http://localhost/api/v1/auth/register \
+            -H "Content-Type: application/json" \
+            -d '{"username":"admin","password":"admin12345","email":"admin@e2e.local"}')
+          echo "Register HTTP $HTTP_CODE"
+          cat /tmp/register.out
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "400" ]; then
+            echo "❌ Unexpected register response"
+            exit 1
+          fi
+
       - name: Run Playwright tests
         working-directory: frontend-react
+        env:
+          E2E_USERNAME: admin
+          E2E_PASSWORD: admin12345
         run: npx playwright test
 
       - name: Upload Playwright report
