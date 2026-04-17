@@ -49,7 +49,7 @@ class AssemblyStatus(enum.StrEnum):
 ASSEMBLY_TRANSITIONS: dict[AssemblyStatus, set[AssemblyStatus]] = {
     AssemblyStatus.PENDING: {AssemblyStatus.IN_PROGRESS, AssemblyStatus.CANCELLED},
     AssemblyStatus.IN_PROGRESS: {AssemblyStatus.READY, AssemblyStatus.CANCELLED},
-    AssemblyStatus.READY: {AssemblyStatus.VEHICLE_ASSIGNED, AssemblyStatus.CANCELLED},
+    AssemblyStatus.READY: {AssemblyStatus.VEHICLE_ASSIGNED, AssemblyStatus.IN_PROGRESS, AssemblyStatus.CANCELLED},
     AssemblyStatus.VEHICLE_ASSIGNED: {AssemblyStatus.SHIPPED, AssemblyStatus.READY, AssemblyStatus.CANCELLED},
     AssemblyStatus.SHIPPED: {AssemblyStatus.DELIVERED, AssemblyStatus.READY, AssemblyStatus.CANCELLED},
     AssemblyStatus.DELIVERED: set(),  # final status

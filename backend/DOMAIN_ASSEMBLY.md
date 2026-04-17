@@ -56,11 +56,15 @@ async def ship_shipment(db, project_id, shipment_id) -> OutboundShipment:
 
 ```
 PENDING → IN_PROGRESS → READY → VEHICLE_ASSIGNED → SHIPPED
-                                                       ↓ (rollback)
-CANCELLED ← (любой статус)                         READY
+              ↑           ↓           ↓ (rollback)       ↓ (rollback)
+              └───────────┘         READY             READY
+CANCELLED ← (любой статус)
 ```
 
-Строго последовательные. Пропуск запрещён.
+Строго последовательные; пропуск запрещён. Допустимые откаты:
+- `READY → IN_PROGRESS` — возврат в сборку (через `start_assembly`); сбрасывается `actual_ready_date`
+- `VEHICLE_ASSIGNED → READY` — отмена назначения машины (`unassign_vehicle`)
+- `SHIPPED → READY` — откат отгрузки (через cancel + повторная сборка)
 
 ## При Ship (VEHICLE_ASSIGNED → SHIPPED)
 

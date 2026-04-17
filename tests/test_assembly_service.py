@@ -482,6 +482,22 @@ class TestLifecycle:
         with pytest.raises(ValueError, match="Cannot transition"):
             await mark_ready(db_session, PROJECT_ID, req.id)
 
+    async def test_reopen_from_ready_to_in_progress(self, db_session):
+        """9b. READY -> IN_PROGRESS (reopen): allowed, clears actual_ready_date."""
+        req = await _create_test_request(db_session)
+        await start_assembly(db_session, PROJECT_ID, req.id)
+        req = await mark_ready(db_session, PROJECT_ID, req.id)
+        assert req.status == AssemblyStatus.READY
+        assert req.actual_ready_date == date.today()
+
+        req = await start_assembly(db_session, PROJECT_ID, req.id)
+        assert req.status == AssemblyStatus.IN_PROGRESS
+        assert req.actual_ready_date is None
+
+        req = await mark_ready(db_session, PROJECT_ID, req.id)
+        assert req.status == AssemblyStatus.READY
+        assert req.actual_ready_date == date.today()
+
 
 @pytest.mark.asyncio
 class TestShipAndCancel:
