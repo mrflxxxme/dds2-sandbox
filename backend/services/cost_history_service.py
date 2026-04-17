@@ -113,9 +113,9 @@ async def get_cost_history(
             "price_cny": float(item.price_cny) if item.price_cny else 0.0,
         }
 
-        if cost_per_unit > 0:
-            articles_map[art]["total_cost_sum"] += cost_per_unit
-            articles_map[art]["cost_count"] += 1
+        if cost_per_unit > 0 and qty > 0:
+            articles_map[art]["total_cost_sum"] += cost_per_unit * qty
+            articles_map[art]["cost_count"] += qty
 
     # 5. Compute avg and latest cost, apply filters
     result_articles = []

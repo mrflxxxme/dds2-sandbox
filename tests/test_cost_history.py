@@ -123,7 +123,7 @@ class TestGetCostHistory:
 
     @pytest.mark.asyncio
     async def test_multiple_orders_avg_cost(self, db_session: AsyncSession, project):
-        """Multiple orders -> avg cost calculated."""
+        """Multiple orders -> weighted avg cost (by qty)."""
         ono1 = _ono()
         ono2 = _ono()
         await _create_cost_order(db_session, project.id, ono1, date(2025, 1, 1))
@@ -133,9 +133,27 @@ class TestGetCostHistory:
 
         result = await get_cost_history(db_session, project.id)
         art = result["articles"][0]
-        assert art["avg_cost"] == 150.0  # (100 + 200) / 2
+        # Weighted: (100*50 + 200*30) / (50+30) = 11000/80 = 137.5
+        assert art["avg_cost"] == 137.5
         # Latest cost = from most recent order (ono2)
         assert art["latest_cost"] == 200.0
+
+    @pytest.mark.asyncio
+    async def test_weighted_avg_skewed_batches(self, db_session: AsyncSession, project):
+        """Large cheap batch + small expensive batch: weighted avg stays close to cheap."""
+        ono1 = _ono()
+        ono2 = _ono()
+        await _create_cost_order(db_session, project.id, ono1, date(2025, 1, 1))
+        await _create_cost_order(db_session, project.id, ono2, date(2025, 2, 1))
+        # 2475 units @ 623.95 (bulk) + 45 units @ 945.97 (sample)
+        await _create_cost_item(db_session, ono1, "ART-SKEW", total_rub=623.95, qty=2475)
+        await _create_cost_item(db_session, ono2, "ART-SKEW", total_rub=945.97, qty=45)
+
+        result = await get_cost_history(db_session, project.id)
+        art = next(a for a in result["articles"] if a["article_seller"] == "ART-SKEW")
+        # Weighted: (623.95*2475 + 945.97*45) / 2520 = (1544276.25 + 42568.65) / 2520 ≈ 629.70
+        # (Simple mean would be 784.96 — wrong.)
+        assert abs(art["avg_cost"] - 629.70) < 0.1
 
     @pytest.mark.asyncio
     async def test_article_search_filter(self, db_session: AsyncSession, project):
