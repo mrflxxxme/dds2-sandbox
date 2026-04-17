@@ -17,6 +17,7 @@ COPY --from=builder /install /usr/local
 
 COPY backend/ ./backend/
 COPY tests/ ./tests/
+COPY scripts/ ./scripts/
 COPY pytest.ini .
 COPY pyproject.toml .
 COPY migrations/ ./migrations/
