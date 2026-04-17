@@ -12,6 +12,8 @@ import type {
     VehicleUpdateData,
     VehicleSchema,
     VehicleCostSummary,
+    VehiclePriceResyncPreview,
+    VehiclePriceResyncApplyResult,
     AvailableItemGroup,
     SupplyChainOverview,
     SplitItem,
@@ -109,6 +111,15 @@ export function addSupplyChainMethods(api: ApiClient) {
         },
         clearAllVehicleItems(orderNo: string) {
             return api.request<{ ok: boolean; removed: number }>('DELETE', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items`);
+        },
+        previewVehiclePriceResync(orderNo: string) {
+            return api.request<VehiclePriceResyncPreview>('GET', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/price-resync/preview`);
+        },
+        applyVehiclePriceResync(orderNo: string) {
+            return api.request<VehiclePriceResyncApplyResult>('POST', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/price-resync`);
+        },
+        bulkUpdateFactoryItemPrices(items: { factory_order_item_id: number; new_price_cny: string | number }[]) {
+            return api.request<{ updated: number; not_found: number[] }>('PUT', '/api/v1/supply-chain/factory-orders/items/bulk-price', { items });
         },
         deleteVehicle(orderNo: string) {
             if (orderNo.includes('/')) {

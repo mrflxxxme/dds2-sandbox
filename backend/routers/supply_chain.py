@@ -17,6 +17,7 @@ from backend.models import Project, User
 from backend.project_context import get_current_project
 from backend.schemas.supply_chain import (
     AddItemsToVehicleRequest,
+    BulkPriceUpdateRequest,
     BulkUpdateItemSpecs,
     FactoryOrderCreate,
     FactoryOrderHistorySchema,
@@ -144,6 +145,17 @@ async def bulk_update_item_specs(
         return await factory_orders.bulk_update_items_specs(db, project.id, order_id, updates)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+
+
+@router.put("/factory-orders/items/bulk-price", dependencies=[Depends(rate_limit_write)])
+async def bulk_update_item_prices(
+    payload: BulkPriceUpdateRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    updates = [u.model_dump() for u in payload.items]
+    return await factory_orders.bulk_update_item_prices(db, project.id, updates, user_name=user.email)
 
 
 @router.put("/factory-orders/{order_id}/items/{item_id}", dependencies=[Depends(rate_limit_write)])
@@ -412,6 +424,32 @@ async def add_items_to_vehicle(
         return await vehicle_delivery.add_items_to_vehicle(db, project.id, order_no, payload)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+
+
+@router.get("/vehicles/{order_no}/price-resync/preview")
+async def preview_vehicle_price_resync(
+    order_no: str,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Preview items whose price differs from the linked factory order."""
+    try:
+        return await vehicle_delivery.preview_price_resync(db, project.id, order_no)
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@router.post("/vehicles/{order_no}/price-resync", dependencies=[Depends(rate_limit_write)])
+async def apply_vehicle_price_resync(
+    order_no: str,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Apply price resync: update CostOrderItem.price_cny from factory orders + recalc."""
+    try:
+        return await vehicle_delivery.apply_price_resync(db, project.id, order_no)
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from e
 
 
 @router.delete("/vehicles/{order_no}/items/{item_id}", dependencies=[Depends(rate_limit_write)])

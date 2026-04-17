@@ -594,6 +594,68 @@ async def update_item(
     return item
 
 
+async def bulk_update_item_prices(
+    db: AsyncSession,
+    project_id: int,
+    updates: list[dict],
+    user_name: str | None = None,
+) -> dict:
+    """Bulk-update FactoryOrderItem.price_cny across (possibly multiple) orders.
+
+    updates: list of {"factory_order_item_id": int, "new_price_cny": Decimal}.
+    Only items belonging to the project are updated; unknown foi_ids are returned
+    in `not_found`. Each price change is logged to FactoryOrderHistory per order.
+    """
+    if not updates:
+        return {"updated": 0, "not_found": []}
+
+    foi_ids = [u["factory_order_item_id"] for u in updates]
+    result = await db.execute(
+        select(FactoryOrderItem).where(
+            FactoryOrderItem.id.in_(foi_ids),
+            FactoryOrderItem.project_id == project_id,
+            FactoryOrderItem.is_deleted == False,  # noqa: E712
+        )
+    )
+    foi_map = {fi.id: fi for fi in result.scalars().all()}
+
+    not_found: list[int] = []
+    # Group price change details per factory_order for concise history entries
+    per_order_changes: dict[int, list[str]] = {}
+    updated_count = 0
+
+    for upd in updates:
+        foi_id = upd["factory_order_item_id"]
+        new_price = upd["new_price_cny"]
+        fi = foi_map.get(foi_id)
+        if not fi:
+            not_found.append(foi_id)
+            continue
+        if fi.price_cny == new_price:
+            continue  # no-op
+        old_price = fi.price_cny
+        fi.price_cny = new_price
+        per_order_changes.setdefault(fi.factory_order_id, []).append(f"{fi.barcode}: {old_price} → {new_price} ¥")
+        updated_count += 1
+
+    if updated_count == 0:
+        return {"updated": 0, "not_found": not_found}
+
+    for fo_id, changes in per_order_changes.items():
+        await _add_history(
+            db,
+            project_id,
+            fo_id,
+            "price_updated",
+            details="Цены обновлены: " + "; ".join(changes),
+            changed_by=user_name,
+        )
+
+    await db.commit()
+    await _invalidate_supplier_catalog(project_id)
+    return {"updated": updated_count, "not_found": not_found}
+
+
 async def bulk_update_items_specs(
     db: AsyncSession,
     project_id: int,

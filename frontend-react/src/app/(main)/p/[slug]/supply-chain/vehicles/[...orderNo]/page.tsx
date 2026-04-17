@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, formatDateTime, exportToExcel, calcTotalBoxesWithMix } from '@/lib/utils';
@@ -12,6 +13,7 @@ import type {
     VehicleStatus,
     VehicleCostSummary,
     VehicleItemSchema,
+    VehiclePriceResyncPreview,
     AvailableItemGroup,
     AvailableItem,
     VehicleDocument,
@@ -518,6 +520,7 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
     const [clearingAll, setClearingAll] = useState(false);
     const [perUnit, setPerUnit] = useState(false); // false = total, true = per unit
     const [expandedId, setExpandedId] = useState<number | null>(null);
+    const [resyncOpen, setResyncOpen] = useState(false);
     const hasCosts = items.some(i => i.total_rub);
 
     const handleRemove = async (itemId: number, isMix?: boolean) => {
@@ -604,10 +607,22 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                     {clearingAll ? '...' : t('vehicle_items_clear_all')}
                 </button>
             )}
+            {items.length > 0 && (
+                <button className="btn btn-secondary btn-sm" onClick={() => setResyncOpen(true)} style={{ fontSize: 12 }}>
+                    {t('price_resync_btn')}
+                </button>
+            )}
             <button className="btn btn-secondary btn-sm" onClick={handleExport} style={{ fontSize: 12 }}>
                 📊 Excel
             </button>
         </div>
+        {resyncOpen && (
+            <PriceResyncModal
+                vehicleOrderNo={vehicleOrderNo}
+                onClose={() => setResyncOpen(false)}
+                onApplied={() => { setResyncOpen(false); onRemoved(); }}
+            />
+        )}
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             {/* Column group headers */}
             {hasCosts && (
@@ -698,7 +713,7 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                             <td style={{ ...td, fontSize: 11, color: 'var(--color-text-muted)' }}>{boxLabel}</td>
                             <td style={{ ...tdR, color: 'var(--color-text-muted)' }}>{itemTotalVol > 0 ? itemTotalVol.toFixed(2) : '—'}</td>
                             <td style={tdR}>{formatNumber(item.price_cny, 2)}</td>
-                            <td style={tdR}>{formatNumber(item.qty * item.price_cny, 0)}</td>
+                            <td style={tdR}>{formatNumber(item.qty * item.price_cny, 2)}</td>
                             {hasCosts && <td style={tdF}>{formatNumber(perUnit ? (item.delivery_rub || 0) : (item.delivery_rub || 0) * item.qty, perUnit ? 2 : 0)}</td>}
                             {hasCosts && <td style={tdF}>{formatNumber(perUnit ? (item.duty_rub || 0) : (item.duty_rub || 0) * item.qty, perUnit ? 2 : 0)}</td>}
                             {hasCosts && <td style={tdF}>{formatNumber(perUnit ? (item.vat_rub || 0) : (item.vat_rub || 0) * item.qty, perUnit ? 2 : 0)}</td>}
@@ -748,7 +763,7 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                     <td />
                     <td style={{ padding: '12px 6px', textAlign: 'right' }}>{totalVolume > 0 ? totalVolume.toFixed(2) : ''}</td>
                     <td />
-                    <td style={{ padding: '12px 6px', textAlign: 'right', whiteSpace: 'nowrap' }}>{formatNumber(Number(totalCny), 0)} ¥</td>
+                    <td style={{ padding: '12px 6px', textAlign: 'right', whiteSpace: 'nowrap' }}>{formatNumber(Number(totalCny), 2)} ¥</td>
                     {hasCosts && <td style={{ ...tdF, padding: '12px 6px', whiteSpace: 'nowrap' }}>{perUnit ? '' : `${formatNumber(totalDelivery, 0)} ₽`}</td>}
                     {hasCosts && <td style={{ ...tdF, padding: '12px 6px', whiteSpace: 'nowrap' }}>{perUnit ? '' : `${formatNumber(totalDuty, 0)} ₽`}</td>}
                     {hasCosts && <td style={{ ...tdF, padding: '12px 6px', whiteSpace: 'nowrap' }}>{perUnit ? '' : `${formatNumber(totalVat, 0)} ₽`}</td>}
@@ -758,6 +773,158 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
             </tfoot>
         </table>
         </>
+    );
+}
+
+// ─── Price Resync Modal ───────────────────────────────────────────────────
+
+function PriceResyncModal({ vehicleOrderNo, onClose, onApplied }: {
+    vehicleOrderNo: string; onClose: () => void; onApplied: () => void;
+}) {
+    const { t } = useT();
+    const [preview, setPreview] = useState<VehiclePriceResyncPreview | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [applying, setApplying] = useState(false);
+    const [mounted, setMounted] = useState(false);
+
+    useEffect(() => { setMounted(true); }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const data = await api.previewVehiclePriceResync(vehicleOrderNo);
+                if (!cancelled) setPreview(data);
+            } catch (e: unknown) {
+                if (!cancelled) setError(e instanceof Error ? e.message : t('msg_error'));
+            } finally {
+                if (!cancelled) setLoading(false);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [vehicleOrderNo, t]);
+
+    const handleApply = async () => {
+        setApplying(true);
+        try {
+            const res = await api.applyVehiclePriceResync(vehicleOrderNo);
+            alert(`${t('price_resync_applied')} ${res.applied}`);
+            onApplied();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : t('msg_error'));
+            setApplying(false);
+        }
+    };
+
+    const isForming = preview?.vehicle_status === 'FORMING';
+    const hasChanges = (preview?.changed_items || 0) > 0;
+
+    if (!mounted) return null;
+
+    return createPortal(
+        <div
+            onClick={onClose}
+            style={{
+                position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                zIndex: 10000, padding: 16,
+            }}
+        >
+            <div
+                onClick={e => e.stopPropagation()}
+                className="glass-card"
+                style={{
+                    maxWidth: 900, width: '100%', maxHeight: '85vh', overflowY: 'auto',
+                    padding: 24, background: 'var(--color-bg)',
+                }}
+            >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>{t('price_resync_title')}</h3>
+                    <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: 'var(--color-text-muted)', padding: 4 }}>✕</button>
+                </div>
+
+                {loading && <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>{t('price_resync_loading')}</div>}
+
+                {error && (
+                    <>
+                        <div style={{ padding: 16, color: 'var(--color-danger)', fontWeight: 500 }}>⚠️ {error}</div>
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+                            <button className="btn btn-secondary btn-sm" onClick={onClose}>{t('price_resync_cancel')}</button>
+                        </div>
+                    </>
+                )}
+
+                {preview && !loading && !error && (
+                    <>
+                        {!isForming && (
+                            <div style={{
+                                padding: 12, marginBottom: 16, borderRadius: 8,
+                                background: 'rgba(255,59,48,0.08)', color: 'var(--color-danger)',
+                                fontSize: 13, fontWeight: 500,
+                            }}>
+                                ⚠️ {t('price_resync_warning_status')}
+                            </div>
+                        )}
+
+                        <div style={{ display: 'flex', gap: 24, fontSize: 13, marginBottom: 16, color: 'var(--color-text-muted)' }}>
+                            <div>{t('price_resync_changes')}: <b style={{ color: 'var(--color-text)' }}>{preview.changed_items} / {preview.total_items}</b></div>
+                            {preview.unlinked_items > 0 && (
+                                <div>{preview.unlinked_items} {t('price_resync_unlinked')}</div>
+                            )}
+                            {hasChanges && (
+                                <div>{t('price_resync_delta')}: <b style={{ color: preview.sum_delta_cny >= 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
+                                    {preview.sum_delta_cny >= 0 ? '+' : ''}{formatNumber(preview.sum_delta_cny, 2)} ¥
+                                </b></div>
+                            )}
+                        </div>
+
+                        {!hasChanges ? (
+                            <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                                ✅ {t('price_resync_empty')}
+                            </div>
+                        ) : (
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                                <thead>
+                                    <tr style={{ borderBottom: '2px solid var(--color-border)', color: 'var(--color-text-muted)' }}>
+                                        <th style={{ textAlign: 'left', padding: '8px 6px', fontWeight: 500 }}>{t('col_barcode')}</th>
+                                        <th style={{ textAlign: 'left', padding: '8px 6px', fontWeight: 500 }}>{t('col_article')}</th>
+                                        <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>{t('col_qty')}</th>
+                                        <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>{t('price_resync_col_old')}</th>
+                                        <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>{t('price_resync_col_new')}</th>
+                                        <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>{t('price_resync_col_delta')}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {preview.items.map(it => (
+                                        <tr key={it.cost_item_id} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                            <td style={{ padding: '6px', fontFamily: 'monospace' }}>{it.barcode}</td>
+                                            <td style={{ padding: '6px', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.article_seller || ''}>{it.article_seller || '—'}</td>
+                                            <td style={{ padding: '6px', textAlign: 'right' }}>{formatNumber(it.qty, 0)}</td>
+                                            <td style={{ padding: '6px', textAlign: 'right', color: 'var(--color-text-muted)' }}>{formatNumber(it.old_price_cny, 2)}</td>
+                                            <td style={{ padding: '6px', textAlign: 'right', fontWeight: 600 }}>{formatNumber(it.new_price_cny, 2)}</td>
+                                            <td style={{ padding: '6px', textAlign: 'right', fontWeight: 600, color: it.delta_sum_cny >= 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
+                                                {it.delta_sum_cny >= 0 ? '+' : ''}{formatNumber(it.delta_sum_cny, 2)}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        )}
+
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+                            <button className="btn btn-secondary btn-sm" onClick={onClose} disabled={applying}>{t('price_resync_cancel')}</button>
+                            {hasChanges && (
+                                <button className="btn btn-primary btn-sm" onClick={handleApply} disabled={applying}>
+                                    {applying ? t('price_resync_applying') : t('price_resync_apply')}
+                                </button>
+                            )}
+                        </div>
+                    </>
+                )}
+            </div>
+        </div>,
+        document.body
     );
 }
 
@@ -816,8 +983,8 @@ function CapacityBar({ vehicle }: { vehicle: VehicleSchema }) {
 
 // ─── Add Items Section (two modes: list + paste) ──────────────────────────
 
-interface PasteRow { barcode: string; qty: string; article: string; autoAdded?: boolean; mixGroupId?: string | null }
-const emptyRow = (): PasteRow => ({ barcode: '', qty: '', article: '' });
+interface PasteRow { barcode: string; qty: string; price: string; article: string; autoAdded?: boolean; mixGroupId?: string | null }
+const emptyRow = (): PasteRow => ({ barcode: '', qty: '', price: '', article: '' });
 
 function calcBoxes(qty: number, pcsPerBox: number | undefined): { boxes: number; notFull: boolean } {
     if (!pcsPerBox || pcsPerBox <= 0) return { boxes: 0, notFull: false };
@@ -860,6 +1027,7 @@ function resolveMixSiblings(
             result.push({
                 barcode: siblingBc,
                 qty: String(autoQty),
+                price: String(siblingItem.price_cny || ''),
                 article: siblingItem.article_seller || siblingItem.subject || '',
                 autoAdded: true,
                 mixGroupId: item.mix_group_id,
@@ -912,6 +1080,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
 
     // Paste mode state
     const [rows, setRows] = useState<PasteRow[]>(Array.from({ length: 5 }, emptyRow));
+    const [showMismatchModal, setShowMismatchModal] = useState(false);
 
     useEffect(() => {
         (async () => {
@@ -1034,7 +1203,8 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
             if (cols.length < 1) continue;
             const barcode = cols[0]?.trim() || '';
             const qty = cols.length >= 2 ? parseNum(cols[1]) : '';
-            if (barcode) newRows.push({ barcode, qty, article: resolveArticle(barcode) });
+            const price = cols.length >= 3 ? parseNum(cols[2]) : '';
+            if (barcode) newRows.push({ barcode, qty, price, article: resolveArticle(barcode) });
         }
         if (newRows.length > 0) {
             const resolved = resolveMixSiblings(newRows, allItemMap);
@@ -1049,43 +1219,93 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
         const qty = parseInt(r.qty) || 0;
         return item && qty > 0 && qty > item.remaining_qty;
     });
+    const missingPriceRows = filledRows.filter(r => {
+        const item = allItemMap[r.barcode.trim()];
+        const qty = parseInt(r.qty) || 0;
+        return item && qty > 0 && qty <= item.remaining_qty && !(parseFloat(r.price) > 0);
+    });
     const validRows = filledRows.filter(r => {
         const item = allItemMap[r.barcode.trim()];
         const qty = parseInt(r.qty) || 0;
-        return item && qty > 0 && qty <= item.remaining_qty;
+        const price = parseFloat(r.price);
+        return item && qty > 0 && qty <= item.remaining_qty && price > 0;
     });
     // Allow adding found items even if some are not found (fallback A)
     const pasteCanSave = validRows.length > 0;
     const hasUnfound = invalidRows.length > 0 || exceededRows.length > 0;
 
+    // Price mismatch: entered price differs from FOI price by > 0.0001 ¥
+    const mismatchRows = validRows.filter(r => {
+        const item = allItemMap[r.barcode.trim()];
+        const pastePrice = parseFloat(r.price);
+        const orderPrice = parseFloat(item.price_cny) || 0;
+        return Math.abs(pastePrice - orderPrice) > 0.0001;
+    });
+
+    const performAdd = async () => {
+        const items = validRows.map(r => ({
+            factory_order_item_id: allItemMap[r.barcode.trim()].id,
+            qty: parseInt(r.qty) || 0,
+        }));
+        const validBarcodes = new Set(validRows.map(r => r.barcode.trim()));
+        await api.addItemsToVehicle(vehicleOrderNo, items);
+
+        // Keep rows that weren't successfully added (unfound + exceeded qty)
+        const remainingRows = rows.filter(r => {
+            const bc = r.barcode.trim();
+            return bc && !validBarcodes.has(bc);
+        });
+
+        if (remainingRows.length > 0) {
+            setRows([...remainingRows, emptyRow(), emptyRow()]);
+            onPartialAdded();
+            const freshData = await api.getAvailableItems();
+            setGroups(freshData);
+        } else {
+            setRows(Array.from({ length: 5 }, emptyRow));
+            onAdded();
+        }
+    };
+
     const handlePasteSubmit = async () => {
         if (!pasteCanSave) return;
+        if (mismatchRows.length > 0) {
+            setShowMismatchModal(true);
+            return;
+        }
         setSubmitting(true);
         setError('');
         try {
-            const items = validRows.map(r => ({
+            await performAdd();
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : t('msg_error'));
+        }
+        setSubmitting(false);
+    };
+
+    const handleKeepOrderPrices = async () => {
+        setShowMismatchModal(false);
+        setSubmitting(true);
+        setError('');
+        try {
+            await performAdd();
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : t('msg_error'));
+        }
+        setSubmitting(false);
+    };
+
+    const handleOverwriteOrderPrices = async () => {
+        setShowMismatchModal(false);
+        setSubmitting(true);
+        setError('');
+        try {
+            const priceUpdates = mismatchRows.map(r => ({
                 factory_order_item_id: allItemMap[r.barcode.trim()].id,
-                qty: parseInt(r.qty) || 0,
+                new_price_cny: r.price,
             }));
-            const validBarcodes = new Set(validRows.map(r => r.barcode.trim()));
-            await api.addItemsToVehicle(vehicleOrderNo, items);
-
-            // Keep rows that weren't successfully added (unfound + exceeded qty)
-            const remainingRows = rows.filter(r => {
-                const bc = r.barcode.trim();
-                return bc && !validBarcodes.has(bc);
-            });
-
-            if (remainingRows.length > 0) {
-                setRows([...remainingRows, emptyRow(), emptyRow()]);
-                // Refresh vehicle data + available items, but keep section open
-                onPartialAdded();
-                const freshData = await api.getAvailableItems();
-                setGroups(freshData);
-            } else {
-                setRows(Array.from({ length: 5 }, emptyRow));
-                onAdded(); // all done — close section
-            }
+            await api.bulkUpdateFactoryItemPrices(priceUpdates);
+            await performAdd();
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : t('msg_error'));
         }
@@ -1325,6 +1545,18 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                 </div>
                             )}
 
+                            {missingPriceRows.length > 0 && (
+                                <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 13, color: '#ef4444' }}>
+                                    ¥? <b>{missingPriceRows.length}</b> {t('paste_missing_price')}
+                                </div>
+                            )}
+
+                            {mismatchRows.length > 0 && (
+                                <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 13, color: '#b45309' }}>
+                                    ⚠️ <b>{mismatchRows.length}</b> {t('paste_price_mismatch')}
+                                </div>
+                            )}
+
                             <div style={{ overflow: 'auto', maxHeight: 360 }} onPaste={handlePaste}>
                                 <table className="data-table" style={{ marginBottom: 0, fontSize: 13 }}>
                                     <thead>
@@ -1336,6 +1568,8 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                             <th style={{ textAlign: 'right' }}>{t('col_pcs_per_box')}</th>
                                             <th style={{ textAlign: 'right' }}>{t('col_available')}</th>
                                             <th style={{ width: 90 }}>{t('col_qty')}</th>
+                                            <th style={{ width: 100 }}>{t('col_price_cny')}</th>
+                                            <th style={{ textAlign: 'right', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('paste_in_order')}</th>
                                             <th style={{ textAlign: 'right' }}>{t('col_boxes')}</th>
                                             <th>{t('col_from_order')}</th>
                                             <th style={{ width: 50, textAlign: 'center' }}></th>
@@ -1382,6 +1616,32 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                                             style={{ ...cellInput, borderColor: exceeds ? '#f59e0b' : 'var(--color-border)', opacity: isAutoAdded ? 0.7 : 1 }}
                                                             autoComplete="off" />
                                                     </td>
+                                                    <td>
+                                                        <input type="number" value={row.price} onChange={e => updateRow(i, 'price', e.target.value)}
+                                                            placeholder="0.00" min={0} step="0.0001"
+                                                            style={{
+                                                                ...cellInput,
+                                                                borderColor: bc && item && qty > 0 && !(parseFloat(row.price) > 0) ? '#ef4444'
+                                                                    : (() => {
+                                                                        const p = parseFloat(row.price);
+                                                                        const op = parseFloat(item?.price_cny || '0') || 0;
+                                                                        return item && p > 0 && Math.abs(p - op) > 0.0001 ? '#f59e0b' : 'var(--color-border)';
+                                                                    })(),
+                                                            }}
+                                                            autoComplete="off" />
+                                                    </td>
+                                                    <td style={{ fontSize: 11, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                                        {item ? (() => {
+                                                            const op = parseFloat(item.price_cny) || 0;
+                                                            const p = parseFloat(row.price);
+                                                            const differs = p > 0 && Math.abs(p - op) > 0.0001;
+                                                            return (
+                                                                <span style={{ color: differs ? '#f59e0b' : 'var(--color-text-muted)', fontWeight: differs ? 600 : 400 }}>
+                                                                    {formatNumber(op, 2)}
+                                                                </span>
+                                                            );
+                                                        })() : ''}
+                                                    </td>
                                                     <td style={{ fontSize: 12, textAlign: 'right' }}>
                                                         {qty > 0 && item?.pcs_per_box ? (
                                                             <BoxDropdown qty={qty} pcsPerBox={item.pcs_per_box} />
@@ -1395,6 +1655,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                                          unknown ? <span style={{ color: '#ef4444', fontSize: 11 }}>✗</span> :
                                                          exceeds ? <span style={{ color: '#f59e0b', fontSize: 11 }}>!</span> :
                                                          notFull && qty > 0 ? <span style={{ color: '#f59e0b', fontSize: 11 }}>⚠</span> :
+                                                         qty > 0 && !(parseFloat(row.price) > 0) ? <span style={{ color: '#ef4444', fontSize: 11 }}>¥?</span> :
                                                          qty > 0 ? <span style={{ color: '#22c55e', fontSize: 11 }}>✓</span> : ''}
                                                     </td>
                                                 </tr>
@@ -1434,11 +1695,125 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                     {submitting ? t('add_items_adding') : `${t('add_items_count')} (${validRows.length})`}
                                 </button>
                             </div>
+
+                            {showMismatchModal && (
+                                <PriceMismatchModal
+                                    rows={mismatchRows}
+                                    allItemMap={allItemMap}
+                                    onCancel={() => setShowMismatchModal(false)}
+                                    onKeepOrder={handleKeepOrderPrices}
+                                    onOverwrite={handleOverwriteOrderPrices}
+                                    submitting={submitting}
+                                />
+                            )}
                         </>
                     )}
                 </>
             )}
         </div>
+    );
+}
+
+// ─── Price Mismatch Modal ─────────────────────────────────────────────────
+
+function PriceMismatchModal({ rows, allItemMap, onCancel, onKeepOrder, onOverwrite, submitting }: {
+    rows: PasteRow[];
+    allItemMap: Record<string, AvailableItem & { source_order: string; source_factory: string }>;
+    onCancel: () => void;
+    onKeepOrder: () => void;
+    onOverwrite: () => void;
+    submitting: boolean;
+}) {
+    const { t } = useT();
+    const [mounted, setMounted] = useState(false);
+    useEffect(() => { setMounted(true); }, []);
+    if (!mounted) return null;
+
+    const totalDelta = rows.reduce((s, r) => {
+        const item = allItemMap[r.barcode.trim()];
+        const p = parseFloat(r.price) || 0;
+        const op = parseFloat(item?.price_cny || '0') || 0;
+        const qty = parseInt(r.qty) || 0;
+        return s + (p - op) * qty;
+    }, 0);
+
+    return createPortal(
+        <div
+            onClick={onCancel}
+            style={{
+                position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                zIndex: 10000, padding: 16,
+            }}
+        >
+            <div
+                onClick={e => e.stopPropagation()}
+                className="glass-card"
+                style={{
+                    maxWidth: 900, width: '100%', maxHeight: '85vh', overflowY: 'auto',
+                    padding: 24, background: 'var(--color-bg)',
+                }}
+            >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>{t('paste_mismatch_title')}</h3>
+                    <button onClick={onCancel} disabled={submitting} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: 'var(--color-text-muted)', padding: 4 }}>✕</button>
+                </div>
+
+                <div style={{ display: 'flex', gap: 24, fontSize: 13, marginBottom: 16, color: 'var(--color-text-muted)' }}>
+                    <div>{t('paste_mismatch_count')}: <b style={{ color: 'var(--color-text)' }}>{rows.length}</b></div>
+                    <div>{t('price_resync_delta')}: <b style={{ color: totalDelta >= 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
+                        {totalDelta >= 0 ? '+' : ''}{formatNumber(totalDelta, 2)} ¥
+                    </b></div>
+                </div>
+
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                    <thead>
+                        <tr style={{ borderBottom: '2px solid var(--color-border)', color: 'var(--color-text-muted)' }}>
+                            <th style={{ textAlign: 'left', padding: '8px 6px', fontWeight: 500 }}>{t('col_barcode')}</th>
+                            <th style={{ textAlign: 'left', padding: '8px 6px', fontWeight: 500 }}>{t('col_article')}</th>
+                            <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>{t('col_qty')}</th>
+                            <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>{t('paste_col_order')}</th>
+                            <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>{t('paste_col_paste')}</th>
+                            <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>Δ ¥</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows.map((r, i) => {
+                            const item = allItemMap[r.barcode.trim()];
+                            const p = parseFloat(r.price) || 0;
+                            const op = parseFloat(item?.price_cny || '0') || 0;
+                            const qty = parseInt(r.qty) || 0;
+                            const delta = (p - op) * qty;
+                            return (
+                                <tr key={i} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                    <td style={{ padding: '6px', fontFamily: 'monospace' }}>{r.barcode}</td>
+                                    <td style={{ padding: '6px', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item?.article_seller || ''}>{item?.article_seller || '—'}</td>
+                                    <td style={{ padding: '6px', textAlign: 'right' }}>{formatNumber(qty, 0)}</td>
+                                    <td style={{ padding: '6px', textAlign: 'right', color: 'var(--color-text-muted)' }}>{formatNumber(op, 2)}</td>
+                                    <td style={{ padding: '6px', textAlign: 'right', fontWeight: 600 }}>{formatNumber(p, 2)}</td>
+                                    <td style={{ padding: '6px', textAlign: 'right', fontWeight: 600, color: delta >= 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
+                                        {delta >= 0 ? '+' : ''}{formatNumber(delta, 2)}
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 16, padding: 10, background: 'rgba(245,158,11,0.05)', borderRadius: 6 }}>
+                    ℹ️ {t('paste_mismatch_hint')}
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+                    <button className="btn btn-secondary btn-sm" onClick={onCancel} disabled={submitting}>{t('price_resync_cancel')}</button>
+                    <button className="btn btn-secondary btn-sm" onClick={onKeepOrder} disabled={submitting}>{t('paste_keep_order')}</button>
+                    <button className="btn btn-primary btn-sm" onClick={onOverwrite} disabled={submitting}>
+                        {submitting ? t('price_resync_applying') : t('paste_overwrite_order')}
+                    </button>
+                </div>
+            </div>
+        </div>,
+        document.body
     );
 }
 

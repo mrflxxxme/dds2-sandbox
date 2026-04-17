@@ -349,6 +349,50 @@ class VehicleCostSummary(BaseModel):
     total_rub: Decimal = Decimal("0")
 
 
+class VehiclePriceResyncItem(BaseModel):
+    """One item whose price differs between vehicle and factory order."""
+
+    cost_item_id: int
+    barcode: str
+    article_seller: str | None = None
+    subject: str | None = None
+    qty: int
+    old_price_cny: Decimal
+    new_price_cny: Decimal
+    delta_sum_cny: Decimal  # (new - old) * qty
+
+
+class VehiclePriceResyncPreview(BaseModel):
+    """Preview of price resync: items that will change + totals."""
+
+    vehicle_status: str | None = None
+    total_items: int  # all vehicle items with a factory order link
+    unlinked_items: int  # items without factory_order_item_id (cannot be synced)
+    changed_items: int  # items where price differs
+    sum_delta_cny: Decimal  # total Σ (new - old) * qty across changed items
+    items: list[VehiclePriceResyncItem] = []
+
+
+class VehiclePriceResyncApplyResult(BaseModel):
+    applied: int
+
+
+class BulkPriceUpdateItem(BaseModel):
+    """One item in a bulk FactoryOrderItem price update request."""
+
+    factory_order_item_id: int
+    new_price_cny: Decimal
+
+
+class BulkPriceUpdateRequest(BaseModel):
+    items: list[BulkPriceUpdateItem]
+
+
+class BulkPriceUpdateResult(BaseModel):
+    updated: int
+    not_found: list[int] = []  # foi_ids that don't belong to project or don't exist
+
+
 class VehicleSchema(BaseModel):
     """CostOrder enriched for supply chain context."""
 
