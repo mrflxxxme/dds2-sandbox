@@ -45,7 +45,9 @@ async def check_rate_limit(request: Request, action: str = "login"):
         if redis is None:
             return  # Redis unavailable — skip rate limiting
 
-        client_ip = request.client.host if request.client else "unknown"
+        # Use X-Real-IP from nginx (trustworthy). request.client.host за nginx
+        # всегда 172.x.x.x (Docker bridge) — все клиенты попадут в один bucket.
+        client_ip = request.headers.get("X-Real-IP") or (request.client.host if request.client else "unknown")
         key = f"rate_limit:{action}:{client_ip}"
 
         current = await redis.get(key)

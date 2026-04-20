@@ -4,7 +4,7 @@ services:
     env_file: .env
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-dds}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dds_secret}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
       POSTGRES_DB: ${POSTGRES_DB:-dds_db}
     command: postgres -c 'config_file=/etc/postgresql/postgresql.conf'
     ports:
@@ -32,7 +32,7 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/dds_db
+      DATABASE_URL: postgres://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@db:5432/dds_db
       POOL_MODE: transaction
       DEFAULT_POOL_SIZE: 20
       MIN_POOL_SIZE: 5
@@ -58,7 +58,7 @@ services:
     image: redis:7-alpine
     # ports: removed — Redis only accessible within Docker network
     # - "6379:6379"
-    command: redis-server --requirepass ${REDIS_PASSWORD:-dds_redis_secret} --maxmemory 256mb --maxmemory-policy volatile-lru
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env} --maxmemory 256mb --maxmemory-policy volatile-lru
     volumes:
       - redisdata:/data
     deploy:
@@ -111,9 +111,9 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@pgbouncer:5432/dds_db?prepared_statement_cache_size=0
-      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/dds_db
-      REDIS_URL: ${REDIS_URL:-redis://:dds_redis_secret@redis:6379/0}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@pgbouncer:5432/dds_db?prepared_statement_cache_size=0
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@db:5432/dds_db
+      REDIS_URL: ${REDIS_URL:?REDIS_URL must be set in .env}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
@@ -146,9 +146,9 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@pgbouncer:5432/dds_db?prepared_statement_cache_size=0
-      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/dds_db
-      REDIS_URL: ${REDIS_URL:-redis://:dds_redis_secret@redis:6379/0}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@pgbouncer:5432/dds_db?prepared_statement_cache_size=0
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@db:5432/dds_db
+      REDIS_URL: ${REDIS_URL:?REDIS_URL must be set in .env}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
@@ -162,7 +162,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 768M
     healthcheck:
       test: [ "CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\"" ]
       interval: 15s
@@ -243,7 +243,7 @@ services:
       PGHOST: db
       POSTGRES_USER: ${POSTGRES_USER:-dds}
       POSTGRES_DB: ${POSTGRES_DB:-dds_db}
-      PGPASSWORD: ${POSTGRES_PASSWORD:-dds_secret}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
       BACKUP_DIR: /backups
       BACKUP_RETENTION_DAYS: "14"
       BACKUP_INTERVAL_HOURS: "6"
@@ -316,7 +316,7 @@ services:
       - GF_SERVER_ROOT_URL=https://app.vyatkin-wb.ru/grafana/
       - GF_SERVER_SERVE_FROM_SUB_PATH=true
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-CHANGE_ME_IN_ENV}
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafanadata:/var/lib/grafana
@@ -336,7 +336,7 @@ services:
     image: prometheuscommunity/postgres-exporter:v0.16.0
     profiles: ["monitoring"]
     environment:
-      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:-dds_secret}@db:5432/${POSTGRES_DB:-dds_db}?sslmode=disable"
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-dds}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@db:5432/${POSTGRES_DB:-dds_db}?sslmode=disable"
     deploy:
       resources:
         limits:
@@ -352,7 +352,7 @@ services:
     image: oliver006/redis_exporter:v1.66.0
     profiles: ["monitoring"]
     environment:
-      REDIS_ADDR: "redis://default:${REDIS_PASSWORD:-dds_redis_secret}@redis:6379"
+      REDIS_ADDR: "redis://default:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379"
     deploy:
       resources:
         limits:
