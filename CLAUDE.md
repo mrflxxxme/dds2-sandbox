@@ -127,11 +127,15 @@ src/types/api.ts — TypeScript интерфейсы
 |---|---|---|
 | `test.yml` | push / PR | Tests (pytest + vitest, без E2E — E2E вынесен в nightly) |
 | `e2e-nightly.yml` | **cron** `0 3 * * *` (ежедневно 03:00 UTC) + manual | Smoke E2E (27 страниц не крашатся) — не блокирует deploy |
-| `security.yml` | push / PR / manual | pip-audit, Trivy, Snyk, npm audit |
-| `claude-review.yml` | PR / `@claude` comment | Claude Code AI-ревью PR |
+| `security.yml` | push / PR / **cron** `0 5 * * *` (daily 05:00 UTC) | pip-audit, Trivy, Snyk, npm audit |
+| `claude-review.yml` | PR / `@claude` comment | Claude AI-ревью PR (opus-4-7 для security/high-risk, sonnet-4-6 default) |
 | `auto-pr.yml` | push в `dev` | автоматический PR `dev → main` |
 | `auto-merge.yml` | green CI на auto-PR | авто-merge при зелёном CI |
 | `cd-production.yml` | merge в `main` | деплой на app-сервер |
+| `post-merge.yml` | push в `main` | ждёт `cd-production` через GH API → HTTP healthcheck `app.vyatkin-wb.ru` → GH issue при fail |
+| `todo-sentinel.yml` | **cron** `0 6 * * 1` (Mon 06:00 UTC) + manual | стары TODO/FIXME (>30 дней) → tracking issue |
+| `known-bugs-sentinel.yml` | **cron** `0 6 * * 2` (Tue 06:00 UTC) + manual | P{N} markers в коде → tracking issue |
+| `weekly-retrospective.yml` | **cron** `0 7 * * 0` (Sun 07:00 UTC) + manual | анализ git log за неделю → suggestions |
 | `deploy-monitoring.yml` | изменения `infra/monitoring/**` | rsync на monitoring-сервер (без `--delete`, исключает `.env` — см. P-incident 2026-04-14) |
 | `server-cleanup.yml` | **cron** `0 3 * * 0` (вс 03:00 UTC) + manual | еженедельная очистка диска app-сервера |
 | `server-diagnose.yml` | manual | диагностика прод-сервера (логи, ресурсы) |

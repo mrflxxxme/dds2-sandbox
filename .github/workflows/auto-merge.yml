@@ -66,9 +66,15 @@ jobs:
           echo "Checking CI status via REST API..."
 
           # 1. Check runs (GitHub Actions workflows)
+          # Игнорируем:
+          #  - "Auto-merge dev → main" (себя)
+          #  - "claude" (Claude Code Review action) — fail expected при self-modify claude-review.yml
+          #  - "Claude Code Review" (имя workflow) — то же
           CHECK_RUNS=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" --jq '
             [.check_runs[] |
-              select(.name != "Auto-merge dev → main") |
+              select(.name != "Auto-merge dev → main"
+                 and .name != "claude"
+                 and .name != "Claude Code Review") |
               {name: .name, status: .status, conclusion: .conclusion}
             ]')
 

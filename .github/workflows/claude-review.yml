@@ -23,4 +23,6 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_args: "--model claude-sonnet-4-6 --max-turns 10"
+          # Model routing: opus-4-7 для security/high-risk, sonnet-4-6 для остального
+          # Max подписка — токены не считаем, max-turns поднят
+          claude_args: ${{ (contains(github.event.pull_request.labels.*.name, 'security') || contains(github.event.pull_request.labels.*.name, 'high-risk')) && '--model claude-opus-4-7 --max-turns 25' || '--model claude-sonnet-4-6 --max-turns 20' }}

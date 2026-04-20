@@ -47,7 +47,55 @@ if [ -n "$all_changed" ]; then
   for f in $new_files; do
     case "$f" in
       backend/models/*.py) hints="$hints\n[DOCS] Новая модель $f — обнови DOMAIN_*.md и SOFT_MODELS" ;;
-      backend/services/*.py|backend/services/*/*.py) hints="$hints\n[DOCS] Новый сервис $f — обнови MAP.md и DOMAIN_*.md" ;;
+      backend/services/*.py|backend/services/*/*.py)
+        hints="$hints\n[DOCS] Новый сервис $f — обнови MAP.md и DOMAIN_*.md"
+        # Auto-create DOMAIN_*.md skeleton если домен новый
+        svc_name=$(basename "$f" .py | sed 's/_service$//')
+        domain_upper=$(echo "$svc_name" | tr '[:lower:]' '[:upper:]')
+        domain_file="$ROOT_DIR/backend/DOMAIN_${domain_upper}.md"
+        if [ ! -f "$domain_file" ] && [ -d "$ROOT_DIR/backend" ]; then
+          cat > "$domain_file" <<DOMEOF
+# Domain: ${domain_upper}
+
+> Auto-generated skeleton by post_stop_check hook. Заполни секции и удали этот блок.
+
+## Назначение
+TODO: краткое описание домена и ответственности
+
+## Архитектура
+\`\`\`
+Вопрос/действие пользователя
+    ↓
+routers/${svc_name}.py — HTTP endpoints
+    ↓
+services/${svc_name}_service.py — бизнес-логика
+    ↓
+models/ — ORM
+\`\`\`
+
+## Ownership
+Файлы этого домена:
+- \`services/${svc_name}_service.py\` — TODO: описание
+- TODO: остальные файлы
+
+## Ключевые модели
+- TODO: основные сущности
+
+## Бизнес-правила
+- TODO: ключевые инварианты
+
+## Кэш
+- TODO: prefix кэша если используется + invalidate_project_reports() если нужно
+
+## Известные грабли
+- TODO
+
+## Тесты
+- \`tests/test_${svc_name}.py\`
+DOMEOF
+          hints="$hints\n[DOCS] Создан skeleton: backend/DOMAIN_${domain_upper}.md — заполни и удали авто-генерированный блок"
+        fi
+        ;;
       backend/routers/*.py) hints="$hints\n[DOCS] Новый роутер $f — обнови DOMAIN_*.md" ;;
       migrations/versions/*.py) hints="$hints\n[DOCS] Новая миграция $f — обнови DOMAIN_*.md" ;;
     esac

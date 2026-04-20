@@ -55,4 +55,16 @@ if [ -n "$hints" ]; then
     echo -e "$hints" >&2
 fi
 
+# --- Speculative explore V1 (opt-in via DDS_PREWARM_ENABLED=1) ---
+# Триггерим pre-warm для ЛЮБОГО промпта длиннее 30 символов
+# (короткие "yes", "ок", "что?" — не имеет смысла исследовать контекст)
+prompt_len=${#prompt}
+if [ "$prompt_len" -gt 30 ]; then
+    SCRIPT_DIR="$(dirname "$0")"
+    PREWARM="$SCRIPT_DIR/prewarm-spawn.sh"
+    if [ -x "$PREWARM" ]; then
+        bash "$PREWARM" "$prompt" 2>&1 || true
+    fi
+fi
+
 exit 0

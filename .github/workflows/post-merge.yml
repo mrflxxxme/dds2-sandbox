@@ -1,0 +1,128 @@
+# Post-merge healthcheck для production (после cd-production.yml деплоя)
+# - Ждёт завершения cd-production через GH API polling (реально 8-9 мин)
+# - HTTP healthcheck на production URL
+# - При fail → GH issue с rollback инструкцией
+#
+# НЕ запускает E2E локально (это делает e2e-nightly.yml — не дублируем).
+# НЕ блокирует merge (он уже произошёл, мы просто детектим прод-проблему быстро).
+name: Post-Merge Production Healthcheck
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  prod-healthcheck:
+    name: Healthcheck production after deploy
+    runs-on: ubuntu-latest
+    # cd-production занимает ~8-9 мин, polling до 12 мин, +5 мин на healthcheck retries и запас
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Wait for cd-production deploy to finish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # cd-production обычно ~8-9 мин. Ждём через GH API его завершения.
+          # Max 12 мин (защита от зависания).
+          set +e
+          REPO="${{ github.repository }}"
+          SHA="${{ github.sha }}"
+          echo "Waiting for cd-production.yml on commit ${SHA:0:7}..."
+          for i in $(seq 1 36); do  # 36 × 20s = 12 мин
+            STATUS=$(gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=20" \
+              --jq '[.workflow_runs[] | select(.name == "Deploy to Production")] | .[0] | .status + ":" + (.conclusion // "null")' 2>/dev/null)
+            echo "Attempt $i: cd-production status=${STATUS:-unknown}"
+            case "$STATUS" in
+              completed:success)
+                echo "✓ cd-production succeeded — proceeding to healthcheck"
+                # Дополнительная пауза 30s — даём nginx/контейнерам прогреться
+                sleep 30
+                exit 0
+                ;;
+              completed:failure|completed:cancelled|completed:timed_out)
+                echo "✗ cd-production failed (${STATUS}) — пропускаем healthcheck (issue не нужен, fail и так виден)"
+                exit 0
+                ;;
+            esac
+            sleep 20
+          done
+          echo "⚠ cd-production не завершился за 12 мин — всё равно пробуем healthcheck"
+          exit 0
+
+      - name: HTTP healthcheck — production
+        id: health
+        continue-on-error: true
+        run: |
+          set +e
+          URL="https://app.vyatkin-wb.ru"
+          # 5 попыток с интервалом 30 сек (вдруг деплой ещё не завершён)
+          for i in 1 2 3 4 5; do
+            echo "Attempt $i: $URL"
+            HTTP=$(curl -sS -o /tmp/healthcheck.out -w "%{http_code}" -m 15 "$URL/" 2>&1 || echo "000")
+            echo "HTTP $HTTP"
+            if [ "$HTTP" = "200" ] || [ "$HTTP" = "302" ] || [ "$HTTP" = "301" ]; then
+              echo "✓ Production responsive on attempt $i"
+              echo "exit=0" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "✗ Production failed all 5 attempts"
+          tail -50 /tmp/healthcheck.out > /tmp/health-tail.txt 2>/dev/null || echo "(no output)" > /tmp/health-tail.txt
+          echo "exit=1" >> "$GITHUB_OUTPUT"
+
+      - name: Create rollback issue if healthcheck failed
+        if: steps.health.outputs.exit == '1'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const date = new Date().toISOString();
+            const sha = context.sha.substring(0, 7);
+            const tail = fs.existsSync('/tmp/health-tail.txt')
+              ? fs.readFileSync('/tmp/health-tail.txt', 'utf8').slice(-2000)
+              : '(no output)';
+            const commitMsg = (context.payload.head_commit && context.payload.head_commit.message) || '(unknown)';
+            const author = (context.payload.head_commit && context.payload.head_commit.author && context.payload.head_commit.author.username) || 'unknown';
+            // Sanitize: оборачиваем commit message в code block чтобы markdown links/HTML не рендерились
+            const safeCommitMsg = '```\n' + commitMsg + '\n```';
+            // Author: проверяем что только alphanumeric + dash + underscore (GH username rules)
+            const safeAuthor = /^[a-zA-Z0-9_-]+$/.test(author) ? author : 'unknown';
+            const lines = [
+              '## Production healthcheck FAILED после merge',
+              '',
+              'Commit `' + sha + '` merged to main at ' + date + '.',
+              'После завершения cd-production (~8-9 мин) — `app.vyatkin-wb.ru` не отвечает 200/301/302 за 5 попыток (2.5 мин).',
+              '',
+              '### Последний коммит',
+              safeCommitMsg,
+              '',
+              '### Автор',
+              '@' + safeAuthor,
+              '',
+              '### Curl tail',
+              '```',
+              tail,
+              '```',
+              '',
+              '### Проверить',
+              '1. `gh run list --workflow=cd-production.yml --limit 3` — статус деплоя',
+              '2. SSH на app-сервер: `docker compose ps` — все контейнеры healthy?',
+              '3. `docker compose logs backend --tail=100`',
+              '4. Если деплой провален — `git revert ' + sha + '` → push в dev → auto-PR',
+              '',
+              '_Auto-generated by post-merge healthcheck workflow_'
+            ];
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '[post-merge] Production HEALTHCHECK FAILED on ' + sha,
+              body: lines.join('\n'),
+              labels: ['post-merge', 'urgent', 'sentinel', 'production']
+            });
