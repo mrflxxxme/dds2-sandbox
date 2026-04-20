@@ -173,3 +173,14 @@ if len(data) > app_settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
 - `restart: unless-stopped` рестартит ТОЛЬКО `exited` контейнеры — `unhealthy` не трогает. Решение: контейнер `willfarrell/autoheal` (есть в `docker-compose.app.yml`) рестартит unhealthy через 30s по лейблу `autoheal: "true"`.
 - Алерты на `error rate` / `slow responses` НЕ срабатывают если backend жив для `/health` и `/metrics`, но мёртв для пользователей (504 от nginx, до backend не доходит). Решение: `BackendNoUserTraffic` алерт в `infra/monitoring/alert_rules.yml`.
 - Deploy workflow `docker compose up -d ... A B C` не запустит сервис D из compose, даже с `--remove-orphans`. Все нужные сервисы (включая `autoheal`) должны быть в списке `cd-production.yml`.
+
+## P29: sanity check числового поля через `> 0` — пропускает мусор от bulk-upload
+**НЕПРАВИЛЬНО:** проверка "поле заполнено" через `value > 0` (или `is not None`). Пропускает мусорные значения вроде `1.01` при реальном диапазоне тысяч — пользователь в Excel потерял множитель, вставил без множителя, а фильтр `> 0` считает "заполнено". Проблема тихая: запись проходит в отчёт и искажает агрегаты (bug 2026-04-20: cost_price=1.01 при retail=2000 → `Ср.С/С=1.01` в БДР, но товар НЕ в списке «без себестоимости»).
+**ПРАВИЛЬНО:** относительный порог от reference value, когда он есть в контексте.
+```python
+# Вместо: cost > 0
+# Используй: cost >= N * reference_value
+MIN_COST_RATIO = 0.05  # 5% от retail
+is_missing = cost is None or cost == 0 or cost < MIN_COST_RATIO * avg_retail_price
+```
+В ответе API полезно вернуть `current_value`, `reference_value`, `is_suspicious` — чтобы UI различал «ноль» и «есть, но мусор» и показывал юзеру проблему. Прецедент: `backend/services/funnel/cost_overrides.py:MIN_COST_RATIO` (commit 433b433).
