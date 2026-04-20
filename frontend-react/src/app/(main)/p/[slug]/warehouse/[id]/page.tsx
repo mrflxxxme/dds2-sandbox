@@ -7,7 +7,7 @@ import TanStackDataTable from '@/components/TanStackDataTable';
 import type {
     Warehouse, InboundReceipt, OutboundShipment,
     WarehouseStockRow, StockMovement, StockTransfer, DeliveryTimesResponse,
-    DefectMarkOperation,
+    DefectMarkOperation, VehicleStatus,
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 
@@ -169,7 +169,7 @@ function ExpectedVehicles({ warehouseId, slug }: { warehouseId: number; slug: st
     const handleAction = async (e: React.MouseEvent, orderNo: string, nextStatus: string) => {
         e.stopPropagation();
         try {
-            await api.updateVehicleStatus(orderNo, { status: nextStatus });
+            await api.updateVehicleStatus(orderNo, { status: nextStatus as VehicleStatus });
             loadVehicles();
         } catch (err: unknown) {
             alert(err instanceof Error ? err.message : 'Ошибка');

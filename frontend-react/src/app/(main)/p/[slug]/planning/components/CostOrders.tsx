@@ -32,14 +32,14 @@ export function CostOrders() {
     const create = async () => {
         try {
             await api.createCostOrder({
-                order_no: form.order_no, invoice_no: form.invoice_no || null,
-                transport_type: form.transport_type, ship_date: form.ship_date || null,
-                actual_arrival_date: form.actual_arrival_date || null,
+                order_no: form.order_no, invoice_no: form.invoice_no || undefined,
+                transport_type: form.transport_type, ship_date: form.ship_date || undefined,
+                actual_arrival_date: form.actual_arrival_date || undefined,
                 delivery_cost_cny: parseFloat(form.delivery_cost_cny) || 0,
                 delivery_cost_usd: parseFloat(form.delivery_cost_usd) || 0,
                 rate_cny: parseFloat(form.rate_cny) || 0, rate_eur: parseFloat(form.rate_eur) || 0,
-                rate_usd: parseFloat(form.rate_usd) || 0, dt_number: form.dt_number || null,
-                note: form.note || null,
+                rate_usd: parseFloat(form.rate_usd) || 0, dt_number: form.dt_number || undefined,
+                note: form.note || undefined,
             });
             setMsg('✅ Заказ создан!'); setShowCreate(false); setForm(emptyForm); load();
         } catch (e: any) { setMsg(`❌ ${e.message}`); }
@@ -63,14 +63,14 @@ export function CostOrders() {
         if (!editOrder) return;
         try {
             await api.updateCostOrder(editOrder, {
-                order_no: form.order_no || editOrder, invoice_no: form.invoice_no || null,
-                transport_type: form.transport_type, ship_date: form.ship_date || null,
-                actual_arrival_date: form.actual_arrival_date || null,
+                order_no: form.order_no || editOrder, invoice_no: form.invoice_no || undefined,
+                transport_type: form.transport_type, ship_date: form.ship_date || undefined,
+                actual_arrival_date: form.actual_arrival_date || undefined,
                 delivery_cost_cny: parseFloat(form.delivery_cost_cny) || 0,
                 delivery_cost_usd: parseFloat(form.delivery_cost_usd) || 0,
                 rate_cny: parseFloat(form.rate_cny) || 0, rate_eur: parseFloat(form.rate_eur) || 0,
-                rate_usd: parseFloat(form.rate_usd) || 0, dt_number: form.dt_number || null,
-                note: form.note || null,
+                rate_usd: parseFloat(form.rate_usd) || 0, dt_number: form.dt_number || undefined,
+                note: form.note || undefined,
             });
             setMsg('✅ Сохранено!'); setEditOrder(null); load();
         } catch (e: any) { setMsg(`❌ ${e.message}`); }

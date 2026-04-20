@@ -116,7 +116,7 @@ function OpiuTab({ period, brand }: { period: Period; brand: string }) {
     const [sections, setSections] = useState<PnlSection[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
-    const timeoutRef = useRef<NodeJS.Timeout>();
+    const timeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
     const retryCountRef = useRef(0);
 
     const loadData = useCallback(async () => {

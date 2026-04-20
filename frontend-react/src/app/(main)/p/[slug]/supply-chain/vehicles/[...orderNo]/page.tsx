@@ -1123,6 +1123,8 @@ function resolveMixSiblings(
                 qty: String(autoQty),
                 price: String(siblingItem.price_cny || ''),
                 article: siblingItem.article_seller || siblingItem.subject || '',
+                box_size: siblingItem.mix_box_size || siblingItem.box_size || '',
+                pcs_per_box: String(siblingPpb || ''),
                 autoAdded: true,
                 mixGroupId: item.mix_group_id,
             });

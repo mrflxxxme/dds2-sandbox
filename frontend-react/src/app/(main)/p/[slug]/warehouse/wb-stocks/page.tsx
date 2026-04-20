@@ -167,10 +167,10 @@ function ArticlesTab() {
         if (!data) return [];
         return [...data.articles].sort((a, b) => {
             const key = sort.key as keyof WbArticleRow;
-            const av = (a[key] ?? 0) as number;
-            const bv = (b[key] ?? 0) as number;
-            if (typeof av === 'string') return sort.dir === 'asc' ? av.localeCompare(bv as unknown as string) : (bv as unknown as string).localeCompare(av);
-            return sort.dir === 'asc' ? av - bv : bv - av;
+            const av = (a[key] ?? 0) as number | string;
+            const bv = (b[key] ?? 0) as number | string;
+            if (typeof av === 'string') return sort.dir === 'asc' ? av.localeCompare(bv as string) : (bv as string).localeCompare(av);
+            return sort.dir === 'asc' ? (av as number) - (bv as number) : (bv as number) - (av as number);
         });
     }, [data, sort]);
 

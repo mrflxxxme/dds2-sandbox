@@ -228,7 +228,7 @@ function BalancesTab() {
     useEffect(() => { load(); }, []);
     const load = async () => { try { setData(await api.getOpeningBalances()); } catch { } };
     const save = async () => {
-        try { await api.upsertOpeningBalance({ ...form, opening_balance: parseFloat(String(form.opening_balance)) }); setMsg('✅ Сохранено!'); setShowForm(false); load(); } catch (e: any) { setMsg(e.message); }
+        try { await api.upsertOpeningBalance({ account: form.account, currency: form.currency, date: form.date_open, amount: parseFloat(String(form.opening_balance)) }); setMsg('✅ Сохранено!'); setShowForm(false); load(); } catch (e: any) { setMsg(e.message); }
     };
 
     return (

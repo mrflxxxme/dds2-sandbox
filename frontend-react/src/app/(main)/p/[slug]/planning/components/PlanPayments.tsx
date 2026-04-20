@@ -38,10 +38,10 @@ export function PlanPayments() {
     const addPayment = async () => {
         try {
             await api.upsertPlanningPayment({
-                pay_date: payForm.pay_date || null, order_no: payForm.order_no ? parseInt(payForm.order_no) : null,
-                direction: payForm.direction, amount: payForm.amount ? parseFloat(payForm.amount) : null,
-                currency: payForm.currency, fx_rate: payForm.fx_rate ? parseFloat(payForm.fx_rate) : null,
-                amount_rub: payForm.amount_rub ? parseFloat(payForm.amount_rub) : null,
+                pay_date: payForm.pay_date || undefined, order_no: payForm.order_no ? parseInt(payForm.order_no) : undefined,
+                direction: payForm.direction, amount: payForm.amount ? parseFloat(payForm.amount) : undefined,
+                currency: payForm.currency, fx_rate: payForm.fx_rate ? parseFloat(payForm.fx_rate) : undefined,
+                amount_rub: payForm.amount_rub ? parseFloat(payForm.amount_rub) : undefined,
             });
             setMsg('✅ Платёж добавлен!'); setShowAddForm(false); load();
         } catch (e: any) { setMsg(`❌ ${e.message}`); }
@@ -54,7 +54,7 @@ export function PlanPayments() {
     const handleAccountChange = async (acc: string) => { setSelAccount(acc); await loadCandidates(acc); };
     const linkTransaction = async () => {
         if (!selPayId || !selTxnId) return;
-        try { await api.createFactLink({ payment_id: selPayId, txn_id: selTxnId, amount_rub: linkAmount ? parseFloat(linkAmount) : null }); setMsg('✅ Привязано!'); await sync(); setShowLinkForm(false); } catch (e: any) { setMsg(`❌ ${e.message}`); }
+        try { await api.createFactLink({ payment_id: selPayId, txn_id: selTxnId, amount_rub: linkAmount ? parseFloat(linkAmount) : 0 }); setMsg('✅ Привязано!'); await sync(); setShowLinkForm(false); } catch (e: any) { setMsg(`❌ ${e.message}`); }
     };
 
     const _status = (r: any) => {
