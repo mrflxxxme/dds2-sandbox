@@ -99,6 +99,27 @@ src/types/api.ts — TypeScript интерфейсы
 - **Ревью** → `REVIEW.md` (чеклист для AI и human ревью)
 - **Статус** → `/status` (быстрая диагностика: git, docker, health, миграции)
 
+## AI-агенты и skills (`.claude/`)
+**Subagents** (`.claude/agents/`) — проактивно вызывать по описанию:
+| Агент | Модель | Когда |
+|-------|--------|-------|
+| `code-reviewer` | opus | после правок кода — качество + конвенции |
+| `security-reviewer` | opus | auth/SQL/crypto/user-input — OWASP + DDS-специфика |
+| `performance-optimizer` | sonnet | новые endpoint/массовые выборки — N+1, bundle, slow queries |
+| `api-designer` | sonnet | новые/изменённые routers/schemas — OpenAPI, breaking changes |
+| `database-reviewer` | sonnet | миграции, сложные SQL, PgBouncer |
+| `tdd-guide` | sonnet | новые фичи — тесты первыми |
+| `build-error-resolver` | sonnet | pytest/build fail — минимальные фиксы |
+| `planner` | opus | планирование фичи/рефакторинга |
+
+**Slash skills** (`.claude/commands/`) — строгие процессы:
+- **Разработка**: `/new-endpoint`, `/new-page`, `/migration`, `/tdd`, `/plan`
+- **Крупные фичи**: `/spec` (spec-driven, 3 артефакта, regressions 6%→2%)
+- **Рефакторинг**: `/codemod` (AST-grep + LLM для 10+ файлов)
+- **Emergency**: `/hotfix` (прод-инцидент), `/rollback` (откат деплоя)
+- **Проверки**: `/smoke`, `/verify`, `/review`, `/status`, `/build-fix`
+- **Рефлексия**: `/learn` (авто-после коммита), `/docs`, `/pause`, `/resume`
+
 ## Git
 - Коммиты: `feat:` / `fix:` / `infra:` / `refactor:` / `test:` (русский или англ.)
 - Ветки: `dev` → проверка → merge в `main` → production auto-deploy
@@ -107,8 +128,10 @@ src/types/api.ts — TypeScript интерфейсы
 
 ## CI и безопасность
 - **Pre-commit**: Ruff + Bandit + Gitleaks (автоматически)
-- **Pre-push**: pytest-testmon + vitest + check_conventions.sh (блокирует при ошибке)
-- **CI**: Tests + Security (pip-audit, Trivy, Snyk) + Conventions + CodeRabbit AI review
+- **Pre-push**: pytest-testmon + vitest + check_conventions.sh + check_slopsquatting.sh (блокирует при ошибке)
+- **CI**: Tests + Security (pip-audit, Trivy, Snyk) + Conventions + Claude Code AI review (`claude-review.yml`, opus-4-7 для security, sonnet-4-6 default)
+- **Reactive CI**: `ci-failure-issue.yml` — при fail Tests/Security автоматически создаёт tracking issue, закрывает когда green
+- **Slopsquatting**: `check_slopsquatting.sh` — валидирует новые imports против PyPI/npm (защита от AI-галлюцинаций пакетов)
 - **Auto-flow**: push dev → auto-PR → green CI → auto-merge → deploy
 - **Branch protection `main`**: require Tests + Security Audit, strict
 - Установка хуков: `make setup` | Экстренный пропуск: `git push --no-verify`

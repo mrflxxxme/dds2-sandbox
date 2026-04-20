@@ -31,6 +31,17 @@ description: "Инкрементальное исправление ошибок
 4. **Перезапустить** — проверить что ошибка ушла
 5. **Следующая** — к оставшимся ошибкам
 
+### Ускорение: Monitor tool для long-running команд
+Для pytest/docker build (>30 сек) используй `Monitor` tool — получаешь stdout **построчно** в реальном времени вместо ожидания конца:
+
+```
+Monitor("docker compose exec backend pytest tests/ -x --tb=short", pattern="FAILED|ERROR|Traceback")
+```
+
+- Экономит 60-80% времени vs `Bash` с wait: первая ошибка ловится через 5 сек, не после всех тестов
+- Подходит для: `pytest`, `docker compose build`, `npm run build`, `alembic upgrade`
+- Для коротких команд (<10 сек) — обычный `Bash` проще
+
 ## Шаг 4: Guardrails
 
 Остановиться и спросить юзера если:

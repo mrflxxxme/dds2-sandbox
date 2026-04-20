@@ -65,6 +65,16 @@ else
     FAILED=1
 fi
 
+# ─── 4. Slopsquatting защита (~3-10 сек) ────────────────────────────
+echo ""
+echo "━━━ Slopsquatting check (new imports) ━━━"
+if bash "$ROOT_DIR/scripts/hooks/check_slopsquatting.sh" 2>&1; then
+    echo -e "${GREEN}✓ All new imports are real packages${NC}"
+else
+    echo -e "${RED}✗ Suspicious package(s) detected — AI галлюцинация?${NC}"
+    FAILED=1
+fi
+
 # ─── Результат ──────────────────────────────────────────────────────
 echo ""
 if [ $FAILED -ne 0 ]; then
