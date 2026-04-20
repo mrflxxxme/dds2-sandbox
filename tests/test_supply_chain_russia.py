@@ -316,3 +316,102 @@ async def test_russian_vehicle_multitenancy(client, auth_headers, db_session):
         )
     )
     assert result.scalar_one_or_none() is None
+
+
+# ─── Regression: stale volume_m3 → delivery allocation ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_recalc_refreshes_stale_volume_from_override(client, auth_headers, db_session):
+    """
+    Regression: when pcs_per_box_override differs from FO's pcs_per_box, the stored
+    volume_m3 may be stale (computed with factory ppb). recalculate_order_items must
+    re-derive volume_m3 from effective override × box_size, otherwise delivery_rub
+    allocation is under-/over-estimated for that item.
+    """
+    from backend.models import CostOrderItem
+    from backend.models.supply_chain import FactoryOrder, FactoryOrderItem
+    from backend.services.cost.items import recalculate_order_items
+
+    headers = await _project_headers(client, auth_headers)
+    project_id = int(headers["X-Project-Id"])
+    vno = f"V-STALE-{_uid()}"
+
+    # China vehicle: delivery 1000 CNY × rate 10 = 10 000 RUB split by volume.
+    resp = await client.post(
+        "/api/v1/supply-chain/vehicles",
+        json={
+            "order_no": vno,
+            "container_type": "truck1",
+            "country": "CHINA",
+            "rate_cny": "10",
+            "rate_usd": "90",
+            "rate_eur": "100",
+            "delivery_cost_cny": "1000",
+            "delivery_cost_usd": "0",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+
+    # Factory order with ppb=9 (box 40×36×40 → 0.0064 m³/шт at ppb=9)
+    fo = FactoryOrder(
+        project_id=project_id,
+        order_number=f"FO-STALE-{_uid()}",
+        factory_name="Test",
+        status="FORMING",
+    )
+    db_session.add(fo)
+    await db_session.flush()
+
+    foi = FactoryOrderItem(
+        project_id=project_id,
+        factory_order_id=fo.id,
+        barcode=f"BC-STALE-{_uid()}",
+        qty=120,
+        price_cny=Decimal("80"),
+        box_size="40*36*40",
+        pcs_per_box=9,
+        weight_kg=Decimal("9"),
+    )
+    db_session.add(foi)
+
+    # CostOrderItem with STALE volume_m3 (=0.0064 per unit, as if ppb=9 was used)
+    # and override pcs_per_box=4 (actual packing in this vehicle).
+    # Effective vol should be 0.0576/4 = 0.0144.
+    item = CostOrderItem(
+        project_id=project_id,
+        order_no=vno,
+        barcode=foi.barcode,
+        subject=None,
+        qty=120,
+        price_cny=Decimal("80"),
+        weight_kg=Decimal("9"),
+        volume_m3=Decimal("0.006400"),  # stale
+        factory_order_item_id=None,  # set after flush
+        pcs_per_box_override=4,
+    )
+    await db_session.flush()
+    item.factory_order_item_id = foi.id
+    db_session.add(item)
+    await db_session.commit()
+
+    updated, err = await recalculate_order_items(db_session, project_id, vno)
+    assert err is None
+    assert updated == 1
+
+    result = await db_session.execute(
+        select(CostOrderItem).where(
+            CostOrderItem.order_no == vno,
+            CostOrderItem.is_deleted == False,  # noqa: E712
+        )
+    )
+    refreshed = result.scalar_one()
+
+    # Volume must be recomputed from effective (override ppb=4, box from FO).
+    assert Decimal(str(refreshed.volume_m3)) == Decimal(
+        "0.014400"
+    ), f"volume_m3 not refreshed from override: got {refreshed.volume_m3}"
+    # Sole item → delivery_rub_unit == delivery_rub_total / qty (1000 * 10 / 120).
+    expected_delivery = Decimal("10000") / Decimal("120")
+    assert abs(Decimal(str(refreshed.delivery_rub)) - expected_delivery) < Decimal("0.01")
