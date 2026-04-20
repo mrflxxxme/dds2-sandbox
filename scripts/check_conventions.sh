@@ -331,6 +331,41 @@ else
 fi
 echo ""
 
+# ─── 19. dangerouslySetInnerHTML без sanitizeAIHtml ──────────────────
+echo "── Check 19: dangerouslySetInnerHTML без sanitizeAIHtml (XSS защита) ──"
+if [ -d frontend-react/src ]; then
+    # Ищем use'ы dangerouslySetInnerHTML в файлах где НЕТ импорта sanitizeAIHtml
+    FOUND=""
+    while IFS= read -r file; do
+        if ! grep -q "sanitizeAIHtml\|from '@/lib/sanitize'" "$file" 2>/dev/null; then
+            FOUND="$FOUND$file"$'\n'
+        fi
+    done < <(grep -rln "dangerouslySetInnerHTML" frontend-react/src --include="*.tsx" --include="*.ts" 2>/dev/null || true)
+    if [ -n "$FOUND" ]; then
+        error "dangerouslySetInnerHTML используется без sanitizeAIHtml (XSS риск) — импортируй из @/lib/sanitize"
+        echo "$FOUND"
+    else
+        ok "Все dangerouslySetInnerHTML через sanitizeAIHtml"
+    fi
+else
+    ok "frontend-react/src not found (skipped)"
+fi
+echo ""
+
+# ─── 20. URL template literals в src/lib/api/*.ts ────────────────────
+echo "── Check 20: template literals в URL вместо URLSearchParams ──"
+if [ -d frontend-react/src/lib/api ]; then
+    # Ищем паттерн `?a=${...}` или `&a=${...}` в API-модулях
+    FOUND=$(grep -rn -E '`[^`]*[?&][a-zA-Z_]+=\$\{[^}]+\}' frontend-react/src/lib/api --include="*.ts" 2>/dev/null | grep -v "test.ts" || true)
+    if [ -n "$FOUND" ]; then
+        warn "Template literals в URL — уязвимы к спецсимволам (H&M, +, %). Используй URLSearchParams."
+        echo "$FOUND" | head -5
+    else
+        ok "URL-билдинг через URLSearchParams"
+    fi
+fi
+echo ""
+
 # ─── Summary ─────────────────────────────────────────────────────────
 echo "═══════════════════════════════════════════════════════"
 if [ "$ERRORS" -gt 0 ]; then
