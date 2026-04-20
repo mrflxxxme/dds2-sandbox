@@ -85,17 +85,17 @@ export function addReportMethods(api: ApiClient) {
             return api.request<DDSPnLResponse>('GET', `/api/v1/reports/dds_pnl?year=${year}`);
         },
         getOpiu(dateFrom: string, dateTo: string, brand?: string, article?: string) {
-            let url = `/api/v1/reports/opiu?date_from=${dateFrom}&date_to=${dateTo}`;
-            if (brand) url += `&brand=${encodeURIComponent(brand)}`;
-            if (article) url += `&article=${encodeURIComponent(article)}`;
-            return api.request<any>('GET', url);
+            const q = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
+            if (brand) q.set('brand', brand);
+            if (article) q.set('article', article);
+            return api.request<any>('GET', `/api/v1/reports/opiu?${q.toString()}`);
         },
         getWbBdr(dateFrom: string, dateTo: string, brand?: string, article?: string, groupBy?: string) {
-            let url = `/api/v1/reports/wb_bdr?date_from=${dateFrom}&date_to=${dateTo}`;
-            if (brand) url += `&brand=${encodeURIComponent(brand)}`;
-            if (article) url += `&article=${encodeURIComponent(article)}`;
-            if (groupBy) url += `&group_by=${encodeURIComponent(groupBy)}`;
-            return api.request<any>('GET', url);
+            const q = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
+            if (brand) q.set('brand', brand);
+            if (article) q.set('article', article);
+            if (groupBy) q.set('group_by', groupBy);
+            return api.request<any>('GET', `/api/v1/reports/wb_bdr?${q.toString()}`);
         },
         getWbBdrSyncStatus(dateFrom?: string, dateTo?: string) {
             let url = `/api/v1/reports/wb_bdr/sync_status`;
@@ -186,11 +186,11 @@ export function addReportMethods(api: ApiClient) {
             );
         },
         getOrderGeography(dateFrom: string, dateTo: string, brand?: string, category?: string, article?: string) {
-            let url = `/api/v1/reports/order_geography?date_from=${dateFrom}&date_to=${dateTo}`;
-            if (brand) url += `&brand=${encodeURIComponent(brand)}`;
-            if (category) url += `&category=${encodeURIComponent(category)}`;
-            if (article) url += `&article=${encodeURIComponent(article)}`;
-            return api.request<any>('GET', url);
+            const q = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
+            if (brand) q.set('brand', brand);
+            if (category) q.set('category', category);
+            if (article) q.set('article', article);
+            return api.request<any>('GET', `/api/v1/reports/order_geography?${q.toString()}`);
         },
     };
 }
