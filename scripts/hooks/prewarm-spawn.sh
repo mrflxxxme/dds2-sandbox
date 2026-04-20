@@ -69,15 +69,16 @@ if ! command -v claude >/dev/null 2>&1; then
     exit 0
 fi
 
-# Spawn haiku в фоне
+# Spawn в фоне
 # Безопасность:
 #  - Промпт пользователя передаётся через ENV (PREWARM_USER_PROMPT), НЕ через интерполяцию строки → защита от $(...) injection
 #  - allowed-tools = только Read/Glob/Grep (без Write/Edit/Bash) → агент НЕ может писать произвольные файлы
 #  - Нет --dangerously-skip-permissions → требуются явные allowed-tools
 #  - Spec пишется через shell redirect, не агентом → spec под контролем хука, не LLM
-#  - Lock через $BASHPID (PID самого subshell), НЕ через $$ (PID родителя) — иначе lock невалидный
+#  - Lock через $BASHPID если доступен (bash 4+), иначе $$. На macOS bash 3.2 BASHPID отсутствует
 (
-    echo "$BASHPID" > "$LOCK"
+    SUBSHELL_PID="${BASHPID:-$$}"
+    echo "$SUBSHELL_PID" > "$LOCK"
     trap 'rm -f "$LOCK"' EXIT
 
     PROMPT_TEMPLATE='Ты — Context Mapper для DDS2 (управленческий учёт e-commerce).
@@ -127,5 +128,5 @@ fi
 ) &
 disown
 
-echo "[PREWARM] Background context map started: .claude/.cache/spec-$HASH.md (haiku, ~30s)" >&2
+echo "[PREWARM] Background context map started: .claude/.cache/spec-$HASH.md (sonnet, ~60s)" >&2
 exit 0
