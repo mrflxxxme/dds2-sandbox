@@ -14,6 +14,10 @@ paths:
 - Redis ConnectionError: проверь `REDIS_URL` в .env и что redis контейнер запущен
 - ilike injection (P4): ВСЕГДА экранируй `%` и `_` в пользовательском вводе для ILIKE
 - Case-sensitive JOINs (P26): коды WB могут отличаться регистром — нормализуй перед JOIN
+- **`a || null` vs `a ?? null` для API body**: `|| null` теряет `[]`/`0`/`''` (они falsy), тело запроса превращается в `undefined` из-за `body ? JSON.stringify(body) : undefined` в client.ts. Использовать `?? null` если хотим различать «не передали» и «передали пустое». Прецедент: `warehouse.acceptReceipt` (коммит 600b133)
+- **URL-билдинг в API-модуле**: ВСЕГДА `URLSearchParams`, НИКОГДА template literals. `brand = "H&M"` ломает query если через `${brand}` — `&` интерпретируется как разделитель. Учти: URLSearchParams кодирует пробел как `+`, не `%20` (тесты писать под `+`). Прецедент: `reports.getOpiu/getWbBdr/getOrderGeography` (коммит 45dda1d)
+- **`process.env` вне функций** — читать env на module level (`const API_URL = process.env.X || ''`), не внутри каждого вызова: тестируемость (mock env один раз) + консистентность с `client.ts`. Прецедент: `supply-chain.downloadVehicleDocument` (коммит 8eaf627)
+- **DOMPurify вместо regex-allowlist** для санитизации HTML из AI: ручной regex НЕ ловит `<img onerror>`, `javascript:` в href, `<svg onload>`. Использовать `sanitizeAIHtml()` из `@/lib/sanitize`, hook `afterSanitizeAttributes` для force `target=_blank rel=noopener`. Прецедент: ai-chat + tma/chat (коммит 8c1d167)
 
 ## Паттерны которые работают
 - Новый API endpoint: schema → service → router → test (в этом порядке)

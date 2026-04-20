@@ -47,11 +47,20 @@ NEVER use inline interfaces or `any`.
 - Imports: `@/lib/api`, `@/types/api`, `@/components/*`, `@/lib/utils`
 
 ## Testing
-- Unit: `npx vitest run` (files in `src/__tests__/`, 42 tests)
+- Unit: `npx vitest run` (files in `src/__tests__/`, 301 tests — **CI блокирующий**)
+  - `__tests__/lib/api/` — 16 файлов, 267 тестов (100% покрытие 9 модулей, 77% общего `src/lib/api/`)
+  - `__tests__/lib/` — utils (17), sanitize (16 — XSS kit)
+  - `__tests__/components/` — DataTable (16), PageHeader (9)
+- **TS гейт**: `tsc --noEmit` в CI блокирует PR (см. `test.yml → frontend-tests`). `ignoreBuildErrors` снят в `next.config.mjs`.
 - E2E smoke (CI nightly): `npx playwright test tests/e2e/smoke.spec.ts` — 27 страниц не крашатся, ~2 мин
 - E2E full (только локально / debug): `npx playwright test` — 73 теста в 11 spec-файлах
 - Config: `vitest.config.ts`, `playwright.config.ts`
-- E2E **НЕ блокирует** PR/merge/deploy — только nightly-сигнал. Блокирующие: pytest (1368) + vitest (42)
+- E2E **НЕ блокирует** PR/merge/deploy — только nightly-сигнал. Блокирующие: pytest (1368) + vitest (301) + tsc.
+
+## HTML из AI-ответов — обязательная санитизация
+- **ЛЮБОЙ** `dangerouslySetInnerHTML` с HTML от AI/LLM/user → только через `sanitizeAIHtml()` из `@/lib/sanitize` (DOMPurify 3.x).
+- Ручные regex-allowlist запрещены — не покрывают вложенные атаки (`<img onerror>`, `javascript:` в href, `<svg onload>`).
+- Sanitize тестируется в `src/__tests__/lib/sanitize.test.ts` (7 XSS + 9 позитивных кейсов) — при расширении allowlist добавлять регрессионный тест.
 
 ## New endpoint checklist
 1. Add TypeScript interface in `src/types/api.ts`
