@@ -20,11 +20,13 @@ if command -v docker &>/dev/null && docker compose ps --format '{{.Name}}' 2>/de
     DOCKER_OK=1
 fi
 
-# ─── 1. Backend тесты (testmon + xdist параллельно, ~10-20 сек) ──────
+# ─── 1. Backend тесты (testmon + xdist -n 2, ~10-20 сек) ─────────────
+# Note: -n 2 (не auto) — auto спавнит по CPU count, на Docker с ограничением
+# RAM (обычно 2GB) приводит к OOM (exit 137). 2 worker'а = оптимум для 4-8 CPU
 echo ""
-echo "━━━ Backend tests (testmon + xdist -n auto) ━━━"
+echo "━━━ Backend tests (testmon + xdist -n 2) ━━━"
 if [ "$DOCKER_OK" -eq 1 ]; then
-    if docker compose exec -T backend pytest --testmon -n auto --tb=short -q 2>/dev/null; then
+    if docker compose exec -T backend pytest --testmon -n 2 --tb=short -q 2>/dev/null; then
         echo -e "${GREEN}✓ Backend tests passed${NC}"
     else
         echo -e "${RED}✗ Backend tests FAILED${NC}"
