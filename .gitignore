@@ -21,6 +21,7 @@ backend/TZ_*.md
 backend/*_mockup.png
 .claude/worktrees/
 .claude/plans/
+.claude/.pending-learn.log
 nginx/ssl/
 
 # Test artifacts

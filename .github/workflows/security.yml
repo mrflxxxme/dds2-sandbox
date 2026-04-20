@@ -5,6 +5,8 @@ name: Security Audit
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 5 * * *'  # Daily 05:00 UTC — security sentinel
   push:
     branches: [main, dev]
     paths:
