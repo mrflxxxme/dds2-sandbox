@@ -185,8 +185,24 @@ jobs:
       - name: Run Alembic migrations
         run: docker compose exec -T backend alembic upgrade head
 
-      - name: Run tests
-        run: docker compose exec -T backend pytest tests/ -x --tb=short -q
+      - name: Run tests with coverage
+        run: |
+          docker compose exec -T backend pytest tests/ -x --tb=short -q \
+            --cov=backend --cov-report=xml:coverage.xml --cov-report=term
+
+      - name: Copy coverage.xml from container
+        if: always()
+        run: docker compose cp backend:/app/coverage.xml ./coverage-backend.xml 2>/dev/null || true
+
+      - name: Upload backend coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage-backend.xml
+          flags: backend
+          name: backend-coverage
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Cleanup
         if: always()
@@ -209,5 +225,15 @@ jobs:
       - name: Install dependencies
         run: cd frontend-react && npm ci --legacy-peer-deps || npm ci --legacy-peer-deps
 
-      - name: Run vitest
-        run: cd frontend-react && npx vitest run
+      - name: Run vitest with coverage
+        run: cd frontend-react && npx vitest run --coverage
+
+      - name: Upload frontend coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./frontend-react/coverage/coverage-final.json
+          flags: frontend
+          name: frontend-coverage
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}

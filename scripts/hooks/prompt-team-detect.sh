@@ -55,6 +55,23 @@ if [ -n "$hints" ]; then
     echo -e "$hints" >&2
 fi
 
+# --- /compact reminder (избегаем caching TTL регрессий, экономим токены) ---
+COUNTER_FILE="$(dirname "$0")/../../.claude/.session-counter"
+count=0
+if [ -f "$COUNTER_FILE" ]; then
+    count=$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)
+    : "${count:=0}"
+fi
+count=$((count + 1))
+echo "$count" > "$COUNTER_FILE"
+
+# Threshold-based reminders (по одному разу на сессию)
+case "$count" in
+    30) echo "[COMPACT] Сессия ~30 prompts — контекст приближается к 60%. Запусти /compact для сохранения cache hit rate (economy ~90% на input)" >&2 ;;
+    50) echo "[COMPACT] Сессия ~50 prompts — СИЛЬНО рекомендую /compact. После pause/resume cache TTL = 5 мин, длинные сессии удорожают API 10-20× (март 2026 инцидент)" >&2 ;;
+    80) echo "[COMPACT] ⚠ Сессия ~80 prompts — /compact или /clear. Дальше — значительный риск context overflow + cost spike" >&2 ;;
+esac
+
 # --- Speculative explore V1 (opt-in via DDS_PREWARM_ENABLED=1) ---
 # Триггерим pre-warm для ЛЮБОГО промпта длиннее 30 символов
 # (короткие "yes", "ок", "что?" — не имеет смысла исследовать контекст)

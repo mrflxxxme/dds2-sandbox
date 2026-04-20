@@ -22,3 +22,4 @@ sqladmin>=0.19.0
 itsdangerous>=2.1.0
 pytest-xdist==3.5.0
 pytest-testmon==2.1.1
+pytest-cov==5.0.0

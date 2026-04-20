@@ -1,6 +1,10 @@
 # ДДС — Система управленческого учёта
 
-Веб-приложение для замены хрупкой логики Google Sheets.  
+[![Tests](https://github.com/vladbydaev37/dds2/actions/workflows/test.yml/badge.svg)](https://github.com/vladbydaev37/dds2/actions/workflows/test.yml)
+[![Backend coverage](https://codecov.io/gh/vladbydaev37/dds2/branch/main/graph/badge.svg?flag=backend)](https://codecov.io/gh/vladbydaev37/dds2)
+[![Frontend coverage](https://codecov.io/gh/vladbydaev37/dds2/branch/main/graph/badge.svg?flag=frontend)](https://codecov.io/gh/vladbydaev37/dds2)
+
+Веб-приложение для замены хрупкой логики Google Sheets.
 Архитектура повторяет вашу систему: **DDS_01 → DDS_02 → DDS_03**.
 
 ---
@@ -134,13 +138,13 @@ docker-compose exec backend python /app/scripts/seed_from_excel.py
 - `purpose_tag` — Комиссия / Логистика / Заказ / Другое
 - `invoice_id / annex_id` — извлечённые из назначения
 
-**customs_topup** — авансы на таможню (из CUSTOMS_PAYMENT)  
-**customs_alloc** — распределение авансов по заказам  
-**orders** — заказы (отправки)  
-**planned_payments** — плановые платежи  
-**wb_funnel_daily** — воронка продаж WB (ежедневные данные)  
-**wb_api_keys** — зашифрованные API-ключи WB  
-**planned_incomes** — плановые поступления WB  
+**customs_topup** — авансы на таможню (из CUSTOMS_PAYMENT)
+**customs_alloc** — распределение авансов по заказам
+**orders** — заказы (отправки)
+**planned_payments** — плановые платежи
+**wb_funnel_daily** — воронка продаж WB (ежедневные данные)
+**wb_api_keys** — зашифрованные API-ключи WB
+**planned_incomes** — плановые поступления WB
 
 ---
 

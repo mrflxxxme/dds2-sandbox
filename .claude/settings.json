@@ -53,7 +53,31 @@
             "timeout": 3
           }
         ],
-        "description": "Auto-detect: backend+frontend → TeamCreate, новая фича → /plan, миграция → последовательно, рефакторинг, опасные команды"
+        "description": "Auto-detect: backend+frontend → TeamCreate, новая фича → /plan, миграция → последовательно, рефакторинг, опасные команды + /compact reminder"
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/hooks/session_start.sh",
+            "timeout": 5
+          }
+        ],
+        "description": "Auto-context: recent commits, branch sync, uncommitted, pending /learn, open CI issues, docker health"
+      },
+      {
+        "matcher": "compact|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/hooks/session_start.sh",
+            "timeout": 2
+          }
+        ],
+        "description": "Reset /compact counter при compact/clear"
       }
     ]
   }
