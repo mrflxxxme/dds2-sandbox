@@ -551,6 +551,31 @@ async def update_vehicle_item(
     if set_box_detail_override:
         cost_item.box_detail_override = box_detail_override
 
+    # Recompute volume_m3 (per unit) when box dimensions change — delivery_rub
+    # in recalculate_order_items is allocated proportionally to volume_m3.
+    if set_box_size_override or set_pcs_per_box_override:
+        from backend.services.cost.helpers import parse_box_volume_m3
+
+        fo_bs = None
+        fo_ppb = None
+        if cost_item.factory_order_item_id:
+            fo_result = await db.execute(
+                select(FactoryOrderItem).where(
+                    FactoryOrderItem.id == cost_item.factory_order_item_id,
+                    FactoryOrderItem.is_deleted == False,
+                )
+            )
+            fo_item = fo_result.scalar_one_or_none()
+            if fo_item:
+                fo_bs = fo_item.mix_box_size if fo_item.mix_group_id and fo_item.mix_box_size else fo_item.box_size
+                fo_ppb = (
+                    fo_item.mix_pcs_per_box if fo_item.mix_group_id and fo_item.mix_pcs_per_box else fo_item.pcs_per_box
+                )
+        effective_bs = cost_item.box_size_override or fo_bs
+        effective_ppb = cost_item.pcs_per_box_override or fo_ppb
+        vol_m3 = parse_box_volume_m3(effective_bs, effective_ppb)
+        cost_item.volume_m3 = vol_m3 if vol_m3 > 0 else None
+
     await db.commit()
 
     from backend.services.cost.items import recalculate_order_items
