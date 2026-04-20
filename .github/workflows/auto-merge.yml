@@ -114,17 +114,34 @@ jobs:
 
           echo "All checks passed!"
 
-          # Check if branch is behind base — update if needed
+          # Check merge state — может быть много значений: CLEAN, BLOCKED, BEHIND, UNSTABLE, DIRTY, HAS_HOOKS, UNKNOWN
           MERGE_STATE=$(gh pr view "$PR_NUMBER" --json mergeStateStatus --jq '.mergeStateStatus')
           echo "Merge state: ${MERGE_STATE}"
 
-          if [ "$MERGE_STATE" = "BEHIND" ]; then
-            echo "Branch is behind base, updating..."
-            gh api -X PUT "repos/${REPO}/pulls/${PR_NUMBER}/update-branch" \
-              --field expected_head_sha="$HEAD_SHA" || true
-            echo "Branch update requested — CI will re-trigger auto-merge"
-            exit 0
-          fi
-
-          echo "Merging PR #${PR_NUMBER}..."
-          gh pr merge "$PR_NUMBER" --merge --delete-branch=false
+          case "$MERGE_STATE" in
+            BEHIND)
+              echo "Branch is behind base, updating..."
+              gh api -X PUT "repos/${REPO}/pulls/${PR_NUMBER}/update-branch" \
+                --field expected_head_sha="$HEAD_SHA" || true
+              echo "Branch update requested — CI will re-trigger auto-merge"
+              exit 0
+              ;;
+            BLOCKED|DIRTY|UNKNOWN)
+              # BLOCKED — branch protection не пропускает (required checks ещё не отработали полностью или not strict-up-to-date)
+              # DIRTY — merge conflict
+              # UNKNOWN — GitHub ещё пересчитывает после update-branch, попробовать в следующий раз
+              echo "Merge state ${MERGE_STATE} prevents merge — skipping (will retry on next CI run)"
+              exit 0
+              ;;
+            CLEAN|HAS_HOOKS|UNSTABLE)
+              # CLEAN — всё ок
+              # HAS_HOOKS — есть pre-merge hooks но мерджить можно
+              # UNSTABLE — non-required check failed, но required все ✅ (наш случай с claude review)
+              echo "Merging PR #${PR_NUMBER} (state=${MERGE_STATE})..."
+              gh pr merge "$PR_NUMBER" --merge --delete-branch=false
+              ;;
+            *)
+              echo "Unknown merge state '${MERGE_STATE}', skipping for safety"
+              exit 0
+              ;;
+          esac
