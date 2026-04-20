@@ -9,16 +9,24 @@ paths:
 
 ### Фичи и кросс-доменные изменения (полный цикл)
 ```
-Фаза 0:   Lead (opus): уточняет → ТЗ
+Фаза 0:   Lead (opus): EnterPlanMode → уточняет → ТЗ → ExitPlanMode (только при approval)
 Фаза 1:   Lead (sonnet): Model→Migration→Schema + Pre-warm frontend (haiku, read-only)
 Фаза 2:   2-3 агента (sonnet) параллельно: Backend[-A, -B] ‖ Frontend
 Фаза 2.5: code-reviewer ‖ security-reviewer (sonnet, read-only)
 Фаза 3:   pytest ‖ vitest ‖ conventions ‖ docs (haiku, параллельно) → коммит
 ```
-- Агент НЕ пишет код, пока человек не подтвердил ТЗ
+- **Plan Mode (Фаза 0)** — для фич/рефакторинга lead вызывает `EnterPlanMode` ПЕРЕД любыми правками. Без `ExitPlanMode` (approval пользователя) код не пишется. Это решает проблему «агент сразу кодит» из `feedback_ask_questions`
 - Backend и Frontend — 0 пересечений файлов, всегда параллелятся
-- Alembic миграции — ТОЛЬКО последовательно
+- Alembic миграции — ТОЛЬКО последовательно (см. `/migration` skill)
 - Один файл — ТОЛЬКО один агент
+
+### Доменные skills (быстрые шаблоны)
+| Skill | Когда |
+|-------|-------|
+| `/new-endpoint` | новый API endpoint (schema → service → router → test) |
+| `/migration` | Alembic миграция (heads → revision → upgrade/downgrade) |
+| `/new-page` | Next.js страница (types → api → page с loading/error/empty) |
+| `/plan` | альтернатива встроенному Plan Mode для backend-only задач |
 
 ### Баги и мелкие изменения
 Без ТЗ — сразу анализ → фикс → тесты → коммит

@@ -48,11 +48,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "input=$(cat); prompt=$(echo \"$input\" | python3 -c 'import sys,json; print(json.load(sys.stdin).get(\"prompt\",\"\"))' 2>/dev/null); if echo \"$prompt\" | grep -qiE '(удали все|drop all|reset hard|force push|удалить базу)'; then echo '[DDS2 SAFETY] Обнаружена потенциально разрушительная команда. Подтверди намерение.' >&2; fi; exit 0",
+            "command": "bash scripts/hooks/prompt-team-detect.sh",
             "timeout": 3
           }
         ],
-        "description": "Предупреждение о разрушительных командах в промпте"
+        "description": "Auto-detect: backend+frontend → TeamCreate, новая фича → /plan, миграция → последовательно, рефакторинг, опасные команды"
       }
     ]
   }
