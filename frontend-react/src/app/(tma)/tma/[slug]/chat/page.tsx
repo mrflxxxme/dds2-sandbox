@@ -3,12 +3,16 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { api } from '@/lib/api';
 import { haptic } from '@/lib/telegram';
+import { sanitizeAIHtml } from '@/lib/sanitize';
 
 /**
  * TMA AI Chat page — chat with AI assistant about project financials.
  *
- * FIX #4: XSS-safe rendering — escape HTML entities BEFORE applying formatting.
- * No dangerouslySetInnerHTML with raw user input.
+ * XSS-safe rendering: AI responses are passed through DOMPurify
+ * (`sanitizeAIHtml`) which strips `<script>`, event handlers (`onerror` etc.),
+ * `javascript:`/unsafe `data:` URLs, and any tag/attr not on the strict
+ * allowlist. User-provided `msg.content` for role='user' is rendered as plain
+ * text (React auto-escaping), never through `dangerouslySetInnerHTML`.
  */
 
 interface ChatMessage {
@@ -24,41 +28,36 @@ const SUGGESTIONS = [
 ];
 
 /**
- * Render AI response safely — allow Telegram HTML tags but escape everything else.
+ * Pre-process AI response and sanitize via DOMPurify.
+ *
+ *  1. Strip synthesizer artefacts (`<!-- ... -->` hidden insights, `[INSIGHT]` lines).
+ *  2. Apply markdown-lite replacements (`**bold**`, `*italic*`, `` `code` ``)
+ *     BEFORE sanitization so they become real HTML tags that DOMPurify can
+ *     whitelist.
+ *  3. Replace newlines with `<br>` for chat-bubble line breaks.
+ *  4. Run the full string through `sanitizeAIHtml` — strips scripts, event
+ *     handlers, unsafe URLs, and anything outside the allowlist.
  */
 function renderMessageSafe(text: string): string {
-    // 0. Remove hidden blocks (insights for memory, not for user)
-    let cleaned = text
-        .replace(/<!--[\s\S]*?-->/g, '')        // HTML comments (synthesizer insights)
-        .replace(/^\[INSIGHT\].*$/gm, '')        // [INSIGHT] lines (agent insights)
-        .replace(/\n{3,}/g, '\n\n')              // collapse extra newlines
+    // 1. Drop hidden synthesizer blocks / INSIGHT lines (not for user eyes).
+    const cleaned = text
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(/^\[INSIGHT\].*$/gm, '')
+        .replace(/\n{3,}/g, '\n\n')
         .trim();
 
-    // 1. Allow known Telegram HTML tags, escape the rest
-    let safe = cleaned
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
+    // 2. Markdown-lite → HTML (DOMPurify will keep the tags, strip anything
+    //    malicious inside them).
+    let withMarkdown = cleaned
+        .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')
+        .replace(/\*(.*?)\*/g, '<i>$1</i>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>');
 
-    // 2. Restore allowed Telegram HTML tags (NO attributes — prevents XSS)
-    const allowedTags = ['b', 'i', 'u', 's', 'code', 'pre', 'blockquote'];
-    for (const tag of allowedTags) {
-        safe = safe.replace(new RegExp(`&lt;${tag}&gt;`, 'gi'), `<${tag}>`);
-        safe = safe.replace(new RegExp(`&lt;/${tag}&gt;`, 'gi'), `</${tag}>`);
-    }
-    // Allow <blockquote expandable> specifically (Telegram feature)
-    safe = safe.replace(/&lt;blockquote expandable&gt;/gi, '<blockquote>');
+    // 3. Line breaks → <br> (TMA chat bubbles are compact, no paragraph tags).
+    withMarkdown = withMarkdown.replace(/\n/g, '<br>');
 
-    // 3. Also support markdown-like formatting as fallback
-    safe = safe.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
-    safe = safe.replace(/\*(.*?)\*/g, '<i>$1</i>');
-    safe = safe.replace(/`([^`]+)`/g, '<code>$1</code>');
-
-    // 4. Convert newlines to <br>
-    safe = safe.replace(/\n/g, '<br>');
-
-    return safe;
+    // 4. Full DOMPurify sanitation — last line of defence.
+    return sanitizeAIHtml(withMarkdown);
 }
 
 export default function TmaChatPage() {

@@ -305,7 +305,7 @@ export default function TeamPage() {
         try {
             await api.updateTelegramUsername(slug, userId, value);
             setMembers(prev => prev.map(m =>
-                m.user_id === userId ? { ...m, telegram_username: value } : m
+                m.user_id === userId ? { ...m, telegram_username: value ?? undefined } : m
             ));
             setMsg('Telegram обновлён');
         } catch (e: any) {

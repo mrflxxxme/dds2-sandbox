@@ -7,8 +7,8 @@ import { DayAnalysisTab } from './components/DayAnalysisTab';
 import { AdsTab } from './components/AdsTab';
 import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelAbcRow, FunnelSummary, FunnelFilters } from '@/types/api';
 
-const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
-const fmtPct = (n: number) => (n || 0).toFixed(2) + '%';
+const fmt = (n: number | undefined) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
+const fmtPct = (n: number | undefined) => (n || 0).toFixed(2) + '%';
 
 /* ─── Main page ──────────────────────────────────────────────── */
 
@@ -788,32 +788,32 @@ export default function FunnelPage() {
                                                 {detailed && <td style={{ fontSize: 12, borderBottom: '1px solid #f3f4f6' }}>{r.subject}</td>}
                                                 {detailed && <td style={{ fontSize: 12, borderBottom: '1px solid #f3f4f6' }}>{r.brand}</td>}
                                                 {/* Воронка */}
-                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', background: r.open_card > 300000 ? '#fffbeb' : undefined }}>{fmt(r.open_card)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', background: (r.open_card ?? 0) > 300000 ? '#fffbeb' : undefined }}>{fmt(r.open_card)}</td>
                                                 <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', background: r.add_to_cart > 15000 ? '#eff6ff' : undefined }}>{fmt(r.add_to_cart)}</td>
-                                                <td style={{ textAlign: 'right', fontWeight: 600, borderBottom: '1px solid #f3f4f6', background: r.orders_count > 2500 ? '#f0fdf4' : undefined }}>{fmt(r.orders_count)}</td>
-                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', background: r.orders_sum_rub > 5000000 ? '#faf5ff' : undefined }}>{fmt(r.orders_sum_rub)}</td>
-                                                <td style={{ textAlign: 'right', fontWeight: 500, borderBottom: '1px solid #f3f4f6', color: r.revenue > 0 ? '#111827' : '#ef4444' }}>{fmt(r.revenue)}</td>
+                                                <td style={{ textAlign: 'right', fontWeight: 600, borderBottom: '1px solid #f3f4f6', background: (r.orders_count ?? 0) > 2500 ? '#f0fdf4' : undefined }}>{fmt(r.orders_count)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', background: (r.orders_sum_rub ?? 0) > 5000000 ? '#faf5ff' : undefined }}>{fmt(r.orders_sum_rub)}</td>
+                                                <td style={{ textAlign: 'right', fontWeight: 500, borderBottom: '1px solid #f3f4f6', color: (r.revenue ?? 0) > 0 ? '#111827' : '#ef4444' }}>{fmt(r.revenue)}</td>
                                                 {/* Реклама */}
-                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6', color: r.adv_sum > 400000 ? '#ef4444' : r.adv_sum > 100000 ? '#f59e0b' : r.adv_sum > 0 ? '#f97316' : '#9ca3af', background: r.adv_sum > 400000 ? '#fef2f2' : undefined }}>{fmt(r.adv_sum)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6', color: (r.adv_sum ?? 0) > 400000 ? '#ef4444' : (r.adv_sum ?? 0) > 100000 ? '#f59e0b' : (r.adv_sum ?? 0) > 0 ? '#f97316' : '#9ca3af', background: (r.adv_sum ?? 0) > 400000 ? '#fef2f2' : undefined }}>{fmt(r.adv_sum)}</td>
                                                 <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.adv_views)}</td>
                                                 <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.adv_clicks)}</td>
-                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: r.ctr > 5 ? '#10b981' : r.ctr > 2 ? '#374151' : '#f59e0b' }}>{fmtPct(r.ctr)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: (r.ctr ?? 0) > 5 ? '#10b981' : (r.ctr ?? 0) > 2 ? '#374151' : '#f59e0b' }}>{fmtPct(r.ctr)}</td>
                                                 <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.cpc)}</td>
                                                 <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.cpm)}</td>
-                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: r.drr > 30 ? '#ef4444' : r.drr > 15 ? '#f59e0b' : r.drr > 0 ? '#10b981' : '#9ca3af', fontWeight: r.drr > 30 ? 600 : 400, background: r.drr > 30 ? '#fef2f2' : undefined }}>{fmtPct(r.drr)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: (r.drr ?? 0) > 30 ? '#ef4444' : (r.drr ?? 0) > 15 ? '#f59e0b' : (r.drr ?? 0) > 0 ? '#10b981' : '#9ca3af', fontWeight: (r.drr ?? 0) > 30 ? 600 : 400, background: (r.drr ?? 0) > 30 ? '#fef2f2' : undefined }}>{fmtPct(r.drr)}</td>
                                                 {/* Финансы */}
                                                 {detailed && <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6' }}>{r.cost_price ? fmt(r.cost_total) : <span style={{ color: '#f59e0b', fontSize: 11 }}>—</span>}</td>}
                                                 <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: !detailed ? '1px solid #f3f4f6' : 'none', color: (r.spp_rate || 0) > 40 ? '#ef4444' : (r.spp_rate || 0) > 20 ? '#f59e0b' : '#10b981', fontSize: 12 }}>{r.spp_rate ? fmtPct(r.spp_rate) : '—'}</td>
                                                 <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: '#374151', fontSize: 12 }}>{r.buyout_percent ? fmtPct(r.buyout_percent) : '—'}</td>
                                                 <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: '#6b7280' }}>{fmt(r.tax)}</td>
-                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: r.commission_rate > 0 ? '#6366f1' : '#9ca3af', fontSize: 12 }}>{r.commission_rate > 0 ? fmtPct(r.commission_rate) : '—'}</td>
-                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: r.commission > 0 ? '#6366f1' : '#9ca3af', fontWeight: 500 }}>{r.commission > 0 ? fmt(r.commission) : '—'}</td>
-                                                <td style={{ textAlign: 'right', fontWeight: 700, borderBottom: '1px solid #f3f4f6', color: r.profit > 0 ? '#10b981' : '#ef4444', background: r.profit > 0 ? '#f0fdf4' : r.profit < 0 ? '#fef2f2' : undefined }}>{fmt(r.profit)}</td>
-                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: r.margin > 20 ? '#10b981' : r.margin > 0 ? '#65a30d' : '#ef4444', fontWeight: r.margin > 20 ? 600 : 400 }}>{fmtPct(r.margin)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: (r.commission_rate ?? 0) > 0 ? '#6366f1' : '#9ca3af', fontSize: 12 }}>{(r.commission_rate ?? 0) > 0 ? fmtPct(r.commission_rate) : '—'}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: (r.commission ?? 0) > 0 ? '#6366f1' : '#9ca3af', fontWeight: 500 }}>{(r.commission ?? 0) > 0 ? fmt(r.commission) : '—'}</td>
+                                                <td style={{ textAlign: 'right', fontWeight: 700, borderBottom: '1px solid #f3f4f6', color: (r.profit ?? 0) > 0 ? '#10b981' : '#ef4444', background: (r.profit ?? 0) > 0 ? '#f0fdf4' : (r.profit ?? 0) < 0 ? '#fef2f2' : undefined }}>{fmt(r.profit)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: (r.margin ?? 0) > 20 ? '#10b981' : (r.margin ?? 0) > 0 ? '#65a30d' : '#ef4444', fontWeight: (r.margin ?? 0) > 20 ? 600 : 400 }}>{fmtPct(r.margin)}</td>
                                                 <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.avg_price)}</td>
                                                 {/* Конверсия */}
-                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6', color: r.add_to_cart_pct > 8 ? '#10b981' : r.add_to_cart_pct > 4 ? '#374151' : '#f59e0b' }}>{fmtPct(r.add_to_cart_pct)}</td>
-                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: r.cart_to_order_pct > 15 ? '#10b981' : r.cart_to_order_pct > 8 ? '#374151' : '#f59e0b' }}>{fmtPct(r.cart_to_order_pct)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6', color: (r.add_to_cart_pct ?? 0) > 8 ? '#10b981' : (r.add_to_cart_pct ?? 0) > 4 ? '#374151' : '#f59e0b' }}>{fmtPct(r.add_to_cart_pct)}</td>
+                                                <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: (r.cart_to_order_pct ?? 0) > 15 ? '#10b981' : (r.cart_to_order_pct ?? 0) > 8 ? '#374151' : '#f59e0b' }}>{fmtPct(r.cart_to_order_pct)}</td>
                                             </tr>
                                         );
                                     })}

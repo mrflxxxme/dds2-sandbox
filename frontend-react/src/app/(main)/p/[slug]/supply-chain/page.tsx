@@ -47,6 +47,7 @@ import type {
     SupplierCatalogSubjectGroup,
     SkuOrderHistoryEntry,
     ShipmentMatrixResponse,
+    ShipmentMatrixItem,
 } from '@/types/api';
 import { CONTAINERS } from '@/app/(main)/p/[slug]/container-loader/lib/packer';
 
@@ -338,7 +339,7 @@ function FactoryOrdersTab() {
         const currency = o.supplier?.currency || 'CNY';
         for (const i of o.items || []) {
             acc.weight += (Number(i.weight_kg) || 0) * i.qty;
-            acc.volume += calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box);
+            acc.volume += calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box ?? null);
             const itemCost = (Number(i.price_cny) || 0) * i.qty;
             if (currency === 'RUB') acc.sumRub += itemCost;
             else acc.sumCny += itemCost;
@@ -377,7 +378,7 @@ function FactoryOrdersTab() {
             key: 'volume', label: t('col_volume_m3'), align: 'right',
             render: (_v: unknown, row: FactoryOrder) => {
                 const items = row.items || [];
-                const total = items.reduce((s, i) => s + calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box), 0);
+                const total = items.reduce((s, i) => s + calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box ?? null), 0);
                 return total > 0 ? formatNumber(total, 1) : '\u2014';
             },
         },
@@ -453,7 +454,7 @@ function FactoryOrdersTab() {
             const totalQty = items.reduce((s, i) => s + i.qty, 0);
             const assignedQty = items.reduce((s, i) => s + i.assigned_qty, 0);
             const totalBoxes = calcTotalBoxesWithMix(items);
-            const totalVolume = items.reduce((s, i) => s + calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box), 0);
+            const totalVolume = items.reduce((s, i) => s + calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box ?? null), 0);
             const totalWeight = items.reduce((s, i) => s + (Number(i.weight_kg) || 0) * i.qty, 0);
             const totalCny = items.reduce((s, i) => s + (Number(i.price_cny) || 0) * i.qty, 0);
             return {
@@ -1587,7 +1588,7 @@ function VehiclesTab() {
         e.stopPropagation();
         if (!confirm(`${t('vehicles_confirm_status')} ${orderNo}?`)) return;
         try {
-            await api.updateVehicleStatus(orderNo, { status: nextStatus });
+            await api.updateVehicleStatus(orderNo, { status: nextStatus as VehicleStatus });
             load();
         } catch (err: unknown) {
             alert(err instanceof Error ? err.message : t('msg_error'));

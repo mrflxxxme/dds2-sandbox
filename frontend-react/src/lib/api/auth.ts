@@ -5,12 +5,12 @@ import type { UserProfile, MessageResponse } from '@/types/api';
 export function addAuthMethods(api: ApiClient) {
     return {
         login(username: string, password: string) {
-            return api.request<{ access_token: string; token_type: string }>(
+            return api.request<{ access_token: string; refresh_token?: string; token_type: string }>(
                 'POST', '/api/v1/auth/login', { username, password }
             );
         },
         register(data: { username: string; password: string; email?: string; first_name?: string; last_name?: string }) {
-            return api.request<{ access_token: string; token_type: string }>(
+            return api.request<{ access_token: string; refresh_token?: string; token_type: string }>(
                 'POST', '/api/v1/auth/register', data
             );
         },

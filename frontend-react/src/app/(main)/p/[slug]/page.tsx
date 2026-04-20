@@ -237,7 +237,7 @@ export default function DashboardPage() {
     if(!data) return null;
 
     const netCashflow=data.month_income-data.month_expense;
-    const funnelDRR=funnel&&funnel.orders_sum_rub>0?(funnel.adv_sum/funnel.orders_sum_rub*100):0;
+    const funnelDRR=funnel&&(funnel.orders_sum_rub??0)>0?((funnel.adv_sum??0)/(funnel.orders_sum_rub??1)*100):0;
 
     return (
         <div className="animate-in">
@@ -258,7 +258,7 @@ export default function DashboardPage() {
                 <KpiCard icon="💰" label="Баланс RUB" value={`${formatNumber(data.balance_rub)} ₽`} color={C.income}/>
                 <KpiCard icon="💴" label="Баланс CNY" value={`${formatNumber(data.balance_cny)} ¥`} color={C.warning}/>
                 <KpiCard icon={netCashflow>=0?'📈':'📉'} label="Cashflow" value={`${netCashflow>=0?'+':''}${formatNumber(netCashflow)} ₽`} sub={`Приход ${fmtK(data.month_income)} / Расход ${fmtK(data.month_expense)}`} color={netCashflow>=0?C.income:C.expense} sparkData={(data.daily_cashflow||[]).map((d:DailyCashflowRow)=>d.income-d.expense)}/>
-                <KpiCard icon="📊" label="ДРР" value={funnel?`${funnelDRR.toFixed(1)}%`:'—'} sub={funnel?`${fmtK(funnel.adv_sum)} / ${fmtK(funnel.orders_sum_rub)} ₽`:''} color={funnelDRR>15?C.expense:C.income}/>
+                <KpiCard icon="📊" label="ДРР" value={funnel?`${funnelDRR.toFixed(1)}%`:'—'} sub={funnel?`${fmtK(funnel.adv_sum??0)} / ${fmtK(funnel.orders_sum_rub??0)} ₽`:''} color={funnelDRR>15?C.expense:C.income}/>
             </div>
 
             {/* KPI Row 2 */}

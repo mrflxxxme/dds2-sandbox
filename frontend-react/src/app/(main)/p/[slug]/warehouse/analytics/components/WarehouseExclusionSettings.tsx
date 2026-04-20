@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react';
 import { api } from '@/lib/api';
 
 export function WarehouseExclusionSettings() {
-    const [warehouses, setWarehouses] = useState<Array<{ name: string; lat: number; lng: number }>>([]);
+    const [warehouses, setWarehouses] = useState<Array<{ name: string }>>([]);
     const [excluded, setExcluded] = useState<string[]>([]);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);

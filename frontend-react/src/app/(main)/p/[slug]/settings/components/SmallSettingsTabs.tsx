@@ -156,7 +156,7 @@ export function FunnelCosts() {
             <td><a href={`https://www.wildberries.ru/catalog/${item.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>{item.nm_id}</a></td>
             {!isOverride && <><td>{item.vendor_code}</td><td>{item.subject}</td><td>{item.brand}</td></>}
             <td>{editCost?.nm_id === item.nm_id ? (
-                <input type="number" value={editCost.cost_price} autoFocus onChange={e => setEditCost({ ...editCost, cost_price: e.target.value })} onKeyDown={e => e.key === 'Enter' && handleSaveCost()}
+                <input type="number" value={editCost!.cost_price} autoFocus onChange={e => setEditCost(prev => prev ? { ...prev, cost_price: e.target.value } : null)} onKeyDown={e => e.key === 'Enter' && handleSaveCost()}
                     style={{ width: 100, background: 'var(--color-bg)', border: '1px solid var(--color-accent)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)' }} />
             ) : isOverride ? fmt(item.cost_price) : '—'}</td>
             <td>{editCost?.nm_id === item.nm_id ? (

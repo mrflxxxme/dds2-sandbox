@@ -114,7 +114,7 @@ export default function DataTable({
     rowClassName,
     maxHeight,
 }: DataTableProps) {
-    const effectiveColumns = autoColumns && data.length > 0
+    const effectiveColumns: Column[] = autoColumns && data.length > 0
         ? Object.keys(data[0]).map(k => ({ key: k, label: k }))
         : columns;
 

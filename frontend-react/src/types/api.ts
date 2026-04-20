@@ -296,9 +296,14 @@ export interface CostOrder {
   invoice_no?: string;
   dt_number?: string;
   ship_date?: string;
+  actual_arrival_date?: string;
+  transport_type?: string;
   delivery_cost?: number;
+  delivery_cost_cny?: number;
+  delivery_cost_usd?: number;
   rate_cny?: number;
   rate_usd?: number;
+  rate_eur?: number;
   note?: string;
   created_at: string;
   items_count?: number;
@@ -446,9 +451,9 @@ export interface FunnelAbcRow {
     margin_pct: number;
 }
 
-export interface FunnelGroupRow extends Omit<FunnelSkuRow, 'nm_id' | 'vendor_code'> {
-    brand?: string;
-    subject?: string;
+export interface FunnelGroupRow extends Omit<FunnelSkuRow, 'nm_id' | 'vendor_code' | 'brand' | 'subject'> {
+    brand?: string | null;
+    subject?: string | null;
     tag?: string;
     imt_group?: string;
     children?: FunnelSkuRow[];
@@ -503,6 +508,7 @@ export interface MissingCostItem {
 
 export interface MessageResponse {
   message: string;
+  project_slug?: string;
 }
 
 export interface ImportResult {

@@ -422,7 +422,7 @@ export default function AssemblyListPage() {
 
     const handleDateChange = async (item: AssemblyRequest, newDate: string) => {
         const oldDate = item.estimated_ready_date;
-        updateItemLocal(item.id, { estimated_ready_date: newDate || null });
+        updateItemLocal(item.id, { estimated_ready_date: newDate || undefined });
 
         try {
             await api.updateAssemblyRequest(item.id, {
