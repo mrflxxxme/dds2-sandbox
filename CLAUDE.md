@@ -132,8 +132,7 @@ src/types/api.ts — TypeScript интерфейсы
 | `auto-pr.yml` | push в `dev` | автоматический PR `dev → main` |
 | `auto-merge.yml` | green CI на auto-PR | авто-merge при зелёном CI |
 | `cd-production.yml` | merge в `main` | деплой на app-сервер |
-| `post-merge.yml` | push в `main` | smoke E2E + GH issue с rollback инструкцией при fail |
-| `test-sentinel.yml` | **cron** `0 4 * * *` (daily 04:00 UTC) + manual | прогон pytest+vitest на main, GH issue + auto-close |
+| `post-merge.yml` | push в `main` | ждёт `cd-production` через GH API → HTTP healthcheck `app.vyatkin-wb.ru` → GH issue при fail |
 | `todo-sentinel.yml` | **cron** `0 6 * * 1` (Mon 06:00 UTC) + manual | стары TODO/FIXME (>30 дней) → tracking issue |
 | `known-bugs-sentinel.yml` | **cron** `0 6 * * 2` (Tue 06:00 UTC) + manual | P{N} markers в коде → tracking issue |
 | `weekly-retrospective.yml` | **cron** `0 7 * * 0` (Sun 07:00 UTC) + manual | анализ git log за неделю → suggestions |

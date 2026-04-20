@@ -1,8 +1,11 @@
-# Phase 4: post-merge actions on main
-# - Smoke E2E (быстрая проверка что main работоспособен)
-# - Performance check (если есть benchmark)
-# - Auto-rollback issue если smoke упал
-name: Post-Merge Actions
+# Post-merge healthcheck для production (после cd-production.yml деплоя)
+# - Ждёт 3 мин (cd-production.yml в среднем 2-3 мин)
+# - HTTP healthcheck на production URL
+# - При fail → GH issue с rollback инструкцией
+#
+# НЕ запускает E2E локально (это делает e2e-nightly.yml — не дублируем).
+# НЕ блокирует merge (он уже произошёл, мы просто детектим прод-проблему быстро).
+name: Post-Merge Production Healthcheck
 
 on:
   push:
@@ -11,95 +14,110 @@ on:
 permissions:
   contents: read
   issues: write
-  pull-requests: write
 
 jobs:
-  smoke-e2e:
-    name: Smoke E2E (post-merge)
+  prod-healthcheck:
+    name: Healthcheck production after deploy
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: frontend-react/package-lock.json
+      - name: Wait for cd-production deploy to finish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # cd-production обычно ~8-9 мин. Ждём через GH API его завершения.
+          # Max 12 мин (защита от зависания).
+          set +e
+          REPO="${{ github.repository }}"
+          SHA="${{ github.sha }}"
+          echo "Waiting for cd-production.yml on commit ${SHA:0:7}..."
+          for i in $(seq 1 36); do  # 36 × 20s = 12 мин
+            STATUS=$(gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=20" \
+              --jq '[.workflow_runs[] | select(.name == "Deploy to Production")] | .[0] | .status + ":" + (.conclusion // "null")' 2>/dev/null)
+            echo "Attempt $i: cd-production status=${STATUS:-unknown}"
+            case "$STATUS" in
+              completed:success)
+                echo "✓ cd-production succeeded — proceeding to healthcheck"
+                # Дополнительная пауза 30s — даём nginx/контейнерам прогреться
+                sleep 30
+                exit 0
+                ;;
+              completed:failure|completed:cancelled|completed:timed_out)
+                echo "✗ cd-production failed (${STATUS}) — пропускаем healthcheck (issue не нужен, fail и так виден)"
+                exit 0
+                ;;
+            esac
+            sleep 20
+          done
+          echo "⚠ cd-production не завершился за 12 мин — всё равно пробуем healthcheck"
+          exit 0
 
-      - name: Install frontend deps
-        working-directory: frontend-react
-        run: npm ci --legacy-peer-deps
-
-      - name: Install Playwright browsers
-        working-directory: frontend-react
-        run: npx playwright install --with-deps chromium
-
-      - name: Run smoke E2E (27 страниц)
-        id: smoke
+      - name: HTTP healthcheck — production
+        id: health
         continue-on-error: true
-        working-directory: frontend-react
         run: |
           set +e
-          npx playwright test tests/e2e/smoke.spec.ts --reporter=line 2>&1 | tee ../smoke-output.txt
-          echo "exit=$?" >> "$GITHUB_OUTPUT"
+          URL="https://app.vyatkin-wb.ru"
+          # 5 попыток с интервалом 30 сек (вдруг деплой ещё не завершён)
+          for i in 1 2 3 4 5; do
+            echo "Attempt $i: $URL"
+            HTTP=$(curl -sS -o /tmp/healthcheck.out -w "%{http_code}" -m 15 "$URL/" 2>&1 || echo "000")
+            echo "HTTP $HTTP"
+            if [ "$HTTP" = "200" ] || [ "$HTTP" = "302" ] || [ "$HTTP" = "301" ]; then
+              echo "✓ Production responsive on attempt $i"
+              echo "exit=0" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "✗ Production failed all 5 attempts"
+          tail -50 /tmp/healthcheck.out > /tmp/health-tail.txt 2>/dev/null || echo "(no output)" > /tmp/health-tail.txt
+          echo "exit=1" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Playwright report on failure
-        if: steps.smoke.outputs.exit != '0'
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-report-smoke
-          path: frontend-react/playwright-report/
-          retention-days: 7
-
-      - name: Create rollback issue if smoke failed
-        if: steps.smoke.outputs.exit != '0'
+      - name: Create rollback issue if healthcheck failed
+        if: steps.health.outputs.exit == '1'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const date = new Date().toISOString();
             const sha = context.sha.substring(0, 7);
-            const tail = fs.existsSync('smoke-output.txt')
-              ? fs.readFileSync('smoke-output.txt', 'utf8').slice(-3000)
+            const tail = fs.existsSync('/tmp/health-tail.txt')
+              ? fs.readFileSync('/tmp/health-tail.txt', 'utf8').slice(-2000)
               : '(no output)';
             const commitMsg = (context.payload.head_commit && context.payload.head_commit.message) || '(unknown)';
             const author = (context.payload.head_commit && context.payload.head_commit.author && context.payload.head_commit.author.username) || 'unknown';
             const lines = [
-              '## Post-merge smoke E2E FAILED',
+              '## Production healthcheck FAILED после merge',
               '',
-              'Commit `' + sha + '` merged to main at ' + date + ' broke smoke E2E.',
+              'Commit `' + sha + '` merged to main at ' + date + '.',
+              'После 3-минутного ожидания деплоя — `app.vyatkin-wb.ru` не отвечает 200/301/302 за 5 попыток (2.5 мин).',
               '',
-              '### Last commit',
+              '### Последний коммит',
               commitMsg,
               '',
-              '### Author',
+              '### Автор',
               '@' + author,
               '',
-              '### Smoke test tail',
+              '### Curl tail',
               '```',
               tail,
               '```',
               '',
-              '### Recommended actions',
-              '1. Check Playwright report (see workflow artifacts)',
-              '2. If reproducible — `git revert ' + sha + '` and push to dev → auto-PR → merge',
-              '3. If flaky — re-run workflow; investigate test stability',
+              '### Проверить',
+              '1. `gh run list --workflow=cd-production.yml --limit 3` — статус деплоя',
+              '2. SSH на app-сервер: `docker compose ps` — все контейнеры healthy?',
+              '3. `docker compose logs backend --tail=100`',
+              '4. Если деплой провален — `git revert ' + sha + '` → push в dev → auto-PR',
               '',
-              '_Auto-generated by post-merge workflow_'
+              '_Auto-generated by post-merge healthcheck workflow_'
             ];
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: '[post-merge] Smoke E2E FAILED on ' + sha,
+              title: '[post-merge] Production HEALTHCHECK FAILED on ' + sha,
               body: lines.join('\n'),
-              labels: ['post-merge', 'urgent', 'sentinel']
+              labels: ['post-merge', 'urgent', 'sentinel', 'production']
             });
-
-  notify-success:
-    name: Mark deploy ready
-    runs-on: ubuntu-latest
-    needs: smoke-e2e
-    if: success()
-    steps:
-      - name: Log success
-        run: echo "✅ Smoke E2E passed on main — deploy via cd-production.yml will proceed"
