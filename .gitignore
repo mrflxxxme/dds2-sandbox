@@ -22,6 +22,7 @@ backend/*_mockup.png
 .claude/worktrees/
 .claude/plans/
 .claude/.pending-learn.log
+.claude/.session-counter
 .claude/.cache/
 nginx/ssl/
 

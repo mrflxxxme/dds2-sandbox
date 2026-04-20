@@ -20,11 +20,11 @@ if command -v docker &>/dev/null && docker compose ps --format '{{.Name}}' 2>/de
     DOCKER_OK=1
 fi
 
-# ─── 1. Backend тесты (только изменённые, ~30-60 сек) ────────────────
+# ─── 1. Backend тесты (testmon + xdist параллельно, ~10-20 сек) ──────
 echo ""
-echo "━━━ Backend tests (testmon) ━━━"
+echo "━━━ Backend tests (testmon + xdist -n auto) ━━━"
 if [ "$DOCKER_OK" -eq 1 ]; then
-    if docker compose exec -T backend pytest --testmon --tb=short -q 2>/dev/null; then
+    if docker compose exec -T backend pytest --testmon -n auto --tb=short -q 2>/dev/null; then
         echo -e "${GREEN}✓ Backend tests passed${NC}"
     else
         echo -e "${RED}✗ Backend tests FAILED${NC}"
