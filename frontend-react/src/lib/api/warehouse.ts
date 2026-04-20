@@ -65,7 +65,7 @@ export function addWarehouseMethods(api: ApiClient) {
         getReceipt(receiptId: number) { return api.request<InboundReceipt>('GET', `/api/v1/warehouse/receipts/${receiptId}`); },
         updateReceipt(receiptId: number, data: Record<string, unknown>) { return api.request<InboundReceipt>('PUT', `/api/v1/warehouse/receipts/${receiptId}`, data); },
         acceptReceipt(receiptId: number, actualQuantities?: { item_id: number; actual_qty: number }[]) {
-            return api.request<InboundReceipt>('POST', `/api/v1/warehouse/receipts/${receiptId}/accept`, actualQuantities || null);
+            return api.request<InboundReceipt>('POST', `/api/v1/warehouse/receipts/${receiptId}/accept`, actualQuantities ?? null);
         },
         cancelReceipt(receiptId: number) { return api.request<InboundReceipt>('POST', `/api/v1/warehouse/receipts/${receiptId}/cancel`); },
 

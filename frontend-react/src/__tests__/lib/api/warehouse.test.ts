@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { ApiClient } from '@/lib/api/client';
 import { addWarehouseMethods } from '@/lib/api/warehouse';
 
@@ -160,25 +160,51 @@ describe('warehouse.createReceipt', () => {
     });
 });
 
-describe('warehouse.acceptReceipt', () => {
-    it('POSTs accept with actual quantities', async () => {
-        const spy = mockFetch({ id: 1, status: 'accepted' });
-        const api = makeApi();
-        await api.acceptReceipt(5, [{ item_id: 1, actual_qty: 9 }]);
-        const [url, init] = spy.mock.calls[0];
-        expect(url).toContain('/api/v1/warehouse/receipts/5/accept');
-        expect((init as RequestInit).method).toBe('POST');
+describe('warehouse.acceptReceipt body serialization (|| null → ?? null)', () => {
+    let captured: { body: string | undefined }[];
+
+    beforeEach(() => {
+        captured = [];
+        vi.stubGlobal('fetch', vi.fn((_url: string, init?: RequestInit) => {
+            captured.push({ body: init?.body as string | undefined });
+            return Promise.resolve({
+                ok: true,
+                status: 200,
+                json: () => Promise.resolve({ id: 42, status: 'ACCEPTED' }),
+            });
+        }));
     });
 
-    it('sends no body when no actual quantities provided (null is falsy — no JSON serialisation)', async () => {
-        const spy = mockFetch({ id: 1, status: 'accepted' });
+    it('sends body with actual quantities array when provided', async () => {
         const api = makeApi();
-        await api.acceptReceipt(5);
-        // The implementation passes `actualQuantities || null` to api.request.
-        // api.request serialises body only when truthy: `body ? JSON.stringify(body) : undefined`.
-        // null is falsy so body is undefined — no body sent in the request.
-        const body = (spy.mock.calls[0][1] as RequestInit).body;
-        expect(body).toBeUndefined();
+        const quantities = [{ item_id: 1, actual_qty: 5 }, { item_id: 2, actual_qty: 3 }];
+        await api.acceptReceipt(42, quantities);
+
+        expect(captured).toHaveLength(1);
+        expect(captured[0].body).toBe(JSON.stringify(quantities));
+    });
+
+    it('sends [] as body when empty array is passed (was lost as null before fix)', async () => {
+        const api = makeApi();
+        await api.acceptReceipt(42, []);
+        expect(captured).toHaveLength(1);
+        // After fix: [] ?? null → [] → JSON.stringify([]) === "[]"
+        expect(captured[0].body).toBe('[]');
+    });
+
+    it('sends no body (undefined) when no argument passed', async () => {
+        const api = makeApi();
+        await api.acceptReceipt(42);
+        expect(captured).toHaveLength(1);
+        expect(captured[0].body).toBeUndefined();
+    });
+
+    it('sends no body when null is passed explicitly', async () => {
+        const api = makeApi();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await api.acceptReceipt(42, null as any);
+        expect(captured).toHaveLength(1);
+        expect(captured[0].body).toBeUndefined();
     });
 });
 
