@@ -1373,6 +1373,9 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
     const pasteCanSave = validRows.length > 0;
     const hasUnfound = invalidRows.length > 0 || exceededRows.length > 0;
 
+    // Normalize box size separators: "62*32*60" / "62×32×60" / "62x32x60" → canonical
+    const normalizeBox = (s: string): string => s.trim().toLowerCase().replace(/[*xхх×]/g, '×');
+
     // Mismatch: price, box_size, or pcs_per_box differs from factory order values
     const rowHasMismatch = (r: PasteRow): boolean => {
         const item = allItemMap[r.barcode.trim()];
@@ -1380,8 +1383,8 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
         const pastePrice = parseFloat(r.price);
         const orderPrice = parseFloat(item.price_cny) || 0;
         if (Math.abs(pastePrice - orderPrice) > 0.0001) return true;
-        const orderBox = (item.box_size || '').trim();
-        const pasteBox = (r.box_size || '').trim();
+        const orderBox = normalizeBox(item.box_size || '');
+        const pasteBox = normalizeBox(r.box_size || '');
         if (pasteBox && pasteBox !== orderBox) return true;
         const orderPpb = item.pcs_per_box || 0;
         const pastePpb = parseInt(r.pcs_per_box) || 0;
@@ -1398,9 +1401,10 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                 qty: parseInt(r.qty) || 0,
             };
             if (overridesFromPaste) {
-                const pasteBox = (r.box_size || '').trim();
-                const orderBox = (item.box_size || '').trim();
-                if (pasteBox && pasteBox !== orderBox) base.box_size_override = pasteBox;
+                const pasteBoxRaw = (r.box_size || '').trim();
+                const pasteBoxNorm = normalizeBox(pasteBoxRaw);
+                const orderBoxNorm = normalizeBox(item.box_size || '');
+                if (pasteBoxRaw && pasteBoxNorm !== orderBoxNorm) base.box_size_override = pasteBoxRaw;
                 const pastePpb = parseInt(r.pcs_per_box) || 0;
                 const orderPpb = item.pcs_per_box || 0;
                 if (pastePpb && pastePpb !== orderPpb) base.pcs_per_box_override = pastePpb;
@@ -1778,7 +1782,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                                         {(() => {
                                                             const orderBox = (item?.box_size || '').trim();
                                                             const pasteBox = (row.box_size || '').trim();
-                                                            const differs = !!(item && pasteBox && pasteBox !== orderBox);
+                                                            const differs = !!(item && pasteBox && normalizeBox(pasteBox) !== normalizeBox(orderBox));
                                                             return (
                                                                 <input value={row.box_size} onChange={e => updateRow(i, 'box_size', e.target.value)}
                                                                     placeholder={orderBox || 'L*W*H'}
@@ -1982,7 +1986,8 @@ function PriceMismatchModal({ rows, allItemMap, onCancel, onKeepOrder, onOverwri
                             const priceDiffers = Math.abs(p - op) > 0.0001;
                             const orderBox = (item?.box_size || '').trim();
                             const pasteBox = (r.box_size || '').trim();
-                            const boxDiffers = !!(pasteBox && pasteBox !== orderBox);
+                            const normBox = (s: string) => s.toLowerCase().replace(/[*xхх×]/g, '×');
+                            const boxDiffers = !!(pasteBox && normBox(pasteBox) !== normBox(orderBox));
                             const orderPpb = item?.pcs_per_box || 0;
                             const pastePpb = parseInt(r.pcs_per_box) || 0;
                             const ppbDiffers = !!(pastePpb && pastePpb !== orderPpb);
