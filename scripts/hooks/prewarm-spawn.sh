@@ -107,11 +107,13 @@ fi
 - <file> — <что туда добавить/изменить>'
 
     SPEC_TMP="${SPEC}.tmp"
+    # Sonnet вместо Haiku — точнее карта контекста (Max подписка → cost не проблема)
+    # max-turns 12 (вместо 6) — более тщательное исследование перед основной задачей
     DDS_PREWARM_ACTIVE=1 \
     PREWARM_USER_PROMPT="$PROMPT" \
-        timeout 90 claude \
+        timeout 120 claude \
         --print \
-        --model haiku \
+        --model sonnet \
         --allowed-tools "Read,Glob,Grep" \
         "$PROMPT_TEMPLATE" > "$SPEC_TMP" 2>/dev/null
 
