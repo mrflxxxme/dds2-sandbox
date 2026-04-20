@@ -47,6 +47,7 @@ async def synthesize(
             model="claude-sonnet-4-20250514",
             max_tokens=2048,
             temperature=0.1,
+            enable_cache=False,
         )
 
         # Extract text from response
