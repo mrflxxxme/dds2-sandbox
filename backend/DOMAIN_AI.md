@@ -34,7 +34,7 @@ synthesizer.py — объединение ответов (если >1 агент
 - `services/ai/synthesizer.py` — объединение ответов нескольких агентов
 - `services/ai/memory.py` — Obsidian-style авто-инсайты в BrandNote (путь: `AI_MEMORY_DIR` env, fallback на tmpdir)
 - `services/ai/executor.py` — исполнитель tools (вызов сервисов, JSON сериализация)
-- `services/ai/llm_client.py` — клиент Anthropic API (Sonnet + Haiku), retry с exponential backoff для 429/5xx
+- `services/ai/llm_client.py` — клиент Anthropic API (Sonnet + Haiku), retry с exponential backoff для 429/5xx, prompt caching через `enable_cache=True` (default) — system + last tool с `cache_control=ephemeral`, ~90% экономии на повторных вызовах в 5-минутном TTL
 - `services/ai/tools/` — определения инструментов (JSON schema для Claude)
 - `services/ai/tools/finance.py` — 6 tools (BDR, OPIU, DDS, margins, cost)
 - `services/ai/tools/marketing.py` — 5 tools (funnel, top products, anomalies, periods)

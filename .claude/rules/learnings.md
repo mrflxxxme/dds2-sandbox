@@ -23,6 +23,7 @@ paths:
 - Отчёты с датами (P25): привязывай rolling period к дате запроса, не к "сегодня"
 - **Pending-файл паттерн** (`.claude/.pending-learn.log`): post-hook пишет, отдельный потребитель читает/чистит. Развязывает синхронные хуки от асинхронной обработки, не порождает рекурсию параллельных claude-процессов
 - **`git blame --porcelain -L line,line -- file | awk '/^author-time/ {print $2; exit}'`** — для получения timestamp когда строка добавлена. Быстрее и стабильнее в CI чем `git log -L`
+- **Anthropic prompt caching** — `system` как `[{"type":"text","text":...,"cache_control":{"type":"ephemeral"}}]` + `cache_control` на последнем tool. ~90% экономия токенов на повторных вызовах в 5-мин TTL. Backward-compat через kwarg `enable_cache=True` default
 
 ## Антипаттерны (не повторять)
 - `SELECT *` в продакшн запросах — всегда указывай колонки
