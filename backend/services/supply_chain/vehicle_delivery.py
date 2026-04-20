@@ -106,6 +106,25 @@ async def get_vehicle(
     return await _enrich_vehicle(db, project_id, vehicle)
 
 
+async def _generate_vehicle_order_no(db: AsyncSession, project_id: int) -> str:
+    """Generate next sequential V-NNNN order_no for this project."""
+    result = await db.execute(
+        select(CostOrder.order_no).where(
+            CostOrder.project_id == project_id,
+            CostOrder.order_no.like("V-%"),
+        )
+    )
+    max_num = 0
+    for (order_no,) in result:
+        parts = order_no.split("-", 1)
+        if len(parts) != 2 or not parts[1].isdigit():
+            continue
+        num = int(parts[1])
+        if num > max_num:
+            max_num = num
+    return f"V-{max_num + 1:04d}"
+
+
 async def create_vehicle(
     db: AsyncSession,
     project_id: int,
@@ -148,9 +167,11 @@ async def create_vehicle(
         transit = await get_or_create_transit_warehouse(db, project_id)
         target_wh_id = transit.id
 
+    order_no = (data.order_no or "").strip() or await _generate_vehicle_order_no(db, project_id)
+
     vehicle = CostOrder(
         project_id=project_id,
-        order_no=data.order_no,
+        order_no=order_no,
         container_type=container_type,
         transport_type=transport_type,
         country=data.country,
@@ -165,6 +186,8 @@ async def create_vehicle(
         payment_ref=payment_ref,
         target_warehouse_id=target_wh_id,
         note=data.note,
+        vehicle_name=data.vehicle_name,
+        plate_number=data.plate_number,
         status=VehicleStatus.FORMING,
     )
     db.add(vehicle)
@@ -209,6 +232,8 @@ async def update_vehicle(
         "rate_eur",
         "payment_ref",
         "country",
+        "vehicle_name",
+        "plate_number",
     }
     update_data = data.model_dump(exclude_unset=True)
 
@@ -325,12 +350,14 @@ async def add_items_to_vehicle(
                 subject = subject or nom.subject
                 article_seller = article_seller or nom.article_seller
 
-        # Calculate volume_m3 per unit from box dimensions
+        # Calculate volume_m3 per unit from box dimensions (use override if provided)
         from backend.services.cost.helpers import parse_box_volume_m3
 
-        bs = fo_item.mix_box_size if fo_item.mix_group_id and fo_item.mix_box_size else fo_item.box_size
-        ppb = fo_item.mix_pcs_per_box if fo_item.mix_group_id and fo_item.mix_pcs_per_box else fo_item.pcs_per_box
-        vol_m3 = parse_box_volume_m3(bs, ppb)
+        fo_bs = fo_item.mix_box_size if fo_item.mix_group_id and fo_item.mix_box_size else fo_item.box_size
+        fo_ppb = fo_item.mix_pcs_per_box if fo_item.mix_group_id and fo_item.mix_pcs_per_box else fo_item.pcs_per_box
+        effective_bs = item_req.box_size_override or fo_bs
+        effective_ppb = item_req.pcs_per_box_override or fo_ppb
+        vol_m3 = parse_box_volume_m3(effective_bs, effective_ppb)
 
         # Create CostOrderItem
         cost_item = CostOrderItem(
@@ -344,6 +371,8 @@ async def add_items_to_vehicle(
             weight_kg=fo_item.weight_kg,
             volume_m3=vol_m3 if vol_m3 > 0 else None,
             factory_order_item_id=fo_item.id,
+            box_size_override=item_req.box_size_override,
+            pcs_per_box_override=item_req.pcs_per_box_override,
         )
         db.add(cost_item)
         fo_item.assigned_qty += item_req.qty
@@ -477,6 +506,70 @@ async def remove_item_from_vehicle(
     await _invalidate_supplier_catalog(project_id)
 
     return {"ok": True}
+
+
+async def update_vehicle_item(
+    db: AsyncSession,
+    project_id: int,
+    order_no: str,
+    item_id: int,
+    new_qty: int | None = None,
+    box_size_override: str | None = None,
+    pcs_per_box_override: int | None = None,
+    box_detail_override: list[int] | None = None,
+    set_box_size_override: bool = False,
+    set_pcs_per_box_override: bool = False,
+    set_box_detail_override: bool = False,
+) -> dict:
+    """Update a CostOrderItem (per-vehicle).
+
+    Intentionally does NOT adjust FactoryOrderItem fields — these are facts
+    about this vehicle only. box_* overrides let users record actual packing
+    that differs from the factory order plan.
+    """
+    result = await db.execute(
+        select(CostOrderItem)
+        .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)
+        .where(
+            CostOrderItem.id == item_id,
+            CostOrderItem.order_no == order_no,
+            CostOrderItem.is_deleted == False,
+            CostOrder.project_id == project_id,
+            CostOrder.is_deleted == False,
+        )
+    )
+    cost_item = result.scalar_one_or_none()
+    if not cost_item:
+        raise ValueError(f"Item {item_id} not found in vehicle {order_no}")
+
+    if new_qty is not None:
+        cost_item.qty = new_qty
+    if set_box_size_override:
+        cost_item.box_size_override = box_size_override
+    if set_pcs_per_box_override:
+        cost_item.pcs_per_box_override = pcs_per_box_override
+    if set_box_detail_override:
+        cost_item.box_detail_override = box_detail_override
+
+    await db.commit()
+
+    from backend.services.cost.items import recalculate_order_items
+
+    await recalculate_order_items(db, project_id, order_no)
+    await _invalidate_supplier_catalog(project_id)
+
+    return {"ok": True, "item_id": item_id}
+
+
+# Backward-compatible alias (kept for any existing callers/tests)
+async def update_vehicle_item_qty(
+    db: AsyncSession,
+    project_id: int,
+    order_no: str,
+    item_id: int,
+    new_qty: int,
+) -> dict:
+    return await update_vehicle_item(db, project_id, order_no, item_id, new_qty=new_qty)
 
 
 async def clear_all_vehicle_items(
@@ -729,6 +822,14 @@ async def _enrich_vehicle(
                     mix_pcs_per_box,
                 ) = fo_data
 
+        # Apply per-vehicle overrides if present
+        if cost_item.box_size_override:
+            box_size = cost_item.box_size_override
+        if cost_item.pcs_per_box_override:
+            pcs_per_box = cost_item.pcs_per_box_override
+        if cost_item.box_detail_override:
+            box_detail = cost_item.box_detail_override
+
         w = _safe_decimal(cost_item.weight_kg)
         v = _safe_decimal(cost_item.volume_m3)
         if w:
@@ -824,6 +925,8 @@ async def _enrich_vehicle(
         payment_ref=vehicle.payment_ref,
         note=vehicle.note,
         dt_number=vehicle.dt_number,
+        vehicle_name=vehicle.vehicle_name,
+        plate_number=vehicle.plate_number,
         target_warehouse_id=vehicle.target_warehouse_id,
         inbound_receipt_id=vehicle.inbound_receipt_id,
         created_at=vehicle.created_at,

@@ -84,15 +84,19 @@ export function formatDateTime(d: string | null | undefined): string {
 }
 
 /** Calculate total boxes with mix group deduplication */
-export function calcTotalBoxesWithMix(items: { qty: number; pcs_per_box?: number | null | undefined; mix_group_id?: string | null | undefined; mix_pcs_per_box?: number | null | undefined }[]): number {
+export function calcTotalBoxesWithMix(items: { qty: number; pcs_per_box?: number | null | undefined; mix_group_id?: string | null | undefined; mix_pcs_per_box?: number | null | undefined; box_detail?: number[] | null | undefined }[]): number {
     let total = 0;
     const mixBoxes = new Map<string, number>(); // mix_group_id → max boxes in group
     for (const item of items) {
         if (item.mix_group_id) {
             const ppb = item.mix_pcs_per_box || item.pcs_per_box || 0;
-            const boxes = ppb > 0 ? Math.ceil(item.qty / ppb) : 0;
+            const boxes = item.box_detail && item.box_detail.length > 0
+                ? item.box_detail.length
+                : (ppb > 0 ? Math.ceil(item.qty / ppb) : 0);
             const prev = mixBoxes.get(item.mix_group_id) || 0;
             mixBoxes.set(item.mix_group_id, Math.max(prev, boxes));
+        } else if (item.box_detail && item.box_detail.length > 0) {
+            total += item.box_detail.length;
         } else {
             const ppb = item.pcs_per_box || 0;
             if (ppb > 0) total += Math.ceil(item.qty / ppb);

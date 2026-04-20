@@ -1299,7 +1299,6 @@ function AddItemsModal({ vehicle, onClose, onDone }: { vehicle: VehicleSchema; o
 function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
     const { t } = useT();
     const [form, setForm] = useState<VehicleCreate>({
-        order_no: '',
         country: 'CHINA',
         container_type: 'truck1',
         delivery_cost_cny: 0,
@@ -1317,7 +1316,6 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
     }, []);
 
     const handleSubmit = async () => {
-        if (!form.order_no.trim()) return;
         setSubmitting(true);
         try {
             await api.createVehicle(form);
@@ -1383,8 +1381,8 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
 
                 <div className="sc-form-grid-2">
                     <div>
-                        <label className="sc-form-label">{t('vehicle_form_number')}</label>
-                        <input value={form.order_no} onChange={e => setForm(f => ({ ...f, order_no: e.target.value }))} placeholder={t('vehicle_form_number_placeholder')} className="sc-form-input" autoFocus />
+                        <label className="sc-form-label">{t('vehicle_form_vehicle_name')}</label>
+                        <input value={form.vehicle_name || ''} onChange={e => setForm(f => ({ ...f, vehicle_name: e.target.value || undefined }))} placeholder={t('vehicle_form_vehicle_name_placeholder')} className="sc-form-input" autoFocus />
                     </div>
                     <div>
                         <label className="sc-form-label">{t('vehicle_form_container_type')}</label>
@@ -1491,6 +1489,10 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
                 )}
 
                 <div className="sc-form-grid-2">
+                    <div>
+                        <label className="sc-form-label">{t('vehicle_form_plate_number')}</label>
+                        <input value={form.plate_number || ''} onChange={e => setForm(f => ({ ...f, plate_number: e.target.value || undefined }))} placeholder={t('vehicle_form_plate_placeholder')} className="sc-form-input" />
+                    </div>
                     {warehouses.length > 0 && (
                         <div>
                             <label className="sc-form-label">{t('vehicle_form_warehouse')}</label>
@@ -1500,15 +1502,16 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
                             </select>
                         </div>
                     )}
-                    <div>
-                        <label className="sc-form-label">{t('vehicle_form_note')}</label>
-                        <input value={form.note || ''} onChange={e => setForm(f => ({ ...f, note: e.target.value }))} className="sc-form-input" />
-                    </div>
+                </div>
+
+                <div>
+                    <label className="sc-form-label">{t('vehicle_form_note')}</label>
+                    <input value={form.note || ''} onChange={e => setForm(f => ({ ...f, note: e.target.value }))} className="sc-form-input" />
                 </div>
             </div>
             <div className="sc-form-footer">
                 <button className="btn btn-secondary btn-sm" onClick={onClose}>{t('btn_cancel')}</button>
-                <button className="btn btn-primary btn-sm" onClick={handleSubmit} disabled={!form.order_no.trim() || submitting}>
+                <button className="btn btn-primary btn-sm" onClick={handleSubmit} disabled={submitting}>
                     {submitting ? t('msg_creating') : t('btn_create')}
                 </button>
             </div>
@@ -1679,6 +1682,7 @@ function VehiclesTab() {
                         <thead>
                             <tr>
                                 <th className="sc-vehicles-th-first">{t('vehicles_title')}</th>
+                                <th className="sc-vehicles-th">{t('col_plate_number')}</th>
                                 <th className="sc-vehicles-th">{t('col_order')}</th>
                                 <th className="sc-vehicles-th">{t('col_status')}</th>
                                 <th className="sc-vehicles-th">{t('col_container')}</th>
@@ -1703,7 +1707,8 @@ function VehiclesTab() {
                                         onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-secondary)')}
                                         onMouseLeave={e => (e.currentTarget.style.background = '')}
                                     >
-                                        <td className="sc-vehicles-td-first">{v.order_no}</td>
+                                        <td className="sc-vehicles-td-first">{v.vehicle_name || v.order_no}</td>
+                                        <td className="sc-vehicles-td sc-text-muted-sm" style={{ color: v.plate_number ? 'var(--color-text)' : 'var(--color-text-muted)' }}>{v.plate_number || '\u2014'}</td>
                                         <td className="sc-vehicles-td sc-text-muted-sm" style={{ color: v.payment_ref ? 'var(--color-text)' : 'var(--color-text-muted)' }}>{v.payment_ref || '\u2014'}</td>
                                         <td className="sc-vehicles-td"><StatusBadge status={status} /></td>
                                         <td className="sc-vehicles-td sc-text-muted-sm">

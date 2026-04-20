@@ -128,6 +128,12 @@ const ru: TranslationDict = {
     col_currency: 'Валюта',
     col_delivery_terms: 'Сроки доставки',
     col_note: 'Примечание',
+    col_plate_number: 'Гос. номер',
+    col_vehicle_name: 'Название',
+    qty_edit_title: 'Изменить количество',
+    qty_edit_save: 'Сохранить',
+    qty_edit_cancel: 'Отмена',
+    qty_edit_mix_disabled: 'Mix-группы редактируются целиком',
 
     // ── KPI ──
     kpi_orders: 'Заказов',
@@ -178,7 +184,7 @@ const ru: TranslationDict = {
     items_add: '+ Добавить позиции',
     items_paste_hint: 'или вставьте данные из Excel (Ctrl+V)',
     items_paste_header: 'Добавить позиции',
-    items_paste_sub: 'вставьте из Excel: Баркод, Кол-во, Цена, Коробка, Шт/кор, Вес',
+    items_paste_sub: 'вставьте из Excel: Баркод, Коробка, Шт/кор, Кол-во, Цена',
     items_save_count: 'Сохранить',
 
     // ── Vehicles tab ──
@@ -205,6 +211,10 @@ const ru: TranslationDict = {
     vehicle_form_rate_eur: 'Курс €/₽',
     vehicle_form_warehouse: 'Склад назначения',
     vehicle_form_note: 'Заметка',
+    vehicle_form_plate_number: 'Гос. номер',
+    vehicle_form_vehicle_name: 'Название машины',
+    vehicle_form_plate_placeholder: 'А123БВ77',
+    vehicle_form_vehicle_name_placeholder: 'Оделяла + панели',
 
     // ── Vehicle items ──
     vehicle_items_empty: 'Нет позиций в машине',
@@ -574,6 +584,12 @@ const zh: TranslationDict = {
     col_currency: '货币',
     col_delivery_terms: '交货期',
     col_note: '备注',
+    col_plate_number: '车牌号',
+    col_vehicle_name: '名称',
+    qty_edit_title: '修改数量',
+    qty_edit_save: '保存',
+    qty_edit_cancel: '取消',
+    qty_edit_mix_disabled: 'Mix 组整体编辑',
 
     // ── KPI ──
     kpi_orders: '订单数',
@@ -624,7 +640,7 @@ const zh: TranslationDict = {
     items_add: '+ 添加品项',
     items_paste_hint: '或从Excel粘贴数据 (Ctrl+V)',
     items_paste_header: '添加品项',
-    items_paste_sub: '从Excel粘贴: 条码、数量、单价、箱规、件/箱、重量',
+    items_paste_sub: '从Excel粘贴: 条码、箱规、件/箱、数量、单价',
     items_save_count: '保存',
 
     // ── Vehicles tab ──
@@ -651,6 +667,10 @@ const zh: TranslationDict = {
     vehicle_form_rate_eur: '汇率 €/₽',
     vehicle_form_warehouse: '目的仓库',
     vehicle_form_note: '备注',
+    vehicle_form_plate_number: '车牌号',
+    vehicle_form_vehicle_name: '车辆名称',
+    vehicle_form_plate_placeholder: 'А123БВ77',
+    vehicle_form_vehicle_name_placeholder: '毛毯 + 面板',
 
     // ── Vehicle items ──
     vehicle_items_empty: '车辆中暂无品项',

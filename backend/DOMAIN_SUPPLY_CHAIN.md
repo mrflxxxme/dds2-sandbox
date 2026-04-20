@@ -14,6 +14,10 @@
 - При удалении item → `item.soft_delete()` (не `db.delete()`)
 
 ### Vehicle = CostOrder (cost_orders) — расширен
+Поля машины (sc15): `vehicle_name` (человекочитаемое имя, редактируется), `plate_number` (гос. номер), `order_no` — неизменяемый ID (используется в FK `cost_order_items.order_no` и в URL).
+
+Поля override на CostOrderItem (sc16): `box_size_override`, `pcs_per_box_override` — per-vehicle переопределение габаритов коробки и шт/кор. Применяется при фактическом приходе (упаковка отличается от плана фабричного заказа). Не меняет фабричный заказ.
+
 Машина (транспортное средство). НЕ новая таблица — расширены cost_orders:
 - `status` — VehicleStatus: FORMING → IN_TRANSIT → CUSTOMS → DELIVERED
 - `target_warehouse_id` — FK на warehouses, куда едет машина
@@ -109,9 +113,10 @@ Prefix: `/api/v1/supply-chain`
 | POST | /factory-orders/{id}/split-to-vehicles | Разбить на машины |
 | GET | /vehicles | Список машин с items и агрегацией |
 | GET | /vehicles/{order_no} | Детали машины |
-| POST | /vehicles | Создать машину |
+| POST | /vehicles | Создать машину. `order_no` опционален — если не задан, генерируется `V-NNNN` (sc15/sc16) |
 | PUT | /vehicles/{order_no}/status | Изменить статус машины |
-| POST | /vehicles/{order_no}/items | Добавить товар в машину |
+| POST | /vehicles/{order_no}/items | Добавить товар в машину. Принимает `box_size_override`, `pcs_per_box_override` — per-vehicle override, не меняет план фабричного заказа (sc16) |
+| PATCH | /vehicles/{order_no}/items/{id} | Обновить qty позиции (факт прихода). НЕ трогает `FactoryOrderItem.assigned_qty` (sc15) |
 | GET | /vehicles/{order_no}/price-resync/preview | Превью расхождений цен `CostOrderItem.price_cny` vs `FactoryOrderItem.price_cny` |
 | POST | /vehicles/{order_no}/price-resync | Синк цен в CostOrderItem из связанного FactoryOrderItem + recalc + invalidate reports |
 | DELETE | /vehicles/{order_no} | Удалить машину (только FORMING) |

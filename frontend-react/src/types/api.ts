@@ -1758,7 +1758,7 @@ export interface SplitItem {
 export type VehicleCountry = 'CHINA' | 'RUSSIA';
 
 export interface VehicleCreate {
-  order_no: string;
+  order_no?: string;
   container_type?: string;
   country?: VehicleCountry;
   delivery_cost_cny?: number;
@@ -1772,6 +1772,8 @@ export interface VehicleCreate {
   payment_ref?: string;
   target_warehouse_id?: number;
   note?: string;
+  vehicle_name?: string;
+  plate_number?: string;
 }
 
 export interface VehicleUpdateData {
@@ -1788,6 +1790,8 @@ export interface VehicleUpdateData {
   dt_number?: string;
   target_warehouse_id?: number;
   note?: string;
+  vehicle_name?: string;
+  plate_number?: string;
 }
 
 export interface VehicleItemSchema {
@@ -1837,6 +1841,8 @@ export interface VehicleSchema {
   payment_ref?: string;
   note?: string;
   dt_number?: string;
+  vehicle_name?: string;
+  plate_number?: string;
   target_warehouse_id?: number;
   inbound_receipt_id?: number;
   created_at?: string;

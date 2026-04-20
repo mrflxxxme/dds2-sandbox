@@ -35,6 +35,7 @@ from backend.schemas.supply_chain import (
     SupplierUpdate,
     VehicleCreate,
     VehicleDocumentSchema,
+    VehicleItemUpdate,
     VehicleStatusHistorySchema,
     VehicleStatusUpdate,
     VehicleUpdate,
@@ -461,6 +462,33 @@ async def remove_item_from_vehicle(
 ):
     try:
         return await vehicle_delivery.remove_item_from_vehicle(db, project.id, order_no, item_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@router.patch("/vehicles/{order_no}/items/{item_id}", dependencies=[Depends(rate_limit_write)])
+async def update_vehicle_item(
+    order_no: str,
+    item_id: int,
+    payload: VehicleItemUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        fields = payload.model_dump(exclude_unset=True)
+        return await vehicle_delivery.update_vehicle_item(
+            db,
+            project.id,
+            order_no,
+            item_id,
+            new_qty=payload.qty,
+            box_size_override=payload.box_size_override,
+            pcs_per_box_override=payload.pcs_per_box_override,
+            box_detail_override=payload.box_detail_override,
+            set_box_size_override="box_size_override" in fields,
+            set_pcs_per_box_override="pcs_per_box_override" in fields,
+            set_box_detail_override="box_detail_override" in fields,
+        )
     except ValueError as e:
         raise HTTPException(404, str(e)) from e
 
