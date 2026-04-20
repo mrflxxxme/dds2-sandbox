@@ -25,6 +25,8 @@ import type {
     ShipmentMatrixResponse,
 } from '@/types/api';
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
+
 export function addSupplyChainMethods(api: ApiClient) {
     return {
         // ─── Factory Orders ─────────────────────────────────────────
@@ -154,7 +156,7 @@ export function addSupplyChainMethods(api: ApiClient) {
             if (token) headers['Authorization'] = `Bearer ${token}`;
             const projectId = api.getProjectId();
             if (projectId) headers['X-Project-Id'] = String(projectId);
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/documents/${docId}/download`, { headers });
+            const res = await fetch(`${API_URL}/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/documents/${docId}/download`, { headers });
             if (!res.ok) throw new Error('Ошибка скачивания');
             return res.blob();
         },
