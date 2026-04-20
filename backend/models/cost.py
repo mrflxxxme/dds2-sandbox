@@ -6,6 +6,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     Date,
     DateTime,
@@ -76,6 +77,8 @@ class CostOrder(Base, SoftDeleteMixin):
     note: Mapped[str | None] = mapped_column(Text)
     dt_number: Mapped[str | None] = mapped_column(String(100))
     container_type: Mapped[str | None] = mapped_column(String(20))
+    vehicle_name: Mapped[str | None] = mapped_column(String(200))
+    plate_number: Mapped[str | None] = mapped_column(String(50))
     actual_ship_date: Mapped[date | None] = mapped_column(Date)
     estimated_arrival_date: Mapped[date | None] = mapped_column(Date)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -111,6 +114,9 @@ class CostOrderItem(Base, SoftDeleteMixin):
     total_cny: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
     unrecognized: Mapped[bool] = mapped_column(Boolean, default=False)
     factory_order_item_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("factory_order_items.id"))
+    box_size_override: Mapped[str | None] = mapped_column(String(50))
+    pcs_per_box_override: Mapped[int | None] = mapped_column(Integer)
+    box_detail_override: Mapped[list[int] | None] = mapped_column(JSON)
     order: Mapped["CostOrder"] = relationship(back_populates="items")
     __table_args__ = (
         Index("ix_cost_item_project_id", "project_id"),

@@ -109,6 +109,12 @@ export function addSupplyChainMethods(api: ApiClient) {
         removeItemFromVehicle(orderNo: string, itemId: number) {
             return api.request<{ ok: boolean }>('DELETE', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items/${itemId}`);
         },
+        updateVehicleItemQty(orderNo: string, itemId: number, qty: number) {
+            return api.request<{ ok: boolean; item_id: number }>('PATCH', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items/${itemId}`, { qty });
+        },
+        updateVehicleItem(orderNo: string, itemId: number, payload: { qty?: number; box_size_override?: string | null; pcs_per_box_override?: number | null; box_detail_override?: number[] | null }) {
+            return api.request<{ ok: boolean; item_id: number }>('PATCH', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items/${itemId}`, payload);
+        },
         clearAllVehicleItems(orderNo: string) {
             return api.request<{ ok: boolean; removed: number }>('DELETE', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items`);
         },

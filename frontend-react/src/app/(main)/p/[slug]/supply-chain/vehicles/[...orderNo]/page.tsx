@@ -161,6 +161,8 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, wareh
         rate_usd: vehicle.rate_usd ? String(vehicle.rate_usd) : '',
         rate_eur: vehicle.rate_eur ? String(vehicle.rate_eur) : '',
         payment_ref: vehicle.payment_ref || '',
+        vehicle_name: vehicle.vehicle_name || '',
+        plate_number: vehicle.plate_number || '',
     });
 
     useEffect(() => {
@@ -176,6 +178,8 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, wareh
             rate_usd: vehicle.rate_usd ? String(vehicle.rate_usd) : '',
             rate_eur: vehicle.rate_eur ? String(vehicle.rate_eur) : '',
             payment_ref: vehicle.payment_ref || '',
+            vehicle_name: vehicle.vehicle_name || '',
+            plate_number: vehicle.plate_number || '',
         });
     }, [vehicle]);
 
@@ -194,6 +198,8 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, wareh
                 rate_usd: form.rate_usd ? Number(form.rate_usd) : undefined,
                 rate_eur: form.rate_eur ? Number(form.rate_eur) : undefined,
                 payment_ref: form.payment_ref || undefined,
+                vehicle_name: form.vehicle_name || undefined,
+                plate_number: form.plate_number || undefined,
             } as any);
             setEditing(false);
             onUpdated();
@@ -256,6 +262,10 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, wareh
 
             {/* Fields grid — 5 columns (China) / 3 columns (Russia) */}
             <div style={{ display: 'grid', gridTemplateColumns: isRussia ? 'repeat(3, 1fr)' : 'repeat(5, 1fr)', gap: '10px 16px' }}>
+                <InfoField label={t('vehicle_form_vehicle_name')} value={vehicle.vehicle_name} editing={editing}
+                    input={<input value={form.vehicle_name} onChange={e => setForm(f => ({ ...f, vehicle_name: e.target.value }))} placeholder={t('vehicle_form_vehicle_name_placeholder')} style={editInput} />} />
+                <InfoField label={t('vehicle_form_plate_number')} value={vehicle.plate_number} editing={editing}
+                    input={<input value={form.plate_number} onChange={e => setForm(f => ({ ...f, plate_number: e.target.value }))} placeholder={t('vehicle_form_plate_placeholder')} style={editInput} />} />
                 <InfoField label={t('vdetail_field_container')} value={containerLabel} />
                 {!isRussia && (
                     <InfoField label={t('cost_invoice')} value={vehicle.invoice_no} editing={editing}
@@ -386,10 +396,15 @@ function VehicleDetailContent() {
                 <button className="btn btn-secondary btn-sm" onClick={goBack} style={{ fontSize: 13 }}>
                     {t('vdetail_back')}
                 </button>
-                <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                     <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>
-                        {t('vdetail_vehicle')} {vehicle.order_no}
+                        {t('vdetail_vehicle')} {vehicle.vehicle_name || vehicle.order_no}
                     </h1>
+                    {vehicle.plate_number && (
+                        <span className="badge badge-secondary" style={{ fontSize: 12 }}>
+                            🚛 {vehicle.plate_number}
+                        </span>
+                    )}
                     {vehicle.country === 'RUSSIA' && (
                         <span className="badge badge-info" style={{ fontSize: 12 }}>
                             {t('country_russia')}
@@ -509,6 +524,75 @@ function parseBoxDims(boxSize: string | undefined): { l: number; w: number; h: n
     const parts = boxSize.split(/[*xXхХ×]/).map(Number);
     if (parts.length === 3 && parts.every(p => p > 0)) return { l: parts[0], w: parts[1], h: parts[2] };
     return null;
+}
+
+function QtyEditCell({ vehicleOrderNo, item, onSaved }: {
+    vehicleOrderNo: string; item: VehicleItemSchema; onSaved: () => void;
+}) {
+    const { t } = useT();
+    const [editing, setEditing] = useState(false);
+    const [value, setValue] = useState<string>(String(item.qty));
+    const [saving, setSaving] = useState(false);
+    const isMix = Boolean(item.mix_group_id);
+
+    useEffect(() => { setValue(String(item.qty)); }, [item.qty]);
+
+    const save = async () => {
+        const next = parseInt(value, 10);
+        if (isNaN(next) || next < 0) { setValue(String(item.qty)); setEditing(false); return; }
+        if (next === item.qty) { setEditing(false); return; }
+        setSaving(true);
+        try {
+            await api.updateVehicleItemQty(vehicleOrderNo, item.id, next);
+            setEditing(false);
+            onSaved();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Error');
+            setValue(String(item.qty));
+        }
+        setSaving(false);
+    };
+
+    const cancel = () => { setValue(String(item.qty)); setEditing(false); };
+
+    if (editing) {
+        return (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, justifyContent: 'flex-end' }}>
+                <input
+                    type="number"
+                    min="0"
+                    value={value}
+                    onChange={e => setValue(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') cancel(); }}
+                    autoFocus
+                    disabled={saving}
+                    style={{ width: 70, padding: '3px 6px', fontSize: 13, textAlign: 'right', border: '1px solid var(--color-accent)', borderRadius: 6, background: 'var(--color-bg)', color: 'var(--color-text)' }}
+                />
+                <button type="button" onClick={save} disabled={saving} title={t('qty_edit_save')}
+                    style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 14, padding: '0 2px', color: 'var(--color-success)' }}>✓</button>
+                <button type="button" onClick={cancel} disabled={saving} title={t('qty_edit_cancel')}
+                    style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 14, padding: '0 2px', color: 'var(--color-text-muted)' }}>✕</button>
+            </span>
+        );
+    }
+
+    return (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, justifyContent: 'flex-end' }}>
+            <span style={{ fontWeight: 600 }}>{formatNumber(item.qty, 0)}</span>
+            {!isMix && (
+                <button
+                    type="button"
+                    onClick={() => setEditing(true)}
+                    title={t('qty_edit_title')}
+                    style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 12, padding: 0, opacity: 0.4, color: 'var(--color-text-muted)' }}
+                    onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
+                    onMouseLeave={e => (e.currentTarget.style.opacity = '0.4')}
+                >
+                    ✏️
+                </button>
+            )}
+        </span>
+    );
 }
 
 function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRemoved }: {
@@ -693,7 +777,9 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                             <td style={{ ...td, fontFamily: 'monospace', fontSize: 12 }}>{item.barcode}</td>
                             <td style={{ ...td, fontSize: 12, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.article_seller || ''}>{item.article_seller || '—'}</td>
                             <td style={{ ...td, fontSize: 12 }}>{item.subject || '—'}</td>
-                            <td style={{ ...tdR, fontWeight: 600 }}>{formatNumber(item.qty, 0)}</td>
+                            <td style={tdR}>
+                                <QtyEditCell vehicleOrderNo={vehicleOrderNo} item={item} onSaved={onRemoved} />
+                            </td>
                             <td style={tdR}>
                                 {item.mix_group_id ? (
                                     <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-accent)' }}
@@ -742,9 +828,13 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                                     pcsPerBox={ppb}
                                     boxDetail={item.box_detail}
                                     colSpan={baseCols + costCols}
-                                    editable={isForming}
-                                    orderId={item.factory_order_id}
-                                    itemId={item.factory_order_item_id}
+                                    editable
+                                    onSaveOverride={async ({ box_detail, pcs_per_box }) => {
+                                        await api.updateVehicleItem(vehicleOrderNo, item.id, {
+                                            box_detail_override: box_detail,
+                                            pcs_per_box_override: pcs_per_box,
+                                        });
+                                    }}
                                     onSaved={onRemoved}
                                 />
                             </tr>
@@ -983,8 +1073,8 @@ function CapacityBar({ vehicle }: { vehicle: VehicleSchema }) {
 
 // ─── Add Items Section (two modes: list + paste) ──────────────────────────
 
-interface PasteRow { barcode: string; qty: string; price: string; article: string; autoAdded?: boolean; mixGroupId?: string | null }
-const emptyRow = (): PasteRow => ({ barcode: '', qty: '', price: '', article: '' });
+interface PasteRow { barcode: string; qty: string; price: string; article: string; box_size: string; pcs_per_box: string; autoAdded?: boolean; mixGroupId?: string | null }
+const emptyRow = (): PasteRow => ({ barcode: '', qty: '', price: '', article: '', box_size: '', pcs_per_box: '' });
 
 function calcBoxes(qty: number, pcsPerBox: number | undefined): { boxes: number; notFull: boolean } {
     if (!pcsPerBox || pcsPerBox <= 0) return { boxes: 0, notFull: false };
@@ -1177,12 +1267,26 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
         const item = allItemMap[bc];
         return item ? (item.article_seller || item.subject || '') : '';
     };
+    const resolveBoxSize = (bc: string): string => {
+        const item = allItemMap[bc];
+        return item ? (item.box_size || '') : '';
+    };
+    const resolvePpb = (bc: string): string => {
+        const item = allItemMap[bc];
+        return item && item.pcs_per_box ? String(item.pcs_per_box) : '';
+    };
 
     const updateRow = (idx: number, field: keyof PasteRow, value: string) => {
         setRows(prev => {
             const next = [...prev];
             next[idx] = { ...next[idx], [field]: value };
-            if (field === 'barcode' && value.trim()) next[idx].article = resolveArticle(value.trim());
+            if (field === 'barcode' && value.trim()) {
+                const bc = value.trim();
+                next[idx].article = resolveArticle(bc);
+                // Auto-fill box_size and pcs_per_box from order if empty
+                if (!next[idx].box_size) next[idx].box_size = resolveBoxSize(bc);
+                if (!next[idx].pcs_per_box) next[idx].pcs_per_box = resolvePpb(bc);
+            }
             // Re-run mix sibling resolution when barcode or qty changes
             if (field === 'barcode' || field === 'qty') {
                 const withoutAutoAdded = next.filter(r => !r.autoAdded);
@@ -1199,12 +1303,47 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
         e.preventDefault();
         const lines = text.trim().split('\n').map(l => l.split('\t'));
         const newRows: PasteRow[] = [];
+        // Expected Excel column order: Баркод, Коробка (LxWxH), Шт/кор, Кол-во, Цена
+        const BOX_RE = /[*xxXхХ×]/;
         for (const cols of lines) {
             if (cols.length < 1) continue;
             const barcode = cols[0]?.trim() || '';
-            const qty = cols.length >= 2 ? parseNum(cols[1]) : '';
-            const price = cols.length >= 3 ? parseNum(cols[2]) : '';
-            if (barcode) newRows.push({ barcode, qty, price, article: resolveArticle(barcode) });
+            if (!barcode) continue;
+            let box_size = '';
+            let pcs_per_box = '';
+            let qty = '';
+            let price = '';
+            if (cols.length >= 5) {
+                // Full format: barcode, box, ppb, qty, price
+                box_size = cols[1]?.trim() || '';
+                pcs_per_box = parseNum(cols[2]);
+                qty = parseNum(cols[3]);
+                price = parseNum(cols[4]);
+            } else if (cols.length === 4) {
+                // Either barcode,box,ppb,qty (no price) or barcode,qty,price,box (legacy)
+                if (BOX_RE.test(cols[1] || '')) {
+                    box_size = cols[1]?.trim() || '';
+                    pcs_per_box = parseNum(cols[2]);
+                    qty = parseNum(cols[3]);
+                } else {
+                    qty = parseNum(cols[1]);
+                    price = parseNum(cols[2]);
+                    box_size = cols[3]?.trim() || '';
+                }
+            } else if (cols.length === 3) {
+                qty = parseNum(cols[1]);
+                price = parseNum(cols[2]);
+            } else if (cols.length === 2) {
+                qty = parseNum(cols[1]);
+            }
+            newRows.push({
+                barcode,
+                qty,
+                price,
+                article: resolveArticle(barcode),
+                box_size: box_size || resolveBoxSize(barcode),
+                pcs_per_box: pcs_per_box || resolvePpb(barcode),
+            });
         }
         if (newRows.length > 0) {
             const resolved = resolveMixSiblings(newRows, allItemMap);
@@ -1234,19 +1373,40 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
     const pasteCanSave = validRows.length > 0;
     const hasUnfound = invalidRows.length > 0 || exceededRows.length > 0;
 
-    // Price mismatch: entered price differs from FOI price by > 0.0001 ¥
-    const mismatchRows = validRows.filter(r => {
+    // Mismatch: price, box_size, or pcs_per_box differs from factory order values
+    const rowHasMismatch = (r: PasteRow): boolean => {
         const item = allItemMap[r.barcode.trim()];
+        if (!item) return false;
         const pastePrice = parseFloat(r.price);
         const orderPrice = parseFloat(item.price_cny) || 0;
-        return Math.abs(pastePrice - orderPrice) > 0.0001;
-    });
+        if (Math.abs(pastePrice - orderPrice) > 0.0001) return true;
+        const orderBox = (item.box_size || '').trim();
+        const pasteBox = (r.box_size || '').trim();
+        if (pasteBox && pasteBox !== orderBox) return true;
+        const orderPpb = item.pcs_per_box || 0;
+        const pastePpb = parseInt(r.pcs_per_box) || 0;
+        if (pastePpb && pastePpb !== orderPpb) return true;
+        return false;
+    };
+    const mismatchRows = validRows.filter(rowHasMismatch);
 
-    const performAdd = async () => {
-        const items = validRows.map(r => ({
-            factory_order_item_id: allItemMap[r.barcode.trim()].id,
-            qty: parseInt(r.qty) || 0,
-        }));
+    const performAdd = async (overridesFromPaste = false) => {
+        const items = validRows.map(r => {
+            const item = allItemMap[r.barcode.trim()];
+            const base: { factory_order_item_id: number; qty: number; box_size_override?: string; pcs_per_box_override?: number } = {
+                factory_order_item_id: item.id,
+                qty: parseInt(r.qty) || 0,
+            };
+            if (overridesFromPaste) {
+                const pasteBox = (r.box_size || '').trim();
+                const orderBox = (item.box_size || '').trim();
+                if (pasteBox && pasteBox !== orderBox) base.box_size_override = pasteBox;
+                const pastePpb = parseInt(r.pcs_per_box) || 0;
+                const orderPpb = item.pcs_per_box || 0;
+                if (pastePpb && pastePpb !== orderPpb) base.pcs_per_box_override = pastePpb;
+            }
+            return base;
+        });
         const validBarcodes = new Set(validRows.map(r => r.barcode.trim()));
         await api.addItemsToVehicle(vehicleOrderNo, items);
 
@@ -1276,7 +1436,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
         setSubmitting(true);
         setError('');
         try {
-            await performAdd();
+            await performAdd(false);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : t('msg_error'));
         }
@@ -1288,7 +1448,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
         setSubmitting(true);
         setError('');
         try {
-            await performAdd();
+            await performAdd(false);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : t('msg_error'));
         }
@@ -1300,12 +1460,22 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
         setSubmitting(true);
         setError('');
         try {
-            const priceUpdates = mismatchRows.map(r => ({
-                factory_order_item_id: allItemMap[r.barcode.trim()].id,
-                new_price_cny: r.price,
-            }));
-            await api.bulkUpdateFactoryItemPrices(priceUpdates);
-            await performAdd();
+            // Price mismatches → overwrite factory order prices (existing semantic).
+            const priceMismatchRows = mismatchRows.filter(r => {
+                const item = allItemMap[r.barcode.trim()];
+                const p = parseFloat(r.price);
+                const op = parseFloat(item?.price_cny || '0') || 0;
+                return Math.abs(p - op) > 0.0001;
+            });
+            if (priceMismatchRows.length > 0) {
+                const priceUpdates = priceMismatchRows.map(r => ({
+                    factory_order_item_id: allItemMap[r.barcode.trim()].id,
+                    new_price_cny: r.price,
+                }));
+                await api.bulkUpdateFactoryItemPrices(priceUpdates);
+            }
+            // Box/ppb mismatches → per-vehicle override on CostOrderItem.
+            await performAdd(true);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : t('msg_error'));
         }
@@ -1564,11 +1734,12 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                             <th style={{ width: 36, textAlign: 'center' }}>#</th>
                                             <th style={{ minWidth: 140 }}>{t('col_article')}</th>
                                             <th>{t('col_category')}</th>
-                                            <th style={{ minWidth: 160 }}>{t('col_barcode')}</th>
-                                            <th style={{ textAlign: 'right' }}>{t('col_pcs_per_box')}</th>
+                                            <th style={{ minWidth: 180 }}>{t('col_barcode')}</th>
+                                            <th style={{ minWidth: 150 }}>{t('col_box_spec')}</th>
+                                            <th style={{ minWidth: 90, textAlign: 'right' }}>{t('col_pcs_per_box')}</th>
                                             <th style={{ textAlign: 'right' }}>{t('col_available')}</th>
-                                            <th style={{ width: 90 }}>{t('col_qty')}</th>
-                                            <th style={{ width: 100 }}>{t('col_price_cny')}</th>
+                                            <th style={{ minWidth: 100 }}>{t('col_qty')}</th>
+                                            <th style={{ minWidth: 120 }}>{t('col_price_cny')}</th>
                                             <th style={{ textAlign: 'right', fontSize: 11, color: 'var(--color-text-muted)' }}>{t('paste_in_order')}</th>
                                             <th style={{ textAlign: 'right' }}>{t('col_boxes')}</th>
                                             <th>{t('col_from_order')}</th>
@@ -1603,8 +1774,33 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                                                             style={{ ...cellInput, borderColor: unknown ? '#ef4444' : 'var(--color-border)', color: unknown ? '#ef4444' : 'var(--color-text)', fontFamily: 'monospace', opacity: isAutoAdded ? 0.7 : 1 }}
                                                             autoComplete="off" />
                                                     </td>
-                                                    <td style={{ fontSize: 12, textAlign: 'right', color: 'var(--color-text-muted)' }}>
-                                                        {item?.pcs_per_box || (bc ? '—' : '')}
+                                                    <td>
+                                                        {(() => {
+                                                            const orderBox = (item?.box_size || '').trim();
+                                                            const pasteBox = (row.box_size || '').trim();
+                                                            const differs = !!(item && pasteBox && pasteBox !== orderBox);
+                                                            return (
+                                                                <input value={row.box_size} onChange={e => updateRow(i, 'box_size', e.target.value)}
+                                                                    placeholder={orderBox || 'L*W*H'}
+                                                                    readOnly={isAutoAdded}
+                                                                    style={{ ...cellInput, fontSize: 12, borderColor: differs ? '#f59e0b' : 'var(--color-border)', opacity: isAutoAdded ? 0.7 : 1 }}
+                                                                    autoComplete="off" />
+                                                            );
+                                                        })()}
+                                                    </td>
+                                                    <td>
+                                                        {(() => {
+                                                            const orderPpb = item?.pcs_per_box || 0;
+                                                            const pastePpb = parseInt(row.pcs_per_box) || 0;
+                                                            const differs = !!(item && pastePpb > 0 && pastePpb !== orderPpb);
+                                                            return (
+                                                                <input type="number" value={row.pcs_per_box} onChange={e => updateRow(i, 'pcs_per_box', e.target.value)}
+                                                                    placeholder={orderPpb ? String(orderPpb) : '0'} min={0}
+                                                                    readOnly={isAutoAdded}
+                                                                    style={{ ...cellInput, fontSize: 12, textAlign: 'right', borderColor: differs ? '#f59e0b' : 'var(--color-border)', opacity: isAutoAdded ? 0.7 : 1 }}
+                                                                    autoComplete="off" />
+                                                            );
+                                                        })()}
                                                     </td>
                                                     <td style={{ fontSize: 12, textAlign: 'right', color: 'var(--color-text-muted)' }}>
                                                         {item ? item.remaining_qty : bc ? '—' : ''}
@@ -1772,9 +1968,9 @@ function PriceMismatchModal({ rows, allItemMap, onCancel, onKeepOrder, onOverwri
                             <th style={{ textAlign: 'left', padding: '8px 6px', fontWeight: 500 }}>{t('col_barcode')}</th>
                             <th style={{ textAlign: 'left', padding: '8px 6px', fontWeight: 500 }}>{t('col_article')}</th>
                             <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>{t('col_qty')}</th>
-                            <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>{t('paste_col_order')}</th>
-                            <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>{t('paste_col_paste')}</th>
-                            <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>Δ ¥</th>
+                            <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>{t('col_price_cny')} ({t('paste_col_order')}→{t('paste_col_paste')})</th>
+                            <th style={{ textAlign: 'left', padding: '8px 6px', fontWeight: 500 }}>{t('col_box_spec')}</th>
+                            <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>{t('col_pcs_per_box')}</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1783,16 +1979,26 @@ function PriceMismatchModal({ rows, allItemMap, onCancel, onKeepOrder, onOverwri
                             const p = parseFloat(r.price) || 0;
                             const op = parseFloat(item?.price_cny || '0') || 0;
                             const qty = parseInt(r.qty) || 0;
-                            const delta = (p - op) * qty;
+                            const priceDiffers = Math.abs(p - op) > 0.0001;
+                            const orderBox = (item?.box_size || '').trim();
+                            const pasteBox = (r.box_size || '').trim();
+                            const boxDiffers = !!(pasteBox && pasteBox !== orderBox);
+                            const orderPpb = item?.pcs_per_box || 0;
+                            const pastePpb = parseInt(r.pcs_per_box) || 0;
+                            const ppbDiffers = !!(pastePpb && pastePpb !== orderPpb);
                             return (
                                 <tr key={i} style={{ borderBottom: '1px solid var(--color-border)' }}>
                                     <td style={{ padding: '6px', fontFamily: 'monospace' }}>{r.barcode}</td>
                                     <td style={{ padding: '6px', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item?.article_seller || ''}>{item?.article_seller || '—'}</td>
                                     <td style={{ padding: '6px', textAlign: 'right' }}>{formatNumber(qty, 0)}</td>
-                                    <td style={{ padding: '6px', textAlign: 'right', color: 'var(--color-text-muted)' }}>{formatNumber(op, 2)}</td>
-                                    <td style={{ padding: '6px', textAlign: 'right', fontWeight: 600 }}>{formatNumber(p, 2)}</td>
-                                    <td style={{ padding: '6px', textAlign: 'right', fontWeight: 600, color: delta >= 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
-                                        {delta >= 0 ? '+' : ''}{formatNumber(delta, 2)}
+                                    <td style={{ padding: '6px', textAlign: 'right', color: priceDiffers ? '#f59e0b' : 'var(--color-text-muted)', fontWeight: priceDiffers ? 600 : 400 }}>
+                                        {priceDiffers ? `${formatNumber(op, 2)} → ${formatNumber(p, 2)}` : formatNumber(op, 2)}
+                                    </td>
+                                    <td style={{ padding: '6px', color: boxDiffers ? '#f59e0b' : 'var(--color-text-muted)', fontWeight: boxDiffers ? 600 : 400 }}>
+                                        {boxDiffers ? `${orderBox || '—'} → ${pasteBox}` : (orderBox || '—')}
+                                    </td>
+                                    <td style={{ padding: '6px', textAlign: 'right', color: ppbDiffers ? '#f59e0b' : 'var(--color-text-muted)', fontWeight: ppbDiffers ? 600 : 400 }}>
+                                        {ppbDiffers ? `${orderPpb || '—'} → ${pastePpb}` : (orderPpb || '—')}
                                     </td>
                                 </tr>
                             );

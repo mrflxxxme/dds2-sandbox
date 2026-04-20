@@ -246,12 +246,14 @@ class VehicleStatusUpdate(BaseModel):
 
 
 class VehicleCreate(BaseModel):
-    order_no: str
+    order_no: str | None = None
     container_type: str = "truck1"
 
     @field_validator("order_no")
     @classmethod
-    def validate_order_no(cls, v: str) -> str:
+    def validate_order_no(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
         if "/" in v or "\\" in v:
             msg = "order_no must not contain slashes (/ or \\)"
             raise ValueError(msg)
@@ -269,6 +271,8 @@ class VehicleCreate(BaseModel):
     payment_ref: str | None = None
     target_warehouse_id: int | None = None
     note: str | None = None
+    vehicle_name: str | None = None
+    plate_number: str | None = None
 
     @field_validator("country")
     @classmethod
@@ -298,6 +302,8 @@ class VehicleUpdate(BaseModel):
     dt_number: str | None = None
     target_warehouse_id: int | None = None
     note: str | None = None
+    vehicle_name: str | None = None
+    plate_number: str | None = None
 
     @field_validator("country")
     @classmethod
@@ -337,6 +343,27 @@ class VehicleItemSchema(BaseModel):
     mix_box_size: str | None = None
     mix_pcs_per_box: int | None = None
     factory_order_number: str | None = None
+
+
+class VehicleItemUpdate(BaseModel):
+    """Per-vehicle edit for a CostOrderItem.
+
+    All fields optional. box_size/pcs_per_box/box_detail are saved as override
+    on the CostOrderItem — FactoryOrderItem plan is not touched.
+    """
+
+    qty: int | None = None
+    box_size_override: str | None = None
+    pcs_per_box_override: int | None = None
+    box_detail_override: list[int] | None = None
+
+    @field_validator("qty")
+    @classmethod
+    def validate_qty(cls, v: int | None) -> int | None:
+        if v is not None and v < 0:
+            msg = "qty must be >= 0"
+            raise ValueError(msg)
+        return v
 
 
 class VehicleCostSummary(BaseModel):
@@ -418,6 +445,8 @@ class VehicleSchema(BaseModel):
     payment_ref: str | None = None
     note: str | None = None
     dt_number: str | None = None
+    vehicle_name: str | None = None
+    plate_number: str | None = None
     target_warehouse_id: int | None = None
     inbound_receipt_id: int | None = None
     created_at: datetime | None = None
@@ -441,6 +470,8 @@ class AddItemsToVehicleRequest(BaseModel):
 class AddItemToVehicle(BaseModel):
     factory_order_item_id: int
     qty: int
+    box_size_override: str | None = None
+    pcs_per_box_override: int | None = None
 
 
 # --- Mix Groups ---

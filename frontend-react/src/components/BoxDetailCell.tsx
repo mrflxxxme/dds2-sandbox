@@ -40,8 +40,12 @@ interface BoxDetailCellProps {
 /** Clickable "Мест" cell — shows box count, click to expand. */
 export default function BoxDetailCell({ qty, pcsPerBox, boxDetail, expanded, onToggle }: BoxDetailCellProps) {
     const ppb = pcsPerBox || 0;
-    const boxes = ppb > 0 ? Math.ceil(qty / ppb) : 0;
-    const notFull = ppb > 0 && qty % ppb !== 0;
+    const boxes = boxDetail && boxDetail.length > 0
+        ? boxDetail.length
+        : (ppb > 0 ? Math.ceil(qty / ppb) : 0);
+    const notFull = boxDetail && boxDetail.length > 0
+        ? boxDetail.some(b => b !== ppb)
+        : (ppb > 0 && qty % ppb !== 0);
 
     if (boxes <= 0) return <span>—</span>;
 
@@ -65,6 +69,11 @@ export default function BoxDetailCell({ qty, pcsPerBox, boxDetail, expanded, onT
 
 /* ─── Expand row (rendered by parent as <tr>) ─────────────────────── */
 
+export interface BoxDetailSavePayload {
+    box_detail: number[] | null;
+    pcs_per_box: number;
+}
+
 interface BoxDetailExpandRowProps {
     qty: number;
     pcsPerBox: number;
@@ -75,17 +84,21 @@ interface BoxDetailExpandRowProps {
     orderId?: number;
     itemId?: number;
     onSaved?: () => void;
+    /** If provided, takes precedence over orderId/itemId — used for per-vehicle overrides. */
+    onSaveOverride?: (payload: BoxDetailSavePayload) => Promise<void>;
 }
 
 /** Expanded row showing box breakdown. Render inside <tr>. */
 export function BoxDetailExpandRow({
-    qty, pcsPerBox, boxDetail, colSpan, editable, orderId, itemId, onSaved,
+    qty, pcsPerBox, boxDetail, colSpan, editable, orderId, itemId, onSaved, onSaveOverride,
 }: BoxDetailExpandRowProps) {
     const [editing, setEditing] = useState(false);
     const detail = boxDetail ?? autoBoxDetail(qty, pcsPerBox);
     const breakdown = formatBoxBreakdown(detail);
 
-    if (editing && editable && orderId && itemId) {
+    const canEdit = editable && ((orderId && itemId) || onSaveOverride);
+
+    if (editing && canEdit) {
         return (
             <td colSpan={colSpan} style={{ padding: '12px 16px', background: 'rgba(59,130,246,0.03)' }}>
                 <BoxDetailEditor
@@ -94,6 +107,7 @@ export function BoxDetailExpandRow({
                     boxDetail={boxDetail ?? null}
                     orderId={orderId}
                     itemId={itemId}
+                    onSaveOverride={onSaveOverride}
                     onClose={() => setEditing(false)}
                     onSaved={() => { setEditing(false); onSaved?.(); }}
                 />
@@ -125,7 +139,7 @@ export function BoxDetailExpandRow({
                 {boxDetail && (
                     <span className="badge badge-info" style={{ fontSize: 10, padding: '1px 6px' }}>ручн.</span>
                 )}
-                {editable && orderId && itemId && (
+                {canEdit && (
                     <button
                         onClick={() => setEditing(true)}
                         className="btn btn-secondary btn-sm"
@@ -141,35 +155,52 @@ export function BoxDetailExpandRow({
 
 /* ─── Inline Editor (inside expand row) ───────────────────────────── */
 
-function BoxDetailEditor({ qty, pcsPerBox, boxDetail, orderId, itemId, onClose, onSaved }: {
+function BoxDetailEditor({ qty, pcsPerBox, boxDetail, orderId, itemId, onSaveOverride, onClose, onSaved }: {
     qty: number;
     pcsPerBox: number;
     boxDetail: number[] | null;
-    orderId: number;
-    itemId: number;
+    orderId?: number;
+    itemId?: number;
+    onSaveOverride?: (payload: BoxDetailSavePayload) => Promise<void>;
     onClose: () => void;
     onSaved: () => void;
 }) {
-    const auto = pcsPerBox > 0 ? autoBoxDetail(qty, pcsPerBox) : [qty];
+    const [ppb, setPpb] = useState<number>(pcsPerBox || 0);
+    const auto = ppb > 0 ? autoBoxDetail(qty, ppb) : [qty];
     const [boxes, setBoxes] = useState<number[]>(boxDetail ?? auto);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
     const total = boxes.reduce((s, v) => s + v, 0);
-    const isValid = total === qty && boxes.every(v => v > 0);
+    const isValid = total === qty && boxes.every(v => v > 0) && ppb > 0;
 
     const updateBox = (idx: number, val: number) =>
         setBoxes(prev => prev.map((v, i) => i === idx ? val : v));
+
+    const handlePpbChange = (val: number) => {
+        setPpb(val);
+        if (val > 0) setBoxes(autoBoxDetail(qty, val));
+    };
 
     const handleSave = async () => {
         if (!isValid) return;
         setSaving(true);
         setError(null);
         try {
-            const isAuto = JSON.stringify(boxes) === JSON.stringify(auto);
-            await api.updateFactoryOrderItem(orderId, itemId, {
-                box_detail: isAuto ? null : boxes,
-            });
+            const freshAuto = ppb > 0 ? autoBoxDetail(qty, ppb) : [qty];
+            const isAuto = JSON.stringify(boxes) === JSON.stringify(freshAuto);
+            if (onSaveOverride) {
+                await onSaveOverride({
+                    box_detail: isAuto ? null : boxes,
+                    pcs_per_box: ppb,
+                });
+            } else if (orderId && itemId) {
+                const payload: { box_detail: number[] | null; pcs_per_box?: number } = {
+                    box_detail: isAuto ? null : boxes,
+                };
+                if (ppb !== pcsPerBox) payload.pcs_per_box = ppb;
+                await api.updateFactoryOrderItem(orderId, itemId, payload);
+            }
             onSaved();
         } catch (e: any) {
             setError(e?.message || 'Ошибка сохранения');
@@ -180,10 +211,26 @@ function BoxDetailEditor({ qty, pcsPerBox, boxDetail, orderId, itemId, onClose, 
 
     return (
         <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
                 <span style={{ fontWeight: 600, fontSize: 13 }}>Разбивка по коробкам</span>
                 <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                    Всего: {qty} шт, по {pcsPerBox} шт/кор
+                    Всего: {qty} шт
+                </span>
+                <span style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    по
+                    <input
+                        type="number"
+                        min={1}
+                        value={ppb || ''}
+                        onChange={e => handlePpbChange(parseInt(e.target.value) || 0)}
+                        style={{
+                            width: 60, padding: '3px 6px', borderRadius: 8, textAlign: 'right',
+                            border: `1px solid ${ppb > 0 ? 'var(--color-border)' : 'var(--color-danger)'}`,
+                            background: 'var(--color-bg)', fontSize: 13, fontWeight: 600,
+                            color: 'var(--color-text)',
+                        }}
+                    />
+                    шт/кор
                 </span>
             </div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
