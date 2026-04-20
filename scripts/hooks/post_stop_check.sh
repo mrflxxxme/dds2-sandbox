@@ -3,13 +3,10 @@
 # Заменяет 2 отдельных хука → 1
 set -uo pipefail
 
-# --- Float in models check ---
+# --- Float in models check (только если есть незакомиченные изменения) ---
 changed=$(git diff --name-only 2>/dev/null)
-if [ -z "$changed" ]; then
-  exit 0
-fi
-
 issues=0
+[ -z "$changed" ] && changed=""
 for f in $changed; do
   case "$f" in
     */models/*.py)
