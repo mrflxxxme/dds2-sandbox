@@ -201,12 +201,12 @@ async def recalculate_order_items(db: AsyncSession, project_id: int, order_no: s
     )
     duty_map = {r.subject: r for r in duty_result.scalars().all()}
 
-    # Backfill volume_m3 from FactoryOrderItem box dimensions for items missing it
+    # Always recompute volume_m3 from effective box dimensions (override > FO mix > FO).
+    # Items without FO link and without override keep their existing volume_m3 (e.g. Excel-uploaded).
     try:
-        fo_ids_need_vol = [
-            item.factory_order_item_id for item in items if item.factory_order_item_id and not item.volume_m3
-        ]
-        if fo_ids_need_vol:
+        fo_ids = [item.factory_order_item_id for item in items if item.factory_order_item_id]
+        fo_box_map: dict[int, tuple] = {}
+        if fo_ids:
             fo_result = await db.execute(
                 select(
                     FactoryOrderItem.id,
@@ -215,25 +215,31 @@ async def recalculate_order_items(db: AsyncSession, project_id: int, order_no: s
                     FactoryOrderItem.mix_group_id,
                     FactoryOrderItem.mix_box_size,
                     FactoryOrderItem.mix_pcs_per_box,
-                ).where(FactoryOrderItem.id.in_(fo_ids_need_vol))
+                ).where(FactoryOrderItem.id.in_(fo_ids))
             )
-            fo_box_map: dict[int, tuple] = {}
             for row in fo_result:
                 fo_box_map[row[0]] = (row[1], row[2], row[3], row[4], row[5])
 
-            for item in items:
-                if not item.volume_m3 and item.factory_order_item_id:
-                    fo_data = fo_box_map.get(item.factory_order_item_id)
-                    if fo_data:
-                        bs = fo_data[3] if fo_data[2] and fo_data[3] else fo_data[0]
-                        ppb = fo_data[4] if fo_data[2] and fo_data[4] else fo_data[1]
-                        vol = parse_box_volume_m3(bs, ppb)
-                        if vol > 0:
-                            item.volume_m3 = vol
+        for item in items:
+            has_override = bool(item.box_size_override or item.pcs_per_box_override)
+            if not item.factory_order_item_id and not has_override:
+                continue
+            fo_bs = None
+            fo_ppb = None
+            if item.factory_order_item_id:
+                fo_data = fo_box_map.get(item.factory_order_item_id)
+                if fo_data:
+                    fo_bs = fo_data[3] if fo_data[2] and fo_data[3] else fo_data[0]
+                    fo_ppb = fo_data[4] if fo_data[2] and fo_data[4] else fo_data[1]
+            effective_bs = item.box_size_override or fo_bs
+            effective_ppb = item.pcs_per_box_override or fo_ppb
+            vol = parse_box_volume_m3(effective_bs, effective_ppb)
+            if vol > 0:
+                item.volume_m3 = vol
     except Exception:
         import logging
 
-        logging.getLogger("dds").warning("Failed to backfill volume_m3, using existing values", exc_info=True)
+        logging.getLogger("dds").warning("Failed to recompute volume_m3, using existing values", exc_info=True)
 
     # Calculate total volume for delivery split
     total_volume = sum(float(item.volume_m3 or 0) * int(item.qty or 1) for item in items)
