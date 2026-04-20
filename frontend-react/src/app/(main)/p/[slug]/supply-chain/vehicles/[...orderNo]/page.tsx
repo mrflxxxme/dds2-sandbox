@@ -185,18 +185,22 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, wareh
 
     const handleSave = async () => {
         setSaving(true);
+        const num = (s: string) => {
+            const n = Number(String(s).replace(',', '.'));
+            return isFinite(n) ? n : undefined;
+        };
         try {
             await api.updateVehicle(vehicle.order_no, {
                 invoice_no: form.invoice_no || undefined,
                 dt_number: form.dt_number || undefined,
                 ship_date: form.ship_date || undefined,
                 actual_ship_date: form.actual_ship_date || undefined,
-                delivery_cost_cny: form.delivery_cost_cny ? Number(form.delivery_cost_cny) : undefined,
+                delivery_cost_cny: form.delivery_cost_cny ? num(form.delivery_cost_cny) : undefined,
                 estimated_arrival_date: form.estimated_arrival_date || undefined,
                 target_warehouse_id: form.target_warehouse_id ? Number(form.target_warehouse_id) : undefined,
-                rate_cny: form.rate_cny ? Number(form.rate_cny) : undefined,
-                rate_usd: form.rate_usd ? Number(form.rate_usd) : undefined,
-                rate_eur: form.rate_eur ? Number(form.rate_eur) : undefined,
+                rate_cny: form.rate_cny ? num(form.rate_cny) : undefined,
+                rate_usd: form.rate_usd ? num(form.rate_usd) : undefined,
+                rate_eur: form.rate_eur ? num(form.rate_eur) : undefined,
                 payment_ref: form.payment_ref || undefined,
                 vehicle_name: form.vehicle_name || undefined,
                 plate_number: form.plate_number || undefined,
@@ -1976,9 +1980,11 @@ function PriceMismatchModal({ rows, allItemMap, onCancel, onKeepOrder, onOverwri
 
                 <div style={{ display: 'flex', gap: 24, fontSize: 13, marginBottom: 16, color: 'var(--color-text-muted)' }}>
                     <div>{t('paste_mismatch_count')}: <b style={{ color: 'var(--color-text)' }}>{rows.length}</b></div>
-                    <div>{t('price_resync_delta')}: <b style={{ color: totalDelta >= 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
-                        {totalDelta >= 0 ? '+' : ''}{formatNumber(totalDelta, 2)} ¥
-                    </b></div>
+                    {Math.abs(totalDelta) > 0.0001 && (
+                        <div>{t('price_resync_delta')}: <b style={{ color: totalDelta >= 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
+                            {totalDelta >= 0 ? '+' : ''}{formatNumber(totalDelta, 2)} ¥
+                        </b></div>
+                    )}
                 </div>
 
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
