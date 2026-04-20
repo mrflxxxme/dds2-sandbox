@@ -42,11 +42,15 @@ async def chat(
     max_tokens: int = 2048,
     temperature: float = 0.3,
     tool_choice: dict | None = None,
+    enable_cache: bool = True,
 ) -> anthropic.types.Message:
     """Send a chat request to Claude with optional tools.
 
     Returns the raw Message object for tool_use handling.
     ``tool_choice`` — e.g. {"type": "any"} to force tool use.
+    ``enable_cache`` — if True (default), marks system + tools with
+    cache_control=ephemeral for prompt caching (~90% savings on repeat calls
+    within 5-minute TTL). Disable for one-shot or rapidly-changing prompts.
     Retries on transient errors (429, 5xx) with exponential backoff.
     """
     client = get_client()
@@ -58,9 +62,23 @@ async def chat(
         "messages": messages,
     }
     if system:
-        kwargs["system"] = system
+        if enable_cache:
+            kwargs["system"] = [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        else:
+            kwargs["system"] = system
     if tools:
-        kwargs["tools"] = tools
+        if enable_cache and len(tools) > 0:
+            cached_tools = [dict(t) for t in tools]
+            cached_tools[-1]["cache_control"] = {"type": "ephemeral"}
+            kwargs["tools"] = cached_tools
+        else:
+            kwargs["tools"] = tools
     if tool_choice and tools:
         kwargs["tool_choice"] = tool_choice
 
