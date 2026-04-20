@@ -4,6 +4,7 @@ import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDate } from '@/lib/utils';
 import type { AiConversation, AiMessage, FileAttachment } from '@/types/api';
+import { sanitizeAIHtml } from '@/lib/sanitize';
 
 /* ─── SSE parser helper ──────────────────────────────────────────────────── */
 function parseSSE(chunk: string): Array<{ type: string; content?: string; message?: AiMessage }> {
@@ -20,23 +21,16 @@ function parseSSE(chunk: string): Array<{ type: string; content?: string; messag
     return events;
 }
 
-/* ─── Simple HTML renderer for assistant messages (Telegram HTML subset) ── */
+/* ─── HTML renderer for assistant messages — DOMPurify sanitation ─────── */
 function renderMessageContent(content: string) {
-    // Convert Telegram HTML tags to safe HTML
-    const html = content
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        // Restore allowed tags
-        .replace(/&lt;b&gt;/g, '<b>').replace(/&lt;\/b&gt;/g, '</b>')
-        .replace(/&lt;i&gt;/g, '<i>').replace(/&lt;\/i&gt;/g, '</i>')
-        .replace(/&lt;code&gt;/g, '<code>').replace(/&lt;\/code&gt;/g, '</code>')
-        .replace(/&lt;pre&gt;/g, '<pre>').replace(/&lt;\/pre&gt;/g, '</pre>')
-        .replace(/&lt;u&gt;/g, '<u>').replace(/&lt;\/u&gt;/g, '</u>')
-        .replace(/&lt;s&gt;/g, '<s>').replace(/&lt;\/s&gt;/g, '</s>')
-        // Convert newlines to <br>
-        .replace(/\n/g, '<br/>');
-    return <div dangerouslySetInnerHTML={{ __html: html }} />;
+    // AI returns Telegram-style HTML (<b>, <i>, <code>, etc.) plus richer
+    // markup (p, ul, a, tables). Previous hand-rolled regex allowlist was
+    // bypassable; DOMPurify with strict config is the proper defence.
+    // Convert bare newlines to <br/> first (AI often emits raw \n between
+    // paragraphs), then sanitize the whole string.
+    const withBreaks = content.replace(/\n/g, '<br/>');
+    const safe = sanitizeAIHtml(withBreaks);
+    return <div dangerouslySetInnerHTML={{ __html: safe }} />;
 }
 
 /* ─── Main component ─────────────────────────────────────────────────────── */
