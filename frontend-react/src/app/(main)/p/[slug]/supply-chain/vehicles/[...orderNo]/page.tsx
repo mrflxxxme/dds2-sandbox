@@ -1303,39 +1303,54 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
         e.preventDefault();
         const lines = text.trim().split('\n').map(l => l.split('\t'));
         const newRows: PasteRow[] = [];
-        // Expected Excel column order: Баркод, Коробка (LxWxH), Шт/кор, Кол-во, Цена
-        const BOX_RE = /[*xxXхХ×]/;
+        // Auto-detect columns: barcode is first, box_size is the column with a dim
+        // separator (×/*/x/х), remaining numeric columns are assigned as ppb/qty/price
+        // by heuristic (decimal → price, smaller int → ppb, larger int → qty).
+        const BOX_RE = /\d\s*[*xXхХ×]\s*\d/;
         for (const cols of lines) {
             if (cols.length < 1) continue;
             const barcode = cols[0]?.trim() || '';
             if (!barcode) continue;
-            let box_size = '';
+
+            // Find box_size column (contains dim separator between digits)
+            let boxIdx = -1;
+            for (let i = 1; i < cols.length; i++) {
+                if (BOX_RE.test(cols[i] || '')) { boxIdx = i; break; }
+            }
+            const box_size = boxIdx >= 0 ? (cols[boxIdx] || '').trim() : '';
+
+            // Remaining non-box columns → distribute across ppb/qty/price
+            const rest: string[] = [];
+            for (let i = 1; i < cols.length; i++) {
+                if (i === boxIdx) continue;
+                const s = (cols[i] || '').trim();
+                if (s) rest.push(s);
+            }
             let pcs_per_box = '';
             let qty = '';
             let price = '';
-            if (cols.length >= 5) {
-                // Full format: barcode, box, ppb, qty, price
-                box_size = cols[1]?.trim() || '';
-                pcs_per_box = parseNum(cols[2]);
-                qty = parseNum(cols[3]);
-                price = parseNum(cols[4]);
-            } else if (cols.length === 4) {
-                // Either barcode,box,ppb,qty (no price) or barcode,qty,price,box (legacy)
-                if (BOX_RE.test(cols[1] || '')) {
-                    box_size = cols[1]?.trim() || '';
-                    pcs_per_box = parseNum(cols[2]);
-                    qty = parseNum(cols[3]);
-                } else {
-                    qty = parseNum(cols[1]);
-                    price = parseNum(cols[2]);
-                    box_size = cols[3]?.trim() || '';
-                }
-            } else if (cols.length === 3) {
-                qty = parseNum(cols[1]);
-                price = parseNum(cols[2]);
-            } else if (cols.length === 2) {
-                qty = parseNum(cols[1]);
+            // Pull out the decimal-looking number as price first
+            const intOnly: string[] = [];
+            for (const s of rest) {
+                const hasDecimal = /[.,]\d/.test(s);
+                if (hasDecimal && !price) price = parseNum(s);
+                else intOnly.push(s);
             }
+            if (intOnly.length >= 2) {
+                const nums = intOnly.map(s => parseInt(parseNum(s)) || 0);
+                // Smaller value = ppb, larger = qty (typical case)
+                if (nums[0] <= nums[1]) {
+                    pcs_per_box = String(nums[0]);
+                    qty = String(nums[1]);
+                } else {
+                    qty = String(nums[0]);
+                    pcs_per_box = String(nums[1]);
+                }
+                if (intOnly.length >= 3 && !price) price = parseNum(intOnly[2]);
+            } else if (intOnly.length === 1) {
+                qty = parseNum(intOnly[0]);
+            }
+
             newRows.push({
                 barcode,
                 qty,
