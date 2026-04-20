@@ -20,6 +20,50 @@ from backend.utils.time import utcnow
 logger = logging.getLogger("dds.scheduler")
 
 
+def _compute_weekly_range(
+    today: date,
+    max_weekly_date: date | None,
+    initial_lookback_days: int = 7,
+) -> tuple[date, date] | None:
+    """Compute date range for weekly finance sync (runs Mon).
+
+    Returns (date_from, date_to) or None when already up-to-date.
+
+    CRITICAL: date_to never includes today (incomplete Monday) — WB has no
+    final data for the current day and returns 204, which earlier treated
+    as a successful empty sync and caused data loss.
+
+    initial_lookback_days applies only when max_weekly_date is None
+    (first sync for this project).
+    """
+    prev_monday = today - timedelta(days=today.weekday() + 7)
+    prev_sunday = prev_monday + timedelta(days=6)
+
+    if max_weekly_date is not None and max_weekly_date >= prev_sunday:
+        return None
+
+    if max_weekly_date is None:
+        date_from = today - timedelta(days=initial_lookback_days)
+    else:
+        date_from = max_weekly_date + timedelta(days=1)
+    return date_from, prev_sunday
+
+
+def _compute_daily_range(today: date, max_daily_date: date | None) -> tuple[date, date] | None:
+    """Compute date range for daily finance sync (runs Tue-Sun).
+
+    Fetches current incomplete week from last Monday to yesterday.
+    Returns None if already up-to-date.
+    """
+    last_monday = today - timedelta(days=today.weekday())
+    yesterday = today - timedelta(days=1)
+
+    date_from = max_daily_date + timedelta(days=1) if max_daily_date and max_daily_date >= last_monday else last_monday
+    if date_from > yesterday:
+        return None
+    return date_from, yesterday
+
+
 async def sync_all_projects_wb_finance():
     """Weekly sync: download weekly finance reports (Mon schedule).
 
@@ -81,39 +125,12 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                     status="RUNNING",
                 )
                 db.add(sync_log)
-                await db.flush()
+                await db.commit()
                 log_id = sync_log.id
 
             async with AsyncSessionLocal() as db:
-                # Find max rr_dt already in DB (only from weekly rows to avoid
-                # daily rows inflating freshness)
-                result = await db.execute(
-                    select(sa_func.max(WbFinanceRow.rr_dt)).where(
-                        and_(
-                            WbFinanceRow.project_id == pid,
-                            WbFinanceRow.date_from != WbFinanceRow.date_to,  # weekly only
-                        )
-                    )
-                )
-                max_weekly_date = result.scalar()
-
-                if max_weekly_date is None and period != "daily":
-                    # No weekly data yet — initial sync (last 60 days)
-                    date_from = today - timedelta(days=60)
-                    date_to = today
-                    logger.info(
-                        "💰 WB Finance %s: project %s — initial sync %s → %s",
-                        job_label,
-                        pid,
-                        date_from,
-                        date_to,
-                    )
-                elif period == "daily":
-                    # Daily mode: fetch from last Monday (start of current week)
-                    # or day after latest daily data
-                    last_monday = today - timedelta(days=today.weekday())
-
-                    # Check max daily rr_dt separately
+                if period == "daily":
+                    # Check max daily rr_dt
                     daily_result = await db.execute(
                         select(sa_func.max(WbFinanceRow.rr_dt)).where(
                             and_(
@@ -124,22 +141,16 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                     )
                     max_daily_date = daily_result.scalar()
 
-                    if max_daily_date and max_daily_date >= last_monday:
-                        date_from = max_daily_date + timedelta(days=1)
-                    else:
-                        date_from = last_monday
-                    date_to = today - timedelta(days=1)  # yesterday — today's data not yet available on WB
-
-                    if date_from > date_to:
+                    daily_range = _compute_daily_range(today, max_daily_date)
+                    if daily_range is None:
                         logger.info(
-                            "💰 WB Finance daily: project %s — already up-to-date "
-                            "(max_daily=%s, last_monday=%s), skip",
+                            "💰 WB Finance daily: project %s — already up-to-date " "(max_daily=%s), skip",
                             pid,
                             max_daily_date,
-                            last_monday,
                         )
                         log_status = "OK"
                         continue
+                    date_from, date_to = daily_range
                     logger.info(
                         "💰 WB Finance daily: project %s — fetching %s → %s (period=daily)",
                         pid,
@@ -147,29 +158,35 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                         date_to,
                     )
                 else:
-                    # Weekly mode: always fetch previous week on Monday
-                    # Compute the previous week range (Mon-Sun)
-                    prev_monday = today - timedelta(days=today.weekday() + 7)
-                    prev_sunday = prev_monday + timedelta(days=6)
+                    # Weekly: check max rr_dt from weekly rows only
+                    result = await db.execute(
+                        select(sa_func.max(WbFinanceRow.rr_dt)).where(
+                            and_(
+                                WbFinanceRow.project_id == pid,
+                                WbFinanceRow.date_from != WbFinanceRow.date_to,  # weekly only
+                            )
+                        )
+                    )
+                    max_weekly_date = result.scalar()
 
-                    # Also gap-fill older missing weeks
-                    if max_weekly_date and max_weekly_date >= prev_sunday:
+                    # 60-day lookback for initial sync, 7-day for incremental
+                    lookback = 60 if max_weekly_date is None else 7
+                    weekly_range = _compute_weekly_range(today, max_weekly_date, initial_lookback_days=lookback)
+                    if weekly_range is None:
                         logger.info(
-                            "💰 WB Finance weekly: project %s — already has data " "through %s, skip",
+                            "💰 WB Finance weekly: project %s — already has data through %s, skip",
                             pid,
                             max_weekly_date,
                         )
                         log_status = "OK"
                         continue
-
-                    date_from = max_weekly_date + timedelta(days=1) if max_weekly_date else prev_monday
-                    date_to = today
-
+                    date_from, date_to = weekly_range
                     logger.info(
-                        "💰 WB Finance weekly: project %s — fetching %s → %s",
+                        "💰 WB Finance weekly: project %s — fetching %s → %s%s",
                         pid,
                         date_from,
                         date_to,
+                        " (initial 60-day sync)" if max_weekly_date is None else "",
                     )
 
                 if period == "daily":
@@ -183,9 +200,14 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                         timeout=600,
                     )
 
-                # Delete daily rows AFTER successful weekly sync to avoid data loss
-                # if sync fails (daily and weekly have different rrd_ids → duplicates)
-                if period != "daily":
+                rows_synced = sync_result.get("rows_synced", 0)
+                log_status = sync_result.get("status", "OK")
+
+                # Delete daily rows AFTER successful weekly sync with non-empty result
+                # Guard (rows_synced > 0): WB returns 204 for not-yet-ready periods,
+                # which arrives as {"status":"ok","rows_synced":0}. Without this guard,
+                # daily rows get deleted and nothing replaces them → data loss.
+                if period != "daily" and rows_synced > 0:
                     del_result = await db.execute(
                         delete(WbFinanceRow).where(
                             and_(
@@ -207,9 +229,15 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                             date_from,
                             date_to,
                         )
-
-                rows_synced = sync_result.get("rows_synced", 0)
-                log_status = sync_result.get("status", "OK")
+                elif period != "daily" and rows_synced == 0:
+                    logger.warning(
+                        "💰 WB Finance weekly: project %s — 0 rows synced for %s → %s, "
+                        "SKIPPING daily cleanup to prevent data loss",
+                        pid,
+                        date_from,
+                        date_to,
+                    )
+                    log_status = "EMPTY"
                 logger.info(
                     "💰 WB Finance %s: project %s — %s, %s rows synced",
                     job_label,
