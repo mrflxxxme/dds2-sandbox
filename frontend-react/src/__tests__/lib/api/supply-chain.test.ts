@@ -243,7 +243,7 @@ describe('supply-chain.createSupplier', () => {
     it('POSTs supplier data', async () => {
         const spy = mockFetch({ id: 2, name: 'Supplier B' });
         const api = makeApi();
-        await api.createSupplier({ name: 'Supplier B', country: 'CN' });
+        await api.createSupplier({ name: 'Supplier B', country: 'CHINA' });
         expect((spy.mock.calls[0][1] as RequestInit).method).toBe('POST');
     });
 });

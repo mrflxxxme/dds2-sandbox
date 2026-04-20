@@ -337,7 +337,7 @@ describe('warehouse.markDefect', () => {
     it('POSTs defect operation', async () => {
         const spy = mockFetch({ message: 'ok' });
         const api = makeApi();
-        await api.markDefect(1, { barcode: '111', qty: 2, reason: 'Брак' });
+        await api.markDefect(1, { barcode: '111', quantity: 2, reason: 'Брак' });
         const [url, init] = spy.mock.calls[0];
         expect(url).toContain('/api/v1/warehouse/1/defects/mark');
         expect((init as RequestInit).method).toBe('POST');

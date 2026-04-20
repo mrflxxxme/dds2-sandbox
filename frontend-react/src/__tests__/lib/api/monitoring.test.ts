@@ -30,12 +30,13 @@ afterEach(() => { vi.restoreAllMocks(); localStorageMock.clear(); });
 describe('monitoring.getMonitoringOverview', () => {
     it('GETs /api/v1/monitoring/overview', async () => {
         const spy = mockFetch({
-            services: { wb: { status: 'ok', last_sync: '2025-01-01T00:00:00' } },
-            alerts: [],
+            health: { wb: 'ok' },
+            total_syncs_24h: 0,
+            total_errors_24h: 0,
         });
         const api = makeApi();
         const result = await api.getMonitoringOverview();
-        expect(result.services).toBeDefined();
+        expect(result.health).toBeDefined();
         expect(spy.mock.calls[0][0]).toContain('/api/v1/monitoring/overview');
         expect((spy.mock.calls[0][1] as RequestInit).method).toBe('GET');
     });

@@ -41,7 +41,7 @@ describe('refs.upsertAccount', () => {
     it('POSTs account data', async () => {
         const spy = mockFetch({ id: 2, name: 'Тинькофф', currency: 'RUB' });
         const api = makeApi();
-        await api.upsertAccount({ name: 'Тинькофф', currency: 'RUB' });
+        await api.upsertAccount({ account: 'Тинькофф', currency: 'RUB' });
         expect((spy.mock.calls[0][1] as RequestInit).method).toBe('POST');
         expect(spy.mock.calls[0][0]).toContain('/api/v1/refs/accounts');
     });
@@ -80,7 +80,7 @@ describe('refs.addCategoryRef', () => {
     it('POSTs category ref data', async () => {
         const spy = mockFetch({ id: 2, cat_lvl1: 'Доходы', cat_lvl2: 'WB', flow: 'income' });
         const api = makeApi();
-        await api.addCategoryRef({ cat_lvl1: 'Доходы', cat_lvl2: 'WB', flow: 'income' });
+        await api.addCategoryRef({ cat_lvl1: 'Доходы', cat_lvl2: 'WB', direction: 'income' });
         expect((spy.mock.calls[0][1] as RequestInit).method).toBe('POST');
     });
 });
@@ -120,7 +120,7 @@ describe('refs.updateProductTagMapping', () => {
     it('POSTs mapping payload', async () => {
         const spy = mockFetch({ message: 'ok' });
         const api = makeApi();
-        await api.updateProductTagMapping({ tag_id: 1, nm_ids: [100, 200] });
+        await api.updateProductTagMapping({ nm_ids: [100, 200], add_tags: [1], remove_tags: [] });
         const [url, init] = spy.mock.calls[0];
         expect(url).toContain('/api/v1/refs/tags/mapping');
         expect((init as RequestInit).method).toBe('POST');

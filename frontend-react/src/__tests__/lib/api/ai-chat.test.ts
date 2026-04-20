@@ -174,7 +174,7 @@ describe('ai-chat.uploadAiFile', () => {
         const file = new File(['data'], 'report.xlsx');
         const result = await api.uploadAiFile(file);
 
-        expect(result.file_id).toBe('f-001');
+        expect(result.name).toBe('report.xlsx');
         const [path, formData] = uploadSpy.mock.calls[0];
         expect(path).toBe('/api/v1/ai/upload');
         expect(formData.get('file')).toBe(file);

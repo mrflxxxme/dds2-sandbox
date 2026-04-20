@@ -41,10 +41,10 @@ describe('planning.createPlanningOrder', () => {
     it('POSTs to /api/v1/planning/orders', async () => {
         const spy = mockFetch({ id: 2, order_no: 'ORD-002' });
         const api = makeApi();
-        await api.createPlanningOrder({ order_no: 'ORD-002', amount_rub: 50000 });
+        await api.createPlanningOrder({ order_no: 2, order_amount: 50000 });
         expect((spy.mock.calls[0][1] as RequestInit).method).toBe('POST');
         const body = JSON.parse((spy.mock.calls[0][1] as RequestInit).body as string);
-        expect(body.order_no).toBe('ORD-002');
+        expect(body.order_no).toBe(2);
     });
 });
 

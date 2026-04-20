@@ -29,10 +29,10 @@ afterEach(() => { vi.restoreAllMocks(); localStorageMock.clear(); });
 
 describe('telegram.getTelegramLink', () => {
     it('POSTs to /api/v1/telegram/link and returns link response', async () => {
-        const spy = mockFetch({ link: 'https://t.me/dds_bot?start=abc123', token: 'abc123' });
+        const spy = mockFetch({ deep_link_url: 'https://t.me/dds_bot?start=abc123' });
         const api = makeApi();
         const result = await api.getTelegramLink();
-        expect(result.link).toContain('t.me');
+        expect(result.deep_link_url).toContain('t.me');
         const [url, init] = spy.mock.calls[0];
         expect(url).toContain('/api/v1/telegram/link');
         expect((init as RequestInit).method).toBe('POST');
@@ -42,12 +42,12 @@ describe('telegram.getTelegramLink', () => {
 describe('telegram.getTelegramChats', () => {
     it('GETs /api/v1/telegram/chats', async () => {
         const spy = mockFetch([
-            { id: 1, chat_id: 123456, chat_title: 'My Chat', notify_enabled: true, created_at: '2025-01-01' },
+            { id: 1, chat_id: 123456, brand: 'My Chat', notify_enabled: true, created_at: '2025-01-01' },
         ]);
         const api = makeApi();
         const result = await api.getTelegramChats();
         expect(result).toHaveLength(1);
-        expect(result[0].chat_title).toBe('My Chat');
+        expect(result[0].brand).toBe('My Chat');
         expect(spy.mock.calls[0][0]).toContain('/api/v1/telegram/chats');
     });
 });

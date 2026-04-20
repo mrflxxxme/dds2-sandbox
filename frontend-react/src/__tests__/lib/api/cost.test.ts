@@ -41,7 +41,7 @@ describe('cost.createCostOrder', () => {
     it('POSTs to /api/v1/cost/orders', async () => {
         const spy = mockFetch({ id: 2, order_no: 'ORD-002', status: 'draft' });
         const api = makeApi();
-        await api.createCostOrder({ order_no: 'ORD-002', currency: 'CNY' });
+        await api.createCostOrder({ order_no: 'ORD-002', transport_type: 'sea' });
         const [url, init] = spy.mock.calls[0];
         expect(url).toContain('/api/v1/cost/orders');
         expect((init as RequestInit).method).toBe('POST');
@@ -54,7 +54,7 @@ describe('cost.updateCostOrder', () => {
     it('PUTs with URL-encoded orderNo', async () => {
         const spy = mockFetch({ id: 1, order_no: 'ORD-001' });
         const api = makeApi();
-        await api.updateCostOrder('ORD-001', { status: 'confirmed' });
+        await api.updateCostOrder('ORD-001', { status: 'FORMING' });
         const [url, init] = spy.mock.calls[0];
         expect(url).toContain('/api/v1/cost/orders/ORD-001');
         expect((init as RequestInit).method).toBe('PUT');
@@ -114,7 +114,7 @@ describe('cost.addDutyRule', () => {
     it('POSTs duty rule data', async () => {
         const spy = mockFetch({ id: 2, hs_code: '6110', rate_pct: 12 });
         const api = makeApi();
-        await api.addDutyRule({ hs_code: '6110', rate_pct: 12 });
+        await api.addDutyRule({ subject: '6110', rate: 12 });
         expect((spy.mock.calls[0][1] as RequestInit).method).toBe('POST');
     });
 });

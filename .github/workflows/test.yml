@@ -225,6 +225,9 @@ jobs:
       - name: Install dependencies
         run: cd frontend-react && npm ci --legacy-peer-deps || npm ci --legacy-peer-deps
 
+      - name: Type check (tsc --noEmit)
+        run: cd frontend-react && npx tsc --noEmit
+
       - name: Run vitest with coverage
         run: cd frontend-react && npx vitest run --coverage
 
