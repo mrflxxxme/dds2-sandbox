@@ -494,6 +494,9 @@ export interface MissingCostItem {
   total_orders: number;
   total_qty: number;
   days_count: number;
+  current_cost: number;
+  avg_price: number;
+  is_suspicious: boolean;
 }
 
 // ─── Common ──────────────────────────────────────────────────────────────────

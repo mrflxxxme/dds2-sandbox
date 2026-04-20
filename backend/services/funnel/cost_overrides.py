@@ -13,15 +13,22 @@ from backend.models import Nomenclature, WbCostOverride, WbFunnelDaily
 
 logger = logging.getLogger("dds.funnel")
 
+# Cost price below this ratio of average retail price is treated as missing.
+# Catches garbage like 1.01 on a 2000 RUB SKU (user pasted thousands and
+# dropped the multiplier) — product would otherwise silently skew reports.
+MIN_COST_RATIO = 0.05
+
 
 async def get_missing_costs(db: AsyncSession, pid: int) -> list[dict]:
     """Return products without cost_price from BOTH funnel and finance data.
 
     Merges two sources:
-    1. wb_funnel_daily — products with orders but no cost_price
+    1. wb_funnel_daily — products with orders but no (or suspiciously low) cost_price
     2. wb_finance_rows — products with sales in BDR but no cost anywhere
 
-    Excludes products that have cost from:
+    "Suspiciously low" = cost < MIN_COST_RATIO * avg_retail_price.
+
+    Excludes products that have meaningful cost from:
     - WbCostOverride (manual overrides by nm_id)
     - Cost order history (avg cost by vendor_code/sa_name)
     """
@@ -33,28 +40,40 @@ async def get_missing_costs(db: AsyncSession, pid: int) -> list[dict]:
     avg_costs = await load_avg_costs(db, pid)
 
     # ── Source 1: Funnel (wb_funnel_daily) ──
+    # avg_retail_price = SUM(orders_sum_rub) / SUM(orders_count)
+    total_orders_sum = func.sum(WbFunnelDaily.orders_sum_rub)
+    total_qty_sum = func.sum(WbFunnelDaily.orders_count)
+    avg_retail_expr = total_orders_sum / func.nullif(total_qty_sum, 0)
+    current_cost_expr = func.max(WbFunnelDaily.cost_price)
+
     q = (
         select(
             WbFunnelDaily.nm_id,
             WbFunnelDaily.vendor_code,
             WbFunnelDaily.subject,
             WbFunnelDaily.brand,
-            func.sum(WbFunnelDaily.orders_sum_rub).label("total_orders"),
-            func.sum(WbFunnelDaily.orders_count).label("total_qty"),
+            total_orders_sum.label("total_orders"),
+            total_qty_sum.label("total_qty"),
             func.count(func.distinct(WbFunnelDaily.date)).label("days_count"),
+            current_cost_expr.label("current_cost"),
+            avg_retail_expr.label("avg_price"),
         )
         .where(
             WbFunnelDaily.project_id == pid,
             WbFunnelDaily.orders_sum_rub > 0,
         )
-        .where((WbFunnelDaily.cost_price.is_(None)) | (WbFunnelDaily.cost_price == 0))
         .group_by(
             WbFunnelDaily.nm_id,
             WbFunnelDaily.vendor_code,
             WbFunnelDaily.subject,
             WbFunnelDaily.brand,
         )
-        .order_by(func.sum(WbFunnelDaily.orders_sum_rub).desc())
+        .having(
+            current_cost_expr.is_(None)
+            | (current_cost_expr == 0)
+            | (current_cost_expr < MIN_COST_RATIO * avg_retail_expr)
+        )
+        .order_by(total_orders_sum.desc())
     )
     rows = (await db.execute(q)).all()
 
@@ -73,9 +92,18 @@ async def get_missing_costs(db: AsyncSession, pid: int) -> list[dict]:
     seen_nm_ids: set[int] = set()
     result = []
     for r in rows:
-        if r.nm_id in cost_ovr and cost_ovr[r.nm_id] > 0:
+        avg_price = float(r.avg_price or 0)
+        min_cost = MIN_COST_RATIO * avg_price
+        current_cost = float(r.current_cost or 0)
+
+        if r.nm_id in cost_ovr and cost_ovr[r.nm_id] >= min_cost and cost_ovr[r.nm_id] > 0:
             continue
-        if r.vendor_code and r.vendor_code in avg_costs and avg_costs[r.vendor_code] > 0:
+        if (
+            r.vendor_code
+            and r.vendor_code in avg_costs
+            and avg_costs[r.vendor_code] >= min_cost
+            and avg_costs[r.vendor_code] > 0
+        ):
             continue
         seen_nm_ids.add(r.nm_id)
         result.append(
@@ -88,6 +116,9 @@ async def get_missing_costs(db: AsyncSession, pid: int) -> list[dict]:
                 "total_orders": round(float(r.total_orders or 0), 2),
                 "total_qty": int(r.total_qty or 0),
                 "days_count": int(r.days_count or 0),
+                "current_cost": round(current_cost, 2),
+                "avg_price": round(avg_price, 2),
+                "is_suspicious": current_cost > 0,
             }
         )
 
@@ -117,11 +148,23 @@ async def get_missing_costs(db: AsyncSession, pid: int) -> list[dict]:
         # Skip if already found in funnel source
         if nm_id and nm_id in seen_nm_ids:
             continue
-        # Skip if has cost from any source
+
+        total_orders = float(r.total_orders or 0)
+        total_qty = int(r.total_qty or 0)
+        avg_price = total_orders / total_qty if total_qty else 0
+        min_cost = MIN_COST_RATIO * avg_price
+
+        # Skip if has meaningful cost from any source (>= 5% of retail)
+        current_cost = 0.0
         if nm_id and nm_id in cost_ovr and cost_ovr[nm_id] > 0:
-            continue
+            current_cost = cost_ovr[nm_id]
+            if current_cost >= min_cost:
+                continue
         if sa_name and sa_name in avg_costs and avg_costs[sa_name] > 0:
-            continue
+            if not current_cost:
+                current_cost = avg_costs[sa_name]
+            if avg_costs[sa_name] >= min_cost:
+                continue
 
         seen_nm_ids.add(nm_id)
         result.append(
@@ -131,9 +174,12 @@ async def get_missing_costs(db: AsyncSession, pid: int) -> list[dict]:
                 "vendor_code": sa_name,
                 "subject": r.subject or "",
                 "brand": r.brand or "",
-                "total_orders": round(float(r.total_orders or 0), 2),
-                "total_qty": int(r.total_qty or 0),
+                "total_orders": round(total_orders, 2),
+                "total_qty": total_qty,
                 "days_count": 0,
+                "current_cost": round(current_cost, 2),
+                "avg_price": round(avg_price, 2),
+                "is_suspicious": current_cost > 0,
             }
         )
 

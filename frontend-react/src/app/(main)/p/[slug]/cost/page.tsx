@@ -265,6 +265,9 @@ function BulkCost() {
             'Заказы (руб)': m.total_orders,
             'Кол-во заказов': m.total_qty,
             'Дней в воронке': m.days_count,
+            'Текущая с/с': m.current_cost || 0,
+            'Средняя цена': m.avg_price || 0,
+            'Подозрительно': m.is_suspicious ? 'да' : '',
         }));
         exportToExcel(data, 'Товары_без_себестоимости');
     };
@@ -344,9 +347,14 @@ function BulkCost() {
                     background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.3)',
                     borderRadius: 8, padding: 14, marginBottom: 16, fontSize: 13,
                 }}>
-                    <b>{missing.length}</b> товаров без себестоимости участвуют в расчётах.
+                    <b>{missing.length}</b> товаров без или с подозрительно низкой себестоимостью участвуют в расчётах.
                     Суммарные заказы: <b>{formatNumber(totalOrdersSum)}</b>.
                     Прибыль и маржинальность завышены для этих товаров.
+                    {missing.some(m => m.is_suspicious) && (
+                        <div style={{ marginTop: 6, fontSize: 12, color: 'var(--color-text-dim)' }}>
+                            Подозрительно низкая = с/с меньше 5% от средней цены продажи.
+                        </div>
+                    )}
                 </div>
             ) : (
                 <div style={{
@@ -400,7 +408,8 @@ function BulkCost() {
                                     <th style={{ minWidth: 100 }}>Бренд</th>
                                     <th style={{ textAlign: 'right', minWidth: 130 }}>Заказы</th>
                                     <th style={{ textAlign: 'right', minWidth: 70 }}>Шт</th>
-                                    <th style={{ width: 130 }}>Себестоимость</th>
+                                    <th style={{ textAlign: 'right', minWidth: 120 }}>Текущая с/с</th>
+                                    <th style={{ width: 130 }}>Новая с/с</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -414,6 +423,19 @@ function BulkCost() {
                                         <td style={{ opacity: 0.7 }}>{m.brand}</td>
                                         <td style={{ textAlign: 'right', fontWeight: 600 }}>{formatNumber(m.total_orders)}</td>
                                         <td style={{ textAlign: 'right', opacity: 0.7 }}>{m.total_qty}</td>
+                                        <td style={{ textAlign: 'right' }}>
+                                            {m.is_suspicious ? (
+                                                <span
+                                                    className="badge badge-warning"
+                                                    style={{ fontSize: 11 }}
+                                                    title={m.avg_price > 0 ? `Средняя цена: ${formatNumber(m.avg_price)}` : undefined}
+                                                >
+                                                    ⚠ {formatNumber(m.current_cost)}
+                                                </span>
+                                            ) : (
+                                                <span style={{ opacity: 0.4 }}>—</span>
+                                            )}
+                                        </td>
                                         <td>
                                             <input
                                                 type="number"

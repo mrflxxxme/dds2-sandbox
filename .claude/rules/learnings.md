@@ -31,6 +31,7 @@ paths:
 - **Wait-on-workflow через GH API polling** — `gh api "repos/X/actions/runs?head_sha=$SHA" --jq '...workflow_runs[] | select(.name=="Y") | .[0].status + ":" + .conclusion'` в loop с timeout. Для post-merge workflow который должен дождаться cd-production. Лучше hardcoded `sleep N`
 - **User input через ENV вместо string interpolation в shell** — `PROMPT_TEMPLATE="...\"$USER_INPUT\"..."` уязвим к `$(cmd)` substitution. Вместо: `MY_ENV_VAR="$USER_INPUT" command "$STATIC_TEMPLATE"` (template без подстановки, агент читает из ENV). Прецедент: prewarm-spawn.sh CRITICAL fix
 - **`--allowed-tools` без Write/Edit + spec через shell redirect** — для безопасного запуска LLM-помощника: tools = только Read/Glob/Grep, результат идёт в stdout, hook сам пишет файл. Альтернатива `--dangerously-skip-permissions + Write` опасна (LLM пишет произвольные пути)
+- **Относительный порог `< N% от reference`** вместо `> 0` для sanity check числовых полей — когда в контексте есть эталон (цена, retail, объём). Ловит мусор от bulk-upload (1.01 при цене 2000 — потерянный множитель в Excel) который абсолютный `> 0` пропускает тихо. В ответе API возвращать `current_value` + `is_suspicious` чтобы UI показал проблему (P29, commit 433b433)
 
 ## Антипаттерны (не повторять)
 - `SELECT *` в продакшн запросах — всегда указывай колонки
