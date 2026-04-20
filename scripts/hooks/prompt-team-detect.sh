@@ -55,6 +55,17 @@ if [ -n "$hints" ]; then
     echo -e "$hints" >&2
 fi
 
+# --- Pending /docs reminder (инжектится пока .pending-docs.log не пуст) ---
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+DOCS_PENDING="$ROOT_DIR/.claude/.pending-docs.log"
+if [ -f "$DOCS_PENDING" ] && [ -s "$DOCS_PENDING" ]; then
+    docs_count=$(wc -l < "$DOCS_PENDING" | tr -d ' ')
+    : "${docs_count:=0}"
+    if [ "$docs_count" -gt 0 ]; then
+        echo "[DOCS] $docs_count pending коммит(ов) без синка документации — запусти /docs (читает .claude/.pending-docs.log, чистит после sync)" >&2
+    fi
+fi
+
 # --- /compact reminder (избегаем caching TTL регрессий, экономим токены) ---
 COUNTER_FILE="$(dirname "$0")/../../.claude/.session-counter"
 count=0
