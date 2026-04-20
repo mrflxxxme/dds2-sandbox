@@ -1,5 +1,5 @@
 # Post-merge healthcheck для production (после cd-production.yml деплоя)
-# - Ждёт 3 мин (cd-production.yml в среднем 2-3 мин)
+# - Ждёт завершения cd-production через GH API polling (реально 8-9 мин)
 # - HTTP healthcheck на production URL
 # - При fail → GH issue с rollback инструкцией
 #
@@ -19,7 +19,8 @@ jobs:
   prod-healthcheck:
     name: Healthcheck production after deploy
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    # cd-production занимает ~8-9 мин, polling до 12 мин, +5 мин на healthcheck retries и запас
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
 
@@ -89,17 +90,21 @@ jobs:
               : '(no output)';
             const commitMsg = (context.payload.head_commit && context.payload.head_commit.message) || '(unknown)';
             const author = (context.payload.head_commit && context.payload.head_commit.author && context.payload.head_commit.author.username) || 'unknown';
+            // Sanitize: оборачиваем commit message в code block чтобы markdown links/HTML не рендерились
+            const safeCommitMsg = '```\n' + commitMsg + '\n```';
+            // Author: проверяем что только alphanumeric + dash + underscore (GH username rules)
+            const safeAuthor = /^[a-zA-Z0-9_-]+$/.test(author) ? author : 'unknown';
             const lines = [
               '## Production healthcheck FAILED после merge',
               '',
               'Commit `' + sha + '` merged to main at ' + date + '.',
-              'После 3-минутного ожидания деплоя — `app.vyatkin-wb.ru` не отвечает 200/301/302 за 5 попыток (2.5 мин).',
+              'После завершения cd-production (~8-9 мин) — `app.vyatkin-wb.ru` не отвечает 200/301/302 за 5 попыток (2.5 мин).',
               '',
               '### Последний коммит',
-              commitMsg,
+              safeCommitMsg,
               '',
               '### Автор',
-              '@' + author,
+              '@' + safeAuthor,
               '',
               '### Curl tail',
               '```',
