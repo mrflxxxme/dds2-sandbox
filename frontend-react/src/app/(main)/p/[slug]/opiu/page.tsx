@@ -46,7 +46,7 @@ export default function OpiuPage() {
     const [article, setArticle] = useState('');
     const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
     const [computing, setComputing] = useState(false);
-    const retryTimeoutRef = useRef<NodeJS.Timeout>();
+    const retryTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
 
     // Default: Jan 1 of current year → today
     useEffect(() => {

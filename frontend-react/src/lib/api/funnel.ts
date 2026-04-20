@@ -7,7 +7,7 @@ export function addFunnelMethods(api: ApiClient) {
         syncFunnel(dateFrom: string, dateTo: string) {
             return api.request<{ ok: boolean; days_synced: number }>('POST', '/api/v1/funnel/sync', { date_from: dateFrom, date_to: dateTo });
         },
-        getFunnelData(params?: { date_from?: string; date_to?: string; brand?: string; vendor_code?: string; subject?: string; group_by?: 'day' | 'sku' | 'brand' | 'subject' | 'tag' | 'imt' }) {
+        getFunnelData(params?: { date_from?: string; date_to?: string; brand?: string; vendor_code?: string; subject?: string; group_by?: 'day' | 'sku' | 'brand' | 'subject' | 'tag' | 'imt' | 'abc' }) {
             const q = new URLSearchParams();
             if (params?.date_from) q.set('date_from', params.date_from);
             if (params?.date_to) q.set('date_to', params.date_to);

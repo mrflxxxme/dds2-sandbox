@@ -5,7 +5,7 @@ import type { Transaction, UnassignedGroupRow, MessageResponse } from '@/types/a
 export function addTransactionMethods(api: ApiClient) {
     return {
         searchTransactions(params: Record<string, unknown> = {}) {
-            return api.request<Transaction[]>('POST', '/api/v1/transactions/search', params);
+            return api.request<Transaction[] | { transactions: Transaction[] }>('POST', '/api/v1/transactions/search', params);
         },
         getUnassigned(limit = 500) {
             return api.request<Transaction[]>('GET', `/api/v1/transactions/unassigned?limit=${limit}`);

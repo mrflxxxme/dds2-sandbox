@@ -382,8 +382,8 @@ function CpBlock({ group, total, cats, isOpen, onToggle, allTxns, onAssign, onAs
                                                     style={{ cursor: 'pointer', accentColor: 'var(--color-primary)' }} />
                                             </td>
                                             <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{formatDate(t.date)}</td>
-                                            <td style={{ fontWeight: 600, whiteSpace: 'nowrap', color: parseFloat(t.income) > 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>
-                                                {formatNumber(parseFloat(t.income) > 0 ? t.income : t.expense)}
+                                            <td style={{ fontWeight: 600, whiteSpace: 'nowrap', color: t.income > 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                                                {formatNumber(t.income > 0 ? t.income : t.expense)}
                                             </td>
                                             <td style={{ fontSize: 12, whiteSpace: 'normal', wordBreak: 'break-word', minWidth: 300 }}>
                                                 {t.purpose || '—'}
@@ -479,7 +479,7 @@ function SingleAssignment({ txns, cats, onAssign }: SingleAssignmentProps) {
                         </select>
                     </div>
                     <button className="btn btn-primary" style={{ width: '100%' }}
-                        onClick={() => onAssign(txn.txn_id, cat1, cat2, scope, txn.cp_key)}>✅ Применить</button>
+                        onClick={() => onAssign(txn.txn_id, cat1, cat2, scope, txn.cp_key ?? '')}>✅ Применить</button>
                 </div>
             </div>
         </div>

@@ -94,7 +94,7 @@ function adaptColumns(cols: Column[]): ColumnDef<any, any>[] {
             meta: { align: col.align || 'left' },
         };
         if (col.getValue) {
-            def.accessorFn = col.getValue;
+            (def as any).accessorFn = col.getValue;
         } else {
             (def as any).accessorKey = col.key;
         }

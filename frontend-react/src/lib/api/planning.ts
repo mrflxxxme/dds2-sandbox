@@ -39,7 +39,7 @@ export function addPlanningMethods(api: ApiClient) {
         async uploadWbPayouts(file: File) {
             const formData = new FormData();
             formData.append('file', file);
-            return api.uploadFormData<{ ok: boolean; created: number; updated: number; skipped: number }>(
+            return api.uploadFormData<{ ok: boolean; created: number; updated: number; skipped: number; total_parsed: number }>(
                 '/api/v1/planning/wb_payouts/upload', formData
             );
         },
