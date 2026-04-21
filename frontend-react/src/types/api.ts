@@ -1289,6 +1289,7 @@ export interface WbFboSupply {
   assembly_request_number?: string;
   assembly_request_status?: string;
   synced_at?: string;
+  return_processed_at?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -1308,6 +1309,26 @@ export interface WbFboSupplyItem {
 export interface WbFboSupplyListResponse {
   items: WbFboSupply[];
   total: number;
+}
+
+export type FboReturnType = 'GOODS' | 'DEFECT' | 'UTILIZED';
+
+export interface FboReturnItem {
+  barcode: string;
+  quantity: number;
+}
+
+export interface FboReturnRequest {
+  return_type: FboReturnType;
+  warehouse_id?: number | null;
+  items: FboReturnItem[];
+  comment?: string | null;
+}
+
+export interface FboReturnResponse {
+  supply_id: number;
+  receipt_id?: number | null;
+  receipt_number?: string | null;
 }
 
 export interface FboSyncResult {

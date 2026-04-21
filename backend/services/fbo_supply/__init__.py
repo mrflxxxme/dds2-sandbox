@@ -23,6 +23,7 @@ from .mappers import (
     _update_supply_from_fbw_list,
     _upsert_supply_items_fbw,
 )
+from .returns import FboReturnType, process_fbo_return
 from .service import (
     get_fbo_summary,
     get_fbo_supply_items,
@@ -65,4 +66,7 @@ __all__ = [
     "enrich_fbo_supplies",
     "sync_fbo_statuses",
     "sync_fbo_supplies",
+    # returns
+    "FboReturnType",
+    "process_fbo_return",
 ]

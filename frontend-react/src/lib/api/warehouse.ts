@@ -13,6 +13,8 @@ import type {
     DefectOperation,
     DeliveryTimesResponse,
     DeliveryTimesUpdate,
+    FboReturnRequest,
+    FboReturnResponse,
     FboSyncResult,
     InboundReceipt,
     LogisticsAnalyticsResponse,
@@ -175,6 +177,9 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         unlinkFboSupply(supplyId: number) {
             return api.request<WbFboSupply>('DELETE', `/api/v1/warehouse/fbo-supplies/${supplyId}/link`);
+        },
+        createFboReturn(supplyId: number, payload: FboReturnRequest) {
+            return api.request<FboReturnResponse>('POST', `/api/v1/warehouse/fbo-supplies/${supplyId}/return`, payload);
         },
 
         // ─── WB Warehouse Names ─────────────────────────────────────────

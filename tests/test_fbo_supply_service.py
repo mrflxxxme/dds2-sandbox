@@ -832,6 +832,215 @@ class TestBackfillSupplyShipmentLink:
         assert supply.outbound_shipment_id == shipment.id
 
 
+# ─── Returns: handle unaccepted qty ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestFboReturns:
+    """process_fbo_return creates receipt + flags supply.return_processed_at."""
+
+    async def test_goods_return_creates_inbound_receipt(self, db_session):
+        from sqlalchemy import select, text
+
+        from backend.models.warehouse import InboundReceipt, InboundStatus, Warehouse, WarehouseStock
+        from backend.services.fbo_supply.returns import FboReturnType, process_fbo_return
+
+        # Warehouse
+        wh = Warehouse(project_id=1, name="хамза-test", warehouse_type="EXTERNAL")
+        db_session.add(wh)
+        await db_session.flush()
+
+        # Nomenclature (barcode)
+        await db_session.execute(
+            text(
+                "INSERT INTO nomenclature (project_id, article_seller, barcode, updated_at) "
+                "VALUES (1, 'art', '2043160691778', NOW()) ON CONFLICT DO NOTHING"
+            )
+        )
+
+        # Supply with partial acceptance (52 unaccepted)
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="38231599",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            total_qty=52,
+            accepted_qty=0,
+        )
+        db_session.add(supply)
+        await db_session.flush()
+
+        item = WbFboSupplyItem(
+            project_id=1,
+            supply_id=supply.id,
+            wb_order_id="W1",
+            barcode="2043160691778",
+            quantity=52,
+            accepted_qty=0,
+        )
+        db_session.add(item)
+        await db_session.commit()
+        await db_session.refresh(supply)
+
+        result = await process_fbo_return(
+            db_session,
+            1,
+            supply.id,
+            return_type=FboReturnType.GOODS,
+            warehouse_id=wh.id,
+            items=[{"barcode": "2043160691778", "quantity": 52}],
+        )
+
+        assert result["supply_id"] == supply.id
+        assert result["receipt_id"] is not None
+
+        r = await db_session.execute(select(InboundReceipt).where(InboundReceipt.id == result["receipt_id"]))
+        receipt = r.scalar_one()
+        assert receipt.status == InboundStatus.ACCEPTED
+        assert receipt.is_defect is False
+        assert "38231599" in (receipt.comment or "")
+
+        s = await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == supply.id))
+        assert s.scalar_one().return_processed_at is not None
+
+        st = await db_session.execute(
+            select(WarehouseStock).where(
+                WarehouseStock.warehouse_id == wh.id,
+                WarehouseStock.barcode == "2043160691778",
+            )
+        )
+        stock = st.scalar_one()
+        assert stock.quantity == 52
+
+    async def test_defect_return_goes_to_defect_stock(self, db_session):
+        from sqlalchemy import select, text
+
+        from backend.models.warehouse import Warehouse, WarehouseStock
+        from backend.services.fbo_supply.returns import FboReturnType, process_fbo_return
+
+        wh = Warehouse(project_id=1, name="хамза-d", warehouse_type="EXTERNAL")
+        db_session.add(wh)
+        await db_session.flush()
+        await db_session.execute(
+            text(
+                "INSERT INTO nomenclature (project_id, article_seller, barcode, updated_at) "
+                "VALUES (1, 'art2', 'BC-DEFECT', NOW()) ON CONFLICT DO NOTHING"
+            )
+        )
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="S2",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            total_qty=10,
+            accepted_qty=0,
+        )
+        db_session.add(supply)
+        await db_session.flush()
+        db_session.add(
+            WbFboSupplyItem(
+                project_id=1,
+                supply_id=supply.id,
+                wb_order_id="W2",
+                barcode="BC-DEFECT",
+                quantity=10,
+                accepted_qty=0,
+            )
+        )
+        await db_session.commit()
+
+        await process_fbo_return(
+            db_session,
+            1,
+            supply.id,
+            return_type=FboReturnType.DEFECT,
+            warehouse_id=wh.id,
+            items=[{"barcode": "BC-DEFECT", "quantity": 10}],
+        )
+
+        st = await db_session.execute(
+            select(WarehouseStock).where(WarehouseStock.warehouse_id == wh.id, WarehouseStock.barcode == "BC-DEFECT")
+        )
+        stock = st.scalar_one()
+        assert stock.quantity == 0
+        assert stock.defect_quantity == 10
+
+    async def test_utilized_return_no_receipt_but_flags_supply(self, db_session):
+        from sqlalchemy import select
+
+        from backend.services.fbo_supply.returns import FboReturnType, process_fbo_return
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="S3",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            total_qty=5,
+            accepted_qty=0,
+        )
+        db_session.add(supply)
+        await db_session.flush()
+        db_session.add(
+            WbFboSupplyItem(
+                project_id=1,
+                supply_id=supply.id,
+                wb_order_id="W3",
+                barcode="BC-UTIL",
+                quantity=5,
+                accepted_qty=0,
+            )
+        )
+        await db_session.commit()
+
+        result = await process_fbo_return(
+            db_session,
+            1,
+            supply.id,
+            return_type=FboReturnType.UTILIZED,
+            warehouse_id=None,
+            items=[{"barcode": "BC-UTIL", "quantity": 5}],
+        )
+
+        assert result["receipt_id"] is None
+        s = (await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == supply.id))).scalar_one()
+        assert s.return_processed_at is not None
+
+    async def test_rejects_qty_over_unaccepted_delta(self, db_session):
+        from backend.services.fbo_supply.returns import FboReturnType, process_fbo_return
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="S4",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            total_qty=10,
+            accepted_qty=7,
+        )
+        db_session.add(supply)
+        await db_session.flush()
+        db_session.add(
+            WbFboSupplyItem(
+                project_id=1,
+                supply_id=supply.id,
+                wb_order_id="W4",
+                barcode="BC-OVER",
+                quantity=10,
+                accepted_qty=7,
+            )
+        )
+        await db_session.commit()
+
+        with pytest.raises(ValueError, match="unaccepted delta"):
+            await process_fbo_return(
+                db_session,
+                1,
+                supply.id,
+                return_type=FboReturnType.UTILIZED,
+                warehouse_id=None,
+                items=[{"barcode": "BC-OVER", "quantity": 5}],  # delta=3
+            )
+
+
 # ─── Router integration tests ──────────────────────────────────────────────
 
 

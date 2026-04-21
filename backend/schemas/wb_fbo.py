@@ -82,3 +82,30 @@ class FboSyncResultSchema(BaseModel):
     updated: int = 0
     errors: int = 0
     message: str = ""
+
+
+# ─── Return (недоприёмка) ──────────────────────────────────────────────────
+
+
+class FboReturnItem(BaseModel):
+    barcode: str
+    quantity: int
+
+
+class FboReturnRequest(BaseModel):
+    """
+    Handle unaccepted qty for a supply with partial acceptance.
+    return_type: GOODS | DEFECT | UTILIZED.
+    warehouse_id required for GOODS/DEFECT (source warehouse).
+    """
+
+    return_type: str
+    warehouse_id: int | None = None
+    items: list[FboReturnItem]
+    comment: str | None = None
+
+
+class FboReturnResponse(BaseModel):
+    supply_id: int
+    receipt_id: int | None = None
+    receipt_number: str | None = None

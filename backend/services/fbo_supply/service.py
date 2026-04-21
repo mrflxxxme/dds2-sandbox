@@ -61,6 +61,7 @@ async def get_fbo_summary(
     partial_q = accepted_q.where(
         WbFboSupply.total_qty > 0,
         WbFboSupply.accepted_qty < WbFboSupply.total_qty,
+        WbFboSupply.return_processed_at.is_(None),
     )
     accepted_partial = (await db.execute(select(func.count()).select_from(partial_q.subquery()))).scalar() or 0
 
@@ -174,14 +175,16 @@ async def list_fbo_supplies(
         )
         base_query = base_query.where(WbFboSupply.id.not_in(any_assembly_ids))
 
-    # Partial acceptance: accepted_qty > 0 AND accepted_qty < total_qty.
-    # Flags supplies where WB rejected part of the shipment — user must decide
-    # what to do with the unaccepted qty (return to source warehouse).
+    # Partial acceptance — only for ACCEPTED supplies where WB rejected part of
+    # the shipment (non-final statuses always have accepted_qty=0 and are not
+    # yet a "недоприёмка"). return_processed_at IS NULL excludes already-handled.
     if partial_only:
         base_query = base_query.where(
             and_(
+                WbFboSupply.wb_status == WbSupplyStatus.ACCEPTED,
                 WbFboSupply.total_qty > 0,
                 WbFboSupply.accepted_qty < WbFboSupply.total_qty,
+                WbFboSupply.return_processed_at.is_(None),
             )
         )
 

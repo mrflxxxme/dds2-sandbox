@@ -64,6 +64,9 @@ class WbFboSupply(Base, TimestampMixin):
         nullable=True,
     )
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # Set when user registered a return for unaccepted qty (goods/defect/utilized).
+    # Supply is excluded from the partial-acceptance summary/filter afterwards.
+    return_processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Relationships
     items: Mapped[list["WbFboSupplyItem"]] = relationship(

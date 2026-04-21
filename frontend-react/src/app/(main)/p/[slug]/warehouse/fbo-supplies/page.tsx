@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatDateTime } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { WbFboSupply, WbFboSupplyItem, OutboundShipment } from '@/types/api';
+import type { WbFboSupply, WbFboSupplyItem, OutboundShipment, Warehouse, FboReturnType } from '@/types/api';
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -66,6 +66,16 @@ export default function FboSuppliesPage() {
     const [loadingShipments, setLoadingShipments] = useState(false);
     const [selectedShipmentId, setSelectedShipmentId] = useState<number | null>(null);
     const [linking, setLinking] = useState(false);
+
+    // Return modal
+    const [returnState, setReturnState] = useState<{
+        supply: WbFboSupply; items: WbFboSupplyItem[];
+    } | null>(null);
+    const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+
+    useEffect(() => {
+        api.getWarehouses().then(setWarehouses).catch(() => setWarehouses([]));
+    }, []);
 
     // Sync
     const [syncing, setSyncing] = useState(false);
@@ -497,6 +507,7 @@ export default function FboSuppliesPage() {
                                                         items={expandedItems}
                                                         loading={loadingItems}
                                                         slug={slug}
+                                                        onOpenReturn={() => setReturnState({ supply, items: expandedItems })}
                                                     />
                                                 </td>
                                             </tr>
@@ -590,6 +601,172 @@ export default function FboSuppliesPage() {
                     </div>
                 </div>
             )}
+
+            {/* Return Modal */}
+            {returnState !== null && (
+                <FboReturnModal
+                    supply={returnState.supply}
+                    items={returnState.items}
+                    warehouses={warehouses}
+                    onClose={() => setReturnState(null)}
+                    onDone={async () => { setReturnState(null); await load(); loadSummary(); }}
+                />
+            )}
+        </div>
+    );
+}
+
+
+// ─── Return modal ────────────────────────────────────────────────────────────
+
+function FboReturnModal({
+    supply, items, warehouses, onClose, onDone,
+}: {
+    supply: WbFboSupply;
+    items: WbFboSupplyItem[];
+    warehouses: Warehouse[];
+    onClose: () => void;
+    onDone: () => Promise<void> | void;
+}) {
+    const deltaItems = items
+        .map(i => ({ ...i, delta: Math.max(0, i.quantity - i.accepted_qty) }))
+        .filter(i => i.delta > 0);
+    const [returnType, setReturnType] = useState<FboReturnType>('GOODS');
+    const [warehouseId, setWarehouseId] = useState<number | ''>(warehouses[0]?.id ?? '');
+    const [qty, setQty] = useState<Record<string, number>>(
+        Object.fromEntries(deltaItems.map(i => [i.barcode, i.delta]))
+    );
+    const [comment, setComment] = useState('');
+    const [saving, setSaving] = useState(false);
+    const [err, setErr] = useState('');
+
+    const needsWarehouse = returnType === 'GOODS' || returnType === 'DEFECT';
+
+    const submit = async () => {
+        setErr('');
+        const payload = {
+            return_type: returnType,
+            warehouse_id: needsWarehouse ? (warehouseId || null) as number | null : null,
+            items: deltaItems
+                .map(i => ({ barcode: i.barcode, quantity: qty[i.barcode] || 0 }))
+                .filter(i => i.quantity > 0),
+            comment: comment.trim() || null,
+        };
+        if (needsWarehouse && !payload.warehouse_id) { setErr('Выберите склад'); return; }
+        if (payload.items.length === 0) { setErr('Нет позиций к возврату'); return; }
+        setSaving(true);
+        try {
+            await api.createFboReturn(supply.id, payload);
+            await onDone();
+        } catch (e: unknown) {
+            setErr(e instanceof Error ? e.message : 'Ошибка');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 640 }}>
+                <h2 className="modal-title">Возврат по поставке FBW-{supply.wb_supply_id}</h2>
+
+                {/* Return type */}
+                <div style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Что произошло с непринятым:</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 14 }}>
+                        <label style={{ cursor: 'pointer' }}>
+                            <input type="radio" checked={returnType === 'GOODS'} onChange={() => setReturnType('GOODS')} />
+                            {' '}Вернулись годными на склад
+                        </label>
+                        <label style={{ cursor: 'pointer' }}>
+                            <input type="radio" checked={returnType === 'DEFECT'} onChange={() => setReturnType('DEFECT')} />
+                            {' '}Вернулись браком на склад
+                        </label>
+                        <label style={{ cursor: 'pointer' }}>
+                            <input type="radio" checked={returnType === 'UTILIZED'} onChange={() => setReturnType('UTILIZED')} />
+                            {' '}Утилизированы WB (списать)
+                        </label>
+                    </div>
+                </div>
+
+                {/* Warehouse picker */}
+                {needsWarehouse && (
+                    <div className="form-group" style={{ marginBottom: 16 }}>
+                        <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Склад возврата</label>
+                        <select
+                            className="form-input"
+                            value={warehouseId}
+                            onChange={e => setWarehouseId(e.target.value ? Number(e.target.value) : '')}
+                        >
+                            <option value="">Выберите склад</option>
+                            {warehouses.map(w => (
+                                <option key={w.id} value={w.id}>{w.name}</option>
+                            ))}
+                        </select>
+                    </div>
+                )}
+
+                {/* Items */}
+                <div style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Позиции возврата</div>
+                    {deltaItems.length === 0 ? (
+                        <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>Нет непринятых позиций</div>
+                    ) : (
+                        <table className="data-table" style={{ fontSize: 13 }}>
+                            <thead>
+                                <tr>
+                                    <th>Товар</th>
+                                    <th>ШК</th>
+                                    <th style={{ textAlign: 'right' }}>Не принято</th>
+                                    <th style={{ textAlign: 'right', width: 120 }}>К возврату</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {deltaItems.map(i => (
+                                    <tr key={i.barcode}>
+                                        <td>{i.article_seller || i.product_name || '—'}</td>
+                                        <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{i.barcode}</td>
+                                        <td style={{ textAlign: 'right' }}>{i.delta}</td>
+                                        <td>
+                                            <input
+                                                className="form-input"
+                                                type="number"
+                                                min={0}
+                                                max={i.delta}
+                                                value={qty[i.barcode] ?? 0}
+                                                onChange={e => setQty(m => ({ ...m, [i.barcode]: Math.min(i.delta, Math.max(0, Number(e.target.value))) }))}
+                                                style={{ textAlign: 'right', padding: '4px 8px', height: 32 }}
+                                            />
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    )}
+                </div>
+
+                {/* Comment */}
+                <div className="form-group" style={{ marginBottom: 16 }}>
+                    <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Комментарий (необязательно)</label>
+                    <input
+                        className="form-input"
+                        value={comment}
+                        onChange={e => setComment(e.target.value)}
+                        placeholder="Например: вернулись после отказа клиента"
+                    />
+                </div>
+
+                {err && (
+                    <div style={{ padding: 8, color: 'var(--color-danger)', fontSize: 13, marginBottom: 12 }}>{err}</div>
+                )}
+
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                    <button className="btn btn-secondary" onClick={onClose} disabled={saving}>Отмена</button>
+                    <button className="btn btn-primary" onClick={submit} disabled={saving || deltaItems.length === 0}>
+                        {saving ? 'Оформление...' : 'Оформить возврат'}
+                    </button>
+                </div>
+            </div>
         </div>
     );
 }
@@ -652,21 +829,56 @@ function SupplyItemsPanel({
     items,
     loading,
     slug,
+    onOpenReturn,
 }: {
     supply: WbFboSupply;
     items: WbFboSupplyItem[];
     loading: boolean;
     slug: string;
+    onOpenReturn: () => void;
 }) {
     if (loading) {
         return <div style={{ padding: 24, textAlign: 'center' }}>Загрузка позиций...</div>;
     }
 
-    const totalQty = items.reduce((s, i) => s + i.quantity, 0);
-    const totalAccepted = items.reduce((s, i) => s + i.accepted_qty, 0);
+    // Use items if present, fall back to supply-level counters
+    // (items may be missing for supplies that haven't been enriched yet).
+    const hasItems = items.length > 0;
+    const totalQty = hasItems ? items.reduce((s, i) => s + i.quantity, 0) : supply.total_qty;
+    const totalAccepted = hasItems ? items.reduce((s, i) => s + i.accepted_qty, 0) : supply.accepted_qty;
+    const unacceptedDelta = Math.max(0, totalQty - totalAccepted);
+    const showReturnBanner = supply.wb_status === 'ACCEPTED' && unacceptedDelta > 0 && !supply.return_processed_at;
 
     return (
         <div style={{ padding: '16px 24px 20px' }}>
+            {/* Недоприёмка banner */}
+            {showReturnBanner && (
+                <div style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                    padding: '10px 14px', marginBottom: 12,
+                    background: 'color-mix(in srgb, var(--color-danger) 8%, transparent)',
+                    border: '1px solid color-mix(in srgb, var(--color-danger) 40%, transparent)',
+                    borderRadius: 8, fontSize: 14,
+                }}>
+                    <div>
+                        <strong style={{ color: 'var(--color-danger)' }}>Недоприёмка:</strong>{' '}
+                        {unacceptedDelta} шт из {totalQty} — WB принял {totalAccepted}
+                    </div>
+                    <button className="btn btn-primary btn-sm" onClick={onOpenReturn}>
+                        Оформить возврат
+                    </button>
+                </div>
+            )}
+            {supply.return_processed_at && (
+                <div style={{
+                    padding: '8px 12px', marginBottom: 12,
+                    background: 'color-mix(in srgb, var(--color-success) 10%, transparent)',
+                    borderRadius: 8, fontSize: 13, color: 'var(--color-text-muted)',
+                }}>
+                    ✓ Недоприёмка обработана {formatDate(supply.return_processed_at)}
+                </div>
+            )}
+
             {/* Warehouse info */}
             {supply.warehouse_name && (
                 <div style={{

@@ -13,6 +13,8 @@ from backend.integrations.wb_api import WBApiClient
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.wb_fbo import (
+    FboReturnRequest,
+    FboReturnResponse,
     FboSupplyLinkRequest,
     FboSyncResultSchema,
     WbFboSupplyItemSchema,
@@ -236,6 +238,47 @@ async def link_supply(
         return WbFboSupplySchema.model_validate(supply)
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
+
+
+# ─── Return: handle unaccepted qty ─────────────────────────────────────────
+
+
+@router.post(
+    "/{supply_id}/return",
+    response_model=FboReturnResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def create_fbo_return(
+    supply_id: int,
+    payload: FboReturnRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Оформить возврат недопринятого qty: GOODS (годные) / DEFECT (брак) /
+    UTILIZED (списание — WB утилизировал). Ставит supply.return_processed_at.
+    """
+    from backend.services.fbo_supply import FboReturnType
+
+    try:
+        rt = FboReturnType(payload.return_type)
+    except ValueError:
+        raise HTTPException(400, f"Invalid return_type: {payload.return_type}") from None
+
+    try:
+        result = await fbo_supply_service.process_fbo_return(
+            db,
+            project.id,
+            supply_id,
+            return_type=rt,
+            warehouse_id=payload.warehouse_id,
+            items=[item.model_dump() for item in payload.items],
+            comment=payload.comment,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+    return FboReturnResponse(**result)
 
 
 @router.delete("/{supply_id}/link", dependencies=[Depends(rate_limit_write)])
