@@ -168,17 +168,18 @@ echo ""
 
 # ─── 10. db.delete() on SoftDelete models ────────────────────────────
 echo "── Check 10: db.delete() on SoftDelete models (use soft_delete()) ──"
-# Models with SoftDeleteMixin — should never use db.delete()
+# Whitelist via inline comment `# no-soft-delete-check: <reason>` для моделей БЕЗ SoftDeleteMixin.
+# Прецедент audit 2026-04-13 #1: FactoryOrderItem.delete() обходил soft-delete → восстановление невозможно.
 FOUND=$(grep -rn "db\.delete(" backend/services/ backend/routers/ --include="*.py" \
     | grep -v "__pycache__" \
     | grep -v "# no-soft-delete-check" \
     | grep -v "test_" \
     2>/dev/null || true)
 if [ -n "$FOUND" ]; then
-    warn "db.delete() found — verify these are on models WITHOUT SoftDeleteMixin"
+    error "db.delete() found без whitelist — добавь soft_delete() ИЛИ '# no-soft-delete-check: <reason>' если модель без SoftDeleteMixin"
     echo "$FOUND"
 else
-    ok "No db.delete() calls found"
+    ok "No db.delete() calls found (whitelist via '# no-soft-delete-check' OK)"
 fi
 echo ""
 
