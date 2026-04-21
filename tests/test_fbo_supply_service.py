@@ -670,9 +670,12 @@ class TestEnrichPartialAcceptance:
             "acceptedQuantity": 336,
             "statusID": 5,
         }
+        # goods sum: qty = 144+52+96+96+18 = 406, accepted = 144+0+96+96+0 = 336
         mock_client.get_fbw_supply_goods.return_value = [
             {"barcode": "2042072435609", "vendorCode": "DIVANDEK", "nmID": 1, "quantity": 144, "acceptedQuantity": 144},
             {"barcode": "2043160691778", "vendorCode": "NAKIDKA", "nmID": 2, "quantity": 52, "acceptedQuantity": 0},
+            {"barcode": "2043300615220", "vendorCode": "KREST-B", "nmID": 4, "quantity": 96, "acceptedQuantity": 96},
+            {"barcode": "2043300615237", "vendorCode": "KREST-K", "nmID": 5, "quantity": 96, "acceptedQuantity": 96},
             {"barcode": "2044145314996", "vendorCode": "ZEBRA", "nmID": 3, "quantity": 18, "acceptedQuantity": 0},
         ]
 
@@ -682,6 +685,8 @@ class TestEnrichPartialAcceptance:
         assert mock_client.get_fbw_supply_goods.called, "goods API must be called for ACCEPTED with partial"
 
         await db_session.refresh(supply)
+        # accepted_qty and total_qty are re-derived from goods sum (source of truth
+        # per-SKU), not from detail.acceptedQuantity (can diverge from items).
         assert supply.accepted_qty == 336
         assert supply.total_qty == 406
 

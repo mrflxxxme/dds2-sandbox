@@ -233,12 +233,18 @@ async def enrich_fbo_supplies(
 
             # Also sync per-item accepted_qty for ACCEPTED supplies with partial
             # acceptance (WB returns acceptedQuantity per barcode in goods API).
+            # WB detail.acceptedQuantity and sum(goods.acceptedQuantity) can
+            # diverge (detail counts depersonalized as accepted, goods doesn't) —
+            # we trust per-SKU goods numbers for supply-level accepted_qty too,
+            # otherwise partial_only filter misses these supplies.
             if supply.wb_status == WbSupplyStatus.ACCEPTED:
                 try:
                     await asyncio.sleep(FBW_RATE_LIMIT_DELAY)
                     goods = await api_client.get_fbw_supply_goods(wb_id_int, limit=100, offset=0)
                     if goods:
                         await _upsert_supply_items_fbw(db, project_id, supply.id, wb_id_int, goods)
+                        supply.accepted_qty = sum(int(g.get("acceptedQuantity") or 0) for g in goods)
+                        supply.total_qty = sum(int(g.get("quantity") or 0) for g in goods)
                 except Exception as goods_err:
                     logger.warning(
                         "fbo_enrich.goods_error",
