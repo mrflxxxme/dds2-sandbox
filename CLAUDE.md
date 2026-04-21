@@ -162,6 +162,7 @@ src/types/api.ts — TypeScript интерфейсы
 | `todo-sentinel.yml` | **cron** `0 6 * * 1` (Mon 06:00 UTC) + manual | стары TODO/FIXME (>30 дней) → tracking issue |
 | `known-bugs-sentinel.yml` | **cron** `0 6 * * 2` (Tue 06:00 UTC) + manual | P{N} markers в коде → tracking issue |
 | `weekly-retrospective.yml` | **cron** `0 7 * * 0` (Sun 07:00 UTC) + manual | анализ git log за неделю → suggestions |
+| `auto-docs-learn.yml` | **cron** `0 6,18 * * *` (09:00 + 21:00 MSK) + manual | headless Claude → /learn + /docs для pending коммитов → auto-commit `[auto-learn]` в dev |
 | `deploy-monitoring.yml` | изменения `infra/monitoring/**` | rsync на monitoring-сервер (без `--delete`, исключает `.env` — см. P-incident 2026-04-14) |
 | `server-cleanup.yml` | **cron** `0 3 * * 0` (вс 03:00 UTC) + manual | еженедельная очистка диска app-сервера |
 | `server-diagnose.yml` | manual | диагностика прод-сервера (логи, ресурсы) |
