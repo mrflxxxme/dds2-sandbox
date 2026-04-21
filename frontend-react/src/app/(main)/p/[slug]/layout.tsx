@@ -18,7 +18,15 @@ const navGroups = [
             { href: '/reports', label: 'Отчёты', icon: '📈', pageKey: 'reports' },
             { href: '/cost', label: 'Себестоимость', icon: '💰', pageKey: 'cost' },
             { href: '/reports/cost-dna', label: 'ДНК себестоимости', icon: '🧬', pageKey: 'reports' },
-            { href: '/refs', label: 'Справочники', icon: '📋', pageKey: 'refs' },
+        ],
+    },
+    {
+        title: 'Справочники',
+        section: 'refs',
+        items: [
+            { href: '/refs/counterparty', label: 'Контрагенты', icon: '👥', pageKey: 'refs' },
+            { href: '/refs/loans', label: 'Займы и кредиты', icon: '💸', pageKey: 'refs' },
+            { href: '/refs', label: 'Счета и категории', icon: '📋', pageKey: 'refs' },
         ],
     },
     {
