@@ -43,10 +43,17 @@ export default function FboSuppliesPage() {
     const [statusFilter, setStatusFilter] = useState('');
     const [warehouseFilter, setWarehouseFilter] = useState('');
     const [warehouseOptions, setWarehouseOptions] = useState<string[]>([]);
+    const [withoutAssembly, setWithoutAssembly] = useState(false);
+    const [partialOnly, setPartialOnly] = useState(false);
     const [sortBy, setSortBy] = useState('created_at_wb');
     const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
     const [page, setPage] = useState(0);
     const PAGE_SIZE = 50;
+
+    // Summary
+    const [summary, setSummary] = useState<{
+        total: number; accepted: number; accepted_without_assembly: number; accepted_partial: number;
+    } | null>(null);
 
     // Expanded rows (supply items)
     const [expandedId, setExpandedId] = useState<number | null>(null);
@@ -72,6 +79,12 @@ export default function FboSuppliesPage() {
         api.getFboWarehouses().then(setWarehouseOptions).catch(() => {});
     }, []);
 
+    const loadSummary = useCallback(() => {
+        api.getFboSuppliesSummary().then(setSummary).catch(() => setSummary(null));
+    }, []);
+
+    useEffect(() => { loadSummary(); }, [loadSummary]);
+
     const load = useCallback(async () => {
         setLoading(true);
         setError('');
@@ -80,6 +93,8 @@ export default function FboSuppliesPage() {
                 search: search || undefined,
                 status: statusFilter || undefined,
                 warehouse: warehouseFilter || undefined,
+                without_assembly: withoutAssembly || undefined,
+                partial_only: partialOnly || undefined,
                 sort_by: sortBy,
                 sort_order: sortOrder,
                 limit: PAGE_SIZE,
@@ -91,7 +106,7 @@ export default function FboSuppliesPage() {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         }
         setLoading(false);
-    }, [search, statusFilter, warehouseFilter, sortBy, sortOrder, page]);
+    }, [search, statusFilter, warehouseFilter, withoutAssembly, partialOnly, sortBy, sortOrder, page]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -266,6 +281,30 @@ export default function FboSuppliesPage() {
                 </div>
             )}
 
+            {/* Summary cards */}
+            {summary && (
+                <div className="stats-grid" style={{ marginBottom: 16 }}>
+                    <SummaryCard label="Всего поставок" value={summary.total} />
+                    <SummaryCard label="Принято WB" value={summary.accepted} />
+                    <SummaryCard
+                        label="Без заявки на сборку"
+                        value={summary.accepted_without_assembly}
+                        hint="WB принял, но в DDS нет заявки"
+                        active={withoutAssembly}
+                        onClick={() => { setWithoutAssembly(v => !v); setPage(0); }}
+                        tone="warning"
+                    />
+                    <SummaryCard
+                        label="С недоприёмкой"
+                        value={summary.accepted_partial}
+                        hint="WB принял не всё — возможно, часть вернулась"
+                        active={partialOnly}
+                        onClick={() => { setPartialOnly(v => !v); setPage(0); }}
+                        tone="danger"
+                    />
+                </div>
+            )}
+
             {/* Filters */}
             <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
                 <div style={{ display: 'flex', gap: 12, alignItems: 'end', flexWrap: 'wrap' }}>
@@ -301,6 +340,22 @@ export default function FboSuppliesPage() {
                             ))}
                         </select>
                     </div>
+                    <label className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                        <input
+                            type="checkbox"
+                            checked={withoutAssembly}
+                            onChange={e => { setWithoutAssembly(e.target.checked); setPage(0); }}
+                        />
+                        Без заявки на сборку
+                    </label>
+                    <label className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                        <input
+                            type="checkbox"
+                            checked={partialOnly}
+                            onChange={e => { setPartialOnly(e.target.checked); setPage(0); }}
+                        />
+                        С недоприёмкой
+                    </label>
                 </div>
             </div>
 
@@ -533,6 +588,56 @@ export default function FboSuppliesPage() {
                             </button>
                         </div>
                     </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+
+// ─── Summary card (clickable filter chip) ───────────────────────────────────
+
+function SummaryCard({
+    label,
+    value,
+    hint,
+    active,
+    onClick,
+    tone,
+}: {
+    label: string;
+    value: number;
+    hint?: string;
+    active?: boolean;
+    onClick?: () => void;
+    tone?: 'warning' | 'danger';
+}) {
+    const clickable = Boolean(onClick);
+    const toneColor =
+        tone === 'warning' ? 'var(--color-warning)' :
+        tone === 'danger' ? 'var(--color-danger)' :
+        'var(--color-text)';
+    return (
+        <div
+            className="glass-card"
+            onClick={onClick}
+            style={{
+                padding: 16,
+                cursor: clickable ? 'pointer' : 'default',
+                borderColor: active ? toneColor : undefined,
+                borderWidth: active ? 2 : undefined,
+                borderStyle: active ? 'solid' : undefined,
+            }}
+        >
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+                {label}
+            </div>
+            <div style={{ fontSize: 28, fontWeight: 700, letterSpacing: '-0.03em', color: toneColor }}>
+                {value.toLocaleString('ru-RU')}
+            </div>
+            {hint && (
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                    {hint}
                 </div>
             )}
         </div>

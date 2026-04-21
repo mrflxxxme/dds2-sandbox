@@ -631,6 +631,207 @@ class TestModels:
         assert supply.wb_status == "ACCEPTED"
 
 
+# ─── Enrich: re-sync partial acceptance for ACCEPTED supplies ──────────────
+
+
+@pytest.mark.asyncio
+class TestEnrichPartialAcceptance:
+    """
+    Enrich must pick up ACCEPTED supplies with accepted_qty < total_qty
+    (partial acceptance) and re-fetch per-item accepted_qty from FBW goods API.
+    """
+
+    async def test_reenrich_accepted_with_partial_acceptance(self, db_session):
+        from datetime import timedelta
+
+        from backend.services.fbo_supply_service import enrich_fbo_supplies
+
+        # Stale supply (synced > 24h ago) accepted with 336/406 — should be picked.
+        stale_synced = datetime.utcnow() - timedelta(hours=36)
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="38231599",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            name="FBW-38231599",
+            created_at_wb=datetime(2026, 4, 1, 14, 16),
+            warehouse_name="Тула",
+            total_qty=406,
+            accepted_qty=0,  # stale: not yet synced after acceptance
+            synced_at=stale_synced,
+        )
+        db_session.add(supply)
+        await db_session.commit()
+        await db_session.refresh(supply)
+
+        mock_client = AsyncMock()
+        mock_client.get_fbw_supply_detail.return_value = {
+            "warehouseName": "Тула",
+            "quantity": 406,
+            "acceptedQuantity": 336,
+            "statusID": 5,
+        }
+        mock_client.get_fbw_supply_goods.return_value = [
+            {"barcode": "2042072435609", "vendorCode": "DIVANDEK", "nmID": 1, "quantity": 144, "acceptedQuantity": 144},
+            {"barcode": "2043160691778", "vendorCode": "NAKIDKA", "nmID": 2, "quantity": 52, "acceptedQuantity": 0},
+            {"barcode": "2044145314996", "vendorCode": "ZEBRA", "nmID": 3, "quantity": 18, "acceptedQuantity": 0},
+        ]
+
+        result = await enrich_fbo_supplies(db_session, 1, mock_client, max_calls=5)
+
+        assert result["enriched"] == 1
+        assert mock_client.get_fbw_supply_goods.called, "goods API must be called for ACCEPTED with partial"
+
+        await db_session.refresh(supply)
+        assert supply.accepted_qty == 336
+        assert supply.total_qty == 406
+
+        from sqlalchemy import select
+
+        items_r = await db_session.execute(
+            select(WbFboSupplyItem).where(WbFboSupplyItem.supply_id == supply.id).order_by(WbFboSupplyItem.barcode)
+        )
+        items = {it.barcode: it for it in items_r.scalars().all()}
+        assert items["2042072435609"].accepted_qty == 144
+        assert items["2043160691778"].accepted_qty == 0
+        assert items["2044145314996"].accepted_qty == 0
+
+    async def test_accepted_within_cooldown_is_skipped(self, db_session):
+        """Recently synced ACCEPTED supply must not be re-enriched (cooldown)."""
+        from backend.services.fbo_supply_service import enrich_fbo_supplies
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="38231599",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            warehouse_name="Тула",
+            total_qty=406,
+            accepted_qty=0,
+            synced_at=datetime.utcnow(),  # just now — within cooldown
+        )
+        db_session.add(supply)
+        await db_session.commit()
+
+        mock_client = AsyncMock()
+        result = await enrich_fbo_supplies(db_session, 1, mock_client, max_calls=5)
+
+        assert result["enriched"] == 0
+        assert not mock_client.get_fbw_supply_detail.called
+
+    async def test_fully_accepted_is_skipped(self, db_session):
+        """ACCEPTED with accepted_qty == total_qty must not trigger re-enrich."""
+        from datetime import timedelta
+
+        from backend.services.fbo_supply_service import enrich_fbo_supplies
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="38231599",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            warehouse_name="Тула",
+            total_qty=100,
+            accepted_qty=100,
+            synced_at=datetime.utcnow() - timedelta(days=7),
+        )
+        db_session.add(supply)
+        await db_session.commit()
+
+        mock_client = AsyncMock()
+        result = await enrich_fbo_supplies(db_session, 1, mock_client, max_calls=5)
+
+        assert result["enriched"] == 0
+        assert not mock_client.get_fbw_supply_detail.called
+
+
+# ─── Backfill: supply ↔ shipment link via AssemblyRequest ──────────────────
+
+
+@pytest.mark.asyncio
+class TestBackfillSupplyShipmentLink:
+    """Repair missing outbound_shipment_id on WbFboSupply using AssemblyRequest."""
+
+    async def test_backfill_copies_link_from_assembly(self, db_session):
+        """Orphan supply + AssemblyRequest with shipment → link restored."""
+        from sqlalchemy import select
+
+        from backend.models.assembly import AssemblyRequest, AssemblyStatus
+        from backend.models.warehouse import OutboundShipment, OutboundStatus
+        from backend.services.fbo_supply.sync import _backfill_supply_shipment_links
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="38231599",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            outbound_shipment_id=None,
+        )
+        db_session.add(supply)
+        await db_session.flush()
+
+        shipment = OutboundShipment(
+            project_id=1,
+            warehouse_id=1,
+            number="OUT-999",
+            status=OutboundStatus.DELIVERED,
+            wb_supply_id=None,
+        )
+        db_session.add(shipment)
+        await db_session.flush()
+
+        assembly = AssemblyRequest(
+            project_id=1,
+            warehouse_id=1,
+            number="ASM-999",
+            status=AssemblyStatus.DELIVERED,
+            wb_fbo_supply_id=supply.id,
+            outbound_shipment_id=shipment.id,
+            estimated_ready_date=date(2026, 4, 10),
+            pallets_count=1,
+            pallet_weight_kg=100,
+        )
+        db_session.add(assembly)
+        await db_session.commit()
+
+        await _backfill_supply_shipment_links(db_session, 1, [supply])
+        await db_session.commit()
+
+        refreshed = (await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == supply.id))).scalar_one()
+        refreshed_sh = (
+            await db_session.execute(select(OutboundShipment).where(OutboundShipment.id == shipment.id))
+        ).scalar_one()
+
+        assert refreshed.outbound_shipment_id == shipment.id
+        assert refreshed_sh.wb_supply_id == "38231599"
+
+    async def test_backfill_noop_for_already_linked(self, db_session):
+        """Supply already linked must stay untouched (no DB writes)."""
+        from backend.models.warehouse import OutboundShipment, OutboundStatus
+        from backend.services.fbo_supply.sync import _backfill_supply_shipment_links
+
+        shipment = OutboundShipment(
+            project_id=1,
+            warehouse_id=1,
+            number="OUT-NOOP",
+            status=OutboundStatus.DELIVERED,
+        )
+        db_session.add(shipment)
+        await db_session.flush()
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="38231599",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            outbound_shipment_id=shipment.id,
+        )
+        db_session.add(supply)
+        await db_session.commit()
+
+        await _backfill_supply_shipment_links(db_session, 1, [supply])
+        assert supply.outbound_shipment_id == shipment.id
+
+
 # ─── Router integration tests ──────────────────────────────────────────────
 
 

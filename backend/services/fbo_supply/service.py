@@ -12,7 +12,7 @@ import logging
 from datetime import date
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.assembly import AssemblyRequest, AssemblyStatus
@@ -26,6 +26,50 @@ logger = logging.getLogger(__name__)
 
 
 # ─── List supplies (with search/filter/sort/pagination) ────────────────────
+
+
+async def get_fbo_summary(
+    db: AsyncSession,
+    project_id: int,
+) -> dict[str, int]:
+    """
+    Counts for FBO supplies dashboard: total, accepted, accepted without
+    assembly request, accepted with partial acceptance. Used to highlight
+    orphan ACCEPTED supplies (WB принял, но в DDS нет заявки на сборку),
+    so the user can spot missed linkage and start a receipt for rejected qty.
+    """
+    base = select(WbFboSupply).where(WbFboSupply.project_id == project_id).subquery()
+
+    total = (await db.execute(select(func.count()).select_from(base))).scalar() or 0
+
+    accepted_q = select(WbFboSupply).where(
+        WbFboSupply.project_id == project_id,
+        WbFboSupply.wb_status == WbSupplyStatus.ACCEPTED,
+    )
+    accepted = (await db.execute(select(func.count()).select_from(accepted_q.subquery()))).scalar() or 0
+
+    linked_ids = select(AssemblyRequest.wb_fbo_supply_id).where(
+        AssemblyRequest.project_id == project_id,
+        AssemblyRequest.wb_fbo_supply_id.is_not(None),
+        AssemblyRequest.is_deleted == False,  # noqa: E712
+    )
+    accepted_no_asm_q = accepted_q.where(WbFboSupply.id.not_in(linked_ids))
+    accepted_without_assembly = (
+        await db.execute(select(func.count()).select_from(accepted_no_asm_q.subquery()))
+    ).scalar() or 0
+
+    partial_q = accepted_q.where(
+        WbFboSupply.total_qty > 0,
+        WbFboSupply.accepted_qty < WbFboSupply.total_qty,
+    )
+    accepted_partial = (await db.execute(select(func.count()).select_from(partial_q.subquery()))).scalar() or 0
+
+    return {
+        "total": int(total),
+        "accepted": int(accepted),
+        "accepted_without_assembly": int(accepted_without_assembly),
+        "accepted_partial": int(accepted_partial),
+    }
 
 
 async def list_warehouses(
@@ -59,6 +103,8 @@ async def list_fbo_supplies(
     limit: int = 50,
     offset: int = 0,
     exclude_with_assembly: bool = False,
+    without_assembly: bool = False,
+    partial_only: bool = False,
 ) -> tuple[list[dict], int]:
     """
     List FBO supplies with filtering, search, sorting, and pagination.
@@ -117,6 +163,27 @@ async def list_fbo_supplies(
             AssemblyRequest.status.in_(active_statuses),
         )
         base_query = base_query.where(WbFboSupply.id.not_in(active_assembly_ids))
+
+    # Supplies without ANY assembly request (ever, including DELIVERED/CANCELLED).
+    # Use for "WB принял, но в DDS нет заявки на сборку" summary card.
+    if without_assembly:
+        any_assembly_ids = select(AssemblyRequest.wb_fbo_supply_id).where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.wb_fbo_supply_id.is_not(None),
+            AssemblyRequest.is_deleted.is_(False),
+        )
+        base_query = base_query.where(WbFboSupply.id.not_in(any_assembly_ids))
+
+    # Partial acceptance: accepted_qty > 0 AND accepted_qty < total_qty.
+    # Flags supplies where WB rejected part of the shipment — user must decide
+    # what to do with the unaccepted qty (return to source warehouse).
+    if partial_only:
+        base_query = base_query.where(
+            and_(
+                WbFboSupply.total_qty > 0,
+                WbFboSupply.accepted_qty < WbFboSupply.total_qty,
+            )
+        )
 
     # Count total
     count_query = select(func.count()).select_from(base_query.subquery())

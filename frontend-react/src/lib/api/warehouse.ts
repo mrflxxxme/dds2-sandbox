@@ -142,6 +142,8 @@ export function addWarehouseMethods(api: ApiClient) {
             search?: string; status?: string; warehouse?: string; date_from?: string; date_to?: string;
             sort_by?: string; sort_order?: string; limit?: number; offset?: number;
             exclude_with_assembly?: boolean;
+            without_assembly?: boolean;
+            partial_only?: boolean;
         }) {
             const query = new URLSearchParams();
             if (params) {
@@ -151,6 +153,12 @@ export function addWarehouseMethods(api: ApiClient) {
             }
             const qs = query.toString();
             return api.request<WbFboSupplyListResponse>('GET', `/api/v1/warehouse/fbo-supplies${qs ? `?${qs}` : ''}`);
+        },
+        getFboSuppliesSummary() {
+            return api.request<{ total: number; accepted: number; accepted_without_assembly: number; accepted_partial: number }>(
+                'GET',
+                '/api/v1/warehouse/fbo-supplies/summary',
+            );
         },
         getFboSupplyItems(supplyId: number, refresh?: boolean) {
             const qs = refresh ? '?refresh=true' : '';

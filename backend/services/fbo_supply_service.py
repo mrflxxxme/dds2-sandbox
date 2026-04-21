@@ -26,6 +26,7 @@ from backend.services.fbo_supply import (  # noqa: F401
     _update_supply_from_fbw_list,
     _upsert_supply_items_fbw,
     enrich_fbo_supplies,
+    get_fbo_summary,
     get_fbo_supply_items,
     link_supply_to_shipment,
     list_fbo_supplies,

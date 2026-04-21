@@ -24,6 +24,7 @@ from .mappers import (
     _upsert_supply_items_fbw,
 )
 from .service import (
+    get_fbo_summary,
     get_fbo_supply_items,
     link_supply_to_shipment,
     list_fbo_supplies,
@@ -52,6 +53,7 @@ __all__ = [
     "_update_supply_from_fbw_list",
     "_upsert_supply_items_fbw",
     # service
+    "get_fbo_summary",
     "get_fbo_supply_items",
     "link_supply_to_shipment",
     "list_fbo_supplies",

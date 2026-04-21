@@ -45,6 +45,8 @@ async def list_fbo_supplies(
     limit: int = Query(50, le=500),
     offset: int = Query(0, ge=0),
     exclude_with_assembly: bool = Query(False, description="Exclude supplies with active assembly requests"),
+    without_assembly: bool = Query(False, description="Only supplies without any assembly request"),
+    partial_only: bool = Query(False, description="Only supplies with partial acceptance (accepted_qty < total_qty)"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -62,11 +64,30 @@ async def list_fbo_supplies(
         limit=limit,
         offset=offset,
         exclude_with_assembly=exclude_with_assembly,
+        without_assembly=without_assembly,
+        partial_only=partial_only,
     )
     return WbFboSupplyListResponse(
         items=[WbFboSupplySchema(**s) for s in supplies],
         total=total,
     )
+
+
+# ─── Summary (counts for dashboard cards) ──────────────────────────────────
+
+
+@router.get("/summary")
+async def get_fbo_supplies_summary(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, int]:
+    """
+    Summary counts: total, accepted, accepted_without_assembly,
+    accepted_partial. Highlights orphan ACCEPTED supplies where WB accepted
+    delivery but DDS has no assembly request — user should either attach one
+    or treat it as an unmanaged delivery.
+    """
+    return await fbo_supply_service.get_fbo_summary(db, project.id)
 
 
 # ─── Warehouse names (for filter dropdown) ─────────────────────────────────
