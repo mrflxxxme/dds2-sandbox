@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Мокап: Ассортимент поставщика</title>
+<style>
+  :root {
+    --color-bg: #f5f5f7;
+    --color-bg-card: rgba(255,255,255,0.75);
+    --color-text: #1d1d1f;
+    --color-text-muted: #86868b;
+    --color-text-dim: #a1a1aa;
+    --color-accent: #0071e3;
+    --color-success: #34c759;
+    --color-warning: #ff9f0a;
+    --color-danger: #ff3b30;
+    --color-border: rgba(0,0,0,0.08);
+    --shadow-glass: 0 4px 24px rgba(0,0,0,0.04);
+    --shadow-glass-hover: 0 8px 32px rgba(0,0,0,0.08);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, 'Inter', sans-serif;
+    background: var(--color-bg);
+    color: var(--color-text);
+    padding: 32px;
+    font-size: 14px;
+  }
+  .container { max-width: 1400px; margin: 0 auto; }
+  .screen { margin-bottom: 64px; }
+  .screen-label {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-accent);
+    margin-bottom: 12px;
+  }
+  .screen-title {
+    font-size: 24px;
+    font-weight: 700;
+    margin: 0 0 24px;
+    color: var(--color-text-muted);
+  }
+  .glass-card {
+    background: var(--color-bg-card);
+    backdrop-filter: blur(24px) saturate(180%);
+    border: 1px solid var(--color-border);
+    border-radius: 20px;
+    box-shadow: var(--shadow-glass);
+    padding: 24px;
+  }
+  /* Page header */
+  .page-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    margin-bottom: 24px;
+  }
+  .page-title { font-size: 28px; font-weight: 700; letter-spacing: -0.03em; margin: 0; }
+  .page-subtitle { font-size: 15px; color: var(--color-text-muted); margin-top: 4px; }
+  .back-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--color-accent);
+    text-decoration: none;
+    margin-bottom: 8px;
+    cursor: pointer;
+  }
+  /* Tabs */
+  .tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 24px;
+  }
+  .tab {
+    padding: 10px 16px;
+    border-radius: 12px;
+    background: #fff;
+    border: 1px solid var(--color-border);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .tab.active {
+    background: var(--color-accent);
+    color: white;
+    border-color: var(--color-accent);
+  }
+  /* KPI grid */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .kpi-card {
+    padding: 20px 24px;
+  }
+  .kpi-label { font-size: 13px; color: var(--color-text-muted); margin-bottom: 8px; }
+  .kpi-value { font-size: 28px; font-weight: 700; letter-spacing: -0.03em; }
+  .kpi-unit { font-size: 13px; color: var(--color-text-muted); margin-top: 4px; }
+  .kpi-accent { color: var(--color-accent); }
+  .kpi-warning { color: var(--color-warning); }
+  .kpi-success { color: var(--color-success); }
+  /* Supplier cards grid */
+  .suppliers-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 16px;
+  }
+  .supplier-card {
+    padding: 20px 24px;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
+  }
+  .supplier-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-glass-hover);
+  }
+  .supplier-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+  .supplier-name { font-size: 18px; font-weight: 700; }
+  .supplier-flag { font-size: 22px; }
+  .supplier-currency {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 8px;
+    background: rgba(0, 113, 227, 0.1);
+    color: var(--color-accent);
+    border-radius: 24px;
+  }
+  .supplier-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    color: var(--color-text-muted);
+    margin-bottom: 6px;
+  }
+  .supplier-row strong { color: var(--color-text); font-weight: 600; }
+  .supplier-total {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--color-border);
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--color-success);
+  }
+  .supplier-delivered-bar {
+    margin-top: 8px;
+    height: 6px;
+    background: rgba(0,0,0,0.06);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .supplier-delivered-fill {
+    height: 100%;
+    background: var(--color-success);
+    border-radius: 3px;
+  }
+  .supplier-delivered-label {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    margin-top: 4px;
+  }
+  /* Toolbar */
+  .toolbar {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .search-input, .filter-select {
+    padding: 10px 14px;
+    border-radius: 12px;
+    border: 1px solid var(--color-border);
+    background: white;
+    font-size: 14px;
+    min-width: 180px;
+  }
+  .search-input { flex: 1; min-width: 240px; }
+  .btn {
+    padding: 10px 16px;
+    border-radius: 12px;
+    border: 1px solid var(--color-border);
+    background: white;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .btn-primary { background: var(--color-accent); color: white; border-color: var(--color-accent); }
+  /* Subject accordion */
+  .subject-group {
+    margin-bottom: 16px;
+    overflow: hidden;
+  }
+  .subject-group.glass-card { padding: 0; }
+  .subject-header {
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    background: rgba(0,0,0,0.02);
+  }
+  .subject-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 16px;
+    font-weight: 700;
+  }
+  .chevron {
+    display: inline-block;
+    font-size: 12px;
+    color: var(--color-text-muted);
+    transition: transform 0.2s;
+  }
+  .subject-stats {
+    display: flex;
+    gap: 24px;
+    font-size: 13px;
+    color: var(--color-text-muted);
+  }
+  .subject-stats strong { color: var(--color-text); font-weight: 600; }
+  /* Items table */
+  table { width: 100%; border-collapse: collapse; }
+  th, td {
+    padding: 12px 16px;
+    text-align: left;
+    border-bottom: 1px solid var(--color-border);
+    font-size: 13px;
+  }
+  th {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    background: rgba(0,0,0,0.015);
+  }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th.num { text-align: right; }
+  tr.item-row { cursor: pointer; }
+  tr.item-row:hover { background: rgba(0, 113, 227, 0.04); }
+  .mono { font-family: 'SF Mono', Menlo, monospace; font-size: 12px; }
+  /* Status bar */
+  .status-bar {
+    width: 120px;
+    height: 8px;
+    background: rgba(0,0,0,0.08);
+    border-radius: 4px;
+    overflow: hidden;
+    display: inline-block;
+    vertical-align: middle;
+    margin-right: 8px;
+  }
+  .status-bar-fill {
+    height: 100%;
+    background: var(--color-success);
+    border-radius: 4px;
+  }
+  .status-label { font-size: 11px; color: var(--color-text-muted); }
+  /* Expanded row */
+  tr.expanded-row td {
+    background: rgba(0, 113, 227, 0.03);
+    padding: 0;
+  }
+  .expand-inner {
+    padding: 16px 24px;
+  }
+  .expand-title {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    letter-spacing: 0.05em;
+    margin-bottom: 8px;
+  }
+  .sub-table {
+    background: white;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--color-border);
+  }
+  .sub-table th, .sub-table td { padding: 10px 14px; font-size: 12px; }
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 24px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .badge-success { background: rgba(52, 199, 89, 0.15); color: #1f9b47; }
+  .badge-warning { background: rgba(255, 159, 10, 0.15); color: #c77700; }
+  .badge-info { background: rgba(0, 113, 227, 0.15); color: var(--color-accent); }
+  .badge-secondary { background: rgba(0,0,0,0.08); color: var(--color-text-muted); }
+  .note {
+    background: #fffbe6;
+    border: 1px solid #ffe58f;
+    padding: 12px 16px;
+    border-radius: 12px;
+    font-size: 13px;
+    margin-bottom: 24px;
+    color: #7c5e00;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <div class="note">
+    <strong>Мокап · 2 экрана</strong> · показывает как это будет выглядеть на проде. Кликов нет — раскрытие уже показано статикой.
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- ЭКРАН 1: Список поставщиков                                            -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="screen">
+    <div class="screen-label">Экран 1</div>
+    <div class="screen-title">Список поставщиков (вкладка «Поставщики»)</div>
+
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">🚚 Цепочка поставок</h1>
+        <div class="page-subtitle">Фабричные заказы, машины, обзор</div>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <div class="tab">📦 Фабричные заказы</div>
+      <div class="tab">🚛 Машины</div>
+      <div class="tab">📊 Обзор</div>
+      <div class="tab active">📋 Поставщики</div>
+    </div>
+
+    <div class="suppliers-grid">
+      <div class="glass-card supplier-card">
+        <div class="supplier-card-head">
+          <div class="supplier-name"><span class="supplier-flag">🇨🇳</span> TiAmo</div>
+          <div class="supplier-currency">CNY</div>
+        </div>
+        <div class="supplier-row"><span>Заказов</span><strong>13</strong></div>
+        <div class="supplier-row"><span>SKU</span><strong>247</strong></div>
+        <div class="supplier-row"><span>Кол-во</span><strong>112 944 шт</strong></div>
+        <div class="supplier-row"><span>Вес / Объём</span><strong>136 427 кг · 384,5 м³</strong></div>
+        <div class="supplier-total">5 896 221 ¥</div>
+        <div class="supplier-delivered-bar"><div class="supplier-delivered-fill" style="width: 21%"></div></div>
+        <div class="supplier-delivered-label">Доставлено: 1 240 000 ¥ (21%)</div>
+      </div>
+
+      <div class="glass-card supplier-card">
+        <div class="supplier-card-head">
+          <div class="supplier-name"><span class="supplier-flag">🇨🇳</span> Guanghzou Trade</div>
+          <div class="supplier-currency">CNY</div>
+        </div>
+        <div class="supplier-row"><span>Заказов</span><strong>5</strong></div>
+        <div class="supplier-row"><span>SKU</span><strong>84</strong></div>
+        <div class="supplier-row"><span>Кол-во</span><strong>28 400 шт</strong></div>
+        <div class="supplier-row"><span>Вес / Объём</span><strong>42 100 кг · 89,2 м³</strong></div>
+        <div class="supplier-total">1 240 500 ¥</div>
+        <div class="supplier-delivered-bar"><div class="supplier-delivered-fill" style="width: 68%"></div></div>
+        <div class="supplier-delivered-label">Доставлено: 843 500 ¥ (68%)</div>
+      </div>
+
+      <div class="glass-card supplier-card">
+        <div class="supplier-card-head">
+          <div class="supplier-name"><span class="supplier-flag">🇷🇺</span> Текстиль-Опт</div>
+          <div class="supplier-currency">RUB</div>
+        </div>
+        <div class="supplier-row"><span>Заказов</span><strong>8</strong></div>
+        <div class="supplier-row"><span>SKU</span><strong>56</strong></div>
+        <div class="supplier-row"><span>Кол-во</span><strong>14 200 шт</strong></div>
+        <div class="supplier-row"><span>Вес / Объём</span><strong>18 400 кг · 32,1 м³</strong></div>
+        <div class="supplier-total">3 420 000 ₽</div>
+        <div class="supplier-delivered-bar"><div class="supplier-delivered-fill" style="width: 100%"></div></div>
+        <div class="supplier-delivered-label">Доставлено: 3 420 000 ₽ (100%)</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- ЭКРАН 2: Ассортимент поставщика                                        -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="screen">
+    <div class="screen-label">Экран 2</div>
+    <div class="screen-title">Ассортимент поставщика (клик по карточке TiAmo)</div>
+
+    <div class="page-header">
+      <div>
+        <a class="back-btn">← Все поставщики</a>
+        <h1 class="page-title">🇨🇳 TiAmo <span style="color:var(--color-text-muted); font-weight: 400; font-size: 18px;">· CNY</span></h1>
+        <div class="page-subtitle">Ассортимент за всё время</div>
+      </div>
+      <button class="btn">📥 Excel</button>
+    </div>
+
+    <!-- KPI -->
+    <div class="stats-grid">
+      <div class="glass-card kpi-card">
+        <div class="kpi-label">Заказов</div>
+        <div class="kpi-value kpi-accent">13</div>
+      </div>
+      <div class="glass-card kpi-card">
+        <div class="kpi-label">Уникальных SKU</div>
+        <div class="kpi-value">247</div>
+      </div>
+      <div class="glass-card kpi-card">
+        <div class="kpi-label">Кол-во всего</div>
+        <div class="kpi-value kpi-warning">112 944</div>
+        <div class="kpi-unit">шт</div>
+      </div>
+      <div class="glass-card kpi-card">
+        <div class="kpi-label">Сумма заказов</div>
+        <div class="kpi-value kpi-success">5 896 221</div>
+        <div class="kpi-unit">¥</div>
+      </div>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <input class="search-input" placeholder="🔍 Поиск по баркоду, артикулу, предмету…">
+      <select class="filter-select">
+        <option>Все предметы</option>
+        <option>Дивандеки</option>
+        <option>Ковры ворсовые</option>
+        <option>Наволочки</option>
+        <option>Покрывала</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--color-text-muted);">
+        <input type="checkbox"> Только с остатком на фабрике
+      </label>
+    </div>
+
+    <!-- Subject group 1: EXPANDED -->
+    <div class="glass-card subject-group">
+      <div class="subject-header">
+        <div class="subject-title"><span class="chevron">▼</span> Дивандеки</div>
+        <div class="subject-stats">
+          <div><strong>42</strong> SKU</div>
+          <div><strong>47 240</strong> шт</div>
+          <div><strong>1 746 418 ¥</strong></div>
+          <div>Доставлено: <strong>32%</strong></div>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Баркод</th>
+            <th>Артикул</th>
+            <th>Размер</th>
+            <th class="num">В кор.</th>
+            <th class="num">Вес, кг</th>
+            <th class="num">Всего, шт</th>
+            <th class="num">Посл. цена</th>
+            <th class="num">Ср. цена</th>
+            <th class="num">Сумма</th>
+            <th>Доставлено</th>
+            <th class="num">Заказов</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="item-row">
+            <td class="mono">2000000000001</td>
+            <td>DVN-001</td>
+            <td>60×40×40</td>
+            <td class="num">20</td>
+            <td class="num">0,85</td>
+            <td class="num">2 400</td>
+            <td class="num">68,00 ¥</td>
+            <td class="num">68,50 ¥</td>
+            <td class="num">164 400 ¥</td>
+            <td>
+              <div class="status-bar"><div class="status-bar-fill" style="width: 33%"></div></div>
+              <span class="status-label">800 / 2400</span>
+            </td>
+            <td class="num">3</td>
+          </tr>
+          <!-- Expanded row -->
+          <tr class="expanded-row">
+            <td colspan="11">
+              <div class="expand-inner">
+                <div class="expand-title">История заказов (DVN-001)</div>
+                <table class="sub-table">
+                  <thead>
+                    <tr>
+                      <th>Заказ</th>
+                      <th>Дата</th>
+                      <th class="num">Кол-во</th>
+                      <th class="num">Цена</th>
+                      <th class="num">Сумма</th>
+                      <th>Машина</th>
+                      <th>Статус</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>дозаказ к 03.03</td>
+                      <td>09.04.2026</td>
+                      <td class="num">800</td>
+                      <td class="num">68,00 ¥</td>
+                      <td class="num">54 400 ¥</td>
+                      <td>—</td>
+                      <td><span class="badge badge-secondary">На фабрике</span></td>
+                    </tr>
+                    <tr>
+                      <td>заказ дивандеки+ковры</td>
+                      <td>21.03.2026</td>
+                      <td class="num">1 600</td>
+                      <td class="num">69,00 ¥</td>
+                      <td class="num">110 400 ¥</td>
+                      <td>VH-11</td>
+                      <td><span class="badge badge-info">В пути</span></td>
+                    </tr>
+                    <tr>
+                      <td>заказ №9</td>
+                      <td>18.02.2026</td>
+                      <td class="num">800</td>
+                      <td class="num">67,00 ¥</td>
+                      <td class="num">53 600 ¥</td>
+                      <td>VH-07</td>
+                      <td><span class="badge badge-success">Доставлено</span></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </td>
+          </tr>
+          <tr class="item-row">
+            <td class="mono">2000000000002</td>
+            <td>DVN-002</td>
+            <td>60×40×40</td>
+            <td class="num">20</td>
+            <td class="num">0,85</td>
+            <td class="num">1 800</td>
+            <td class="num">71,00 ¥</td>
+            <td class="num">70,20 ¥</td>
+            <td class="num">126 360 ¥</td>
+            <td>
+              <div class="status-bar"><div class="status-bar-fill" style="width: 60%"></div></div>
+              <span class="status-label">1080 / 1800</span>
+            </td>
+            <td class="num">2</td>
+          </tr>
+          <tr class="item-row">
+            <td class="mono">2000000000003</td>
+            <td>DVN-003</td>
+            <td>80×50×40</td>
+            <td class="num">15</td>
+            <td class="num">1,20</td>
+            <td class="num">3 200</td>
+            <td class="num">92,00 ¥</td>
+            <td class="num">91,40 ¥</td>
+            <td class="num">292 480 ¥</td>
+            <td>
+              <div class="status-bar"><div class="status-bar-fill" style="width: 0%"></div></div>
+              <span class="status-label">0 / 3200</span>
+            </td>
+            <td class="num">1</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Subject group 2: COLLAPSED -->
+    <div class="glass-card subject-group">
+      <div class="subject-header">
+        <div class="subject-title"><span class="chevron" style="transform: rotate(-90deg)">▼</span> Ковры ворсовые</div>
+        <div class="subject-stats">
+          <div><strong>38</strong> SKU</div>
+          <div><strong>27 240</strong> шт</div>
+          <div><strong>1 550 338 ¥</strong></div>
+          <div>Доставлено: <strong>0%</strong></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="glass-card subject-group">
+      <div class="subject-header">
+        <div class="subject-title"><span class="chevron" style="transform: rotate(-90deg)">▼</span> Наволочки</div>
+        <div class="subject-stats">
+          <div><strong>10</strong> SKU</div>
+          <div><strong>2 000</strong> шт</div>
+          <div><strong>29 800 ¥</strong></div>
+          <div>Доставлено: <strong>45%</strong></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="glass-card subject-group">
+      <div class="subject-header">
+        <div class="subject-title"><span class="chevron" style="transform: rotate(-90deg)">▼</span> Покрывала</div>
+        <div class="subject-stats">
+          <div><strong>6</strong> SKU</div>
+          <div><strong>870</strong> шт</div>
+          <div><strong>64 928 ¥</strong></div>
+          <div>Доставлено: <strong>100%</strong></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

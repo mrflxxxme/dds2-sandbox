@@ -64,6 +64,13 @@ synthesizer.py — объединение ответов (если >1 агент
 - Подключён в `backend/main.py` (`app.include_router(ai_chat.router)`).
 - Frontend: `frontend-react/src/app/(main)/p/[slug]/ai-chat/page.tsx` + `lib/api/ai-chat.ts`.
 
+#### XSS защита (коммит 8c1d167)
+- Ответы агента рендерятся через `dangerouslySetInnerHTML` — обязательна санитизация
+- `frontend-react/src/lib/sanitize.ts::sanitizeAIHtml()` — DOMPurify + hook `afterSanitizeAttributes` (force `target=_blank rel="noopener noreferrer"` на ссылках)
+- Используется в ai-chat + `(tma)/tma/chat`
+- НЕ использовать ручной regex/allowlist — он пропускает `<img onerror>`, `javascript:` в href, `<svg onload>`
+- Тесты: `frontend-react/src/__tests__/lib/sanitize.test.ts` (7 XSS-кейсов + 9 позитивных)
+
 ## 7 агентов
 
 | Агент | Роль | Типичные вопросы |
