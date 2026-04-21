@@ -4,6 +4,7 @@ import type {
     DdsMonthRow, Transaction, DDSPnLResponse, CostHistoryResponse,
     WbStocksResponse, WbStocksArticlesResponse, WbStockHistoryResponse,
     CostDnaResponse,
+    CounterpartyTurnoversResponse, CounterpartyType,
 } from '@/types/api';
 
 export function addReportMethods(api: ApiClient) {
@@ -191,6 +192,21 @@ export function addReportMethods(api: ApiClient) {
             if (category) q.set('category', category);
             if (article) q.set('article', article);
             return api.request<any>('GET', `/api/v1/reports/order_geography?${q.toString()}`);
+        },
+        getCounterpartyTurnovers(params: {
+            date_from: string;
+            date_to: string;
+            type?: CounterpartyType;
+            currency?: 'RUB' | 'CNY';
+        }) {
+            const q = new URLSearchParams();
+            q.set('date_from', params.date_from);
+            q.set('date_to', params.date_to);
+            if (params.type) q.set('type', params.type);
+            if (params.currency) q.set('currency', params.currency);
+            return api.request<CounterpartyTurnoversResponse>(
+                'GET', `/api/v1/reports/counterparty-turnovers?${q.toString()}`
+            );
         },
     };
 }

@@ -1763,6 +1763,8 @@ interface SupplierFormState {
     delivery_days_min: string;
     delivery_days_max: string;
     note: string;
+    inn: string;
+    contract_number: string;
 }
 
 const emptySupplierForm = (): SupplierFormState => ({
@@ -1772,6 +1774,8 @@ const emptySupplierForm = (): SupplierFormState => ({
     delivery_days_min: '',
     delivery_days_max: '',
     note: '',
+    inn: '',
+    contract_number: '',
 });
 
 // ─── Supplier Catalog View ──────────────────────────────────────────────────
@@ -2838,6 +2842,8 @@ function SuppliersTab() {
             delivery_days_min: s.delivery_days_min != null ? String(s.delivery_days_min) : '',
             delivery_days_max: s.delivery_days_max != null ? String(s.delivery_days_max) : '',
             note: s.note || '',
+            inn: s.inn ?? '',
+            contract_number: s.contract_number ?? '',
         });
         setShowForm(true);
     };
@@ -2857,6 +2863,8 @@ function SuppliersTab() {
                 delivery_days_min: form.delivery_days_min ? Number(form.delivery_days_min) : undefined,
                 delivery_days_max: form.delivery_days_max ? Number(form.delivery_days_max) : undefined,
                 note: form.note || undefined,
+                inn: form.inn.trim() || null,
+                contract_number: form.contract_number.trim() || null,
             };
             if (editSupplier) {
                 await api.updateSupplier(editSupplier.id, payload);
@@ -3039,6 +3047,26 @@ function SuppliersTab() {
                                 value={form.delivery_days_max}
                                 onChange={e => setForm(f => ({ ...f, delivery_days_max: e.target.value }))}
                                 placeholder="45"
+                                className="sc-form-input"
+                            />
+                        </div>
+                    </div>
+                    <div className="sc-form-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                        <div>
+                            <label className="sc-form-label">ИНН</label>
+                            <input
+                                value={form.inn}
+                                onChange={e => setForm(f => ({ ...f, inn: e.target.value }))}
+                                placeholder="10 или 12 цифр"
+                                className="sc-form-input"
+                            />
+                        </div>
+                        <div>
+                            <label className="sc-form-label">Номер контракта</label>
+                            <input
+                                value={form.contract_number}
+                                onChange={e => setForm(f => ({ ...f, contract_number: e.target.value }))}
+                                placeholder="20250707"
                                 className="sc-form-input"
                             />
                         </div>

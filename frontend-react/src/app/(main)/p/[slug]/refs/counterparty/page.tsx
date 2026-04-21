@@ -1,0 +1,318 @@
+'use client';
+
+import { useCallback, useEffect, useState } from 'react';
+import { useParams, useRouter } from 'next/navigation';
+import { api } from '@/lib/api';
+import { exportToExcel } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import CounterpartyTypeBadge from '@/components/CounterpartyTypeBadge';
+import type { CounterpartyListItem, CounterpartyType, CounterpartyCreate } from '@/types/api';
+
+const COUNTERPARTY_TYPES: { value: CounterpartyType; label: string }[] = [
+    { value: 'SUPPLIER', label: 'Поставщик' },
+    { value: 'FULFILLMENT', label: 'Фулфилмент' },
+    { value: 'CARRIER', label: 'Перевозчик' },
+    { value: 'CUSTOMS_BROKER', label: 'Таможенный брокер' },
+    { value: 'DESIGNER', label: 'Дизайнер' },
+    { value: 'LEGAL', label: 'Юридические' },
+    { value: 'LANDLORD', label: 'Аренда' },
+    { value: 'IT_SERVICE', label: 'IT-сервис' },
+    { value: 'MARKETPLACE', label: 'Маркетплейс' },
+    { value: 'BANK', label: 'Банк' },
+    { value: 'GOVERNMENT', label: 'Государство' },
+    { value: 'AFFILIATED', label: 'Аффилированные' },
+    { value: 'OTHER', label: 'Прочее' },
+];
+
+const emptyForm = (): CounterpartyCreate => ({
+    name: '',
+    primary_type: 'OTHER',
+    secondary_types: [],
+    inn: null,
+    kpp: null,
+    contract_number: null,
+    notes: null,
+});
+
+export default function CounterpartyPage() {
+    const params = useParams();
+    const slug = params.slug as string;
+    const router = useRouter();
+
+    const [items, setItems] = useState<CounterpartyListItem[]>([]);
+    const [total, setTotal] = useState(0);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+
+    // Filters
+    const [search, setSearch] = useState('');
+    const [typeFilter, setTypeFilter] = useState<CounterpartyType | ''>('');
+    const [activeOnly, setActiveOnly] = useState(false);
+
+    // Create form
+    const [showCreate, setShowCreate] = useState(false);
+    const [form, setForm] = useState<CounterpartyCreate>(emptyForm());
+    const [saving, setSaving] = useState(false);
+    const [formError, setFormError] = useState('');
+
+    const load = useCallback(async () => {
+        setLoading(true);
+        setError('');
+        try {
+            const res = await api.listCounterparties({
+                q: search.trim() || undefined,
+                type: typeFilter || undefined,
+                active_only: activeOnly || undefined,
+                limit: 200,
+                offset: 0,
+            });
+            setItems(res.items);
+            setTotal(res.total);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+        } finally {
+            setLoading(false);
+        }
+    }, [search, typeFilter, activeOnly]);
+
+    useEffect(() => { load(); }, [load]);
+
+    // Debounced search
+    useEffect(() => {
+        const timer = setTimeout(() => { load(); }, 300);
+        return () => clearTimeout(timer);
+    }, [search]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const handleCreate = async () => {
+        if (!form.name.trim()) { setFormError('Введите название'); return; }
+        setSaving(true);
+        setFormError('');
+        try {
+            await api.createCounterparty({
+                ...form,
+                inn: form.inn?.trim() || null,
+                kpp: form.kpp?.trim() || null,
+                contract_number: form.contract_number?.trim() || null,
+                notes: form.notes?.trim() || null,
+            });
+            setShowCreate(false);
+            setForm(emptyForm());
+            await load();
+        } catch (e: unknown) {
+            setFormError(e instanceof Error ? e.message : 'Ошибка создания');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const handleDelete = async (id: number) => {
+        if (!confirm('Удалить контрагента?')) return;
+        try {
+            await api.deleteCounterparty(id);
+            await load();
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка удаления');
+        }
+    };
+
+    const columns = [
+        {
+            key: 'inn', label: 'ИНН',
+            render: (v: string | null) => v ? (
+                <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</span>
+            ) : <span style={{ color: 'var(--color-text-dim)' }}>—</span>,
+        },
+        {
+            key: 'name', label: 'Название',
+            render: (v: string, row: CounterpartyListItem) => (
+                <button
+                    className="btn btn-secondary btn-sm"
+                    style={{ background: 'none', border: 'none', padding: 0, fontWeight: 500, cursor: 'pointer', textAlign: 'left' }}
+                    onClick={() => router.push(`/p/${slug}/refs/counterparty/${row.id}`)}
+                >
+                    {v}
+                </button>
+            ),
+        },
+        {
+            key: 'primary_type', label: 'Тип',
+            render: (v: CounterpartyType) => <CounterpartyTypeBadge type={v} size="sm" />,
+        },
+        {
+            key: 'contract_number', label: 'Контракт',
+            render: (v: string | null) => v ? (
+                <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</span>
+            ) : <span style={{ color: 'var(--color-text-dim)' }}>—</span>,
+        },
+        {
+            key: 'created_by_import', label: 'Источник',
+            render: (v: boolean) => (
+                <span className={`badge ${v ? 'badge-secondary' : 'badge-success'}`} style={{ fontSize: 11 }}>
+                    {v ? 'импорт' : 'вручную'}
+                </span>
+            ),
+        },
+        {
+            key: '_actions', label: '',
+            render: (_v: unknown, row: CounterpartyListItem) => (
+                <div style={{ display: 'flex', gap: 4 }}>
+                    <button
+                        className="btn btn-secondary btn-sm"
+                        style={{ padding: '2px 8px', fontSize: 11 }}
+                        onClick={() => router.push(`/p/${slug}/refs/counterparty/${row.id}`)}
+                    >
+                        →
+                    </button>
+                    <button
+                        className="btn btn-danger btn-sm"
+                        style={{ padding: '2px 8px', fontSize: 11 }}
+                        onClick={() => handleDelete(row.id)}
+                    >
+                        ✕
+                    </button>
+                </div>
+            ),
+            sortable: false,
+        },
+    ];
+
+    return (
+        <div className="animate-in">
+            <div className="page-header">
+                <div>
+                    <h1 className="page-title">Контрагенты</h1>
+                    <p className="page-subtitle">Справочник контрагентов проекта ({total})</p>
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => exportToExcel(items, 'counterparties')}
+                        disabled={items.length === 0}
+                    >
+                        Excel
+                    </button>
+                    <button className="btn btn-primary btn-sm" onClick={() => setShowCreate(true)}>
+                        + Добавить
+                    </button>
+                </div>
+            </div>
+
+            {/* Filters */}
+            <div className="glass-card" style={{ marginBottom: 16, padding: '12px 16px' }}>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <input
+                        className="form-input"
+                        style={{ flex: 1, minWidth: 200 }}
+                        placeholder="Поиск по имени или ИНН..."
+                        value={search}
+                        onChange={e => setSearch(e.target.value)}
+                    />
+                    <select
+                        className="form-input"
+                        style={{ width: 200 }}
+                        value={typeFilter}
+                        onChange={e => setTypeFilter(e.target.value as CounterpartyType | '')}
+                    >
+                        <option value="">Все типы</option>
+                        {COUNTERPARTY_TYPES.map(t => (
+                            <option key={t.value} value={t.value}>{t.label}</option>
+                        ))}
+                    </select>
+                    <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', cursor: 'pointer' }}>
+                        <input
+                            type="checkbox"
+                            checked={activeOnly}
+                            onChange={e => setActiveOnly(e.target.checked)}
+                        />
+                        Только активные
+                    </label>
+                </div>
+            </div>
+
+            {/* Create form */}
+            {showCreate && (
+                <div className="glass-card" style={{ marginBottom: 16 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                        <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Новый контрагент</h3>
+                        <button className="btn btn-secondary btn-sm" onClick={() => { setShowCreate(false); setForm(emptyForm()); setFormError(''); }}>✕</button>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+                        <div className="form-group" style={{ gridColumn: '1/-1' }}>
+                            <label className="form-label">Название *</label>
+                            <input className="form-input" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} autoFocus />
+                        </div>
+                        <div className="form-group">
+                            <label className="form-label">Тип</label>
+                            <select className="form-input" value={form.primary_type} onChange={e => setForm(f => ({ ...f, primary_type: e.target.value as CounterpartyType }))}>
+                                {COUNTERPARTY_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                            </select>
+                        </div>
+                        <div className="form-group">
+                            <label className="form-label">ИНН</label>
+                            <input className="form-input" value={form.inn ?? ''} onChange={e => setForm(f => ({ ...f, inn: e.target.value || null }))} placeholder="10 или 12 цифр" />
+                        </div>
+                        <div className="form-group">
+                            <label className="form-label">КПП</label>
+                            <input className="form-input" value={form.kpp ?? ''} onChange={e => setForm(f => ({ ...f, kpp: e.target.value || null }))} placeholder="9 цифр" />
+                        </div>
+                        <div className="form-group">
+                            <label className="form-label">Номер контракта</label>
+                            <input className="form-input" value={form.contract_number ?? ''} onChange={e => setForm(f => ({ ...f, contract_number: e.target.value || null }))} />
+                        </div>
+                        <div className="form-group" style={{ gridColumn: '1/-1' }}>
+                            <label className="form-label">Примечания</label>
+                            <input className="form-input" value={form.notes ?? ''} onChange={e => setForm(f => ({ ...f, notes: e.target.value || null }))} />
+                        </div>
+                    </div>
+                    {formError && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginTop: 8 }}>{formError}</div>}
+                    <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
+                        <button className="btn btn-primary btn-sm" onClick={handleCreate} disabled={saving}>
+                            {saving ? 'Сохранение...' : 'Сохранить'}
+                        </button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => { setShowCreate(false); setForm(emptyForm()); setFormError(''); }}>
+                            Отмена
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Error */}
+            {error && (
+                <div className="glass-card" style={{ padding: 16, marginBottom: 16, color: 'var(--color-danger)', display: 'flex', justifyContent: 'space-between' }}>
+                    <span>{error}</span>
+                    <button className="btn btn-secondary btn-sm" onClick={load}>Повторить</button>
+                </div>
+            )}
+
+            {/* Loading */}
+            {loading ? (
+                <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)' }}>
+                    Загрузка...
+                </div>
+            ) : items.length === 0 ? (
+                <div className="glass-card" style={{ padding: 48, textAlign: 'center' }}>
+                    <div style={{ fontSize: 48, marginBottom: 16 }}>🏢</div>
+                    <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>Контрагентов пока нет</div>
+                    <div style={{ color: 'var(--color-text-dim)', marginBottom: 20 }}>
+                        {search || typeFilter
+                            ? 'По заданным фильтрам ничего не найдено. Попробуйте изменить условия.'
+                            : 'Добавьте контрагента вручную или запустите backfill из транзакций.'}
+                    </div>
+                    <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
+                        + Добавить контрагента
+                    </button>
+                </div>
+            ) : (
+                <div data-testid="counterparty-list">
+                    <TanStackDataTable
+                        columns={columns}
+                        data={items}
+                        emptyText="Нет контрагентов"
+                        enableSorting
+                        enablePagination
+                    />
+                </div>
+            )}
+        </div>
+    );
+}

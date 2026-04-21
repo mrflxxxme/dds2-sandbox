@@ -12,6 +12,7 @@ const importTypes = [
     { id: 'WB_PAYOUT', label: 'WB Выписка ИП/Транзит (.xlsx)', icon: '🟣', requiresAccount: true },
     { id: 'WB_MULTI', label: 'WB Все счета (.xls)', icon: '🟣', requiresAccount: false },
     { id: 'WB_CABINET_PAYOUTS', label: 'WB Выплаты (Кабинет WB)', icon: '💰', requiresAccount: false },
+    { id: 'FAKTURA_WB_BANK', label: 'WB Банк (Faktura.ru .xls)', icon: '📄', requiresAccount: false },
     { id: 'FTS_CUSTOMS', label: 'Таможня ФТС (.pdf)', icon: '🛃', requiresAccount: false },
 ];
 
