@@ -42,6 +42,14 @@ async def get_nomenclature(
     ]
 
 
+@router.get("/nomenclature/subjects")
+async def get_nomenclature_subjects(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> list[str]:
+    return await cost_service.get_nomenclature_subjects(db, project.id)
+
+
 @router.put("/nomenclature/bulk_area", dependencies=[Depends(rate_limit_write)])
 async def bulk_update_nomenclature_area(
     payload: BulkAreaUpdate,

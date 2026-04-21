@@ -10,6 +10,10 @@ class EventType2(str, enum.Enum):
     FX_BUY = "FX_BUY"
     CUSTOMS_PAYMENT = "CUSTOMS_PAYMENT"
     OPER = "OPER"
+    # Deposit events (Phase 1: counterparties-loans)
+    DEPOSIT_PLACE = "DEPOSIT_PLACE"  # placement of funds into deposit (is_cashflow2=0)
+    DEPOSIT_RETURN = "DEPOSIT_RETURN"  # return of deposit funds (is_cashflow2=0)
+    DEPOSIT_INTEREST = "DEPOSIT_INTEREST"  # interest earned on deposit (is_cashflow2=1)
 
 
 class TransactionStatus(str, enum.Enum):

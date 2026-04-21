@@ -121,10 +121,23 @@ class TestCachePrefixSync:
         )
 
     def test_no_stale_invalidation_prefixes(self):
-        """invalidate_project_reports() should not list removed prefixes."""
+        """invalidate_project_reports() should not list removed prefixes.
+
+        Exception: prefixes registered in Phase 1 for services that will be
+        added in Phase 2 (counterparties-loans feature). These are intentionally
+        pre-registered so Phase 2 services can add @cached without touching cache.py.
+        """
+        # Prefixes pre-registered in cache.py for Phase 2 services (counterparties-loans).
+        # Remove entries here once the corresponding @cached service is implemented.
+        PHASE2_PENDING = {
+            "counterparty_list",
+            "counterparty_detail",
+            "reports:counterparty_turnovers",
+            "loan_list",
+        }
         cached = _find_cached_prefixes()
         invalidated = _find_invalidate_prefixes()
-        stale = invalidated - cached
+        stale = invalidated - cached - PHASE2_PENDING
         assert not stale, (
             f"Prefixes in invalidate_project_reports() but no @cached: {stale}. " f"Remove them from backend/cache.py."
         )

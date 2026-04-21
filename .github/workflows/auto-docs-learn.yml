@@ -76,7 +76,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_args: --model claude-sonnet-4-6 --max-turns 30
+          claude_args: --model claude-opus-4-7 --max-turns 30
           prompt: |
             Ты запущен в cron workflow для синхронизации документации DDS2.
             Текущая ветка: dev. Рабочая директория: репозиторий.

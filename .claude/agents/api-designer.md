@@ -2,7 +2,7 @@
 name: api-designer
 description: "API-дизайнер DDS2. Проверяет OpenAPI, breaking changes, версионирование, REST-консистентность. Используй при новых endpoint'ах или изменении существующих схем."
 tools: ["Read", "Grep", "Glob", "Bash"]
-model: sonnet
+model: opus
 ---
 
 # API Designer — DDS2

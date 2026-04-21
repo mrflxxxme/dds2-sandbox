@@ -28,6 +28,7 @@ from backend.services.cost.items import (
 )
 from backend.services.cost.nomenclature import (
     get_nomenclature,
+    get_nomenclature_subjects,
     upload_nomenclature,
 )
 from backend.services.cost.orders import (
@@ -49,6 +50,7 @@ __all__ = [
     "DEFAULT_VAT_RATE",
     # Nomenclature
     "get_nomenclature",
+    "get_nomenclature_subjects",
     "upload_nomenclature",
     # Duty
     "get_duty_rules",

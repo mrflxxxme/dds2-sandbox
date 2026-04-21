@@ -82,7 +82,7 @@ description: "Spec-driven development для крупных фич DDS2: спе�
 - [ ] Page `src/app/(main)/p/[slug]/<name>/`
 - [ ] Vitest в `<page>.test.tsx`
 
-## Phase 3: Verify (parallel haiku agents)
+## Phase 3: Verify (parallel opus agents)
 - [ ] pytest
 - [ ] vitest
 - [ ] check_conventions

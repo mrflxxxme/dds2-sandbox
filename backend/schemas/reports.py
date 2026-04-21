@@ -2,10 +2,10 @@
 Report schemas.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class BalanceRow(BaseModel):
@@ -125,3 +125,51 @@ class CostDnaResponse(BaseModel):
     categories: list[CostDnaCategory]
     totals: CostDnaTotals
     has_tax_settings: bool  # False → UI tooltip "налоги не настроены"
+
+
+# ─── Counterparty Turnovers report ───────────────────────────────────────────
+
+
+class CounterpartyTurnoversMonth(BaseModel):
+    """Monthly bucket for a single counterparty row."""
+
+    month: str  # "2026-01"
+    in_sum: Decimal = Field(alias="in", default=Decimal("0"))
+    out_sum: Decimal = Field(alias="out", default=Decimal("0"))
+    net: Decimal = Field(default=Decimal("0"))
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CounterpartyTurnoversRow(BaseModel):
+    """One row in the counterparty-turnovers pivot table."""
+
+    counterparty_id: int
+    inn: str | None = None
+    name: str
+    primary_type: str
+    months: list[CounterpartyTurnoversMonth] = Field(default_factory=list)
+    total_in: Decimal = Decimal("0")
+    total_out: Decimal = Decimal("0")
+    total_net: Decimal = Decimal("0")
+    tx_count: int = 0
+
+
+class CounterpartyTurnoversRequest(BaseModel):
+    """Query params for GET /reports/counterparty-turnovers."""
+
+    project_id: int
+    date_from: date
+    date_to: date
+    type: str | None = None  # CounterpartyType filter
+    currency: str = "RUB"
+    min_turnover: Decimal = Decimal("0")
+
+
+class CounterpartyTurnoversResponse(BaseModel):
+    """Full counterparty-turnovers report response."""
+
+    rows: list[CounterpartyTurnoversRow]
+    period_from: date
+    period_to: date
+    currency: str

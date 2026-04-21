@@ -18,7 +18,7 @@ description: "Массовый рефакторинг DDS2 через AST-grep +
 
 ## Инструменты
 - `ast-grep` (sg) — детерминированный AST matcher для Python/TS/TSX
-- Sub-agent с `sonnet` — для edge cases которые AST не покрыл
+- Sub-agent с `opus` — для edge cases которые AST не покрыл
 - pytest + check_conventions — валидация после
 
 Установить ast-grep:

@@ -39,6 +39,14 @@ from backend.models.cost import (
     Nomenclature,
 )
 
+# Counterparties & Loans
+from backend.models.counterparty import (
+    Counterparty,
+    CounterpartyDocument,
+    CounterpartyType,
+    DocType,
+)
+
 # Customs
 from backend.models.customs import (
     CustomsAlloc,
@@ -70,6 +78,13 @@ from backend.models.integrations import (
     WbFunnelDaily,
     WbStockSnapshot,
     WbWarehouseStock,
+)
+from backend.models.loan import (
+    Loan,
+    LoanDirection,
+    LoanPayment,
+    LoanPaymentType,
+    LoanStatus,
 )
 
 # Order City (WB order feed city mapping)
@@ -181,6 +196,16 @@ from backend.models.wb_tariff import (
 WbApiKey = IntegrationKey
 
 __all__ = [
+    # Counterparties & Loans
+    "Counterparty",
+    "CounterpartyDocument",
+    "CounterpartyType",
+    "DocType",
+    "Loan",
+    "LoanPayment",
+    "LoanDirection",
+    "LoanStatus",
+    "LoanPaymentType",
     # Enums
     "EventType2",
     "TransactionStatus",

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Speculative explore V1 (минимальный)
-# Запускает фоновый haiku-агент для pre-warm контекста по промпту
+# Запускает фоновый opus-агент для pre-warm контекста по промпту
 #
 # Триггер: вызывается из prompt-team-detect.sh при наличии тегов
 # [TEAM]/[PLAN]/[MIGRATION]/[REFACTOR]
@@ -108,13 +108,13 @@ fi
 - <file> — <что туда добавить/изменить>'
 
     SPEC_TMP="${SPEC}.tmp"
-    # Sonnet вместо Haiku — точнее карта контекста (Max подписка → cost не проблема)
+    # Opus 4.7 — пользователь требует opus везде в параллельной работе (Max подписка → cost не проблема)
     # max-turns 12 (вместо 6) — более тщательное исследование перед основной задачей
     DDS_PREWARM_ACTIVE=1 \
     PREWARM_USER_PROMPT="$PROMPT" \
-        timeout 120 claude \
+        timeout 180 claude \
         --print \
-        --model sonnet \
+        --model opus \
         --allowed-tools "Read,Glob,Grep" \
         "$PROMPT_TEMPLATE" > "$SPEC_TMP" 2>/dev/null
 
@@ -128,5 +128,5 @@ fi
 ) &
 disown
 
-echo "[PREWARM] Background context map started: .claude/.cache/spec-$HASH.md (sonnet, ~60s)" >&2
+echo "[PREWARM] Background context map started: .claude/.cache/spec-$HASH.md (opus, ~90s)" >&2
 exit 0

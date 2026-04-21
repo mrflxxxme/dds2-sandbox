@@ -101,17 +101,17 @@ src/types/api.ts — TypeScript интерфейсы
 - **Статус** → `/status` (быстрая диагностика: git, docker, health, миграции)
 
 ## AI-агенты и skills (`.claude/`)
-**Subagents** (`.claude/agents/`) — проактивно вызывать по описанию:
-| Агент | Модель | Когда |
-|-------|--------|-------|
-| `code-reviewer` | opus | после правок кода — качество + конвенции |
-| `security-reviewer` | opus | auth/SQL/crypto/user-input — OWASP + DDS-специфика |
-| `performance-optimizer` | sonnet | новые endpoint/массовые выборки — N+1, bundle, slow queries |
-| `api-designer` | sonnet | новые/изменённые routers/schemas — OpenAPI, breaking changes |
-| `database-reviewer` | sonnet | миграции, сложные SQL, PgBouncer |
-| `tdd-guide` | sonnet | новые фичи — тесты первыми |
-| `build-error-resolver` | sonnet | pytest/build fail — минимальные фиксы |
-| `planner` | opus | планирование фичи/рефакторинга |
+**Subagents** (`.claude/agents/`) — проактивно вызывать по описанию. **Все на `opus` 4.7** (Max подписка, требование владельца 2026-04-21):
+| Агент | Когда |
+|-------|-------|
+| `code-reviewer` | после правок кода — качество + конвенции |
+| `security-reviewer` | auth/SQL/crypto/user-input — OWASP + DDS-специфика |
+| `performance-optimizer` | новые endpoint/массовые выборки — N+1, bundle, slow queries |
+| `api-designer` | новые/изменённые routers/schemas — OpenAPI, breaking changes |
+| `database-reviewer` | миграции, сложные SQL, PgBouncer |
+| `tdd-guide` | новые фичи — тесты первыми |
+| `build-error-resolver` | pytest/build fail — минимальные фиксы |
+| `planner` | планирование фичи/рефакторинга |
 
 **Slash skills** (`.claude/commands/`) — строгие процессы:
 - **Разработка**: `/new-endpoint`, `/new-page`, `/migration`, `/tdd`, `/plan`
@@ -130,7 +130,7 @@ src/types/api.ts — TypeScript интерфейсы
 ## CI и безопасность
 - **Pre-commit**: Ruff + Bandit + Gitleaks (автоматически)
 - **Pre-push**: pytest-testmon + vitest + check_conventions.sh + check_slopsquatting.sh (блокирует при ошибке)
-- **CI**: Tests + Security (pip-audit, Trivy, Snyk) + Conventions + Claude Code AI review (`claude-review.yml`, opus-4-7 для security, sonnet-4-6 default)
+- **CI**: Tests + Security (pip-audit, Trivy, Snyk) + Conventions + Claude Code AI review (`claude-review.yml`, opus-4-7 везде)
 - **Coverage**: `pytest-cov` (backend) + `vitest --coverage` (frontend) + Codecov upload в `test.yml` (коммит d892f45)
 - **Reactive CI**: `ci-failure-issue.yml` — при fail Tests/Security автоматически создаёт tracking issue, закрывает когда green
 - **Slopsquatting**: `check_slopsquatting.sh` — валидирует новые imports против PyPI/npm (защита от AI-галлюцинаций пакетов)
@@ -154,7 +154,7 @@ src/types/api.ts — TypeScript интерфейсы
 | `test.yml` | push / PR | Tests (pytest + vitest, без E2E — E2E вынесен в nightly) |
 | `e2e-nightly.yml` | **cron** `0 3 * * *` (ежедневно 03:00 UTC) + manual | Smoke E2E (27 страниц не крашатся) — не блокирует deploy |
 | `security.yml` | push / PR / **cron** `0 5 * * *` (daily 05:00 UTC) | pip-audit, Trivy, Snyk, npm audit |
-| `claude-review.yml` | PR / `@claude` comment | Claude AI-ревью PR (opus-4-7 для security/high-risk, sonnet-4-6 default) |
+| `claude-review.yml` | PR / `@claude` comment | Claude AI-ревью PR (opus-4-7 везде) |
 | `auto-pr.yml` | push в `dev` | автоматический PR `dev → main` |
 | `auto-merge.yml` | green CI на auto-PR | авто-merge при зелёном CI |
 | `cd-production.yml` | merge в `main` | деплой на app-сервер |
