@@ -88,6 +88,7 @@ src/types/api.ts — TypeScript интерфейсы
 | AI Агенты | orchestrator→agents→synthesizer; 19 tools в 11 модулях (ai/tools/); memory=BrandNote | services/ai/ |
 | Telegram | polling с прокси на проде; HMAC auth для TMA | telegram_bot, telegram_service |
 | Поставки | FactoryOrder→CostOrder→Warehouse; VehicleStatus; split_to_vehicles | supply_chain/, cost.py |
+| Контрагенты+Займы | upsert by INN/contract_number; мультивалюта RUB/CNY раздельно; Faktura.ru парсер; enrich_purpose regex; backfill скрипт | counterparty_service, loan_service, reports/counterparty_turnovers, etl/parsers/faktura.py, etl/master_logic.py (DOMAIN_COUNTERPARTY.md) |
 | Фронтенд | types/api.ts; formatNumber(); loading+error+empty states | src/app/, src/lib/api/ |
 
 ## Быстрая навигация (для агентов)

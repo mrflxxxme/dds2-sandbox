@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001
 """
 Master Logic: applies business rules to normalized transactions.
 Produces: txn_id, cp_key, net, is_internal, is_fx, event_type2,
@@ -7,8 +8,6 @@ Produces: txn_id, cp_key, net, is_internal, is_fx, event_type2,
 
 import hashlib
 import re
-from decimal import Decimal
-from typing import Optional
 
 import pandas as pd
 
@@ -22,8 +21,9 @@ RE_COMMISSION = re.compile(
     r"комисси|commission|swift|тариф|bank charge",
     re.IGNORECASE,
 )
+# Extended logistics regex (Phase 2 counterparties-loans)
 RE_LOGISTICS = re.compile(
-    r"invoice|forwarding|freight|transport|доставк",
+    r"invoice|forwarding|freight|transport|доставк|транспортн|перевоз|экспедиц|форвардин",
     re.IGNORECASE,
 )
 RE_ORDER = re.compile(
@@ -33,11 +33,38 @@ RE_ORDER = re.compile(
 RE_INVOICE_ID = re.compile(r"INVOICE\s*([A-Z0-9\-]+)", re.IGNORECASE)
 RE_ANNEX_ID = re.compile(r"(?:ANNEX|APPENDIX|ПРИЛОЖЕН(?:ИЕ)?)\s*[№#]?\s*([0-9]+)", re.IGNORECASE)
 
+# ─── Phase 2: Counterparties / Loans regex patterns ─────────────────────────
+
+# China suppliers / foreign contracts
+RE_CONTRACT = re.compile(r"CONTRACT\s*(?:NO\.?)?\s*(\d{6,})", re.IGNORECASE)
+RE_UNK = re.compile(r"УНК\s+([\d/]+)", re.IGNORECASE)
+RE_MT103 = re.compile(r"МТ103\s*реф\.?([A-Z0-9]+)", re.IGNORECASE)
+
+# Deposits — do NOT count as cashflow (is_cashflow2 = 0 for place/return)
+RE_DEPOSIT_PLACE = re.compile(r"Размещени\w*\s+средств\s+в\s+депозит", re.IGNORECASE)
+RE_DEPOSIT_RETURN = re.compile(r"Возврат\s+депозита", re.IGNORECASE)
+RE_DEPOSIT_INTEREST = re.compile(r"Уплата\s+процентов\s+по\s+депозит", re.IGNORECASE)
+
+# Loans — link to Loan via contract_number
+RE_LOAN_INTEREST = re.compile(r"Уплата\s+процентов\s+по.*займ", re.IGNORECASE)
+# Disbursement = "Предоставление/Выдача/Перевод" + somewhere "договор" AND "займ"
+RE_LOAN_DISBURSEMENT = re.compile(
+    r"(?:Предоставлени|Выдач|Перевод)\w*.*?(?:(?:договор\w*.*?займ\w*)|(?:займ\w*.*?договор\w*))",
+    re.IGNORECASE | re.DOTALL,
+)
+RE_LOAN_REPAY = re.compile(
+    r"(?:Оплата|Возврат)\w*.*?(?:(?:договор\w*.*?займ\w*)|(?:займ\w*.*?договор\w*))",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Fulfillment / logistics (category detection from purpose)
+RE_FULFILLMENT = re.compile(r"упаковк|маркировк|фулфилмент|ФФ-\d|\bфф\s", re.IGNORECASE)
+
 
 # ─── txn_id ──────────────────────────────────────────────────────────────────
 
-def make_txn_id(date, account, currency, counterparty_account, counterparty,
-                income, expense, purpose) -> str:
+
+def make_txn_id(date, account, currency, counterparty_account, counterparty, income, expense, purpose) -> str:
     date_str = pd.Timestamp(date).strftime("%Y%m%d") if date is not None else "00000000"
     cp_acc = str(counterparty_account or counterparty or "").strip()[:50]
     purpose_part = str(purpose or "").strip().lower()[:80]
@@ -49,17 +76,16 @@ def make_txn_id(date, account, currency, counterparty_account, counterparty,
     return key
 
 
-def make_txn_id_hash(date, account, currency, counterparty_account, counterparty,
-                     income, expense, purpose) -> str:
+def make_txn_id_hash(date, account, currency, counterparty_account, counterparty, income, expense, purpose) -> str:
     """SHA1-based stable ID for deduplication."""
-    raw = make_txn_id(date, account, currency, counterparty_account, counterparty,
-                      income, expense, purpose)
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+    raw = make_txn_id(date, account, currency, counterparty_account, counterparty, income, expense, purpose)
+    return hashlib.sha1(raw.encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
 # ─── cp_key ──────────────────────────────────────────────────────────────────
 
-def make_cp_key(inn: Optional[str], counterparty: Optional[str]) -> Optional[str]:
+
+def make_cp_key(inn: str | None, counterparty: str | None) -> str | None:
     if inn and str(inn).strip():
         return str(inn).strip()
     if counterparty and str(counterparty).strip():
@@ -69,7 +95,8 @@ def make_cp_key(inn: Optional[str], counterparty: Optional[str]) -> Optional[str
 
 # ─── Purpose tag ─────────────────────────────────────────────────────────────
 
-def get_purpose_tag(purpose: Optional[str]) -> str:
+
+def get_purpose_tag(purpose: str | None) -> str:
     if not purpose:
         return "Другое"
     p = str(purpose)
@@ -82,28 +109,95 @@ def get_purpose_tag(purpose: Optional[str]) -> str:
     return "Другое"
 
 
-def extract_invoice_id(purpose: Optional[str]) -> Optional[str]:
+def extract_invoice_id(purpose: str | None) -> str | None:
     if not purpose:
         return None
     m = RE_INVOICE_ID.search(str(purpose))
     return m.group(1).upper() if m else None
 
 
-def extract_annex_id(purpose: Optional[str]) -> Optional[str]:
+def extract_annex_id(purpose: str | None) -> str | None:
     if not purpose:
         return None
     m = RE_ANNEX_ID.search(str(purpose))
     return m.group(1) if m else None
 
 
+# ─── Phase 2: Purpose enrichment (contract_number, unk, deposits, loans) ─────
+
+
+def enrich_purpose(purpose: str | None) -> dict:
+    """
+    Apply Phase 2 regex to a transaction purpose string.
+
+    Returns a dict with optional fields:
+      - contract_number: str | None
+      - unk_number: str | None
+      - mt103_ref: str | None
+      - event_type2_override: "DEPOSIT_PLACE" | "DEPOSIT_RETURN" | "DEPOSIT_INTEREST" | None
+      - is_cashflow2_override: int | None  (0 for place/return, 1 for interest)
+      - loan_payment_type: "DISBURSEMENT" | "PRINCIPAL_REPAY" | "INTEREST_PAY" | None
+
+    Pure function; no side effects.
+    """
+    result: dict = {
+        "contract_number": None,
+        "unk_number": None,
+        "mt103_ref": None,
+        "event_type2_override": None,
+        "is_cashflow2_override": None,
+        "loan_payment_type": None,
+    }
+    if not purpose:
+        return result
+    text = str(purpose)
+
+    # Contract number (foreign contracts only, min 6 digits)
+    m = RE_CONTRACT.search(text)
+    if m:
+        result["contract_number"] = m.group(1)
+
+    # UNK — currency control number
+    m = RE_UNK.search(text)
+    if m:
+        result["unk_number"] = m.group(1)
+
+    # MT103 ref
+    m = RE_MT103.search(text)
+    if m:
+        result["mt103_ref"] = m.group(1)
+
+    # Deposits — order matters (interest before return/place since they can co-occur)
+    if RE_DEPOSIT_INTEREST.search(text):
+        result["event_type2_override"] = "DEPOSIT_INTEREST"
+        result["is_cashflow2_override"] = 1  # interest IS cashflow (income/expense)
+    elif RE_DEPOSIT_RETURN.search(text):
+        result["event_type2_override"] = "DEPOSIT_RETURN"
+        result["is_cashflow2_override"] = 0  # return of principal is not cashflow
+    elif RE_DEPOSIT_PLACE.search(text):
+        result["event_type2_override"] = "DEPOSIT_PLACE"
+        result["is_cashflow2_override"] = 0  # placement is not cashflow
+
+    # Loans (interest first since it's most specific)
+    if RE_LOAN_INTEREST.search(text):
+        result["loan_payment_type"] = "INTEREST_PAY"
+    elif RE_LOAN_REPAY.search(text):
+        result["loan_payment_type"] = "PRINCIPAL_REPAY"
+    elif RE_LOAN_DISBURSEMENT.search(text):
+        result["loan_payment_type"] = "DISBURSEMENT"
+
+    return result
+
+
 # ─── Master Logic pipeline ───────────────────────────────────────────────────
+
 
 def apply_master_logic(
     df: pd.DataFrame,
-    our_accounts: set[str],       # account numbers where is_our_account=True
+    our_accounts: set[str],  # account numbers where is_our_account=True
     customs_payee_accounts: set[str],  # account numbers where is_customs_payee=True
-    cp_categories: dict[str, dict],    # {cp_key: {cat_lvl1, cat_lvl2}}
-    overrides: dict[str, dict],        # {txn_id: {cat_lvl1, cat_lvl2}}
+    cp_categories: dict[str, dict],  # {cp_key: {cat_lvl1, cat_lvl2}}
+    overrides: dict[str, dict],  # {txn_id: {cat_lvl1, cat_lvl2}}
 ) -> pd.DataFrame:
     """
     Input df must have NORM_COLS.
@@ -114,17 +208,20 @@ def apply_master_logic(
     # ── txn_id ──
     result["txn_id"] = result.apply(
         lambda r: make_txn_id(
-            r["date"], r["account"], r["currency"],
-            r.get("counterparty_account"), r.get("counterparty"),
-            r.get("income", 0), r.get("expense", 0), r.get("purpose"),
+            r["date"],
+            r["account"],
+            r["currency"],
+            r.get("counterparty_account"),
+            r.get("counterparty"),
+            r.get("income", 0),
+            r.get("expense", 0),
+            r.get("purpose"),
         ),
         axis=1,
     )
 
     # ── cp_key ──
-    result["cp_key"] = result.apply(
-        lambda r: make_cp_key(r.get("inn"), r.get("counterparty")), axis=1
-    )
+    result["cp_key"] = result.apply(lambda r: make_cp_key(r.get("inn"), r.get("counterparty")), axis=1)
 
     # ── net ──
     result["income"] = pd.to_numeric(result["income"], errors="coerce").fillna(0)
@@ -132,19 +229,17 @@ def apply_master_logic(
     result["net"] = result["income"] - result["expense"]
 
     # ── is_internal ──
-    result["is_internal"] = result["counterparty_account"].apply(
-        lambda a: bool(a and str(a).strip() in our_accounts)
-    ).astype(int)
+    result["is_internal"] = (
+        result["counterparty_account"].apply(lambda a: bool(a and str(a).strip() in our_accounts)).astype(int)
+    )
 
     # ── is_fx ──
-    result["is_fx"] = result["purpose"].apply(
-        lambda p: bool(p and RE_FX.search(str(p)))
-    ).astype(int)
+    result["is_fx"] = result["purpose"].apply(lambda p: bool(p and RE_FX.search(str(p)))).astype(int)
 
     # ── CUSTOMS_PAYMENT ──
-    result["is_customs"] = result["counterparty_account"].apply(
-        lambda a: bool(a and str(a).strip() in customs_payee_accounts)
-    ).astype(int)
+    result["is_customs"] = (
+        result["counterparty_account"].apply(lambda a: bool(a and str(a).strip() in customs_payee_accounts)).astype(int)
+    )
 
     # ── event_type2 (priority: internal > fx > customs > oper) ──
     def _event_type2(row):
@@ -159,9 +254,7 @@ def apply_master_logic(
     result["event_type2"] = result.apply(_event_type2, axis=1)
 
     # ── is_cashflow2 ──
-    result["is_cashflow2"] = result["event_type2"].apply(
-        lambda e: 0 if e in ("INTERNAL_TRANSFER", "FX_BUY") else 1
-    )
+    result["is_cashflow2"] = result["event_type2"].apply(lambda e: 0 if e in ("INTERNAL_TRANSFER", "FX_BUY") else 1)
 
     # ── SRC_IMP enrichment ──
     result["purpose_tag"] = result["purpose"].apply(get_purpose_tag)
