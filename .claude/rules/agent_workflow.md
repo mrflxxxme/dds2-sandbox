@@ -10,11 +10,12 @@ paths:
 ### Фичи и кросс-доменные изменения (полный цикл)
 ```
 Фаза 0:   Lead (opus): EnterPlanMode → уточняет → ТЗ → ExitPlanMode (только при approval)
-Фаза 1:   Lead (sonnet): Model→Migration→Schema + Pre-warm frontend (haiku, read-only)
-Фаза 2:   2-3 агента (sonnet) параллельно: Backend[-A, -B] ‖ Frontend
-Фаза 2.5: code-reviewer ‖ security-reviewer (sonnet, read-only)
-Фаза 3:   pytest ‖ vitest ‖ conventions ‖ docs (haiku, параллельно) → коммит
+Фаза 1:   Lead (opus): Model→Migration→Schema + Pre-warm frontend (opus, read-only)
+Фаза 2:   2-3 агента (opus) параллельно: Backend[-A, -B] ‖ Frontend
+Фаза 2.5: code-reviewer ‖ security-reviewer (opus, read-only)
+Фаза 3:   pytest ‖ vitest ‖ conventions ‖ docs (opus, параллельно) → коммит
 ```
+**Model policy: opus 4.7 везде** (Max подписка → cost не проблема, требование владельца 2026-04-21, см. `memory/feedback_model_always_opus.md`).
 - **Plan Mode (Фаза 0)** — для фич/рефакторинга lead вызывает `EnterPlanMode` ПЕРЕД любыми правками. Без `ExitPlanMode` (approval пользователя) код не пишется. Это решает проблему «агент сразу кодит» из `feedback_ask_questions`
 - Backend и Frontend — 0 пересечений файлов, всегда параллелятся
 - Alembic миграции — ТОЛЬКО последовательно (см. `/migration` skill)
@@ -43,13 +44,15 @@ paths:
 ### Баги и мелкие изменения
 Без ТЗ — сразу анализ → фикс → тесты → коммит
 
-## Model Routing (экономия токенов)
+## Model Routing
+**Все роли → opus 4.7.** Пользователь на Max plan, cost не проблема, важнее качество рассуждений. Прецедент 2026-04-21.
+
 | Задача | Модель |
 |--------|--------|
 | Lead + планирование | opus |
-| Реализация (Фаза 2) | sonnet |
-| Review (Фаза 2.5) | sonnet |
-| Pre-warm, валидация, docs | haiku |
+| Реализация (Фаза 2) | opus |
+| Review (Фаза 2.5) | opus |
+| Pre-warm, валидация, docs | opus |
 
 ## File Ownership Rules (0 конфликтов)
 | Зона | Файлы | Владелец |

@@ -2,7 +2,7 @@
 name: tdd-guide
 description: "TDD специалист для DDS2. Enforces write-tests-first. Используй ПРОАКТИВНО при написании фич, фиксах багов, рефакторинге."
 tools: ["Read", "Write", "Edit", "Bash", "Grep"]
-model: sonnet
+model: opus
 ---
 
 # TDD Guide — DDS2

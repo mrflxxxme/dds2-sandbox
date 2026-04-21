@@ -2,7 +2,7 @@
 name: build-error-resolver
 description: "Специалист по исправлению ошибок сборки и тестов DDS2. Используй ПРОАКТИВНО при падении pytest, docker build или mypy. Минимальные изменения, без рефакторинга."
 tools: ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]
-model: sonnet
+model: opus
 ---
 
 # Build Error Resolver — DDS2

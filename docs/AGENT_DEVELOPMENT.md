@@ -14,11 +14,11 @@
 
 ```
 Фаза 0:   Понимание    → Lead (opus): уточняет → ТЗ
-Фаза 1:   Фундамент    → Lead (sonnet): Model→Migration→Schema
-           + Pre-warm   → Frontend explorer (haiku, read-only) — параллельно
-Фаза 2:   Реализация   → 2-3 агента (sonnet) параллельно
-Фаза 2.5: Review       → code-reviewer + security-reviewer (sonnet) параллельно
-Фаза 3:   Валидация    → pytest ‖ vitest ‖ conventions ‖ docs (haiku) параллельно
+Фаза 1:   Фундамент    → Lead (opus): Model→Migration→Schema
+           + Pre-warm   → Frontend explorer (opus, read-only) — параллельно
+Фаза 2:   Реализация   → 2-3 агента (opus) параллельно
+Фаза 2.5: Review       → code-reviewer + security-reviewer (opus) параллельно
+Фаза 3:   Валидация    → pytest ‖ vitest ‖ conventions ‖ docs (opus) параллельно
            → Коммит
 ```
 
@@ -102,7 +102,7 @@
 
 ### Фаза 1 — Фундамент + Pre-warm (lead последовательно + 1 read-only агент)
 
-**Lead agent (sonnet) — строго последовательно:**
+**Lead agent (opus) — строго последовательно:**
 
 ```
 1. Model (models/*.py)
@@ -115,7 +115,7 @@
 - Schema зависит от Model
 - Два Alembic revision одновременно → сломанная цепочка
 
-**Frontend Pre-warm (haiku, read-only) — параллельно с lead:**
+**Frontend Pre-warm (opus, read-only) — параллельно с lead:**
 
 Пока lead создаёт модели/миграции, read-only агент изучает frontend:
 1. Читает `src/types/api.ts` — существующие интерфейсы
@@ -131,7 +131,7 @@
 
 ---
 
-### Фаза 2 — Реализация (2-3 агента параллельно, sonnet)
+### Фаза 2 — Реализация (2-3 агента параллельно, opus)
 
 Главный агент сам запускает sub-агентов через Agent tool и контролирует результат.
 Человек не участвует — ждёт результат Фазы 3.
@@ -141,7 +141,7 @@
 ```
 ┌─────────────────────────┐    ┌─────────────────────────┐
 │  Агент 1: Backend       │    │  Агент 2: Frontend      │
-│  (sonnet)               │    │  (sonnet)               │
+│  (opus)               │    │  (opus)               │
 │                         │    │                         │
 │  1. Тесты (красные)     │    │  1. Типы в api.ts       │
 │  2. Service             │    │  2. API метод в api.ts   │
@@ -165,7 +165,7 @@
 ```
 ┌───────────────────┐  ┌───────────────────┐  ┌───────────────────┐
 │  Backend-A        │  │  Backend-B        │  │  Frontend         │
-│  (sonnet)         │  │  (sonnet)         │  │  (sonnet)         │
+│  (opus)         │  │  (opus)         │  │  (opus)         │
 │                   │  │                   │  │                   │
 │  domain A:        │  │  domain B:        │  │  types + api +    │
 │  service+router   │  │  service+router   │  │  page + tests     │
@@ -183,14 +183,14 @@ API-методы в `api.ts` пишутся по контракту — когд
 
 ---
 
-### Фаза 2.5 — Параллельный Review (2 read-only агента, sonnet)
+### Фаза 2.5 — Параллельный Review (2 read-only агента, opus)
 
 Запускается сразу после завершения Фазы 2, ДО тестов:
 
 ```
 ┌──────────────────────────┐    ┌──────────────────────────┐
-│  code-reviewer (sonnet)  │    │  security-reviewer       │
-│  read-only               │    │  (sonnet) read-only      │
+│  code-reviewer (opus)  │    │  security-reviewer       │
+│  read-only               │    │  (opus) read-only      │
 │                          │    │                          │
 │  - Iron rules            │    │  - SQL injection         │
 │  - Качество кода         │    │  - Multi-tenancy         │
@@ -202,14 +202,14 @@ API-методы в `api.ts` пишутся по контракту — когд
 **CRITICAL issues** → исправить ДО Фазы 3
 **WARNING/LOW** → заметить, продолжить к Фазе 3
 
-### Фаза 3 — Параллельная валидация + Docs (3-4 агента, haiku)
+### Фаза 3 — Параллельная валидация + Docs (3-4 агента, opus)
 
 Все проверки НЕЗАВИСИМЫ — запускать параллельно:
 
 ```
 ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
 │  pytest          │  │  vitest          │  │  conventions     │  │  docs (optional) │
-│  (haiku)         │  │  (haiku)         │  │  (haiku)         │  │  (haiku)         │
+│  (opus)         │  │  (opus)         │  │  (opus)         │  │  (opus)         │
 │                  │  │                  │  │                  │  │                  │
 │  docker compose  │  │  cd frontend-    │  │  bash scripts/   │  │  git diff →      │
 │  exec backend    │  │  react && npx    │  │  check_          │  │  update          │
@@ -281,19 +281,21 @@ API-методы в `api.ts` пишутся по контракту — когд
 
 ---
 
-### Model Routing (оптимизация токенов и скорости)
+### Model Routing
+**Политика: opus 4.7 везде** (Max подписка, требование владельца 2026-04-21 — см. `memory/feedback_model_always_opus.md`). Раньше использовалась смешанная стратегия sonnet/haiku для экономии, но теперь важнее качество.
+
 
 | Задача | Модель | Обоснование |
 |--------|--------|-------------|
 | Lead agent (Фаза 0 + оркестрация) | opus | Сложное планирование, формирование ТЗ |
-| Фаза 1 (Model+Migration+Schema) | sonnet | Структурная генерация кода |
-| Фаза 2 Backend (service+router+tests) | sonnet | Реализация с iron rules |
-| Фаза 2 Frontend (page+types+api) | sonnet | Реализация с conventions |
-| Фаза 2.5 code-reviewer | sonnet | Уже настроен |
-| Фаза 2.5 security-reviewer | sonnet | Уже настроен |
-| Фаза 1 Pre-warm (frontend exploration) | haiku | Read-only, сбор контекста |
-| Фаза 3 валидаторы (pytest/vitest/conventions) | haiku | Запуск команд, парсинг вывода |
-| Фаза 3 docs agent | haiku | Чтение diff, обновление markdown |
+| Фаза 1 (Model+Migration+Schema) | opus | Структурная генерация кода |
+| Фаза 2 Backend (service+router+tests) | opus | Реализация с iron rules |
+| Фаза 2 Frontend (page+types+api) | opus | Реализация с conventions |
+| Фаза 2.5 code-reviewer | opus | Уже настроен |
+| Фаза 2.5 security-reviewer | opus | Уже настроен |
+| Фаза 1 Pre-warm (frontend exploration) | opus | Read-only, сбор контекста |
+| Фаза 3 валидаторы (pytest/vitest/conventions) | opus | Запуск команд, парсинг вывода |
+| Фаза 3 docs agent | opus | Чтение diff, обновление markdown |
 
 ---
 
