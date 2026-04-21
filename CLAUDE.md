@@ -92,6 +92,7 @@ src/types/api.ts — TypeScript интерфейсы
 
 ## Быстрая навигация (для агентов)
 - **Карта backend** → `backend/MAP.md` (типовые паттерны, импорты, где что лежит)
+- **AI workflow** → `docs/AI_WORKFLOW.md` (шпаргалка: сценарии, subagents, skills, что работает само)
 - **Шаблоны** → `.claude/templates/` (скелеты service, router, test, model, schema, page)
 - **Грабли** → `docs/KNOWN_PITFALLS.md` (ошибки которые агенты повторяют)
 - **Worktrees** → `scripts/worktree-start.sh` / `worktree-finish.sh` (параллельная работа)
@@ -130,8 +131,10 @@ src/types/api.ts — TypeScript интерфейсы
 - **Pre-commit**: Ruff + Bandit + Gitleaks (автоматически)
 - **Pre-push**: pytest-testmon + vitest + check_conventions.sh + check_slopsquatting.sh (блокирует при ошибке)
 - **CI**: Tests + Security (pip-audit, Trivy, Snyk) + Conventions + Claude Code AI review (`claude-review.yml`, opus-4-7 для security, sonnet-4-6 default)
+- **Coverage**: `pytest-cov` (backend) + `vitest --coverage` (frontend) + Codecov upload в `test.yml` (коммит d892f45)
 - **Reactive CI**: `ci-failure-issue.yml` — при fail Tests/Security автоматически создаёт tracking issue, закрывает когда green
 - **Slopsquatting**: `check_slopsquatting.sh` — валидирует новые imports против PyPI/npm (защита от AI-галлюцинаций пакетов)
+- **Conventions enforcement**: Check 10 (`db.delete()` на SoftDelete) теперь **error**, не warn — коммит `fe5d74f`. Обход: комментарий `# no-soft-delete-check: <reason>` рядом со строкой
 - **Auto-flow**: push dev → auto-PR → green CI → auto-merge → deploy
 - **Branch protection `main`**: require Tests + Security Audit, strict
 - Установка хуков: `make setup` | Экстренный пропуск: `git push --no-verify`

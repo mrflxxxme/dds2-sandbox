@@ -69,6 +69,13 @@
 - **CancelledError:** все sync jobs MUST ловить `asyncio.CancelledError` (не наследуется от Exception) — иначе error_msg = null в sync_log
 - **Monitoring:** endpoint `/monitoring/overview` работает в api-контейнере, scheduler статус определяется по sync_log (не in-memory)
 
+### Scheduler расписание (MSK, tue-sun)
+- `wb_finance_daily_05` — **05:00 MSK**, ранний прогон (коммит 5fd7291). WB публикует финотчёт за прошлый день к 03-05 MSK, данные успевают в БДР к утреннему дайджесту
+- `wb_finance_daily_08` — 08:00 MSK, страхует на случай поздней публикации
+- `wb_finance_daily_14` — 14:00 MSK, добор пропущенных
+- `wb_finance_daily_catchup` — на старте worker (пропущенные прогоны)
+- `misfire_grace_time=3600` — задача не пропадает при рестарте worker в пределах часа
+
 ### Worker Lifecycle
 - `stop_grace_period: 60s` — worker получает 60 секунд на graceful shutdown при деплое
 - `stop_scheduler(wait=True)` — APScheduler ждёт завершения текущих задач
