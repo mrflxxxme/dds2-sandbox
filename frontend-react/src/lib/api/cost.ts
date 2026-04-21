@@ -13,6 +13,7 @@ export function addCostMethods(api: ApiClient) {
             return api.request<{ ok: boolean; order_no: string; payments_created: number; plan: Record<string, unknown> }>('POST', `/api/v1/cost/orders/${encodeURIComponent(orderNo)}/generate_plan`);
         },
         getNomenclature() { return api.request<Nomenclature[]>('GET', '/api/v1/cost/nomenclature'); },
+        getNomenclatureSubjects() { return api.request<string[]>('GET', '/api/v1/cost/nomenclature/subjects'); },
         syncNomenclature() { return api.request<{ ok: boolean; synced: number; status?: string; error_msg?: string; finished_at?: string }>('POST', '/api/v1/integrations/wb/sync_nomenclature'); },
         getDutyRules() { return api.request<DutyRule[]>('GET', '/api/v1/cost/duty_rules'); },
         addDutyRule(data: Partial<DutyRule>) { return api.request<DutyRule>('POST', '/api/v1/cost/duty_rules', data); },

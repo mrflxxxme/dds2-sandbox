@@ -25,6 +25,17 @@ async def get_nomenclature(db: AsyncSession, project_id: int, limit: int = 1000,
     return list(result.scalars().all())
 
 
+async def get_nomenclature_subjects(db: AsyncSession, project_id: int) -> list[str]:
+    """Return distinct non-empty subjects for the project (for category dropdowns/duty rules)."""
+    result = await db.execute(
+        select(Nomenclature.subject)
+        .where(Nomenclature.project_id == project_id, Nomenclature.subject.isnot(None))
+        .distinct()
+        .order_by(Nomenclature.subject)
+    )
+    return [s for s in result.scalars().all() if s]
+
+
 async def upload_nomenclature(db: AsyncSession, project_id: int, data: bytes) -> tuple[int, int]:
     """Upload nomenclature from Excel data, returns (inserted, updated)."""
     df = pd.read_excel(io.BytesIO(data))

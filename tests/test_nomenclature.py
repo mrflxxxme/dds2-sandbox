@@ -8,7 +8,12 @@ import io
 import pandas as pd
 import pytest
 
-from backend.services.cost.nomenclature import get_nomenclature, upload_nomenclature
+from backend.models import Nomenclature
+from backend.services.cost.nomenclature import (
+    get_nomenclature,
+    get_nomenclature_subjects,
+    upload_nomenclature,
+)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # get_nomenclature
@@ -35,6 +40,57 @@ class TestGetNomenclature:
         result_b = await get_nomenclature(db_session, other_project.id)
         assert result_a == []
         assert result_b == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# get_nomenclature_subjects
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGetNomenclatureSubjects:
+    @pytest.mark.asyncio
+    async def test_empty_for_new_project(self, db_session, project):
+        result = await get_nomenclature_subjects(db_session, project.id)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_returns_distinct_sorted(self, db_session, project):
+        """Duplicates collapsed, result sorted; nulls and empty strings excluded."""
+        for bc, subj in [
+            ("9000000000001", "Шторы интерьерные"),
+            ("9000000000002", "Шторы интерьерные"),
+            ("9000000000003", "Ковры"),
+            ("9000000000004", "Вазы"),
+            ("9000000000005", None),
+            ("9000000000006", ""),
+        ]:
+            db_session.add(Nomenclature(project_id=project.id, barcode=bc, subject=subj))
+        await db_session.commit()
+
+        result = await get_nomenclature_subjects(db_session, project.id)
+        assert result == ["Вазы", "Ковры", "Шторы интерьерные"]
+
+    @pytest.mark.asyncio
+    async def test_not_limited_by_row_count(self, db_session, project):
+        """Subject at alphabet tail still returned even if >1000 rows precede it."""
+        for i in range(1001):
+            db_session.add(Nomenclature(project_id=project.id, barcode=f"8{i:012d}", subject="Ковры"))
+        db_session.add(Nomenclature(project_id=project.id, barcode="8999999999999", subject="Шторы интерьерные"))
+        await db_session.commit()
+
+        result = await get_nomenclature_subjects(db_session, project.id)
+        assert "Шторы интерьерные" in result
+
+    @pytest.mark.asyncio
+    async def test_project_isolation(self, db_session, project, other_project):
+        db_session.add(Nomenclature(project_id=project.id, barcode="7000000000001", subject="Только_A"))
+        db_session.add(Nomenclature(project_id=other_project.id, barcode="7000000000002", subject="Только_B"))
+        await db_session.commit()
+
+        result_a = await get_nomenclature_subjects(db_session, project.id)
+        result_b = await get_nomenclature_subjects(db_session, other_project.id)
+        assert "Только_A" in result_a and "Только_B" not in result_a
+        assert "Только_B" in result_b and "Только_A" not in result_b
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

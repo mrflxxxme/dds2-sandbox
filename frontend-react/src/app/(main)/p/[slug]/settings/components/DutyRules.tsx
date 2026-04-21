@@ -28,13 +28,17 @@ export function DutyRules() {
 
     const loadNomenclature = useCallback(async () => {
         try {
-            const nom = await api.getNomenclature();
-            setNomenclature(nom);
-            setCategories([...new Set(nom.map((n: Nomenclature) => n.subject).filter(Boolean))].sort() as string[]);
+            setNomenclature(await api.getNomenclature());
         } catch { }
     }, []);
 
-    useEffect(() => { loadRules(); loadNomenclature(); loadVatRate(); }, [loadNomenclature]);
+    const loadCategories = useCallback(async () => {
+        try {
+            setCategories(await api.getNomenclatureSubjects());
+        } catch { }
+    }, []);
+
+    useEffect(() => { loadRules(); loadNomenclature(); loadCategories(); loadVatRate(); }, [loadNomenclature, loadCategories]);
     useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(''), 5000); return () => clearTimeout(t); }, [msg]);
 
     const loadRules = async () => { try { setRules(await api.getDutyRules()); } catch { } };
