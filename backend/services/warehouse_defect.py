@@ -217,8 +217,8 @@ async def mark_defect_bulk(
             errors.append({"barcode": barcode, "error": str(e)})
 
     if not processed_items:
-        # Nothing applied — drop the empty document
-        await db.delete(operation)
+        # Nothing applied — soft-delete the empty document (DefectMarkOperation has SoftDeleteMixin)
+        operation.soft_delete()
         await db.commit()
         return {
             "status": "error",
@@ -561,7 +561,7 @@ async def delete_defect_movement(
     reverted_type = movement.movement_type
     qty = abs(movement.defect_delta) or abs(movement.quantity)
 
-    await db.delete(movement)
+    await db.delete(movement)  # no-soft-delete-check: StockMovement has no SoftDeleteMixin (audit log pattern)
     await db.commit()
 
     return {"status": "ok", "reverted": reverted_type, "quantity": qty}

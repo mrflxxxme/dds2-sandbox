@@ -168,7 +168,7 @@ async def update_receipt(db: AsyncSession, project_id: int, receipt_id: int, pay
         # Replace items if provided
         if "items" in payload and payload["items"] is not None:
             for old_item in list(receipt.items):
-                await db.delete(old_item)
+                await db.delete(old_item)  # no-soft-delete-check: InboundReceiptItem has no SoftDeleteMixin
             await db.flush()
 
             barcode_map = await _resolve_barcodes_batch(db, project_id, [d["barcode"] for d in payload["items"]])

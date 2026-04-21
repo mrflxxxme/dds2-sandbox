@@ -66,3 +66,15 @@ paths:
 - **Model → Migration → Schema** — последовательно (lead), потом параллелятся
 - **Рефакторинг** — один teammate пишет тесты, другой рефакторит (разные файлы)
 - **cache.py** — только lead agent, ПОСЛЕ завершения backend teammates
+
+## Constraints для параллельных teammate (обязательно в промпте)
+Вставлять **каждому** teammate при `isolation: worktree`. Ссылка: `feedback_worktree_isolation.md` (прецедент 2026-04-20 — 30 мин на merge-конфликты из-за нарушений).
+
+### 1. Relative paths only
+> Ты работаешь в git worktree. **ВСЕ** пути — относительные, от текущей рабочей директории. **НИКАКИХ** `/Users/a1/Desktop/dds_app/...` в Read/Write/Edit/Bash — иначе правки уйдут в main dir вместо worktree, создадут add/add конфликты при merge.
+
+### 2. Types-first для тестов
+> Если меняешь API — сначала обнови `frontend-react/src/types/api.ts` и `frontend-react/src/lib/api/<domain>.ts`, **потом** пиши/обновляй тесты. Тесты на основе неактуальных типов = TS errors и false negatives. Порядок: types → api-клиент → тесты → компонент.
+
+### 3. Git-status-check в конце
+> Перед завершением работы выполни `git status` и `git diff --stat` в своей рабочей директории. В отчёте main-агенту перечисли: (a) изменённые файлы с путями, (b) подтверждение что все пути — внутри worktree (не main dir), (c) `git log -1 --oneline` если коммитил. Без этого merge не запускается.

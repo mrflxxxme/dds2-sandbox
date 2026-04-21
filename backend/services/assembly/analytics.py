@@ -66,7 +66,7 @@ async def refresh_from_fbo(
     # Remove items not in FBO anymore
     for barcode, item in current_map.items():
         if barcode not in fbo_map:
-            await db.delete(item)  # AssemblyRequestItem has no SoftDeleteMixin
+            await db.delete(item)  # no-soft-delete-check: AssemblyRequestItem has no SoftDeleteMixin
             removed += 1
 
     # Add new / update existing

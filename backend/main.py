@@ -117,6 +117,13 @@ class RequestIdMiddleware:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fail-fast: REGISTER_ENABLED=true в production = CRITICAL security hole (audit 2026-04-13)
+    if settings.REGISTER_ENABLED and settings.DDS_ENV == "production":
+        raise RuntimeError(
+            "REGISTER_ENABLED=true in production is forbidden (open registration on financial system). "
+            "Set REGISTER_ENABLED=false in production .env."
+        )
+
     # NOTE: Schema creation is handled by Alembic migrations (entrypoint.sh).
     # Base.metadata.create_all was removed — it competed with Alembic for
     # schema locks and ran redundantly on every worker process.

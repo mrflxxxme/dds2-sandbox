@@ -171,7 +171,7 @@ async def _upsert_supply_items_fbw(
     result = await db.execute(select(WbFboSupplyItem).where(WbFboSupplyItem.supply_id == supply_id))
     old_items = result.scalars().all()
     for item in old_items:
-        await db.delete(item)
+        await db.delete(item)  # no-soft-delete-check: WbFboSupplyItem has no SoftDeleteMixin
     await db.flush()
 
     # Insert new items from FBW goods

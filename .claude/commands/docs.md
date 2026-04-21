@@ -4,11 +4,17 @@ description: "Автообновление документации после �
 
 # /docs — Автообновление документации DDS2
 
+## Когда использовать
+- Вручную после изменения кода/схем/моделей
+- Автотриггер: UserPromptSubmit hook сообщает `[DOCS] N pending коммит(ов)` — это значит `.claude/.pending-docs.log` не пуст (заполняется post-commit hook при изменениях в `backend/` / `frontend-react/src/` / `migrations/`)
+
 ## Процесс
 
 ### Шаг 1: Собери изменения
-Выполни `git diff --name-only` и `git diff --cached --name-only` чтобы получить все изменённые файлы.
-Также посмотри `git log --oneline -5` для контекста последних коммитов.
+**Приоритет — pending-docs.log:**
+Если `.claude/.pending-docs.log` не пуст — это authoritative источник: каждая строка `hash timestamp message`. Для каждого коммита получи diff: `git show --stat <hash>` + `git show <hash> -- <file>`.
+
+Если лог пуст — fallback: `git diff --name-only` + `git diff --cached --name-only` + `git log --oneline -5`.
 
 ### Шаг 2: Определи затронутые домены
 Маппинг директорий → доменных файлов:
@@ -55,7 +61,14 @@ description: "Автообновление документации после �
 - Внеси изменения через Edit tool
 - Покажи пользователю что было обновлено
 
-### Шаг 5: Отчёт
+### Шаг 5: Очисти pending-docs.log
+После успешного sync обнули лог (не удаляй файл — просто truncate):
+```bash
+> .claude/.pending-docs.log
+```
+Это снимет `[DOCS]` reminder при следующем prompt. Если sync частичный (обработана только часть коммитов) — удали из лога только обработанные строки, остальное оставь.
+
+### Шаг 6: Отчёт
 Выведи таблицу:
 
 ```

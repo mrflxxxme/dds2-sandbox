@@ -152,9 +152,12 @@ def start_scheduler():
             misfire_grace_time=3600,
         )
 
-    # WB finance report sync — DAILY: Tue-Sun at 08:00, 14:00 MSK
-    # Fetches daily reports (period=daily) for current incomplete week
-    for job_hour in [8, 14]:
+    # WB finance report sync — DAILY: Tue-Sun at 05:00, 08:00, 14:00 MSK
+    # Fetches daily reports (period=daily) for current incomplete week.
+    # 05:00 MSK — ранний прогон, чтобы данные за вчера появились в БДР к утру
+    # (WB обычно публикует финотчёт за прошлый день к 03-05 утра MSK).
+    # 08:00 страхует на случай поздней публикации, 14:00 — добор.
+    for job_hour in [5, 8, 14]:
         _scheduler.add_job(
             sync_all_projects_wb_finance_daily,
             trigger=CronTrigger(day_of_week="tue-sun", hour=job_hour, minute=0, timezone=MSK),
