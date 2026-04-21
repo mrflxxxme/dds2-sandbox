@@ -34,6 +34,87 @@ from backend.models import (
 )
 
 
+def _upsert_counterparties_from_df(db: Session, df, project_id: int) -> tuple[dict[str, int], dict[int, int]]:
+    """
+    Batch UPSERT Counterparty rows by (project_id, inn) for all unique INNs in df.
+
+    Returns:
+      - inn_to_cp_id: {inn: counterparty_id} for all upserted rows
+      - cp_id_to_loan_id: {counterparty_id: loan_id} for counterparties with EXACTLY ONE active loan
+        (ambiguous matches are skipped — user resolves via POST /loans/{id}/payments/match)
+    """
+    if df.empty or "inn" not in df.columns:
+        return {}, {}
+
+    # Collect unique INNs with longest name
+    unique: dict[str, str] = {}
+    for row in df.to_dict("records"):
+        inn = row.get("inn")
+        if inn is None or str(inn).strip() == "" or str(inn) == "nan":
+            continue
+        inn = str(inn).strip()
+        if len(inn) < 10 or len(inn) > 12 or not inn.isdigit():
+            continue
+        name_raw = row.get("counterparty")
+        name = str(name_raw).strip() if name_raw and str(name_raw) != "nan" else inn
+        if inn not in unique or len(name) > len(unique[inn]):
+            unique[inn] = name
+
+    if not unique:
+        return {}, {}
+
+    # Upsert via ON CONFLICT on partial unique index (project_id, inn) WHERE inn IS NOT NULL AND is_deleted=false
+    inn_to_cp_id: dict[str, int] = {}
+    for inn, name in unique.items():
+        result = db.execute(
+            text("""
+                INSERT INTO counterparty (
+                    project_id, inn, name, primary_type, created_by_import,
+                    is_deleted, created_at, updated_at
+                )
+                VALUES (:pid, :inn, :name, 'OTHER', TRUE, FALSE, :now, :now)
+                ON CONFLICT (project_id, inn) WHERE inn IS NOT NULL AND is_deleted = false
+                DO UPDATE SET
+                    name = CASE
+                        WHEN LENGTH(EXCLUDED.name) > LENGTH(counterparty.name)
+                        THEN EXCLUDED.name
+                        ELSE counterparty.name
+                    END,
+                    updated_at = EXCLUDED.updated_at
+                RETURNING id
+            """),
+            {"pid": project_id, "inn": inn, "name": name, "now": utcnow()},
+        ).scalar()
+        if result is not None:
+            inn_to_cp_id[inn] = result
+    db.flush()
+
+    # Build cp_id_to_loan_id map: only counterparties with exactly 1 active loan
+    cp_id_to_loan_id: dict[int, int] = {}
+    if inn_to_cp_id:
+        cp_ids = list(inn_to_cp_id.values())
+        loans_rows = db.execute(
+            text("""
+                SELECT counterparty_id, id
+                FROM loan
+                WHERE project_id = :pid
+                  AND counterparty_id = ANY(:cpids)
+                  AND status = 'ACTIVE'
+                  AND is_deleted = false
+            """),
+            {"pid": project_id, "cpids": cp_ids},
+        ).fetchall()
+        # Count loans per counterparty; keep only the ones with exactly 1
+        loan_count: dict[int, int] = {}
+        first_loan: dict[int, int] = {}
+        for cp_id, loan_id in loans_rows:
+            loan_count[cp_id] = loan_count.get(cp_id, 0) + 1
+            first_loan.setdefault(cp_id, loan_id)
+        cp_id_to_loan_id = {cp_id: first_loan[cp_id] for cp_id, cnt in loan_count.items() if cnt == 1}
+
+    return inn_to_cp_id, cp_id_to_loan_id
+
+
 def _ensure_account(db: Session, account_no: str, source_type: str, project_id: int):
     """Create account if it doesn't exist yet (scoped by project_id)."""
     existing = db.execute(
@@ -180,6 +261,10 @@ def import_statement(
         df = apply_master_logic(df, our_accounts, customs_accounts, cp_categories, overrides)
         log_ctx.info("etl.master_logic.done", rows=len(df))
 
+        # 2.5. Auto-upsert Counterparty by INN + build (inn -> cp_id) / (cp_id -> active_loan_id) maps
+        inn_to_cp_id, cp_id_to_loan_id = _upsert_counterparties_from_df(db, df, project_id)
+        log_ctx.info("etl.counterparty_upsert.done", count=len(inn_to_cp_id))
+
         # 3. Bulk upsert
         inserted = 0
         skipped = 0
@@ -216,6 +301,11 @@ def import_statement(
                 skipped += 1
                 continue
 
+            row_inn = safe_str(row.get("inn"))
+            cp_id = inn_to_cp_id.get(row_inn) if row_inn else None
+            loan_payment_type = safe_str(row.get("loan_payment_type"))
+            # Auto-match loan_id only if counterparty has exactly one active loan
+            loan_id = cp_id_to_loan_id.get(cp_id) if (cp_id and loan_payment_type) else None
             batch.append(
                 Transaction(
                     project_id=project_id,
@@ -224,7 +314,7 @@ def import_statement(
                     account=safe_str(row["account"]) or account_no,
                     currency=safe_str(row["currency"]) or "RUB",
                     counterparty=safe_str(row.get("counterparty")),
-                    inn=safe_str(row.get("inn")),
+                    inn=row_inn,
                     counterparty_account=safe_str(row.get("counterparty_account")),
                     purpose=safe_str(row.get("purpose")),
                     income=safe_dec(row.get("income", 0)),
@@ -243,6 +333,11 @@ def import_statement(
                     purpose_tag=safe_str(row.get("purpose_tag")),
                     invoice_id=safe_str(row.get("invoice_id")),
                     annex_id=safe_str(row.get("annex_id")),
+                    counterparty_id=cp_id,
+                    contract_number=safe_str(row.get("contract_number")),
+                    unk_number=safe_str(row.get("unk_number")),
+                    loan_id=loan_id,
+                    loan_payment_type=loan_payment_type,
                 )
             )
 
