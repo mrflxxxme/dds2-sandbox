@@ -50,7 +50,14 @@ class CounterpartyCategory(Base, SoftDeleteMixin):
     cp_key_auto: Mapped[str | None] = mapped_column(String(100))
     cp_name_auto: Mapped[str | None] = mapped_column(String(200))
 
-    __table_args__ = (Index("ix_cp_cat_project_id", "project_id"),)
+    # Counterparty FK (Phase 1: counterparties-loans). cp_key kept as legacy.
+    counterparty_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("counterparty.id"), nullable=True)
+
+    __table_args__ = (
+        Index("ix_cp_cat_project_id", "project_id"),
+        # Partial index created via CONCURRENTLY in migration:
+        #   ix_counterparty_categories_counterparty_id  (counterparty_id)
+    )
 
 
 class Override(Base, SoftDeleteMixin):

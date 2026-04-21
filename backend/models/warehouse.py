@@ -94,11 +94,18 @@ class Warehouse(Base, TimestampMixin, SoftDeleteMixin):
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # Counterparty link (Phase 1: counterparties-loans)
+    counterparty_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("counterparty.id"), nullable=True)
+
     # Relationships
     receipts: Mapped[list["InboundReceipt"]] = relationship(back_populates="warehouse")
     shipments: Mapped[list["OutboundShipment"]] = relationship(back_populates="warehouse")
 
-    __table_args__ = (Index("ix_warehouses_project_id", "project_id"),)
+    __table_args__ = (
+        Index("ix_warehouses_project_id", "project_id"),
+        # Partial index created via CONCURRENTLY in migration:
+        #   ix_warehouses_counterparty_id  (counterparty_id)
+    )
 
 
 # ─── Inbound Receipt (Приёмка) ──────────────────────────────────────────────

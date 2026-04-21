@@ -46,11 +46,20 @@ class Supplier(Base, TimestampMixin, SoftDeleteMixin):
     delivery_days_max: Mapped[int | None] = mapped_column(Integer)
     note: Mapped[str | None] = mapped_column(Text)
 
+    # Counterparty links (Phase 1: counterparties-loans)
+    inn: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    contract_number: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    counterparty_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("counterparty.id"), nullable=True)
+
     factory_orders: Mapped[list["FactoryOrder"]] = relationship(back_populates="supplier")
 
     __table_args__ = (
         UniqueConstraint("project_id", "name", name="uq_supplier_project_name"),
         Index("ix_suppliers_project_id", "project_id"),
+        # Partial unique/indexes created via CONCURRENTLY in migration:
+        #   ix_suppliers_counterparty_id  (counterparty_id)
+        #   ix_suppliers_inn              (project_id, inn) WHERE inn IS NOT NULL
+        #   uq_suppliers_contract         UNIQUE (project_id, contract_number) WHERE contract_number IS NOT NULL AND is_deleted = false
     )
 
 

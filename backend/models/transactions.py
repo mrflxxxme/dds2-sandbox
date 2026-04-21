@@ -64,6 +64,15 @@ class Transaction(Base, SoftDeleteMixin):
     invoice_id: Mapped[str | None] = mapped_column(String(100))
     annex_id: Mapped[str | None] = mapped_column(String(50))
 
+    # Counterparty & Loan links (Phase 1: counterparties-loans)
+    counterparty_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("counterparty.id"), nullable=True)
+    contract_number: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    unk_number: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    loan_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("loan.id"), nullable=True)
+    loan_payment_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("loan_payment.id"), nullable=True)
+    # String (not SAEnum) to avoid Alembic complications when enum values change
+    loan_payment_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
     account_ref: Mapped[Optional["Account"]] = relationship(back_populates="transactions", foreign_keys=[account])
 
     __table_args__ = (
