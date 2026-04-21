@@ -24,10 +24,12 @@ from backend.routers import (
     assembly,
     auth,
     cost,
+    counterparty,
     fbo_supplies,
     funnel,
     import_txn,
     integrations,
+    loans,
     monitoring,
     planning,
     projects,
@@ -498,6 +500,18 @@ app.include_router(
     ai_chat.router,
     prefix="/api/v1",
     tags=["AI Chat"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    counterparty.router,
+    prefix="/api/v1",
+    tags=["Counterparties"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    loans.router,
+    prefix="/api/v1",
+    tags=["Loans"],
     dependencies=[Depends(get_current_user)],
 )
 

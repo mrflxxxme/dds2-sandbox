@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002
 """
 Router: /reports — balance, DDS month, FX, customs controls, dashboard, tax.
 
@@ -7,24 +8,28 @@ Sub-routers:
 """
 
 from datetime import date
-from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models import Project
-from backend.schemas import (
-    BalanceRow, DdsMonthRow, FxControlRow, BalanceDailyRow,
-    IncomeDailyRow, IncomeByCategoryRow, TaxRateSaveRequest,
-)
 from backend.project_context import get_current_project
-from backend.services import reports as reports_service
+from backend.routers.reports_stock import router as _stock_router
 
 # ─── Sub-routers ────────────────────────────────────────────────────────────
 from backend.routers.reports_wb import router as _wb_router
-from backend.routers.reports_stock import router as _stock_router
+from backend.schemas import (
+    BalanceDailyRow,
+    BalanceRow,
+    DdsMonthRow,
+    FxControlRow,
+    IncomeByCategoryRow,
+    IncomeDailyRow,
+    TaxRateSaveRequest,
+)
+from backend.services import reports as reports_service
 
 router = APIRouter(prefix="/reports")
 
@@ -35,7 +40,7 @@ router.include_router(_stock_router)
 
 @router.get("/balance", response_model=list[BalanceRow])
 async def get_balance(
-    as_of: Optional[date] = Query(None),
+    as_of: date | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -70,8 +75,8 @@ async def get_dds_pnl(
 
 @router.get("/fx_control", response_model=list[FxControlRow])
 async def get_fx_control(
-    date_from: Optional[date] = Query(None),
-    date_to: Optional[date] = Query(None),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -80,8 +85,8 @@ async def get_fx_control(
 
 @router.get("/customs_control")
 async def get_customs_control(
-    date_from: Optional[date] = Query(None),
-    date_to: Optional[date] = Query(None),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -92,15 +97,13 @@ async def get_customs_control(
 async def get_balance_daily(
     account: str = Query(...),
     currency: str = Query(...),
-    date_from: Optional[date] = Query(None),
-    date_to: Optional[date] = Query(None),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Running daily balance for a specific account."""
-    return await reports_service.get_balance_daily(
-        db, project.id, account, currency, date_from, date_to
-    )
+    return await reports_service.get_balance_daily(db, project.id, account, currency, date_from, date_to)
 
 
 @router.get("/income_daily", response_model=list[IncomeDailyRow])
@@ -120,20 +123,18 @@ async def get_income_by_category_daily(
     year: int = Query(...),
     month: int = Query(...),
     currency: str = Query("RUB"),
-    cat_lvl1: Optional[str] = Query(None),
+    cat_lvl1: str | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Daily income grouped by category for a given month."""
-    return await reports_service.get_income_by_category_daily(
-        db, project.id, year, month, currency, cat_lvl1
-    )
+    return await reports_service.get_income_by_category_daily(db, project.id, year, month, currency, cat_lvl1)
 
 
 @router.get("/dashboard_summary")
 async def get_dashboard_summary(
-    date_from: Optional[date] = Query(None),
-    date_to: Optional[date] = Query(None),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -143,15 +144,16 @@ async def get_dashboard_summary(
 
 @router.get("/dashboard_daily_filtered")
 async def get_dashboard_daily_filtered(
-    date_from: Optional[date] = Query(None),
-    date_to: Optional[date] = Query(None),
-    cp_key: Optional[str] = Query(None),
-    category: Optional[str] = Query(None),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    cp_key: str | None = Query(None),
+    category: str | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Daily cashflow filtered by counterparty or expense category."""
     from datetime import date as date_cls
+
     df = date_from or date_cls(2020, 1, 1)
     dt = date_to or date_cls.today()
     return await reports_service.get_daily_filtered(db, project.id, df, dt, cp_key=cp_key, category=category)
@@ -159,10 +161,10 @@ async def get_dashboard_daily_filtered(
 
 @router.get("/dashboard_transactions")
 async def get_dashboard_transactions(
-    date_from: Optional[date] = Query(None),
-    date_to: Optional[date] = Query(None),
-    cp_key: Optional[str] = Query(None),
-    category: Optional[str] = Query(None),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    cp_key: str | None = Query(None),
+    category: str | None = Query(None),
     flow: str = Query("all"),
     limit: int = Query(100),
     offset: int = Query(0),
@@ -171,28 +173,41 @@ async def get_dashboard_transactions(
 ):
     """Transaction list filtered by counterparty/category for dashboard detail view."""
     from datetime import date as date_cls
+
     df = date_from or date_cls(2020, 1, 1)
     dt = date_to or date_cls.today()
     return await reports_service.get_filtered_transactions(
-        db, project.id, df, dt, cp_key=cp_key, category=category,
-        flow=flow, limit=limit, offset=offset,
+        db,
+        project.id,
+        df,
+        dt,
+        cp_key=cp_key,
+        category=category,
+        flow=flow,
+        limit=limit,
+        offset=offset,
     )
 
 
 @router.get("/category_counterparties")
 async def get_category_counterparties(
     category: str = Query(...),
-    date_from: Optional[date] = Query(None),
-    date_to: Optional[date] = Query(None),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Counterparties grouped within an expense category."""
     from datetime import date as date_cls
+
     df = date_from or date_cls(2020, 1, 1)
     dt = date_to or date_cls.today()
     return await reports_service.get_category_counterparties(
-        db, project.id, category, df, dt,
+        db,
+        project.id,
+        category,
+        df,
+        dt,
     )
 
 
@@ -203,38 +218,39 @@ async def backfill_fx_rates(
 ):
     """Extract FX rates from existing VTB conversion transactions."""
     from backend.services import fx_service
+
     return await fx_service.backfill_rates_from_transactions(db, project.id)
 
 
 @router.get("/fx_rates")
 async def get_fx_rates(
-    date_from: Optional[date] = Query(None),
-    date_to: Optional[date] = Query(None),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """List FX rates for the project."""
     from datetime import date as date_cls
+
     from backend.models import FxRate
-    from sqlalchemy import select
 
     df = date_from or date_cls(2020, 1, 1)
     dt = date_to or date_cls.today()
     result = await db.execute(
-        select(FxRate).where(
+        select(FxRate)
+        .where(
             FxRate.project_id == project.id,
             FxRate.date >= df,
             FxRate.date <= dt,
-        ).order_by(FxRate.date.desc())
+        )
+        .order_by(FxRate.date.desc())
     )
     rates = result.scalars().all()
-    return [
-        {"id": r.id, "date": str(r.date), "pair": r.pair, "rate": float(r.rate), "source": r.source}
-        for r in rates
-    ]
+    return [{"id": r.id, "date": str(r.date), "pair": r.pair, "rate": float(r.rate), "source": r.source} for r in rates]
 
 
 # ─── Tax Rates ──────────────────────────────────────────────────────
+
 
 @router.get("/tax_rates")
 async def get_tax_rates(
@@ -244,6 +260,7 @@ async def get_tax_rates(
 ):
     """Get tax rates for all brands for the given year."""
     from backend.services import tax_service
+
     return await tax_service.get_tax_rates(db, project.id, year)
 
 
@@ -255,4 +272,34 @@ async def save_tax_rates(
 ):
     """Save project-level tax rates for one year (upsert 12 months)."""
     from backend.services import tax_service
+
     return await tax_service.save_tax_rates(db, project.id, payload.year, payload.tax_regime, payload.months)
+
+
+# ─── Counterparty turnovers (Phase 2: counterparties-loans) ────────────────
+
+
+@router.get("/counterparty-turnovers")
+async def get_counterparty_turnovers(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    type: str | None = Query(None),  # — query arg alias
+    currency: str | None = Query(None, description="RUB or CNY (default: all)"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Counterparty turnovers pivot (month × counterparty), multi-currency.
+    RUB and CNY are returned SEPARATELY — no conversion.
+    Cached 300s; invalidated via invalidate_project_reports().
+    """
+    from backend.services.reports.counterparty_turnovers import get_counterparty_turnovers as svc
+
+    return await svc(
+        db,
+        project.id,
+        date_from=date_from,
+        date_to=date_to,
+        type=type,
+        currency=currency,
+    )

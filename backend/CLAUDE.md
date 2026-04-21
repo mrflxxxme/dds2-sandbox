@@ -24,6 +24,7 @@
 - `DOMAIN_TELEGRAM.md` — telegram bot, TMA, digest, notifications
 - `DOMAIN_AI.md` — AI multi-agent system (7 agents, orchestrator, memory, 19 tools)
 - `DOMAIN_SUPPLY_CHAIN.md` — factory orders, vehicles, delivery status
+- `DOMAIN_COUNTERPARTY.md` — counterparties + loans, Faktura.ru parser, ETL regex enrichment, backfill
 
 ## Undomain files (shared/infra)
 - `services/refs_service.py` — CRUD для справочников (Account, Override, CounterpartyCategory)
