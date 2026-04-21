@@ -71,7 +71,7 @@ async def delete_brand_plan(db: AsyncSession, project_id: int, plan_id: int) -> 
     obj = result.scalar_one_or_none()
     if not obj:
         return False
-    await db.delete(obj)
+    await db.delete(obj)  # no-soft-delete-check: BrandPlan has no SoftDeleteMixin
     await db.commit()
     await invalidate_cache(f"reports:plan_fact:project_id={project_id}")
     return True

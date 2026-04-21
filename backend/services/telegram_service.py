@@ -137,7 +137,7 @@ async def unbind_chat(db: AsyncSession, binding_id: int, project_id: int) -> boo
     binding = result.scalar_one_or_none()
     if not binding:
         return False
-    await db.delete(binding)
+    await db.delete(binding)  # no-soft-delete-check: TelegramChatBinding has no SoftDeleteMixin
     await db.commit()
     return True
 
@@ -312,6 +312,6 @@ async def delete_brand_note(db: AsyncSession, note_id: int, project_id: int) -> 
     note = result.scalar_one_or_none()
     if not note:
         return False
-    await db.delete(note)
+    await db.delete(note)  # no-soft-delete-check: BrandNote has no SoftDeleteMixin
     await db.commit()
     return True

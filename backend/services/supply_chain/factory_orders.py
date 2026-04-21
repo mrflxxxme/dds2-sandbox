@@ -742,7 +742,7 @@ async def delete_item(
     if item.assigned_qty > 0:
         raise ValueError(f"Нельзя удалить: позиция распределена по машинам " f"({item.assigned_qty} шт.)")
 
-    await db.delete(item)
+    item.soft_delete()
     await db.commit()
     await _invalidate_supplier_catalog(project_id)
     return True

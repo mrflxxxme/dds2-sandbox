@@ -61,7 +61,7 @@ class Settings(BaseSettings):
 
     # Rate limiting
     LOGIN_RATE_LIMIT: int = 10  # max attempts per minute per IP
-    REGISTER_ENABLED: bool = True  # disable open registration
+    REGISTER_ENABLED: bool = False  # secure default: включать только явно в dev .env
 
     # File upload limits
     MAX_UPLOAD_SIZE_MB: int = 50
