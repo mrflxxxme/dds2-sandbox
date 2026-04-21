@@ -117,11 +117,14 @@ class RequestIdMiddleware:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Fail-fast: REGISTER_ENABLED=true в production = CRITICAL security hole (audit 2026-04-13)
+    # REGISTER_ENABLED=true в production — осознанный выбор владельца проекта
+    # (открытая регистрация = feature, см. memory/feedback_register_enabled_prod.md).
+    # Ранее был RuntimeError (audit 2026-04-13), но это прибило прод 2026-04-21.
+    # Оставляем warning для видимости, но не блокируем запуск.
     if settings.REGISTER_ENABLED and settings.DDS_ENV == "production":
-        raise RuntimeError(
-            "REGISTER_ENABLED=true in production is forbidden (open registration on financial system). "
-            "Set REGISTER_ENABLED=false in production .env."
+        logger.warning(
+            "REGISTER_ENABLED=true in production — открытая регистрация включена осознанно. "
+            "Если это не входит в план — смени на false в .env и перезапусти backend."
         )
 
     # NOTE: Schema creation is handled by Alembic migrations (entrypoint.sh).
