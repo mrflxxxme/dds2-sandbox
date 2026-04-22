@@ -46,7 +46,10 @@ Model → Alembic migration → Schema → Service → Router → Test
 Детали в `.claude/rules/agent_workflow.md` и `docs/AGENT_DEVELOPMENT.md`.
 - **Фича** → уточни ТЗ, жди подтверждения, потом кодь
 - **Баг/мелочь** → сразу делай
-- **Backend + Frontend** → АВТОМАТИЧЕСКИ создавать Team (TeamCreate), параллельные teammates
+- **Backend + Frontend** (обе части реально нужны) → 2 параллельных агента (или Team)
+- **Только backend / только frontend** → lead делает сам, последовательно (без спавна агентов)
+- **Subagents по триггеру** (`code-reviewer`, `security-reviewer`, etc.) → ПОСЛЕ работы, не параллельно с ней
+- **Валидация** (pytest/vitest/conventions) → Bash напрямую, без спавна агентов
 - **Один файл = один агент**, Alembic миграции ТОЛЬКО последовательно
 
 ### Технические детали
