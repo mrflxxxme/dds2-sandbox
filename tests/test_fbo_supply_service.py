@@ -650,9 +650,9 @@ class TestEnrichPartialAcceptance:
         stale_synced = datetime.utcnow() - timedelta(hours=36)
         supply = WbFboSupply(
             project_id=1,
-            wb_supply_id="38231599",
+            wb_supply_id="38231501",
             wb_status=WbSupplyStatus.ACCEPTED,
-            name="FBW-38231599",
+            name="FBW-38231501",
             created_at_wb=datetime(2026, 4, 1, 14, 16),
             warehouse_name="Тула",
             total_qty=406,
@@ -706,7 +706,7 @@ class TestEnrichPartialAcceptance:
 
         supply = WbFboSupply(
             project_id=1,
-            wb_supply_id="38231599",
+            wb_supply_id="38231502",
             wb_status=WbSupplyStatus.ACCEPTED,
             created_at_wb=datetime(2026, 4, 1),
             warehouse_name="Тула",
@@ -731,7 +731,7 @@ class TestEnrichPartialAcceptance:
 
         supply = WbFboSupply(
             project_id=1,
-            wb_supply_id="38231599",
+            wb_supply_id="38231503",
             wb_status=WbSupplyStatus.ACCEPTED,
             created_at_wb=datetime(2026, 4, 1),
             warehouse_name="Тула",
@@ -766,7 +766,7 @@ class TestBackfillSupplyShipmentLink:
 
         supply = WbFboSupply(
             project_id=1,
-            wb_supply_id="38231599",
+            wb_supply_id="38231504",
             wb_status=WbSupplyStatus.ACCEPTED,
             created_at_wb=datetime(2026, 4, 1),
             outbound_shipment_id=None,
@@ -807,7 +807,7 @@ class TestBackfillSupplyShipmentLink:
         ).scalar_one()
 
         assert refreshed.outbound_shipment_id == shipment.id
-        assert refreshed_sh.wb_supply_id == "38231599"
+        assert refreshed_sh.wb_supply_id == "38231504"
 
     async def test_backfill_noop_for_already_linked(self, db_session):
         """Supply already linked must stay untouched (no DB writes)."""
@@ -825,7 +825,7 @@ class TestBackfillSupplyShipmentLink:
 
         supply = WbFboSupply(
             project_id=1,
-            wb_supply_id="38231599",
+            wb_supply_id="38231505",
             wb_status=WbSupplyStatus.ACCEPTED,
             created_at_wb=datetime(2026, 4, 1),
             outbound_shipment_id=shipment.id,
@@ -866,7 +866,7 @@ class TestFboReturns:
         # Supply with partial acceptance (52 unaccepted)
         supply = WbFboSupply(
             project_id=1,
-            wb_supply_id="38231599",
+            wb_supply_id="38231506",
             wb_status=WbSupplyStatus.ACCEPTED,
             created_at_wb=datetime(2026, 4, 1),
             total_qty=52,
@@ -903,7 +903,7 @@ class TestFboReturns:
         receipt = r.scalar_one()
         assert receipt.status == InboundStatus.ACCEPTED
         assert receipt.is_defect is False
-        assert "38231599" in (receipt.comment or "")
+        assert "38231506" in (receipt.comment or "")
 
         s = await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == supply.id))
         assert s.scalar_one().return_processed_at is not None

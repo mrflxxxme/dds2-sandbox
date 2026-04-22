@@ -50,6 +50,9 @@ export default function AssemblyNewPage() {
     // Bulk paste result feedback
     const [pasteResult, setPasteResult] = useState<string | null>(null);
 
+    // Warning shown when FBO lazy-load returned no items (WB rate limit / empty supply)
+    const [fboItemsWarning, setFboItemsWarning] = useState<string | null>(null);
+
     // Close dropdown on outside click
     useEffect(() => {
         const handler = (e: MouseEvent) => {
@@ -133,10 +136,12 @@ export default function AssemblyNewPage() {
     useEffect(() => {
         if (!fboSupplyId) {
             // Don't clear items when FBO is deselected — user may have added items manually
+            setFboItemsWarning(null);
             return;
         }
         const loadItems = async () => {
             setLoadingFboItems(true);
+            setFboItemsWarning(null);
             try {
                 const items: WbFboSupplyItem[] = await api.getFboSupplyItems(Number(fboSupplyId));
                 // Group by barcode and sum quantities
@@ -153,9 +158,16 @@ export default function AssemblyNewPage() {
                         });
                     }
                 }
-                setFormItems(Array.from(grouped.values()));
-            } catch {
-                setFormItems([]);
+                if (grouped.size === 0) {
+                    setFormItems([{ barcode: '', quantity: 1 }]);
+                    setFboItemsWarning('WB API не вернул позиции для этой поставки (возможно, лимит запросов или данные ещё не синхронизированы). Заполните штрихкоды вручную или вставьте из Excel (Ctrl+V).');
+                } else {
+                    setFormItems(Array.from(grouped.values()));
+                }
+            } catch (e: unknown) {
+                setFormItems([{ barcode: '', quantity: 1 }]);
+                const msg = e instanceof Error ? e.message : 'Ошибка загрузки';
+                setFboItemsWarning(`Не удалось загрузить позиции из WB: ${msg}. Заполните вручную или вставьте из Excel (Ctrl+V).`);
             }
             setLoadingFboItems(false);
         };
@@ -502,6 +514,13 @@ export default function AssemblyNewPage() {
                         </button>
                     </div>
                 </div>
+
+                {fboItemsWarning && !loadingFboItems && (
+                    <div style={{ padding: 12, marginBottom: 12, background: 'rgba(255, 159, 10, 0.1)', border: '1px solid var(--color-warning)', borderRadius: 8, fontSize: 13, color: 'var(--color-text)' }}>
+                        <span style={{ color: 'var(--color-warning)', fontWeight: 600 }}>⚠ </span>
+                        {fboItemsWarning}
+                    </div>
+                )}
 
                 {loadingFboItems ? (
                     <div style={{ textAlign: 'center', padding: 24 }}>Загрузка позиций из FBO...</div>
