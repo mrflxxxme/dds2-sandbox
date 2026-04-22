@@ -158,10 +158,14 @@ async def list_fbo_supplies(
             AssemblyStatus.VEHICLE_ASSIGNED,
             AssemblyStatus.SHIPPED,
         ]
+        # wb_fbo_supply_id.is_not(None): Postgres NOT IN with NULL in subquery
+        # makes every comparison NULL (i.e. false), so an active AR with
+        # wb_fbo_supply_id=NULL would silently zero out the entire supply list.
         active_assembly_ids = select(AssemblyRequest.wb_fbo_supply_id).where(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.is_deleted.is_(False),
             AssemblyRequest.status.in_(active_statuses),
+            AssemblyRequest.wb_fbo_supply_id.is_not(None),
         )
         base_query = base_query.where(WbFboSupply.id.not_in(active_assembly_ids))
 

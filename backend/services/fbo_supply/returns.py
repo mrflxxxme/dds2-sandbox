@@ -66,6 +66,9 @@ async def process_fbo_return(
     if supply is None:
         raise ValueError("FBO Supply not found")
 
+    if supply.return_processed_at is not None:
+        raise ValueError("Return already processed for this supply")
+
     _validate_items_against_delta(supply, items)
 
     if return_type in (FboReturnType.GOODS, FboReturnType.DEFECT):

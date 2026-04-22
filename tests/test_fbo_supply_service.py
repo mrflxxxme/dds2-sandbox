@@ -419,6 +419,74 @@ class TestListWarehouses:
 
 
 @pytest.mark.asyncio
+class TestExcludeWithAssembly:
+    """exclude_with_assembly must tolerate active AR with wb_fbo_supply_id=NULL.
+
+    Without IS NOT NULL filter in subquery, Postgres NOT IN (..., NULL) returns
+    NULL for every comparison → every supply is filtered out silently.
+    """
+
+    async def test_null_ar_does_not_zero_out_supplies(self, db_session):
+        from backend.models.assembly import AssemblyRequest, AssemblyStatus
+        from backend.models.warehouse import Warehouse
+
+        wh = Warehouse(project_id=1, name="wh-excl", warehouse_type="EXTERNAL")
+        db_session.add(wh)
+        await db_session.flush()
+
+        # Two supplies: A (no AR), B (linked to an active AR)
+        supply_a = WbFboSupply(
+            project_id=1,
+            wb_supply_id="EXCL-A",
+            wb_status=WbSupplyStatus.ACTIVE,
+            created_at_wb=datetime(2026, 3, 20),
+        )
+        supply_b = WbFboSupply(
+            project_id=1,
+            wb_supply_id="EXCL-B",
+            wb_status=WbSupplyStatus.ACTIVE,
+            created_at_wb=datetime(2026, 3, 20),
+        )
+        db_session.add_all([supply_a, supply_b])
+        await db_session.flush()
+
+        # AR linked to supply B (active status)
+        linked_ar = AssemblyRequest(
+            project_id=1,
+            warehouse_id=wh.id,
+            number="ASM-EXCL-B",
+            status=AssemblyStatus.PENDING,
+            wb_fbo_supply_id=supply_b.id,
+            estimated_ready_date=date(2026, 4, 10),
+            pallets_count=1,
+            pallet_weight_kg=100,
+        )
+        # Orphan AR with wb_fbo_supply_id=NULL — this is what broke NOT IN before the fix
+        null_ar = AssemblyRequest(
+            project_id=1,
+            warehouse_id=wh.id,
+            number="ASM-EXCL-NULL",
+            status=AssemblyStatus.PENDING,
+            wb_fbo_supply_id=None,
+            estimated_ready_date=date(2026, 4, 10),
+            pallets_count=1,
+            pallet_weight_kg=100,
+        )
+        db_session.add_all([linked_ar, null_ar])
+        await db_session.commit()
+
+        supplies, total = await list_fbo_supplies(
+            db_session,
+            project_id=1,
+            exclude_with_assembly=True,
+        )
+        ids = {s["wb_supply_id"] for s in supplies}
+        assert "EXCL-A" in ids, "Supply without any AR must be returned"
+        assert "EXCL-B" not in ids, "Supply with active AR must be filtered out"
+        assert total >= 1
+
+
+@pytest.mark.asyncio
 class TestGetFboSupplyItems:
     """Test get_fbo_supply_items."""
 
@@ -1043,6 +1111,53 @@ class TestFboReturns:
                 return_type=FboReturnType.UTILIZED,
                 warehouse_id=None,
                 items=[{"barcode": "BC-OVER", "quantity": 5}],  # delta=3
+            )
+
+    async def test_rejects_double_return_for_same_supply(self, db_session):
+        """Idempotency: second call after return_processed_at is set must fail."""
+        from backend.services.fbo_supply.returns import FboReturnType, process_fbo_return
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="S5-IDEMP",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            total_qty=5,
+            accepted_qty=0,
+        )
+        db_session.add(supply)
+        await db_session.flush()
+        db_session.add(
+            WbFboSupplyItem(
+                project_id=1,
+                supply_id=supply.id,
+                wb_order_id="W5",
+                barcode="BC-IDEMP",
+                quantity=5,
+                accepted_qty=0,
+            )
+        )
+        await db_session.commit()
+
+        # first call succeeds (UTILIZED — no warehouse/nomenclature setup needed)
+        await process_fbo_return(
+            db_session,
+            1,
+            supply.id,
+            return_type=FboReturnType.UTILIZED,
+            warehouse_id=None,
+            items=[{"barcode": "BC-IDEMP", "quantity": 5}],
+        )
+
+        # second call must refuse — supply.return_processed_at is already set
+        with pytest.raises(ValueError, match="already processed"):
+            await process_fbo_return(
+                db_session,
+                1,
+                supply.id,
+                return_type=FboReturnType.UTILIZED,
+                warehouse_id=None,
+                items=[{"barcode": "BC-IDEMP", "quantity": 5}],
             )
 
 
