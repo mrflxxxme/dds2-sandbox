@@ -30,39 +30,48 @@
 4. **Мой коммит** → `post-commit-track.sh` → авто `/learn` → обновляю `learnings.md` + `memory/`
 5. **`git push`** → pre-push: backend testmon + vitest + conventions + **slopsquatting**
 6. **Push в `dev`** → `auto-pr.yml` → PR → green CI → `auto-merge.yml` → `cd-production.yml`
-7. **Любой PR** → `claude-review.yml` (opus-4-7 если label `security`/`high-risk`, иначе sonnet)
+7. **Любой PR** → `claude-review.yml` (opus-4-7 везде; `security`/`high-risk` лейблы → 25 turn-ов, иначе 20)
 8. **Упал Tests/Security** → `ci-failure-issue.yml` → auto-issue → auto-close при green
 9. **Cron weekly**: todo-sentinel, known-bugs-sentinel, weekly-retrospective
 
 ## Subagents (8 штук)
 
-| Агент | Модель | Триггер |
-|-------|--------|---------|
-| `code-reviewer` | opus | после правок кода |
-| `security-reviewer` | opus | auth / SQL / crypto / user-input |
-| `planner` | opus | планирование фичи/рефакторинга |
-| `performance-optimizer` | sonnet | новые endpoint / slow queries / bundle |
-| `api-designer` | sonnet | изменение routers / schemas |
-| `database-reviewer` | sonnet | миграции, сложные SQL |
-| `tdd-guide` | sonnet | новые фичи — тесты первыми |
-| `build-error-resolver` | sonnet | pytest/build fail |
+**Модель: все на `opus` 4.7** (Max подписка, требование владельца 2026-04-21). Зафиксировано через `CLAUDE_CODE_SUBAGENT_MODEL=claude-opus-4-7` в `.claude/settings.json`.
 
-## Slash skills (18 штук)
+| Агент | Триггер |
+|-------|---------|
+| `code-reviewer` | после правок кода |
+| `security-reviewer` | auth / SQL / crypto / user-input |
+| `planner` | планирование фичи/рефакторинга |
+| `performance-optimizer` | новые endpoint / slow queries / bundle |
+| `api-designer` | изменение routers / schemas |
+| `database-reviewer` | миграции, сложные SQL |
+| `tdd-guide` | новые фичи — тесты первыми |
+| `build-error-resolver` | pytest/build fail |
+
+## Slash skills
 
 - **Разработка**: `/new-endpoint`, `/new-page`, `/migration`, `/tdd`, `/plan`
-- **Крупные фичи**: `/spec` (spec-driven, regressions 6% → 2%)
+- **Крупные фичи локально**: `/spec` (2-5 файлов, regressions 6% → 2%)
+- **Крупные фичи облако ☁️**: `/ultraplan` (cross-domain рефакторы 3+ DOMAIN, миграция auth, новый домен, большая интеграция). См. `.claude/rules/lead_agent_v2.md` §5
 - **Рефакторинг**: `/codemod` (AST-grep + LLM для 10+ файлов)
 - **Emergency**: `/hotfix`, `/rollback`
 - **Проверки**: `/smoke`, `/verify`, `/review`, `/status`, `/build-fix`
+- **Ревью больших PR облако ☁️**: `/ultrareview` (PR > 500 LOC, миграции БД, security-sensitive, money-handling). До 5 мая 2026 — 3 бесплатных запуска
 - **Рефлексия**: `/learn` (авто-после-коммита), `/docs`, `/pause`, `/resume`
 
-## Model routing (экономия ~65%)
+## Model policy
 
-| Задача | Модель | Почему |
-|--------|--------|--------|
-| Code/security review, planning | **opus-4-7** | +13% accuracy (SWE-bench), ловит CRITICAL/HIGH |
-| Реализация, рефакторинг, тесты | **sonnet-4-6** | default, достаточно |
-| Валидация, docs, smoke | **haiku-4-5** | дёшево + быстро |
+**Всё на Opus 4.7** (Max подписка, cost = 0). Решение 2026-04-21 — важнее качество рассуждений, чем экономия токенов.
+
+| Где | Модель |
+|-----|--------|
+| Subagents (все 8) | `opus` через frontmatter + `CLAUDE_CODE_SUBAGENT_MODEL=claude-opus-4-7` |
+| `claude-review.yml` CI | `claude-opus-4-7` (security/high-risk лейблы → 25 turn, иначе 20) |
+| `auto-docs-learn.yml` | `claude-opus-4-7` |
+| Prompt cache | `ENABLE_PROMPT_CACHING_1H=1` — TTL 1 час на стабильный контекст |
+
+Старая policy (opus для ревью, sonnet для реализации, haiku для docs) отменена — см. [`memory/feedback_model_always_opus.md`](/Users/a1/.claude/projects/-Users-a1-Desktop-dds-app/memory/feedback_model_always_opus.md).
 
 ## Защита от AI-ошибок
 
@@ -82,11 +91,13 @@
 
 ## Workflow для пользователя
 
-**Продолжай работать как раньше** — всё подключено и срабатывает само. Явно вызывать новые skills только в трёх кейсах:
+**Продолжай работать как раньше** — всё подключено и срабатывает само. Явно вызывать skills только когда нужно:
 
 1. `/hotfix` / `/rollback` — когда прод лёг
-2. `/spec` — для фич длиннее 1 дня
-3. `/codemod` — для массовых замен
+2. `/spec` — для фич 2-5 файлов длиннее 1 дня
+3. `/ultraplan` ☁️ — для cross-domain рефакторов (3+ DOMAIN), миграции auth, нового домена
+4. `/ultrareview` ☁️ — для PR > 500 LOC, миграций БД, security-sensitive кода
+5. `/codemod` — для массовых замен (10+ файлов)
 
 Остальные agents (`performance-optimizer`, `api-designer`) я вызову сам когда замечу что задача в их профиль.
 
@@ -97,7 +108,7 @@ git push origin dev
     ↓ pre-push: tests + vitest + conventions + slopsquatting
     ↓
 auto-pr.yml → PR dev → main
-    ↓ claude-review.yml (opus для security, sonnet иначе)
+    ↓ claude-review.yml (opus-4-7 везде; security/high-risk → 25 turn, default 20)
     ↓ Tests + Security Audit + Conventions
     ↓ green CI
 auto-merge.yml → squash merge в main
@@ -112,8 +123,10 @@ post-merge.yml → healthcheck → GH issue при fail
 ## Связанные документы
 
 - [`CLAUDE.md`](../CLAUDE.md) — главная точка входа, iron rules, архитектура
+- [`.claude/rules/lead_agent_v2.md`](../.claude/rules/lead_agent_v2.md) — **канон lead-agent v2** (роутинг, параллелизм, cloud-команды)
+- [`docs/OPUS_4_7_MIGRATION.md`](OPUS_4_7_MIGRATION.md) — специфика 4.7 (literal понимание, verbosity, task budget)
 - [`docs/AGENT_DEVELOPMENT.md`](AGENT_DEVELOPMENT.md) — детали TDD + Teams workflow
-- [`.claude/rules/agent_workflow.md`](../.claude/rules/agent_workflow.md) — file ownership, model routing
+- [`.claude/rules/agent_workflow.md`](../.claude/rules/agent_workflow.md) — file ownership, параллелизм
 - [`.claude/rules/learnings.md`](../.claude/rules/learnings.md) — накопленные паттерны и антипаттерны
 - [`memory/MEMORY.md`](/Users/a1/.claude/projects/-Users-a1-Desktop-dds-app/memory/MEMORY.md) — user feedback, project state, references
 - [`REVIEW.md`](../REVIEW.md) — чеклист code review

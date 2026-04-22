@@ -95,6 +95,8 @@ src/types/api.ts — TypeScript интерфейсы
 | Фронтенд | types/api.ts; formatNumber(); loading+error+empty states | src/app/, src/lib/api/ |
 
 ## Быстрая навигация (для агентов)
+- **Lead-agent canon v2** → `.claude/rules/lead_agent_v2.md` (роутинг задач, параллелизм, cloud-команды, anti-patterns — источник правды для Opus 4.7)
+- **Opus 4.7 specifics** → `docs/OPUS_4_7_MIGRATION.md` (что изменилось vs 4.6: literal понимание, verbosity, subagent delegation, task budget)
 - **Карта backend** → `backend/MAP.md` (типовые паттерны, импорты, где что лежит)
 - **AI workflow** → `docs/AI_WORKFLOW.md` (шпаргалка: сценарии, subagents, skills, что работает само)
 - **Шаблоны** → `.claude/templates/` (скелеты service, router, test, model, schema, page)
@@ -119,10 +121,12 @@ src/types/api.ts — TypeScript интерфейсы
 
 **Slash skills** (`.claude/commands/`) — строгие процессы:
 - **Разработка**: `/new-endpoint`, `/new-page`, `/migration`, `/tdd`, `/plan`
-- **Крупные фичи**: `/spec` (spec-driven, 3 артефакта, regressions 6%→2%)
+- **Крупные фичи** (локально): `/spec` (spec-driven, 3 артефакта, regressions 6%→2%) — для 2-5 файлов
+- **Крупные фичи** (облако ☁️): `/ultraplan` — cross-domain рефакторы (3+ DOMAIN), миграция auth, новый домен, большая интеграция. 3 explorer-агента + critic, освобождает локальный терминал. См. `.claude/rules/lead_agent_v2.md` §5
 - **Рефакторинг**: `/codemod` (AST-grep + LLM для 10+ файлов)
 - **Emergency**: `/hotfix` (прод-инцидент), `/rollback` (откат деплоя)
 - **Проверки**: `/smoke`, `/verify`, `/review`, `/status`, `/build-fix`
+- **Ревью больших PR** (облако ☁️): `/ultrareview` — PR > 500 LOC, миграции БД, security-sensitive, money-handling. До 5 мая 2026 — 3 бесплатных запуска
 - **Рефлексия**: `/learn` (авто-после коммита), `/docs`, `/pause`, `/resume`
 
 ## Git
@@ -141,6 +145,7 @@ src/types/api.ts — TypeScript интерфейсы
 - **Conventions enforcement**: Check 10 (`db.delete()` на SoftDelete) теперь **error**, не warn — коммит `fe5d74f`. Обход: комментарий `# no-soft-delete-check: <reason>` рядом со строкой
 - **Auto-flow**: push dev → auto-PR → green CI → auto-merge → deploy
 - **Branch protection `main`**: require Tests + Security Audit, strict
+- **Deep review** (`/ultrareview` multi-agent, ~$15-25/ревью): `auto-label-deep-review.yml` ставит label `deep-review` на PR с миграциями, `Numeric(18,` изменениями, auth/crypto файлами, diff > 1000 LOC. Lead вызывает `/ultrareview` в CLI перед merge. Правила и бюджет: `REVIEW.md`
 - Установка хуков: `make setup` | Экстренный пропуск: `git push --no-verify`
 
 ## Деплой по серверам (3-серверная архитектура)
@@ -158,7 +163,8 @@ src/types/api.ts — TypeScript интерфейсы
 | `test.yml` | push / PR | Tests (pytest + vitest, без E2E — E2E вынесен в nightly) |
 | `e2e-nightly.yml` | **cron** `0 3 * * *` (ежедневно 03:00 UTC) + manual | Smoke E2E (27 страниц не крашатся) — не блокирует deploy |
 | `security.yml` | push / PR / **cron** `0 5 * * *` (daily 05:00 UTC) | pip-audit, Trivy, Snyk, npm audit |
-| `claude-review.yml` | PR / `@claude` comment | Claude AI-ревью PR (opus-4-7 везде) |
+| `claude-review.yml` | PR / `@claude` comment | Claude AI-ревью PR single-agent (opus-4-7 везде, 20-25 turns) |
+| `auto-label-deep-review.yml` | PR open/sync | ставит label `deep-review` на PR с migrations / money / auth / >1000 LOC → сигнал lead'у запустить `/ultrareview` перед merge |
 | `auto-pr.yml` | push в `dev` | автоматический PR `dev → main` |
 | `auto-merge.yml` | green CI на auto-PR | авто-merge при зелёном CI |
 | `cd-production.yml` | merge в `main` | деплой на app-сервер |

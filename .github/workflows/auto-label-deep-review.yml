@@ -1,0 +1,77 @@
+# Auto-label PRs that warrant /ultrareview multi-agent review
+# Label: deep-review — signals lead to run /ultrareview CLI before merge.
+# Triggers: migrations, money-handling (Numeric(18,2)), auth/crypto, diff > 1000 LOC.
+name: Auto-label deep-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  auto-label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect risk signals
+        id: detect
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
+          CHANGED_FILES="$(git diff --name-only "$BASE_SHA...$HEAD_SHA")"
+          DIFF_LOC="$(git diff --shortstat "$BASE_SHA...$HEAD_SHA" | awk '{print ($4+$6)}')"
+          : "${DIFF_LOC:=0}"
+
+          REASONS=()
+
+          # 1. Alembic migrations — невозможно откатить после merge
+          if echo "$CHANGED_FILES" | grep -qE '^migrations/versions/'; then
+            REASONS+=("migrations")
+          fi
+
+          # 2. Money-handling — Numeric(18, 2) в моделях/сервисах
+          if echo "$CHANGED_FILES" | grep -qE '\.(py|ts|tsx)$'; then
+            MONEY_HITS=$(git diff "$BASE_SHA...$HEAD_SHA" -- '*.py' '*.ts' '*.tsx' 2>/dev/null \
+              | grep -cE '^\+.*Numeric\(18' || true)
+            if [ "${MONEY_HITS:-0}" -gt 0 ]; then
+              REASONS+=("money-handling")
+            fi
+          fi
+
+          # 3. Auth / crypto / security-sensitive
+          if echo "$CHANGED_FILES" | grep -qE '(auth|crypto|jwt|password|security|rate_limit)' ; then
+            REASONS+=("auth/crypto")
+          fi
+
+          # 4. Huge PR — > 1000 LOC
+          if [ "$DIFF_LOC" -gt 1000 ]; then
+            REASONS+=("huge-pr:${DIFF_LOC}LOC")
+          fi
+
+          if [ ${#REASONS[@]} -gt 0 ]; then
+            echo "needs_label=true" >> "$GITHUB_OUTPUT"
+            IFS=',' ; echo "reasons=${REASONS[*]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_label=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Add deep-review label
+        if: steps.detect.outputs.needs_label == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REASONS: ${{ steps.detect.outputs.reasons }}
+        run: |
+          gh pr edit "$PR_NUMBER" --add-label "deep-review"
+          gh pr comment "$PR_NUMBER" --body "🔍 **Auto-labelled \`deep-review\`** — reasons: \`$REASONS\`
+
+          Перед merge рекомендуется: \`/ultrareview\` в Claude Code CLI (multi-agent verification, \$15-\$25).
+          Если уверен что ручного ревью достаточно — сними label."

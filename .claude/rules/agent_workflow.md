@@ -4,8 +4,12 @@ paths:
 ---
 # Agent Workflow — DDS2
 
+> **Канон:** `lead_agent_v2.md` (этот же каталог) — источник правды для lead-agent роли. Этот файл — операционные детали параллелизма и subagents, дополняет канон.
+
 ## Принцип
 **По умолчанию lead делает задачу сам, последовательно.** Параллельные агенты включаются только когда задача реально делится на изолированные слои (backend + frontend).
+
+**Opus 4.7 консервативен** — параллелизм включается только по **явной** формулировке («spawn subagents in the same turn», «launch teammates concurrently», «run reviewers in parallel»). Без такой формулировки lead делает сам.
 
 **Подробно:** `docs/AGENT_DEVELOPMENT.md`
 
@@ -49,7 +53,11 @@ paths:
 | `/migration` | Alembic миграция (heads → revision → upgrade/downgrade) |
 | `/new-page` | Next.js страница (types → api → page с loading/error/empty) |
 | `/plan` | альтернатива встроенному Plan Mode для backend-only задач |
-| `/spec` | spec-driven development для крупных фич |
+| `/spec` | spec-driven development для крупных фич (2-5 файлов) |
+| `/ultraplan` ☁️ | cross-domain рефакторы (3+ DOMAIN), миграция auth, новый домен — облачное планирование (3 explorer + critic) |
+| `/ultrareview` ☁️ | PR > 500 LOC, миграции БД, security-sensitive, money-handling — multi-agent verification в облаке |
+
+**Правило cloud-offload:** если `/ultraplan` или `/ultrareview` запущены — lead **не дублирует** их работу локально. См. `lead_agent_v2.md` §5.
 
 ## Plan Mode для фич
 Lead вызывает `EnterPlanMode` ПЕРЕД любыми правками. Без `ExitPlanMode` (approval пользователя) код не пишется. Решает «агент сразу кодит» из `feedback_ask_questions`.
@@ -95,3 +103,6 @@ Lead agent (Phase 1, Phase 3 коммит) → НЕ изолируется (ра
 
 ### 4. Long-running → run_in_background
 > Если ожидаемое время выполнения >5 мин — `run_in_background: true`. Иначе пользователь думает что Claude завис.
+
+### 5. Task budget (advisory, новое в 4.7)
+> Средний worktree-teammate: **40k токенов** на задачу. Long-running (миграция + backfill + тесты): **80k токенов**. Если teammate превышает без результата — это сигнал что он зациклился, fail-fast с отчётом, не продолжать loop. Pre-commit падает 2 раза на одном файле → остановка (см. пункт 3 teammate-constraints в `lead_agent_v2.md` §4). Прецедент 2026-04-21: `agent-a9ac9883`, 25 мин вместо 15 — остановлен вручную через TaskStop.
