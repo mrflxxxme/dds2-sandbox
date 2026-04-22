@@ -237,7 +237,9 @@ async def enrich_fbo_supplies(
             # diverge (detail counts depersonalized as accepted, goods doesn't) —
             # we trust per-SKU goods numbers for supply-level accepted_qty too,
             # otherwise partial_only filter misses these supplies.
+            goods_ok = True
             if supply.wb_status == WbSupplyStatus.ACCEPTED:
+                goods_ok = False
                 try:
                     await asyncio.sleep(FBW_RATE_LIMIT_DELAY)
                     goods = await api_client.get_fbw_supply_goods(wb_id_int, limit=100, offset=0)
@@ -245,13 +247,18 @@ async def enrich_fbo_supplies(
                         await _upsert_supply_items_fbw(db, project_id, supply.id, wb_id_int, goods)
                         supply.accepted_qty = sum(int(g.get("acceptedQuantity") or 0) for g in goods)
                         supply.total_qty = sum(int(g.get("quantity") or 0) for g in goods)
+                    goods_ok = True
                 except Exception as goods_err:
                     logger.warning(
                         "fbo_enrich.goods_error",
                         extra={"wb_supply_id": supply.wb_supply_id, "error": str(goods_err)},
                     )
 
-            supply.synced_at = utcnow()
+            # Only mark as synced when goods API succeeded — otherwise 24h cooldown
+            # blocks retry indefinitely even after WB recovers from 429 (P 2026-04-22:
+            # 44 ACCEPTED supplies stuck with accepted_qty=0 for 13 days).
+            if goods_ok:
+                supply.synced_at = utcnow()
             await db.commit()
             enriched += 1
 
