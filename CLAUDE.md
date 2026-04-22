@@ -145,6 +145,7 @@ src/types/api.ts — TypeScript интерфейсы
 - **Conventions enforcement**: Check 10 (`db.delete()` на SoftDelete) теперь **error**, не warn — коммит `fe5d74f`. Обход: комментарий `# no-soft-delete-check: <reason>` рядом со строкой
 - **Auto-flow**: push dev → auto-PR → green CI → auto-merge → deploy
 - **Branch protection `main`**: require Tests + Security Audit, strict
+- **Deep review** (`/ultrareview` multi-agent, ~$15-25/ревью): `auto-label-deep-review.yml` ставит label `deep-review` на PR с миграциями, `Numeric(18,` изменениями, auth/crypto файлами, diff > 1000 LOC. Lead вызывает `/ultrareview` в CLI перед merge. Правила и бюджет: `REVIEW.md`
 - Установка хуков: `make setup` | Экстренный пропуск: `git push --no-verify`
 
 ## Деплой по серверам (3-серверная архитектура)
@@ -162,7 +163,8 @@ src/types/api.ts — TypeScript интерфейсы
 | `test.yml` | push / PR | Tests (pytest + vitest, без E2E — E2E вынесен в nightly) |
 | `e2e-nightly.yml` | **cron** `0 3 * * *` (ежедневно 03:00 UTC) + manual | Smoke E2E (27 страниц не крашатся) — не блокирует deploy |
 | `security.yml` | push / PR / **cron** `0 5 * * *` (daily 05:00 UTC) | pip-audit, Trivy, Snyk, npm audit |
-| `claude-review.yml` | PR / `@claude` comment | Claude AI-ревью PR (opus-4-7 везде) |
+| `claude-review.yml` | PR / `@claude` comment | Claude AI-ревью PR single-agent (opus-4-7 везде, 20-25 turns) |
+| `auto-label-deep-review.yml` | PR open/sync | ставит label `deep-review` на PR с migrations / money / auth / >1000 LOC → сигнал lead'у запустить `/ultrareview` перед merge |
 | `auto-pr.yml` | push в `dev` | автоматический PR `dev → main` |
 | `auto-merge.yml` | green CI на auto-PR | авто-merge при зелёном CI |
 | `cd-production.yml` | merge в `main` | деплой на app-сервер |
