@@ -15,7 +15,6 @@ from backend.project_context import get_current_project
 from backend.schemas.wb_fbo import (
     FboReturnRequest,
     FboReturnResponse,
-    FboSupplyLinkRequest,
     FboSyncResultSchema,
     WbFboSupplyItemSchema,
     WbFboSupplyListResponse,
@@ -217,29 +216,6 @@ async def sync_fbo_statuses(
         raise HTTPException(500, f"Status sync failed: {str(e)[:200]}") from e
 
 
-# ─── Link supply ↔ shipment ───────────────────────────────────────────────
-
-
-@router.post("/{supply_id}/link", dependencies=[Depends(rate_limit_write)])
-async def link_supply(
-    supply_id: int,
-    payload: FboSupplyLinkRequest,
-    project: Project = Depends(get_current_project),
-    db: AsyncSession = Depends(get_db),
-):
-    """Link FBO supply to an OutboundShipment."""
-    try:
-        supply = await fbo_supply_service.link_supply_to_shipment(
-            db,
-            project.id,
-            supply_id,
-            payload.outbound_shipment_id,
-        )
-        return WbFboSupplySchema.model_validate(supply)
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from None
-
-
 # ─── Return: handle unaccepted qty ─────────────────────────────────────────
 
 
@@ -279,21 +255,3 @@ async def create_fbo_return(
         raise HTTPException(400, str(e)) from None
 
     return FboReturnResponse(**result)
-
-
-@router.delete("/{supply_id}/link", dependencies=[Depends(rate_limit_write)])
-async def unlink_supply(
-    supply_id: int,
-    project: Project = Depends(get_current_project),
-    db: AsyncSession = Depends(get_db),
-):
-    """Unlink FBO supply from OutboundShipment."""
-    try:
-        supply = await fbo_supply_service.unlink_supply_from_shipment(
-            db,
-            project.id,
-            supply_id,
-        )
-        return WbFboSupplySchema.model_validate(supply)
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from None

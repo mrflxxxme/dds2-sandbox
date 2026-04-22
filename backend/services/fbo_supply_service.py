@@ -4,7 +4,8 @@ FBO Supply service: backward-compatible re-export shim.
 The actual implementation lives in backend/services/fbo_supply/ package:
   - mappers.py: Pure transformations (status maps, parse dates, create/update from API)
   - sync.py: Sync orchestration (sync_fbo_supplies, enrich, sync_statuses, auto-deliver)
-  - service.py: Query + link operations (list, get_items, link/unlink, list_warehouses)
+  - service.py: Query operations (list, get_items, list_warehouses)
+  - returns.py: Handle unaccepted qty (GOODS/DEFECT/UTILIZED)
 
 All public functions are re-exported here so existing imports
 like `from backend.services.fbo_supply_service import X` or
@@ -29,11 +30,9 @@ from backend.services.fbo_supply import (  # noqa: F401
     enrich_fbo_supplies,
     get_fbo_summary,
     get_fbo_supply_items,
-    link_supply_to_shipment,
     list_fbo_supplies,
     list_warehouses,
     process_fbo_return,
     sync_fbo_statuses,
     sync_fbo_supplies,
-    unlink_supply_from_shipment,
 )

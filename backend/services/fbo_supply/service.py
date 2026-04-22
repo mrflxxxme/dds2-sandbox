@@ -1,11 +1,13 @@
 """
-FBO Supply service — query + link operations.
+FBO Supply service — query operations.
 
 Functions:
 - list_warehouses: Unique warehouse names for filter dropdown
 - list_fbo_supplies: List with search/filter/sort/pagination
 - get_fbo_supply_items: Items for a supply (with lazy-load from WB API)
-- link_supply_to_shipment / unlink_supply_from_shipment
+
+Link/unlink is done via AssemblyRequest create/delete in assembly module —
+the FBO page is read-only for the supply ↔ assembly relationship.
 """
 
 import logging
@@ -16,11 +18,9 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.assembly import AssemblyRequest, AssemblyStatus
-from backend.models.warehouse import OutboundShipment
 from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem, WbSupplyStatus
 
 from .mappers import _update_supply_from_fbw_detail, _upsert_supply_items_fbw
-from .sync import _auto_deliver_shipment
 
 logger = logging.getLogger(__name__)
 
@@ -169,15 +169,20 @@ async def list_fbo_supplies(
         )
         base_query = base_query.where(WbFboSupply.id.not_in(active_assembly_ids))
 
-    # Supplies without ANY assembly request (ever, including DELIVERED/CANCELLED).
-    # Use for "WB принял, но в DDS нет заявки на сборку" summary card.
+    # Supplies that WB already ACCEPTED but have NO assembly request in DDS.
+    # Non-final statuses (ACTIVE/IN_PROGRESS/CANCELLED) are excluded: they are
+    # either in progress (AR may arrive later) or cancelled (not actionable).
+    # Matches the "Без заявки на сборку" summary card (see get_fbo_summary).
     if without_assembly:
         any_assembly_ids = select(AssemblyRequest.wb_fbo_supply_id).where(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.wb_fbo_supply_id.is_not(None),
             AssemblyRequest.is_deleted.is_(False),
         )
-        base_query = base_query.where(WbFboSupply.id.not_in(any_assembly_ids))
+        base_query = base_query.where(
+            WbFboSupply.wb_status == WbSupplyStatus.ACCEPTED,
+            WbFboSupply.id.not_in(any_assembly_ids),
+        )
 
     # Partial acceptance — only for ACCEPTED supplies where WB rejected part of
     # the shipment (non-final statuses always have accepted_qty=0 and are not
@@ -321,87 +326,3 @@ async def get_fbo_supply_items(
             )
 
     return items
-
-
-# ─── Link / Unlink supply <-> OutboundShipment ───────────────────────────────
-
-
-async def link_supply_to_shipment(
-    db: AsyncSession,
-    project_id: int,
-    supply_id: int,
-    outbound_shipment_id: int,
-) -> WbFboSupply:
-    """
-    Link FBO supply to an OutboundShipment.
-    Sets supply.outbound_shipment_id and shipment.wb_supply_id.
-    """
-    # Get supply
-    result = await db.execute(
-        select(WbFboSupply).where(
-            WbFboSupply.id == supply_id,
-            WbFboSupply.project_id == project_id,
-        )
-    )
-    supply = result.scalar_one_or_none()
-    if not supply:
-        raise ValueError("FBO Supply not found")
-
-    # Get shipment
-    result = await db.execute(
-        select(OutboundShipment).where(
-            OutboundShipment.id == outbound_shipment_id,
-            OutboundShipment.project_id == project_id,
-            OutboundShipment.is_deleted == False,  # noqa: E712
-        )
-    )
-    shipment = result.scalar_one_or_none()
-    if not shipment:
-        raise ValueError("Outbound shipment not found")
-
-    # Link both sides
-    supply.outbound_shipment_id = outbound_shipment_id
-    shipment.wb_supply_id = supply.wb_supply_id
-
-    # Auto-deliver if supply already ACCEPTED
-    if supply.wb_status == WbSupplyStatus.ACCEPTED:
-        await _auto_deliver_shipment(db, project_id, outbound_shipment_id)
-
-    await db.commit()
-    await db.refresh(supply)
-    return supply
-
-
-async def unlink_supply_from_shipment(
-    db: AsyncSession,
-    project_id: int,
-    supply_id: int,
-) -> WbFboSupply:
-    """Unlink FBO supply from its OutboundShipment."""
-    result = await db.execute(
-        select(WbFboSupply).where(
-            WbFboSupply.id == supply_id,
-            WbFboSupply.project_id == project_id,
-        )
-    )
-    supply = result.scalar_one_or_none()
-    if not supply:
-        raise ValueError("FBO Supply not found")
-
-    if supply.outbound_shipment_id:
-        # Clear shipment side
-        result = await db.execute(
-            select(OutboundShipment).where(
-                OutboundShipment.id == supply.outbound_shipment_id,
-                OutboundShipment.project_id == project_id,
-                OutboundShipment.is_deleted == False,  # noqa: E712
-            )
-        )
-        shipment = result.scalar_one_or_none()
-        if shipment:
-            shipment.wb_supply_id = None  # type: ignore[assignment]
-
-    supply.outbound_shipment_id = None
-    await db.commit()
-    await db.refresh(supply)
-    return supply

@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatDateTime } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { WbFboSupply, WbFboSupplyItem, OutboundShipment, Warehouse, FboReturnType } from '@/types/api';
+import type { WbFboSupply, WbFboSupplyItem, Warehouse, FboReturnType } from '@/types/api';
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -59,13 +59,6 @@ export default function FboSuppliesPage() {
     const [expandedId, setExpandedId] = useState<number | null>(null);
     const [expandedItems, setExpandedItems] = useState<WbFboSupplyItem[]>([]);
     const [loadingItems, setLoadingItems] = useState(false);
-
-    // Link modal
-    const [linkSupplyId, setLinkSupplyId] = useState<number | null>(null);
-    const [shipments, setShipments] = useState<OutboundShipment[]>([]);
-    const [loadingShipments, setLoadingShipments] = useState(false);
-    const [selectedShipmentId, setSelectedShipmentId] = useState<number | null>(null);
-    const [linking, setLinking] = useState(false);
 
     // Return modal
     const [returnState, setReturnState] = useState<{
@@ -203,54 +196,6 @@ export default function FboSuppliesPage() {
             setSyncMessage(e instanceof Error ? e.message : 'Ошибка');
         }
         setSyncingStatuses(false);
-    };
-
-    // ─── Link modal ──────────────────────────────────────────────────────
-
-    const openLinkModal = async (supplyId: number) => {
-        setLinkSupplyId(supplyId);
-        setSelectedShipmentId(null);
-        setLoadingShipments(true);
-        try {
-            // Load all warehouses, then shipments from each
-            const warehouses = await api.getWarehouses();
-            const allShipments: OutboundShipment[] = [];
-            for (const wh of warehouses) {
-                try {
-                    const ships = await api.getShipments(wh.id);
-                    allShipments.push(...ships);
-                } catch { /* skip */ }
-            }
-            // Show only SHIPPED/DRAFT (not yet linked)
-            setShipments(allShipments.filter(s =>
-                (s.status === 'SHIPPED' || s.status === 'DRAFT') && !s.wb_supply_id
-            ));
-        } catch {
-            setShipments([]);
-        }
-        setLoadingShipments(false);
-    };
-
-    const handleLink = async () => {
-        if (!linkSupplyId || !selectedShipmentId) return;
-        setLinking(true);
-        try {
-            await api.linkFboSupply(linkSupplyId, selectedShipmentId);
-            setLinkSupplyId(null);
-            await load();
-        } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка привязки');
-        }
-        setLinking(false);
-    };
-
-    const handleUnlink = async (supplyId: number) => {
-        try {
-            await api.unlinkFboSupply(supplyId);
-            await load();
-        } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка отвязки');
-        }
     };
 
     // ─── Pagination ──────────────────────────────────────────────────────
@@ -478,19 +423,19 @@ export default function FboSuppliesPage() {
                                                         </span>
                                                     </Link>
                                                 ) : supply.outbound_shipment_id ? (
-                                                    <button
-                                                        className="btn btn-secondary btn-sm"
-                                                        onClick={() => handleUnlink(supply.id)}
-                                                        title="Отвязать"
-                                                    >
-                                                        Связана #{supply.outbound_shipment_id}
-                                                    </button>
-                                                ) : (
+                                                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                                        Отгружена
+                                                    </span>
+                                                ) : supply.wb_status === 'ACCEPTED' ? (
                                                     <Link href={`/p/${slug}/warehouse/assembly/new?fbo_supply_id=${supply.id}`}>
                                                         <button className="btn btn-primary btn-sm">
                                                             Создать заявку
                                                         </button>
                                                     </Link>
+                                                ) : (
+                                                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                                        &mdash;
+                                                    </span>
                                                 )}
                                             </td>
                                             <td>{formatDateTime(supply.created_at_wb)}</td>
@@ -545,60 +490,6 @@ export default function FboSuppliesPage() {
                             </div>
                         </div>
                     )}
-                </div>
-            )}
-
-            {/* Link Modal */}
-            {linkSupplyId !== null && (
-                <div className="modal-overlay" onClick={() => setLinkSupplyId(null)}>
-                    <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
-                        <h2 className="modal-title">Связать с отгрузкой</h2>
-                        {loadingShipments ? (
-                            <div style={{ textAlign: 'center', padding: 24 }}>Загрузка отгрузок...</div>
-                        ) : shipments.length === 0 ? (
-                            <div style={{ textAlign: 'center', padding: 24, color: 'var(--color-text-muted)' }}>
-                                Нет доступных отгрузок (DRAFT/SHIPPED без привязки)
-                            </div>
-                        ) : (
-                            <div style={{ maxHeight: 300, overflow: 'auto' }}>
-                                {shipments.map(s => (
-                                    <div
-                                        key={s.id}
-                                        onClick={() => setSelectedShipmentId(s.id)}
-                                        style={{
-                                            padding: '10px 12px',
-                                            borderRadius: 8,
-                                            cursor: 'pointer',
-                                            border: selectedShipmentId === s.id
-                                                ? '2px solid var(--color-primary)'
-                                                : '1px solid var(--color-border)',
-                                            marginBottom: 8,
-                                            background: selectedShipmentId === s.id
-                                                ? 'var(--color-primary-light)'
-                                                : 'transparent',
-                                        }}
-                                    >
-                                        <div style={{ fontWeight: 500 }}>{s.number}</div>
-                                        <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-                                            {s.destination || 'Без назначения'} &middot; {s.status} &middot; {s.items?.length || 0} поз.
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
-                            <button className="btn btn-secondary" onClick={() => setLinkSupplyId(null)}>
-                                Отмена
-                            </button>
-                            <button
-                                className="btn btn-primary"
-                                onClick={handleLink}
-                                disabled={linking || !selectedShipmentId}
-                            >
-                                {linking ? 'Привязка...' : 'Связать'}
-                            </button>
-                        </div>
-                    </div>
                 </div>
             )}
 

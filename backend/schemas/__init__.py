@@ -153,7 +153,6 @@ from backend.schemas.warehouse import (
 
 # WB FBO Supplies
 from backend.schemas.wb_fbo import (
-    FboSupplyLinkRequest,
     FboSyncResultSchema,
     WbFboSupplyItemSchema,
     WbFboSupplyListResponse,
@@ -274,6 +273,5 @@ __all__ = [
     "WbFboSupplyWithItemsSchema",
     "WbFboSupplyItemSchema",
     "WbFboSupplyListResponse",
-    "FboSupplyLinkRequest",
     "FboSyncResultSchema",
 ]

@@ -7,7 +7,8 @@ Import from this package or from backend.services.fbo_supply_service.
 Modules:
   - mappers: Pure transformations (status maps, parse dates, create/update from API)
   - sync: Sync orchestration (sync_fbo_supplies, enrich, sync_statuses, auto-deliver)
-  - service: Query + link operations (list, get_items, link/unlink, list_warehouses)
+  - service: Query operations (list, get_items, list_warehouses)
+  - returns: Handle unaccepted qty (GOODS/DEFECT/UTILIZED)
 """
 
 from .mappers import (
@@ -27,10 +28,8 @@ from .returns import FboReturnType, process_fbo_return
 from .service import (
     get_fbo_summary,
     get_fbo_supply_items,
-    link_supply_to_shipment,
     list_fbo_supplies,
     list_warehouses,
-    unlink_supply_from_shipment,
 )
 from .sync import (
     _auto_deliver_assembly,
@@ -56,10 +55,8 @@ __all__ = [
     # service
     "get_fbo_summary",
     "get_fbo_supply_items",
-    "link_supply_to_shipment",
     "list_fbo_supplies",
     "list_warehouses",
-    "unlink_supply_from_shipment",
     # sync
     "_auto_deliver_assembly",
     "_auto_deliver_shipment",

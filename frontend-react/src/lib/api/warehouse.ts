@@ -172,12 +172,6 @@ export function addWarehouseMethods(api: ApiClient) {
         syncFboStatuses() {
             return api.request<FboSyncResult>('POST', '/api/v1/warehouse/fbo-supplies/sync-statuses');
         },
-        linkFboSupply(supplyId: number, outboundShipmentId: number) {
-            return api.request<WbFboSupply>('POST', `/api/v1/warehouse/fbo-supplies/${supplyId}/link`, { outbound_shipment_id: outboundShipmentId });
-        },
-        unlinkFboSupply(supplyId: number) {
-            return api.request<WbFboSupply>('DELETE', `/api/v1/warehouse/fbo-supplies/${supplyId}/link`);
-        },
         createFboReturn(supplyId: number, payload: FboReturnRequest) {
             return api.request<FboReturnResponse>('POST', `/api/v1/warehouse/fbo-supplies/${supplyId}/return`, payload);
         },

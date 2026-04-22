@@ -62,15 +62,6 @@ class WbFboSupplyListResponse(BaseModel):
     total: int
 
 
-# ─── Link request ───────────────────────────────────────────────────────────
-
-
-class FboSupplyLinkRequest(BaseModel):
-    """Link FBO supply to an OutboundShipment."""
-
-    outbound_shipment_id: int
-
-
 # ─── Sync response ──────────────────────────────────────────────────────────
 
 

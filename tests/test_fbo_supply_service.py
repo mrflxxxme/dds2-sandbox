@@ -30,12 +30,10 @@ from backend.services.fbo_supply_service import (
     _update_supply_from_fbw_detail,
     _update_supply_from_fbw_list,
     get_fbo_supply_items,
-    link_supply_to_shipment,
     list_fbo_supplies,
     list_warehouses,
     sync_fbo_statuses,
     sync_fbo_supplies,
-    unlink_supply_from_shipment,
 )
 
 # ─── Fixture: ensure test project exists ─────────────────────────────────────
@@ -271,12 +269,6 @@ class TestSchemas:
         result = FboSyncResultSchema(synced=10, created=3, updated=7, errors=0, message="ok")
         assert result.synced == 10
 
-    def test_link_request(self):
-        from backend.schemas.wb_fbo import FboSupplyLinkRequest
-
-        req = FboSupplyLinkRequest(outbound_shipment_id=42)
-        assert req.outbound_shipment_id == 42
-
 
 # ─── Service tests (require DB) ────────────────────────────────────────────
 
@@ -419,6 +411,48 @@ class TestListWarehouses:
 
 
 @pytest.mark.asyncio
+class TestWithoutAssembly:
+    """without_assembly must filter to ACCEPTED only — matches summary card
+    'WB принял, но в DDS нет заявки'. Non-final statuses aren't actionable.
+    """
+
+    async def test_without_assembly_excludes_non_accepted(self, db_session):
+        # ACCEPTED without AR → should appear
+        accepted_no_ar = WbFboSupply(
+            project_id=1,
+            wb_supply_id="WA-ACCEPTED",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 3, 20),
+        )
+        # ACTIVE without AR → should NOT appear (non-final)
+        active_no_ar = WbFboSupply(
+            project_id=1,
+            wb_supply_id="WA-ACTIVE",
+            wb_status=WbSupplyStatus.ACTIVE,
+            created_at_wb=datetime(2026, 3, 20),
+        )
+        # IN_PROGRESS without AR → should NOT appear
+        in_progress_no_ar = WbFboSupply(
+            project_id=1,
+            wb_supply_id="WA-IN-PROGRESS",
+            wb_status=WbSupplyStatus.IN_PROGRESS,
+            created_at_wb=datetime(2026, 3, 20),
+        )
+        db_session.add_all([accepted_no_ar, active_no_ar, in_progress_no_ar])
+        await db_session.commit()
+
+        supplies, _total = await list_fbo_supplies(
+            db_session,
+            project_id=1,
+            without_assembly=True,
+        )
+        ids = {s["wb_supply_id"] for s in supplies}
+        assert "WA-ACCEPTED" in ids
+        assert "WA-ACTIVE" not in ids
+        assert "WA-IN-PROGRESS" not in ids
+
+
+@pytest.mark.asyncio
 class TestExcludeWithAssembly:
     """exclude_with_assembly must tolerate active AR with wb_fbo_supply_id=NULL.
 
@@ -535,32 +569,6 @@ class TestGetFboSupplyItems:
         assert len(items) == 1
         assert items[0].barcode == "123456789"
         assert items[0].quantity == 5
-
-
-@pytest.mark.asyncio
-class TestLinkUnlink:
-    """Test link/unlink supply ↔ shipment."""
-
-    async def test_link_not_found_supply(self, db_session):
-        with pytest.raises(ValueError, match="FBO Supply not found"):
-            await link_supply_to_shipment(db_session, 1, 99999, 1)
-
-    async def test_unlink_not_found(self, db_session):
-        with pytest.raises(ValueError, match="FBO Supply not found"):
-            await unlink_supply_from_shipment(db_session, 1, 99999)
-
-    async def test_link_not_found_shipment(self, db_session):
-        supply = WbFboSupply(
-            project_id=1,
-            wb_supply_id="LINK-NO-SHIP",
-            wb_status=WbSupplyStatus.ACTIVE,
-            created_at_wb=datetime(2026, 3, 20),
-        )
-        db_session.add(supply)
-        await db_session.commit()
-
-        with pytest.raises(ValueError, match="Outbound shipment not found"):
-            await link_supply_to_shipment(db_session, 1, supply.id, 99999)
 
 
 @pytest.mark.asyncio
@@ -1191,17 +1199,6 @@ class TestRouterEndpoints:
 
     async def test_sync_endpoint_no_auth(self, client):
         resp = await client.post("/api/v1/warehouse/fbo-supplies/sync")
-        assert resp.status_code in (401, 403)
-
-    async def test_link_endpoint_no_auth(self, client):
-        resp = await client.post(
-            "/api/v1/warehouse/fbo-supplies/1/link",
-            json={"outbound_shipment_id": 1},
-        )
-        assert resp.status_code in (401, 403)
-
-    async def test_unlink_endpoint_no_auth(self, client):
-        resp = await client.delete("/api/v1/warehouse/fbo-supplies/1/link")
         assert resp.status_code in (401, 403)
 
     async def test_list_with_search_param(self, client, auth_headers):
