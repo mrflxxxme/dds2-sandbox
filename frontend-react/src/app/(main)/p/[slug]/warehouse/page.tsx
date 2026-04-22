@@ -5,7 +5,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import { usePermissions } from '@/lib/hooks/usePermissions';
-import type { Warehouse, StockTransfer } from '@/types/api';
+import type { Warehouse, StockTransfer, CounterpartyListItem } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 
 export default function WarehousePage() {
@@ -26,6 +26,9 @@ export default function WarehousePage() {
     const [formCountry, setFormCountry] = useState('');
     const [formAddress, setFormAddress] = useState('');
     const [formDays, setFormDays] = useState('');
+    const [formCounterpartyId, setFormCounterpartyId] = useState<number | null>(null);
+    const [counterparties, setCounterparties] = useState<CounterpartyListItem[]>([]);
+    const [cpSearch, setCpSearch] = useState('');
     const [saving, setSaving] = useState(false);
 
     const load = useCallback(async () => {
@@ -46,6 +49,13 @@ export default function WarehousePage() {
 
     useEffect(() => { load(); }, [load]);
 
+    useEffect(() => {
+        // Load counterparty list for the dropdown (non-blocking for the page)
+        api.listCounterparties({ limit: 500, active_only: true })
+            .then(res => setCounterparties(res.items))
+            .catch(() => { /* ignore — dropdown will be empty */ });
+    }, []);
+
     const handleCreate = async () => {
         if (!formName.trim()) return;
         setSaving(true);
@@ -56,12 +66,15 @@ export default function WarehousePage() {
                 country: formCountry.trim() || undefined,
                 address: formAddress.trim() || undefined,
                 assembly_days: formDays ? parseInt(formDays) : undefined,
+                counterparty_id: formCounterpartyId ?? null,
             });
             setShowCreate(false);
             setFormName('');
             setFormCountry('');
             setFormAddress('');
             setFormDays('');
+            setFormCounterpartyId(null);
+            setCpSearch('');
             await load();
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
@@ -185,6 +198,35 @@ export default function WarehousePage() {
                         <div className="form-group">
                             <label className="form-label">Адрес</label>
                             <input className="form-input" value={formAddress} onChange={e => setFormAddress(e.target.value)} placeholder="г. Москва, ул. ..." />
+                        </div>
+                        <div className="form-group">
+                            <label className="form-label">Контрагент</label>
+                            <input
+                                className="form-input"
+                                placeholder="Поиск по имени или ИНН..."
+                                value={cpSearch}
+                                onChange={e => setCpSearch(e.target.value)}
+                                style={{ marginBottom: 6 }}
+                            />
+                            <select
+                                className="form-input"
+                                value={formCounterpartyId ?? ''}
+                                onChange={e => setFormCounterpartyId(e.target.value ? Number(e.target.value) : null)}
+                            >
+                                <option value="">— Не привязан —</option>
+                                {counterparties
+                                    .filter(cp =>
+                                        !cpSearch.trim() ||
+                                        cp.name.toLowerCase().includes(cpSearch.toLowerCase()) ||
+                                        (cp.inn ?? '').includes(cpSearch)
+                                    )
+                                    .slice(0, 200)
+                                    .map(cp => (
+                                        <option key={cp.id} value={cp.id}>
+                                            {cp.name}{cp.inn ? ` · ${cp.inn}` : ''}
+                                        </option>
+                                    ))}
+                            </select>
                         </div>
                         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
                             <button className="btn btn-secondary" onClick={() => setShowCreate(false)}>Отмена</button>

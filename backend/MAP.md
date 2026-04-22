@@ -24,6 +24,16 @@
 ### Справочники
 - CRUD (Account, Override, CounterpartyCategory, OpeningBalance): `services/refs_service.py`
 
+### Контрагенты + Займы (Phase 2)
+- Модели: `models/counterparty.py` (Counterparty, CounterpartyDocument), `models/loan.py` (Loan, LoanPayment)
+- Сервисы: `services/counterparty_service.py`, `services/loan_service.py`
+- Отчёт оборотов (pivot, мультивалюта): `services/reports/counterparty_turnovers.py`
+- Роутеры: `routers/counterparty.py` (/counterparties + /documents), `routers/loans.py`
+- Парсер Faktura.ru (XML 2003): `etl/parsers/faktura.py` (FAKTURA_WB_BANK)
+- ETL обогащение purpose: `etl/master_logic.py` → `enrich_purpose()` (contract_number, УНК, депозиты, займы)
+- Backfill: `scripts/backfill_counterparties.py --project-id=X`
+- Домен: `backend/DOMAIN_COUNTERPARTY.md`
+
 ### Изменить отчёт
 - ДДС: `services/reports/dds.py`
 - БДР: `services/wb_bdr_service.py` (+ `bdr_loaders.py`, `bdr_enrichment.py`, `wb_bdr_helpers.py`)

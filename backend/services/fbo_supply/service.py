@@ -1,31 +1,151 @@
 """
-FBO Supply service — query + link operations.
+FBO Supply service — query operations.
 
 Functions:
 - list_warehouses: Unique warehouse names for filter dropdown
 - list_fbo_supplies: List with search/filter/sort/pagination
 - get_fbo_supply_items: Items for a supply (with lazy-load from WB API)
-- link_supply_to_shipment / unlink_supply_from_shipment
+
+Link/unlink is done via AssemblyRequest create/delete in assembly module —
+the FBO page is read-only for the supply ↔ assembly relationship.
 """
 
 import logging
 from datetime import date
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.assembly import AssemblyRequest, AssemblyStatus
-from backend.models.warehouse import OutboundShipment
 from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem, WbSupplyStatus
 
 from .mappers import _update_supply_from_fbw_detail, _upsert_supply_items_fbw
-from .sync import _auto_deliver_shipment
 
 logger = logging.getLogger(__name__)
 
 
 # ─── List supplies (with search/filter/sort/pagination) ────────────────────
+
+
+async def get_fbo_summary(
+    db: AsyncSession,
+    project_id: int,
+) -> dict[str, int]:
+    """
+    Counts for FBO supplies dashboard: total, accepted, accepted without
+    assembly request, accepted with partial acceptance. Used to highlight
+    orphan ACCEPTED supplies (WB принял, но в DDS нет заявки на сборку),
+    so the user can spot missed linkage and start a receipt for rejected qty.
+    """
+    base = select(WbFboSupply).where(WbFboSupply.project_id == project_id).subquery()
+
+    total = (await db.execute(select(func.count()).select_from(base))).scalar() or 0
+
+    accepted_q = select(WbFboSupply).where(
+        WbFboSupply.project_id == project_id,
+        WbFboSupply.wb_status == WbSupplyStatus.ACCEPTED,
+    )
+    accepted = (await db.execute(select(func.count()).select_from(accepted_q.subquery()))).scalar() or 0
+
+    linked_ids = select(AssemblyRequest.wb_fbo_supply_id).where(
+        AssemblyRequest.project_id == project_id,
+        AssemblyRequest.wb_fbo_supply_id.is_not(None),
+        AssemblyRequest.is_deleted == False,  # noqa: E712
+    )
+    accepted_no_asm_q = accepted_q.where(WbFboSupply.id.not_in(linked_ids))
+    accepted_without_assembly = (
+        await db.execute(select(func.count()).select_from(accepted_no_asm_q.subquery()))
+    ).scalar() or 0
+
+    partial_q = accepted_q.where(
+        WbFboSupply.total_qty > 0,
+        WbFboSupply.accepted_qty < WbFboSupply.total_qty,
+        WbFboSupply.return_processed_at.is_(None),
+    )
+    accepted_partial = (await db.execute(select(func.count()).select_from(partial_q.subquery()))).scalar() or 0
+
+    return {
+        "total": int(total),
+        "accepted": int(accepted),
+        "accepted_without_assembly": int(accepted_without_assembly),
+        "accepted_partial": int(accepted_partial),
+    }
+
+
+async def get_partial_acceptance_summary(
+    db: AsyncSession,
+    project_id: int,
+) -> dict[str, Any]:
+    """
+    Недоприёмка dashboard: aggregates across ALL partial-accepted supplies
+    (total_qty > accepted_qty). Buckets:
+
+      - unaccepted_total   sum(total_qty - accepted_qty)  (весь дельта)
+      - unprocessed        where return_processed_at IS NULL
+      - returned_to_stock  return_type IN (GOODS, DEFECT)  → sum(return_qty)
+      - utilized           return_type = UTILIZED          → sum(return_qty)
+
+    Plus items_breakdown: per-barcode aggregate (qty not accepted across supplies).
+    """
+    # Supply-level aggregates
+    supplies_q = select(WbFboSupply).where(
+        WbFboSupply.project_id == project_id,
+        WbFboSupply.wb_status == WbSupplyStatus.ACCEPTED,
+        WbFboSupply.total_qty > 0,
+        WbFboSupply.accepted_qty < WbFboSupply.total_qty,
+    )
+    result = await db.execute(supplies_q)
+    supplies = list(result.scalars().all())
+
+    unaccepted_total = sum(max(0, (s.total_qty or 0) - (s.accepted_qty or 0)) for s in supplies)
+    unprocessed = sum(
+        max(0, (s.total_qty or 0) - (s.accepted_qty or 0)) for s in supplies if s.return_processed_at is None
+    )
+    returned_to_stock = sum(int(s.return_qty or 0) for s in supplies if s.return_type in ("GOODS", "DEFECT"))
+    utilized = sum(int(s.return_qty or 0) for s in supplies if s.return_type == "UTILIZED")
+
+    # Per-barcode breakdown — which goods are affected by недоприёмка
+    # (sum delta across all affected supplies). UI shows a collapsible list.
+    supply_ids = [s.id for s in supplies]
+    breakdown: list[dict[str, Any]] = []
+    if supply_ids:
+        items_result = await db.execute(
+            select(
+                WbFboSupplyItem.barcode,
+                WbFboSupplyItem.product_name,
+                WbFboSupplyItem.article_seller,
+                func.sum(WbFboSupplyItem.quantity - WbFboSupplyItem.accepted_qty).label("delta"),
+            )
+            .where(
+                WbFboSupplyItem.supply_id.in_(supply_ids),
+                WbFboSupplyItem.project_id == project_id,
+                WbFboSupplyItem.quantity > WbFboSupplyItem.accepted_qty,
+            )
+            .group_by(
+                WbFboSupplyItem.barcode,
+                WbFboSupplyItem.product_name,
+                WbFboSupplyItem.article_seller,
+            )
+            .order_by(func.sum(WbFboSupplyItem.quantity - WbFboSupplyItem.accepted_qty).desc())
+        )
+        for row in items_result.all():
+            breakdown.append(
+                {
+                    "barcode": row.barcode,
+                    "product_name": row.product_name,
+                    "article_seller": row.article_seller,
+                    "delta": int(row.delta or 0),
+                }
+            )
+
+    return {
+        "unaccepted_total": int(unaccepted_total),
+        "unprocessed": int(unprocessed),
+        "returned_to_stock": int(returned_to_stock),
+        "utilized": int(utilized),
+        "items_breakdown": breakdown,
+    }
 
 
 async def list_warehouses(
@@ -59,6 +179,8 @@ async def list_fbo_supplies(
     limit: int = 50,
     offset: int = 0,
     exclude_with_assembly: bool = False,
+    without_assembly: bool = False,
+    partial_only: bool = False,
 ) -> tuple[list[dict], int]:
     """
     List FBO supplies with filtering, search, sorting, and pagination.
@@ -111,12 +233,44 @@ async def list_fbo_supplies(
             AssemblyStatus.VEHICLE_ASSIGNED,
             AssemblyStatus.SHIPPED,
         ]
+        # wb_fbo_supply_id.is_not(None): Postgres NOT IN with NULL in subquery
+        # makes every comparison NULL (i.e. false), so an active AR with
+        # wb_fbo_supply_id=NULL would silently zero out the entire supply list.
         active_assembly_ids = select(AssemblyRequest.wb_fbo_supply_id).where(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.is_deleted.is_(False),
             AssemblyRequest.status.in_(active_statuses),
+            AssemblyRequest.wb_fbo_supply_id.is_not(None),
         )
         base_query = base_query.where(WbFboSupply.id.not_in(active_assembly_ids))
+
+    # Supplies that WB already ACCEPTED but have NO assembly request in DDS.
+    # Non-final statuses (ACTIVE/IN_PROGRESS/CANCELLED) are excluded: they are
+    # either in progress (AR may arrive later) or cancelled (not actionable).
+    # Matches the "Без заявки на сборку" summary card (see get_fbo_summary).
+    if without_assembly:
+        any_assembly_ids = select(AssemblyRequest.wb_fbo_supply_id).where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.wb_fbo_supply_id.is_not(None),
+            AssemblyRequest.is_deleted.is_(False),
+        )
+        base_query = base_query.where(
+            WbFboSupply.wb_status == WbSupplyStatus.ACCEPTED,
+            WbFboSupply.id.not_in(any_assembly_ids),
+        )
+
+    # Partial acceptance — only for ACCEPTED supplies where WB rejected part of
+    # the shipment (non-final statuses always have accepted_qty=0 and are not
+    # yet a "недоприёмка"). return_processed_at IS NULL excludes already-handled.
+    if partial_only:
+        base_query = base_query.where(
+            and_(
+                WbFboSupply.wb_status == WbSupplyStatus.ACCEPTED,
+                WbFboSupply.total_qty > 0,
+                WbFboSupply.accepted_qty < WbFboSupply.total_qty,
+                WbFboSupply.return_processed_at.is_(None),
+            )
+        )
 
     # Count total
     count_query = select(func.count()).select_from(base_query.subquery())
@@ -138,6 +292,11 @@ async def list_fbo_supplies(
     # Enrich with assembly request info (single query for the page)
     supply_ids = [s.id for s in supplies]
     assembly_map: dict[int, tuple[int, str, str]] = {}
+    # source_warehouse_map: supply_id → warehouse_id from the AR that shipped
+    # this FBO supply. Used on UI to preselect the return-warehouse in the
+    # "Оформить возврат" modal (goods should come back to the warehouse they
+    # were picked from). Looks up ANY AR (active or finalized) for the supply.
+    source_warehouse_map: dict[int, int] = {}
     if supply_ids:
         active_statuses = [
             AssemblyStatus.PENDING,
@@ -152,15 +311,20 @@ async def list_fbo_supplies(
                 AssemblyRequest.id,
                 AssemblyRequest.number,
                 AssemblyRequest.status,
+                AssemblyRequest.warehouse_id,
             ).where(
                 AssemblyRequest.project_id == project_id,
                 AssemblyRequest.is_deleted.is_(False),
-                AssemblyRequest.status.in_(active_statuses),
                 AssemblyRequest.wb_fbo_supply_id.in_(supply_ids),
             )
         )
         for row in asm_result.all():
-            assembly_map[row.wb_fbo_supply_id] = (row.id, row.number, row.status)
+            # Prefer ACTIVE AR for badge; source_warehouse_id is taken from
+            # any AR (last one wins — typically only one AR per supply).
+            if row.status in active_statuses and row.wb_fbo_supply_id not in assembly_map:
+                assembly_map[row.wb_fbo_supply_id] = (row.id, row.number, row.status)
+            if row.warehouse_id is not None:
+                source_warehouse_map[row.wb_fbo_supply_id] = row.warehouse_id
 
     # Build enriched dicts
     enriched = []
@@ -170,6 +334,7 @@ async def list_fbo_supplies(
         d["assembly_request_id"] = asm[0] if asm else None
         d["assembly_request_number"] = asm[1] if asm else None
         d["assembly_request_status"] = asm[2] if asm else None
+        d["source_warehouse_id"] = source_warehouse_map.get(s.id)
         enriched.append(d)
 
     return enriched, total
@@ -247,87 +412,3 @@ async def get_fbo_supply_items(
             )
 
     return items
-
-
-# ─── Link / Unlink supply <-> OutboundShipment ───────────────────────────────
-
-
-async def link_supply_to_shipment(
-    db: AsyncSession,
-    project_id: int,
-    supply_id: int,
-    outbound_shipment_id: int,
-) -> WbFboSupply:
-    """
-    Link FBO supply to an OutboundShipment.
-    Sets supply.outbound_shipment_id and shipment.wb_supply_id.
-    """
-    # Get supply
-    result = await db.execute(
-        select(WbFboSupply).where(
-            WbFboSupply.id == supply_id,
-            WbFboSupply.project_id == project_id,
-        )
-    )
-    supply = result.scalar_one_or_none()
-    if not supply:
-        raise ValueError("FBO Supply not found")
-
-    # Get shipment
-    result = await db.execute(
-        select(OutboundShipment).where(
-            OutboundShipment.id == outbound_shipment_id,
-            OutboundShipment.project_id == project_id,
-            OutboundShipment.is_deleted == False,  # noqa: E712
-        )
-    )
-    shipment = result.scalar_one_or_none()
-    if not shipment:
-        raise ValueError("Outbound shipment not found")
-
-    # Link both sides
-    supply.outbound_shipment_id = outbound_shipment_id
-    shipment.wb_supply_id = supply.wb_supply_id
-
-    # Auto-deliver if supply already ACCEPTED
-    if supply.wb_status == WbSupplyStatus.ACCEPTED:
-        await _auto_deliver_shipment(db, project_id, outbound_shipment_id)
-
-    await db.commit()
-    await db.refresh(supply)
-    return supply
-
-
-async def unlink_supply_from_shipment(
-    db: AsyncSession,
-    project_id: int,
-    supply_id: int,
-) -> WbFboSupply:
-    """Unlink FBO supply from its OutboundShipment."""
-    result = await db.execute(
-        select(WbFboSupply).where(
-            WbFboSupply.id == supply_id,
-            WbFboSupply.project_id == project_id,
-        )
-    )
-    supply = result.scalar_one_or_none()
-    if not supply:
-        raise ValueError("FBO Supply not found")
-
-    if supply.outbound_shipment_id:
-        # Clear shipment side
-        result = await db.execute(
-            select(OutboundShipment).where(
-                OutboundShipment.id == supply.outbound_shipment_id,
-                OutboundShipment.project_id == project_id,
-                OutboundShipment.is_deleted == False,  # noqa: E712
-            )
-        )
-        shipment = result.scalar_one_or_none()
-        if shipment:
-            shipment.wb_supply_id = None  # type: ignore[assignment]
-
-    supply.outbound_shipment_id = None
-    await db.commit()
-    await db.refresh(supply)
-    return supply

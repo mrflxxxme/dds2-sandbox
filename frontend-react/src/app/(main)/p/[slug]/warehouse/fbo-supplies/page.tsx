@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatDateTime } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { WbFboSupply, WbFboSupplyItem, OutboundShipment } from '@/types/api';
+import type { WbFboSupply, WbFboSupplyItem, Warehouse, FboReturnType, FboPartialSummary } from '@/types/api';
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -43,22 +43,32 @@ export default function FboSuppliesPage() {
     const [statusFilter, setStatusFilter] = useState('');
     const [warehouseFilter, setWarehouseFilter] = useState('');
     const [warehouseOptions, setWarehouseOptions] = useState<string[]>([]);
+    const [withoutAssembly, setWithoutAssembly] = useState(false);
+    const [partialOnly, setPartialOnly] = useState(false);
     const [sortBy, setSortBy] = useState('created_at_wb');
     const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
     const [page, setPage] = useState(0);
     const PAGE_SIZE = 50;
+
+    // Summary
+    const [summary, setSummary] = useState<{
+        total: number; accepted: number; accepted_without_assembly: number; accepted_partial: number;
+    } | null>(null);
 
     // Expanded rows (supply items)
     const [expandedId, setExpandedId] = useState<number | null>(null);
     const [expandedItems, setExpandedItems] = useState<WbFboSupplyItem[]>([]);
     const [loadingItems, setLoadingItems] = useState(false);
 
-    // Link modal
-    const [linkSupplyId, setLinkSupplyId] = useState<number | null>(null);
-    const [shipments, setShipments] = useState<OutboundShipment[]>([]);
-    const [loadingShipments, setLoadingShipments] = useState(false);
-    const [selectedShipmentId, setSelectedShipmentId] = useState<number | null>(null);
-    const [linking, setLinking] = useState(false);
+    // Return modal
+    const [returnState, setReturnState] = useState<{
+        supply: WbFboSupply; items: WbFboSupplyItem[];
+    } | null>(null);
+    const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+
+    useEffect(() => {
+        api.getWarehouses().then(setWarehouses).catch(() => setWarehouses([]));
+    }, []);
 
     // Sync
     const [syncing, setSyncing] = useState(false);
@@ -72,6 +82,22 @@ export default function FboSuppliesPage() {
         api.getFboWarehouses().then(setWarehouseOptions).catch(() => {});
     }, []);
 
+    const loadSummary = useCallback(() => {
+        api.getFboSuppliesSummary().then(setSummary).catch(() => setSummary(null));
+    }, []);
+
+    useEffect(() => { loadSummary(); }, [loadSummary]);
+
+    // Partial-acceptance summary (qty buckets + per-barcode breakdown) —
+    // loaded only when the user enables the "С недоприёмкой" filter.
+    const [partialSummary, setPartialSummary] = useState<FboPartialSummary | null>(null);
+    const [partialBreakdownOpen, setPartialBreakdownOpen] = useState(false);
+    const loadPartialSummary = useCallback(() => {
+        if (!partialOnly) { setPartialSummary(null); return; }
+        api.getFboPartialSummary().then(setPartialSummary).catch(() => setPartialSummary(null));
+    }, [partialOnly]);
+    useEffect(() => { loadPartialSummary(); }, [loadPartialSummary]);
+
     const load = useCallback(async () => {
         setLoading(true);
         setError('');
@@ -80,6 +106,8 @@ export default function FboSuppliesPage() {
                 search: search || undefined,
                 status: statusFilter || undefined,
                 warehouse: warehouseFilter || undefined,
+                without_assembly: withoutAssembly || undefined,
+                partial_only: partialOnly || undefined,
                 sort_by: sortBy,
                 sort_order: sortOrder,
                 limit: PAGE_SIZE,
@@ -91,7 +119,7 @@ export default function FboSuppliesPage() {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         }
         setLoading(false);
-    }, [search, statusFilter, warehouseFilter, sortBy, sortOrder, page]);
+    }, [search, statusFilter, warehouseFilter, withoutAssembly, partialOnly, sortBy, sortOrder, page]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -180,54 +208,6 @@ export default function FboSuppliesPage() {
         setSyncingStatuses(false);
     };
 
-    // ─── Link modal ──────────────────────────────────────────────────────
-
-    const openLinkModal = async (supplyId: number) => {
-        setLinkSupplyId(supplyId);
-        setSelectedShipmentId(null);
-        setLoadingShipments(true);
-        try {
-            // Load all warehouses, then shipments from each
-            const warehouses = await api.getWarehouses();
-            const allShipments: OutboundShipment[] = [];
-            for (const wh of warehouses) {
-                try {
-                    const ships = await api.getShipments(wh.id);
-                    allShipments.push(...ships);
-                } catch { /* skip */ }
-            }
-            // Show only SHIPPED/DRAFT (not yet linked)
-            setShipments(allShipments.filter(s =>
-                (s.status === 'SHIPPED' || s.status === 'DRAFT') && !s.wb_supply_id
-            ));
-        } catch {
-            setShipments([]);
-        }
-        setLoadingShipments(false);
-    };
-
-    const handleLink = async () => {
-        if (!linkSupplyId || !selectedShipmentId) return;
-        setLinking(true);
-        try {
-            await api.linkFboSupply(linkSupplyId, selectedShipmentId);
-            setLinkSupplyId(null);
-            await load();
-        } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка привязки');
-        }
-        setLinking(false);
-    };
-
-    const handleUnlink = async (supplyId: number) => {
-        try {
-            await api.unlinkFboSupply(supplyId);
-            await load();
-        } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка отвязки');
-        }
-    };
-
     // ─── Pagination ──────────────────────────────────────────────────────
 
     const totalPages = Math.ceil(total / PAGE_SIZE);
@@ -266,6 +246,30 @@ export default function FboSuppliesPage() {
                 </div>
             )}
 
+            {/* Summary cards */}
+            {summary && (
+                <div className="stats-grid" style={{ marginBottom: 16 }}>
+                    <SummaryCard label="Всего поставок" value={summary.total} />
+                    <SummaryCard label="Принято WB" value={summary.accepted} />
+                    <SummaryCard
+                        label="Без заявки на сборку"
+                        value={summary.accepted_without_assembly}
+                        hint="WB принял, но в DDS нет заявки"
+                        active={withoutAssembly}
+                        onClick={() => { setWithoutAssembly(v => !v); setPage(0); }}
+                        tone="warning"
+                    />
+                    <SummaryCard
+                        label="С недоприёмкой"
+                        value={summary.accepted_partial}
+                        hint="WB принял не всё — возможно, часть вернулась"
+                        active={partialOnly}
+                        onClick={() => { setPartialOnly(v => !v); setPage(0); }}
+                        tone="danger"
+                    />
+                </div>
+            )}
+
             {/* Filters */}
             <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
                 <div style={{ display: 'flex', gap: 12, alignItems: 'end', flexWrap: 'wrap' }}>
@@ -301,8 +305,33 @@ export default function FboSuppliesPage() {
                             ))}
                         </select>
                     </div>
+                    <label className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                        <input
+                            type="checkbox"
+                            checked={withoutAssembly}
+                            onChange={e => { setWithoutAssembly(e.target.checked); setPage(0); }}
+                        />
+                        Без заявки на сборку
+                    </label>
+                    <label className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                        <input
+                            type="checkbox"
+                            checked={partialOnly}
+                            onChange={e => { setPartialOnly(e.target.checked); setPage(0); }}
+                        />
+                        С недоприёмкой
+                    </label>
                 </div>
             </div>
+
+            {/* Partial-acceptance mini-summary */}
+            {partialOnly && partialSummary && (
+                <PartialSummaryPanel
+                    summary={partialSummary}
+                    open={partialBreakdownOpen}
+                    onToggle={() => setPartialBreakdownOpen(v => !v)}
+                />
+            )}
 
             {/* Error */}
             {error && (
@@ -413,19 +442,19 @@ export default function FboSuppliesPage() {
                                                         </span>
                                                     </Link>
                                                 ) : supply.outbound_shipment_id ? (
-                                                    <button
-                                                        className="btn btn-secondary btn-sm"
-                                                        onClick={() => handleUnlink(supply.id)}
-                                                        title="Отвязать"
-                                                    >
-                                                        Связана #{supply.outbound_shipment_id}
-                                                    </button>
-                                                ) : (
+                                                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                                        Отгружена
+                                                    </span>
+                                                ) : supply.wb_status === 'ACCEPTED' ? (
                                                     <Link href={`/p/${slug}/warehouse/assembly/new?fbo_supply_id=${supply.id}`}>
                                                         <button className="btn btn-primary btn-sm">
                                                             Создать заявку
                                                         </button>
                                                     </Link>
+                                                ) : (
+                                                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                                        &mdash;
+                                                    </span>
                                                 )}
                                             </td>
                                             <td>{formatDateTime(supply.created_at_wb)}</td>
@@ -442,6 +471,7 @@ export default function FboSuppliesPage() {
                                                         items={expandedItems}
                                                         loading={loadingItems}
                                                         slug={slug}
+                                                        onOpenReturn={() => setReturnState({ supply, items: expandedItems })}
                                                     />
                                                 </td>
                                             </tr>
@@ -482,57 +512,467 @@ export default function FboSuppliesPage() {
                 </div>
             )}
 
-            {/* Link Modal */}
-            {linkSupplyId !== null && (
-                <div className="modal-overlay" onClick={() => setLinkSupplyId(null)}>
-                    <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
-                        <h2 className="modal-title">Связать с отгрузкой</h2>
-                        {loadingShipments ? (
-                            <div style={{ textAlign: 'center', padding: 24 }}>Загрузка отгрузок...</div>
-                        ) : shipments.length === 0 ? (
-                            <div style={{ textAlign: 'center', padding: 24, color: 'var(--color-text-muted)' }}>
-                                Нет доступных отгрузок (DRAFT/SHIPPED без привязки)
+            {/* Return Modal */}
+            {returnState !== null && (
+                <FboReturnModal
+                    supply={returnState.supply}
+                    items={returnState.items}
+                    warehouses={warehouses}
+                    onClose={() => setReturnState(null)}
+                    onDone={async () => {
+                        setReturnState(null);
+                        // Close the expanded row — accepted_qty/return_processed_at
+                        // on the cached supply object is now stale; re-expand will
+                        // re-fetch items from the refreshed backend row.
+                        setExpandedId(null);
+                        setExpandedItems([]);
+                        await load();
+                        loadSummary();
+                        loadPartialSummary();
+                    }}
+                />
+            )}
+        </div>
+    );
+}
+
+
+// ─── Return modal ────────────────────────────────────────────────────────────
+
+function FboReturnModal({
+    supply, items, warehouses, onClose, onDone,
+}: {
+    supply: WbFboSupply;
+    items: WbFboSupplyItem[];
+    warehouses: Warehouse[];
+    onClose: () => void;
+    onDone: () => Promise<void> | void;
+}) {
+    const deltaItems = items
+        .map(i => ({ ...i, delta: Math.max(0, i.quantity - i.accepted_qty) }))
+        .filter(i => i.delta > 0);
+
+    // Warehouse auto-selected from the linked AR source. Fallback to first
+    // available only if supply has no AR yet.
+    const [warehouseId, setWarehouseId] = useState<number | ''>(
+        supply.source_warehouse_id ?? warehouses[0]?.id ?? ''
+    );
+    // Per-row split: how many go to stock, how many to utilize. By default
+    // all delta goes to stock (the common case).
+    const [rows, setRows] = useState<Record<string, { stock: number; utilize: number }>>(
+        Object.fromEntries(deltaItems.map(i => [i.barcode, { stock: i.delta, utilize: 0 }]))
+    );
+    const [comment, setComment] = useState('');
+    const [saving, setSaving] = useState(false);
+    const [err, setErr] = useState('');
+
+    const totalDelta = deltaItems.reduce((s, i) => s + i.delta, 0);
+    const totalStock = Object.values(rows).reduce((s, r) => s + (r.stock || 0), 0);
+    const totalUtilize = Object.values(rows).reduce((s, r) => s + (r.utilize || 0), 0);
+    const totalReturn = totalStock + totalUtilize;
+    const hasStock = totalStock > 0;
+
+    // Keep sum (stock + utilize) ≤ delta for the row. User enters one value;
+    // the other is auto-capped.
+    const setStock = (barcode: string, delta: number, v: number) => {
+        setRows(r => {
+            const current = r[barcode] || { stock: 0, utilize: 0 };
+            const newStock = Math.max(0, Math.min(delta - (current.utilize || 0), v));
+            return { ...r, [barcode]: { ...current, stock: newStock } };
+        });
+    };
+    const setUtilize = (barcode: string, delta: number, v: number) => {
+        setRows(r => {
+            const current = r[barcode] || { stock: 0, utilize: 0 };
+            const newUtilize = Math.max(0, Math.min(delta - (current.stock || 0), v));
+            return { ...r, [barcode]: { ...current, utilize: newUtilize } };
+        });
+    };
+
+    const allToStock = () => {
+        setRows(Object.fromEntries(deltaItems.map(i => [i.barcode, { stock: i.delta, utilize: 0 }])));
+    };
+    const allToUtilize = () => {
+        setRows(Object.fromEntries(deltaItems.map(i => [i.barcode, { stock: 0, utilize: i.delta }])));
+    };
+    const resetAll = () => {
+        setRows(Object.fromEntries(deltaItems.map(i => [i.barcode, { stock: 0, utilize: 0 }])));
+    };
+
+    const submit = async () => {
+        setErr('');
+        if (totalReturn === 0) { setErr('Укажи количество к возврату или утилизации'); return; }
+        if (hasStock && !warehouseId) { setErr('Выберите склад для возврата на склад'); return; }
+
+        // Flatten per-row split into items[] with return_type per row.
+        const payloadItems: { barcode: string; quantity: number; return_type: FboReturnType }[] = [];
+        for (const i of deltaItems) {
+            const r = rows[i.barcode] || { stock: 0, utilize: 0 };
+            if (r.stock > 0) payloadItems.push({ barcode: i.barcode, quantity: r.stock, return_type: 'GOODS' });
+            if (r.utilize > 0) payloadItems.push({ barcode: i.barcode, quantity: r.utilize, return_type: 'UTILIZED' });
+        }
+
+        setSaving(true);
+        try {
+            await api.createFboReturn(supply.id, {
+                warehouse_id: hasStock ? (warehouseId as number) : null,
+                items: payloadItems,
+                comment: comment.trim() || null,
+            });
+            await onDone();
+        } catch (e: unknown) {
+            setErr(e instanceof Error ? e.message : 'Ошибка');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const submitLabel =
+        totalStock > 0 && totalUtilize > 0 ? 'Оформить возврат и списание' :
+            totalUtilize > 0 ? 'Утилизировать' :
+                'Оформить возврат';
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div
+                className="modal-card"
+                onClick={e => e.stopPropagation()}
+                style={{
+                    maxWidth: 860, width: '92vw', maxHeight: '90vh',
+                    display: 'flex', flexDirection: 'column',
+                    background: '#ffffff',
+                    backdropFilter: 'none',
+                    WebkitBackdropFilter: 'none',
+                }}
+            >
+                {/* Header */}
+                <div style={{ marginBottom: 16 }}>
+                    <h2 className="modal-title" style={{ marginBottom: 4 }}>
+                        Возврат по поставке FBW-{supply.wb_supply_id}
+                    </h2>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                        WB принял {supply.accepted_qty} из {supply.total_qty} шт. Непринято — {totalDelta} шт.
+                    </div>
+                </div>
+
+                {/* Status strip: where the qty is going */}
+                <div style={{
+                    display: 'flex', gap: 16, alignItems: 'center',
+                    padding: '10px 14px', marginBottom: 16,
+                    background: 'var(--color-bg)', borderRadius: 12,
+                    fontSize: 13, flexWrap: 'wrap',
+                }}>
+                    <div>
+                        <span style={{ color: 'var(--color-text-muted)' }}>На склад: </span>
+                        <strong style={{ color: 'var(--color-success)' }}>{totalStock} шт</strong>
+                    </div>
+                    <div>
+                        <span style={{ color: 'var(--color-text-muted)' }}>Утилизировать: </span>
+                        <strong style={{ color: 'var(--color-danger)' }}>{totalUtilize} шт</strong>
+                    </div>
+                    <div>
+                        <span style={{ color: 'var(--color-text-muted)' }}>Из </span>
+                        <strong>{totalDelta}</strong>
+                        <span style={{ color: 'var(--color-text-muted)' }}> непринятых</span>
+                    </div>
+                    <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                        <button type="button" className="btn btn-secondary btn-sm" onClick={allToStock}>
+                            Всё на склад
+                        </button>
+                        <button type="button" className="btn btn-secondary btn-sm" onClick={allToUtilize}>
+                            Всё утилизировать
+                        </button>
+                        <button type="button" className="btn btn-secondary btn-sm" onClick={resetAll}>
+                            Сбросить
+                        </button>
+                    </div>
+                </div>
+
+                {/* Scrollable content */}
+                <div style={{ overflowY: 'auto', flex: 1, paddingRight: 4 }}>
+                    {/* Warehouse picker (only when any row has stock > 0) */}
+                    {hasStock && (
+                        <div className="form-group" style={{ marginBottom: 16 }}>
+                            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+                                Склад возврата
+                            </label>
+                            <select
+                                className="form-input"
+                                value={warehouseId}
+                                onChange={e => setWarehouseId(e.target.value ? Number(e.target.value) : '')}
+                            >
+                                <option value="">Выберите склад</option>
+                                {warehouses.map(w => (
+                                    <option key={w.id} value={w.id}>{w.name}</option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
+
+                    {/* Items */}
+                    <div style={{ marginBottom: 16 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>
+                            Позиции ({deltaItems.length})
+                        </div>
+                        {deltaItems.length === 0 ? (
+                            <div style={{
+                                padding: 24, textAlign: 'center', borderRadius: 8,
+                                background: 'var(--color-bg)', color: 'var(--color-text-muted)', fontSize: 13,
+                            }}>
+                                Нет непринятых позиций
                             </div>
                         ) : (
-                            <div style={{ maxHeight: 300, overflow: 'auto' }}>
-                                {shipments.map(s => (
-                                    <div
-                                        key={s.id}
-                                        onClick={() => setSelectedShipmentId(s.id)}
-                                        style={{
-                                            padding: '10px 12px',
-                                            borderRadius: 8,
-                                            cursor: 'pointer',
-                                            border: selectedShipmentId === s.id
-                                                ? '2px solid var(--color-primary)'
-                                                : '1px solid var(--color-border)',
-                                            marginBottom: 8,
-                                            background: selectedShipmentId === s.id
-                                                ? 'var(--color-primary-light)'
-                                                : 'transparent',
-                                        }}
-                                    >
-                                        <div style={{ fontWeight: 500 }}>{s.number}</div>
-                                        <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-                                            {s.destination || 'Без назначения'} &middot; {s.status} &middot; {s.items?.length || 0} поз.
-                                        </div>
-                                    </div>
-                                ))}
+                            <div style={{ border: '1px solid var(--color-border)', borderRadius: 8, overflow: 'hidden' }}>
+                                <table className="data-table" style={{ fontSize: 13, margin: 0 }}>
+                                    <thead>
+                                        <tr>
+                                            <th style={{ paddingLeft: 12 }}>Товар / ШК</th>
+                                            <th style={{ textAlign: 'right', width: 90 }}>Не принято</th>
+                                            <th style={{ textAlign: 'right', width: 140, color: 'var(--color-success)' }}>
+                                                На склад
+                                            </th>
+                                            <th style={{ textAlign: 'right', width: 140, paddingRight: 12, color: 'var(--color-danger)' }}>
+                                                Утилизировать
+                                            </th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {deltaItems.map(i => {
+                                            const row = rows[i.barcode] || { stock: 0, utilize: 0 };
+                                            const placed = row.stock + row.utilize;
+                                            const overCapped = placed >= i.delta;
+                                            return (
+                                                <tr key={i.barcode}>
+                                                    <td style={{ paddingLeft: 12 }}>
+                                                        <div style={{ fontWeight: 500 }}>
+                                                            {i.article_seller || i.product_name || '—'}
+                                                        </div>
+                                                        <div style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                                            {i.barcode}
+                                                        </div>
+                                                    </td>
+                                                    <td style={{
+                                                        textAlign: 'right',
+                                                        color: overCapped ? 'var(--color-success)' : 'var(--color-text-muted)',
+                                                        fontWeight: overCapped ? 600 : 400,
+                                                    }}>
+                                                        {i.delta}
+                                                    </td>
+                                                    <td style={{ textAlign: 'right' }}>
+                                                        <input
+                                                            className="form-input"
+                                                            type="number"
+                                                            min={0}
+                                                            max={i.delta}
+                                                            value={row.stock}
+                                                            onChange={e => setStock(i.barcode, i.delta, Number(e.target.value) || 0)}
+                                                            style={{ textAlign: 'right', padding: '4px 8px', height: 32, width: 120 }}
+                                                        />
+                                                    </td>
+                                                    <td style={{ textAlign: 'right', paddingRight: 12 }}>
+                                                        <input
+                                                            className="form-input"
+                                                            type="number"
+                                                            min={0}
+                                                            max={i.delta}
+                                                            value={row.utilize}
+                                                            onChange={e => setUtilize(i.barcode, i.delta, Number(e.target.value) || 0)}
+                                                            style={{ textAlign: 'right', padding: '4px 8px', height: 32, width: 120 }}
+                                                        />
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
                             </div>
                         )}
-                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
-                            <button className="btn btn-secondary" onClick={() => setLinkSupplyId(null)}>
-                                Отмена
-                            </button>
-                            <button
-                                className="btn btn-primary"
-                                onClick={handleLink}
-                                disabled={linking || !selectedShipmentId}
-                            >
-                                {linking ? 'Привязка...' : 'Связать'}
-                            </button>
-                        </div>
                     </div>
+
+                    {/* Comment */}
+                    <div className="form-group" style={{ marginBottom: 8 }}>
+                        <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+                            Комментарий (необязательно)
+                        </label>
+                        <input
+                            className="form-input"
+                            value={comment}
+                            onChange={e => setComment(e.target.value)}
+                            placeholder="Например: вернулись после отказа клиента"
+                        />
+                    </div>
+                </div>
+
+                {/* Footer */}
+                {err && (
+                    <div style={{
+                        padding: '8px 12px', marginTop: 12,
+                        background: 'color-mix(in srgb, var(--color-danger) 8%, transparent)',
+                        border: '1px solid color-mix(in srgb, var(--color-danger) 30%, transparent)',
+                        borderRadius: 8, color: 'var(--color-danger)', fontSize: 13,
+                    }}>
+                        {err}
+                    </div>
+                )}
+                <div style={{
+                    display: 'flex', gap: 12, justifyContent: 'flex-end', alignItems: 'center',
+                    marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--color-border)',
+                }}>
+                    <button className="btn btn-secondary" onClick={onClose} disabled={saving}>
+                        Отмена
+                    </button>
+                    <button
+                        className="btn btn-primary"
+                        onClick={submit}
+                        disabled={saving || deltaItems.length === 0 || totalReturn === 0}
+                    >
+                        {saving ? 'Сохранение...' : `${submitLabel} (${totalReturn} шт)`}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+
+// ─── Partial-acceptance mini-summary ─────────────────────────────────────────
+
+function PartialSummaryPanel({
+    summary,
+    open,
+    onToggle,
+}: {
+    summary: FboPartialSummary;
+    open: boolean;
+    onToggle: () => void;
+}) {
+    const buckets: { label: string; value: number; color: string; hint: string }[] = [
+        { label: 'Не приняли', value: summary.unaccepted_total, color: 'var(--color-danger)', hint: 'Всего шт не принято WB' },
+        { label: 'Нераспределено', value: summary.unprocessed, color: 'var(--color-warning)', hint: 'Решение не принято' },
+        { label: 'Возвращено на склад', value: summary.returned_to_stock, color: 'var(--color-success)', hint: 'Годные + брак' },
+        { label: 'Списано', value: summary.utilized, color: 'var(--color-text-muted)', hint: 'Утилизировано WB' },
+    ];
+    const totalItems = summary.items_breakdown.reduce((s, i) => s + i.delta, 0);
+
+    return (
+        <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: summary.items_breakdown.length > 0 ? 12 : 0 }}>
+                {buckets.map(b => (
+                    <div key={b.label} style={{ padding: 12, borderRadius: 12, background: 'var(--color-bg)' }}>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>
+                            {b.label}
+                        </div>
+                        <div style={{ fontSize: 22, fontWeight: 700, color: b.color, letterSpacing: '-0.02em' }}>
+                            {b.value.toLocaleString('ru-RU')} <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--color-text-muted)' }}>шт</span>
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>{b.hint}</div>
+                    </div>
+                ))}
+            </div>
+
+            {summary.items_breakdown.length > 0 && (
+                <>
+                    <button
+                        type="button"
+                        onClick={onToggle}
+                        style={{
+                            display: 'flex', alignItems: 'center', gap: 6, width: '100%',
+                            padding: '8px 12px', borderRadius: 8, border: '1px solid var(--color-border)',
+                            background: open ? 'var(--color-bg)' : 'transparent',
+                            cursor: 'pointer', fontSize: 13, fontWeight: 500, color: 'var(--color-text)',
+                            transition: 'background 0.15s',
+                        }}
+                    >
+                        <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                            {open ? '\u25BC' : '\u25B6'}
+                        </span>
+                        {open ? 'Скрыть' : 'Показать'} позиции ({summary.items_breakdown.length} артикулов, {totalItems} шт)
+                    </button>
+                    {open && (
+                        <div style={{ marginTop: 8, maxHeight: 320, overflowY: 'auto', border: '1px solid var(--color-border)', borderRadius: 8 }}>
+                            <table className="data-table" style={{ fontSize: 13, margin: 0 }}>
+                                <thead>
+                                    <tr>
+                                        <th style={{ paddingLeft: 12 }}>Товар / Артикул</th>
+                                        <th>ШК</th>
+                                        <th style={{ textAlign: 'right', paddingRight: 12, width: 110 }}>Не принято</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {summary.items_breakdown.map(i => (
+                                        <tr key={i.barcode}>
+                                            <td style={{ paddingLeft: 12 }}>
+                                                <div style={{ fontWeight: 500 }}>
+                                                    {i.product_name || i.article_seller || '—'}
+                                                </div>
+                                                {i.article_seller && i.product_name && (
+                                                    <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                                        {i.article_seller}
+                                                    </div>
+                                                )}
+                                            </td>
+                                            <td style={{ fontFamily: 'monospace', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                                {i.barcode}
+                                            </td>
+                                            <td style={{ textAlign: 'right', paddingRight: 12, fontWeight: 600, color: 'var(--color-danger)' }}>
+                                                {i.delta}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                </>
+            )}
+        </div>
+    );
+}
+
+
+// ─── Summary card (clickable filter chip) ───────────────────────────────────
+
+function SummaryCard({
+    label,
+    value,
+    hint,
+    active,
+    onClick,
+    tone,
+}: {
+    label: string;
+    value: number;
+    hint?: string;
+    active?: boolean;
+    onClick?: () => void;
+    tone?: 'warning' | 'danger';
+}) {
+    const clickable = Boolean(onClick);
+    const toneColor =
+        tone === 'warning' ? 'var(--color-warning)' :
+        tone === 'danger' ? 'var(--color-danger)' :
+        'var(--color-text)';
+    return (
+        <div
+            className="glass-card"
+            onClick={onClick}
+            style={{
+                padding: 16,
+                cursor: clickable ? 'pointer' : 'default',
+                borderColor: active ? toneColor : undefined,
+                borderWidth: active ? 2 : undefined,
+                borderStyle: active ? 'solid' : undefined,
+            }}
+        >
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+                {label}
+            </div>
+            <div style={{ fontSize: 28, fontWeight: 700, letterSpacing: '-0.03em', color: toneColor }}>
+                {value.toLocaleString('ru-RU')}
+            </div>
+            {hint && (
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                    {hint}
                 </div>
             )}
         </div>
@@ -547,21 +987,56 @@ function SupplyItemsPanel({
     items,
     loading,
     slug,
+    onOpenReturn,
 }: {
     supply: WbFboSupply;
     items: WbFboSupplyItem[];
     loading: boolean;
     slug: string;
+    onOpenReturn: () => void;
 }) {
     if (loading) {
         return <div style={{ padding: 24, textAlign: 'center' }}>Загрузка позиций...</div>;
     }
 
-    const totalQty = items.reduce((s, i) => s + i.quantity, 0);
-    const totalAccepted = items.reduce((s, i) => s + i.accepted_qty, 0);
+    // Use items if present, fall back to supply-level counters
+    // (items may be missing for supplies that haven't been enriched yet).
+    const hasItems = items.length > 0;
+    const totalQty = hasItems ? items.reduce((s, i) => s + i.quantity, 0) : supply.total_qty;
+    const totalAccepted = hasItems ? items.reduce((s, i) => s + i.accepted_qty, 0) : supply.accepted_qty;
+    const unacceptedDelta = Math.max(0, totalQty - totalAccepted);
+    const showReturnBanner = supply.wb_status === 'ACCEPTED' && unacceptedDelta > 0 && !supply.return_processed_at;
 
     return (
         <div style={{ padding: '16px 24px 20px' }}>
+            {/* Недоприёмка banner */}
+            {showReturnBanner && (
+                <div style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                    padding: '10px 14px', marginBottom: 12,
+                    background: 'color-mix(in srgb, var(--color-danger) 8%, transparent)',
+                    border: '1px solid color-mix(in srgb, var(--color-danger) 40%, transparent)',
+                    borderRadius: 8, fontSize: 14,
+                }}>
+                    <div>
+                        <strong style={{ color: 'var(--color-danger)' }}>Недоприёмка:</strong>{' '}
+                        {unacceptedDelta} шт из {totalQty} — WB принял {totalAccepted}
+                    </div>
+                    <button className="btn btn-primary btn-sm" onClick={onOpenReturn}>
+                        Оформить возврат
+                    </button>
+                </div>
+            )}
+            {supply.return_processed_at && (
+                <div style={{
+                    padding: '8px 12px', marginBottom: 12,
+                    background: 'color-mix(in srgb, var(--color-success) 10%, transparent)',
+                    borderRadius: 8, fontSize: 13, color: 'var(--color-text-muted)',
+                }}>
+                    ✓ Недоприёмка обработана {formatDate(supply.return_processed_at)}
+                </div>
+            )}
+
             {/* Warehouse info */}
             {supply.warehouse_name && (
                 <div style={{

@@ -821,6 +821,8 @@ export interface Warehouse {
   is_active: boolean;
   total_stock: number;
   vehicles_in_transit: number;
+  counterparty_id?: number | null;
+  counterparty_name?: string | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -1286,7 +1288,11 @@ export interface WbFboSupply {
   assembly_request_id?: number;
   assembly_request_number?: string;
   assembly_request_status?: string;
+  source_warehouse_id?: number;
   synced_at?: string;
+  return_processed_at?: string;
+  return_type?: 'GOODS' | 'DEFECT' | 'UTILIZED' | null;
+  return_qty?: number | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -1306,6 +1312,41 @@ export interface WbFboSupplyItem {
 export interface WbFboSupplyListResponse {
   items: WbFboSupply[];
   total: number;
+}
+
+export interface FboPartialSummaryItem {
+  barcode: string;
+  product_name?: string;
+  article_seller?: string;
+  delta: number;
+}
+
+export interface FboPartialSummary {
+  unaccepted_total: number;
+  unprocessed: number;
+  returned_to_stock: number;
+  utilized: number;
+  items_breakdown: FboPartialSummaryItem[];
+}
+
+export type FboReturnType = 'GOODS' | 'DEFECT' | 'UTILIZED';
+
+export interface FboReturnItem {
+  barcode: string;
+  quantity: number;
+  return_type: FboReturnType;
+}
+
+export interface FboReturnRequest {
+  warehouse_id?: number | null;
+  items: FboReturnItem[];
+  comment?: string | null;
+}
+
+export interface FboReturnResponse {
+  supply_id: number;
+  receipt_id?: number | null;
+  receipt_number?: string | null;
 }
 
 export interface FboSyncResult {
@@ -1649,6 +1690,9 @@ export interface Supplier {
   delivery_days_min?: number;
   delivery_days_max?: number;
   note?: string;
+  inn?: string | null;
+  contract_number?: string | null;
+  counterparty_id?: number | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -2081,4 +2125,239 @@ export interface AiFileUploadResponse {
   type: string;
   size: number;
   content: string;
+}
+
+// ─── Counterparties ──────────────────────────────────────────────────────────
+
+export type CounterpartyType =
+  | 'SUPPLIER'
+  | 'FULFILLMENT'
+  | 'CARRIER'
+  | 'CUSTOMS_BROKER'
+  | 'DESIGNER'
+  | 'LEGAL'
+  | 'LANDLORD'
+  | 'IT_SERVICE'
+  | 'MARKETPLACE'
+  | 'BANK'
+  | 'GOVERNMENT'
+  | 'AFFILIATED'
+  | 'OTHER';
+
+export type DocType = 'CONTRACT' | 'CERTIFICATE' | 'INVOICE' | 'OTHER';
+
+export interface CounterpartyContacts {
+  phone?: string;
+  email?: string;
+  tg?: string;
+  contact_person?: string;
+}
+
+export interface CounterpartyStats {
+  in_sum: number;
+  out_sum: number;
+  net: number;
+  tx_count: number;
+}
+
+export interface CounterpartyListItem {
+  id: number;
+  inn: string | null;
+  name: string;
+  primary_type: CounterpartyType;
+  secondary_types: CounterpartyType[] | null;
+  kpp: string | null;
+  contract_number: string | null;
+  notes?: string | null;
+  contacts?: CounterpartyContacts | null;
+  created_by_import: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface CounterpartyDetail extends CounterpartyListItem {
+  stats_rub: CounterpartyStats;
+  stats_cny: CounterpartyStats;
+  linked_warehouses: { id: number; name: string }[];
+  linked_suppliers: { id: number; name: string }[];
+  active_loans: LoanShort[];
+  docs_count: number;
+}
+
+export type Counterparty = CounterpartyListItem;
+
+export interface CounterpartyCreate {
+  inn?: string | null;
+  name: string;
+  primary_type: CounterpartyType;
+  secondary_types?: CounterpartyType[] | null;
+  kpp?: string | null;
+  contract_number?: string | null;
+  notes?: string | null;
+  contacts?: CounterpartyContacts | null;
+}
+
+export interface CounterpartyUpdate {
+  inn?: string | null;
+  name?: string;
+  primary_type?: CounterpartyType;
+  secondary_types?: CounterpartyType[] | null;
+  kpp?: string | null;
+  contract_number?: string | null;
+  notes?: string | null;
+  contacts?: CounterpartyContacts | null;
+}
+
+export interface CounterpartyDocument {
+  id: number;
+  counterparty_id: number;
+  doc_type: DocType;
+  original_filename: string | null;
+  file_size: number | null;
+  mime_type: string | null;
+  uploaded_at: string;
+  /** Signed MinIO URL (TTL 300s). Computed by backend per-request. */
+  minio_path_signed_url: string;
+}
+
+export interface CounterpartyListResponse {
+  items: CounterpartyListItem[];
+  total: number;
+}
+
+// ─── Loans ───────────────────────────────────────────────────────────────────
+
+export type LoanDirection = 'INCOMING' | 'OUTGOING' | 'AFFILIATED';
+export type LoanStatus = 'ACTIVE' | 'CLOSED' | 'DEFAULTED';
+export type LoanPaymentType =
+  | 'DISBURSEMENT'
+  | 'PRINCIPAL_REPAY'
+  | 'INTEREST_PAY'
+  | 'PENALTY';
+
+export interface LoanShort {
+  id: number;
+  direction: LoanDirection;
+  principal: number;
+  currency: string;
+  rate?: number | null;
+  contract_number?: string;
+  contract_date?: string;
+  start_date: string;
+  maturity_date: string | null;
+  status: LoanStatus;
+}
+
+export interface Loan extends LoanShort {
+  project_id?: number;
+  counterparty_id: number;
+  rate: number | null;
+  contract_number: string;
+  contract_date: string;
+  notes: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface LoanPayment {
+  id: number;
+  loan_id: number;
+  transaction_id: number | null;
+  payment_type: LoanPaymentType;
+  amount: number;
+  currency: string;
+  paid_at: string;
+  created_at?: string | null;
+}
+
+export interface LoanScheduleSummary {
+  principal_paid: number;
+  interest_paid: number;
+  penalty_paid: number;
+  remaining: number;
+}
+
+export interface LoanDetail extends Loan {
+  counterparty_name?: string | null;
+  counterparty_inn?: string | null;
+  payments: LoanPayment[];
+  schedule_summary: LoanScheduleSummary;
+}
+
+export interface LoanDirectionTotals {
+  count: number;
+  sum_rub: number;
+  sum_cny: number;
+}
+
+export interface LoanListResponse {
+  items: Loan[];
+  totals_by_direction: {
+    INCOMING: LoanDirectionTotals;
+    OUTGOING: LoanDirectionTotals;
+    AFFILIATED: LoanDirectionTotals;
+  };
+  total: number;
+}
+
+export interface LoanCreate {
+  counterparty_id: number;
+  direction: LoanDirection;
+  principal: number;
+  currency?: string;
+  rate?: number | null;
+  contract_number: string;
+  contract_date: string;
+  start_date: string;
+  maturity_date?: string | null;
+  status?: LoanStatus;
+  notes?: string | null;
+}
+
+export interface LoanUpdate {
+  direction?: LoanDirection;
+  principal?: number;
+  currency?: string;
+  rate?: number | null;
+  contract_number?: string;
+  contract_date?: string;
+  start_date?: string;
+  maturity_date?: string | null;
+  status?: LoanStatus;
+  notes?: string | null;
+}
+
+export interface LoanPaymentMatch {
+  transaction_id: number;
+  payment_type: LoanPaymentType;
+  amount: number;
+}
+
+// ─── Counterparty Turnovers Report ───────────────────────────────────────────
+
+export interface CounterpartyTurnoverMonth {
+  month: string;
+  in: number;
+  out: number;
+  net: number;
+}
+
+export interface CounterpartyTurnoverRow {
+  counterparty_id: number;
+  inn: string | null;
+  name: string;
+  primary_type: CounterpartyType;
+  months: CounterpartyTurnoverMonth[];
+  total: {
+    in: number;
+    out: number;
+    net: number;
+  };
+  tx_count: number;
+}
+
+export interface CounterpartyTurnoversResponse {
+  rows: CounterpartyTurnoverRow[];
+  period: { from: string; to: string };
+  currency: string;
 }

@@ -13,7 +13,8 @@ from backend.integrations.wb_api import WBApiClient
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.wb_fbo import (
-    FboSupplyLinkRequest,
+    FboReturnRequest,
+    FboReturnResponse,
     FboSyncResultSchema,
     WbFboSupplyItemSchema,
     WbFboSupplyListResponse,
@@ -45,6 +46,8 @@ async def list_fbo_supplies(
     limit: int = Query(50, le=500),
     offset: int = Query(0, ge=0),
     exclude_with_assembly: bool = Query(False, description="Exclude supplies with active assembly requests"),
+    without_assembly: bool = Query(False, description="Only supplies without any assembly request"),
+    partial_only: bool = Query(False, description="Only supplies with partial acceptance (accepted_qty < total_qty)"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -62,11 +65,42 @@ async def list_fbo_supplies(
         limit=limit,
         offset=offset,
         exclude_with_assembly=exclude_with_assembly,
+        without_assembly=without_assembly,
+        partial_only=partial_only,
     )
     return WbFboSupplyListResponse(
         items=[WbFboSupplySchema(**s) for s in supplies],
         total=total,
     )
+
+
+# ─── Summary (counts for dashboard cards) ──────────────────────────────────
+
+
+@router.get("/summary")
+async def get_fbo_supplies_summary(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, int]:
+    """
+    Summary counts: total, accepted, accepted_without_assembly,
+    accepted_partial. Highlights orphan ACCEPTED supplies where WB accepted
+    delivery but DDS has no assembly request — user should either attach one
+    or treat it as an unmanaged delivery.
+    """
+    return await fbo_supply_service.get_fbo_summary(db, project.id)
+
+
+@router.get("/partial-summary")
+async def get_partial_summary(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Недоприёмка dashboard: aggregate qty buckets + per-barcode breakdown.
+    Shown as a mini-panel when user enables the 'С недоприёмкой' filter.
+    """  # noqa: RUF002 — mixed cyrillic/latin is intentional (product terms)
+    return await fbo_supply_service.get_partial_acceptance_summary(db, project.id)
 
 
 # ─── Warehouse names (for filter dropdown) ─────────────────────────────────
@@ -194,42 +228,35 @@ async def sync_fbo_statuses(
         raise HTTPException(500, f"Status sync failed: {str(e)[:200]}") from e
 
 
-# ─── Link supply ↔ shipment ───────────────────────────────────────────────
+# ─── Return: handle unaccepted qty ─────────────────────────────────────────
 
 
-@router.post("/{supply_id}/link", dependencies=[Depends(rate_limit_write)])
-async def link_supply(
+@router.post(
+    "/{supply_id}/return",
+    response_model=FboReturnResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def create_fbo_return(
     supply_id: int,
-    payload: FboSupplyLinkRequest,
+    payload: FboReturnRequest,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Link FBO supply to an OutboundShipment."""
+    """
+    Оформить возврат/утилизацию по непринятому qty. Каждая строка items несёт
+    свой return_type (GOODS / UTILIZED / DEFECT), что позволяет в одном
+    вызове одну часть вернуть на склад, а другую — списать.
+    """  # noqa: RUF002 — cyrillic product terms
     try:
-        supply = await fbo_supply_service.link_supply_to_shipment(
+        result = await fbo_supply_service.process_fbo_return(
             db,
             project.id,
             supply_id,
-            payload.outbound_shipment_id,
+            items=[item.model_dump() for item in payload.items],
+            warehouse_id=payload.warehouse_id,
+            comment=payload.comment,
         )
-        return WbFboSupplySchema.model_validate(supply)
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
 
-
-@router.delete("/{supply_id}/link", dependencies=[Depends(rate_limit_write)])
-async def unlink_supply(
-    supply_id: int,
-    project: Project = Depends(get_current_project),
-    db: AsyncSession = Depends(get_db),
-):
-    """Unlink FBO supply from OutboundShipment."""
-    try:
-        supply = await fbo_supply_service.unlink_supply_from_shipment(
-            db,
-            project.id,
-            supply_id,
-        )
-        return WbFboSupplySchema.model_validate(supply)
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+    return FboReturnResponse(**result)

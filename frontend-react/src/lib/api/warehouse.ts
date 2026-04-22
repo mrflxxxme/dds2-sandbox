@@ -13,6 +13,9 @@ import type {
     DefectOperation,
     DeliveryTimesResponse,
     DeliveryTimesUpdate,
+    FboPartialSummary,
+    FboReturnRequest,
+    FboReturnResponse,
     FboSyncResult,
     InboundReceipt,
     LogisticsAnalyticsResponse,
@@ -142,6 +145,8 @@ export function addWarehouseMethods(api: ApiClient) {
             search?: string; status?: string; warehouse?: string; date_from?: string; date_to?: string;
             sort_by?: string; sort_order?: string; limit?: number; offset?: number;
             exclude_with_assembly?: boolean;
+            without_assembly?: boolean;
+            partial_only?: boolean;
         }) {
             const query = new URLSearchParams();
             if (params) {
@@ -151,6 +156,18 @@ export function addWarehouseMethods(api: ApiClient) {
             }
             const qs = query.toString();
             return api.request<WbFboSupplyListResponse>('GET', `/api/v1/warehouse/fbo-supplies${qs ? `?${qs}` : ''}`);
+        },
+        getFboSuppliesSummary() {
+            return api.request<{ total: number; accepted: number; accepted_without_assembly: number; accepted_partial: number }>(
+                'GET',
+                '/api/v1/warehouse/fbo-supplies/summary',
+            );
+        },
+        getFboPartialSummary() {
+            return api.request<FboPartialSummary>(
+                'GET',
+                '/api/v1/warehouse/fbo-supplies/partial-summary',
+            );
         },
         getFboSupplyItems(supplyId: number, refresh?: boolean) {
             const qs = refresh ? '?refresh=true' : '';
@@ -162,11 +179,8 @@ export function addWarehouseMethods(api: ApiClient) {
         syncFboStatuses() {
             return api.request<FboSyncResult>('POST', '/api/v1/warehouse/fbo-supplies/sync-statuses');
         },
-        linkFboSupply(supplyId: number, outboundShipmentId: number) {
-            return api.request<WbFboSupply>('POST', `/api/v1/warehouse/fbo-supplies/${supplyId}/link`, { outbound_shipment_id: outboundShipmentId });
-        },
-        unlinkFboSupply(supplyId: number) {
-            return api.request<WbFboSupply>('DELETE', `/api/v1/warehouse/fbo-supplies/${supplyId}/link`);
+        createFboReturn(supplyId: number, payload: FboReturnRequest) {
+            return api.request<FboReturnResponse>('POST', `/api/v1/warehouse/fbo-supplies/${supplyId}/return`, payload);
         },
 
         // ─── WB Warehouse Names ─────────────────────────────────────────

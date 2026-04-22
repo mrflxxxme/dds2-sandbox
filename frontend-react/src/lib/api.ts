@@ -24,6 +24,8 @@ import { addWarehouseMethods } from './api/warehouse';
 import { addMonitoringMethods } from './api/monitoring';
 import { addSupplyChainMethods } from './api/supply-chain';
 import { addAiChatMethods } from './api/ai-chat';
+import { addCounterpartyMethods } from './api/counterparty';
+import { addLoanMethods } from './api/loans';
 
 const client = new ApiClient();
 
@@ -43,4 +45,6 @@ export const api = Object.assign(client, {
     ...addMonitoringMethods(client),
     ...addSupplyChainMethods(client),
     ...addAiChatMethods(client),
+    ...addCounterpartyMethods(client),
+    ...addLoanMethods(client),
 });

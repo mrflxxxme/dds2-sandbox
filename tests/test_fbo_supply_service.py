@@ -30,12 +30,10 @@ from backend.services.fbo_supply_service import (
     _update_supply_from_fbw_detail,
     _update_supply_from_fbw_list,
     get_fbo_supply_items,
-    link_supply_to_shipment,
     list_fbo_supplies,
     list_warehouses,
     sync_fbo_statuses,
     sync_fbo_supplies,
-    unlink_supply_from_shipment,
 )
 
 # ─── Fixture: ensure test project exists ─────────────────────────────────────
@@ -271,12 +269,6 @@ class TestSchemas:
         result = FboSyncResultSchema(synced=10, created=3, updated=7, errors=0, message="ok")
         assert result.synced == 10
 
-    def test_link_request(self):
-        from backend.schemas.wb_fbo import FboSupplyLinkRequest
-
-        req = FboSupplyLinkRequest(outbound_shipment_id=42)
-        assert req.outbound_shipment_id == 42
-
 
 # ─── Service tests (require DB) ────────────────────────────────────────────
 
@@ -419,6 +411,116 @@ class TestListWarehouses:
 
 
 @pytest.mark.asyncio
+class TestWithoutAssembly:
+    """without_assembly must filter to ACCEPTED only — matches summary card
+    'WB принял, но в DDS нет заявки'. Non-final statuses aren't actionable.
+    """
+
+    async def test_without_assembly_excludes_non_accepted(self, db_session):
+        # ACCEPTED without AR → should appear
+        accepted_no_ar = WbFboSupply(
+            project_id=1,
+            wb_supply_id="WA-ACCEPTED",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 3, 20),
+        )
+        # ACTIVE without AR → should NOT appear (non-final)
+        active_no_ar = WbFboSupply(
+            project_id=1,
+            wb_supply_id="WA-ACTIVE",
+            wb_status=WbSupplyStatus.ACTIVE,
+            created_at_wb=datetime(2026, 3, 20),
+        )
+        # IN_PROGRESS without AR → should NOT appear
+        in_progress_no_ar = WbFboSupply(
+            project_id=1,
+            wb_supply_id="WA-IN-PROGRESS",
+            wb_status=WbSupplyStatus.IN_PROGRESS,
+            created_at_wb=datetime(2026, 3, 20),
+        )
+        db_session.add_all([accepted_no_ar, active_no_ar, in_progress_no_ar])
+        await db_session.commit()
+
+        supplies, _total = await list_fbo_supplies(
+            db_session,
+            project_id=1,
+            without_assembly=True,
+        )
+        ids = {s["wb_supply_id"] for s in supplies}
+        assert "WA-ACCEPTED" in ids
+        assert "WA-ACTIVE" not in ids
+        assert "WA-IN-PROGRESS" not in ids
+
+
+@pytest.mark.asyncio
+class TestExcludeWithAssembly:
+    """exclude_with_assembly must tolerate active AR with wb_fbo_supply_id=NULL.
+
+    Without IS NOT NULL filter in subquery, Postgres NOT IN (..., NULL) returns
+    NULL for every comparison → every supply is filtered out silently.
+    """
+
+    async def test_null_ar_does_not_zero_out_supplies(self, db_session):
+        from backend.models.assembly import AssemblyRequest, AssemblyStatus
+        from backend.models.warehouse import Warehouse
+
+        wh = Warehouse(project_id=1, name="wh-excl", warehouse_type="EXTERNAL")
+        db_session.add(wh)
+        await db_session.flush()
+
+        # Two supplies: A (no AR), B (linked to an active AR)
+        supply_a = WbFboSupply(
+            project_id=1,
+            wb_supply_id="EXCL-A",
+            wb_status=WbSupplyStatus.ACTIVE,
+            created_at_wb=datetime(2026, 3, 20),
+        )
+        supply_b = WbFboSupply(
+            project_id=1,
+            wb_supply_id="EXCL-B",
+            wb_status=WbSupplyStatus.ACTIVE,
+            created_at_wb=datetime(2026, 3, 20),
+        )
+        db_session.add_all([supply_a, supply_b])
+        await db_session.flush()
+
+        # AR linked to supply B (active status)
+        linked_ar = AssemblyRequest(
+            project_id=1,
+            warehouse_id=wh.id,
+            number="ASM-EXCL-B",
+            status=AssemblyStatus.PENDING,
+            wb_fbo_supply_id=supply_b.id,
+            estimated_ready_date=date(2026, 4, 10),
+            pallets_count=1,
+            pallet_weight_kg=100,
+        )
+        # Orphan AR with wb_fbo_supply_id=NULL — this is what broke NOT IN before the fix
+        null_ar = AssemblyRequest(
+            project_id=1,
+            warehouse_id=wh.id,
+            number="ASM-EXCL-NULL",
+            status=AssemblyStatus.PENDING,
+            wb_fbo_supply_id=None,
+            estimated_ready_date=date(2026, 4, 10),
+            pallets_count=1,
+            pallet_weight_kg=100,
+        )
+        db_session.add_all([linked_ar, null_ar])
+        await db_session.commit()
+
+        supplies, total = await list_fbo_supplies(
+            db_session,
+            project_id=1,
+            exclude_with_assembly=True,
+        )
+        ids = {s["wb_supply_id"] for s in supplies}
+        assert "EXCL-A" in ids, "Supply without any AR must be returned"
+        assert "EXCL-B" not in ids, "Supply with active AR must be filtered out"
+        assert total >= 1
+
+
+@pytest.mark.asyncio
 class TestGetFboSupplyItems:
     """Test get_fbo_supply_items."""
 
@@ -467,32 +569,6 @@ class TestGetFboSupplyItems:
         assert len(items) == 1
         assert items[0].barcode == "123456789"
         assert items[0].quantity == 5
-
-
-@pytest.mark.asyncio
-class TestLinkUnlink:
-    """Test link/unlink supply ↔ shipment."""
-
-    async def test_link_not_found_supply(self, db_session):
-        with pytest.raises(ValueError, match="FBO Supply not found"):
-            await link_supply_to_shipment(db_session, 1, 99999, 1)
-
-    async def test_unlink_not_found(self, db_session):
-        with pytest.raises(ValueError, match="FBO Supply not found"):
-            await unlink_supply_from_shipment(db_session, 1, 99999)
-
-    async def test_link_not_found_shipment(self, db_session):
-        supply = WbFboSupply(
-            project_id=1,
-            wb_supply_id="LINK-NO-SHIP",
-            wb_status=WbSupplyStatus.ACTIVE,
-            created_at_wb=datetime(2026, 3, 20),
-        )
-        db_session.add(supply)
-        await db_session.commit()
-
-        with pytest.raises(ValueError, match="Outbound shipment not found"):
-            await link_supply_to_shipment(db_session, 1, supply.id, 99999)
 
 
 @pytest.mark.asyncio
@@ -631,6 +707,597 @@ class TestModels:
         assert supply.wb_status == "ACCEPTED"
 
 
+# ─── Enrich: re-sync partial acceptance for ACCEPTED supplies ──────────────
+
+
+@pytest.mark.asyncio
+class TestEnrichPartialAcceptance:
+    """
+    Enrich must pick up ACCEPTED supplies with accepted_qty < total_qty
+    (partial acceptance) and re-fetch per-item accepted_qty from FBW goods API.
+    """
+
+    async def test_reenrich_accepted_with_partial_acceptance(self, db_session):
+        from datetime import timedelta
+
+        from backend.services.fbo_supply_service import enrich_fbo_supplies
+
+        # Stale supply (synced > 24h ago) accepted with 336/406 — should be picked.
+        stale_synced = datetime.utcnow() - timedelta(hours=36)
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="38231501",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            name="FBW-38231501",
+            created_at_wb=datetime(2026, 4, 1, 14, 16),
+            warehouse_name="Тула",
+            total_qty=406,
+            accepted_qty=0,  # stale: not yet synced after acceptance
+            synced_at=stale_synced,
+        )
+        db_session.add(supply)
+        await db_session.commit()
+        await db_session.refresh(supply)
+
+        mock_client = AsyncMock()
+        mock_client.get_fbw_supply_detail.return_value = {
+            "warehouseName": "Тула",
+            "quantity": 406,
+            "acceptedQuantity": 336,
+            "statusID": 5,
+        }
+        # goods sum: qty = 144+52+96+96+18 = 406, accepted = 144+0+96+96+0 = 336
+        mock_client.get_fbw_supply_goods.return_value = [
+            {"barcode": "2042072435609", "vendorCode": "DIVANDEK", "nmID": 1, "quantity": 144, "acceptedQuantity": 144},
+            {"barcode": "2043160691778", "vendorCode": "NAKIDKA", "nmID": 2, "quantity": 52, "acceptedQuantity": 0},
+            {"barcode": "2043300615220", "vendorCode": "KREST-B", "nmID": 4, "quantity": 96, "acceptedQuantity": 96},
+            {"barcode": "2043300615237", "vendorCode": "KREST-K", "nmID": 5, "quantity": 96, "acceptedQuantity": 96},
+            {"barcode": "2044145314996", "vendorCode": "ZEBRA", "nmID": 3, "quantity": 18, "acceptedQuantity": 0},
+        ]
+
+        result = await enrich_fbo_supplies(db_session, 1, mock_client, max_calls=5)
+
+        assert result["enriched"] == 1
+        assert mock_client.get_fbw_supply_goods.called, "goods API must be called for ACCEPTED with partial"
+
+        await db_session.refresh(supply)
+        # accepted_qty and total_qty are re-derived from goods sum (source of truth
+        # per-SKU), not from detail.acceptedQuantity (can diverge from items).
+        assert supply.accepted_qty == 336
+        assert supply.total_qty == 406
+
+        from sqlalchemy import select
+
+        items_r = await db_session.execute(
+            select(WbFboSupplyItem).where(WbFboSupplyItem.supply_id == supply.id).order_by(WbFboSupplyItem.barcode)
+        )
+        items = {it.barcode: it for it in items_r.scalars().all()}
+        assert items["2042072435609"].accepted_qty == 144
+        assert items["2043160691778"].accepted_qty == 0
+        assert items["2044145314996"].accepted_qty == 0
+
+    async def test_accepted_within_cooldown_is_skipped(self, db_session):
+        """Recently synced ACCEPTED supply must not be re-enriched (cooldown)."""
+        from backend.services.fbo_supply_service import enrich_fbo_supplies
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="38231502",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            warehouse_name="Тула",
+            total_qty=406,
+            accepted_qty=0,
+            synced_at=datetime.utcnow(),  # just now — within cooldown
+        )
+        db_session.add(supply)
+        await db_session.commit()
+
+        mock_client = AsyncMock()
+        result = await enrich_fbo_supplies(db_session, 1, mock_client, max_calls=5)
+
+        assert result["enriched"] == 0
+        assert not mock_client.get_fbw_supply_detail.called
+
+    async def test_fully_accepted_is_skipped(self, db_session):
+        """ACCEPTED with accepted_qty == total_qty must not trigger re-enrich."""
+        from datetime import timedelta
+
+        from backend.services.fbo_supply_service import enrich_fbo_supplies
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="38231503",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            warehouse_name="Тула",
+            total_qty=100,
+            accepted_qty=100,
+            synced_at=datetime.utcnow() - timedelta(days=7),
+        )
+        db_session.add(supply)
+        await db_session.commit()
+
+        mock_client = AsyncMock()
+        result = await enrich_fbo_supplies(db_session, 1, mock_client, max_calls=5)
+
+        assert result["enriched"] == 0
+        assert not mock_client.get_fbw_supply_detail.called
+
+
+# ─── Backfill: supply ↔ shipment link via AssemblyRequest ──────────────────
+
+
+@pytest.mark.asyncio
+class TestBackfillSupplyShipmentLink:
+    """Repair missing outbound_shipment_id on WbFboSupply using AssemblyRequest."""
+
+    async def test_backfill_copies_link_from_assembly(self, db_session):
+        """Orphan supply + AssemblyRequest with shipment → link restored."""
+        from sqlalchemy import select
+
+        from backend.models.assembly import AssemblyRequest, AssemblyStatus
+        from backend.models.warehouse import OutboundShipment, OutboundStatus
+        from backend.services.fbo_supply.sync import _backfill_supply_shipment_links
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="38231504",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            outbound_shipment_id=None,
+        )
+        db_session.add(supply)
+        await db_session.flush()
+
+        shipment = OutboundShipment(
+            project_id=1,
+            warehouse_id=1,
+            number="OUT-999",
+            status=OutboundStatus.DELIVERED,
+            wb_supply_id=None,
+        )
+        db_session.add(shipment)
+        await db_session.flush()
+
+        assembly = AssemblyRequest(
+            project_id=1,
+            warehouse_id=1,
+            number="ASM-999",
+            status=AssemblyStatus.DELIVERED,
+            wb_fbo_supply_id=supply.id,
+            outbound_shipment_id=shipment.id,
+            estimated_ready_date=date(2026, 4, 10),
+            pallets_count=1,
+            pallet_weight_kg=100,
+        )
+        db_session.add(assembly)
+        await db_session.commit()
+
+        await _backfill_supply_shipment_links(db_session, 1, [supply])
+        await db_session.commit()
+
+        refreshed = (await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == supply.id))).scalar_one()
+        refreshed_sh = (
+            await db_session.execute(select(OutboundShipment).where(OutboundShipment.id == shipment.id))
+        ).scalar_one()
+
+        assert refreshed.outbound_shipment_id == shipment.id
+        assert refreshed_sh.wb_supply_id == "38231504"
+
+    async def test_backfill_noop_for_already_linked(self, db_session):
+        """Supply already linked must stay untouched (no DB writes)."""
+        from backend.models.warehouse import OutboundShipment, OutboundStatus
+        from backend.services.fbo_supply.sync import _backfill_supply_shipment_links
+
+        shipment = OutboundShipment(
+            project_id=1,
+            warehouse_id=1,
+            number="OUT-NOOP",
+            status=OutboundStatus.DELIVERED,
+        )
+        db_session.add(shipment)
+        await db_session.flush()
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="38231505",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            outbound_shipment_id=shipment.id,
+        )
+        db_session.add(supply)
+        await db_session.commit()
+
+        await _backfill_supply_shipment_links(db_session, 1, [supply])
+        assert supply.outbound_shipment_id == shipment.id
+
+
+# ─── Returns: handle unaccepted qty ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestFboReturns:
+    """process_fbo_return creates receipt + flags supply.return_processed_at."""
+
+    async def test_goods_return_creates_inbound_receipt(self, db_session):
+        from sqlalchemy import select, text
+
+        from backend.models.warehouse import InboundReceipt, InboundStatus, Warehouse, WarehouseStock
+        from backend.services.fbo_supply.returns import process_fbo_return
+
+        # Warehouse
+        wh = Warehouse(project_id=1, name="хамза-test", warehouse_type="EXTERNAL")
+        db_session.add(wh)
+        await db_session.flush()
+
+        # Nomenclature (barcode)
+        await db_session.execute(
+            text(
+                "INSERT INTO nomenclature (project_id, article_seller, barcode, updated_at) "
+                "VALUES (1, 'art', '2043160691778', NOW()) ON CONFLICT DO NOTHING"
+            )
+        )
+
+        # Supply with partial acceptance (52 unaccepted)
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="38231506",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            total_qty=52,
+            accepted_qty=0,
+        )
+        db_session.add(supply)
+        await db_session.flush()
+
+        item = WbFboSupplyItem(
+            project_id=1,
+            supply_id=supply.id,
+            wb_order_id="W1",
+            barcode="2043160691778",
+            quantity=52,
+            accepted_qty=0,
+        )
+        db_session.add(item)
+        await db_session.commit()
+        await db_session.refresh(supply)
+
+        result = await process_fbo_return(
+            db_session,
+            1,
+            supply.id,
+            items=[{"barcode": "2043160691778", "quantity": 52, "return_type": "GOODS"}],
+            warehouse_id=wh.id,
+        )
+
+        assert result["supply_id"] == supply.id
+        assert result["receipt_id"] is not None
+
+        r = await db_session.execute(select(InboundReceipt).where(InboundReceipt.id == result["receipt_id"]))
+        receipt = r.scalar_one()
+        assert receipt.status == InboundStatus.ACCEPTED
+        assert receipt.is_defect is False
+        assert "38231506" in (receipt.comment or "")
+
+        s = await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == supply.id))
+        assert s.scalar_one().return_processed_at is not None
+
+        st = await db_session.execute(
+            select(WarehouseStock).where(
+                WarehouseStock.warehouse_id == wh.id,
+                WarehouseStock.barcode == "2043160691778",
+            )
+        )
+        stock = st.scalar_one()
+        assert stock.quantity == 52
+
+    async def test_defect_return_goes_to_defect_stock(self, db_session):
+        from sqlalchemy import select, text
+
+        from backend.models.warehouse import Warehouse, WarehouseStock
+        from backend.services.fbo_supply.returns import process_fbo_return
+
+        wh = Warehouse(project_id=1, name="хамза-d", warehouse_type="EXTERNAL")
+        db_session.add(wh)
+        await db_session.flush()
+        await db_session.execute(
+            text(
+                "INSERT INTO nomenclature (project_id, article_seller, barcode, updated_at) "
+                "VALUES (1, 'art2', 'BC-DEFECT', NOW()) ON CONFLICT DO NOTHING"
+            )
+        )
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="S2",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            total_qty=10,
+            accepted_qty=0,
+        )
+        db_session.add(supply)
+        await db_session.flush()
+        db_session.add(
+            WbFboSupplyItem(
+                project_id=1,
+                supply_id=supply.id,
+                wb_order_id="W2",
+                barcode="BC-DEFECT",
+                quantity=10,
+                accepted_qty=0,
+            )
+        )
+        await db_session.commit()
+
+        await process_fbo_return(
+            db_session,
+            1,
+            supply.id,
+            items=[{"barcode": "BC-DEFECT", "quantity": 10, "return_type": "DEFECT"}],
+            warehouse_id=wh.id,
+        )
+
+        st = await db_session.execute(
+            select(WarehouseStock).where(WarehouseStock.warehouse_id == wh.id, WarehouseStock.barcode == "BC-DEFECT")
+        )
+        stock = st.scalar_one()
+        assert stock.quantity == 0
+        assert stock.defect_quantity == 10
+
+    async def test_utilized_return_no_receipt_but_flags_supply(self, db_session):
+        from sqlalchemy import select
+
+        from backend.services.fbo_supply.returns import process_fbo_return
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="S3",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            total_qty=5,
+            accepted_qty=0,
+        )
+        db_session.add(supply)
+        await db_session.flush()
+        db_session.add(
+            WbFboSupplyItem(
+                project_id=1,
+                supply_id=supply.id,
+                wb_order_id="W3",
+                barcode="BC-UTIL",
+                quantity=5,
+                accepted_qty=0,
+            )
+        )
+        await db_session.commit()
+
+        result = await process_fbo_return(
+            db_session,
+            1,
+            supply.id,
+            items=[{"barcode": "BC-UTIL", "quantity": 5, "return_type": "UTILIZED"}],
+        )
+
+        assert result["receipt_id"] is None
+        s = (await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == supply.id))).scalar_one()
+        assert s.return_processed_at is not None
+
+    async def test_rejects_qty_over_unaccepted_delta(self, db_session):
+        from backend.services.fbo_supply.returns import process_fbo_return
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="S4",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            total_qty=10,
+            accepted_qty=7,
+        )
+        db_session.add(supply)
+        await db_session.flush()
+        db_session.add(
+            WbFboSupplyItem(
+                project_id=1,
+                supply_id=supply.id,
+                wb_order_id="W4",
+                barcode="BC-OVER",
+                quantity=10,
+                accepted_qty=7,
+            )
+        )
+        await db_session.commit()
+
+        with pytest.raises(ValueError, match="unaccepted delta"):
+            await process_fbo_return(
+                db_session,
+                1,
+                supply.id,
+                items=[{"barcode": "BC-OVER", "quantity": 5, "return_type": "UTILIZED"}],  # delta=3
+            )
+
+    async def test_rejects_double_return_for_same_supply(self, db_session):
+        """Idempotency: second call after return_processed_at is set must fail."""
+        from backend.services.fbo_supply.returns import process_fbo_return
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="S5-IDEMP",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            total_qty=5,
+            accepted_qty=0,
+        )
+        db_session.add(supply)
+        await db_session.flush()
+        db_session.add(
+            WbFboSupplyItem(
+                project_id=1,
+                supply_id=supply.id,
+                wb_order_id="W5",
+                barcode="BC-IDEMP",
+                quantity=5,
+                accepted_qty=0,
+            )
+        )
+        await db_session.commit()
+
+        # first call succeeds (UTILIZED — no warehouse/nomenclature setup needed)
+        await process_fbo_return(
+            db_session,
+            1,
+            supply.id,
+            items=[{"barcode": "BC-IDEMP", "quantity": 5, "return_type": "UTILIZED"}],
+        )
+
+        # second call must refuse — supply.return_processed_at is already set
+        with pytest.raises(ValueError, match="already processed"):
+            await process_fbo_return(
+                db_session,
+                1,
+                supply.id,
+                items=[{"barcode": "BC-IDEMP", "quantity": 5, "return_type": "UTILIZED"}],
+            )
+
+    async def test_mixed_return_splits_stock_and_utilization(self, db_session):
+        """Одна строка GOODS + одна UTILIZED → InboundReceipt создаётся только
+        для GOODS, стоковая строка не попадает в receipt. supply.return_type='MIXED'.
+        """
+        from sqlalchemy import select, text
+
+        from backend.models.warehouse import InboundReceiptItem, Warehouse, WarehouseStock
+        from backend.services.fbo_supply.returns import process_fbo_return
+
+        wh = Warehouse(project_id=1, name="mixed-wh", warehouse_type="EXTERNAL")
+        db_session.add(wh)
+        await db_session.flush()
+
+        await db_session.execute(
+            text(
+                "INSERT INTO nomenclature (project_id, article_seller, barcode, updated_at) "
+                "VALUES (1, 'mix1', 'BC-MIX-1', NOW()), "
+                "(1, 'mix2', 'BC-MIX-2', NOW()) ON CONFLICT DO NOTHING"
+            )
+        )
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="S-MIX",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            total_qty=10,
+            accepted_qty=0,
+        )
+        db_session.add(supply)
+        await db_session.flush()
+        db_session.add_all(
+            [
+                WbFboSupplyItem(
+                    project_id=1,
+                    supply_id=supply.id,
+                    wb_order_id="W-MIX-1",
+                    barcode="BC-MIX-1",
+                    quantity=6,
+                    accepted_qty=0,
+                ),
+                WbFboSupplyItem(
+                    project_id=1,
+                    supply_id=supply.id,
+                    wb_order_id="W-MIX-2",
+                    barcode="BC-MIX-2",
+                    quantity=4,
+                    accepted_qty=0,
+                ),
+            ]
+        )
+        await db_session.commit()
+
+        result = await process_fbo_return(
+            db_session,
+            1,
+            supply.id,
+            items=[
+                {"barcode": "BC-MIX-1", "quantity": 6, "return_type": "GOODS"},
+                {"barcode": "BC-MIX-2", "quantity": 4, "return_type": "UTILIZED"},
+            ],
+            warehouse_id=wh.id,
+        )
+
+        # Receipt created for GOODS row only
+        assert result["receipt_id"] is not None
+        items_in_receipt = (
+            (
+                await db_session.execute(
+                    select(InboundReceiptItem).where(InboundReceiptItem.receipt_id == result["receipt_id"])
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(items_in_receipt) == 1
+        assert items_in_receipt[0].barcode == "BC-MIX-1"
+        assert items_in_receipt[0].actual_qty == 6
+
+        # Stock: only BC-MIX-1 increased, BC-MIX-2 untouched
+        stock_1 = (
+            await db_session.execute(
+                select(WarehouseStock).where(WarehouseStock.warehouse_id == wh.id, WarehouseStock.barcode == "BC-MIX-1")
+            )
+        ).scalar_one()
+        assert stock_1.quantity == 6
+
+        stock_2 = (
+            await db_session.execute(
+                select(WarehouseStock).where(WarehouseStock.warehouse_id == wh.id, WarehouseStock.barcode == "BC-MIX-2")
+            )
+        ).scalar_one_or_none()
+        assert stock_2 is None
+
+        # Supply flagged MIXED
+        s = (await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == supply.id))).scalar_one()
+        assert s.return_type == "MIXED"
+        assert s.return_qty == 10
+        assert s.return_processed_at is not None
+
+    async def test_pure_utilization_requires_no_warehouse(self, db_session):
+        """All UTILIZED items → receipt_id=None, warehouse_id not required."""
+        from sqlalchemy import select
+
+        from backend.services.fbo_supply.returns import process_fbo_return
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="S-PURE-UTIL",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            total_qty=3,
+            accepted_qty=0,
+        )
+        db_session.add(supply)
+        await db_session.flush()
+        db_session.add(
+            WbFboSupplyItem(
+                project_id=1,
+                supply_id=supply.id,
+                wb_order_id="W-PURE",
+                barcode="BC-PURE-UTIL",
+                quantity=3,
+                accepted_qty=0,
+            )
+        )
+        await db_session.commit()
+
+        result = await process_fbo_return(
+            db_session,
+            1,
+            supply.id,
+            items=[{"barcode": "BC-PURE-UTIL", "quantity": 3, "return_type": "UTILIZED"}],
+        )
+        assert result["receipt_id"] is None
+
+        s = (await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == supply.id))).scalar_one()
+        assert s.return_type == "UTILIZED"
+
+
 # ─── Router integration tests ──────────────────────────────────────────────
 
 
@@ -661,17 +1328,6 @@ class TestRouterEndpoints:
 
     async def test_sync_endpoint_no_auth(self, client):
         resp = await client.post("/api/v1/warehouse/fbo-supplies/sync")
-        assert resp.status_code in (401, 403)
-
-    async def test_link_endpoint_no_auth(self, client):
-        resp = await client.post(
-            "/api/v1/warehouse/fbo-supplies/1/link",
-            json={"outbound_shipment_id": 1},
-        )
-        assert resp.status_code in (401, 403)
-
-    async def test_unlink_endpoint_no_auth(self, client):
-        resp = await client.delete("/api/v1/warehouse/fbo-supplies/1/link")
         assert resp.status_code in (401, 403)
 
     async def test_list_with_search_param(self, client, auth_headers):

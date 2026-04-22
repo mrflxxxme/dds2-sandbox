@@ -12,7 +12,7 @@ import logging
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.assembly import AssemblyRequest, AssemblyStatus, AssemblyStatusHistory
@@ -26,7 +26,12 @@ from .mappers import (
     _create_supply_from_fbw_list,
     _update_supply_from_fbw_detail,
     _update_supply_from_fbw_list,
+    _upsert_supply_items_fbw,
 )
+
+# Re-enrich ACCEPTED supplies with accepted_qty < total_qty at most every 24h
+# to avoid burning FBW rate-limit (6 req/min).
+ACCEPTED_REENRICH_COOLDOWN_HOURS = 24
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +127,14 @@ async def sync_fbo_supplies(
                 )
                 errors += 1
 
-        # 4. Auto-deliver linked shipments for ACCEPTED supplies
+        # 4. Back-fill missing outbound_shipment_id link via AssemblyRequest.
+        #    Linkage is normally set in assembly.status.ship_request() when supply is
+        #    picked before SHIPPED, but supply can be attached to AssemblyRequest AFTER
+        #    shipping — then supply.outbound_shipment_id stays NULL. Repair it here
+        #    so auto-deliver (step 5) and partial-acceptance returns work correctly.
+        await _backfill_supply_shipment_links(db, project_id, list(existing_map.values()))
+
+        # 5. Auto-deliver linked shipments for ACCEPTED supplies
         for _wb_supply_id, supply in existing_map.items():
             if supply.wb_status == WbSupplyStatus.ACCEPTED and supply.outbound_shipment_id:
                 await _auto_deliver_shipment(db, project_id, supply.outbound_shipment_id)
@@ -168,13 +180,27 @@ async def enrich_fbo_supplies(
 
     Returns: {enriched, errors}
     """
-    # Find supplies needing detail (no warehouse_name OR CANCELLED with possible partial acceptance)
+    # Find supplies needing detail:
+    #  - no warehouse_name (fresh from list API)
+    #  - CANCELLED (WB may accept items after initial cancel)
+    #  - ACCEPTED with accepted_qty < total_qty (partial acceptance: re-sync actual qty
+    #    from detail + goods after cooldown, so items get per-SKU accepted_qty too)
+    cooldown_threshold = utcnow() - timedelta(hours=ACCEPTED_REENRICH_COOLDOWN_HOURS)
     result = await db.execute(
         select(WbFboSupply).where(
             WbFboSupply.project_id == project_id,
             or_(
                 WbFboSupply.warehouse_name.is_(None),
                 WbFboSupply.wb_status == WbSupplyStatus.CANCELLED,
+                and_(
+                    WbFboSupply.wb_status == WbSupplyStatus.ACCEPTED,
+                    WbFboSupply.total_qty > 0,
+                    WbFboSupply.accepted_qty < WbFboSupply.total_qty,
+                    or_(
+                        WbFboSupply.synced_at.is_(None),
+                        WbFboSupply.synced_at < cooldown_threshold,
+                    ),
+                ),
             ),
         )
     )
@@ -200,9 +226,31 @@ async def enrich_fbo_supplies(
             if enriched > 0:
                 await asyncio.sleep(FBW_RATE_LIMIT_DELAY)
 
-            detail = await api_client.get_fbw_supply_detail(int(supply.wb_supply_id))
+            wb_id_int = int(supply.wb_supply_id)
+            detail = await api_client.get_fbw_supply_detail(wb_id_int)
             if detail:
                 _update_supply_from_fbw_detail(supply, detail)
+
+            # Also sync per-item accepted_qty for ACCEPTED supplies with partial
+            # acceptance (WB returns acceptedQuantity per barcode in goods API).
+            # WB detail.acceptedQuantity and sum(goods.acceptedQuantity) can
+            # diverge (detail counts depersonalized as accepted, goods doesn't) —
+            # we trust per-SKU goods numbers for supply-level accepted_qty too,
+            # otherwise partial_only filter misses these supplies.
+            if supply.wb_status == WbSupplyStatus.ACCEPTED:
+                try:
+                    await asyncio.sleep(FBW_RATE_LIMIT_DELAY)
+                    goods = await api_client.get_fbw_supply_goods(wb_id_int, limit=100, offset=0)
+                    if goods:
+                        await _upsert_supply_items_fbw(db, project_id, supply.id, wb_id_int, goods)
+                        supply.accepted_qty = sum(int(g.get("acceptedQuantity") or 0) for g in goods)
+                        supply.total_qty = sum(int(g.get("quantity") or 0) for g in goods)
+                except Exception as goods_err:
+                    logger.warning(
+                        "fbo_enrich.goods_error",
+                        extra={"wb_supply_id": supply.wb_supply_id, "error": str(goods_err)},
+                    )
+
             supply.synced_at = utcnow()
             await db.commit()
             enriched += 1
@@ -343,6 +391,70 @@ async def sync_fbo_statuses(
         "errors": errors,
         "message": f"Updated {updated} supply statuses",
     }
+
+
+# ─── Linkage backfill ──────────────────────────────────────────────────────
+
+
+async def _backfill_supply_shipment_links(
+    db: AsyncSession,
+    project_id: int,
+    supplies: list[WbFboSupply],
+) -> None:
+    """
+    For every supply without outbound_shipment_id, try to find an AssemblyRequest
+    that points at this supply and already has a shipment — then copy the link.
+    Also backfills OutboundShipment.wb_supply_id when missing, so reverse lookups
+    (shipment → supply) work.
+
+    This repairs the common case where user attached wb_fbo_supply_id to an
+    AssemblyRequest AFTER it was shipped (ship_request sets the link only if
+    wb_fbo_supply_id is already set at SHIPPED time).
+    """
+    orphans = [s for s in supplies if s.outbound_shipment_id is None]
+    if not orphans:
+        return
+
+    orphan_ids = [s.id for s in orphans]
+    result = await db.execute(
+        select(AssemblyRequest.wb_fbo_supply_id, AssemblyRequest.outbound_shipment_id).where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.wb_fbo_supply_id.in_(orphan_ids),
+            AssemblyRequest.outbound_shipment_id.is_not(None),
+            AssemblyRequest.is_deleted == False,  # noqa: E712
+        )
+    )
+    link_map: dict[int, int] = {row[0]: row[1] for row in result.all()}
+    if not link_map:
+        return
+
+    shipment_ids = list(set(link_map.values()))
+    sh_result = await db.execute(
+        select(OutboundShipment).where(
+            OutboundShipment.id.in_(shipment_ids),
+            OutboundShipment.project_id == project_id,
+            OutboundShipment.is_deleted == False,  # noqa: E712
+        )
+    )
+    shipments_by_id: dict[int, OutboundShipment] = {sh.id: sh for sh in sh_result.scalars().all()}
+
+    for supply in orphans:
+        ship_id = link_map.get(supply.id)
+        if not ship_id:
+            continue
+        supply.outbound_shipment_id = ship_id
+        shipment = shipments_by_id.get(ship_id)
+        if shipment and not shipment.wb_supply_id:
+            shipment.wb_supply_id = supply.wb_supply_id
+        logger.info(
+            "fbo_sync.backfill_link",
+            extra={
+                "project_id": project_id,
+                "supply_id": supply.id,
+                "wb_supply_id": supply.wb_supply_id,
+                "shipment_id": ship_id,
+            },
+        )
 
 
 # ─── Auto-deliver helpers ─────────────────────────────────────────────────

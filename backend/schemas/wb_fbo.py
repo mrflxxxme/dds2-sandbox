@@ -43,6 +43,7 @@ class WbFboSupplySchema(BaseModel):
     assembly_request_id: int | None = None
     assembly_request_number: str | None = None
     assembly_request_status: str | None = None
+    source_warehouse_id: int | None = None
     synced_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -62,15 +63,6 @@ class WbFboSupplyListResponse(BaseModel):
     total: int
 
 
-# ─── Link request ───────────────────────────────────────────────────────────
-
-
-class FboSupplyLinkRequest(BaseModel):
-    """Link FBO supply to an OutboundShipment."""
-
-    outbound_shipment_id: int
-
-
 # ─── Sync response ──────────────────────────────────────────────────────────
 
 
@@ -82,3 +74,34 @@ class FboSyncResultSchema(BaseModel):
     updated: int = 0
     errors: int = 0
     message: str = ""
+
+
+# ─── Return (недоприёмка) ──────────────────────────────────────────────────
+
+
+class FboReturnItem(BaseModel):
+    """One row of the return — split per barcode with its own disposition."""
+
+    barcode: str
+    quantity: int
+    return_type: str  # GOODS | UTILIZED (DEFECT kept server-side for back-compat)
+
+
+class FboReturnRequest(BaseModel):
+    """
+    Handle unaccepted qty for a supply with partial acceptance.
+
+    Each item in `items` carries its own `return_type` so the user can split
+    one supply between «Вернуть на склад» (GOODS) and «Утилизация» (UTILIZED)
+    in a single submit. `warehouse_id` is required if any item has GOODS/DEFECT.
+    """
+
+    warehouse_id: int | None = None
+    items: list[FboReturnItem]
+    comment: str | None = None
+
+
+class FboReturnResponse(BaseModel):
+    supply_id: int
+    receipt_id: int | None = None
+    receipt_number: str | None = None
