@@ -8,7 +8,6 @@ Functions:
 - link_supply_to_shipment / unlink_supply_from_shipment
 """
 
-import asyncio
 import logging
 from datetime import date
 from typing import Any
@@ -19,17 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.models.assembly import AssemblyRequest, AssemblyStatus
 from backend.models.warehouse import OutboundShipment
 from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem, WbSupplyStatus
-from backend.utils.time import utcnow
 
 from .mappers import _update_supply_from_fbw_detail, _upsert_supply_items_fbw
 from .sync import _auto_deliver_shipment
-
-# WB Suppliers API rate-limits /supplies/{id}/goods aggressively (6 req/min).
-# Cap lazy-load time so UI does not hang through the full 3x60s retry backoff.
-_LAZY_LOAD_TIMEOUT_SEC = 8.0
-# Cooldown: don't re-hit WB API for the same supply within this window after a
-# failed/empty attempt. Scheduler enrich (every 3h) will pick it up eventually.
-_LAZY_LOAD_COOLDOWN_SEC = 120
 
 logger = logging.getLogger(__name__)
 
@@ -289,21 +280,14 @@ async def get_fbo_supply_items(
     )
     items = list(items_result.scalars().all())
 
-    # Lazy-load from WB API if no items cached or force refresh.
-    # Throttled: if we tried recently, return DB state (may be empty) — avoids
-    # piling up 3x60s retries on every click when WB /supplies/{id}/goods 429s.
-    should_try_lazy_load = (not items or force_refresh) and api_client and supply.wb_supply_id.isdigit()
-    if should_try_lazy_load and not force_refresh and supply.synced_at:
-        age = (utcnow() - supply.synced_at).total_seconds()
-        if age < _LAZY_LOAD_COOLDOWN_SEC:
-            should_try_lazy_load = False
-
-    if should_try_lazy_load:
-        wb_id_int = int(supply.wb_supply_id)
+    # Lazy-load from WB API if no items cached or force refresh
+    if (not items or force_refresh) and api_client and supply.wb_supply_id.isdigit():
         try:
-            goods = await asyncio.wait_for(
-                api_client.get_fbw_supply_goods(wb_id_int, limit=100, offset=0),
-                timeout=_LAZY_LOAD_TIMEOUT_SEC,
+            wb_id_int = int(supply.wb_supply_id)
+            goods = await api_client.get_fbw_supply_goods(
+                wb_id_int,
+                limit=100,
+                offset=0,
             )
             if goods:
                 await _upsert_supply_items_fbw(db, project_id, supply.id, wb_id_int, goods)
@@ -311,10 +295,7 @@ async def get_fbo_supply_items(
             # Also fetch detail (warehouse_name, qty) if missing
             if not supply.warehouse_name:
                 try:
-                    detail = await asyncio.wait_for(
-                        api_client.get_fbw_supply_detail(wb_id_int),
-                        timeout=_LAZY_LOAD_TIMEOUT_SEC,
-                    )
+                    detail = await api_client.get_fbw_supply_detail(wb_id_int)
                     if detail:
                         _update_supply_from_fbw_detail(supply, detail)
                 except Exception as e:
@@ -323,7 +304,6 @@ async def get_fbo_supply_items(
                         extra={"supply_id": supply_id, "error": str(e)},
                     )
 
-            supply.synced_at = utcnow()
             await db.commit()
             # Re-fetch from DB
             items_result2 = await db.execute(
@@ -331,16 +311,6 @@ async def get_fbo_supply_items(
             )
             items = list(items_result2.scalars().all())
         except Exception as e:
-            # Mark attempt timestamp so we don't hammer WB API on next click.
-            try:
-                await db.rollback()
-                supply_refresh = await db.execute(select(WbFboSupply).where(WbFboSupply.id == supply_id))
-                supply2 = supply_refresh.scalar_one_or_none()
-                if supply2:
-                    supply2.synced_at = utcnow()
-                    await db.commit()
-            except Exception:
-                await db.rollback()
             logger.warning(
                 "fbo_items.lazy_load_error",
                 extra={"supply_id": supply_id, "error": str(e)},
