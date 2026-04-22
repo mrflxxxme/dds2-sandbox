@@ -8,10 +8,32 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+import pytest_asyncio
 
 
 def _inn() -> str:
     return str(int(uuid.uuid4().hex[:9], 16) % 9000000000 + 1000000000)
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _seed_accounts(db_session):
+    """Transaction.account has FK → accounts.account. Tests below use two
+    hardcoded account numbers; create them once per test so a fresh CI DB
+    doesn't trip transactions_account_fkey. ON CONFLICT DO NOTHING — idempotent
+    across re-runs."""
+    from sqlalchemy import text
+
+    await db_session.execute(
+        text(
+            "INSERT INTO accounts (account, bank, currency, is_our_account, is_customs_payee, is_deleted) "
+            "VALUES (:a1, 'WB', 'RUB', true, false, false), "
+            "(:a2, 'VTB', 'RUB', true, false, false) "
+            "ON CONFLICT (account) DO NOTHING"
+        ),
+        {"a1": "40702810800000001893", "a2": "40702810400810052145"},
+    )
+    await db_session.commit()
+    yield
 
 
 async def _create_project(client, auth_headers) -> int:
