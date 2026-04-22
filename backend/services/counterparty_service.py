@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import logging
 import mimetypes
+from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
 
@@ -483,7 +484,7 @@ class CounterpartyService:
         *,
         counterparty_id: int,
         project_id: int,
-    ) -> list[CounterpartyDocument]:
+    ) -> Sequence[CounterpartyDocument]:
         """List all non-deleted documents for a counterparty."""
         res = await self.db.execute(
             select(CounterpartyDocument)
