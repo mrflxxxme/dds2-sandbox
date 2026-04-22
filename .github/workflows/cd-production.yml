@@ -123,7 +123,17 @@ jobs:
             elif curl -sf http://localhost/health > /dev/null 2>&1; then
               echo "✅ HTTP health check passed"
             else
-              echo "❌ Health check failed! Rolling back..."
+              echo "❌ Health check failed!"
+              # Детектим миграции между HEAD~1 и HEAD — если есть, код откатывать нельзя
+              # без alembic downgrade + restore backup (иначе schema drift → 500 on prod)
+              MIGRATIONS_CHANGED=$(git diff --name-only HEAD~1 HEAD -- migrations/versions/ 2>/dev/null | wc -l | tr -d ' ')
+              if [ "${MIGRATIONS_CHANGED:-0}" -gt 0 ]; then
+                echo "⚠️ Миграции изменены (${MIGRATIONS_CHANGED} файлов) — автооткат кода ОТМЕНЁН"
+                echo "⚠️ Требуется ручной rollback: (a) alembic downgrade -N; (b) restore /opt/dds_data/backups/pre-deploy-*.sql.gz; (c) git checkout HEAD~1 -- ."
+                echo "⚠️ Контейнеры оставлены в текущем (broken) состоянии — нужно diagnose"
+                exit 1
+              fi
+              echo "Миграций в коммите нет — откатываем только код..."
               git checkout HEAD~1 -- .
               docker compose -f docker-compose.app.yml up -d --build backend worker frontend-react
               echo "🔄 Rollback complete"

@@ -34,9 +34,10 @@ jobs:
           REPO="${{ github.repository }}"
 
           # Find open PR from dev to main
-          PR_NUMBER=$(gh pr list --base main --head dev --state open --json number --jq '.[0].number')
+          # // empty — jq возвращает пустую строку вместо "null" когда массив пуст
+          PR_NUMBER=$(gh pr list --base main --head dev --state open --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
 
-          if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
+          if [ -z "$PR_NUMBER" ]; then
             echo "No open PR from dev → main found, skipping"
             exit 0
           fi
