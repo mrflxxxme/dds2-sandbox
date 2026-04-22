@@ -95,6 +95,8 @@ src/types/api.ts — TypeScript интерфейсы
 | Фронтенд | types/api.ts; formatNumber(); loading+error+empty states | src/app/, src/lib/api/ |
 
 ## Быстрая навигация (для агентов)
+- **Lead-agent canon v2** → `.claude/rules/lead_agent_v2.md` (роутинг задач, параллелизм, cloud-команды, anti-patterns — источник правды для Opus 4.7)
+- **Opus 4.7 specifics** → `docs/OPUS_4_7_MIGRATION.md` (что изменилось vs 4.6: literal понимание, verbosity, subagent delegation, task budget)
 - **Карта backend** → `backend/MAP.md` (типовые паттерны, импорты, где что лежит)
 - **AI workflow** → `docs/AI_WORKFLOW.md` (шпаргалка: сценарии, subagents, skills, что работает само)
 - **Шаблоны** → `.claude/templates/` (скелеты service, router, test, model, schema, page)
@@ -119,10 +121,12 @@ src/types/api.ts — TypeScript интерфейсы
 
 **Slash skills** (`.claude/commands/`) — строгие процессы:
 - **Разработка**: `/new-endpoint`, `/new-page`, `/migration`, `/tdd`, `/plan`
-- **Крупные фичи**: `/spec` (spec-driven, 3 артефакта, regressions 6%→2%)
+- **Крупные фичи** (локально): `/spec` (spec-driven, 3 артефакта, regressions 6%→2%) — для 2-5 файлов
+- **Крупные фичи** (облако ☁️): `/ultraplan` — cross-domain рефакторы (3+ DOMAIN), миграция auth, новый домен, большая интеграция. 3 explorer-агента + critic, освобождает локальный терминал. См. `.claude/rules/lead_agent_v2.md` §5
 - **Рефакторинг**: `/codemod` (AST-grep + LLM для 10+ файлов)
 - **Emergency**: `/hotfix` (прод-инцидент), `/rollback` (откат деплоя)
 - **Проверки**: `/smoke`, `/verify`, `/review`, `/status`, `/build-fix`
+- **Ревью больших PR** (облако ☁️): `/ultrareview` — PR > 500 LOC, миграции БД, security-sensitive, money-handling. До 5 мая 2026 — 3 бесплатных запуска
 - **Рефлексия**: `/learn` (авто-после коммита), `/docs`, `/pause`, `/resume`
 
 ## Git

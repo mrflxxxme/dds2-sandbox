@@ -1,7 +1,9 @@
 {
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
-    "DDS_PREWARM_ENABLED": "1"
+    "DDS_PREWARM_ENABLED": "1",
+    "ENABLE_PROMPT_CACHING_1H": "1",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-4-7"
   },
   "hooks": {
     "PreToolUse": [
