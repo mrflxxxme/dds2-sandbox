@@ -1288,8 +1288,11 @@ export interface WbFboSupply {
   assembly_request_id?: number;
   assembly_request_number?: string;
   assembly_request_status?: string;
+  source_warehouse_id?: number;
   synced_at?: string;
   return_processed_at?: string;
+  return_type?: 'GOODS' | 'DEFECT' | 'UTILIZED' | null;
+  return_qty?: number | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -1311,15 +1314,30 @@ export interface WbFboSupplyListResponse {
   total: number;
 }
 
+export interface FboPartialSummaryItem {
+  barcode: string;
+  product_name?: string;
+  article_seller?: string;
+  delta: number;
+}
+
+export interface FboPartialSummary {
+  unaccepted_total: number;
+  unprocessed: number;
+  returned_to_stock: number;
+  utilized: number;
+  items_breakdown: FboPartialSummaryItem[];
+}
+
 export type FboReturnType = 'GOODS' | 'DEFECT' | 'UTILIZED';
 
 export interface FboReturnItem {
   barcode: string;
   quantity: number;
+  return_type: FboReturnType;
 }
 
 export interface FboReturnRequest {
-  return_type: FboReturnType;
   warehouse_id?: number | null;
   items: FboReturnItem[];
   comment?: string | null;

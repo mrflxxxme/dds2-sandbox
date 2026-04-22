@@ -13,6 +13,7 @@ import type {
     DefectOperation,
     DeliveryTimesResponse,
     DeliveryTimesUpdate,
+    FboPartialSummary,
     FboReturnRequest,
     FboReturnResponse,
     FboSyncResult,
@@ -160,6 +161,12 @@ export function addWarehouseMethods(api: ApiClient) {
             return api.request<{ total: number; accepted: number; accepted_without_assembly: number; accepted_partial: number }>(
                 'GET',
                 '/api/v1/warehouse/fbo-supplies/summary',
+            );
+        },
+        getFboPartialSummary() {
+            return api.request<FboPartialSummary>(
+                'GET',
+                '/api/v1/warehouse/fbo-supplies/partial-summary',
             );
         },
         getFboSupplyItems(supplyId: number, refresh?: boolean) {

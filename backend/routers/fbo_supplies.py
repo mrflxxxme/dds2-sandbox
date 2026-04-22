@@ -91,6 +91,18 @@ async def get_fbo_supplies_summary(
     return await fbo_supply_service.get_fbo_summary(db, project.id)
 
 
+@router.get("/partial-summary")
+async def get_partial_summary(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Недоприёмка dashboard: aggregate qty buckets + per-barcode breakdown.
+    Shown as a mini-panel when user enables the 'С недоприёмкой' filter.
+    """  # noqa: RUF002 — mixed cyrillic/latin is intentional (product terms)
+    return await fbo_supply_service.get_partial_acceptance_summary(db, project.id)
+
+
 # ─── Warehouse names (for filter dropdown) ─────────────────────────────────
 
 
@@ -231,24 +243,17 @@ async def create_fbo_return(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Оформить возврат недопринятого qty: GOODS (годные) / DEFECT (брак) /
-    UTILIZED (списание — WB утилизировал). Ставит supply.return_processed_at.
-    """
-    from backend.services.fbo_supply import FboReturnType
-
-    try:
-        rt = FboReturnType(payload.return_type)
-    except ValueError:
-        raise HTTPException(400, f"Invalid return_type: {payload.return_type}") from None
-
+    Оформить возврат/утилизацию по непринятому qty. Каждая строка items несёт
+    свой return_type (GOODS / UTILIZED / DEFECT), что позволяет в одном
+    вызове одну часть вернуть на склад, а другую — списать.
+    """  # noqa: RUF002 — cyrillic product terms
     try:
         result = await fbo_supply_service.process_fbo_return(
             db,
             project.id,
             supply_id,
-            return_type=rt,
-            warehouse_id=payload.warehouse_id,
             items=[item.model_dump() for item in payload.items],
+            warehouse_id=payload.warehouse_id,
             comment=payload.comment,
         )
     except ValueError as e:

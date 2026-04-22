@@ -28,6 +28,7 @@ from .returns import FboReturnType, process_fbo_return
 from .service import (
     get_fbo_summary,
     get_fbo_supply_items,
+    get_partial_acceptance_summary,
     list_fbo_supplies,
     list_warehouses,
 )
@@ -55,6 +56,7 @@ __all__ = [
     # service
     "get_fbo_summary",
     "get_fbo_supply_items",
+    "get_partial_acceptance_summary",
     "list_fbo_supplies",
     "list_warehouses",
     # sync

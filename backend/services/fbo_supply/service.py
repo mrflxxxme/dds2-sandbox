@@ -73,6 +73,81 @@ async def get_fbo_summary(
     }
 
 
+async def get_partial_acceptance_summary(
+    db: AsyncSession,
+    project_id: int,
+) -> dict[str, Any]:
+    """
+    Недоприёмка dashboard: aggregates across ALL partial-accepted supplies
+    (total_qty > accepted_qty). Buckets:
+
+      - unaccepted_total   sum(total_qty - accepted_qty)  (весь дельта)
+      - unprocessed        where return_processed_at IS NULL
+      - returned_to_stock  return_type IN (GOODS, DEFECT)  → sum(return_qty)
+      - utilized           return_type = UTILIZED          → sum(return_qty)
+
+    Plus items_breakdown: per-barcode aggregate (qty not accepted across supplies).
+    """
+    # Supply-level aggregates
+    supplies_q = select(WbFboSupply).where(
+        WbFboSupply.project_id == project_id,
+        WbFboSupply.wb_status == WbSupplyStatus.ACCEPTED,
+        WbFboSupply.total_qty > 0,
+        WbFboSupply.accepted_qty < WbFboSupply.total_qty,
+    )
+    result = await db.execute(supplies_q)
+    supplies = list(result.scalars().all())
+
+    unaccepted_total = sum(max(0, (s.total_qty or 0) - (s.accepted_qty or 0)) for s in supplies)
+    unprocessed = sum(
+        max(0, (s.total_qty or 0) - (s.accepted_qty or 0)) for s in supplies if s.return_processed_at is None
+    )
+    returned_to_stock = sum(int(s.return_qty or 0) for s in supplies if s.return_type in ("GOODS", "DEFECT"))
+    utilized = sum(int(s.return_qty or 0) for s in supplies if s.return_type == "UTILIZED")
+
+    # Per-barcode breakdown — which goods are affected by недоприёмка
+    # (sum delta across all affected supplies). UI shows a collapsible list.
+    supply_ids = [s.id for s in supplies]
+    breakdown: list[dict[str, Any]] = []
+    if supply_ids:
+        items_result = await db.execute(
+            select(
+                WbFboSupplyItem.barcode,
+                WbFboSupplyItem.product_name,
+                WbFboSupplyItem.article_seller,
+                func.sum(WbFboSupplyItem.quantity - WbFboSupplyItem.accepted_qty).label("delta"),
+            )
+            .where(
+                WbFboSupplyItem.supply_id.in_(supply_ids),
+                WbFboSupplyItem.project_id == project_id,
+                WbFboSupplyItem.quantity > WbFboSupplyItem.accepted_qty,
+            )
+            .group_by(
+                WbFboSupplyItem.barcode,
+                WbFboSupplyItem.product_name,
+                WbFboSupplyItem.article_seller,
+            )
+            .order_by(func.sum(WbFboSupplyItem.quantity - WbFboSupplyItem.accepted_qty).desc())
+        )
+        for row in items_result.all():
+            breakdown.append(
+                {
+                    "barcode": row.barcode,
+                    "product_name": row.product_name,
+                    "article_seller": row.article_seller,
+                    "delta": int(row.delta or 0),
+                }
+            )
+
+    return {
+        "unaccepted_total": int(unaccepted_total),
+        "unprocessed": int(unprocessed),
+        "returned_to_stock": int(returned_to_stock),
+        "utilized": int(utilized),
+        "items_breakdown": breakdown,
+    }
+
+
 async def list_warehouses(
     db: AsyncSession,
     project_id: int,
@@ -217,6 +292,11 @@ async def list_fbo_supplies(
     # Enrich with assembly request info (single query for the page)
     supply_ids = [s.id for s in supplies]
     assembly_map: dict[int, tuple[int, str, str]] = {}
+    # source_warehouse_map: supply_id → warehouse_id from the AR that shipped
+    # this FBO supply. Used on UI to preselect the return-warehouse in the
+    # "Оформить возврат" modal (goods should come back to the warehouse they
+    # were picked from). Looks up ANY AR (active or finalized) for the supply.
+    source_warehouse_map: dict[int, int] = {}
     if supply_ids:
         active_statuses = [
             AssemblyStatus.PENDING,
@@ -231,15 +311,20 @@ async def list_fbo_supplies(
                 AssemblyRequest.id,
                 AssemblyRequest.number,
                 AssemblyRequest.status,
+                AssemblyRequest.warehouse_id,
             ).where(
                 AssemblyRequest.project_id == project_id,
                 AssemblyRequest.is_deleted.is_(False),
-                AssemblyRequest.status.in_(active_statuses),
                 AssemblyRequest.wb_fbo_supply_id.in_(supply_ids),
             )
         )
         for row in asm_result.all():
-            assembly_map[row.wb_fbo_supply_id] = (row.id, row.number, row.status)
+            # Prefer ACTIVE AR for badge; source_warehouse_id is taken from
+            # any AR (last one wins — typically only one AR per supply).
+            if row.status in active_statuses and row.wb_fbo_supply_id not in assembly_map:
+                assembly_map[row.wb_fbo_supply_id] = (row.id, row.number, row.status)
+            if row.warehouse_id is not None:
+                source_warehouse_map[row.wb_fbo_supply_id] = row.warehouse_id
 
     # Build enriched dicts
     enriched = []
@@ -249,6 +334,7 @@ async def list_fbo_supplies(
         d["assembly_request_id"] = asm[0] if asm else None
         d["assembly_request_number"] = asm[1] if asm else None
         d["assembly_request_status"] = asm[2] if asm else None
+        d["source_warehouse_id"] = source_warehouse_map.get(s.id)
         enriched.append(d)
 
     return enriched, total

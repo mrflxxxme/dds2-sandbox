@@ -67,6 +67,13 @@ class WbFboSupply(Base, TimestampMixin):
     # Set when user registered a return for unaccepted qty (goods/defect/utilized).
     # Supply is excluded from the partial-acceptance summary/filter afterwards.
     return_processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # GOODS / DEFECT / UTILIZED (FboReturnType). Populated together with
+    # return_processed_at. Used to aggregate the "недоприёмка" dashboard
+    # (возвращено на склад vs списано).
+    return_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Actual qty returned (sum across items). Useful when user returns less
+    # than the full delta, so aggregates stay accurate.
+    return_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Relationships
     items: Mapped[list["WbFboSupplyItem"]] = relationship(

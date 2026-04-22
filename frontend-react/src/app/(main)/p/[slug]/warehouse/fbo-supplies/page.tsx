@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatDateTime } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { WbFboSupply, WbFboSupplyItem, Warehouse, FboReturnType } from '@/types/api';
+import type { WbFboSupply, WbFboSupplyItem, Warehouse, FboReturnType, FboPartialSummary } from '@/types/api';
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -87,6 +87,16 @@ export default function FboSuppliesPage() {
     }, []);
 
     useEffect(() => { loadSummary(); }, [loadSummary]);
+
+    // Partial-acceptance summary (qty buckets + per-barcode breakdown) —
+    // loaded only when the user enables the "С недоприёмкой" filter.
+    const [partialSummary, setPartialSummary] = useState<FboPartialSummary | null>(null);
+    const [partialBreakdownOpen, setPartialBreakdownOpen] = useState(false);
+    const loadPartialSummary = useCallback(() => {
+        if (!partialOnly) { setPartialSummary(null); return; }
+        api.getFboPartialSummary().then(setPartialSummary).catch(() => setPartialSummary(null));
+    }, [partialOnly]);
+    useEffect(() => { loadPartialSummary(); }, [loadPartialSummary]);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -314,6 +324,15 @@ export default function FboSuppliesPage() {
                 </div>
             </div>
 
+            {/* Partial-acceptance mini-summary */}
+            {partialOnly && partialSummary && (
+                <PartialSummaryPanel
+                    summary={partialSummary}
+                    open={partialBreakdownOpen}
+                    onToggle={() => setPartialBreakdownOpen(v => !v)}
+                />
+            )}
+
             {/* Error */}
             {error && (
                 <div className="glass-card" style={{ padding: 16, marginBottom: 16, color: 'var(--color-danger)' }}>
@@ -500,7 +519,17 @@ export default function FboSuppliesPage() {
                     items={returnState.items}
                     warehouses={warehouses}
                     onClose={() => setReturnState(null)}
-                    onDone={async () => { setReturnState(null); await load(); loadSummary(); }}
+                    onDone={async () => {
+                        setReturnState(null);
+                        // Close the expanded row — accepted_qty/return_processed_at
+                        // on the cached supply object is now stale; re-expand will
+                        // re-fetch items from the refreshed backend row.
+                        setExpandedId(null);
+                        setExpandedItems([]);
+                        await load();
+                        loadSummary();
+                        loadPartialSummary();
+                    }}
                 />
             )}
         </div>
@@ -522,32 +551,74 @@ function FboReturnModal({
     const deltaItems = items
         .map(i => ({ ...i, delta: Math.max(0, i.quantity - i.accepted_qty) }))
         .filter(i => i.delta > 0);
-    const [returnType, setReturnType] = useState<FboReturnType>('GOODS');
-    const [warehouseId, setWarehouseId] = useState<number | ''>(warehouses[0]?.id ?? '');
-    const [qty, setQty] = useState<Record<string, number>>(
-        Object.fromEntries(deltaItems.map(i => [i.barcode, i.delta]))
+
+    // Warehouse auto-selected from the linked AR source. Fallback to first
+    // available only if supply has no AR yet.
+    const [warehouseId, setWarehouseId] = useState<number | ''>(
+        supply.source_warehouse_id ?? warehouses[0]?.id ?? ''
+    );
+    // Per-row split: how many go to stock, how many to utilize. By default
+    // all delta goes to stock (the common case).
+    const [rows, setRows] = useState<Record<string, { stock: number; utilize: number }>>(
+        Object.fromEntries(deltaItems.map(i => [i.barcode, { stock: i.delta, utilize: 0 }]))
     );
     const [comment, setComment] = useState('');
     const [saving, setSaving] = useState(false);
     const [err, setErr] = useState('');
 
-    const needsWarehouse = returnType === 'GOODS' || returnType === 'DEFECT';
+    const totalDelta = deltaItems.reduce((s, i) => s + i.delta, 0);
+    const totalStock = Object.values(rows).reduce((s, r) => s + (r.stock || 0), 0);
+    const totalUtilize = Object.values(rows).reduce((s, r) => s + (r.utilize || 0), 0);
+    const totalReturn = totalStock + totalUtilize;
+    const hasStock = totalStock > 0;
+
+    // Keep sum (stock + utilize) ≤ delta for the row. User enters one value;
+    // the other is auto-capped.
+    const setStock = (barcode: string, delta: number, v: number) => {
+        setRows(r => {
+            const current = r[barcode] || { stock: 0, utilize: 0 };
+            const newStock = Math.max(0, Math.min(delta - (current.utilize || 0), v));
+            return { ...r, [barcode]: { ...current, stock: newStock } };
+        });
+    };
+    const setUtilize = (barcode: string, delta: number, v: number) => {
+        setRows(r => {
+            const current = r[barcode] || { stock: 0, utilize: 0 };
+            const newUtilize = Math.max(0, Math.min(delta - (current.stock || 0), v));
+            return { ...r, [barcode]: { ...current, utilize: newUtilize } };
+        });
+    };
+
+    const allToStock = () => {
+        setRows(Object.fromEntries(deltaItems.map(i => [i.barcode, { stock: i.delta, utilize: 0 }])));
+    };
+    const allToUtilize = () => {
+        setRows(Object.fromEntries(deltaItems.map(i => [i.barcode, { stock: 0, utilize: i.delta }])));
+    };
+    const resetAll = () => {
+        setRows(Object.fromEntries(deltaItems.map(i => [i.barcode, { stock: 0, utilize: 0 }])));
+    };
 
     const submit = async () => {
         setErr('');
-        const payload = {
-            return_type: returnType,
-            warehouse_id: needsWarehouse ? (warehouseId || null) as number | null : null,
-            items: deltaItems
-                .map(i => ({ barcode: i.barcode, quantity: qty[i.barcode] || 0 }))
-                .filter(i => i.quantity > 0),
-            comment: comment.trim() || null,
-        };
-        if (needsWarehouse && !payload.warehouse_id) { setErr('Выберите склад'); return; }
-        if (payload.items.length === 0) { setErr('Нет позиций к возврату'); return; }
+        if (totalReturn === 0) { setErr('Укажи количество к возврату или утилизации'); return; }
+        if (hasStock && !warehouseId) { setErr('Выберите склад для возврата на склад'); return; }
+
+        // Flatten per-row split into items[] with return_type per row.
+        const payloadItems: { barcode: string; quantity: number; return_type: FboReturnType }[] = [];
+        for (const i of deltaItems) {
+            const r = rows[i.barcode] || { stock: 0, utilize: 0 };
+            if (r.stock > 0) payloadItems.push({ barcode: i.barcode, quantity: r.stock, return_type: 'GOODS' });
+            if (r.utilize > 0) payloadItems.push({ barcode: i.barcode, quantity: r.utilize, return_type: 'UTILIZED' });
+        }
+
         setSaving(true);
         try {
-            await api.createFboReturn(supply.id, payload);
+            await api.createFboReturn(supply.id, {
+                warehouse_id: hasStock ? (warehouseId as number) : null,
+                items: payloadItems,
+                comment: comment.trim() || null,
+            });
             await onDone();
         } catch (e: unknown) {
             setErr(e instanceof Error ? e.message : 'Ошибка');
@@ -556,108 +627,304 @@ function FboReturnModal({
         }
     };
 
+    const submitLabel =
+        totalStock > 0 && totalUtilize > 0 ? 'Оформить возврат и списание' :
+            totalUtilize > 0 ? 'Утилизировать' :
+                'Оформить возврат';
+
     return (
         <div className="modal-overlay" onClick={onClose}>
-            <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 640 }}>
-                <h2 className="modal-title">Возврат по поставке FBW-{supply.wb_supply_id}</h2>
-
-                {/* Return type */}
+            <div
+                className="modal-card"
+                onClick={e => e.stopPropagation()}
+                style={{
+                    maxWidth: 860, width: '92vw', maxHeight: '90vh',
+                    display: 'flex', flexDirection: 'column',
+                    background: '#ffffff',
+                    backdropFilter: 'none',
+                    WebkitBackdropFilter: 'none',
+                }}
+            >
+                {/* Header */}
                 <div style={{ marginBottom: 16 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Что произошло с непринятым:</div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 14 }}>
-                        <label style={{ cursor: 'pointer' }}>
-                            <input type="radio" checked={returnType === 'GOODS'} onChange={() => setReturnType('GOODS')} />
-                            {' '}Вернулись годными на склад
-                        </label>
-                        <label style={{ cursor: 'pointer' }}>
-                            <input type="radio" checked={returnType === 'DEFECT'} onChange={() => setReturnType('DEFECT')} />
-                            {' '}Вернулись браком на склад
-                        </label>
-                        <label style={{ cursor: 'pointer' }}>
-                            <input type="radio" checked={returnType === 'UTILIZED'} onChange={() => setReturnType('UTILIZED')} />
-                            {' '}Утилизированы WB (списать)
-                        </label>
+                    <h2 className="modal-title" style={{ marginBottom: 4 }}>
+                        Возврат по поставке FBW-{supply.wb_supply_id}
+                    </h2>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                        WB принял {supply.accepted_qty} из {supply.total_qty} шт. Непринято — {totalDelta} шт.
                     </div>
                 </div>
 
-                {/* Warehouse picker */}
-                {needsWarehouse && (
-                    <div className="form-group" style={{ marginBottom: 16 }}>
-                        <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Склад возврата</label>
-                        <select
-                            className="form-input"
-                            value={warehouseId}
-                            onChange={e => setWarehouseId(e.target.value ? Number(e.target.value) : '')}
-                        >
-                            <option value="">Выберите склад</option>
-                            {warehouses.map(w => (
-                                <option key={w.id} value={w.id}>{w.name}</option>
-                            ))}
-                        </select>
+                {/* Status strip: where the qty is going */}
+                <div style={{
+                    display: 'flex', gap: 16, alignItems: 'center',
+                    padding: '10px 14px', marginBottom: 16,
+                    background: 'var(--color-bg)', borderRadius: 12,
+                    fontSize: 13, flexWrap: 'wrap',
+                }}>
+                    <div>
+                        <span style={{ color: 'var(--color-text-muted)' }}>На склад: </span>
+                        <strong style={{ color: 'var(--color-success)' }}>{totalStock} шт</strong>
                     </div>
-                )}
+                    <div>
+                        <span style={{ color: 'var(--color-text-muted)' }}>Утилизировать: </span>
+                        <strong style={{ color: 'var(--color-danger)' }}>{totalUtilize} шт</strong>
+                    </div>
+                    <div>
+                        <span style={{ color: 'var(--color-text-muted)' }}>Из </span>
+                        <strong>{totalDelta}</strong>
+                        <span style={{ color: 'var(--color-text-muted)' }}> непринятых</span>
+                    </div>
+                    <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                        <button type="button" className="btn btn-secondary btn-sm" onClick={allToStock}>
+                            Всё на склад
+                        </button>
+                        <button type="button" className="btn btn-secondary btn-sm" onClick={allToUtilize}>
+                            Всё утилизировать
+                        </button>
+                        <button type="button" className="btn btn-secondary btn-sm" onClick={resetAll}>
+                            Сбросить
+                        </button>
+                    </div>
+                </div>
 
-                {/* Items */}
-                <div style={{ marginBottom: 16 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Позиции возврата</div>
-                    {deltaItems.length === 0 ? (
-                        <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>Нет непринятых позиций</div>
-                    ) : (
-                        <table className="data-table" style={{ fontSize: 13 }}>
-                            <thead>
-                                <tr>
-                                    <th>Товар</th>
-                                    <th>ШК</th>
-                                    <th style={{ textAlign: 'right' }}>Не принято</th>
-                                    <th style={{ textAlign: 'right', width: 120 }}>К возврату</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {deltaItems.map(i => (
-                                    <tr key={i.barcode}>
-                                        <td>{i.article_seller || i.product_name || '—'}</td>
-                                        <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{i.barcode}</td>
-                                        <td style={{ textAlign: 'right' }}>{i.delta}</td>
-                                        <td>
-                                            <input
-                                                className="form-input"
-                                                type="number"
-                                                min={0}
-                                                max={i.delta}
-                                                value={qty[i.barcode] ?? 0}
-                                                onChange={e => setQty(m => ({ ...m, [i.barcode]: Math.min(i.delta, Math.max(0, Number(e.target.value))) }))}
-                                                style={{ textAlign: 'right', padding: '4px 8px', height: 32 }}
-                                            />
-                                        </td>
-                                    </tr>
+                {/* Scrollable content */}
+                <div style={{ overflowY: 'auto', flex: 1, paddingRight: 4 }}>
+                    {/* Warehouse picker (only when any row has stock > 0) */}
+                    {hasStock && (
+                        <div className="form-group" style={{ marginBottom: 16 }}>
+                            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+                                Склад возврата
+                            </label>
+                            <select
+                                className="form-input"
+                                value={warehouseId}
+                                onChange={e => setWarehouseId(e.target.value ? Number(e.target.value) : '')}
+                            >
+                                <option value="">Выберите склад</option>
+                                {warehouses.map(w => (
+                                    <option key={w.id} value={w.id}>{w.name}</option>
                                 ))}
-                            </tbody>
-                        </table>
+                            </select>
+                        </div>
                     )}
+
+                    {/* Items */}
+                    <div style={{ marginBottom: 16 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>
+                            Позиции ({deltaItems.length})
+                        </div>
+                        {deltaItems.length === 0 ? (
+                            <div style={{
+                                padding: 24, textAlign: 'center', borderRadius: 8,
+                                background: 'var(--color-bg)', color: 'var(--color-text-muted)', fontSize: 13,
+                            }}>
+                                Нет непринятых позиций
+                            </div>
+                        ) : (
+                            <div style={{ border: '1px solid var(--color-border)', borderRadius: 8, overflow: 'hidden' }}>
+                                <table className="data-table" style={{ fontSize: 13, margin: 0 }}>
+                                    <thead>
+                                        <tr>
+                                            <th style={{ paddingLeft: 12 }}>Товар / ШК</th>
+                                            <th style={{ textAlign: 'right', width: 90 }}>Не принято</th>
+                                            <th style={{ textAlign: 'right', width: 140, color: 'var(--color-success)' }}>
+                                                На склад
+                                            </th>
+                                            <th style={{ textAlign: 'right', width: 140, paddingRight: 12, color: 'var(--color-danger)' }}>
+                                                Утилизировать
+                                            </th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {deltaItems.map(i => {
+                                            const row = rows[i.barcode] || { stock: 0, utilize: 0 };
+                                            const placed = row.stock + row.utilize;
+                                            const overCapped = placed >= i.delta;
+                                            return (
+                                                <tr key={i.barcode}>
+                                                    <td style={{ paddingLeft: 12 }}>
+                                                        <div style={{ fontWeight: 500 }}>
+                                                            {i.article_seller || i.product_name || '—'}
+                                                        </div>
+                                                        <div style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                                            {i.barcode}
+                                                        </div>
+                                                    </td>
+                                                    <td style={{
+                                                        textAlign: 'right',
+                                                        color: overCapped ? 'var(--color-success)' : 'var(--color-text-muted)',
+                                                        fontWeight: overCapped ? 600 : 400,
+                                                    }}>
+                                                        {i.delta}
+                                                    </td>
+                                                    <td style={{ textAlign: 'right' }}>
+                                                        <input
+                                                            className="form-input"
+                                                            type="number"
+                                                            min={0}
+                                                            max={i.delta}
+                                                            value={row.stock}
+                                                            onChange={e => setStock(i.barcode, i.delta, Number(e.target.value) || 0)}
+                                                            style={{ textAlign: 'right', padding: '4px 8px', height: 32, width: 120 }}
+                                                        />
+                                                    </td>
+                                                    <td style={{ textAlign: 'right', paddingRight: 12 }}>
+                                                        <input
+                                                            className="form-input"
+                                                            type="number"
+                                                            min={0}
+                                                            max={i.delta}
+                                                            value={row.utilize}
+                                                            onChange={e => setUtilize(i.barcode, i.delta, Number(e.target.value) || 0)}
+                                                            style={{ textAlign: 'right', padding: '4px 8px', height: 32, width: 120 }}
+                                                        />
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Comment */}
+                    <div className="form-group" style={{ marginBottom: 8 }}>
+                        <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+                            Комментарий (необязательно)
+                        </label>
+                        <input
+                            className="form-input"
+                            value={comment}
+                            onChange={e => setComment(e.target.value)}
+                            placeholder="Например: вернулись после отказа клиента"
+                        />
+                    </div>
                 </div>
 
-                {/* Comment */}
-                <div className="form-group" style={{ marginBottom: 16 }}>
-                    <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Комментарий (необязательно)</label>
-                    <input
-                        className="form-input"
-                        value={comment}
-                        onChange={e => setComment(e.target.value)}
-                        placeholder="Например: вернулись после отказа клиента"
-                    />
-                </div>
-
+                {/* Footer */}
                 {err && (
-                    <div style={{ padding: 8, color: 'var(--color-danger)', fontSize: 13, marginBottom: 12 }}>{err}</div>
+                    <div style={{
+                        padding: '8px 12px', marginTop: 12,
+                        background: 'color-mix(in srgb, var(--color-danger) 8%, transparent)',
+                        border: '1px solid color-mix(in srgb, var(--color-danger) 30%, transparent)',
+                        borderRadius: 8, color: 'var(--color-danger)', fontSize: 13,
+                    }}>
+                        {err}
+                    </div>
                 )}
-
-                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                    <button className="btn btn-secondary" onClick={onClose} disabled={saving}>Отмена</button>
-                    <button className="btn btn-primary" onClick={submit} disabled={saving || deltaItems.length === 0}>
-                        {saving ? 'Оформление...' : 'Оформить возврат'}
+                <div style={{
+                    display: 'flex', gap: 12, justifyContent: 'flex-end', alignItems: 'center',
+                    marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--color-border)',
+                }}>
+                    <button className="btn btn-secondary" onClick={onClose} disabled={saving}>
+                        Отмена
+                    </button>
+                    <button
+                        className="btn btn-primary"
+                        onClick={submit}
+                        disabled={saving || deltaItems.length === 0 || totalReturn === 0}
+                    >
+                        {saving ? 'Сохранение...' : `${submitLabel} (${totalReturn} шт)`}
                     </button>
                 </div>
             </div>
+        </div>
+    );
+}
+
+
+// ─── Partial-acceptance mini-summary ─────────────────────────────────────────
+
+function PartialSummaryPanel({
+    summary,
+    open,
+    onToggle,
+}: {
+    summary: FboPartialSummary;
+    open: boolean;
+    onToggle: () => void;
+}) {
+    const buckets: { label: string; value: number; color: string; hint: string }[] = [
+        { label: 'Не приняли', value: summary.unaccepted_total, color: 'var(--color-danger)', hint: 'Всего шт не принято WB' },
+        { label: 'Нераспределено', value: summary.unprocessed, color: 'var(--color-warning)', hint: 'Решение не принято' },
+        { label: 'Возвращено на склад', value: summary.returned_to_stock, color: 'var(--color-success)', hint: 'Годные + брак' },
+        { label: 'Списано', value: summary.utilized, color: 'var(--color-text-muted)', hint: 'Утилизировано WB' },
+    ];
+    const totalItems = summary.items_breakdown.reduce((s, i) => s + i.delta, 0);
+
+    return (
+        <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: summary.items_breakdown.length > 0 ? 12 : 0 }}>
+                {buckets.map(b => (
+                    <div key={b.label} style={{ padding: 12, borderRadius: 12, background: 'var(--color-bg)' }}>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>
+                            {b.label}
+                        </div>
+                        <div style={{ fontSize: 22, fontWeight: 700, color: b.color, letterSpacing: '-0.02em' }}>
+                            {b.value.toLocaleString('ru-RU')} <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--color-text-muted)' }}>шт</span>
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>{b.hint}</div>
+                    </div>
+                ))}
+            </div>
+
+            {summary.items_breakdown.length > 0 && (
+                <>
+                    <button
+                        type="button"
+                        onClick={onToggle}
+                        style={{
+                            display: 'flex', alignItems: 'center', gap: 6, width: '100%',
+                            padding: '8px 12px', borderRadius: 8, border: '1px solid var(--color-border)',
+                            background: open ? 'var(--color-bg)' : 'transparent',
+                            cursor: 'pointer', fontSize: 13, fontWeight: 500, color: 'var(--color-text)',
+                            transition: 'background 0.15s',
+                        }}
+                    >
+                        <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                            {open ? '\u25BC' : '\u25B6'}
+                        </span>
+                        {open ? 'Скрыть' : 'Показать'} позиции ({summary.items_breakdown.length} артикулов, {totalItems} шт)
+                    </button>
+                    {open && (
+                        <div style={{ marginTop: 8, maxHeight: 320, overflowY: 'auto', border: '1px solid var(--color-border)', borderRadius: 8 }}>
+                            <table className="data-table" style={{ fontSize: 13, margin: 0 }}>
+                                <thead>
+                                    <tr>
+                                        <th style={{ paddingLeft: 12 }}>Товар / Артикул</th>
+                                        <th>ШК</th>
+                                        <th style={{ textAlign: 'right', paddingRight: 12, width: 110 }}>Не принято</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {summary.items_breakdown.map(i => (
+                                        <tr key={i.barcode}>
+                                            <td style={{ paddingLeft: 12 }}>
+                                                <div style={{ fontWeight: 500 }}>
+                                                    {i.product_name || i.article_seller || '—'}
+                                                </div>
+                                                {i.article_seller && i.product_name && (
+                                                    <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                                        {i.article_seller}
+                                                    </div>
+                                                )}
+                                            </td>
+                                            <td style={{ fontFamily: 'monospace', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                                {i.barcode}
+                                            </td>
+                                            <td style={{ textAlign: 'right', paddingRight: 12, fontWeight: 600, color: 'var(--color-danger)' }}>
+                                                {i.delta}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                </>
+            )}
         </div>
     );
 }

@@ -30,6 +30,7 @@ from backend.services.fbo_supply import (  # noqa: F401
     enrich_fbo_supplies,
     get_fbo_summary,
     get_fbo_supply_items,
+    get_partial_acceptance_summary,
     list_fbo_supplies,
     list_warehouses,
     process_fbo_return,

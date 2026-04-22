@@ -924,7 +924,7 @@ class TestFboReturns:
         from sqlalchemy import select, text
 
         from backend.models.warehouse import InboundReceipt, InboundStatus, Warehouse, WarehouseStock
-        from backend.services.fbo_supply.returns import FboReturnType, process_fbo_return
+        from backend.services.fbo_supply.returns import process_fbo_return
 
         # Warehouse
         wh = Warehouse(project_id=1, name="хамза-test", warehouse_type="EXTERNAL")
@@ -967,9 +967,8 @@ class TestFboReturns:
             db_session,
             1,
             supply.id,
-            return_type=FboReturnType.GOODS,
+            items=[{"barcode": "2043160691778", "quantity": 52, "return_type": "GOODS"}],
             warehouse_id=wh.id,
-            items=[{"barcode": "2043160691778", "quantity": 52}],
         )
 
         assert result["supply_id"] == supply.id
@@ -997,7 +996,7 @@ class TestFboReturns:
         from sqlalchemy import select, text
 
         from backend.models.warehouse import Warehouse, WarehouseStock
-        from backend.services.fbo_supply.returns import FboReturnType, process_fbo_return
+        from backend.services.fbo_supply.returns import process_fbo_return
 
         wh = Warehouse(project_id=1, name="хамза-d", warehouse_type="EXTERNAL")
         db_session.add(wh)
@@ -1034,9 +1033,8 @@ class TestFboReturns:
             db_session,
             1,
             supply.id,
-            return_type=FboReturnType.DEFECT,
+            items=[{"barcode": "BC-DEFECT", "quantity": 10, "return_type": "DEFECT"}],
             warehouse_id=wh.id,
-            items=[{"barcode": "BC-DEFECT", "quantity": 10}],
         )
 
         st = await db_session.execute(
@@ -1049,7 +1047,7 @@ class TestFboReturns:
     async def test_utilized_return_no_receipt_but_flags_supply(self, db_session):
         from sqlalchemy import select
 
-        from backend.services.fbo_supply.returns import FboReturnType, process_fbo_return
+        from backend.services.fbo_supply.returns import process_fbo_return
 
         supply = WbFboSupply(
             project_id=1,
@@ -1077,9 +1075,7 @@ class TestFboReturns:
             db_session,
             1,
             supply.id,
-            return_type=FboReturnType.UTILIZED,
-            warehouse_id=None,
-            items=[{"barcode": "BC-UTIL", "quantity": 5}],
+            items=[{"barcode": "BC-UTIL", "quantity": 5, "return_type": "UTILIZED"}],
         )
 
         assert result["receipt_id"] is None
@@ -1087,7 +1083,7 @@ class TestFboReturns:
         assert s.return_processed_at is not None
 
     async def test_rejects_qty_over_unaccepted_delta(self, db_session):
-        from backend.services.fbo_supply.returns import FboReturnType, process_fbo_return
+        from backend.services.fbo_supply.returns import process_fbo_return
 
         supply = WbFboSupply(
             project_id=1,
@@ -1116,14 +1112,12 @@ class TestFboReturns:
                 db_session,
                 1,
                 supply.id,
-                return_type=FboReturnType.UTILIZED,
-                warehouse_id=None,
-                items=[{"barcode": "BC-OVER", "quantity": 5}],  # delta=3
+                items=[{"barcode": "BC-OVER", "quantity": 5, "return_type": "UTILIZED"}],  # delta=3
             )
 
     async def test_rejects_double_return_for_same_supply(self, db_session):
         """Idempotency: second call after return_processed_at is set must fail."""
-        from backend.services.fbo_supply.returns import FboReturnType, process_fbo_return
+        from backend.services.fbo_supply.returns import process_fbo_return
 
         supply = WbFboSupply(
             project_id=1,
@@ -1152,9 +1146,7 @@ class TestFboReturns:
             db_session,
             1,
             supply.id,
-            return_type=FboReturnType.UTILIZED,
-            warehouse_id=None,
-            items=[{"barcode": "BC-IDEMP", "quantity": 5}],
+            items=[{"barcode": "BC-IDEMP", "quantity": 5, "return_type": "UTILIZED"}],
         )
 
         # second call must refuse — supply.return_processed_at is already set
@@ -1163,10 +1155,147 @@ class TestFboReturns:
                 db_session,
                 1,
                 supply.id,
-                return_type=FboReturnType.UTILIZED,
-                warehouse_id=None,
-                items=[{"barcode": "BC-IDEMP", "quantity": 5}],
+                items=[{"barcode": "BC-IDEMP", "quantity": 5, "return_type": "UTILIZED"}],
             )
+
+    async def test_mixed_return_splits_stock_and_utilization(self, db_session):
+        """Одна строка GOODS + одна UTILIZED → InboundReceipt создаётся только
+        для GOODS, стоковая строка не попадает в receipt. supply.return_type='MIXED'.
+        """
+        from sqlalchemy import select, text
+
+        from backend.models.warehouse import InboundReceiptItem, Warehouse, WarehouseStock
+        from backend.services.fbo_supply.returns import process_fbo_return
+
+        wh = Warehouse(project_id=1, name="mixed-wh", warehouse_type="EXTERNAL")
+        db_session.add(wh)
+        await db_session.flush()
+
+        await db_session.execute(
+            text(
+                "INSERT INTO nomenclature (project_id, article_seller, barcode, updated_at) "
+                "VALUES (1, 'mix1', 'BC-MIX-1', NOW()), "
+                "(1, 'mix2', 'BC-MIX-2', NOW()) ON CONFLICT DO NOTHING"
+            )
+        )
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="S-MIX",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            total_qty=10,
+            accepted_qty=0,
+        )
+        db_session.add(supply)
+        await db_session.flush()
+        db_session.add_all(
+            [
+                WbFboSupplyItem(
+                    project_id=1,
+                    supply_id=supply.id,
+                    wb_order_id="W-MIX-1",
+                    barcode="BC-MIX-1",
+                    quantity=6,
+                    accepted_qty=0,
+                ),
+                WbFboSupplyItem(
+                    project_id=1,
+                    supply_id=supply.id,
+                    wb_order_id="W-MIX-2",
+                    barcode="BC-MIX-2",
+                    quantity=4,
+                    accepted_qty=0,
+                ),
+            ]
+        )
+        await db_session.commit()
+
+        result = await process_fbo_return(
+            db_session,
+            1,
+            supply.id,
+            items=[
+                {"barcode": "BC-MIX-1", "quantity": 6, "return_type": "GOODS"},
+                {"barcode": "BC-MIX-2", "quantity": 4, "return_type": "UTILIZED"},
+            ],
+            warehouse_id=wh.id,
+        )
+
+        # Receipt created for GOODS row only
+        assert result["receipt_id"] is not None
+        items_in_receipt = (
+            (
+                await db_session.execute(
+                    select(InboundReceiptItem).where(InboundReceiptItem.receipt_id == result["receipt_id"])
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(items_in_receipt) == 1
+        assert items_in_receipt[0].barcode == "BC-MIX-1"
+        assert items_in_receipt[0].actual_qty == 6
+
+        # Stock: only BC-MIX-1 increased, BC-MIX-2 untouched
+        stock_1 = (
+            await db_session.execute(
+                select(WarehouseStock).where(WarehouseStock.warehouse_id == wh.id, WarehouseStock.barcode == "BC-MIX-1")
+            )
+        ).scalar_one()
+        assert stock_1.quantity == 6
+
+        stock_2 = (
+            await db_session.execute(
+                select(WarehouseStock).where(WarehouseStock.warehouse_id == wh.id, WarehouseStock.barcode == "BC-MIX-2")
+            )
+        ).scalar_one_or_none()
+        assert stock_2 is None
+
+        # Supply flagged MIXED
+        s = (await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == supply.id))).scalar_one()
+        assert s.return_type == "MIXED"
+        assert s.return_qty == 10
+        assert s.return_processed_at is not None
+
+    async def test_pure_utilization_requires_no_warehouse(self, db_session):
+        """All UTILIZED items → receipt_id=None, warehouse_id not required."""
+        from sqlalchemy import select
+
+        from backend.services.fbo_supply.returns import process_fbo_return
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="S-PURE-UTIL",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            total_qty=3,
+            accepted_qty=0,
+        )
+        db_session.add(supply)
+        await db_session.flush()
+        db_session.add(
+            WbFboSupplyItem(
+                project_id=1,
+                supply_id=supply.id,
+                wb_order_id="W-PURE",
+                barcode="BC-PURE-UTIL",
+                quantity=3,
+                accepted_qty=0,
+            )
+        )
+        await db_session.commit()
+
+        result = await process_fbo_return(
+            db_session,
+            1,
+            supply.id,
+            items=[{"barcode": "BC-PURE-UTIL", "quantity": 3, "return_type": "UTILIZED"}],
+        )
+        assert result["receipt_id"] is None
+
+        s = (await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == supply.id))).scalar_one()
+        assert s.return_type == "UTILIZED"
 
 
 # ─── Router integration tests ──────────────────────────────────────────────

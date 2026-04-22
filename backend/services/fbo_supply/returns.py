@@ -49,18 +49,19 @@ async def process_fbo_return(
     db: AsyncSession,
     project_id: int,
     supply_id: int,
-    return_type: FboReturnType,
-    warehouse_id: int | None,
     items: list[dict[str, Any]],
+    warehouse_id: int | None = None,
     comment: str | None = None,
 ) -> dict[str, Any]:
     """
-    Handle unaccepted qty for a WbFboSupply.
+    Handle unaccepted qty for a WbFboSupply — mixed mode (per-item return_type).
 
-    items: [{barcode: str, quantity: int}, ...] — qty to return per SKU.
-    warehouse_id: required for GOODS/DEFECT (source warehouse). Ignored for UTILIZED.
+    items: [{barcode, quantity, return_type: GOODS|DEFECT|UTILIZED}, ...]
+    Rows with GOODS/DEFECT are grouped into a single InboundReceipt on
+    `warehouse_id`. UTILIZED rows are logged-only (no stock change).
 
-    Returns: {receipt_id, receipt_number, supply_id} (receipt_* = None for UTILIZED).
+    Returns: {receipt_id, receipt_number, supply_id}. receipt_* is None if
+    there are no GOODS/DEFECT rows (pure utilization case).
     """
     supply = await _load_supply(db, project_id, supply_id)
     if supply is None:
@@ -71,9 +72,19 @@ async def process_fbo_return(
 
     _validate_items_against_delta(supply, items)
 
-    if return_type in (FboReturnType.GOODS, FboReturnType.DEFECT):
+    # Partition items by disposition.
+    stock_items = [i for i in items if i.get("return_type") in ("GOODS", "DEFECT")]
+    utilize_items = [i for i in items if i.get("return_type") == "UTILIZED"]
+
+    unknown_types = [i.get("return_type") for i in items if i.get("return_type") not in ("GOODS", "DEFECT", "UTILIZED")]
+    if unknown_types:
+        raise ValueError(f"Unknown return_type: {unknown_types[0]}")
+
+    result: dict[str, Any] = {"receipt_id": None, "receipt_number": None}
+
+    if stock_items:
         if warehouse_id is None:
-            raise ValueError("warehouse_id is required for GOODS/DEFECT return")
+            raise ValueError("warehouse_id is required when items include GOODS/DEFECT")
         wh = (
             await db.execute(
                 select(Warehouse).where(
@@ -91,18 +102,30 @@ async def process_fbo_return(
             project_id=project_id,
             warehouse_id=warehouse_id,
             supply=supply,
-            items=items,
-            is_defect=return_type == FboReturnType.DEFECT,
+            items=stock_items,
             comment=comment,
         )
         result = {"receipt_id": receipt.id, "receipt_number": receipt.number}
-    elif return_type == FboReturnType.UTILIZED:
-        await _log_utilization(db, project_id, supply, items, comment)
-        result = {"receipt_id": None, "receipt_number": None}
-    else:
-        raise ValueError(f"Unknown return_type: {return_type}")
+
+    if utilize_items:
+        await _log_utilization(db, project_id, supply, utilize_items, comment)
+
+    # supply.return_type: GOODS / DEFECT / UTILIZED for homogeneous returns,
+    # 'MIXED' when the user split the delta across stock + utilization.
+    has_stock = bool(stock_items)
+    has_utilize = bool(utilize_items)
+    if has_stock and has_utilize:
+        supply.return_type = "MIXED"
+    elif has_utilize:
+        supply.return_type = "UTILIZED"
+    elif stock_items:
+        # All GOODS, all DEFECT, or mixed GOODS+DEFECT — prefer DEFECT flag
+        # only when ALL stock rows are defect.
+        all_defect = all(i.get("return_type") == "DEFECT" for i in stock_items)
+        supply.return_type = "DEFECT" if all_defect else "GOODS"
 
     supply.return_processed_at = utcnow()
+    supply.return_qty = sum(int(r.get("quantity") or 0) for r in items)
     await db.commit()
     result["supply_id"] = supply.id
     return result
@@ -147,12 +170,17 @@ async def _create_return_receipt(
     warehouse_id: int,
     supply: WbFboSupply,
     items: list[dict[str, Any]],
-    is_defect: bool,
     comment: str | None,
 ) -> InboundReceipt:
-    """Create and immediately accept an InboundReceipt on the source warehouse."""
+    """Create and immediately accept an InboundReceipt on the source warehouse.
+
+    Items may mix GOODS and DEFECT — decide per row how to apply to stock.
+    Receipt header is_defect/defect_reason reflect the mix: True only when
+    every row is DEFECT (keeps single-type receipts unchanged).
+    """
+    all_defect = all(row.get("return_type") == "DEFECT" for row in items)
     number = await _next_number(db, project_id, "IN", InboundReceipt)
-    defect_reason = "Недоприёмка WB (брак)" if is_defect else None
+    defect_reason = "Недоприёмка WB (брак)" if all_defect else None
     auto_comment = f"Возврат по поставке FBW-{supply.wb_supply_id}"
     if comment:
         auto_comment = f"{auto_comment}. {comment}"
@@ -165,7 +193,7 @@ async def _create_return_receipt(
         planned_date=utcnow().date(),
         actual_date=utcnow().date(),
         comment=auto_comment,
-        is_defect=is_defect,
+        is_defect=all_defect,
         defect_reason=defect_reason,
     )
     db.add(receipt)
@@ -177,6 +205,7 @@ async def _create_return_receipt(
     for row in items:
         bc = row["barcode"]
         qty = int(row["quantity"])
+        is_defect = row.get("return_type") == "DEFECT"
         nom = barcode_map.get(bc)
         if nom is None:
             raise ValueError(f"Nomenclature not found for barcode {bc}")
@@ -190,8 +219,6 @@ async def _create_return_receipt(
                 actual_qty=qty,
             )
         )
-        # Immediately apply to stock (defect_delta for defect returns,
-        # regular quantity delta for goods returns).
         if is_defect:
             await _update_stock(
                 db,

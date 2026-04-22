@@ -43,6 +43,7 @@ class WbFboSupplySchema(BaseModel):
     assembly_request_id: int | None = None
     assembly_request_number: str | None = None
     assembly_request_status: str | None = None
+    source_warehouse_id: int | None = None
     synced_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -79,18 +80,22 @@ class FboSyncResultSchema(BaseModel):
 
 
 class FboReturnItem(BaseModel):
+    """One row of the return — split per barcode with its own disposition."""
+
     barcode: str
     quantity: int
+    return_type: str  # GOODS | UTILIZED (DEFECT kept server-side for back-compat)
 
 
 class FboReturnRequest(BaseModel):
     """
     Handle unaccepted qty for a supply with partial acceptance.
-    return_type: GOODS | DEFECT | UTILIZED.
-    warehouse_id required for GOODS/DEFECT (source warehouse).
+
+    Each item in `items` carries its own `return_type` so the user can split
+    one supply between «Вернуть на склад» (GOODS) and «Утилизация» (UTILIZED)
+    in a single submit. `warehouse_id` is required if any item has GOODS/DEFECT.
     """
 
-    return_type: str
     warehouse_id: int | None = None
     items: list[FboReturnItem]
     comment: str | None = None
