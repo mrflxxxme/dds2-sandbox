@@ -824,6 +824,45 @@ class TestEnrichPartialAcceptance:
         assert result["enriched"] == 0
         assert not mock_client.get_fbw_supply_detail.called
 
+    async def test_goods_api_error_preserves_stale_synced_at(self, db_session):
+        """ACCEPTED supply must NOT update synced_at when goods API fails —
+        otherwise 24h cooldown blocks retry indefinitely even after WB recovers.
+        Regression: 2026-04-22, 44 supplies stuck with accepted_qty=0 for 13 days."""
+        from datetime import timedelta
+
+        from backend.services.fbo_supply_service import enrich_fbo_supplies
+
+        stale_synced = datetime.utcnow() - timedelta(hours=36)
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="38413056",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            name="FBW-38413056",
+            created_at_wb=datetime(2026, 4, 9),
+            warehouse_name="Коледино",
+            total_qty=241,
+            accepted_qty=0,
+            synced_at=stale_synced,
+        )
+        db_session.add(supply)
+        await db_session.commit()
+
+        mock_client = AsyncMock()
+        mock_client.get_fbw_supply_detail.return_value = {
+            "warehouseName": "Коледино",
+            "quantity": 241,
+            "statusID": 5,
+        }
+        mock_client.get_fbw_supply_goods.side_effect = Exception("WB API rate limited (429)")
+
+        await enrich_fbo_supplies(db_session, 1, mock_client, max_calls=5)
+
+        assert mock_client.get_fbw_supply_goods.called
+        await db_session.refresh(supply)
+        assert supply.synced_at == stale_synced, (
+            "synced_at must not be refreshed when goods API fails — " "else 24h cooldown blocks retry indefinitely"
+        )
+
 
 # ─── Backfill: supply ↔ shipment link via AssemblyRequest ──────────────────
 
