@@ -425,38 +425,35 @@ export default function FboSuppliesPage() {
                                                 )}
                                             </td>
                                             <td onClick={e => e.stopPropagation()}>
-                                                {supply.assembly_request_id ? (
-                                                    <Link href={`/p/${slug}/warehouse/assembly/${supply.assembly_request_id}`}>
-                                                        <span className="badge" style={{
-                                                            background: supply.assembly_request_status === 'SHIPPED' ? 'var(--color-success)' :
-                                                                supply.assembly_request_status === 'VEHICLE_ASSIGNED' ? 'var(--color-info)' :
-                                                                supply.assembly_request_status === 'READY' ? 'var(--color-warning)' :
-                                                                'var(--color-bg-secondary)',
-                                                            color: ['SHIPPED', 'VEHICLE_ASSIGNED', 'READY'].includes(supply.assembly_request_status || '') ? '#fff' : 'var(--color-text)',
-                                                            padding: '4px 8px',
-                                                            borderRadius: 4,
-                                                            fontSize: 12,
-                                                            cursor: 'pointer',
-                                                        }}>
-                                                            {supply.assembly_request_number}
-                                                        </span>
-                                                    </Link>
-                                                ) : supply.outbound_shipment_id && supply.outbound_shipment_warehouse_id ? (
-                                                    <Link href={`/p/${slug}/warehouse/${supply.outbound_shipment_warehouse_id}/shipment/${supply.outbound_shipment_id}`}>
-                                                        <span className="badge" style={{
-                                                            background: supply.outbound_shipment_status === 'DELIVERED' ? 'var(--color-success)' :
-                                                                supply.outbound_shipment_status === 'SHIPPED' ? 'var(--color-info)' :
-                                                                supply.outbound_shipment_status === 'CANCELLED' ? 'var(--color-danger)' :
-                                                                'var(--color-bg-secondary)',
-                                                            color: ['DELIVERED', 'SHIPPED', 'CANCELLED'].includes(supply.outbound_shipment_status || '') ? '#fff' : 'var(--color-text)',
-                                                            padding: '4px 8px',
-                                                            borderRadius: 4,
-                                                            fontSize: 12,
-                                                            cursor: 'pointer',
-                                                        }}>
-                                                            {supply.outbound_shipment_number || 'Отгружена'}
-                                                        </span>
-                                                    </Link>
+                                                {(supply.assembly_request_id || supply.outbound_shipment_id) ? (
+                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+                                                        {supply.assembly_request_id && (
+                                                            <Link href={`/p/${slug}/warehouse/assembly/${supply.assembly_request_id}`}>
+                                                                <span className={`badge ${
+                                                                    supply.assembly_request_status === 'DELIVERED' ? 'badge-success' :
+                                                                    supply.assembly_request_status === 'SHIPPED' ? 'badge-success' :
+                                                                    supply.assembly_request_status === 'VEHICLE_ASSIGNED' ? 'badge-info' :
+                                                                    supply.assembly_request_status === 'READY' ? 'badge-warning' :
+                                                                    supply.assembly_request_status === 'CANCELLED' ? 'badge-danger' :
+                                                                    'badge-secondary'
+                                                                }`} style={{ cursor: 'pointer' }}>
+                                                                    {supply.assembly_request_number}
+                                                                </span>
+                                                            </Link>
+                                                        )}
+                                                        {supply.outbound_shipment_id && supply.outbound_shipment_warehouse_id && (
+                                                            <Link href={`/p/${slug}/warehouse/${supply.outbound_shipment_warehouse_id}/shipment/${supply.outbound_shipment_id}`}>
+                                                                <span className={`badge ${
+                                                                    supply.outbound_shipment_status === 'DELIVERED' ? 'badge-success' :
+                                                                    supply.outbound_shipment_status === 'SHIPPED' ? 'badge-info' :
+                                                                    supply.outbound_shipment_status === 'CANCELLED' ? 'badge-danger' :
+                                                                    'badge-secondary'
+                                                                }`} style={{ cursor: 'pointer' }}>
+                                                                    {supply.outbound_shipment_number || 'Отгружена'}
+                                                                </span>
+                                                            </Link>
+                                                        )}
+                                                    </div>
                                                 ) : supply.wb_status === 'ACCEPTED' ? (
                                                     <Link href={`/p/${slug}/warehouse/assembly/new?fbo_supply_id=${supply.id}`}>
                                                         <button className="btn btn-primary btn-sm">
