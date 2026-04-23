@@ -320,9 +320,12 @@ async def list_fbo_supplies(
             )
         )
         for row in asm_result.all():
-            # Prefer ACTIVE AR for badge; source_warehouse_id is taken from
-            # any AR (last one wins — typically only one AR per supply).
-            if row.status in active_statuses and row.wb_fbo_supply_id not in assembly_map:
+            # Prefer active AR for badge, but fallback to terminal states
+            # (DELIVERED/CANCELLED) so the UI always shows the AR number,
+            # not just an empty «Отгружена» placeholder.
+            is_active = row.status in active_statuses
+            existing = assembly_map.get(row.wb_fbo_supply_id)
+            if existing is None or (is_active and existing[2] not in active_statuses):
                 assembly_map[row.wb_fbo_supply_id] = (row.id, row.number, row.status)
             if row.warehouse_id is not None:
                 source_warehouse_map[row.wb_fbo_supply_id] = row.warehouse_id
