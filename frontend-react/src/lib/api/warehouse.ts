@@ -151,7 +151,9 @@ export function addWarehouseMethods(api: ApiClient) {
             return api.request<string[]>('GET', '/api/v1/warehouse/fbo-supplies/warehouses');
         },
         getFboSupplies(params?: {
-            search?: string; status?: string; warehouse?: string; date_from?: string; date_to?: string;
+            search?: string; status?: string; warehouse?: string;
+            source_warehouse_id?: number;
+            date_from?: string; date_to?: string;
             sort_by?: string; sort_order?: string; limit?: number; offset?: number;
             exclude_with_assembly?: boolean;
             without_assembly?: boolean;

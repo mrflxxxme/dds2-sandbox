@@ -43,6 +43,7 @@ export default function FboSuppliesPage() {
     const [statusFilter, setStatusFilter] = useState('');
     const [warehouseFilter, setWarehouseFilter] = useState('');
     const [warehouseOptions, setWarehouseOptions] = useState<string[]>([]);
+    const [sourceWarehouseFilter, setSourceWarehouseFilter] = useState<number | ''>('');
     const [withoutAssembly, setWithoutAssembly] = useState(false);
     const [partialOnly, setPartialOnly] = useState(false);
     const [excessOnly, setExcessOnly] = useState(false);
@@ -132,6 +133,7 @@ export default function FboSuppliesPage() {
                 search: search || undefined,
                 status: statusFilter || undefined,
                 warehouse: warehouseFilter || undefined,
+                source_warehouse_id: sourceWarehouseFilter === '' ? undefined : sourceWarehouseFilter,
                 date_from: dateFrom || undefined,
                 date_to: dateTo || undefined,
                 without_assembly: withoutAssembly || undefined,
@@ -148,7 +150,7 @@ export default function FboSuppliesPage() {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         }
         setLoading(false);
-    }, [search, statusFilter, warehouseFilter, dateFrom, dateTo, withoutAssembly, partialOnly, excessOnly, sortBy, sortOrder, page]);
+    }, [search, statusFilter, warehouseFilter, sourceWarehouseFilter, dateFrom, dateTo, withoutAssembly, partialOnly, excessOnly, sortBy, sortOrder, page]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -344,15 +346,31 @@ export default function FboSuppliesPage() {
                             ))}
                         </select>
                     </div>
-                    <div className="form-group">
+                    <div className="form-group" title="Склад Wildberries">
                         <select
                             className="form-input"
                             value={warehouseFilter}
                             onChange={e => { setWarehouseFilter(e.target.value); setPage(0); }}
                         >
-                            <option value="">Все склады</option>
+                            <option value="">Все склады WB</option>
                             {warehouseOptions.map(wh => (
                                 <option key={wh} value={wh}>{wh}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <div className="form-group" title="Наш склад забора">
+                        <select
+                            className="form-input"
+                            value={sourceWarehouseFilter}
+                            onChange={e => {
+                                const v = e.target.value;
+                                setSourceWarehouseFilter(v === '' ? '' : Number(v));
+                                setPage(0);
+                            }}
+                        >
+                            <option value="">Все склады забора</option>
+                            {warehouses.map(wh => (
+                                <option key={wh.id} value={wh.id}>{wh.name}</option>
                             ))}
                         </select>
                     </div>
@@ -446,7 +464,9 @@ export default function FboSuppliesPage() {
                                 <th style={{ width: 40 }}></th>
                                 <th>Поставка</th>
                                 <th>Статус</th>
-                                <th>Склад</th>
+                                <th>Склад WB</th>
+                                <th>Склад забора</th>
+                                <th>Дата забора</th>
                                 <th style={{ textAlign: 'right' }}>Кол-во</th>
                                 <th>Отгрузка</th>
                                 <th
@@ -498,6 +518,12 @@ export default function FboSuppliesPage() {
                                             </td>
                                             <td style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
                                                 {supply.warehouse_name || '\u2014'}
+                                            </td>
+                                            <td style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                                {supply.outbound_shipment_warehouse_name || '\u2014'}
+                                            </td>
+                                            <td style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                                {formatDate(supply.outbound_shipment_shipped_date)}
                                             </td>
                                             <td style={{ textAlign: 'right', fontWeight: 500 }}>
                                                 {supply.total_qty || 0}
@@ -557,7 +583,7 @@ export default function FboSuppliesPage() {
                                         {/* Expanded items row */}
                                         {isExpanded && (
                                             <tr>
-                                                <td colSpan={9} style={{ padding: 0, background: 'var(--color-bg-secondary)' }}>
+                                                <td colSpan={11} style={{ padding: 0, background: 'var(--color-bg-secondary)' }}>
                                                     <SupplyItemsPanel
                                                         supply={supply}
                                                         items={expandedItems}

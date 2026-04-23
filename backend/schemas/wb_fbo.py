@@ -43,6 +43,8 @@ class WbFboSupplySchema(BaseModel):
     outbound_shipment_number: str | None = None
     outbound_shipment_status: str | None = None
     outbound_shipment_warehouse_id: int | None = None
+    outbound_shipment_warehouse_name: str | None = None
+    outbound_shipment_shipped_date: date | None = None
     is_archived: bool | None = None
     excess_processed_at: datetime | None = None
     excess_qty: int | None = None
