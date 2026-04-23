@@ -166,7 +166,7 @@ async def test_list_with_type_filter(db_session, client, auth_headers):
     )
 
     filters = CounterpartyFilter(type="FULFILLMENT", limit=100, offset=0)
-    items, total = await service.list(project_id=project_id, filters=filters)
+    items, total, _ = await service.list(project_id=project_id, filters=filters)
 
     types_in_result = {cp.primary_type for cp in items}
     assert "FULFILLMENT" in types_in_result
@@ -183,7 +183,7 @@ async def test_list_search_ilike(db_session, client, auth_headers):
     await service.upsert_by_inn(inn=inn, name="Кузнецов Транспорт", project_id=project_id)
 
     filters = CounterpartyFilter(q="кузнец", limit=100, offset=0)
-    items, total = await service.list(project_id=project_id, filters=filters)
+    items, total, _ = await service.list(project_id=project_id, filters=filters)
 
     names = [cp.name for cp in items]
     assert any("Кузнецов" in n for n in names)
@@ -197,7 +197,7 @@ async def test_list_search_ilike_percent_escaped(db_session, client, auth_header
 
     # This should not raise an error (percent escaped properly)
     filters = CounterpartyFilter(q="%injection_attempt", limit=100, offset=0)
-    items, total = await service.list(project_id=project_id, filters=filters)
+    items, total, _ = await service.list(project_id=project_id, filters=filters)
     # No crash — safe result (zero or more items)
     assert isinstance(items, list)
     assert isinstance(total, int)
@@ -214,7 +214,7 @@ async def test_list_active_only(db_session, client, auth_headers):
     await service.soft_delete(cp.id, project_id=project_id)
 
     filters = CounterpartyFilter(active_only=True, limit=100, offset=0)
-    items, total = await service.list(project_id=project_id, filters=filters)
+    items, total, _ = await service.list(project_id=project_id, filters=filters)
 
     assert all(not getattr(item, "is_deleted", False) for item in items)
     ids = [item.id for item in items]

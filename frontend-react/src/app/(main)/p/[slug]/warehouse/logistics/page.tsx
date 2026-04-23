@@ -89,6 +89,8 @@ export default function LogisticsPage() {
     const [vehicleInfo, setVehicleInfo] = useState('');
     const [vehicleBrand, setVehicleBrand] = useState('');
     const [driverPhone, setDriverPhone] = useState('');
+    const [carrierInn, setCarrierInn] = useState('');
+    const [carrierName, setCarrierName] = useState('');
     const [selectedIds, setSelectedIds] = useState<number[]>([]);
     const [actionLoading, setActionLoading] = useState(false);
 
@@ -279,11 +281,16 @@ export default function LogisticsPage() {
                     delivery_date: p.delivery_date,
                 };
             });
+            const carrierPayload = {
+                carrier_inn: carrierInn.trim() || null,
+                carrier_name: carrierName.trim() || null,
+            };
             if (selectedIds.length === 1) {
                 await api.assignVehicle(selectedIds[0], {
                     vehicle_info: vehicleInfo.trim(),
                     vehicle_brand: vehicleBrand.trim(),
                     driver_phone: driverPhone.trim(),
+                    ...carrierPayload,
                     ...bulkItems[0],
                 });
             } else {
@@ -291,11 +298,14 @@ export default function LogisticsPage() {
                     vehicle_info: vehicleInfo.trim(),
                     vehicle_brand: vehicleBrand.trim(),
                     driver_phone: driverPhone.trim(),
+                    ...carrierPayload,
                     items: bulkItems,
                 });
             }
             setShowVehicleModal(false);
             setCheckedIds(new Set());
+            setCarrierInn('');
+            setCarrierName('');
             await load();
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
@@ -906,7 +916,7 @@ export default function LogisticsPage() {
                         <h2 className="modal-title">Назначить машину</h2>
 
                         {/* Block 1: Common vehicle data */}
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 16 }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 12 }}>
                             <div className="form-group" style={{ margin: 0 }}>
                                 <label className="form-label">Описание машины *</label>
                                 <input className="form-input" value={vehicleInfo} onChange={e => setVehicleInfo(e.target.value)} placeholder="Номер, водитель, ТК..." autoFocus />
@@ -918,6 +928,29 @@ export default function LogisticsPage() {
                             <div className="form-group" style={{ margin: 0 }}>
                                 <label className="form-label">Телефон водителя *</label>
                                 <input className="form-input" value={driverPhone} onChange={e => setDriverPhone(e.target.value)} placeholder="+7 999 123-45-67" />
+                            </div>
+                        </div>
+
+                        {/* Block 1b: Carrier (optional) */}
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 12, marginBottom: 16, padding: 12, background: 'var(--color-bg)', borderRadius: 8 }}>
+                            <div className="form-group" style={{ margin: 0 }}>
+                                <label className="form-label">ИНН подрядчика</label>
+                                <input
+                                    className="form-input"
+                                    value={carrierInn}
+                                    onChange={e => setCarrierInn(e.target.value)}
+                                    placeholder="10 или 12 цифр"
+                                    maxLength={12}
+                                />
+                            </div>
+                            <div className="form-group" style={{ margin: 0 }}>
+                                <label className="form-label">Название подрядчика</label>
+                                <input
+                                    className="form-input"
+                                    value={carrierName}
+                                    onChange={e => setCarrierName(e.target.value)}
+                                    placeholder="ООО «ТК» / ИП Иванов — свяжется с контрагентом автоматически"
+                                />
                             </div>
                         </div>
 

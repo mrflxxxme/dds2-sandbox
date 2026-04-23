@@ -142,6 +142,10 @@ async def get_partial_acceptance_summary(
     db: AsyncSession,
     project_id: int,
     accounting_started_at: date | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    warehouse: str | None = None,
+    status: str | None = None,
     archived_view: bool = False,
 ) -> dict[str, Any]:
     """
@@ -155,16 +159,31 @@ async def get_partial_acceptance_summary(
 
     Plus items_breakdown: per-barcode aggregate (qty not accepted across supplies).
 
-    Honors the same archive/date-cutoff as the main list view — otherwise the
-    dashboard would count supplies hidden from the table (confusing mismatch).
-    """
+    Honors the same global filters as the list view (period, archive, warehouse,
+    status) — otherwise dashboard cards would count supplies hidden from the
+    table (e.g. 15k шт за всю историю при 24 видимых поставках за 30 дней).
+    """  # — cyrillic product terms
+    cutoff: list[Any] = [_archive_clause(accounting_started_at, archived_view)]
+    if date_from:
+        cutoff.append(func.date(WbFboSupply.created_at_wb) >= date_from)
+    if date_to:
+        cutoff.append(func.date(WbFboSupply.created_at_wb) <= date_to)
+    if warehouse:
+        cutoff.append(WbFboSupply.warehouse_name == warehouse)
+    if status:
+        statuses = [s.strip() for s in status.split(",")]
+        if len(statuses) == 1:
+            cutoff.append(WbFboSupply.wb_status == statuses[0])
+        else:
+            cutoff.append(WbFboSupply.wb_status.in_(statuses))
+
     # Supply-level aggregates
     supplies_q = select(WbFboSupply).where(
         WbFboSupply.project_id == project_id,
         WbFboSupply.wb_status == WbSupplyStatus.ACCEPTED,
         WbFboSupply.total_qty > 0,
         WbFboSupply.accepted_qty < WbFboSupply.total_qty,
-        _archive_clause(accounting_started_at, archived_view),
+        *cutoff,
     )
     result = await db.execute(supplies_q)
     supplies = list(result.scalars().all())

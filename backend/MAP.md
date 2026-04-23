@@ -24,16 +24,6 @@
 ### Справочники
 - CRUD (Account, Override, CounterpartyCategory, OpeningBalance): `services/refs_service.py`
 
-### Контрагенты + Займы (Phase 2)
-- Модели: `models/counterparty.py` (Counterparty, CounterpartyDocument), `models/loan.py` (Loan, LoanPayment)
-- Сервисы: `services/counterparty_service.py`, `services/loan_service.py`
-- Отчёт оборотов (pivot, мультивалюта): `services/reports/counterparty_turnovers.py`
-- Роутеры: `routers/counterparty.py` (/counterparties + /documents), `routers/loans.py`
-- Парсер Faktura.ru (XML 2003): `etl/parsers/faktura.py` (FAKTURA_WB_BANK)
-- ETL обогащение purpose: `etl/master_logic.py` → `enrich_purpose()` (contract_number, УНК, депозиты, займы)
-- Backfill: `scripts/backfill_counterparties.py --project-id=X`
-- Домен: `backend/DOMAIN_COUNTERPARTY.md`
-
 ### Изменить отчёт
 - ДДС: `services/reports/dds.py`
 - БДР: `services/wb_bdr_service.py` (+ `bdr_loaders.py`, `bdr_enrichment.py`, `wb_bdr_helpers.py`)
@@ -88,6 +78,7 @@
 - Прогноз остатков: `services/stock_forecast_service.py` — прогноз выбытия по трендам продаж (wb / wb_rf / wb_rf_transit), светофор
 - FBO поставки WB: `services/fbo_supply_service.py`
 - Гео данные складов: `services/warehouse_geo.py`, `services/warehouse_geo_data.py`
+- WB возвраты на ПВЗ: `services/wb_returns_service.py` (~650 строк) — sync (WB Seller Analytics API) + list/summary + classify_ui_state + create_receipt_from_returns → InboundReceipt(EXPECTED, is_defect=true). Scheduler job: `scheduler/jobs/wb_goods_returns_sync.py`
 
 ### Планирование
 - CRUD: `services/planning/crud.py`
@@ -129,13 +120,13 @@ from backend.models.mixins import SoftDeleteMixin
 | Что ищу | Где |
 |---------|-----|
 | Модель таблицы | `models/{domain}.py` + `models/__init__.py` |
-| API endpoint | `routers/` (ai_chat, assembly, auth, cost, fbo_supplies, funnel, import_txn, integrations, monitoring, planning, planning_customs, planning_wb_payouts, projects, refs, reports, reports_stock, reports_wb, supply_chain, telegram, telegram_miniapp, telegram_webhook, warehouse, ws) |
+| API endpoint | `routers/` (ai_chat, assembly, auth, cost, counterparty, fbo_supplies, funnel, import_txn, integrations, loans, monitoring, planning, planning_customs, planning_wb_payouts, projects, refs, reports, reports_stock, reports_wb, supply_chain, telegram, telegram_miniapp, telegram_webhook, warehouse, wb_returns, ws) |
 | Бизнес-логика | `services/` (domain services + `ai_chat_service.py` для web AI chat + `project_settings_service.py` для мутаций настроек проекта). NB: `assembly/`, `fbo_supply/`, `supply_chain/` — пакеты (разбиты из монолитов) |
-| Pydantic schemas | `schemas/` (ai_chat, anomaly, assembly, auth, capital, common, cost, imports, integrations, monitoring, planning, refs, reports, supply_chain, tariff, tax, telegram, transactions, warehouse, wb_fbo) |
+| Pydantic schemas | `schemas/` (ai_chat, anomaly, assembly, auth, capital, common, cost, counterparty, imports, integrations, loan, monitoring, planning, refs, reports, supply_chain, tariff, tax, telegram, transactions, warehouse, wb_fbo, wb_returns) |
 | Импорт файлов / ETL | `etl/` |
 | WB HTTP клиент | `integrations/wb_api.py` |
 | Telegram бот | `integrations/telegram_bot.py` |
-| Фоновые задачи | `scheduler/jobs/` (ai_digest, fbo_supplies, funnel, health_check, prewarm, wb_finance, wb_stocks) |
+| Фоновые задачи | `scheduler/jobs/` (ai_digest, fbo_supplies, funnel, health_check, prewarm, wb_finance, wb_goods_returns_sync, wb_stocks) |
 | Кэш конфигурация | `cache.py` |
 | Утилиты | `utils/` (time.py, crypto.py, file_validation.py, queries.py, telegram.py, telegram_auth.py) |
 | Тесты | `tests/` (в корне проекта, рядом с `backend/`) |
@@ -155,6 +146,7 @@ from backend.models.mixins import SoftDeleteMixin
 | `Nomenclature`, `CostOrder` | `models/cost.py` | Себестоимость |
 | `Warehouse`, `WarehouseStock` | `models/warehouse.py` | Склад |
 | `WbFboSupply` | `models/wb_fbo.py` | FBO поставки |
+| `WbGoodsReturn` | `models/wb_returns.py` | Возвраты с WB на ПВЗ (линк на `InboundReceipt`) |
 | `BrandNote`, `TelegramBotUser` | `models/telegram.py` | Telegram / AI память |
 | `AiConversation`, `AiMessage` | `models/ai_chat.py` | Web AI chat (история диалогов с агентами) |
 | `Account`, `CategoryRef` | `models/refs.py` | Справочники |

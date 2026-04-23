@@ -115,8 +115,13 @@ export default function FboSuppliesPage() {
     const [partialBreakdownOpen, setPartialBreakdownOpen] = useState(false);
     const loadPartialSummary = useCallback(() => {
         if (!partialOnly) { setPartialSummary(null); return; }
-        api.getFboPartialSummary().then(setPartialSummary).catch(() => setPartialSummary(null));
-    }, [partialOnly]);
+        api.getFboPartialSummary({
+            date_from: dateFrom || undefined,
+            date_to: dateTo || undefined,
+            warehouse: warehouseFilter || undefined,
+            status: statusFilter || undefined,
+        }).then(setPartialSummary).catch(() => setPartialSummary(null));
+    }, [partialOnly, dateFrom, dateTo, warehouseFilter, statusFilter]);
     useEffect(() => { loadPartialSummary(); }, [loadPartialSummary]);
 
     const load = useCallback(async () => {

@@ -25,6 +25,7 @@ from backend.schemas.warehouse import (
     StockMovementSchema,
     StockTransferCreate,
     StockTransferSchema,
+    WarehouseCounterpartyLink,
     WarehouseCreate,
     WarehouseReorder,
     WarehouseSchema,
@@ -89,6 +90,26 @@ async def update_warehouse(
         project.id,
         warehouse_id,
         payload.model_dump(exclude_unset=True),
+    )
+    if not wh:
+        raise HTTPException(404, "Warehouse not found")
+    return WarehouseSchema.model_validate(wh)
+
+
+@router.patch("/{warehouse_id}/counterparty", dependencies=[Depends(rate_limit_write)])
+async def set_warehouse_counterparty(
+    warehouse_id: int,
+    payload: WarehouseCounterpartyLink,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Link warehouse to a Counterparty by INN. Auto-creates CP as FULFILLMENT if new/OTHER."""
+    wh = await warehouse_service.link_counterparty(
+        db,
+        project.id,
+        warehouse_id,
+        inn=payload.inn,
+        name=payload.name,
     )
     if not wh:
         raise HTTPException(404, "Warehouse not found")

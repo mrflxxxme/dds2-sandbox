@@ -39,6 +39,7 @@ WB_API_BASE_V2 = "https://common-api.wildberries.ru"
 WB_CONTENT_API_BASE = "https://content-api.wildberries.ru"
 WB_MARKETPLACE_API_BASE = "https://marketplace-api.wildberries.ru"
 WB_SUPPLIERS_API_BASE = "https://supplies-api.wildberries.ru"
+WB_SELLER_ANALYTICS_API_BASE = "https://seller-analytics-api.wildberries.ru"
 
 # Request timeout in seconds
 TIMEOUT = 30
@@ -463,6 +464,56 @@ class WBApiClient:
 
         logger.info("wb_api.cards_fetched", total=len(all_cards))
         return all_cards
+
+    # ─── Goods Returns (Seller Analytics API) ───────────────────────────────
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def get_goods_returns(self, date_from: date, date_to: date) -> list[dict]:
+        """
+        Fetch goods-returns report (возвраты товаров на ПВЗ).
+        WB Seller Analytics API: GET /api/v1/analytics/goods-return
+        Rate limit: 1 req/min, max 31-day window.
+        Returns list of raw report rows (camelCase keys preserved).
+        """
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                params = {
+                    "dateFrom": date_from.isoformat(),
+                    "dateTo": date_to.isoformat(),
+                }
+                url = f"{WB_SELLER_ANALYTICS_API_BASE}/api/v1/analytics/goods-return"
+                logger.info(
+                    "wb_api.request",
+                    method="GET",
+                    path="/api/v1/analytics/goods-return",
+                    params=params,
+                )
+                response = await client.get(url, headers=self.headers, params=params)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401)")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError(
+                        "WB API rate limited (429)",
+                        retry_after=retry_after,
+                    )
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Seller Analytics API server error: HTTP {response.status_code}")
+                if response.status_code == 204:
+                    return []
+                if response.status_code != 200:
+                    raise ValueError(
+                        f"WB Seller Analytics API error: HTTP {response.status_code} — {response.text[:200]}"
+                    )
+
+                data = response.json()
+                # Response: {"report": [...]} or occasionally a bare list.
+                if isinstance(data, dict) and "report" in data:
+                    report = data["report"]
+                    return report if isinstance(report, list) else []
+                if isinstance(data, list):
+                    return data
+                return []
 
 
 def parse_wb_cards_to_nomenclature(cards: list[dict]) -> list[dict]:

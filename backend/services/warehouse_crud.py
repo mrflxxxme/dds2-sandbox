@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.cost import CostOrder
+from backend.models.counterparty import Counterparty
 from backend.models.enums import VehicleStatus
 from backend.models.warehouse import (
     Warehouse,
@@ -53,9 +54,16 @@ async def list_warehouses(db: AsyncSession, project_id: int) -> list:
     )
 
     result = await db.execute(
-        select(Warehouse, stock_sub.c.total_stock, vehicles_sub.c.vehicles_in_transit)
+        select(
+            Warehouse,
+            stock_sub.c.total_stock,
+            vehicles_sub.c.vehicles_in_transit,
+            Counterparty.inn.label("cp_inn"),
+            Counterparty.name.label("cp_name"),
+        )
         .outerjoin(stock_sub, Warehouse.id == stock_sub.c.warehouse_id)
         .outerjoin(vehicles_sub, Warehouse.id == vehicles_sub.c.target_warehouse_id)
+        .outerjoin(Counterparty, Counterparty.id == Warehouse.counterparty_id)
         .where(
             Warehouse.project_id == project_id,
             Warehouse.is_deleted.is_(False),
@@ -64,9 +72,11 @@ async def list_warehouses(db: AsyncSession, project_id: int) -> list:
     )
     rows = result.all()
     warehouses = []
-    for wh, total_stock, vehicles_in_transit in rows:
+    for wh, total_stock, vehicles_in_transit, cp_inn, cp_name in rows:
         wh.total_stock = int(total_stock or 0)
         wh.vehicles_in_transit = int(vehicles_in_transit or 0)
+        wh.counterparty_inn = cp_inn
+        wh.counterparty_name = cp_name
         warehouses.append(wh)
     return warehouses
 
@@ -98,15 +108,24 @@ async def get_or_create_transit_warehouse(db: AsyncSession, project_id: int) -> 
 
 
 async def get_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -> Warehouse | None:
-    """Get a single warehouse by id."""
+    """Get a single warehouse by id. Populates counterparty_inn/name if linked."""
     result = await db.execute(
-        select(Warehouse).where(
+        select(Warehouse, Counterparty.inn.label("cp_inn"), Counterparty.name.label("cp_name"))
+        .outerjoin(Counterparty, Counterparty.id == Warehouse.counterparty_id)
+        .where(
             Warehouse.id == warehouse_id,
             Warehouse.project_id == project_id,
             Warehouse.is_deleted == False,  # noqa: E712
         )
     )
-    return result.scalar_one_or_none()
+    row = result.first()
+    if row is None:
+        return None
+    wh, cp_inn, cp_name = row
+    wh.counterparty_inn = cp_inn
+    wh.counterparty_name = cp_name
+    assert isinstance(wh, Warehouse)
+    return wh
 
 
 async def create_warehouse(db: AsyncSession, project_id: int, payload: dict) -> Warehouse:
@@ -138,6 +157,72 @@ async def update_warehouse(db: AsyncSession, project_id: int, warehouse_id: int,
 
     await db.commit()
     await db.refresh(wh)
+    return wh
+
+
+async def link_counterparty(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    *,
+    inn: str | None,
+    name: str | None,
+) -> Warehouse | None:
+    """Set/update warehouse's counterparty (legal entity) by INN.
+
+    Upserts a Counterparty by (project_id, inn). If the CP is new or has
+    primary_type='OTHER' — bumps it to FULFILLMENT. Never overwrites other types.
+    If inn is None — unlinks the counterparty from the warehouse.
+    """
+    from sqlalchemy import text as sa_text
+
+    from backend.cache import invalidate_project_reports
+    from backend.models.counterparty import Counterparty
+
+    wh = await get_warehouse(db, project_id, warehouse_id)
+    if not wh:
+        return None
+
+    if not inn:
+        wh.counterparty_id = None
+        await db.commit()
+        await db.refresh(wh)
+        return wh
+
+    clean_inn = inn.strip()
+    cp_name = (name or "").strip() or clean_inn
+
+    existing = await db.execute(
+        select(Counterparty).where(
+            Counterparty.project_id == project_id,
+            Counterparty.inn == clean_inn,
+            Counterparty.is_deleted == False,  # noqa: E712
+        )
+    )
+    cp = existing.scalar_one_or_none()
+    if cp is None:
+        cp = Counterparty(
+            project_id=project_id,
+            inn=clean_inn,
+            name=cp_name,
+            primary_type="FULFILLMENT",
+            created_by_import=False,
+        )
+        db.add(cp)
+        await db.flush()
+    else:
+        # Update name only if longer; bump primary_type only if OTHER
+        if cp_name and len(cp_name) > len(cp.name or ""):
+            cp.name = cp_name
+        if cp.primary_type == "OTHER":
+            cp.primary_type = "FULFILLMENT"
+
+    wh.counterparty_id = cp.id
+    await db.commit()
+    await db.refresh(wh)
+    await invalidate_project_reports(project_id)
+    # Mute unused import warnings when this helper isn't wired elsewhere yet
+    _ = sa_text
     return wh
 
 

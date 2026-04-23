@@ -255,6 +255,67 @@ Regression guard: `tests/test_warehouse_tax_cutoff_parity.py`. При любом
 Не интегрирован с локальным WarehouseStock. Синхронизация: `warehouse_stock_service.sync_warehouse_stocks()`.
 Используется для аналитики (compute_need) и единых остатков.
 
+## WB Goods Returns (возвраты на ПВЗ)
+
+`WbGoodsReturn` — отчёт «Возвраты и перемещение товаров» из WB Seller Analytics API
+(`GET /api/v1/analytics/goods-return`). Хранится зеркально + линк на `InboundReceipt`
+когда пользователь оформляет приёмку на физ.склад.
+
+### Flow
+```
+WB API (раз в 30 мин, rate limit 1/min, max 31 день окно)
+  → WbGoodsReturn.upsert(srid)                                     # sync_project_returns
+  → user видит «Готовые к выдаче» на /p/<slug>/wb-returns
+  → selects srids + warehouse + POST /wb-returns/create-receipt
+  → create_receipt_from_returns:
+       • валидирует warehouse (project_id, is_deleted, is_active — inactive → 400)
+       • pg_advisory_xact_lock(ns, project_id) — сериализует выдачу номеров ВЗ-yymmdd-N
+       • SELECT ... FOR UPDATE на WbGoodsReturn (project, srid, inbound_receipt_id IS NULL) —
+         блокирует параллельный POST с пересекающимися srid
+       • создаёт InboundReceipt(EXPECTED, is_defect=true, defect_reason="Возврат WB с ПВЗ"),
+         номер ВЗ-yymmdd-N где дата — MSK (не UTC контейнера), N = MAX(suffix)+1
+       • на каждую единицу — InboundReceiptItem(expected_qty=1, actual_qty=0)
+         (если nomenclature по barcode нет — создаёт stub; если barcode пуст — пропускает item,
+          линкует возврат, srid попадает в `skipped_srids` в ответе → UI warning)
+       • выставляет WbGoodsReturn.inbound_receipt_id = receipt.id
+  → склад подтверждает через стандартный Accept Receipt flow (warehouse_inbound.accept_receipt)
+       → status → ACCEPTED → WarehouseStock.defect_quantity пополняется
+```
+
+### UI state (derived)
+`classify_ui_state(ret, receipt_status)` — одна из:
+- `expired` — inactive + expired_dt в прошлом + completed_dt = NULL
+- `received` — InboundReceipt.status == ACCEPTED
+- `picked_up_pending_receipt` — linked EXPECTED + completed_dt != NULL (забрали, ждём приёмку)
+- `pickup_planned` — linked EXPECTED + completed_dt == NULL
+- `picked_without_receipt` — completed_dt != NULL + нет линка (retro-приёмка нужна)
+- `ready_for_pickup` — active + ready_to_return_dt != NULL + not completed
+- `in_transit_to_pvz` — fallback для активных без ready_to_return_dt
+
+### Endpoints (`/api/v1/wb-returns/*`)
+| Метод | Путь | Назначение |
+|-------|------|-----------|
+| GET | `/` | список с фильтром `tab=pvz\|in_transit\|history\|all` + search + pvz_id + даты |
+| GET | `/summary` | KPI-счётчики по 8 ui_state |
+| GET | `/pvz-groups` | группировка «Tab 1» по `dst_office_id` |
+| POST | `/create-receipt` | создать приёмку из набора srid |
+| POST | `/sync` | ручной запуск sync (use date_from/date_to или дефолт 7 дней) |
+
+### Scheduler job
+`backend/scheduler/jobs/wb_goods_returns_sync.py::sync_all_projects_wb_returns`
+— каждые 30 мин, интервал-trigger, SyncLog(service="wb", sync_type="goods_returns").
+
+### Файлы
+| Файл | Назначение |
+|------|-----------|
+| models/wb_returns.py | `WbGoodsReturn` (SoftDelete + TimestampMixin, UniqueConstraint project_id+srid) |
+| schemas/wb_returns.py | Pydantic Out/Group/Summary/CreateIn/CreateOut/SyncIn/SyncOut/ListResponse |
+| services/wb_returns_service.py | sync + list + summary + classify_ui_state + create_receipt_from_returns |
+| routers/wb_returns.py | 5 endpoints, все через `Depends(get_current_project)` + `rate_limit_write` на мутациях |
+| scheduler/jobs/wb_goods_returns_sync.py | периодический sync для всех project_id с WB ключом |
+| integrations/wb_api.py | `WBApiClient.get_goods_returns(date_from, date_to)` |
+| tests/test_wb_returns.py | unit тесты: sync upsert, tab filters, summary, classify_ui_state, create_receipt |
+
 ## Файлы модуля
 
 | Файл | Назначение |

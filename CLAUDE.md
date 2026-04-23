@@ -14,7 +14,7 @@ make test-fast                                    # Параллельные т�
 make test-changed                                 # Только изменённые тесты (testmon)
 make test-unit                                    # Только unit-тесты
 cd frontend-react && npx vitest run                                # Frontend тесты
-cd frontend-react && npx playwright test tests/e2e/smoke.spec.ts   # Smoke (27 страниц, ~2 мин)
+cd frontend-react && npx playwright test tests/e2e/smoke.spec.ts   # Smoke (27 маршрутов, ~2 мин)
 cd frontend-react && npx playwright test                           # Все E2E (73 теста, локально/debug)
 ```
 
@@ -63,9 +63,9 @@ Model → Alembic migration → Schema → Service → Router → Test
 ```
 src/app/(main)/p/[slug]/ — основное приложение (22 страниц: dds, import, txn, inbox, reports, planning, cost, funnel, trends, refs, settings, opiu, orders, plan-fact, team, monitoring, bulk-cost, container-loader, order-geography, warehouse, supply-chain, ai-chat)
 src/app/(tma)/tma/[slug]/ — Telegram Mini App (capital, chat, funnel, pnl, pulse, warehouse)
-src/lib/api/ — модульный API клиент (client.ts + 15 доменных файлов, JWT auth + auto-refresh)
+src/lib/api/ — модульный API клиент (client.ts + 18 доменных файлов, JWT auth + auto-refresh)
 src/lib/utils.ts — formatNumber, formatDate, exportToExcel
-src/components/ — DataTable, FormModal, KpiCard, PageGuard, PageHeader, TabLayout, TanStackDataTable, Toast, BoxDetailCell
+src/components/ — DataTable, FormModal, KpiCard, PageGuard, PageHeader, TabLayout, TanStackDataTable, Toast, BoxDetailCell, CounterpartyCard, CounterpartyTypeBadge, CurrencySplitStats, DocumentUploader, LoanScheduleChart
 src/types/api.ts — TypeScript интерфейсы
 ```
 
@@ -161,7 +161,7 @@ src/types/api.ts — TypeScript интерфейсы
 | Workflow | Триггер | Назначение |
 |---|---|---|
 | `test.yml` | push / PR | Tests (pytest + vitest, без E2E — E2E вынесен в nightly) |
-| `e2e-nightly.yml` | **cron** `0 3 * * *` (ежедневно 03:00 UTC) + manual | Smoke E2E (27 страниц не крашатся) — не блокирует deploy |
+| `e2e-nightly.yml` | **cron** `0 3 * * *` (ежедневно 03:00 UTC) + manual | Smoke E2E (27 маршрутов не крашатся) — не блокирует deploy |
 | `security.yml` | push / PR / **cron** `0 5 * * *` (daily 05:00 UTC) | pip-audit, Trivy, Snyk, npm audit |
 | `claude-review.yml` | PR / `@claude` comment | Claude AI-ревью PR single-agent (opus-4-7 везде, 20-25 turns) |
 | `auto-label-deep-review.yml` | PR open/sync | ставит label `deep-review` на PR с migrations / money / auth / >1000 LOC → сигнал lead'у запустить `/ultrareview` перед merge |

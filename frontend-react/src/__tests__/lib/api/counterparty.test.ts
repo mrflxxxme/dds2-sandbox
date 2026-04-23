@@ -151,6 +151,69 @@ describe('counterparty.getCounterparty', () => {
     });
 });
 
+describe('counterparty.getCounterpartyTransactions', () => {
+    afterEach(() => { vi.restoreAllMocks(); localStorageMock.clear(); });
+
+    it('GETs /api/v1/counterparties/{id}/transactions', async () => {
+        const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+            ok: true, status: 200,
+            json: async () => ({ items: [], total: 0 }),
+        } as Response);
+
+        const api = makeApi();
+        await api.getCounterpartyTransactions(42);
+
+        const [url] = fetchSpy.mock.calls[0];
+        expect(String(url)).toContain('/api/v1/counterparties/42/transactions');
+    });
+
+    it('serializes all filters via URLSearchParams', async () => {
+        const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+            ok: true, status: 200,
+            json: async () => ({ items: [], total: 0 }),
+        } as Response);
+
+        const api = makeApi();
+        await api.getCounterpartyTransactions(7, {
+            date_from: '2026-01-01',
+            date_to: '2026-12-31',
+            currency: 'RUB',
+            limit: 500,
+            offset: 100,
+        });
+
+        const [url] = fetchSpy.mock.calls[0];
+        const urlStr = String(url);
+        expect(urlStr).toContain('date_from=2026-01-01');
+        expect(urlStr).toContain('date_to=2026-12-31');
+        expect(urlStr).toContain('currency=RUB');
+        expect(urlStr).toContain('limit=500');
+        expect(urlStr).toContain('offset=100');
+    });
+
+    it('returns items and total', async () => {
+        vi.spyOn(global, 'fetch').mockResolvedValue({
+            ok: true, status: 200,
+            json: async () => ({
+                items: [
+                    {
+                        id: 1, date: '2026-03-12T00:00:00', account: '40702810000000000001',
+                        currency: 'RUB', income: 1000, expense: 0, purpose: 'Test',
+                        event_type2: null, loan_payment_type: null, contract_number: null,
+                    },
+                ],
+                total: 83,
+            }),
+        } as Response);
+
+        const api = makeApi();
+        const res = await api.getCounterpartyTransactions(1);
+        expect(res.items).toHaveLength(1);
+        expect(res.total).toBe(83);
+        expect(res.items[0].purpose).toBe('Test');
+    });
+});
+
 describe('counterparty.createCounterparty', () => {
     afterEach(() => { vi.restoreAllMocks(); localStorageMock.clear(); });
 

@@ -97,6 +97,7 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
     vehicle_info: Mapped[str | None] = mapped_column(String(300), nullable=True)
     vehicle_brand: Mapped[str | None] = mapped_column(String(100), nullable=True)
     driver_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    counterparty_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("counterparty.id"), nullable=True)
     pickup_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     pickup_time_slot: Mapped[str | None] = mapped_column(String(20), nullable=True)
     pickup_cost: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
@@ -124,6 +125,7 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_assembly_requests_project_id", "project_id"),
         Index("ix_assembly_requests_warehouse_id", "warehouse_id"),
         Index("ix_assembly_requests_status", "status"),
+        Index("ix_assembly_requests_counterparty_id", "counterparty_id"),
         # Partial unique: allow new request for same FBO after cancel
         Index(
             "ix_assembly_requests_fbo_unique",

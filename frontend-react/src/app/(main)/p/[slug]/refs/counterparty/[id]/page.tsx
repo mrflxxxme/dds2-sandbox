@@ -4,35 +4,23 @@ import { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
-import CounterpartyTypeBadge from '@/components/CounterpartyTypeBadge';
+import CounterpartyTypeBadge, { TYPE_CONFIG } from '@/components/CounterpartyTypeBadge';
 import CurrencySplitStats from '@/components/CurrencySplitStats';
 import DocumentUploader from '@/components/DocumentUploader';
 import TabLayout from '@/components/TabLayout';
 import type {
     CounterpartyDetail, CounterpartyDocument, DocType,
-    LoanShort, CounterpartyUpdate, CounterpartyType,
+    CounterpartyUpdate, CounterpartyTransactionItem, CounterpartyType,
 } from '@/types/api';
 
 const TODAY = new Date().toISOString().slice(0, 10);
-const MONTH_AGO = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+const HALF_YEAR_AGO = new Date(Date.now() - 180 * 24 * 3600 * 1000).toISOString().slice(0, 10);
 
 const DOC_TYPE_LABELS: Record<DocType, string> = {
     CONTRACT: 'Договор',
     CERTIFICATE: 'Сертификат',
     INVOICE: 'Счёт',
     OTHER: 'Прочее',
-};
-
-const LOAN_STATUS_LABELS: Record<string, string> = {
-    ACTIVE: 'Активный',
-    CLOSED: 'Закрыт',
-    DEFAULTED: 'Дефолт',
-};
-
-const LOAN_DIRECTION_LABELS: Record<string, string> = {
-    INCOMING: 'Получен',
-    OUTGOING: 'Выдан',
-    AFFILIATED: 'Аффил.',
 };
 
 export default function CounterpartyDetailPage() {
@@ -43,12 +31,14 @@ export default function CounterpartyDetailPage() {
 
     const [detail, setDetail] = useState<CounterpartyDetail | null>(null);
     const [documents, setDocuments] = useState<CounterpartyDocument[]>([]);
+    const [transactions, setTransactions] = useState<CounterpartyTransactionItem[]>([]);
+    const [txTotal, setTxTotal] = useState(0);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [activeTab, setActiveTab] = useState(0);
 
     // Date range for stats
-    const [dateFrom, setDateFrom] = useState(MONTH_AGO);
+    const [dateFrom, setDateFrom] = useState(HALF_YEAR_AGO);
     const [dateTo, setDateTo] = useState(TODAY);
 
     // Edit
@@ -60,12 +50,15 @@ export default function CounterpartyDetailPage() {
         setLoading(true);
         setError('');
         try {
-            const [d, docs] = await Promise.all([
+            const [d, docs, txs] = await Promise.all([
                 api.getCounterparty(id, { date_from: dateFrom, date_to: dateTo }),
                 api.listCounterpartyDocuments(id),
+                api.getCounterpartyTransactions(id, { date_from: dateFrom, date_to: dateTo, limit: 500 }),
             ]);
             setDetail(d);
             setDocuments(docs);
+            setTransactions(txs.items);
+            setTxTotal(txs.total);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         } finally {
@@ -134,7 +127,6 @@ export default function CounterpartyDetailPage() {
     const tabs = [
         { label: 'Статистика', icon: '📊' },
         { label: `Документы (${detail.docs_count})`, icon: '📎' },
-        { label: `Займы (${detail.active_loans.length})`, icon: '💰' },
     ];
 
     return (
@@ -197,6 +189,18 @@ export default function CounterpartyDetailPage() {
                             <label className="form-label">Название *</label>
                             <input className="form-input" value={editForm.name ?? ''} onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))} />
                         </div>
+                        <div className="form-group" style={{ gridColumn: '1/-1' }}>
+                            <label className="form-label">Категория *</label>
+                            <select
+                                className="form-input"
+                                value={editForm.primary_type ?? 'OTHER'}
+                                onChange={e => setEditForm(f => ({ ...f, primary_type: e.target.value as CounterpartyType }))}
+                            >
+                                {(Object.entries(TYPE_CONFIG) as [CounterpartyType, { label: string; icon: string }][]).map(([key, cfg]) => (
+                                    <option key={key} value={key}>{cfg.icon} {cfg.label}</option>
+                                ))}
+                            </select>
+                        </div>
                         <div className="form-group">
                             <label className="form-label">ИНН</label>
                             <input className="form-input" value={editForm.inn ?? ''} onChange={e => setEditForm(f => ({ ...f, inn: e.target.value || null }))} />
@@ -243,10 +247,23 @@ export default function CounterpartyDetailPage() {
                 <div style={{ display: 'flex', gap: 16, marginBottom: 20 }}>
                     {detail.linked_warehouses.length > 0 && (
                         <div className="glass-card" style={{ flex: 1 }}>
-                            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>🏢 Связанные склады</div>
-                            {detail.linked_warehouses.map(w => (
-                                <div key={w.id} style={{ fontSize: 13, padding: '4px 0' }}>{w.name}</div>
-                            ))}
+                            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>🏢 Привязанные склады</div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                {detail.linked_warehouses.map(w => (
+                                    <button
+                                        key={w.id}
+                                        type="button"
+                                        onClick={() => router.push(`/p/${slug}/warehouse/${w.id}`)}
+                                        style={{
+                                            background: 'none', border: 'none', padding: '4px 0',
+                                            fontSize: 13, color: 'var(--color-accent)', cursor: 'pointer',
+                                            textAlign: 'left',
+                                        }}
+                                    >
+                                        {w.name} →
+                                    </button>
+                                ))}
+                            </div>
                         </div>
                     )}
                     {detail.linked_suppliers.length > 0 && (
@@ -286,30 +303,70 @@ export default function CounterpartyDetailPage() {
                 {/* Статистика */}
                 {activeTab === 0 && (
                     <div>
-                        {detail.stats_rub.tx_count === 0 && detail.stats_cny.tx_count === 0 ? (
+                        {transactions.length === 0 ? (
                             <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)' }}>
                                 Транзакций за выбранный период не найдено
                             </div>
                         ) : (
                             <div className="glass-card">
-                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
-                                    <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>Сводка за период</h3>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                                    <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>
+                                        Транзакции ({formatNumber(txTotal, 0)}
+                                        {txTotal > transactions.length ? `, показано ${formatNumber(transactions.length, 0)}` : ''})
+                                    </h3>
                                     <button
                                         className="btn btn-secondary btn-sm"
-                                        onClick={() => exportToExcel([detail.stats_rub, detail.stats_cny], 'counterparty_stats')}
+                                        onClick={() => exportToExcel(
+                                            transactions.map(t => ({
+                                                Дата: formatDate(t.date),
+                                                Счёт: t.account,
+                                                Валюта: t.currency,
+                                                Приход: Number(t.income),
+                                                Расход: Number(t.expense),
+                                                Назначение: t.purpose ?? '',
+                                                Тип: t.event_type2 ?? '',
+                                                'Займ-тип': t.loan_payment_type ?? '',
+                                                Контракт: t.contract_number ?? '',
+                                            })),
+                                            'counterparty_transactions',
+                                        )}
                                     >
                                         Excel
                                     </button>
                                 </div>
-                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                                    <div style={{ padding: '8px 12px', background: 'var(--color-bg)', borderRadius: 8 }}>
-                                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>₽ Платежей</div>
-                                        <div style={{ fontSize: 16, fontWeight: 600 }}>{formatNumber(detail.stats_rub.tx_count, 0)}</div>
-                                    </div>
-                                    <div style={{ padding: '8px 12px', background: 'var(--color-bg)', borderRadius: 8 }}>
-                                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>¥ Платежей</div>
-                                        <div style={{ fontSize: 16, fontWeight: 600 }}>{formatNumber(detail.stats_cny.tx_count, 0)}</div>
-                                    </div>
+                                <div style={{ overflowX: 'auto' }}>
+                                    <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+                                        <thead>
+                                            <tr style={{ borderBottom: '1px solid var(--color-border)', textAlign: 'left' }}>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Дата</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Счёт</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', textAlign: 'right' }}>Приход</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', textAlign: 'right' }}>Расход</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Вал.</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Назначение</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {transactions.map(t => (
+                                                <tr key={t.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                                    <td style={{ padding: '8px 8px', whiteSpace: 'nowrap' }}>{formatDate(t.date)}</td>
+                                                    <td style={{ padding: '8px 8px', fontFamily: 'monospace', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                                        {t.account.length > 10 ? `…${t.account.slice(-10)}` : t.account}
+                                                    </td>
+                                                    <td style={{ padding: '8px 8px', textAlign: 'right', color: Number(t.income) > 0 ? 'var(--color-success)' : undefined, fontVariantNumeric: 'tabular-nums' }}>
+                                                        {Number(t.income) > 0 ? formatNumber(t.income) : ''}
+                                                    </td>
+                                                    <td style={{ padding: '8px 8px', textAlign: 'right', color: Number(t.expense) > 0 ? 'var(--color-danger)' : undefined, fontVariantNumeric: 'tabular-nums' }}>
+                                                        {Number(t.expense) > 0 ? formatNumber(t.expense) : ''}
+                                                    </td>
+                                                    <td style={{ padding: '8px 8px', fontSize: 12 }}>{t.currency}</td>
+                                                    <td style={{ padding: '8px 8px', fontSize: 12, maxWidth: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={t.purpose ?? ''}>
+                                                        {t.purpose ?? '—'}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
                                 </div>
                             </div>
                         )}
@@ -374,48 +431,6 @@ export default function CounterpartyDetailPage() {
                     </div>
                 )}
 
-                {/* Займы */}
-                {activeTab === 2 && (
-                    <div>
-                        {detail.active_loans.length === 0 ? (
-                            <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)' }}>
-                                Активных займов нет
-                            </div>
-                        ) : (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                                {detail.active_loans.map((loan: LoanShort) => (
-                                    <div
-                                        key={loan.id}
-                                        className="glass-card"
-                                        style={{ cursor: 'pointer' }}
-                                        onClick={() => router.push(`/p/${slug}/refs/loans/${loan.id}`)}
-                                    >
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                            <div>
-                                                <div style={{ fontSize: 14, fontWeight: 600 }}>
-                                                    {LOAN_DIRECTION_LABELS[loan.direction]} · {loan.contract_number}
-                                                </div>
-                                                <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
-                                                    {formatDate(loan.start_date)}
-                                                    {loan.maturity_date ? ` — ${formatDate(loan.maturity_date)}` : ''}
-                                                    {loan.rate ? ` · ${(loan.rate * 100).toFixed(2)}% г.` : ''}
-                                                </div>
-                                            </div>
-                                            <div style={{ textAlign: 'right' }}>
-                                                <div style={{ fontSize: 16, fontWeight: 700 }}>
-                                                    {formatNumber(loan.principal)} {loan.currency}
-                                                </div>
-                                                <span className={`badge ${loan.status === 'ACTIVE' ? 'badge-success' : loan.status === 'CLOSED' ? 'badge-secondary' : 'badge-danger'}`} style={{ fontSize: 11 }}>
-                                                    {LOAN_STATUS_LABELS[loan.status]}
-                                                </span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                )}
             </div>
         </div>
     );

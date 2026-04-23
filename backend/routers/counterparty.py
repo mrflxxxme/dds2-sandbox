@@ -5,6 +5,7 @@ Router: /counterparties — Counterparty CRUD + documents.
 from __future__ import annotations
 
 from datetime import date, timedelta
+from decimal import Decimal
 
 from fastapi import (
     APIRouter,
@@ -32,6 +33,8 @@ from backend.schemas.counterparty import (
     CounterpartyFilter,
     CounterpartyListItem,
     CounterpartyListResponse,
+    CounterpartySummaryResponse,
+    CounterpartyTransactionsResponse,
     CounterpartyUpdate,
 )
 from backend.services.counterparty_service import (
@@ -69,10 +72,12 @@ async def list_counterparties(
     active_only: bool = Query(False),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """List counterparties with filters."""
+    """List counterparties with filters. When date_from/date_to are set, includes turnover per CP."""
     filters = CounterpartyFilter(
         type=type,
         q=q,
@@ -81,11 +86,42 @@ async def list_counterparties(
         offset=offset,
     )
     service = CounterpartyService(db)
-    items, total = await service.list(project_id=project.id, filters=filters)
-    return CounterpartyListResponse(
-        items=[CounterpartyListItem.model_validate(cp) for cp in items],
-        total=total,
+    items, total, turnover_map = await service.list(
+        project_id=project.id,
+        filters=filters,
+        date_from=date_from,
+        date_to=date_to,
     )
+    out_items: list[CounterpartyListItem] = []
+    has_range = date_from is not None or date_to is not None
+    for cp in items:
+        item = CounterpartyListItem.model_validate(cp)
+        if has_range:
+            t = turnover_map.get(cp.id)
+            if t is not None:
+                item.income_rub = t["income_rub"]
+                item.expense_rub = t["expense_rub"]
+                item.income_cny = t["income_cny"]
+                item.expense_cny = t["expense_cny"]
+                item.tx_count = t["tx_count"]
+            else:
+                item.income_rub = item.expense_rub = item.income_cny = item.expense_cny = Decimal("0")
+                item.tx_count = 0
+        out_items.append(item)
+    return CounterpartyListResponse(items=out_items, total=total)
+
+
+@router.get("/summary", response_model=CounterpartySummaryResponse)
+async def summary_counterparties(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregate turnover grouped by primary_type (category)."""
+    service = CounterpartyService(db)
+    items = await service.summary_by_type(project_id=project.id, date_from=date_from, date_to=date_to)
+    return CounterpartySummaryResponse(items=items, date_from=date_from, date_to=date_to)
 
 
 @router.get("/{counterparty_id}", response_model=CounterpartyDetail)
@@ -100,7 +136,7 @@ async def get_counterparty(
     if date_to is None:
         date_to = date.today()
     if date_from is None:
-        date_from = date_to - timedelta(days=90)
+        date_from = date_to - timedelta(days=180)
 
     service = CounterpartyService(db)
     detail = await service.get(
@@ -110,6 +146,34 @@ async def get_counterparty(
         date_to=date_to,
     )
     return detail
+
+
+# ─── Transactions ────────────────────────────────────────────────────────────
+
+
+@router.get("/{counterparty_id}/transactions", response_model=CounterpartyTransactionsResponse)
+async def list_counterparty_transactions(
+    counterparty_id: int,
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    currency: str | None = Query(None, max_length=3),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """List bank transactions linked to a counterparty (newest first)."""
+    service = CounterpartyService(db)
+    items, total = await service.list_transactions(
+        counterparty_id=counterparty_id,
+        project_id=project.id,
+        date_from=date_from,
+        date_to=date_to,
+        currency=currency,
+        limit=limit,
+        offset=offset,
+    )
+    return CounterpartyTransactionsResponse(items=items, total=total)
 
 
 # ─── Create / Update / Delete ────────────────────────────────────────────────

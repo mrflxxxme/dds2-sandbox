@@ -3,10 +3,16 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
-import { exportToExcel } from '@/lib/utils';
+import { exportToExcel, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
-import CounterpartyTypeBadge from '@/components/CounterpartyTypeBadge';
-import type { CounterpartyListItem, CounterpartyType, CounterpartyCreate } from '@/types/api';
+import CounterpartyTypeBadge, { TYPE_CONFIG } from '@/components/CounterpartyTypeBadge';
+import type {
+    CounterpartyListItem, CounterpartyType, CounterpartyCreate,
+    CounterpartyCategorySummary,
+} from '@/types/api';
+
+const TODAY = new Date().toISOString().slice(0, 10);
+const HALF_YEAR_AGO = new Date(Date.now() - 180 * 24 * 3600 * 1000).toISOString().slice(0, 10);
 
 const COUNTERPARTY_TYPES: { value: CounterpartyType; label: string }[] = [
     { value: 'SUPPLIER', label: 'Поставщик' },
@@ -40,6 +46,7 @@ export default function CounterpartyPage() {
     const router = useRouter();
 
     const [items, setItems] = useState<CounterpartyListItem[]>([]);
+    const [summary, setSummary] = useState<CounterpartyCategorySummary[]>([]);
     const [total, setTotal] = useState(0);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -48,6 +55,8 @@ export default function CounterpartyPage() {
     const [search, setSearch] = useState('');
     const [typeFilter, setTypeFilter] = useState<CounterpartyType | ''>('');
     const [activeOnly, setActiveOnly] = useState(false);
+    const [dateFrom, setDateFrom] = useState(HALF_YEAR_AGO);
+    const [dateTo, setDateTo] = useState(TODAY);
 
     // Create form
     const [showCreate, setShowCreate] = useState(false);
@@ -59,21 +68,27 @@ export default function CounterpartyPage() {
         setLoading(true);
         setError('');
         try {
-            const res = await api.listCounterparties({
-                q: search.trim() || undefined,
-                type: typeFilter || undefined,
-                active_only: activeOnly || undefined,
-                limit: 200,
-                offset: 0,
-            });
-            setItems(res.items);
-            setTotal(res.total);
+            const [listRes, summaryRes] = await Promise.all([
+                api.listCounterparties({
+                    q: search.trim() || undefined,
+                    type: typeFilter || undefined,
+                    active_only: activeOnly || undefined,
+                    limit: 200,
+                    offset: 0,
+                    date_from: dateFrom,
+                    date_to: dateTo,
+                }),
+                api.getCounterpartiesSummary({ date_from: dateFrom, date_to: dateTo }),
+            ]);
+            setItems(listRes.items);
+            setTotal(listRes.total);
+            setSummary(summaryRes.items);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         } finally {
             setLoading(false);
         }
-    }, [search, typeFilter, activeOnly]);
+    }, [search, typeFilter, activeOnly, dateFrom, dateTo]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -145,6 +160,31 @@ export default function CounterpartyPage() {
             ) : <span style={{ color: 'var(--color-text-dim)' }}>—</span>,
         },
         {
+            key: 'expense_rub', label: 'Расход ₽',
+            render: (_v: unknown, row: CounterpartyListItem) => {
+                const rub = Number(row.expense_rub ?? 0);
+                const cny = Number(row.expense_cny ?? 0);
+                if (rub === 0 && cny === 0) {
+                    return <span style={{ color: 'var(--color-text-dim)' }}>—</span>;
+                }
+                return (
+                    <div style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                        {rub > 0 && <div style={{ color: 'var(--color-danger)', fontWeight: 500 }}>{formatNumber(rub)} ₽</div>}
+                        {cny > 0 && <div style={{ color: 'var(--color-warning)', fontSize: 12 }}>{formatNumber(cny)} ¥</div>}
+                    </div>
+                );
+            },
+        },
+        {
+            key: 'tx_count', label: 'Транз.',
+            render: (v: number | null | undefined) => {
+                const n = v ?? 0;
+                return n > 0 ? (
+                    <span style={{ fontVariantNumeric: 'tabular-nums' }}>{formatNumber(n, 0)}</span>
+                ) : <span style={{ color: 'var(--color-text-dim)' }}>—</span>;
+            },
+        },
+        {
             key: 'created_by_import', label: 'Источник',
             render: (v: boolean) => (
                 <span className={`badge ${v ? 'badge-secondary' : 'badge-success'}`} style={{ fontSize: 11 }}>
@@ -196,6 +236,69 @@ export default function CounterpartyPage() {
                     </button>
                 </div>
             </div>
+
+            {/* Period picker */}
+            <div className="glass-card" style={{ marginBottom: 16, padding: '12px 16px' }}>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Период:</span>
+                    <input type="date" className="form-input" style={{ width: 160 }} value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
+                    <span style={{ color: 'var(--color-text-dim)' }}>—</span>
+                    <input type="date" className="form-input" style={{ width: 160 }} value={dateTo} onChange={e => setDateTo(e.target.value)} />
+                </div>
+            </div>
+
+            {/* Category summary */}
+            {summary.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                    <div style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+                        gap: 12,
+                    }}>
+                        {summary
+                            .filter(s => s.count_cps > 0 && (s.expense_rub > 0 || s.expense_cny > 0 || s.income_rub > 0 || s.income_cny > 0 || typeFilter === s.primary_type))
+                            .map(s => {
+                                const cfg = TYPE_CONFIG[s.primary_type] ?? TYPE_CONFIG.OTHER;
+                                const active = typeFilter === s.primary_type;
+                                return (
+                                    <button
+                                        key={s.primary_type}
+                                        type="button"
+                                        className="glass-card"
+                                        style={{
+                                            textAlign: 'left', cursor: 'pointer', padding: 14,
+                                            border: active ? '2px solid var(--color-accent)' : undefined,
+                                            background: active ? 'rgba(0,113,227,0.06)' : undefined,
+                                        }}
+                                        onClick={() => setTypeFilter(active ? '' : s.primary_type)}
+                                    >
+                                        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, display: 'flex', gap: 6, alignItems: 'center' }}>
+                                            <span>{cfg.icon}</span>
+                                            <span>{cfg.label}</span>
+                                            <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--color-text-dim)', fontWeight: 400 }}>
+                                                {formatNumber(s.count_cps, 0)} КА
+                                            </span>
+                                        </div>
+                                        {s.expense_rub > 0 && (
+                                            <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-danger)', fontVariantNumeric: 'tabular-nums' }}>
+                                                {formatNumber(s.expense_rub)} ₽
+                                            </div>
+                                        )}
+                                        {s.expense_cny > 0 && (
+                                            <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--color-warning)', fontVariantNumeric: 'tabular-nums' }}>
+                                                {formatNumber(s.expense_cny)} ¥
+                                            </div>
+                                        )}
+                                        {s.expense_rub === 0 && s.expense_cny === 0 && (
+                                            <div style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>нет расходов</div>
+                                        )}
+                                    </button>
+                                );
+                            })
+                        }
+                    </div>
+                </div>
+            )}
 
             {/* Filters */}
             <div className="glass-card" style={{ marginBottom: 16, padding: '12px 16px' }}>

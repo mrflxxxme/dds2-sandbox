@@ -2,7 +2,7 @@
 Counterparty schemas: CRUD + filters + stats + document upload/response.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -109,6 +109,13 @@ class CounterpartyListItem(CounterpartyBase):
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
+    # Per-period turnover (populated when date_from/date_to are passed). None = not computed.
+    income_rub: Decimal | None = None
+    expense_rub: Decimal | None = None
+    income_cny: Decimal | None = None
+    expense_cny: Decimal | None = None
+    tx_count: int | None = None
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -145,6 +152,50 @@ class CounterpartyFilter(BaseModel):
         if v is not None and v not in ALLOWED_CP_TYPES:
             raise ValueError(f"type must be one of: {ALLOWED_CP_TYPES}")
         return v
+
+
+class CounterpartyTransactionItem(BaseModel):
+    """Single bank transaction linked to a counterparty."""
+
+    id: int
+    date: datetime
+    account: str
+    currency: str
+    income: Decimal
+    expense: Decimal
+    purpose: str | None = None
+    event_type2: str | None = None
+    loan_payment_type: str | None = None
+    contract_number: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CounterpartyTransactionsResponse(BaseModel):
+    """Paginated list of transactions for a counterparty."""
+
+    items: list[CounterpartyTransactionItem]
+    total: int
+
+
+class CounterpartyCategorySummary(BaseModel):
+    """Aggregate turnover for one primary_type over a date range."""
+
+    primary_type: str
+    count_cps: int
+    income_rub: Decimal = Decimal("0")
+    expense_rub: Decimal = Decimal("0")
+    income_cny: Decimal = Decimal("0")
+    expense_cny: Decimal = Decimal("0")
+    tx_count: int = 0
+
+
+class CounterpartySummaryResponse(BaseModel):
+    """Summary grouped by primary_type."""
+
+    items: list[CounterpartyCategorySummary]
+    date_from: date | None = None
+    date_to: date | None = None
 
 
 # ─── CounterpartyDocument ─────────────────────────────────────────────────────

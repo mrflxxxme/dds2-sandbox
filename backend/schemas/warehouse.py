@@ -48,6 +48,16 @@ class WarehouseSchema(BaseModel):
     vehicles_in_transit: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    counterparty_id: int | None = None
+    counterparty_inn: str | None = None
+    counterparty_name: str | None = None
+
+
+class WarehouseCounterpartyLink(BaseModel):
+    """Body for PATCH /warehouses/{id}/counterparty."""
+
+    inn: str | None = None
+    name: str | None = None
 
 
 class WarehouseReorder(BaseModel):

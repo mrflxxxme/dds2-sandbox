@@ -7,6 +7,7 @@ All queries are scoped by project_id and filter out is_deleted rows.
 
 from __future__ import annotations
 
+import builtins
 import io
 import logging
 import mimetypes
@@ -25,9 +26,11 @@ from backend.models.counterparty import Counterparty, CounterpartyDocument
 from backend.models.loan import Loan
 from backend.models.transactions import Transaction
 from backend.schemas.counterparty import (
+    CounterpartyCategorySummary,
     CounterpartyCreate,
     CounterpartyFilter,
     CounterpartyStats,
+    CounterpartyTransactionItem,
     CounterpartyUpdate,
 )
 from backend.storage import get_minio
@@ -156,8 +159,15 @@ class CounterpartyService:
         *,
         project_id: int,
         filters: CounterpartyFilter,
-    ) -> tuple[list[Counterparty], int]:
-        """List counterparties with filters + pagination. Returns (items, total)."""
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> tuple[list[Counterparty], int, dict[int, dict]]:
+        """List counterparties with filters + pagination.
+
+        When date_from/date_to are provided, also computes per-CP turnover
+        (sum by currency + tx count). Returns (items, total, turnover_map)
+        where turnover_map[cp_id] = {"income_rub", "expense_rub", "income_cny", "expense_cny", "tx_count"}.
+        """
         stmt = select(Counterparty).where(
             Counterparty.project_id == project_id,
         )
@@ -185,7 +195,128 @@ class CounterpartyService:
         stmt = stmt.order_by(Counterparty.name).limit(filters.limit).offset(filters.offset)
         res = await self.db.execute(stmt)
         items = list(res.scalars().all())
-        return items, int(total or 0)
+
+        # Compute per-CP turnover for the fetched page if a date range is given
+        turnover_map: dict[int, dict] = {}
+        if (date_from is not None or date_to is not None) and items:
+            cp_ids = [cp.id for cp in items]
+            agg_stmt = (
+                select(
+                    Transaction.counterparty_id.label("cp_id"),
+                    Transaction.currency.label("currency"),
+                    func.coalesce(func.sum(Transaction.income), 0).label("in_sum"),
+                    func.coalesce(func.sum(Transaction.expense), 0).label("out_sum"),
+                    func.count(Transaction.id).label("tx_cnt"),
+                )
+                .where(
+                    Transaction.project_id == project_id,
+                    Transaction.is_deleted == False,  # noqa: E712
+                    Transaction.is_internal == False,  # noqa: E712 - exclude internal transfers
+                    Transaction.counterparty_id.in_(cp_ids),
+                )
+                .group_by(Transaction.counterparty_id, Transaction.currency)
+            )
+            if date_from is not None:
+                agg_stmt = agg_stmt.where(Transaction.date >= date_from)
+            if date_to is not None:
+                agg_stmt = agg_stmt.where(Transaction.date <= date_to)
+            agg_res = await self.db.execute(agg_stmt)
+            for row in agg_res.all():
+                bucket = turnover_map.setdefault(
+                    row.cp_id,
+                    {
+                        "income_rub": Decimal("0"),
+                        "expense_rub": Decimal("0"),
+                        "income_cny": Decimal("0"),
+                        "expense_cny": Decimal("0"),
+                        "tx_count": 0,
+                    },
+                )
+                income = Decimal(str(row.in_sum or 0))
+                expense = Decimal(str(row.out_sum or 0))
+                if (row.currency or "").upper() == "CNY":
+                    bucket["income_cny"] += income
+                    bucket["expense_cny"] += expense
+                else:
+                    bucket["income_rub"] += income
+                    bucket["expense_rub"] += expense
+                bucket["tx_count"] += int(row.tx_cnt or 0)
+
+        return items, int(total or 0), turnover_map
+
+    # ─── summary_by_type ────────────────────────────────────────────────
+
+    async def summary_by_type(
+        self,
+        *,
+        project_id: int,
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> builtins.list[CounterpartyCategorySummary]:
+        """Aggregate turnover by primary_type across all non-deleted counterparties."""
+        cp_count_stmt = (
+            select(
+                Counterparty.primary_type.label("pt"),
+                func.count(Counterparty.id).label("cps"),
+            )
+            .where(
+                Counterparty.project_id == project_id,
+                Counterparty.is_deleted == False,  # noqa: E712
+            )
+            .group_by(Counterparty.primary_type)
+        )
+        count_res = await self.db.execute(cp_count_stmt)
+        count_by_type: dict[str, int] = {row.pt: int(row.cps or 0) for row in count_res.all()}
+
+        tx_stmt = (
+            select(
+                Counterparty.primary_type.label("pt"),
+                Transaction.currency.label("currency"),
+                func.coalesce(func.sum(Transaction.income), 0).label("in_sum"),
+                func.coalesce(func.sum(Transaction.expense), 0).label("out_sum"),
+                func.count(Transaction.id).label("tx_cnt"),
+            )
+            .join(Counterparty, Counterparty.id == Transaction.counterparty_id)
+            .where(
+                Transaction.project_id == project_id,
+                Transaction.is_deleted == False,  # noqa: E712
+                Transaction.is_internal == False,  # noqa: E712 - exclude internal transfers
+                Counterparty.is_deleted == False,  # noqa: E712
+                Counterparty.project_id == project_id,
+            )
+            .group_by(Counterparty.primary_type, Transaction.currency)
+        )
+        if date_from is not None:
+            tx_stmt = tx_stmt.where(Transaction.date >= date_from)
+        if date_to is not None:
+            tx_stmt = tx_stmt.where(Transaction.date <= date_to)
+        tx_res = await self.db.execute(tx_stmt)
+
+        by_type: dict[str, CounterpartyCategorySummary] = {}
+        for pt, cnt in count_by_type.items():
+            by_type[pt] = CounterpartyCategorySummary(primary_type=pt, count_cps=cnt)
+
+        for row in tx_res.all():
+            bucket = by_type.setdefault(
+                row.pt,
+                CounterpartyCategorySummary(primary_type=row.pt, count_cps=count_by_type.get(row.pt, 0)),
+            )
+            income = Decimal(str(row.in_sum or 0))
+            expense = Decimal(str(row.out_sum or 0))
+            if (row.currency or "").upper() == "CNY":
+                bucket.income_cny += income
+                bucket.expense_cny += expense
+            else:
+                bucket.income_rub += income
+                bucket.expense_rub += expense
+            bucket.tx_count += int(row.tx_cnt or 0)
+
+        # Sort: highest RUB turnover first, then alpha
+        result = list(by_type.values())
+        result.sort(
+            key=lambda s: (-(s.expense_rub + s.income_rub), s.primary_type),
+        )
+        return result
 
     # ─── stats ──────────────────────────────────────────────────────────
 
@@ -207,6 +338,7 @@ class CounterpartyService:
             Transaction.project_id == project_id,
             Transaction.counterparty_id == counterparty_id,
             Transaction.is_deleted == False,  # noqa: E712
+            Transaction.is_internal == False,  # noqa: E712 - exclude internal transfers
             Transaction.currency == currency,
             Transaction.date >= date_from,
             Transaction.date <= date_to,
@@ -221,6 +353,78 @@ class CounterpartyService:
             net=in_sum - out_sum,
             tx_count=int(row.tx_count or 0),
         )
+
+    # ─── list_transactions ──────────────────────────────────────────────
+
+    async def list_transactions(
+        self,
+        *,
+        counterparty_id: int,
+        project_id: int,
+        date_from: date | None = None,
+        date_to: date | None = None,
+        currency: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[builtins.list[CounterpartyTransactionItem], int]:
+        """List bank transactions linked to a counterparty. Newest first."""
+        # Verify counterparty belongs to project (prevents cross-tenant leak)
+        cp_res = await self.db.execute(
+            select(Counterparty.id).where(
+                Counterparty.id == counterparty_id,
+                Counterparty.project_id == project_id,
+                Counterparty.is_deleted == False,  # noqa: E712
+            )
+        )
+        if cp_res.scalar_one_or_none() is None:
+            raise HTTPException(status_code=404, detail="Counterparty not found")
+
+        stmt = select(
+            Transaction.id,
+            Transaction.date,
+            Transaction.account,
+            Transaction.currency,
+            Transaction.income,
+            Transaction.expense,
+            Transaction.purpose,
+            Transaction.event_type2,
+            Transaction.loan_payment_type,
+            Transaction.contract_number,
+        ).where(
+            Transaction.project_id == project_id,
+            Transaction.counterparty_id == counterparty_id,
+            Transaction.is_deleted == False,  # noqa: E712
+            Transaction.is_internal == False,  # noqa: E712 - exclude internal transfers
+        )
+        if date_from is not None:
+            stmt = stmt.where(Transaction.date >= date_from)
+        if date_to is not None:
+            stmt = stmt.where(Transaction.date <= date_to)
+        if currency:
+            stmt = stmt.where(Transaction.currency == currency.upper())
+
+        total_stmt = select(func.count()).select_from(stmt.subquery())
+        total_res = await self.db.execute(total_stmt)
+        total = int(total_res.scalar_one() or 0)
+
+        stmt = stmt.order_by(Transaction.date.desc(), Transaction.id.desc()).limit(limit).offset(offset)
+        res = await self.db.execute(stmt)
+        items = [
+            CounterpartyTransactionItem(
+                id=row.id,
+                date=row.date,
+                account=row.account,
+                currency=row.currency,
+                income=Decimal(str(row.income or 0)),
+                expense=Decimal(str(row.expense or 0)),
+                purpose=row.purpose,
+                event_type2=row.event_type2,
+                loan_payment_type=row.loan_payment_type,
+                contract_number=row.contract_number,
+            )
+            for row in res.all()
+        ]
+        return items, total
 
     # ─── get ────────────────────────────────────────────────────────────
 
@@ -293,6 +497,20 @@ class CounterpartyService:
         )
         docs_count = int(docs_res.scalar_one() or 0)
 
+        # Warehouses that use this counterparty as their legal entity
+        from backend.models.warehouse import Warehouse
+
+        wh_res = await self.db.execute(
+            select(Warehouse.id, Warehouse.name, Warehouse.warehouse_type).where(
+                Warehouse.project_id == project_id,
+                Warehouse.counterparty_id == counterparty_id,
+                Warehouse.is_deleted == False,  # noqa: E712
+            )
+        )
+        linked_warehouses = [
+            {"id": row.id, "name": row.name, "warehouse_type": row.warehouse_type} for row in wh_res.all()
+        ]
+
         return {
             "id": cp.id,
             "inn": cp.inn,
@@ -309,7 +527,7 @@ class CounterpartyService:
             "stats_rub": stats_rub,
             "stats_cny": stats_cny,
             "active_loans": active_loans,
-            "linked_warehouses": [],
+            "linked_warehouses": linked_warehouses,
             "linked_suppliers": [],
             "docs_count": docs_count,
         }

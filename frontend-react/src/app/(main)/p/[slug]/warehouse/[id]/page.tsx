@@ -18,7 +18,7 @@ export default function WarehouseDetailPage() {
     const router = useRouter();
     const slug = params.slug as string;
     const warehouseId = Number(params.id);
-    const [tab, setTab] = useState<'all' | 'receipts' | 'shipments' | 'stock' | 'defects' | 'delivery'>('receipts');
+    const [tab, setTab] = useState<'all' | 'receipts' | 'shipments' | 'stock' | 'defects' | 'delivery' | 'requisites'>('receipts');
     const [warehouse, setWarehouse] = useState<Warehouse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -58,6 +58,7 @@ export default function WarehouseDetailPage() {
         { key: 'defects' as const, label: 'Брак', count: defectCount },
         { key: 'delivery' as const, label: 'Время доставки' },
         { key: 'all' as const, label: 'История движений' },
+        { key: 'requisites' as const, label: 'Реквизиты' },
     ];
 
     return (
@@ -137,6 +138,115 @@ export default function WarehouseDetailPage() {
             {tab === 'stock' && <StockTab warehouseId={warehouseId} />}
             {tab === 'defects' && <DefectsTab warehouseId={warehouseId} onCountChange={setDefectCount} />}
             {tab === 'delivery' && <DeliveryTab warehouseId={warehouseId} />}
+            {tab === 'requisites' && <RequisitesTab warehouse={warehouse} onChanged={load} />}
+        </div>
+    );
+}
+
+/* ─── Requisites Tab (ИНН + название юрлица) ─────────────────────────── */
+
+function RequisitesTab({ warehouse, onChanged }: { warehouse: Warehouse; onChanged: () => void }) {
+    const [inn, setInn] = useState(warehouse.counterparty_inn ?? '');
+    const [name, setName] = useState(warehouse.counterparty_name ?? '');
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState('');
+    const [message, setMessage] = useState('');
+
+    const handleSave = async () => {
+        setSaving(true);
+        setError('');
+        setMessage('');
+        try {
+            const cleanInn = inn.trim();
+            if (cleanInn && !/^\d{10,12}$/.test(cleanInn)) {
+                setError('ИНН должен быть 10 или 12 цифр');
+                setSaving(false);
+                return;
+            }
+            await api.setWarehouseCounterparty(warehouse.id, {
+                inn: cleanInn || null,
+                name: name.trim() || null,
+            });
+            setMessage(cleanInn ? 'Реквизиты сохранены. Контрагент привязан как «Фулфилмент».' : 'Реквизиты очищены.');
+            onChanged();
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка сохранения');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const handleUnlink = async () => {
+        if (!confirm('Отвязать контрагента от склада?')) return;
+        setSaving(true);
+        setError('');
+        try {
+            await api.setWarehouseCounterparty(warehouse.id, { inn: null, name: null });
+            setInn('');
+            setName('');
+            setMessage('Контрагент отвязан от склада.');
+            onChanged();
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <div className="glass-card" style={{ padding: 24 }}>
+            <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0, marginBottom: 8 }}>Реквизиты компании</h3>
+            <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 20 }}>
+                ИНН и название юр. лица, которое обслуживает этот склад. Используется для авто-категоризации
+                расходов из выписок — транзакции с совпадающим ИНН попадут в категорию «Фулфилмент».
+            </p>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 16, maxWidth: 700 }}>
+                <div className="form-group">
+                    <label className="form-label">ИНН</label>
+                    <input
+                        className="form-input"
+                        value={inn}
+                        onChange={e => setInn(e.target.value)}
+                        placeholder="10 или 12 цифр"
+                        maxLength={12}
+                    />
+                </div>
+                <div className="form-group">
+                    <label className="form-label">Название компании</label>
+                    <input
+                        className="form-input"
+                        value={name}
+                        onChange={e => setName(e.target.value)}
+                        placeholder="ООО «Ромашка» / ИП Иванов"
+                    />
+                </div>
+            </div>
+
+            {error && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginTop: 12 }}>{error}</div>}
+            {message && <div style={{ color: 'var(--color-success)', fontSize: 13, marginTop: 12 }}>{message}</div>}
+
+            <div style={{ marginTop: 20, display: 'flex', gap: 8 }}>
+                <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={saving}>
+                    {saving ? 'Сохранение...' : 'Сохранить'}
+                </button>
+                {warehouse.counterparty_id && (
+                    <button className="btn btn-danger btn-sm" onClick={handleUnlink} disabled={saving}>
+                        Отвязать контрагента
+                    </button>
+                )}
+            </div>
+
+            {warehouse.counterparty_id && (
+                <div style={{
+                    marginTop: 20, padding: 12, background: 'var(--color-bg)',
+                    borderRadius: 8, fontSize: 13, color: 'var(--color-text-muted)',
+                }}>
+                    Привязан контрагент #{warehouse.counterparty_id}
+                    {warehouse.counterparty_inn ? ` · ИНН ${warehouse.counterparty_inn}` : ''}
+                    {warehouse.counterparty_name ? ` · ${warehouse.counterparty_name}` : ''}
+                </div>
+            )}
         </div>
     );
 }
