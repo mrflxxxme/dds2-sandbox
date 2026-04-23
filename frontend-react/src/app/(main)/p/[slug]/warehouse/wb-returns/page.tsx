@@ -35,6 +35,7 @@ const UI_STATE_LABEL: Record<WbGoodsReturnUiState, string> = {
     received: 'Принят',
     expired: 'Просрочен',
     picked_without_receipt: 'Без оформления',
+    archived: 'В архиве',
 };
 
 const UI_STATE_BADGE: Record<WbGoodsReturnUiState, string> = {
@@ -45,6 +46,7 @@ const UI_STATE_BADGE: Record<WbGoodsReturnUiState, string> = {
     received: 'badge-success',
     expired: 'badge-danger',
     picked_without_receipt: 'badge-danger',
+    archived: 'badge-secondary',
 };
 
 const ACTIONABLE_STATES: ReadonlyArray<WbGoodsReturnUiState> = [
@@ -71,6 +73,13 @@ function formatProduct(item: WbGoodsReturn): string {
     if (item.subject_name) parts.push(item.subject_name);
     if (parts.length === 0 && item.nm_id) parts.push(`nm ${item.nm_id}`);
     return parts.join(' · ') || '—';
+}
+
+function formatArticle(item: WbGoodsReturn): string {
+    // артикул продавца (из Nomenclature) приоритетнее WB-артикула
+    if (item.article_seller) return item.article_seller;
+    if (item.nm_id) return String(item.nm_id);
+    return '—';
 }
 
 // ─── Component ──────────────────────────────────────────────────────────
@@ -103,6 +112,9 @@ export default function WbReturnsPage() {
     const [modalWarehouseId, setModalWarehouseId] = useState<number | null>(null);
     const [modalComment, setModalComment] = useState('');
     const [creatingReceipt, setCreatingReceipt] = useState(false);
+
+    // Archive state
+    const [archiving, setArchiving] = useState(false);
 
     // Sync state
     const [syncing, setSyncing] = useState(false);
@@ -181,18 +193,6 @@ export default function WbReturnsPage() {
         });
     };
 
-    const toggleGroupAll = (group: WbGoodsReturnPvzGroup, checked: boolean) => {
-        setSelectedSrids(prev => {
-            const next = new Set(prev);
-            for (const it of group.items) {
-                if (!isActionable(it.ui_state)) continue;
-                if (checked) next.add(it.srid);
-                else next.delete(it.srid);
-            }
-            return next;
-        });
-    };
-
     const clearSelection = () => setSelectedSrids(new Set());
 
     // ─── Receipt modal ────────────────────────────────────────────────
@@ -240,6 +240,31 @@ export default function WbReturnsPage() {
             });
         } finally {
             setCreatingReceipt(false);
+        }
+    };
+
+    // ─── Archive ──────────────────────────────────────────────────────
+    const archiveSrids = async (srids: string[]) => {
+        if (srids.length === 0) return;
+        const noun = srids.length === 1 ? 'позицию' : 'позиций';
+        if (!confirm(`Отправить в архив ${srids.length} ${noun}? Они будут скрыты из «На ПВЗ» и появятся в «Истории».`)) return;
+        setArchiving(true);
+        try {
+            const res = await api.archiveWbReturns({ srids });
+            const skipped = res.skipped_srids?.length ?? 0;
+            const msg = skipped > 0
+                ? `Архивировано ${res.archived_count}, пропущено ${skipped} (не соответствуют «забрали без оформления»)`
+                : `Архивировано ${res.archived_count}`;
+            setToast({ message: msg, type: skipped > 0 ? 'info' : 'success' });
+            setSelectedSrids(new Set());
+            await load();
+        } catch (e: unknown) {
+            setToast({
+                message: e instanceof Error ? e.message : 'Ошибка архивации',
+                type: 'error',
+            });
+        } finally {
+            setArchiving(false);
         }
     };
 
@@ -365,9 +390,10 @@ export default function WbReturnsPage() {
                     groups={pvzGroups}
                     selectedSrids={selectedSrids}
                     onToggleSrid={toggleSrid}
-                    onToggleGroupAll={toggleGroupAll}
                     expandedId={expandedGroupId}
                     onExpand={setExpandedGroupId}
+                    onArchive={(srid) => archiveSrids([srid])}
+                    archiving={archiving}
                 />
             )}
 
@@ -432,10 +458,26 @@ export default function WbReturnsPage() {
                     }}
                 >
                     <span style={{ fontWeight: 600 }}>Выбрано: {selectedSrids.size}</span>
-                    <button className="btn btn-secondary btn-sm" onClick={clearSelection}>
+                    <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={clearSelection}
+                        disabled={archiving || creatingReceipt}
+                    >
                         Очистить
                     </button>
-                    <button className="btn btn-primary btn-sm" onClick={openReceiptModal}>
+                    <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => archiveSrids(Array.from(selectedSrids))}
+                        disabled={archiving || creatingReceipt}
+                        title="Применимо только к «Забрали без оформления» — остальные будут пропущены"
+                    >
+                        {archiving ? 'Архивация...' : 'В архив'}
+                    </button>
+                    <button
+                        className="btn btn-primary btn-sm"
+                        onClick={openReceiptModal}
+                        disabled={archiving || creatingReceipt}
+                    >
                         Оформить приёмку
                     </button>
                 </div>
@@ -525,12 +567,13 @@ interface PvzTabProps {
     groups: WbGoodsReturnPvzGroup[];
     selectedSrids: Set<string>;
     onToggleSrid: (srid: string) => void;
-    onToggleGroupAll: (group: WbGoodsReturnPvzGroup, checked: boolean) => void;
     expandedId: number | 'unknown' | null;
     onExpand: (id: number | 'unknown' | null) => void;
+    onArchive: (srid: string) => void;
+    archiving: boolean;
 }
 
-function PvzTab({ groups, selectedSrids, onToggleSrid, onToggleGroupAll, expandedId, onExpand }: PvzTabProps) {
+function PvzTab({ groups, selectedSrids, onToggleSrid, expandedId, onExpand, onArchive, archiving }: PvzTabProps) {
     if (groups.length === 0) {
         return (
             <div className="empty-state glass-card" style={{ padding: 64, textAlign: 'center' }}>
@@ -550,10 +593,6 @@ function PvzTab({ groups, selectedSrids, onToggleSrid, onToggleGroupAll, expande
             {groups.map(group => {
                 const groupKey: number | 'unknown' = group.dst_office_id ?? 'unknown';
                 const isOpen = expandedId === groupKey;
-
-                const actionableItems = group.items.filter(i => isActionable(i.ui_state));
-                const selectedInGroup = actionableItems.filter(i => selectedSrids.has(i.srid)).length;
-                const allSelected = actionableItems.length > 0 && selectedInGroup === actionableItems.length;
 
                 const daysToExpire = daysBetween(group.nearest_expired_dt);
                 const urgent = daysToExpire != null && daysToExpire <= 3;
@@ -603,70 +642,230 @@ function PvzTab({ groups, selectedSrids, onToggleSrid, onToggleGroupAll, expande
                         </div>
 
                         {isOpen && (
-                            <div style={{ marginTop: 16, overflowX: 'auto' }}>
-                                <table className="data-table" style={{ width: '100%' }}>
-                                    <thead>
-                                        <tr>
-                                            <th style={{ width: 40 }}>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={allSelected}
-                                                    disabled={actionableItems.length === 0}
-                                                    onChange={e => onToggleGroupAll(group, e.target.checked)}
-                                                    onClick={e => e.stopPropagation()}
-                                                />
-                                            </th>
-                                            <th>Товар</th>
-                                            <th>Размер</th>
-                                            <th>SRID</th>
-                                            <th>Статус</th>
-                                            <th>Готов с</th>
-                                            <th>Истекает</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {group.items.map(item => {
-                                            const actionable = isActionable(item.ui_state);
-                                            const checked = selectedSrids.has(item.srid);
-                                            return (
-                                                <tr key={item.id}>
-                                                    <td style={{ textAlign: 'center' }}>
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={checked}
-                                                            disabled={!actionable}
-                                                            onChange={() => onToggleSrid(item.srid)}
-                                                            onClick={e => e.stopPropagation()}
-                                                        />
-                                                    </td>
-                                                    <td>{formatProduct(item)}</td>
-                                                    <td style={{ color: 'var(--color-text-muted)' }}>
-                                                        {item.tech_size || '—'}
-                                                    </td>
-                                                    <td style={{
-                                                        fontFamily: 'monospace',
-                                                        fontSize: 12,
-                                                        color: 'var(--color-text-muted)',
-                                                    }}>
-                                                        {item.srid}
-                                                    </td>
-                                                    <td>
-                                                        <span className={`badge ${UI_STATE_BADGE[item.ui_state]}`}>
-                                                            {UI_STATE_LABEL[item.ui_state]}
-                                                        </span>
-                                                    </td>
-                                                    <td>{formatDate(item.ready_to_return_dt)}</td>
-                                                    <td>{formatDate(item.expired_dt)}</td>
-                                                </tr>
-                                            );
-                                        })}
-                                    </tbody>
-                                </table>
+                            <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 20 }}>
+                                <PvzSection
+                                    title="Готовые к выдаче"
+                                    icon="📦"
+                                    accentColor="var(--color-success)"
+                                    emptyHint="— нет"
+                                    items={group.items.filter(i => i.ui_state === 'ready_for_pickup')}
+                                    columns={['checkbox', 'product', 'article', 'size', 'srid', 'ready_from', 'expires']}
+                                    selectedSrids={selectedSrids}
+                                    onToggleSrid={onToggleSrid}
+                                    onArchive={onArchive}
+                                    archiving={archiving}
+                                />
+                                <PvzSection
+                                    title="В пути на ПВЗ"
+                                    icon="🚛"
+                                    accentColor="var(--color-accent)"
+                                    emptyHint="— нет"
+                                    items={group.items.filter(i => i.ui_state === 'in_transit_to_pvz')}
+                                    columns={['product', 'article', 'size', 'srid', 'expires']}
+                                    selectedSrids={selectedSrids}
+                                    onToggleSrid={onToggleSrid}
+                                    onArchive={onArchive}
+                                    archiving={archiving}
+                                />
+                                <PvzSection
+                                    title="Забрали без оформления"
+                                    icon="⚠️"
+                                    accentColor="var(--color-danger)"
+                                    emptyHint="— нет"
+                                    items={group.items.filter(i => i.ui_state === 'picked_without_receipt')}
+                                    columns={['checkbox', 'product', 'article', 'size', 'srid', 'picked_at', 'archive_btn']}
+                                    selectedSrids={selectedSrids}
+                                    onToggleSrid={onToggleSrid}
+                                    onArchive={onArchive}
+                                    archiving={archiving}
+                                />
                             </div>
                         )}
                     </div>
                 );
             })}
+        </div>
+    );
+}
+
+// ─── PvzSection — мини-таблица под конкретный ui_state внутри группы ПВЗ ──
+
+type PvzColumn =
+    | 'checkbox'
+    | 'product'
+    | 'article'
+    | 'size'
+    | 'srid'
+    | 'ready_from'
+    | 'picked_at'
+    | 'expires'
+    | 'archive_btn';
+
+interface PvzSectionProps {
+    title: string;
+    icon: string;
+    accentColor: string;
+    emptyHint: string;
+    items: WbGoodsReturn[];
+    columns: PvzColumn[];
+    selectedSrids: Set<string>;
+    onToggleSrid: (srid: string) => void;
+    onArchive: (srid: string) => void;
+    archiving: boolean;
+}
+
+function PvzSection({
+    title, icon, accentColor, emptyHint,
+    items, columns, selectedSrids, onToggleSrid, onArchive, archiving,
+}: PvzSectionProps) {
+    const hasCheckbox = columns.includes('checkbox');
+    const selectableSrids = items.filter(i => isActionable(i.ui_state)).map(i => i.srid);
+    const selectedInSection = selectableSrids.filter(s => selectedSrids.has(s)).length;
+    const allSectionSelected = selectableSrids.length > 0 && selectedInSection === selectableSrids.length;
+
+    const toggleAll = (checked: boolean) => {
+        for (const srid of selectableSrids) {
+            const isSel = selectedSrids.has(srid);
+            if (checked && !isSel) onToggleSrid(srid);
+            else if (!checked && isSel) onToggleSrid(srid);
+        }
+    };
+
+    return (
+        <div>
+            <div
+                style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    padding: '6px 12px',
+                    borderLeft: `3px solid ${accentColor}`,
+                    background: 'rgba(0,0,0,0.02)',
+                    borderRadius: 6,
+                    marginBottom: 8,
+                }}
+            >
+                <span style={{ fontSize: 16 }}>{icon}</span>
+                <span style={{ fontWeight: 600, fontSize: 14 }}>
+                    {title} <span style={{ color: accentColor, fontWeight: 700 }}>{items.length}</span>
+                </span>
+            </div>
+
+            {items.length === 0 ? (
+                <div style={{
+                    padding: '8px 16px',
+                    color: 'var(--color-text-muted)',
+                    fontSize: 13,
+                    fontStyle: 'italic',
+                }}>
+                    {emptyHint}
+                </div>
+            ) : (
+                <div style={{ overflowX: 'auto' }}>
+                    <table className="data-table" style={{ width: '100%' }}>
+                        <thead>
+                            <tr>
+                                {columns.map(col => {
+                                    switch (col) {
+                                        case 'checkbox':
+                                            return (
+                                                <th key={col} style={{ width: 40 }}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={allSectionSelected}
+                                                        disabled={selectableSrids.length === 0}
+                                                        onChange={e => toggleAll(e.target.checked)}
+                                                        onClick={e => e.stopPropagation()}
+                                                    />
+                                                </th>
+                                            );
+                                        case 'product': return <th key={col}>Товар</th>;
+                                        case 'article': return <th key={col}>Артикул</th>;
+                                        case 'size': return <th key={col}>Размер</th>;
+                                        case 'srid': return <th key={col}>SRID</th>;
+                                        case 'ready_from': return <th key={col}>Готов с</th>;
+                                        case 'picked_at': return <th key={col}>Забрали с ПВЗ</th>;
+                                        case 'expires': return <th key={col}>Истекает</th>;
+                                        case 'archive_btn': return <th key={col} style={{ width: 100 }}></th>;
+                                    }
+                                })}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {items.map(item => {
+                                const checked = selectedSrids.has(item.srid);
+                                const actionable = isActionable(item.ui_state);
+                                return (
+                                    <tr key={item.id}>
+                                        {columns.map(col => {
+                                            switch (col) {
+                                                case 'checkbox':
+                                                    return (
+                                                        <td key={col} style={{ textAlign: 'center' }}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={checked}
+                                                                disabled={!actionable}
+                                                                onChange={() => onToggleSrid(item.srid)}
+                                                                onClick={e => e.stopPropagation()}
+                                                            />
+                                                        </td>
+                                                    );
+                                                case 'product':
+                                                    return <td key={col}>{formatProduct(item)}</td>;
+                                                case 'article':
+                                                    return (
+                                                        <td key={col} style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                                                            {formatArticle(item)}
+                                                        </td>
+                                                    );
+                                                case 'size':
+                                                    return (
+                                                        <td key={col} style={{ color: 'var(--color-text-muted)' }}>
+                                                            {item.tech_size || '—'}
+                                                        </td>
+                                                    );
+                                                case 'srid':
+                                                    return (
+                                                        <td key={col} style={{
+                                                            fontFamily: 'monospace',
+                                                            fontSize: 12,
+                                                            color: 'var(--color-text-muted)',
+                                                        }}>
+                                                            {item.srid}
+                                                        </td>
+                                                    );
+                                                case 'ready_from':
+                                                    return <td key={col}>{formatDate(item.ready_to_return_dt)}</td>;
+                                                case 'picked_at':
+                                                    return <td key={col}>{formatDate(item.completed_dt)}</td>;
+                                                case 'expires':
+                                                    return <td key={col}>{formatDate(item.expired_dt)}</td>;
+                                                case 'archive_btn':
+                                                    return (
+                                                        <td key={col} style={{ textAlign: 'right' }}>
+                                                            <button
+                                                                className="btn btn-secondary btn-sm"
+                                                                onClick={e => {
+                                                                    e.stopPropagation();
+                                                                    onArchive(item.srid);
+                                                                }}
+                                                                disabled={archiving}
+                                                                title="Отправить в архив (списать без приёмки)"
+                                                            >
+                                                                В архив
+                                                            </button>
+                                                        </td>
+                                                    );
+                                            }
+                                        })}
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+            )}
         </div>
     );
 }
@@ -793,6 +992,12 @@ function InTransitTab({ items, slug }: InTransitTabProps) {
                                     <td></td>
                                     <td colSpan={2} style={{ paddingLeft: 32, fontSize: 13 }}>
                                         {formatProduct(item)}
+                                        <span
+                                            style={{ color: 'var(--color-text-muted)', marginLeft: 8, fontFamily: 'monospace', fontSize: 11 }}
+                                            title="Артикул продавца (или WB nmID)"
+                                        >
+                                            арт. {formatArticle(item)}
+                                        </span>
                                         <span style={{ color: 'var(--color-text-muted)', marginLeft: 8, fontFamily: 'monospace', fontSize: 11 }}>
                                             {item.srid}
                                         </span>
@@ -825,6 +1030,14 @@ function HistoryTab({ items }: { items: WbGoodsReturn[] }) {
             exportValue: (row: WbGoodsReturn) => formatProduct(row),
         },
         {
+            key: 'article',
+            label: 'Артикул',
+            render: (_: unknown, row: WbGoodsReturn) => (
+                <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{formatArticle(row)}</span>
+            ),
+            exportValue: (row: WbGoodsReturn) => formatArticle(row),
+        },
+        {
             key: 'srid',
             label: 'SRID',
             render: (v: string) => (
@@ -851,6 +1064,12 @@ function HistoryTab({ items }: { items: WbGoodsReturn[] }) {
             exportValue: (row: WbGoodsReturn) => row.completed_dt ?? '',
         },
         {
+            key: 'archived_at',
+            label: 'В архив',
+            render: (v: string | null) => formatDate(v),
+            exportValue: (row: WbGoodsReturn) => row.archived_at ?? '',
+        },
+        {
             key: 'expired_dt',
             label: 'Истекает',
             format: 'date' as const,
@@ -870,7 +1089,7 @@ function HistoryTab({ items }: { items: WbGoodsReturn[] }) {
                     История пуста
                 </div>
                 <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
-                    Здесь будут отображаться принятые, просроченные и оформленные без приёмки возвраты.
+                    Здесь отображаются принятые и архивированные возвраты. Отправьте «без оформления» в архив кнопкой на вкладке «На ПВЗ» — они появятся здесь.
                 </div>
             </div>
         );
