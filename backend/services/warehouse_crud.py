@@ -124,6 +124,7 @@ async def get_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) ->
     wh, cp_inn, cp_name = row
     wh.counterparty_inn = cp_inn
     wh.counterparty_name = cp_name
+    assert isinstance(wh, Warehouse)
     return wh
 
 

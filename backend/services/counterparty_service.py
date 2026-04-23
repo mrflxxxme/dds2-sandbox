@@ -7,6 +7,7 @@ All queries are scoped by project_id and filter out is_deleted rows.
 
 from __future__ import annotations
 
+import builtins
 import io
 import logging
 import mimetypes
@@ -251,7 +252,7 @@ class CounterpartyService:
         project_id: int,
         date_from: date | None = None,
         date_to: date | None = None,
-    ) -> list[CounterpartyCategorySummary]:
+    ) -> builtins.list[CounterpartyCategorySummary]:
         """Aggregate turnover by primary_type across all non-deleted counterparties."""
         cp_count_stmt = (
             select(
@@ -365,7 +366,7 @@ class CounterpartyService:
         currency: str | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> tuple[list[CounterpartyTransactionItem], int]:
+    ) -> tuple[builtins.list[CounterpartyTransactionItem], int]:
         """List bank transactions linked to a counterparty. Newest first."""
         # Verify counterparty belongs to project (prevents cross-tenant leak)
         cp_res = await self.db.execute(
