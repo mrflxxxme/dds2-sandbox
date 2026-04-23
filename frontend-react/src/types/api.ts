@@ -1289,6 +1289,8 @@ export interface WbFboSupply {
   outbound_shipment_number?: string;
   outbound_shipment_status?: string;
   outbound_shipment_warehouse_id?: number;
+  outbound_shipment_warehouse_name?: string;
+  outbound_shipment_shipped_date?: string;
   is_archived?: boolean | null;
   excess_processed_at?: string | null;
   excess_qty?: number | null;

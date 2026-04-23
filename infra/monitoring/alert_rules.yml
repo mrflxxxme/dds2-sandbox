@@ -162,3 +162,18 @@ groups:
         annotations:
           summary: "Backend serves no user traffic"
           description: "0 user requests over 5 min while /metrics keeps responding — backend likely hung on a deadlock (Redis / DB / external API). Same pattern as incident 2026-04-14."
+
+      # ─── Scheduler Jobs (sync freshness) ──────────────────────────────
+      # Gauge set by worker job on success. Cron runs at 08:00 & 20:00 MSK
+      # (12h between runs). SLO = 16h: allows one missed run without paging.
+      # Value 0 on boot (metric registered but never updated) also triggers
+      # the alert — time() - 0 is huge, so new deploys where worker never
+      # ran the job get flagged.
+      - alert: WbReturnsSyncStale
+        expr: (time() - dds_wb_goods_returns_last_success_timestamp) > 57600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WB возвраты на ПВЗ: синк устарел (> 16ч)"
+          description: "Последний успешный прогон {{ $value | humanizeDuration }} назад. Ожидается дважды в день (08:00 + 20:00 MSK). Проверьте worker и sync_log.sync_type='goods_returns'."

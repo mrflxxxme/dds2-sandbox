@@ -188,18 +188,35 @@ async def get_partial_acceptance_summary(
     result = await db.execute(supplies_q)
     supplies = list(result.scalars().all())
 
-    unaccepted_total = sum(max(0, (s.total_qty or 0) - (s.accepted_qty or 0)) for s in supplies)
-    unprocessed = sum(
-        max(0, (s.total_qty or 0) - (s.accepted_qty or 0)) for s in supplies if s.return_processed_at is None
-    )
+    # unaccepted_total/unprocessed считаются по items (gross sum), не по
+    # supply-net-delta: иначе cards не сходятся с «Показать позиции» если в  # noqa: RUF003
+    # одной поставке часть артикулов с недоприёмкой, часть с излишком  # noqa: RUF003
+    # (supply-net зачитывает, item-sum — нет). returned_to_stock/utilized
+    # остаются по supply.return_qty — это явное действие пользователя.
+    supply_ids_all = [s.id for s in supplies]
+    unprocessed_ids = [s.id for s in supplies if s.return_processed_at is None]
+
+    async def _sum_items_delta(ids: list[int]) -> int:
+        if not ids:
+            return 0
+        row = await db.execute(
+            select(func.sum(WbFboSupplyItem.quantity - WbFboSupplyItem.accepted_qty)).where(
+                WbFboSupplyItem.supply_id.in_(ids),
+                WbFboSupplyItem.project_id == project_id,
+                WbFboSupplyItem.quantity > WbFboSupplyItem.accepted_qty,
+            )
+        )
+        return int(row.scalar() or 0)
+
+    unaccepted_total = await _sum_items_delta(supply_ids_all)
+    unprocessed = await _sum_items_delta(unprocessed_ids)
     returned_to_stock = sum(int(s.return_qty or 0) for s in supplies if s.return_type in ("GOODS", "DEFECT"))
     utilized = sum(int(s.return_qty or 0) for s in supplies if s.return_type == "UTILIZED")
 
     # Per-barcode breakdown — which goods are affected by недоприёмка
     # (sum delta across all affected supplies). UI shows a collapsible list.
-    supply_ids = [s.id for s in supplies]
     breakdown: list[dict[str, Any]] = []
-    if supply_ids:
+    if supply_ids_all:
         items_result = await db.execute(
             select(
                 WbFboSupplyItem.barcode,
@@ -208,7 +225,7 @@ async def get_partial_acceptance_summary(
                 func.sum(WbFboSupplyItem.quantity - WbFboSupplyItem.accepted_qty).label("delta"),
             )
             .where(
-                WbFboSupplyItem.supply_id.in_(supply_ids),
+                WbFboSupplyItem.supply_id.in_(supply_ids_all),
                 WbFboSupplyItem.project_id == project_id,
                 WbFboSupplyItem.quantity > WbFboSupplyItem.accepted_qty,
             )
@@ -262,6 +279,7 @@ async def list_fbo_supplies(
     search: str | None = None,
     status: str | None = None,
     warehouse: str | None = None,
+    source_warehouse_id: int | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     sort_by: str = "created_at_wb",
@@ -306,6 +324,16 @@ async def list_fbo_supplies(
     # Filter by warehouse
     if warehouse:
         base_query = base_query.where(WbFboSupply.warehouse_name == warehouse)
+
+    # Filter by «склад забора» — our warehouse from the linked OutboundShipment.
+    # Supplies without an outbound shipment are excluded (no pickup warehouse).
+    if source_warehouse_id is not None:
+        pickup_shipment_ids = select(OutboundShipment.id).where(
+            OutboundShipment.project_id == project_id,
+            OutboundShipment.is_deleted.is_(False),
+            OutboundShipment.warehouse_id == source_warehouse_id,
+        )
+        base_query = base_query.where(WbFboSupply.outbound_shipment_id.in_(pickup_shipment_ids))
 
     # Filter by date range
     if date_from:
@@ -459,9 +487,11 @@ async def list_fbo_supplies(
         for src_row in source_result.all():
             reassign_source_wb_ids.setdefault(src_row.reassigned_to_supply_id, []).append(src_row.wb_supply_id)
 
-    # Enrich with outbound shipment info (single query)
-    # supply_id -> (number, status, warehouse_id)
-    shipment_map: dict[int, tuple[str, str, int]] = {}
+    # Enrich with outbound shipment info (single query, JOIN Warehouse for name)
+    # supply_id -> (number, status, warehouse_id, warehouse_name, shipped_date)
+    from backend.models.warehouse import Warehouse
+
+    shipment_map: dict[int, tuple[str, str, int, str | None, date | None]] = {}
     shipment_ids = [s.outbound_shipment_id for s in supplies if s.outbound_shipment_id]
     if shipment_ids:
         ship_result = await db.execute(
@@ -470,14 +500,24 @@ async def list_fbo_supplies(
                 OutboundShipment.number,
                 OutboundShipment.status,
                 OutboundShipment.warehouse_id,
-            ).where(
+                OutboundShipment.shipped_date,
+                Warehouse.name,
+            )
+            .join(Warehouse, Warehouse.id == OutboundShipment.warehouse_id)
+            .where(
                 OutboundShipment.project_id == project_id,
                 OutboundShipment.is_deleted.is_(False),
                 OutboundShipment.id.in_(shipment_ids),
             )
         )
         for ship_row in ship_result.all():
-            shipment_map[ship_row.id] = (ship_row.number, ship_row.status, ship_row.warehouse_id)
+            shipment_map[ship_row.id] = (
+                ship_row.number,
+                ship_row.status,
+                ship_row.warehouse_id,
+                ship_row.name,
+                ship_row.shipped_date,
+            )
 
     # Build enriched dicts
     enriched = []
@@ -492,6 +532,8 @@ async def list_fbo_supplies(
         d["outbound_shipment_number"] = ship[0] if ship else None
         d["outbound_shipment_status"] = ship[1] if ship else None
         d["outbound_shipment_warehouse_id"] = ship[2] if ship else None
+        d["outbound_shipment_warehouse_name"] = ship[3] if ship else None
+        d["outbound_shipment_shipped_date"] = ship[4] if ship else None
         d["reassigned_to_wb_supply_id"] = (
             reassign_target_wb_id.get(s.reassigned_to_supply_id) if s.reassigned_to_supply_id else None
         )
