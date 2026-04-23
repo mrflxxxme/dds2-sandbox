@@ -344,8 +344,8 @@ async def list_fbo_supplies(
                 OutboundShipment.id.in_(shipment_ids),
             )
         )
-        for row in ship_result.all():
-            shipment_map[row.id] = (row.number, row.status, row.warehouse_id)
+        for ship_row in ship_result.all():
+            shipment_map[ship_row.id] = (ship_row.number, ship_row.status, ship_row.warehouse_id)
 
     # Build enriched dicts
     enriched = []
