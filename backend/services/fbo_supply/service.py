@@ -26,6 +26,36 @@ from .mappers import _update_supply_from_fbw_detail, _upsert_supply_items_fbw
 logger = logging.getLogger(__name__)
 
 
+def _archive_clause(accounting_started_at: date | None, archived_view: bool) -> Any:
+    """
+    Build WHERE clause to split supplies into «active» vs «archive» buckets.
+
+    Tri-state is_archived overrides the auto rule (date-based):
+        NULL  → auto: archived iff created_at_wb < accounting_started_at
+        TRUE  → always archived (manual)
+        FALSE → always active (manual restore)
+    """
+    if archived_view:
+        # Archive page: explicit TRUE OR (auto: NULL + before cut-off)
+        if accounting_started_at:
+            auto_archive = and_(
+                WbFboSupply.is_archived.is_(None),
+                func.date(WbFboSupply.created_at_wb) < accounting_started_at,
+            )
+            return or_(WbFboSupply.is_archived.is_(True), auto_archive)
+        return WbFboSupply.is_archived.is_(True)
+
+    # Active page: explicit FALSE OR (auto: NULL + on/after cut-off, or no cut-off)
+    if accounting_started_at:
+        auto_active = and_(
+            WbFboSupply.is_archived.is_(None),
+            func.date(WbFboSupply.created_at_wb) >= accounting_started_at,
+        )
+        return or_(WbFboSupply.is_archived.is_(False), auto_active)
+    # No cut-off configured: show everything except explicit archive
+    return WbFboSupply.is_archived.is_not(True)
+
+
 # ─── List supplies (with search/filter/sort/pagination) ────────────────────
 
 
@@ -33,6 +63,11 @@ async def get_fbo_summary(
     db: AsyncSession,
     project_id: int,
     accounting_started_at: date | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    warehouse: str | None = None,
+    status: str | None = None,
+    archived_view: bool = False,
 ) -> dict[str, int]:
     """
     Counts for FBO supplies dashboard: total, accepted, accepted without
@@ -40,9 +75,24 @@ async def get_fbo_summary(
     orphan ACCEPTED supplies (WB принял, но в DDS нет заявки на сборку),
     so the user can spot missed linkage and start a receipt for rejected qty.
 
-    Honors project's accounting cut-off so dashboard counters match the list view.
+    Honors all global filters (period, archive bucket, warehouse, status) so
+    dashboard counters match the list view exactly. partial_only/without_assembly
+    are intentionally excluded — those toggles drill into the list, but the
+    cards should keep showing the global counters they highlight.
     """
-    cutoff = [func.date(WbFboSupply.created_at_wb) >= accounting_started_at] if accounting_started_at else []
+    cutoff: list[Any] = [_archive_clause(accounting_started_at, archived_view)]
+    if date_from:
+        cutoff.append(func.date(WbFboSupply.created_at_wb) >= date_from)
+    if date_to:
+        cutoff.append(func.date(WbFboSupply.created_at_wb) <= date_to)
+    if warehouse:
+        cutoff.append(WbFboSupply.warehouse_name == warehouse)
+    if status:
+        statuses = [s.strip() for s in status.split(",")]
+        if len(statuses) == 1:
+            cutoff.append(WbFboSupply.wb_status == statuses[0])
+        else:
+            cutoff.append(WbFboSupply.wb_status.in_(statuses))
 
     base = select(WbFboSupply).where(WbFboSupply.project_id == project_id, *cutoff).subquery()
 
@@ -72,11 +122,19 @@ async def get_fbo_summary(
     )
     accepted_partial = (await db.execute(select(func.count()).select_from(partial_q.subquery()))).scalar() or 0
 
+    excess_q = accepted_q.where(
+        WbFboSupply.total_qty > 0,
+        WbFboSupply.accepted_qty > WbFboSupply.total_qty,
+        WbFboSupply.excess_processed_at.is_(None),
+    )
+    accepted_excess = (await db.execute(select(func.count()).select_from(excess_q.subquery()))).scalar() or 0
+
     return {
         "total": int(total),
         "accepted": int(accepted),
         "accepted_without_assembly": int(accepted_without_assembly),
         "accepted_partial": int(accepted_partial),
+        "accepted_excess": int(accepted_excess),
     }
 
 
@@ -188,8 +246,9 @@ async def list_fbo_supplies(
     exclude_with_assembly: bool = False,
     without_assembly: bool = False,
     partial_only: bool = False,
+    excess_only: bool = False,
     accounting_started_at: date | None = None,
-    include_archived: bool = False,
+    archived_view: bool = False,
 ) -> tuple[list[dict], int]:
     """
     List FBO supplies with filtering, search, sorting, and pagination.
@@ -233,12 +292,8 @@ async def list_fbo_supplies(
             func.date(WbFboSupply.created_at_wb) <= date_to,
         )
 
-    # Hide legacy data created before the project's accounting cut-off.
-    # Override via include_archived=True (e.g. «показать архив» toggle).
-    if accounting_started_at and not include_archived:
-        base_query = base_query.where(
-            func.date(WbFboSupply.created_at_wb) >= accounting_started_at,
-        )
+    # Split into active/archive bucket (auto by date + manual override)
+    base_query = base_query.where(_archive_clause(accounting_started_at, archived_view))
 
     # Exclude supplies that already have an active assembly request
     if exclude_with_assembly:
@@ -285,6 +340,17 @@ async def list_fbo_supplies(
                 WbFboSupply.total_qty > 0,
                 WbFboSupply.accepted_qty < WbFboSupply.total_qty,
                 WbFboSupply.return_processed_at.is_(None),
+            )
+        )
+
+    # Excess (overshoot): WB accepted MORE than we shipped, not yet written off.
+    if excess_only:
+        base_query = base_query.where(
+            and_(
+                WbFboSupply.wb_status == WbSupplyStatus.ACCEPTED,
+                WbFboSupply.total_qty > 0,
+                WbFboSupply.accepted_qty > WbFboSupply.total_qty,
+                WbFboSupply.excess_processed_at.is_(None),
             )
         )
 
@@ -381,6 +447,68 @@ async def list_fbo_supplies(
         enriched.append(d)
 
     return enriched, total
+
+
+# ─── Archive flag ───────────────────────────────────────────────────────────
+
+
+async def restore_linked_from_archive(
+    db: AsyncSession,
+    project_id: int,
+    accounting_started_at: date | None,
+) -> int:
+    """
+    Bulk-restore from archive all supplies that were linked to our
+    AssemblyRequest / OutboundShipment. Sets is_archived=FALSE so they
+    reappear in the active list regardless of created_at_wb vs cut-off.
+    Returns the number of restored supplies.
+    """
+    # Find currently-archived supplies linked to our processes.
+    linked_asm_ids = select(AssemblyRequest.wb_fbo_supply_id).where(
+        AssemblyRequest.project_id == project_id,
+        AssemblyRequest.wb_fbo_supply_id.is_not(None),
+        AssemblyRequest.is_deleted.is_(False),
+    )
+    query = select(WbFboSupply).where(
+        WbFboSupply.project_id == project_id,
+        _archive_clause(accounting_started_at, archived_view=True),
+        or_(
+            WbFboSupply.outbound_shipment_id.is_not(None),
+            WbFboSupply.id.in_(linked_asm_ids),
+        ),
+    )
+    result = await db.execute(query)
+    supplies = list(result.scalars().all())
+    for s in supplies:
+        s.is_archived = False
+    await db.commit()
+    return len(supplies)
+
+
+async def set_archive_flag(
+    db: AsyncSession,
+    project_id: int,
+    supply_id: int,
+    is_archived: bool | None,
+) -> WbFboSupply:
+    """
+    Override the auto archive rule for a single supply.
+    is_archived=True → manually move to archive; False → restore from archive;
+    None → reset to auto rule (date-based).
+    """
+    result = await db.execute(
+        select(WbFboSupply).where(
+            WbFboSupply.id == supply_id,
+            WbFboSupply.project_id == project_id,
+        )
+    )
+    supply = result.scalar_one_or_none()
+    if supply is None:
+        raise ValueError("FBO supply not found")
+    supply.is_archived = is_archived
+    await db.commit()
+    await db.refresh(supply)
+    return supply
 
 
 # ─── Get supply items ───────────────────────────────────────────────────────

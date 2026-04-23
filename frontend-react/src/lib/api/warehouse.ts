@@ -150,7 +150,8 @@ export function addWarehouseMethods(api: ApiClient) {
             exclude_with_assembly?: boolean;
             without_assembly?: boolean;
             partial_only?: boolean;
-            include_archived?: boolean;
+            excess_only?: boolean;
+            archived_view?: boolean;
         }) {
             const query = new URLSearchParams();
             if (params) {
@@ -161,10 +162,45 @@ export function addWarehouseMethods(api: ApiClient) {
             const qs = query.toString();
             return api.request<WbFboSupplyListResponse>('GET', `/api/v1/warehouse/fbo-supplies${qs ? `?${qs}` : ''}`);
         },
-        getFboSuppliesSummary() {
-            return api.request<{ total: number; accepted: number; accepted_without_assembly: number; accepted_partial: number }>(
+        getFboSuppliesSummary(params?: {
+            date_from?: string; date_to?: string;
+            warehouse?: string; status?: string; archived_view?: boolean;
+        }) {
+            const query = new URLSearchParams();
+            if (params) {
+                Object.entries(params).forEach(([k, v]) => {
+                    if (v !== undefined && v !== null && v !== '' && v !== false) query.set(k, String(v));
+                });
+            }
+            const qs = query.toString();
+            return api.request<{ total: number; accepted: number; accepted_without_assembly: number; accepted_partial: number; accepted_excess: number }>(
                 'GET',
-                '/api/v1/warehouse/fbo-supplies/summary',
+                `/api/v1/warehouse/fbo-supplies/summary${qs ? `?${qs}` : ''}`,
+            );
+        },
+        setFboSupplyArchive(supplyId: number, isArchived: boolean | null) {
+            return api.request<WbFboSupply>(
+                'PATCH',
+                `/api/v1/warehouse/fbo-supplies/${supplyId}/archive`,
+                { is_archived: isArchived },
+            );
+        },
+        restoreLinkedFromArchive() {
+            return api.request<{ restored: number }>(
+                'POST',
+                '/api/v1/warehouse/fbo-supplies/archive/restore-linked',
+                {},
+            );
+        },
+        processFboExcess(supplyId: number, payload: {
+            warehouse_id: number;
+            items: { barcode: string; quantity: number }[];
+            comment?: string;
+        }) {
+            return api.request<{ supply_id: number; shipment_id: number; shipment_number: string; total_qty: number }>(
+                'POST',
+                `/api/v1/warehouse/fbo-supplies/${supplyId}/excess`,
+                payload,
             );
         },
         getFboPartialSummary() {

@@ -7,6 +7,7 @@ import enum
 from datetime import date, datetime
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
@@ -74,6 +75,17 @@ class WbFboSupply(Base, TimestampMixin):
     # Actual qty returned (sum across items). Useful when user returns less
     # than the full delta, so aggregates stay accurate.
     return_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Manual override for the auto archive rule (Project.accounting_started_at):
+    #   NULL  → auto: archived iff created_at_wb < project.accounting_started_at
+    #   TRUE  → always archived (manually moved to archive)
+    #   FALSE → always active (manually restored from archive)
+    is_archived: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Excess (overshoot) handling — symmetric to return_processed_at:
+    # when WB accepted MORE than we shipped (sum(item.accepted) > sum(item.qty)),
+    # user clicks the write-off button — we create an OutboundShipment for the
+    # delta and stamp these fields. Supply then drops out of the excess filter.
+    excess_processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    excess_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Relationships
     items: Mapped[list["WbFboSupplyItem"]] = relationship(

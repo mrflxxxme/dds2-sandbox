@@ -13,6 +13,9 @@ from backend.integrations.wb_api import WBApiClient
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.wb_fbo import (
+    FboArchiveRequest,
+    FboExcessRequest,
+    FboExcessResponse,
     FboReturnRequest,
     FboReturnResponse,
     FboSyncResultSchema,
@@ -48,7 +51,12 @@ async def list_fbo_supplies(
     exclude_with_assembly: bool = Query(False, description="Exclude supplies with active assembly requests"),
     without_assembly: bool = Query(False, description="Only supplies without any assembly request"),
     partial_only: bool = Query(False, description="Only supplies with partial acceptance (accepted_qty < total_qty)"),
-    include_archived: bool = Query(False, description="Show supplies created before the project's accounting cut-off"),
+    excess_only: bool = Query(
+        False, description="Only supplies with excess (accepted_qty > total_qty), not yet written off"
+    ),
+    archived_view: bool = Query(
+        False, description="Show ONLY archived supplies (separate page); default — only active"
+    ),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -68,8 +76,9 @@ async def list_fbo_supplies(
         exclude_with_assembly=exclude_with_assembly,
         without_assembly=without_assembly,
         partial_only=partial_only,
+        excess_only=excess_only,
         accounting_started_at=project.accounting_started_at,
-        include_archived=include_archived,
+        archived_view=archived_view,
     )
     return WbFboSupplyListResponse(
         items=[WbFboSupplySchema(**s) for s in supplies],
@@ -82,16 +91,29 @@ async def list_fbo_supplies(
 
 @router.get("/summary")
 async def get_fbo_supplies_summary(
+    date_from: date | None = Query(None, description="Date from"),
+    date_to: date | None = Query(None, description="Date to"),
+    warehouse: str | None = Query(None, description="Filter by warehouse name"),
+    status: str | None = Query(None, description="Filter by WB status (comma-separated)"),
+    archived_view: bool = Query(False, description="Show counters for archived bucket"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, int]:
     """
     Summary counts: total, accepted, accepted_without_assembly,
-    accepted_partial. Highlights orphan ACCEPTED supplies where WB accepted
-    delivery but DDS has no assembly request — user should either attach one
-    or treat it as an unmanaged delivery.
+    accepted_partial. Mirrors the same global filters as the list view
+    (period, archive, warehouse, status) so cards stay consistent.
     """
-    return await fbo_supply_service.get_fbo_summary(db, project.id, accounting_started_at=project.accounting_started_at)
+    return await fbo_supply_service.get_fbo_summary(
+        db,
+        project.id,
+        accounting_started_at=project.accounting_started_at,
+        date_from=date_from,
+        date_to=date_to,
+        warehouse=warehouse,
+        status=status,
+        archived_view=archived_view,
+    )
 
 
 @router.get("/partial-summary")
@@ -116,6 +138,48 @@ async def list_fbo_warehouses(
 ):
     """Get unique warehouse names for filter dropdown."""
     return await fbo_supply_service.list_warehouses(db, project.id)
+
+
+# ─── Archive override ─────────────────────────────────────────────────────
+
+
+@router.post(
+    "/archive/restore-linked",
+    dependencies=[Depends(rate_limit_write)],
+)
+async def restore_linked_from_archive(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, int]:
+    """
+    Bulk-restore archived supplies that are linked to our AssemblyRequest
+    or OutboundShipment. Useful on the archive page when a user wants to
+    recover all «our» supplies at once.
+    """
+    restored = await fbo_supply_service.restore_linked_from_archive(db, project.id, project.accounting_started_at)
+    return {"restored": restored}
+
+
+@router.patch(
+    "/{supply_id}/archive",
+    response_model=WbFboSupplySchema,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def patch_fbo_archive(
+    supply_id: int,
+    payload: FboArchiveRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Override the auto archive rule for a supply.
+    is_archived=True → move to archive; False → restore; null → reset to auto.
+    """
+    try:
+        supply = await fbo_supply_service.set_archive_flag(db, project.id, supply_id, payload.is_archived)
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from None
+    return WbFboSupplySchema.model_validate(supply)
 
 
 # ─── Supply items ──────────────────────────────────────────────────────────
@@ -263,3 +327,36 @@ async def create_fbo_return(
         raise HTTPException(400, str(e)) from None
 
     return FboReturnResponse(**result)
+
+
+# ─── Excess: списать излишек, который WB принял сверх отправленного ────────
+
+
+@router.post(
+    "/{supply_id}/excess",
+    response_model=FboExcessResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def create_fbo_excess(
+    supply_id: int,
+    payload: FboExcessRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Списать со склада излишек, который WB принял сверх отправленного.
+    Создаёт OutboundShipment на указанный склад на сумму per-barcode delta
+    (accepted - quantity). Помечает supply.excess_processed_at.
+    """  # noqa: RUF002 — cyrillic product terms
+    try:
+        result = await fbo_supply_service.process_fbo_excess(
+            db,
+            project.id,
+            supply_id,
+            items=[item.model_dump() for item in payload.items],
+            warehouse_id=payload.warehouse_id,
+            comment=payload.comment,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    return FboExcessResponse(**result)

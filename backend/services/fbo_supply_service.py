@@ -33,7 +33,10 @@ from backend.services.fbo_supply import (  # noqa: F401
     get_partial_acceptance_summary,
     list_fbo_supplies,
     list_warehouses,
+    process_fbo_excess,
     process_fbo_return,
+    restore_linked_from_archive,
+    set_archive_flag,
     sync_fbo_statuses,
     sync_fbo_supplies,
 )

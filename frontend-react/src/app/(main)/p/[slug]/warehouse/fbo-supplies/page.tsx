@@ -45,7 +45,7 @@ export default function FboSuppliesPage() {
     const [warehouseOptions, setWarehouseOptions] = useState<string[]>([]);
     const [withoutAssembly, setWithoutAssembly] = useState(false);
     const [partialOnly, setPartialOnly] = useState(false);
-    const [includeArchived, setIncludeArchived] = useState(false);
+    const [excessOnly, setExcessOnly] = useState(false);
     // Default period: last 30 days by created_at_wb. User can extend or clear.
     const [dateFrom, setDateFrom] = useState(() => {
         const d = new Date();
@@ -60,7 +60,7 @@ export default function FboSuppliesPage() {
 
     // Summary
     const [summary, setSummary] = useState<{
-        total: number; accepted: number; accepted_without_assembly: number; accepted_partial: number;
+        total: number; accepted: number; accepted_without_assembly: number; accepted_partial: number; accepted_excess: number;
     } | null>(null);
 
     // Expanded rows (supply items)
@@ -70,6 +70,10 @@ export default function FboSuppliesPage() {
 
     // Return modal
     const [returnState, setReturnState] = useState<{
+        supply: WbFboSupply; items: WbFboSupplyItem[];
+    } | null>(null);
+    // Excess modal (overshoot: WB accepted more than we shipped)
+    const [excessState, setExcessState] = useState<{
         supply: WbFboSupply; items: WbFboSupplyItem[];
     } | null>(null);
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
@@ -91,8 +95,13 @@ export default function FboSuppliesPage() {
     }, []);
 
     const loadSummary = useCallback(() => {
-        api.getFboSuppliesSummary().then(setSummary).catch(() => setSummary(null));
-    }, []);
+        api.getFboSuppliesSummary({
+            date_from: dateFrom || undefined,
+            date_to: dateTo || undefined,
+            warehouse: warehouseFilter || undefined,
+            status: statusFilter || undefined,
+        }).then(setSummary).catch(() => setSummary(null));
+    }, [dateFrom, dateTo, warehouseFilter, statusFilter]);
 
     useEffect(() => { loadSummary(); }, [loadSummary]);
 
@@ -118,7 +127,7 @@ export default function FboSuppliesPage() {
                 date_to: dateTo || undefined,
                 without_assembly: withoutAssembly || undefined,
                 partial_only: partialOnly || undefined,
-                include_archived: includeArchived || undefined,
+                excess_only: excessOnly || undefined,
                 sort_by: sortBy,
                 sort_order: sortOrder,
                 limit: PAGE_SIZE,
@@ -130,7 +139,7 @@ export default function FboSuppliesPage() {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         }
         setLoading(false);
-    }, [search, statusFilter, warehouseFilter, dateFrom, dateTo, withoutAssembly, partialOnly, includeArchived, sortBy, sortOrder, page]);
+    }, [search, statusFilter, warehouseFilter, dateFrom, dateTo, withoutAssembly, partialOnly, excessOnly, sortBy, sortOrder, page]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -292,6 +301,14 @@ export default function FboSuppliesPage() {
                         onClick={() => { setPartialOnly(v => !v); setPage(0); }}
                         tone="danger"
                     />
+                    <SummaryCard
+                        label="С излишком"
+                        value={summary.accepted_excess}
+                        hint="WB принял больше отправленного — списать со склада"
+                        active={excessOnly}
+                        onClick={() => { setExcessOnly(v => !v); setPage(0); }}
+                        tone="warning"
+                    />
                 </div>
             )}
 
@@ -364,14 +381,17 @@ export default function FboSuppliesPage() {
                         />
                         С недоприёмкой
                     </label>
-                    <label className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }} title="Показать поставки до даты начала учёта">
+                    <label className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
                         <input
                             type="checkbox"
-                            checked={includeArchived}
-                            onChange={e => { setIncludeArchived(e.target.checked); setPage(0); }}
+                            checked={excessOnly}
+                            onChange={e => { setExcessOnly(e.target.checked); setPage(0); }}
                         />
-                        Архив
+                        С излишком
                     </label>
+                    <Link href={`/p/${slug}/warehouse/fbo-supplies/archive`} className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--color-text-muted)', textDecoration: 'none' }}>
+                        📁 Архив
+                    </Link>
                 </div>
             </div>
 
@@ -532,6 +552,18 @@ export default function FboSuppliesPage() {
                                                         loading={loadingItems}
                                                         slug={slug}
                                                         onOpenReturn={() => setReturnState({ supply, items: expandedItems })}
+                                                        onOpenExcess={() => setExcessState({ supply, items: expandedItems })}
+                                                        onArchive={async () => {
+                                                            try {
+                                                                await api.setFboSupplyArchive(supply.id, true);
+                                                                setSupplies(prev => prev.filter(s => s.id !== supply.id));
+                                                                setExpandedId(null);
+                                                                setExpandedItems([]);
+                                                                loadSummary();
+                                                            } catch (e) {
+                                                                alert('Не удалось отправить в архив: ' + (e instanceof Error ? e.message : 'ошибка'));
+                                                            }
+                                                        }}
                                                     />
                                                 </td>
                                             </tr>
@@ -589,6 +621,23 @@ export default function FboSuppliesPage() {
                         await load();
                         loadSummary();
                         loadPartialSummary();
+                    }}
+                />
+            )}
+
+            {/* Excess Modal: списать излишек со склада */}
+            {excessState !== null && (
+                <FboExcessModal
+                    supply={excessState.supply}
+                    items={excessState.items}
+                    warehouses={warehouses}
+                    onClose={() => setExcessState(null)}
+                    onDone={async () => {
+                        setExcessState(null);
+                        setExpandedId(null);
+                        setExpandedItems([]);
+                        await load();
+                        loadSummary();
                     }}
                 />
             )}
@@ -895,6 +944,182 @@ function FboReturnModal({
 }
 
 
+// ─── Excess (overshoot) modal ────────────────────────────────────────────────
+
+function FboExcessModal({
+    supply, items, warehouses, onClose, onDone,
+}: {
+    supply: WbFboSupply;
+    items: WbFboSupplyItem[];
+    warehouses: Warehouse[];
+    onClose: () => void;
+    onDone: () => Promise<void> | void;
+}) {
+    // Excess delta per barcode = max(0, accepted - quantity)
+    const deltaItems = items
+        .map(i => ({ ...i, delta: Math.max(0, i.accepted_qty - i.quantity) }))
+        .filter(i => i.delta > 0);
+
+    const [warehouseId, setWarehouseId] = useState<number | ''>(
+        supply.source_warehouse_id ?? warehouses[0]?.id ?? ''
+    );
+    const [rows, setRows] = useState<Record<string, number>>(
+        Object.fromEntries(deltaItems.map(i => [i.barcode, i.delta]))
+    );
+    const [comment, setComment] = useState('');
+    const [saving, setSaving] = useState(false);
+    const [err, setErr] = useState('');
+
+    const totalDelta = deltaItems.reduce((s, i) => s + i.delta, 0);
+    const totalWriteOff = Object.values(rows).reduce((s, v) => s + (v || 0), 0);
+
+    const setQty = (barcode: string, delta: number, v: number) => {
+        setRows(r => ({ ...r, [barcode]: Math.max(0, Math.min(delta, v)) }));
+    };
+
+    const submit = async () => {
+        setErr('');
+        if (totalWriteOff === 0) { setErr('Укажи количество к списанию'); return; }
+        if (!warehouseId) { setErr('Выбери склад для списания'); return; }
+        const payloadItems = deltaItems
+            .map(i => ({ barcode: i.barcode, quantity: rows[i.barcode] || 0 }))
+            .filter(it => it.quantity > 0);
+
+        setSaving(true);
+        try {
+            await api.processFboExcess(supply.id, {
+                warehouse_id: warehouseId as number,
+                items: payloadItems,
+                comment: comment.trim() || undefined,
+            });
+            await onDone();
+        } catch (e: unknown) {
+            setErr(e instanceof Error ? e.message : 'Ошибка');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div
+                className="modal-card"
+                onClick={e => e.stopPropagation()}
+                style={{
+                    maxWidth: 720, width: '92vw', maxHeight: '90vh',
+                    display: 'flex', flexDirection: 'column',
+                    background: '#ffffff',
+                    backdropFilter: 'none',
+                    WebkitBackdropFilter: 'none',
+                }}
+            >
+                {/* Header */}
+                <div style={{ marginBottom: 16 }}>
+                    <h2 className="modal-title" style={{ marginBottom: 4 }}>
+                        Списать излишек со склада
+                    </h2>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                        Поставка <strong>FBW-{supply.wb_supply_id}</strong>: WB принял на {totalDelta} шт больше, чем мы отправили.
+                    </div>
+                </div>
+
+                {/* Warehouse selector */}
+                <div style={{ marginBottom: 16 }}>
+                    <label style={{ fontSize: 13, fontWeight: 600, display: 'block', marginBottom: 6 }}>
+                        Склад списания
+                    </label>
+                    <select
+                        className="form-input"
+                        value={warehouseId}
+                        onChange={e => setWarehouseId(e.target.value ? Number(e.target.value) : '')}
+                        style={{ width: '100%' }}
+                    >
+                        <option value="">— выбрать —</option>
+                        {warehouses.map(w => (
+                            <option key={w.id} value={w.id}>{w.name}</option>
+                        ))}
+                    </select>
+                </div>
+
+                {/* Items table (scrollable) */}
+                <div style={{
+                    marginBottom: 16, border: '1px solid var(--color-border)',
+                    borderRadius: 12, overflow: 'auto', flex: '1 1 auto', maxHeight: '50vh',
+                    background: '#ffffff',
+                }}>
+                    <table className="data-table" style={{ fontSize: 13, margin: 0 }}>
+                        <thead>
+                            <tr>
+                                <th style={{ paddingLeft: 12 }}>Товар / ШК</th>
+                                <th style={{ textAlign: 'right' }}>Излишек</th>
+                                <th style={{ textAlign: 'right', paddingRight: 12, width: 140 }}>Списать</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {deltaItems.map(i => (
+                                <tr key={i.barcode}>
+                                    <td style={{ paddingLeft: 12 }}>
+                                        <div style={{ fontWeight: 500 }}>
+                                            {i.product_name || i.article_seller || '—'}
+                                        </div>
+                                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)', fontFamily: 'monospace' }}>
+                                            {i.barcode}
+                                        </div>
+                                    </td>
+                                    <td style={{ textAlign: 'right', color: 'var(--color-warning)', fontWeight: 600 }}>
+                                        +{i.delta}
+                                    </td>
+                                    <td style={{ textAlign: 'right', paddingRight: 12 }}>
+                                        <input
+                                            className="form-input"
+                                            type="number"
+                                            min={0}
+                                            max={i.delta}
+                                            value={rows[i.barcode] || 0}
+                                            onChange={e => setQty(i.barcode, i.delta, Number(e.target.value) || 0)}
+                                            style={{ textAlign: 'right', padding: '4px 8px', height: 32, width: 120 }}
+                                        />
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+
+                {/* Comment */}
+                <div style={{ marginBottom: 16 }}>
+                    <label style={{ fontSize: 13, fontWeight: 600, display: 'block', marginBottom: 6 }}>
+                        Комментарий (опционально)
+                    </label>
+                    <input
+                        type="text"
+                        className="form-input"
+                        value={comment}
+                        onChange={e => setComment(e.target.value)}
+                        placeholder="Например: ошибка склада при отгрузке"
+                        style={{ width: '100%' }}
+                    />
+                </div>
+
+                {err && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 12 }}>{err}</div>}
+
+                {/* Footer */}
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                    <button className="btn btn-secondary" onClick={onClose} disabled={saving}>Отмена</button>
+                    <button
+                        className="btn btn-primary"
+                        onClick={submit}
+                        disabled={saving || deltaItems.length === 0 || totalWriteOff === 0}
+                    >
+                        {saving ? 'Сохранение...' : `Списать (${totalWriteOff} шт)`}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+
 // ─── Partial-acceptance mini-summary ─────────────────────────────────────────
 
 function PartialSummaryPanel({
@@ -949,7 +1174,7 @@ function PartialSummaryPanel({
                         {open ? 'Скрыть' : 'Показать'} позиции ({summary.items_breakdown.length} артикулов, {totalItems} шт)
                     </button>
                     {open && (
-                        <div style={{ marginTop: 8, maxHeight: 320, overflowY: 'auto', border: '1px solid var(--color-border)', borderRadius: 8 }}>
+                        <div style={{ marginTop: 8, maxHeight: 720, overflowY: 'auto', border: '1px solid var(--color-border)', borderRadius: 8 }}>
                             <table className="data-table" style={{ fontSize: 13, margin: 0 }}>
                                 <thead>
                                     <tr>
@@ -1048,12 +1273,16 @@ function SupplyItemsPanel({
     loading,
     slug,
     onOpenReturn,
+    onOpenExcess,
+    onArchive,
 }: {
     supply: WbFboSupply;
     items: WbFboSupplyItem[];
     loading: boolean;
     slug: string;
     onOpenReturn: () => void;
+    onOpenExcess?: () => void;
+    onArchive?: () => void;
 }) {
     if (loading) {
         return <div style={{ padding: 24, textAlign: 'center' }}>Загрузка позиций...</div>;
@@ -1064,8 +1293,16 @@ function SupplyItemsPanel({
     const hasItems = items.length > 0;
     const totalQty = hasItems ? items.reduce((s, i) => s + i.quantity, 0) : supply.total_qty;
     const totalAccepted = hasItems ? items.reduce((s, i) => s + i.accepted_qty, 0) : supply.accepted_qty;
-    const unacceptedDelta = Math.max(0, totalQty - totalAccepted);
+    // Per-item deltas — important for пересорт (одни товары приняли меньше,
+    // другие больше). Aggregated total - accepted скрыл бы один из них.
+    const unacceptedDelta = hasItems
+        ? items.reduce((s, i) => s + Math.max(0, i.quantity - i.accepted_qty), 0)
+        : Math.max(0, totalQty - totalAccepted);
+    const excessDelta = hasItems
+        ? items.reduce((s, i) => s + Math.max(0, i.accepted_qty - i.quantity), 0)
+        : Math.max(0, totalAccepted - totalQty);
     const showReturnBanner = supply.wb_status === 'ACCEPTED' && unacceptedDelta > 0 && !supply.return_processed_at;
+    const showExcessBanner = supply.wb_status === 'ACCEPTED' && excessDelta > 0 && !supply.excess_processed_at;
 
     return (
         <div style={{ padding: '16px 24px 20px' }}>
@@ -1094,6 +1331,46 @@ function SupplyItemsPanel({
                     borderRadius: 8, fontSize: 13, color: 'var(--color-text-muted)',
                 }}>
                     ✓ Недоприёмка обработана {formatDate(supply.return_processed_at)}
+                </div>
+            )}
+
+            {/* Излишек banner: WB принял БОЛЬШЕ чем отправлено */}
+            {showExcessBanner && onOpenExcess && (
+                <div style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                    padding: '10px 14px', marginBottom: 12,
+                    background: 'color-mix(in srgb, var(--color-warning) 10%, transparent)',
+                    border: '1px solid color-mix(in srgb, var(--color-warning) 40%, transparent)',
+                    borderRadius: 8, fontSize: 14,
+                }}>
+                    <div>
+                        <strong style={{ color: 'var(--color-warning)' }}>Излишек:</strong>{' '}
+                        {excessDelta} шт — WB принял больше, чем отправлено
+                    </div>
+                    <button className="btn btn-primary btn-sm" onClick={onOpenExcess}>
+                        Списать со склада
+                    </button>
+                </div>
+            )}
+            {supply.excess_processed_at && (
+                <div style={{
+                    padding: '8px 12px', marginBottom: 12,
+                    background: 'color-mix(in srgb, var(--color-success) 10%, transparent)',
+                    borderRadius: 8, fontSize: 13, color: 'var(--color-text-muted)',
+                }}>
+                    ✓ Излишек ({supply.excess_qty} шт) списан {formatDate(supply.excess_processed_at)}
+                </div>
+            )}
+
+            {onArchive && (
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+                    <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={onArchive}
+                        title="Скрыть из основного списка (можно вернуть из архива)"
+                    >
+                        📁 В архив
+                    </button>
                 </div>
             )}
 

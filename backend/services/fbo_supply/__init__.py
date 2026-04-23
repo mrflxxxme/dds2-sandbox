@@ -24,13 +24,15 @@ from .mappers import (
     _update_supply_from_fbw_list,
     _upsert_supply_items_fbw,
 )
-from .returns import FboReturnType, process_fbo_return
+from .returns import FboReturnType, process_fbo_excess, process_fbo_return
 from .service import (
     get_fbo_summary,
     get_fbo_supply_items,
     get_partial_acceptance_summary,
     list_fbo_supplies,
     list_warehouses,
+    restore_linked_from_archive,
+    set_archive_flag,
 )
 from .sync import (
     _auto_deliver_assembly,
@@ -59,6 +61,8 @@ __all__ = [
     "get_partial_acceptance_summary",
     "list_fbo_supplies",
     "list_warehouses",
+    "restore_linked_from_archive",
+    "set_archive_flag",
     # sync
     "_auto_deliver_assembly",
     "_auto_deliver_shipment",
@@ -67,5 +71,6 @@ __all__ = [
     "sync_fbo_supplies",
     # returns
     "FboReturnType",
+    "process_fbo_excess",
     "process_fbo_return",
 ]

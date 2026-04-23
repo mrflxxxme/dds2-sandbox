@@ -43,6 +43,9 @@ class WbFboSupplySchema(BaseModel):
     outbound_shipment_number: str | None = None
     outbound_shipment_status: str | None = None
     outbound_shipment_warehouse_id: int | None = None
+    is_archived: bool | None = None
+    excess_processed_at: datetime | None = None
+    excess_qty: int | None = None
     assembly_request_id: int | None = None
     assembly_request_number: str | None = None
     assembly_request_status: str | None = None
@@ -77,6 +80,36 @@ class FboSyncResultSchema(BaseModel):
     updated: int = 0
     errors: int = 0
     message: str = ""
+
+
+class FboArchiveRequest(BaseModel):
+    """PATCH body for archive flag override.
+    None = reset to auto rule, True = manual archive, False = manual restore."""
+
+    is_archived: bool | None = None
+
+
+class FboExcessItem(BaseModel):
+    """One row of excess write-off — per barcode."""
+
+    barcode: str
+    quantity: int
+
+
+class FboExcessRequest(BaseModel):
+    """Write off the excess (overshoot) qty from our warehouse.
+    WB accepted more than we shipped → take the delta off the source warehouse."""
+
+    warehouse_id: int
+    items: list[FboExcessItem]
+    comment: str | None = None
+
+
+class FboExcessResponse(BaseModel):
+    supply_id: int
+    shipment_id: int
+    shipment_number: str
+    total_qty: int
 
 
 # ─── Return (недоприёмка) ──────────────────────────────────────────────────
