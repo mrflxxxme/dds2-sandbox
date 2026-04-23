@@ -2,10 +2,10 @@
 Auth models: User, Project, ProjectMember, ProjectInvite.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -42,6 +42,10 @@ class Project(Base, SoftDeleteMixin):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     tax_rate: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), default=6)
     vat_rate: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), default=22)
+    # Cut-off date for legacy data: anything before this is considered archive
+    # and hidden from default list views (FBO supplies and similar).
+    # NULL = show everything (no archive cut-off configured for this project).
+    accounting_started_at: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     members: Mapped[list["ProjectMember"]] = relationship(back_populates="project")
     invites: Mapped[list["ProjectInvite"]] = relationship(back_populates="project")

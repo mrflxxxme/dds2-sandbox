@@ -48,6 +48,7 @@ async def list_fbo_supplies(
     exclude_with_assembly: bool = Query(False, description="Exclude supplies with active assembly requests"),
     without_assembly: bool = Query(False, description="Only supplies without any assembly request"),
     partial_only: bool = Query(False, description="Only supplies with partial acceptance (accepted_qty < total_qty)"),
+    include_archived: bool = Query(False, description="Show supplies created before the project's accounting cut-off"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -67,6 +68,8 @@ async def list_fbo_supplies(
         exclude_with_assembly=exclude_with_assembly,
         without_assembly=without_assembly,
         partial_only=partial_only,
+        accounting_started_at=project.accounting_started_at,
+        include_archived=include_archived,
     )
     return WbFboSupplyListResponse(
         items=[WbFboSupplySchema(**s) for s in supplies],
@@ -88,7 +91,7 @@ async def get_fbo_supplies_summary(
     delivery but DDS has no assembly request — user should either attach one
     or treat it as an unmanaged delivery.
     """
-    return await fbo_supply_service.get_fbo_summary(db, project.id)
+    return await fbo_supply_service.get_fbo_summary(db, project.id, accounting_started_at=project.accounting_started_at)
 
 
 @router.get("/partial-summary")

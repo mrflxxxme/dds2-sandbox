@@ -40,6 +40,9 @@ export function addWarehouseMethods(api: ApiClient) {
         getWarehouses() { return api.request<Warehouse[]>('GET', '/api/v1/warehouse'); },
         createWarehouse(data: Partial<Warehouse>) { return api.request<Warehouse>('POST', '/api/v1/warehouse', data); },
         updateWarehouse(id: number, data: Partial<Warehouse>) { return api.request<Warehouse>('PUT', `/api/v1/warehouse/${id}`, data); },
+        setWarehouseCounterparty(id: number, data: { inn: string | null; name: string | null }) {
+            return api.request<Warehouse>('PATCH', `/api/v1/warehouse/${id}/counterparty`, data);
+        },
         deleteWarehouse(id: number) { return api.request<MessageResponse>('DELETE', `/api/v1/warehouse/${id}`); },
         reorderWarehouses(items: { id: number; sort_order: number }[]) {
             return api.request<MessageResponse>('PUT', '/api/v1/warehouse/reorder', { items });
@@ -147,6 +150,7 @@ export function addWarehouseMethods(api: ApiClient) {
             exclude_with_assembly?: boolean;
             without_assembly?: boolean;
             partial_only?: boolean;
+            include_archived?: boolean;
         }) {
             const query = new URLSearchParams();
             if (params) {
@@ -226,6 +230,8 @@ export function addWarehouseMethods(api: ApiClient) {
             pickup_time_slot: string;
             pickup_cost: number;
             delivery_date: string;
+            carrier_inn?: string | null;
+            carrier_name?: string | null;
         }) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/assign-vehicle`, data);
         },
@@ -242,6 +248,8 @@ export function addWarehouseMethods(api: ApiClient) {
             vehicle_info: string;
             vehicle_brand: string;
             driver_phone: string;
+            carrier_inn?: string | null;
+            carrier_name?: string | null;
             items: Array<{
                 request_id: number;
                 pickup_date: string;

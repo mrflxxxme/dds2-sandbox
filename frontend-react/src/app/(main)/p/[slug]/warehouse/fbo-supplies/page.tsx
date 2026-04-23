@@ -45,6 +45,14 @@ export default function FboSuppliesPage() {
     const [warehouseOptions, setWarehouseOptions] = useState<string[]>([]);
     const [withoutAssembly, setWithoutAssembly] = useState(false);
     const [partialOnly, setPartialOnly] = useState(false);
+    const [includeArchived, setIncludeArchived] = useState(false);
+    // Default period: last 30 days by created_at_wb. User can extend or clear.
+    const [dateFrom, setDateFrom] = useState(() => {
+        const d = new Date();
+        d.setDate(d.getDate() - 30);
+        return d.toISOString().slice(0, 10);
+    });
+    const [dateTo, setDateTo] = useState('');
     const [sortBy, setSortBy] = useState('created_at_wb');
     const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
     const [page, setPage] = useState(0);
@@ -106,8 +114,11 @@ export default function FboSuppliesPage() {
                 search: search || undefined,
                 status: statusFilter || undefined,
                 warehouse: warehouseFilter || undefined,
+                date_from: dateFrom || undefined,
+                date_to: dateTo || undefined,
                 without_assembly: withoutAssembly || undefined,
                 partial_only: partialOnly || undefined,
+                include_archived: includeArchived || undefined,
                 sort_by: sortBy,
                 sort_order: sortOrder,
                 limit: PAGE_SIZE,
@@ -119,7 +130,7 @@ export default function FboSuppliesPage() {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         }
         setLoading(false);
-    }, [search, statusFilter, warehouseFilter, withoutAssembly, partialOnly, sortBy, sortOrder, page]);
+    }, [search, statusFilter, warehouseFilter, dateFrom, dateTo, withoutAssembly, partialOnly, includeArchived, sortBy, sortOrder, page]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -319,6 +330,24 @@ export default function FboSuppliesPage() {
                             ))}
                         </select>
                     </div>
+                    <div className="form-group" title="Дата создания поставки в WB">
+                        <input
+                            type="date"
+                            className="form-input"
+                            value={dateFrom}
+                            onChange={e => { setDateFrom(e.target.value); setPage(0); }}
+                            placeholder="С"
+                        />
+                    </div>
+                    <div className="form-group">
+                        <input
+                            type="date"
+                            className="form-input"
+                            value={dateTo}
+                            onChange={e => { setDateTo(e.target.value); setPage(0); }}
+                            placeholder="По"
+                        />
+                    </div>
                     <label className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
                         <input
                             type="checkbox"
@@ -334,6 +363,14 @@ export default function FboSuppliesPage() {
                             onChange={e => { setPartialOnly(e.target.checked); setPage(0); }}
                         />
                         С недоприёмкой
+                    </label>
+                    <label className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }} title="Показать поставки до даты начала учёта">
+                        <input
+                            type="checkbox"
+                            checked={includeArchived}
+                            onChange={e => { setIncludeArchived(e.target.checked); setPage(0); }}
+                        />
+                        Архив
                     </label>
                 </div>
             </div>

@@ -32,20 +32,26 @@ logger = logging.getLogger(__name__)
 async def get_fbo_summary(
     db: AsyncSession,
     project_id: int,
+    accounting_started_at: date | None = None,
 ) -> dict[str, int]:
     """
     Counts for FBO supplies dashboard: total, accepted, accepted without
     assembly request, accepted with partial acceptance. Used to highlight
     orphan ACCEPTED supplies (WB принял, но в DDS нет заявки на сборку),
     so the user can spot missed linkage and start a receipt for rejected qty.
+
+    Honors project's accounting cut-off so dashboard counters match the list view.
     """
-    base = select(WbFboSupply).where(WbFboSupply.project_id == project_id).subquery()
+    cutoff = [func.date(WbFboSupply.created_at_wb) >= accounting_started_at] if accounting_started_at else []
+
+    base = select(WbFboSupply).where(WbFboSupply.project_id == project_id, *cutoff).subquery()
 
     total = (await db.execute(select(func.count()).select_from(base))).scalar() or 0
 
     accepted_q = select(WbFboSupply).where(
         WbFboSupply.project_id == project_id,
         WbFboSupply.wb_status == WbSupplyStatus.ACCEPTED,
+        *cutoff,
     )
     accepted = (await db.execute(select(func.count()).select_from(accepted_q.subquery()))).scalar() or 0
 
@@ -182,6 +188,8 @@ async def list_fbo_supplies(
     exclude_with_assembly: bool = False,
     without_assembly: bool = False,
     partial_only: bool = False,
+    accounting_started_at: date | None = None,
+    include_archived: bool = False,
 ) -> tuple[list[dict], int]:
     """
     List FBO supplies with filtering, search, sorting, and pagination.
@@ -223,6 +231,13 @@ async def list_fbo_supplies(
     if date_to:
         base_query = base_query.where(
             func.date(WbFboSupply.created_at_wb) <= date_to,
+        )
+
+    # Hide legacy data created before the project's accounting cut-off.
+    # Override via include_archived=True (e.g. «показать архив» toggle).
+    if accounting_started_at and not include_archived:
+        base_query = base_query.where(
+            func.date(WbFboSupply.created_at_wb) >= accounting_started_at,
         )
 
     # Exclude supplies that already have an active assembly request
