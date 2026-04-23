@@ -1404,6 +1404,44 @@ export interface FboReassignResponse {
   reassigned_qty: number;
 }
 
+export type FboAuditAction =
+  | 'ARCHIVE' | 'UNARCHIVE' | 'BULK_RESTORE'
+  | 'RETURN' | 'EXCESS' | 'REASSIGN' | 'REVERT';
+
+export interface FboAuditEntry {
+  id: number;
+  supply_id: number;
+  action: FboAuditAction;
+  payload: Record<string, unknown>;
+  user_id: number | null;
+  created_at: string;
+  reverted_audit_id: number | null;
+  reverted_at: string | null;
+  revertible: boolean;
+}
+
+export interface FboAuditResponse {
+  supply_id: number;
+  entries: FboAuditEntry[];
+}
+
+export interface FboAuditListEntry extends FboAuditEntry {
+  supply_wb_id: string;
+  warehouse_name: string | null;
+  username: string | null;
+}
+
+export interface FboAuditListResponse {
+  entries: FboAuditListEntry[];
+  total: number;
+}
+
+export interface FboAuditRevertResponse {
+  audit_id: number;
+  revert_id: number;
+  action: string;
+}
+
 // ─── Assembly Requests ────────────────────────────────────────────────────
 
 export type AssemblyStatus = 'PENDING' | 'IN_PROGRESS' | 'READY' | 'VEHICLE_ASSIGNED' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED';

@@ -192,3 +192,42 @@ class FboReassignResponse(BaseModel):
     target_supply_id: int
     target_wb_supply_id: str
     reassigned_qty: int
+
+
+# ─── Audit trail ──────────────────────────────────────────────────────────
+
+
+class FboAuditEntry(BaseModel):
+    id: int
+    supply_id: int
+    action: str
+    payload: dict
+    user_id: int | None = None
+    created_at: datetime
+    reverted_audit_id: int | None = None
+    reverted_at: datetime | None = None
+    revertible: bool = False
+
+
+class FboAuditResponse(BaseModel):
+    supply_id: int
+    entries: list[FboAuditEntry]
+
+
+class FboAuditListEntry(FboAuditEntry):
+    """Global-feed entry — includes supply reference for deep-linking."""
+
+    supply_wb_id: str
+    warehouse_name: str | None = None
+    username: str | None = None
+
+
+class FboAuditListResponse(BaseModel):
+    entries: list[FboAuditListEntry]
+    total: int
+
+
+class FboAuditRevertResponse(BaseModel):
+    audit_id: int
+    revert_id: int
+    action: str

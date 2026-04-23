@@ -13,6 +13,9 @@ import type {
     DefectOperation,
     DeliveryTimesResponse,
     DeliveryTimesUpdate,
+    FboAuditListResponse,
+    FboAuditResponse,
+    FboAuditRevertResponse,
     FboPartialSummary,
     FboReassignCandidatesResponse,
     FboReassignRequest,
@@ -236,6 +239,31 @@ export function addWarehouseMethods(api: ApiClient) {
                 'POST',
                 `/api/v1/warehouse/fbo-supplies/${supplyId}/reassign`,
                 payload,
+            );
+        },
+        getFboSupplyAudit(supplyId: number) {
+            return api.request<FboAuditResponse>(
+                'GET',
+                `/api/v1/warehouse/fbo-supplies/${supplyId}/audit`,
+            );
+        },
+        getFboAuditList(params?: { action?: string; supply_wb_id?: string; limit?: number; offset?: number }) {
+            const q = new URLSearchParams();
+            if (params?.action) q.set('action', params.action);
+            if (params?.supply_wb_id) q.set('supply_wb_id', params.supply_wb_id);
+            if (params?.limit !== undefined) q.set('limit', String(params.limit));
+            if (params?.offset !== undefined) q.set('offset', String(params.offset));
+            const qs = q.toString();
+            return api.request<FboAuditListResponse>(
+                'GET',
+                `/api/v1/warehouse/fbo-supplies/audit${qs ? '?' + qs : ''}`,
+            );
+        },
+        revertFboAudit(auditId: number) {
+            return api.request<FboAuditRevertResponse>(
+                'POST',
+                `/api/v1/warehouse/fbo-supplies/audit/${auditId}/revert`,
+                {},
             );
         },
 

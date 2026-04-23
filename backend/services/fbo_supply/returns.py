@@ -55,6 +55,7 @@ async def process_fbo_return(
     items: list[dict[str, Any]],
     warehouse_id: int | None = None,
     comment: str | None = None,
+    user_id: int | None = None,
 ) -> dict[str, Any]:
     """
     Handle unaccepted qty for a WbFboSupply — mixed mode (per-item return_type).
@@ -129,12 +130,35 @@ async def process_fbo_return(
 
     supply.return_processed_at = utcnow()
     supply.return_qty = sum(int(r.get("quantity") or 0) for r in items)
+
+    from backend.models.wb_fbo import FboAuditAction
+
+    from .audit import log_action
+
+    await log_action(
+        db,
+        project_id=project_id,
+        supply_id=supply.id,
+        action=FboAuditAction.RETURN,
+        payload={
+            "items": items,
+            "warehouse_id": warehouse_id,
+            "return_type": supply.return_type,
+            "return_qty": supply.return_qty,
+            "receipt_id": result.get("receipt_id"),
+            "receipt_number": result.get("receipt_number"),
+            "comment": comment,
+        },
+        user_id=user_id,
+    )
     await db.commit()
     result["supply_id"] = supply.id
     return result
 
 
 async def _load_supply(db: AsyncSession, project_id: int, supply_id: int) -> WbFboSupply | None:
+    """Row-level lock on supply — prevents double-submit races on
+    return_processed_at / excess_processed_at guards."""
     result = await db.execute(
         select(WbFboSupply)
         .where(
@@ -142,6 +166,7 @@ async def _load_supply(db: AsyncSession, project_id: int, supply_id: int) -> WbF
             WbFboSupply.project_id == project_id,
         )
         .options(selectinload(WbFboSupply.items))
+        .with_for_update()
     )
     return result.scalar_one_or_none()
 
@@ -261,6 +286,7 @@ async def process_fbo_excess(
     items: list[dict[str, Any]],
     warehouse_id: int,
     comment: str | None = None,
+    user_id: int | None = None,
 ) -> dict[str, Any]:
     """
     Handle excess (overshoot) qty for a WbFboSupply: WB accepted MORE than
@@ -339,6 +365,26 @@ async def process_fbo_excess(
 
     supply.excess_processed_at = utcnow()
     supply.excess_qty = total_qty
+
+    from backend.models.wb_fbo import FboAuditAction
+
+    from .audit import log_action
+
+    await log_action(
+        db,
+        project_id=project_id,
+        supply_id=supply.id,
+        action=FboAuditAction.EXCESS,
+        payload={
+            "items": items,
+            "warehouse_id": warehouse_id,
+            "excess_qty": total_qty,
+            "shipment_id": shipment.id,
+            "shipment_number": shipment.number,
+            "comment": comment,
+        },
+        user_id=user_id,
+    )
     await db.commit()
 
     return {

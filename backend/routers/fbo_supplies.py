@@ -8,12 +8,16 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.auth import get_current_user
 from backend.database import AsyncSessionLocal, get_db
 from backend.integrations.wb_api import WBApiClient
-from backend.models import Project
+from backend.models import Project, User
 from backend.project_context import get_current_project
 from backend.schemas.wb_fbo import (
     FboArchiveRequest,
+    FboAuditListResponse,
+    FboAuditResponse,
+    FboAuditRevertResponse,
     FboExcessRequest,
     FboExcessResponse,
     FboReassignCandidatesResponse,
@@ -121,6 +125,7 @@ async def get_fbo_supplies_summary(
 
 @router.get("/partial-summary")
 async def get_partial_summary(
+    archived_view: bool = Query(False, description="Count supplies in archive bucket instead of active"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -128,7 +133,12 @@ async def get_partial_summary(
     Недоприёмка dashboard: aggregate qty buckets + per-barcode breakdown.
     Shown as a mini-panel when user enables the 'С недоприёмкой' filter.
     """  # noqa: RUF002 — mixed cyrillic/latin is intentional (product terms)
-    return await fbo_supply_service.get_partial_acceptance_summary(db, project.id)
+    return await fbo_supply_service.get_partial_acceptance_summary(
+        db,
+        project.id,
+        accounting_started_at=project.accounting_started_at,
+        archived_view=archived_view,
+    )
 
 
 # ─── Warehouse names (for filter dropdown) ─────────────────────────────────
@@ -153,13 +163,19 @@ async def list_fbo_warehouses(
 async def restore_linked_from_archive(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> dict[str, int]:
     """
     Bulk-restore archived supplies that are linked to our AssemblyRequest
     or OutboundShipment. Useful on the archive page when a user wants to
     recover all «our» supplies at once.
     """
-    restored = await fbo_supply_service.restore_linked_from_archive(db, project.id, project.accounting_started_at)
+    restored = await fbo_supply_service.restore_linked_from_archive(
+        db,
+        project.id,
+        project.accounting_started_at,
+        user_id=user.id,
+    )
     return {"restored": restored}
 
 
@@ -173,13 +189,20 @@ async def patch_fbo_archive(
     payload: FboArchiveRequest,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """
     Override the auto archive rule for a supply.
     is_archived=True → move to archive; False → restore; null → reset to auto.
     """
     try:
-        supply = await fbo_supply_service.set_archive_flag(db, project.id, supply_id, payload.is_archived)
+        supply = await fbo_supply_service.set_archive_flag(
+            db,
+            project.id,
+            supply_id,
+            payload.is_archived,
+            user_id=user.id,
+        )
     except ValueError as e:
         raise HTTPException(404, str(e)) from None
     return WbFboSupplySchema.model_validate(supply)
@@ -311,6 +334,7 @@ async def create_fbo_return(
     payload: FboReturnRequest,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """
     Оформить возврат/утилизацию по непринятому qty. Каждая строка items несёт
@@ -325,6 +349,7 @@ async def create_fbo_return(
             items=[item.model_dump() for item in payload.items],
             warehouse_id=payload.warehouse_id,
             comment=payload.comment,
+            user_id=user.id,
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
@@ -345,6 +370,7 @@ async def create_fbo_excess(
     payload: FboExcessRequest,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """
     Списать со склада излишек, который WB принял сверх отправленного.
@@ -359,6 +385,7 @@ async def create_fbo_excess(
             items=[item.model_dump() for item in payload.items],
             warehouse_id=payload.warehouse_id,
             comment=payload.comment,
+            user_id=user.id,
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
@@ -399,6 +426,7 @@ async def reassign_fbo_supply(
     payload: FboReassignRequest,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """
     Привязать текущую поставку (доприёмку) к поставке с недоприёмкой:
@@ -411,7 +439,67 @@ async def reassign_fbo_supply(
             project.id,
             supply_id,
             payload.target_supply_id,
+            user_id=user.id,
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
     return FboReassignResponse(**result)
+
+
+# ─── Audit trail (history + undo) ─────────────────────────────────────────
+
+
+@router.get("/audit", response_model=FboAuditListResponse)
+async def list_fbo_audit(
+    action: str | None = Query(None, description="Filter by action"),
+    supply_wb_id: str | None = Query(None, description="Filter by WB supply id"),
+    limit: int = Query(100, le=500),
+    offset: int = Query(0, ge=0),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Global audit feed across all supplies — newest first."""
+    entries, total = await fbo_supply_service.get_audit_list(
+        db,
+        project.id,
+        action=action,
+        supply_wb_id=supply_wb_id,
+        limit=limit,
+        offset=offset,
+    )
+    return FboAuditListResponse(entries=entries, total=total)
+
+
+@router.get("/{supply_id}/audit", response_model=FboAuditResponse)
+async def get_fbo_audit(
+    supply_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """History of user actions for this supply, newest first."""
+    entries = await fbo_supply_service.get_audit_trail(db, project.id, supply_id)
+    return FboAuditResponse(supply_id=supply_id, entries=entries)
+
+
+@router.post(
+    "/audit/{audit_id}/revert",
+    response_model=FboAuditRevertResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def revert_fbo_audit(
+    audit_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Undo a prior reversible action (ARCHIVE/UNARCHIVE/REASSIGN)."""
+    try:
+        result = await fbo_supply_service.revert_audit_entry(
+            db,
+            project.id,
+            audit_id,
+            user_id=user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    return FboAuditRevertResponse(**result)

@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatDateTime } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { WbFboSupply, WbFboSupplyItem, Warehouse, FboReturnType, FboPartialSummary, FboReassignCandidate } from '@/types/api';
+import type { WbFboSupply, WbFboSupplyItem, Warehouse, FboReturnType, FboPartialSummary, FboReassignCandidate, FboAuditEntry } from '@/types/api';
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -396,6 +396,9 @@ export default function FboSuppliesPage() {
                     <Link href={`/p/${slug}/warehouse/fbo-supplies/archive`} className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--color-text-muted)', textDecoration: 'none' }}>
                         📁 Архив
                     </Link>
+                    <Link href={`/p/${slug}/warehouse/fbo-supplies/history`} className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--color-text-muted)', textDecoration: 'none' }}>
+                        🕐 История
+                    </Link>
                 </div>
             </div>
 
@@ -558,6 +561,13 @@ export default function FboSuppliesPage() {
                                                         onOpenReturn={() => setReturnState({ supply, items: expandedItems })}
                                                         onOpenExcess={() => setExcessState({ supply, items: expandedItems })}
                                                         onOpenReassign={() => setReassignState({ supply })}
+                                                        onAfterRevert={async () => {
+                                                            setExpandedId(null);
+                                                            setExpandedItems([]);
+                                                            await load();
+                                                            loadSummary();
+                                                            loadPartialSummary();
+                                                        }}
                                                         onArchive={async () => {
                                                             try {
                                                                 await api.setFboSupplyArchive(supply.id, true);
@@ -1436,6 +1446,7 @@ function SupplyItemsPanel({
     onOpenReturn,
     onOpenExcess,
     onOpenReassign,
+    onAfterRevert,
     onArchive,
 }: {
     supply: WbFboSupply;
@@ -1445,6 +1456,7 @@ function SupplyItemsPanel({
     onOpenReturn: () => void;
     onOpenExcess?: () => void;
     onOpenReassign?: () => void;
+    onAfterRevert?: () => void | Promise<void>;
     onArchive?: () => void;
 }) {
     if (loading) {
@@ -1628,6 +1640,201 @@ function SupplyItemsPanel({
                         />
                     );
                 })()
+            )}
+
+            {/* Audit trail (история действий) */}
+            <SupplyAuditPanel supplyId={supply.id} onAfterRevert={onAfterRevert} />
+        </div>
+    );
+}
+
+
+// ─── Audit trail panel ──────────────────────────────────────────────────────
+
+const ACTION_LABEL: Record<string, string> = {
+    ARCHIVE: 'В архив',
+    UNARCHIVE: 'Из архива / автоправило',
+    BULK_RESTORE: 'Массовое восстановление',
+    RETURN: 'Обработана недоприёмка',
+    EXCESS: 'Списан излишек',
+    REASSIGN: 'Привязана как доприёмка',
+    REVERT: 'Откат действия',
+};
+
+const ACTION_ICON: Record<string, string> = {
+    ARCHIVE: '📁',
+    UNARCHIVE: '♻️',
+    BULK_RESTORE: '♻️',
+    RETURN: '↩️',
+    EXCESS: '📤',
+    REASSIGN: '📦',
+    REVERT: '↶',
+};
+
+function formatAuditPayload(entry: FboAuditEntry): string {
+    const p = entry.payload || {};
+    switch (entry.action) {
+        case 'ARCHIVE':
+        case 'UNARCHIVE': {
+            const nv = p.new;
+            const ov = p.old;
+            const fmt = (v: unknown) => v === true ? 'в архиве' : v === false ? 'активна' : 'автоправило';
+            return `${fmt(ov)} → ${fmt(nv)}`;
+        }
+        case 'REASSIGN': {
+            const tgt = p.target_wb_supply_id;
+            const qty = p.reassigned_qty;
+            return `${qty} шт → в поставку FBW-${tgt}`;
+        }
+        case 'RETURN': {
+            const type = p.return_type || '—';
+            const qty = p.return_qty || 0;
+            const receipt = p.receipt_number;
+            return `${qty} шт, тип: ${type}${receipt ? `, приёмка ${receipt}` : ''}`;
+        }
+        case 'EXCESS': {
+            const qty = p.excess_qty || 0;
+            const num = p.shipment_number;
+            return `${qty} шт, отгрузка ${num || '—'}`;
+        }
+        case 'REVERT': {
+            const orig = p.action || '';
+            return `откат действия «${ACTION_LABEL[orig as string] || orig}»`;
+        }
+        case 'BULK_RESTORE':
+            return 'восстановлена из архива (bulk)';
+        default:
+            return '';
+    }
+}
+
+function SupplyAuditPanel({
+    supplyId,
+    onAfterRevert,
+}: {
+    supplyId: number;
+    onAfterRevert?: () => void | Promise<void>;
+}) {
+    const [open, setOpen] = useState(false);
+    const [entries, setEntries] = useState<FboAuditEntry[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [reverting, setReverting] = useState<number | null>(null);
+    const [err, setErr] = useState('');
+
+    const load = useCallback(async () => {
+        setLoading(true);
+        setErr('');
+        try {
+            const resp = await api.getFboSupplyAudit(supplyId);
+            setEntries(resp.entries);
+        } catch (e: unknown) {
+            setErr(e instanceof Error ? e.message : 'Ошибка');
+        } finally {
+            setLoading(false);
+        }
+    }, [supplyId]);
+
+    useEffect(() => {
+        if (open) load();
+    }, [open, load]);
+
+    const revert = async (auditId: number) => {
+        if (!confirm('Откатить это действие?')) return;
+        setReverting(auditId);
+        setErr('');
+        try {
+            await api.revertFboAudit(auditId);
+            await load();
+            if (onAfterRevert) await onAfterRevert();
+        } catch (e: unknown) {
+            setErr(e instanceof Error ? e.message : 'Ошибка');
+        } finally {
+            setReverting(null);
+        }
+    };
+
+    return (
+        <div style={{ marginTop: 16 }}>
+            <button
+                type="button"
+                onClick={() => setOpen(o => !o)}
+                style={{
+                    display: 'flex', alignItems: 'center', gap: 6, width: '100%',
+                    padding: '8px 12px', borderRadius: 8, border: '1px solid var(--color-border)',
+                    background: open ? 'var(--color-bg)' : 'transparent',
+                    cursor: 'pointer', fontSize: 13, fontWeight: 500, color: 'var(--color-text)',
+                    transition: 'background 0.15s',
+                }}
+            >
+                <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                    {open ? '\u25BC' : '\u25B6'}
+                </span>
+                🕐 История действий {entries.length > 0 && `(${entries.length})`}
+            </button>
+            {open && (
+                <div style={{ marginTop: 8, border: '1px solid var(--color-border)', borderRadius: 8, overflow: 'hidden' }}>
+                    {loading ? (
+                        <div style={{ padding: 16, textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 13 }}>
+                            Загрузка...
+                        </div>
+                    ) : err ? (
+                        <div style={{ padding: 12, color: 'var(--color-danger)', fontSize: 13 }}>{err}</div>
+                    ) : entries.length === 0 ? (
+                        <div style={{ padding: 16, textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 13 }}>
+                            Действий пока не было
+                        </div>
+                    ) : (
+                        <table className="data-table" style={{ fontSize: 13, margin: 0 }}>
+                            <thead>
+                                <tr>
+                                    <th style={{ paddingLeft: 12, width: 40 }}></th>
+                                    <th>Действие</th>
+                                    <th>Детали</th>
+                                    <th style={{ textAlign: 'right', paddingRight: 12, width: 140 }}>Когда</th>
+                                    <th style={{ textAlign: 'right', paddingRight: 12, width: 120 }}></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {entries.map(e => {
+                                    const isReverted = e.reverted_at !== null;
+                                    return (
+                                        <tr key={e.id} style={isReverted ? { opacity: 0.55 } : undefined}>
+                                            <td style={{ paddingLeft: 12, fontSize: 18 }}>{ACTION_ICON[e.action] || '•'}</td>
+                                            <td>
+                                                <div style={{ fontWeight: 500 }}>
+                                                    {ACTION_LABEL[e.action] || e.action}
+                                                </div>
+                                                {isReverted && (
+                                                    <span className="badge badge-secondary" style={{ fontSize: 10 }}>
+                                                        откачено
+                                                    </span>
+                                                )}
+                                            </td>
+                                            <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                                {formatAuditPayload(e)}
+                                            </td>
+                                            <td style={{ textAlign: 'right', paddingRight: 12, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                                {formatDateTime(e.created_at)}
+                                            </td>
+                                            <td style={{ textAlign: 'right', paddingRight: 12 }}>
+                                                {e.revertible && !isReverted && (
+                                                    <button
+                                                        className="btn btn-secondary btn-sm"
+                                                        onClick={() => revert(e.id)}
+                                                        disabled={reverting !== null}
+                                                        title="Откатить это действие"
+                                                    >
+                                                        {reverting === e.id ? '...' : '↶ Откатить'}
+                                                    </button>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    )}
+                </div>
             )}
         </div>
     );

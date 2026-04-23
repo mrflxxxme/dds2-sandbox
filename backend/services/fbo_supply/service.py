@@ -141,6 +141,8 @@ async def get_fbo_summary(
 async def get_partial_acceptance_summary(
     db: AsyncSession,
     project_id: int,
+    accounting_started_at: date | None = None,
+    archived_view: bool = False,
 ) -> dict[str, Any]:
     """
     Недоприёмка dashboard: aggregates across ALL partial-accepted supplies
@@ -152,6 +154,9 @@ async def get_partial_acceptance_summary(
       - utilized           return_type = UTILIZED          → sum(return_qty)
 
     Plus items_breakdown: per-barcode aggregate (qty not accepted across supplies).
+
+    Honors the same archive/date-cutoff as the main list view — otherwise the
+    dashboard would count supplies hidden from the table (confusing mismatch).
     """
     # Supply-level aggregates
     supplies_q = select(WbFboSupply).where(
@@ -159,6 +164,7 @@ async def get_partial_acceptance_summary(
         WbFboSupply.wb_status == WbSupplyStatus.ACCEPTED,
         WbFboSupply.total_qty > 0,
         WbFboSupply.accepted_qty < WbFboSupply.total_qty,
+        _archive_clause(accounting_started_at, archived_view),
     )
     result = await db.execute(supplies_q)
     supplies = list(result.scalars().all())
@@ -421,7 +427,7 @@ async def list_fbo_supplies(
                 WbFboSupply.project_id == project_id,
             )
         )
-        reassign_target_wb_id = {row.id: row.wb_supply_id for row in target_result.all()}
+        reassign_target_wb_id = {tgt_row.id: tgt_row.wb_supply_id for tgt_row in target_result.all()}
 
     reassign_source_wb_ids: dict[int, list[str]] = {}
     if supply_ids:
@@ -431,8 +437,8 @@ async def list_fbo_supplies(
                 WbFboSupply.project_id == project_id,
             )
         )
-        for row in source_result.all():
-            reassign_source_wb_ids.setdefault(row.reassigned_to_supply_id, []).append(row.wb_supply_id)
+        for src_row in source_result.all():
+            reassign_source_wb_ids.setdefault(src_row.reassigned_to_supply_id, []).append(src_row.wb_supply_id)
 
     # Enrich with outbound shipment info (single query)
     # supply_id -> (number, status, warehouse_id)
@@ -483,6 +489,7 @@ async def restore_linked_from_archive(
     db: AsyncSession,
     project_id: int,
     accounting_started_at: date | None,
+    user_id: int | None = None,
 ) -> int:
     """
     Bulk-restore from archive all supplies that were linked to our
@@ -504,10 +511,23 @@ async def restore_linked_from_archive(
             WbFboSupply.id.in_(linked_asm_ids),
         ),
     )
+    from backend.models.wb_fbo import FboAuditAction
+
+    from .audit import log_action
+
     result = await db.execute(query)
     supplies = list(result.scalars().all())
     for s in supplies:
+        old = s.is_archived
         s.is_archived = False
+        await log_action(
+            db,
+            project_id=project_id,
+            supply_id=s.id,
+            action=FboAuditAction.BULK_RESTORE,
+            payload={"old": old, "new": False},
+            user_id=user_id,
+        )
     await db.commit()
     return len(supplies)
 
@@ -517,12 +537,17 @@ async def set_archive_flag(
     project_id: int,
     supply_id: int,
     is_archived: bool | None,
+    user_id: int | None = None,
 ) -> WbFboSupply:
     """
     Override the auto archive rule for a single supply.
     is_archived=True → manually move to archive; False → restore from archive;
     None → reset to auto rule (date-based).
     """
+    from backend.models.wb_fbo import FboAuditAction
+
+    from .audit import log_action
+
     result = await db.execute(
         select(WbFboSupply).where(
             WbFboSupply.id == supply_id,
@@ -532,7 +557,17 @@ async def set_archive_flag(
     supply = result.scalar_one_or_none()
     if supply is None:
         raise ValueError("FBO supply not found")
+    old = supply.is_archived
     supply.is_archived = is_archived
+    action = FboAuditAction.ARCHIVE if is_archived else FboAuditAction.UNARCHIVE
+    await log_action(
+        db,
+        project_id=project_id,
+        supply_id=supply_id,
+        action=action,
+        payload={"old": old, "new": is_archived},
+        user_id=user_id,
+    )
     await db.commit()
     await db.refresh(supply)
     return supply
@@ -729,6 +764,7 @@ async def reassign_to_supply(
     project_id: int,
     source_supply_id: int,
     target_supply_id: int,
+    user_id: int | None = None,
 ) -> dict[str, Any]:
     """
     Link source supply → target supply: add source item accepted qty to target's
@@ -743,11 +779,15 @@ async def reassign_to_supply(
         raise ValueError("Source and target must differ")
 
     ids = [source_supply_id, target_supply_id]
+    # Row-level lock to prevent concurrent reassigns into the same target
+    # (two races could both read stale accepted_qty and over-increment).
     result = await db.execute(
-        select(WbFboSupply).where(
+        select(WbFboSupply)
+        .where(
             WbFboSupply.id.in_(ids),
             WbFboSupply.project_id == project_id,
         )
+        .with_for_update()
     )
     supplies = {s.id: s for s in result.scalars().all()}
     source = supplies.get(source_supply_id)
@@ -772,16 +812,20 @@ async def reassign_to_supply(
         raise ValueError("Source supply has no items to reassign")
 
     target_items_result = await db.execute(
-        select(WbFboSupplyItem).where(
+        select(WbFboSupplyItem)
+        .where(
             WbFboSupplyItem.supply_id == target_supply_id,
             WbFboSupplyItem.project_id == project_id,
         )
+        .with_for_update()
     )
     target_items_by_barcode: dict[str, list[WbFboSupplyItem]] = {}
     for item in target_items_result.scalars().all():
         target_items_by_barcode.setdefault(item.barcode, []).append(item)
 
     reassigned_qty = 0
+    # Track per-item deltas so we can revert precisely (target.items[i].accepted_qty)
+    target_item_deltas: list[tuple[int, int]] = []
     for src in source_items:
         src_qty = int(src.accepted_qty or 0)
         if src_qty <= 0:
@@ -798,6 +842,7 @@ async def reassign_to_supply(
             tgt.accepted_qty = int(tgt.accepted_qty or 0) + take
             remaining -= take
             reassigned_qty += take
+            target_item_deltas.append((tgt.id, take))
         if remaining > 0:
             raise ValueError(
                 f"Barcode {src.barcode}: source has {src_qty} шт but target has "
@@ -808,8 +853,28 @@ async def reassign_to_supply(
         raise ValueError("No matching barcodes between source and target")
 
     target.accepted_qty = int(target.accepted_qty or 0) + reassigned_qty
+    old_is_archived = source.is_archived  # snapshot for revert
     source.reassigned_to_supply_id = target.id
     source.is_archived = True
+
+    from backend.models.wb_fbo import FboAuditAction
+
+    from .audit import log_action
+
+    await log_action(
+        db,
+        project_id=project_id,
+        supply_id=source.id,
+        action=FboAuditAction.REASSIGN,
+        payload={
+            "target_supply_id": target.id,
+            "target_wb_supply_id": target.wb_supply_id,
+            "reassigned_qty": reassigned_qty,
+            "target_items": target_item_deltas,
+            "old_is_archived": old_is_archived,
+        },
+        user_id=user_id,
+    )
 
     await db.commit()
     await db.refresh(source)

@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -155,4 +156,57 @@ class WbFboSupplyItem(Base):
     __table_args__ = (
         Index("ix_wb_fbo_supply_items_project_id", "project_id"),
         Index("ix_wb_fbo_supply_items_supply_id", "supply_id"),
+    )
+
+
+# ─── Audit trail for FBO user actions ─────────────────────────────────────
+
+
+class FboAuditAction(str, enum.Enum):
+    """Actions tracked in FboSupplyAudit. Automatic WB-sync changes are not logged."""
+
+    ARCHIVE = "ARCHIVE"  # manual move to archive (is_archived=True)
+    UNARCHIVE = "UNARCHIVE"  # manual restore (is_archived=False) or reset to auto (None)
+    BULK_RESTORE = "BULK_RESTORE"  # restore all linked supplies from archive
+    RETURN = "RETURN"  # process unaccepted qty (GOODS/DEFECT/UTILIZED/MIXED)
+    EXCESS = "EXCESS"  # write off overshoot from stock
+    REASSIGN = "REASSIGN"  # link this supply as a доприёмка to another
+    REVERT = "REVERT"  # undo of a prior audit entry (reverted_audit_id set)
+
+
+class FboSupplyAudit(Base):
+    """Append-only log of user-initiated changes to a WbFboSupply.
+
+    Only reversible trivial actions (ARCHIVE/UNARCHIVE/REASSIGN) can be
+    rolled back via UI — RETURN/EXCESS touch physical stock and require
+    a separate handled-by-human workflow.
+    """
+
+    __tablename__ = "wb_fbo_supply_audit"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    # SET NULL (not CASCADE) — audit is append-only, must survive supply removal.
+    supply_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("wb_fbo_supplies.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    # payload — snapshot of what changed (old/new values, related IDs)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    # For REVERT rows — which audit entry was rolled back (self-FK, append-only)
+    reverted_audit_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("wb_fbo_supply_audit.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Set on the ORIGINAL row when it gets reverted (null → still active)
+    reverted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_wb_fbo_supply_audit_supply", "supply_id", "created_at"),
+        Index("ix_wb_fbo_supply_audit_project", "project_id", "created_at"),
     )

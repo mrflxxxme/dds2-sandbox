@@ -171,6 +171,8 @@ from backend.models.warehouse import (
 
 # WB FBO Supplies
 from backend.models.wb_fbo import (
+    FboAuditAction,
+    FboSupplyAudit,
     WbFboSupply,
     WbFboSupplyItem,
     WbSupplyStatus,
@@ -185,6 +187,11 @@ from backend.models.wb_finance import (
 # WB Order Cancel Stats
 from backend.models.wb_order_cancel import (
     WbOrderCancelDaily,
+)
+
+# WB Goods Returns (отчёт по возвратам на ПВЗ)
+from backend.models.wb_returns import (
+    WbGoodsReturn,
 )
 
 # WB Tariffs (commission rates by subject)
@@ -300,9 +307,13 @@ __all__ = [
     # WB Order Cancel Stats
     "WbOrderCancelDaily",
     # WB FBO Supplies
+    "FboAuditAction",
+    "FboSupplyAudit",
     "WbFboSupply",
     "WbFboSupplyItem",
     "WbSupplyStatus",
+    # WB Goods Returns
+    "WbGoodsReturn",
     # Supply Chain
     "FactoryOrder",
     "FactoryOrderHistory",

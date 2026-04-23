@@ -11,6 +11,7 @@ Modules:
   - returns: Handle unaccepted qty (GOODS/DEFECT/UTILIZED)
 """
 
+from .audit import get_audit_list, get_audit_trail, log_action, revert_audit_entry
 from .mappers import (
     FBW_BOX_TYPE_MAP,
     FBW_RATE_LIMIT_DELAY,
@@ -45,6 +46,11 @@ from .sync import (
 )
 
 __all__ = [
+    # audit
+    "get_audit_list",
+    "get_audit_trail",
+    "log_action",
+    "revert_audit_entry",
     # mappers
     "FBW_BOX_TYPE_MAP",
     "FBW_RATE_LIMIT_DELAY",
