@@ -13,7 +13,13 @@ import type {
     DefectOperation,
     DeliveryTimesResponse,
     DeliveryTimesUpdate,
+    FboAuditListResponse,
+    FboAuditResponse,
+    FboAuditRevertResponse,
     FboPartialSummary,
+    FboReassignCandidatesResponse,
+    FboReassignRequest,
+    FboReassignResponse,
     FboReturnRequest,
     FboReturnResponse,
     FboSyncResult,
@@ -40,6 +46,9 @@ export function addWarehouseMethods(api: ApiClient) {
         getWarehouses() { return api.request<Warehouse[]>('GET', '/api/v1/warehouse'); },
         createWarehouse(data: Partial<Warehouse>) { return api.request<Warehouse>('POST', '/api/v1/warehouse', data); },
         updateWarehouse(id: number, data: Partial<Warehouse>) { return api.request<Warehouse>('PUT', `/api/v1/warehouse/${id}`, data); },
+        setWarehouseCounterparty(id: number, data: { inn: string | null; name: string | null }) {
+            return api.request<Warehouse>('PATCH', `/api/v1/warehouse/${id}/counterparty`, data);
+        },
         deleteWarehouse(id: number) { return api.request<MessageResponse>('DELETE', `/api/v1/warehouse/${id}`); },
         reorderWarehouses(items: { id: number; sort_order: number }[]) {
             return api.request<MessageResponse>('PUT', '/api/v1/warehouse/reorder', { items });
@@ -147,6 +156,8 @@ export function addWarehouseMethods(api: ApiClient) {
             exclude_with_assembly?: boolean;
             without_assembly?: boolean;
             partial_only?: boolean;
+            excess_only?: boolean;
+            archived_view?: boolean;
         }) {
             const query = new URLSearchParams();
             if (params) {
@@ -157,10 +168,45 @@ export function addWarehouseMethods(api: ApiClient) {
             const qs = query.toString();
             return api.request<WbFboSupplyListResponse>('GET', `/api/v1/warehouse/fbo-supplies${qs ? `?${qs}` : ''}`);
         },
-        getFboSuppliesSummary() {
-            return api.request<{ total: number; accepted: number; accepted_without_assembly: number; accepted_partial: number }>(
+        getFboSuppliesSummary(params?: {
+            date_from?: string; date_to?: string;
+            warehouse?: string; status?: string; archived_view?: boolean;
+        }) {
+            const query = new URLSearchParams();
+            if (params) {
+                Object.entries(params).forEach(([k, v]) => {
+                    if (v !== undefined && v !== null && v !== '' && v !== false) query.set(k, String(v));
+                });
+            }
+            const qs = query.toString();
+            return api.request<{ total: number; accepted: number; accepted_without_assembly: number; accepted_partial: number; accepted_excess: number }>(
                 'GET',
-                '/api/v1/warehouse/fbo-supplies/summary',
+                `/api/v1/warehouse/fbo-supplies/summary${qs ? `?${qs}` : ''}`,
+            );
+        },
+        setFboSupplyArchive(supplyId: number, isArchived: boolean | null) {
+            return api.request<WbFboSupply>(
+                'PATCH',
+                `/api/v1/warehouse/fbo-supplies/${supplyId}/archive`,
+                { is_archived: isArchived },
+            );
+        },
+        restoreLinkedFromArchive() {
+            return api.request<{ restored: number }>(
+                'POST',
+                '/api/v1/warehouse/fbo-supplies/archive/restore-linked',
+                {},
+            );
+        },
+        processFboExcess(supplyId: number, payload: {
+            warehouse_id: number;
+            items: { barcode: string; quantity: number }[];
+            comment?: string;
+        }) {
+            return api.request<{ supply_id: number; shipment_id: number; shipment_number: string; total_qty: number }>(
+                'POST',
+                `/api/v1/warehouse/fbo-supplies/${supplyId}/excess`,
+                payload,
             );
         },
         getFboPartialSummary() {
@@ -181,6 +227,44 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         createFboReturn(supplyId: number, payload: FboReturnRequest) {
             return api.request<FboReturnResponse>('POST', `/api/v1/warehouse/fbo-supplies/${supplyId}/return`, payload);
+        },
+        getFboReassignCandidates(supplyId: number) {
+            return api.request<FboReassignCandidatesResponse>(
+                'GET',
+                `/api/v1/warehouse/fbo-supplies/${supplyId}/reassign/candidates`,
+            );
+        },
+        reassignFboSupply(supplyId: number, payload: FboReassignRequest) {
+            return api.request<FboReassignResponse>(
+                'POST',
+                `/api/v1/warehouse/fbo-supplies/${supplyId}/reassign`,
+                payload,
+            );
+        },
+        getFboSupplyAudit(supplyId: number) {
+            return api.request<FboAuditResponse>(
+                'GET',
+                `/api/v1/warehouse/fbo-supplies/${supplyId}/audit`,
+            );
+        },
+        getFboAuditList(params?: { action?: string; supply_wb_id?: string; limit?: number; offset?: number }) {
+            const q = new URLSearchParams();
+            if (params?.action) q.set('action', params.action);
+            if (params?.supply_wb_id) q.set('supply_wb_id', params.supply_wb_id);
+            if (params?.limit !== undefined) q.set('limit', String(params.limit));
+            if (params?.offset !== undefined) q.set('offset', String(params.offset));
+            const qs = q.toString();
+            return api.request<FboAuditListResponse>(
+                'GET',
+                `/api/v1/warehouse/fbo-supplies/audit${qs ? '?' + qs : ''}`,
+            );
+        },
+        revertFboAudit(auditId: number) {
+            return api.request<FboAuditRevertResponse>(
+                'POST',
+                `/api/v1/warehouse/fbo-supplies/audit/${auditId}/revert`,
+                {},
+            );
         },
 
         // ─── WB Warehouse Names ─────────────────────────────────────────
@@ -226,6 +310,8 @@ export function addWarehouseMethods(api: ApiClient) {
             pickup_time_slot: string;
             pickup_cost: number;
             delivery_date: string;
+            carrier_inn?: string | null;
+            carrier_name?: string | null;
         }) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/assign-vehicle`, data);
         },
@@ -242,6 +328,8 @@ export function addWarehouseMethods(api: ApiClient) {
             vehicle_info: string;
             vehicle_brand: string;
             driver_phone: string;
+            carrier_inn?: string | null;
+            carrier_name?: string | null;
             items: Array<{
                 request_id: number;
                 pickup_date: string;

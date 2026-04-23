@@ -26,6 +26,9 @@ from backend.models.warehouse import (
     InboundReceiptItem,
     InboundStatus,
     MovementType,
+    OutboundShipment,
+    OutboundShipmentItem,
+    OutboundStatus,
     Warehouse,
 )
 from backend.models.wb_fbo import WbFboSupply
@@ -52,6 +55,7 @@ async def process_fbo_return(
     items: list[dict[str, Any]],
     warehouse_id: int | None = None,
     comment: str | None = None,
+    user_id: int | None = None,
 ) -> dict[str, Any]:
     """
     Handle unaccepted qty for a WbFboSupply — mixed mode (per-item return_type).
@@ -126,12 +130,35 @@ async def process_fbo_return(
 
     supply.return_processed_at = utcnow()
     supply.return_qty = sum(int(r.get("quantity") or 0) for r in items)
+
+    from backend.models.wb_fbo import FboAuditAction
+
+    from .audit import log_action
+
+    await log_action(
+        db,
+        project_id=project_id,
+        supply_id=supply.id,
+        action=FboAuditAction.RETURN,
+        payload={
+            "items": items,
+            "warehouse_id": warehouse_id,
+            "return_type": supply.return_type,
+            "return_qty": supply.return_qty,
+            "receipt_id": result.get("receipt_id"),
+            "receipt_number": result.get("receipt_number"),
+            "comment": comment,
+        },
+        user_id=user_id,
+    )
     await db.commit()
     result["supply_id"] = supply.id
     return result
 
 
 async def _load_supply(db: AsyncSession, project_id: int, supply_id: int) -> WbFboSupply | None:
+    """Row-level lock on supply — prevents double-submit races on
+    return_processed_at / excess_processed_at guards."""
     result = await db.execute(
         select(WbFboSupply)
         .where(
@@ -139,6 +166,7 @@ async def _load_supply(db: AsyncSession, project_id: int, supply_id: int) -> WbF
             WbFboSupply.project_id == project_id,
         )
         .options(selectinload(WbFboSupply.items))
+        .with_for_update()
     )
     return result.scalar_one_or_none()
 
@@ -249,6 +277,139 @@ async def _create_return_receipt(
 
     await db.flush()
     return receipt
+
+
+async def process_fbo_excess(
+    db: AsyncSession,
+    project_id: int,
+    supply_id: int,
+    items: list[dict[str, Any]],
+    warehouse_id: int,
+    comment: str | None = None,
+    user_id: int | None = None,
+) -> dict[str, Any]:
+    """
+    Handle excess (overshoot) qty for a WbFboSupply: WB accepted MORE than
+    we shipped per barcode. User chooses a warehouse to write off the delta
+    from. Creates an OutboundShipment + items + stock adjustment, then
+    flags supply.excess_processed_at.
+    """
+    supply = await _load_supply(db, project_id, supply_id)
+    if supply is None:
+        raise ValueError("FBO Supply not found")
+    if supply.excess_processed_at is not None:
+        raise ValueError("Excess already processed for this supply")
+
+    _validate_items_against_excess(supply, items)
+
+    wh = (
+        await db.execute(
+            select(Warehouse).where(
+                Warehouse.id == warehouse_id,
+                Warehouse.project_id == project_id,
+                Warehouse.is_deleted == False,  # noqa: E712
+            )
+        )
+    ).scalar_one_or_none()
+    if wh is None:
+        raise ValueError("Warehouse not found")
+
+    barcodes = [row["barcode"] for row in items]
+    barcode_map = await _resolve_barcodes_batch(db, project_id, barcodes)
+
+    number = await _next_number(db, project_id, "OUT", OutboundShipment)
+    auto_comment = f"Излишек по поставке FBW-{supply.wb_supply_id} (WB принял больше отправленного)"
+    if comment:
+        auto_comment = f"{auto_comment}. {comment}"
+
+    shipment = OutboundShipment(
+        project_id=project_id,
+        warehouse_id=warehouse_id,
+        number=number,
+        status=OutboundStatus.SHIPPED,
+        shipped_date=utcnow().date(),
+        comment=auto_comment,
+    )
+    db.add(shipment)
+    await db.flush()
+
+    total_qty = 0
+    for row in items:
+        bc = row["barcode"]
+        qty = int(row["quantity"])
+        nom = barcode_map.get(bc)
+        if nom is None:
+            raise ValueError(f"Nomenclature not found for barcode {bc}")
+        db.add(
+            OutboundShipmentItem(
+                project_id=project_id,
+                shipment_id=shipment.id,
+                nomenclature_id=nom.id,
+                barcode=bc,
+                quantity=qty,
+            )
+        )
+        await _update_stock(
+            db,
+            project_id=project_id,
+            warehouse_id=warehouse_id,
+            nomenclature_id=nom.id,
+            barcode=bc,
+            delta=-qty,
+            movement_type=MovementType.OUTBOUND,
+            reference_type="SHIPMENT",
+            reference_id=shipment.id,
+            comment=f"Излишек FBW-{supply.wb_supply_id}",
+        )
+        total_qty += qty
+
+    supply.excess_processed_at = utcnow()
+    supply.excess_qty = total_qty
+
+    from backend.models.wb_fbo import FboAuditAction
+
+    from .audit import log_action
+
+    await log_action(
+        db,
+        project_id=project_id,
+        supply_id=supply.id,
+        action=FboAuditAction.EXCESS,
+        payload={
+            "items": items,
+            "warehouse_id": warehouse_id,
+            "excess_qty": total_qty,
+            "shipment_id": shipment.id,
+            "shipment_number": shipment.number,
+            "comment": comment,
+        },
+        user_id=user_id,
+    )
+    await db.commit()
+
+    return {
+        "supply_id": supply.id,
+        "shipment_id": shipment.id,
+        "shipment_number": shipment.number,
+        "total_qty": total_qty,
+    }
+
+
+def _validate_items_against_excess(supply: WbFboSupply, items: list[dict[str, Any]]) -> None:
+    """Excess delta = max(0, accepted - quantity) per barcode."""
+    if not items:
+        raise ValueError("items must not be empty")
+    excess_by_barcode: dict[str, int] = {
+        it.barcode: max(0, (it.accepted_qty or 0) - (it.quantity or 0)) for it in supply.items
+    }
+    for row in items:
+        bc = row.get("barcode")
+        qty = int(row.get("quantity", 0) or 0)
+        if not bc or qty <= 0:
+            raise ValueError("items[*].barcode and items[*].quantity > 0 are required")
+        available = excess_by_barcode.get(bc, 0)
+        if qty > available:
+            raise ValueError(f"qty {qty} > excess delta {available} for barcode {bc}")
 
 
 async def _log_utilization(

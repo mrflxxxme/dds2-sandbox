@@ -171,6 +171,8 @@ from backend.models.warehouse import (
 
 # WB FBO Supplies
 from backend.models.wb_fbo import (
+    FboAuditAction,
+    FboSupplyAudit,
     WbFboSupply,
     WbFboSupplyItem,
     WbSupplyStatus,
@@ -300,6 +302,8 @@ __all__ = [
     # WB Order Cancel Stats
     "WbOrderCancelDaily",
     # WB FBO Supplies
+    "FboAuditAction",
+    "FboSupplyAudit",
     "WbFboSupply",
     "WbFboSupplyItem",
     "WbSupplyStatus",

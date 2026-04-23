@@ -11,6 +11,7 @@ Modules:
   - returns: Handle unaccepted qty (GOODS/DEFECT/UTILIZED)
 """
 
+from .audit import get_audit_list, get_audit_trail, log_action, revert_audit_entry
 from .mappers import (
     FBW_BOX_TYPE_MAP,
     FBW_RATE_LIMIT_DELAY,
@@ -24,13 +25,17 @@ from .mappers import (
     _update_supply_from_fbw_list,
     _upsert_supply_items_fbw,
 )
-from .returns import FboReturnType, process_fbo_return
+from .returns import FboReturnType, process_fbo_excess, process_fbo_return
 from .service import (
     get_fbo_summary,
     get_fbo_supply_items,
     get_partial_acceptance_summary,
+    get_reassignment_candidates,
     list_fbo_supplies,
     list_warehouses,
+    reassign_to_supply,
+    restore_linked_from_archive,
+    set_archive_flag,
 )
 from .sync import (
     _auto_deliver_assembly,
@@ -41,6 +46,11 @@ from .sync import (
 )
 
 __all__ = [
+    # audit
+    "get_audit_list",
+    "get_audit_trail",
+    "log_action",
+    "revert_audit_entry",
     # mappers
     "FBW_BOX_TYPE_MAP",
     "FBW_RATE_LIMIT_DELAY",
@@ -57,8 +67,12 @@ __all__ = [
     "get_fbo_summary",
     "get_fbo_supply_items",
     "get_partial_acceptance_summary",
+    "get_reassignment_candidates",
     "list_fbo_supplies",
     "list_warehouses",
+    "reassign_to_supply",
+    "restore_linked_from_archive",
+    "set_archive_flag",
     # sync
     "_auto_deliver_assembly",
     "_auto_deliver_shipment",
@@ -67,5 +81,6 @@ __all__ = [
     "sync_fbo_supplies",
     # returns
     "FboReturnType",
+    "process_fbo_excess",
     "process_fbo_return",
 ]

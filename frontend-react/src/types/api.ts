@@ -822,6 +822,7 @@ export interface Warehouse {
   total_stock: number;
   vehicles_in_transit: number;
   counterparty_id?: number | null;
+  counterparty_inn?: string | null;
   counterparty_name?: string | null;
   created_at?: string;
   updated_at?: string;
@@ -1288,6 +1289,12 @@ export interface WbFboSupply {
   outbound_shipment_number?: string;
   outbound_shipment_status?: string;
   outbound_shipment_warehouse_id?: number;
+  is_archived?: boolean | null;
+  excess_processed_at?: string | null;
+  excess_qty?: number | null;
+  reassigned_to_supply_id?: number | null;
+  reassigned_to_wb_supply_id?: string | null;
+  reassigned_from_wb_supply_ids?: string[];
   assembly_request_id?: number;
   assembly_request_number?: string;
   assembly_request_status?: string;
@@ -1360,6 +1367,81 @@ export interface FboSyncResult {
   message: string;
 }
 
+export interface FboReassignCandidateItem {
+  barcode: string;
+  article_seller?: string | null;
+  product_name?: string | null;
+  quantity: number;
+  accepted_qty: number;
+  unaccepted_delta: number;
+}
+
+export interface FboReassignCandidate {
+  id: number;
+  wb_supply_id: string;
+  warehouse_name?: string | null;
+  created_at_wb: string;
+  total_qty: number;
+  accepted_qty: number;
+  same_warehouse: boolean;
+  matched_qty: number;
+  matched_items: FboReassignCandidateItem[];
+}
+
+export interface FboReassignCandidatesResponse {
+  source_supply_id: number;
+  candidates: FboReassignCandidate[];
+}
+
+export interface FboReassignRequest {
+  target_supply_id: number;
+}
+
+export interface FboReassignResponse {
+  source_supply_id: number;
+  target_supply_id: number;
+  target_wb_supply_id: string;
+  reassigned_qty: number;
+}
+
+export type FboAuditAction =
+  | 'ARCHIVE' | 'UNARCHIVE' | 'BULK_RESTORE'
+  | 'RETURN' | 'EXCESS' | 'REASSIGN' | 'REVERT';
+
+export interface FboAuditEntry {
+  id: number;
+  supply_id: number;
+  action: FboAuditAction;
+  payload: Record<string, unknown>;
+  user_id: number | null;
+  created_at: string;
+  reverted_audit_id: number | null;
+  reverted_at: string | null;
+  revertible: boolean;
+}
+
+export interface FboAuditResponse {
+  supply_id: number;
+  entries: FboAuditEntry[];
+}
+
+export interface FboAuditListEntry extends FboAuditEntry {
+  supply_wb_id: string;
+  warehouse_name: string | null;
+  username: string | null;
+}
+
+export interface FboAuditListResponse {
+  entries: FboAuditListEntry[];
+  total: number;
+}
+
+export interface FboAuditRevertResponse {
+  audit_id: number;
+  revert_id: number;
+  action: string;
+}
+
 // ─── Assembly Requests ────────────────────────────────────────────────────
 
 export type AssemblyStatus = 'PENDING' | 'IN_PROGRESS' | 'READY' | 'VEHICLE_ASSIGNED' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED';
@@ -1405,6 +1487,9 @@ export interface AssemblyRequest {
   shipped_at?: string;
   comment?: string;
   brands?: string;
+  counterparty_id?: number | null;
+  carrier_inn?: string | null;
+  carrier_name?: string | null;
   items: AssemblyRequestItem[];
   created_at: string;
   updated_at: string;
@@ -1447,6 +1532,8 @@ export interface AssemblyRequestUpdate {
   vehicle_info?: string;
   vehicle_brand?: string;
   driver_phone?: string;
+  carrier_inn?: string | null;
+  carrier_name?: string | null;
 }
 
 export interface RefreshFromFboResponse {
@@ -2176,12 +2263,18 @@ export interface CounterpartyListItem {
   created_by_import: boolean;
   created_at: string | null;
   updated_at: string | null;
+  /** Per-period turnover; populated when date_from/date_to are passed. */
+  income_rub?: number | null;
+  expense_rub?: number | null;
+  income_cny?: number | null;
+  expense_cny?: number | null;
+  tx_count?: number | null;
 }
 
 export interface CounterpartyDetail extends CounterpartyListItem {
   stats_rub: CounterpartyStats;
   stats_cny: CounterpartyStats;
-  linked_warehouses: { id: number; name: string }[];
+  linked_warehouses: { id: number; name: string; warehouse_type?: string }[];
   linked_suppliers: { id: number; name: string }[];
   active_loans: LoanShort[];
   docs_count: number;
@@ -2226,6 +2319,40 @@ export interface CounterpartyDocument {
 export interface CounterpartyListResponse {
   items: CounterpartyListItem[];
   total: number;
+}
+
+export interface CounterpartyTransactionItem {
+  id: number;
+  date: string;
+  account: string;
+  currency: string;
+  income: number;
+  expense: number;
+  purpose: string | null;
+  event_type2: string | null;
+  loan_payment_type: string | null;
+  contract_number: string | null;
+}
+
+export interface CounterpartyTransactionsResponse {
+  items: CounterpartyTransactionItem[];
+  total: number;
+}
+
+export interface CounterpartyCategorySummary {
+  primary_type: CounterpartyType;
+  count_cps: number;
+  income_rub: number;
+  expense_rub: number;
+  income_cny: number;
+  expense_cny: number;
+  tx_count: number;
+}
+
+export interface CounterpartySummaryResponse {
+  items: CounterpartyCategorySummary[];
+  date_from: string | null;
+  date_to: string | null;
 }
 
 // ─── Loans ───────────────────────────────────────────────────────────────────
@@ -2363,4 +2490,96 @@ export interface CounterpartyTurnoversResponse {
   rows: CounterpartyTurnoverRow[];
   period: { from: string; to: string };
   currency: string;
+}
+
+// ─── WB Goods Returns (отчёт по возвратам и перемещению товаров) ───────────
+
+export type WbGoodsReturnUiState =
+  | 'ready_for_pickup'
+  | 'in_transit_to_pvz'
+  | 'pickup_planned'
+  | 'picked_up_pending_receipt'
+  | 'received'
+  | 'expired'
+  | 'picked_without_receipt';
+
+export interface WbGoodsReturn {
+  id: number;
+  srid: string;
+  shk_id: string | null;
+  sticker_id: string | null;
+  barcode: string | null;
+  nm_id: number | null;
+  subject_name: string | null;
+  brand: string | null;
+  tech_size: string | null;
+  order_id: number | null;
+  order_dt: string | null;
+  ready_to_return_dt: string | null;
+  expired_dt: string | null;
+  completed_dt: string | null;
+  status: string | null;
+  return_type: string | null;
+  reason: string | null;
+  is_status_active: boolean;
+  dst_office_id: number | null;
+  dst_office_address: string | null;
+  inbound_receipt_id: number | null;
+  inbound_receipt_number: string | null;
+  inbound_receipt_status: string | null;
+  inbound_warehouse_id: number | null;
+  inbound_warehouse_name: string | null;
+  ui_state: WbGoodsReturnUiState;
+  synced_at: string;
+}
+
+export interface WbGoodsReturnSummary {
+  ready_for_pickup: number;
+  in_transit_to_pvz: number;
+  soon_expires: number;
+  pickup_planned: number;
+  picked_up_pending_receipt: number;
+  picked_without_receipt: number;
+  expired: number;
+  received: number;
+}
+
+export interface WbGoodsReturnPvzGroup {
+  dst_office_id: number | null;
+  dst_office_address: string | null;
+  total: number;
+  ready_count: number;
+  in_transit_count: number;
+  picked_without_receipt_count: number;
+  nearest_expired_dt: string | null;
+  items: WbGoodsReturn[];
+}
+
+export interface WbGoodsReturnsListResponse {
+  items: WbGoodsReturn[];
+  total: number;
+}
+
+export interface CreateReceiptFromReturnsInput {
+  warehouse_id: number;
+  srids: string[];
+  comment?: string;
+}
+
+export interface CreateReceiptFromReturnsResult {
+  receipt_id: number;
+  receipt_number: string;
+  warehouse_id: number;
+  status: string;
+  items_count: number;
+  linked_srids: string[];
+  /** srid без barcode — залинкованы в приёмку, но без InboundReceiptItem. */
+  skipped_srids: string[];
+}
+
+export interface WbGoodsReturnsSyncResult {
+  rows_fetched: number;
+  rows_upserted: number;
+  started_at: string;
+  finished_at: string;
 }
