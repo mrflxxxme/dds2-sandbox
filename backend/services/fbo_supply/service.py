@@ -18,6 +18,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.assembly import AssemblyRequest, AssemblyStatus
+from backend.models.warehouse import OutboundShipment
 from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem, WbSupplyStatus
 
 from .mappers import _update_supply_from_fbw_detail, _upsert_supply_items_fbw
@@ -326,6 +327,26 @@ async def list_fbo_supplies(
             if row.warehouse_id is not None:
                 source_warehouse_map[row.wb_fbo_supply_id] = row.warehouse_id
 
+    # Enrich with outbound shipment info (single query)
+    # supply_id -> (number, status, warehouse_id)
+    shipment_map: dict[int, tuple[str, str, int]] = {}
+    shipment_ids = [s.outbound_shipment_id for s in supplies if s.outbound_shipment_id]
+    if shipment_ids:
+        ship_result = await db.execute(
+            select(
+                OutboundShipment.id,
+                OutboundShipment.number,
+                OutboundShipment.status,
+                OutboundShipment.warehouse_id,
+            ).where(
+                OutboundShipment.project_id == project_id,
+                OutboundShipment.is_deleted.is_(False),
+                OutboundShipment.id.in_(shipment_ids),
+            )
+        )
+        for ship_row in ship_result.all():
+            shipment_map[ship_row.id] = (ship_row.number, ship_row.status, ship_row.warehouse_id)
+
     # Build enriched dicts
     enriched = []
     for s in supplies:
@@ -335,6 +356,10 @@ async def list_fbo_supplies(
         d["assembly_request_number"] = asm[1] if asm else None
         d["assembly_request_status"] = asm[2] if asm else None
         d["source_warehouse_id"] = source_warehouse_map.get(s.id)
+        ship = shipment_map.get(s.outbound_shipment_id) if s.outbound_shipment_id else None
+        d["outbound_shipment_number"] = ship[0] if ship else None
+        d["outbound_shipment_status"] = ship[1] if ship else None
+        d["outbound_shipment_warehouse_id"] = ship[2] if ship else None
         enriched.append(d)
 
     return enriched, total
@@ -375,8 +400,15 @@ async def get_fbo_supply_items(
     )
     items = list(items_result.scalars().all())
 
-    # Lazy-load from WB API if no items cached or force refresh
-    if (not items or force_refresh) and api_client and supply.wb_supply_id.isdigit():
+    # Auto-refresh when supply looks stuck: ACCEPTED but accepted < total.
+    # Before this, supplies with stale items (accepted_qty=0) would show zeros
+    # in the UI indefinitely because `not items` was false.
+    stale_acceptance = (
+        supply.wb_status == WbSupplyStatus.ACCEPTED and supply.total_qty > 0 and supply.accepted_qty < supply.total_qty
+    )
+
+    # Lazy-load from WB API if no items cached, force refresh, or looks stuck
+    if (not items or force_refresh or stale_acceptance) and api_client and supply.wb_supply_id.isdigit():
         try:
             wb_id_int = int(supply.wb_supply_id)
             goods = await api_client.get_fbw_supply_goods(
@@ -386,6 +418,9 @@ async def get_fbo_supply_items(
             )
             if goods:
                 await _upsert_supply_items_fbw(db, project_id, supply.id, wb_id_int, goods)
+                # Sync supply-level counters from goods so list view matches items
+                supply.accepted_qty = sum(int(g.get("acceptedQuantity") or 0) for g in goods)
+                supply.total_qty = sum(int(g.get("quantity") or 0) for g in goods)
 
             # Also fetch detail (warehouse_name, qty) if missing
             if not supply.warehouse_name:

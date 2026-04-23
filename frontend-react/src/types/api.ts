@@ -1285,6 +1285,9 @@ export interface WbFboSupply {
   total_qty: number;
   accepted_qty: number;
   outbound_shipment_id?: number;
+  outbound_shipment_number?: string;
+  outbound_shipment_status?: string;
+  outbound_shipment_warehouse_id?: number;
   assembly_request_id?: number;
   assembly_request_number?: string;
   assembly_request_status?: string;

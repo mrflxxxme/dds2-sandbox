@@ -40,6 +40,9 @@ class WbFboSupplySchema(BaseModel):
     total_qty: int = 0
     accepted_qty: int = 0
     outbound_shipment_id: int | None = None
+    outbound_shipment_number: str | None = None
+    outbound_shipment_status: str | None = None
+    outbound_shipment_warehouse_id: int | None = None
     assembly_request_id: int | None = None
     assembly_request_number: str | None = None
     assembly_request_status: str | None = None

@@ -441,10 +441,22 @@ export default function FboSuppliesPage() {
                                                             {supply.assembly_request_number}
                                                         </span>
                                                     </Link>
-                                                ) : supply.outbound_shipment_id ? (
-                                                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-                                                        Отгружена
-                                                    </span>
+                                                ) : supply.outbound_shipment_id && supply.outbound_shipment_warehouse_id ? (
+                                                    <Link href={`/p/${slug}/warehouse/${supply.outbound_shipment_warehouse_id}/shipment/${supply.outbound_shipment_id}`}>
+                                                        <span className="badge" style={{
+                                                            background: supply.outbound_shipment_status === 'DELIVERED' ? 'var(--color-success)' :
+                                                                supply.outbound_shipment_status === 'SHIPPED' ? 'var(--color-info)' :
+                                                                supply.outbound_shipment_status === 'CANCELLED' ? 'var(--color-danger)' :
+                                                                'var(--color-bg-secondary)',
+                                                            color: ['DELIVERED', 'SHIPPED', 'CANCELLED'].includes(supply.outbound_shipment_status || '') ? '#fff' : 'var(--color-text)',
+                                                            padding: '4px 8px',
+                                                            borderRadius: 4,
+                                                            fontSize: 12,
+                                                            cursor: 'pointer',
+                                                        }}>
+                                                            {supply.outbound_shipment_number || 'Отгружена'}
+                                                        </span>
+                                                    </Link>
                                                 ) : supply.wb_status === 'ACCEPTED' ? (
                                                     <Link href={`/p/${slug}/warehouse/assembly/new?fbo_supply_id=${supply.id}`}>
                                                         <button className="btn btn-primary btn-sm">
