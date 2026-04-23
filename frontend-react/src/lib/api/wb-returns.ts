@@ -1,6 +1,8 @@
 /** WB Goods Returns (ПВЗ) API methods */
 import { ApiClient } from './client';
 import type {
+    ArchiveReturnsInput,
+    ArchiveReturnsResult,
     CreateReceiptFromReturnsInput,
     CreateReceiptFromReturnsResult,
     WbGoodsReturn,
@@ -42,6 +44,9 @@ export function addWbReturnsMethods(api: ApiClient) {
         },
         createReceiptFromReturns(data: CreateReceiptFromReturnsInput) {
             return api.request<CreateReceiptFromReturnsResult>('POST', '/api/v1/wb-returns/create-receipt', data);
+        },
+        archiveWbReturns(data: ArchiveReturnsInput) {
+            return api.request<ArchiveReturnsResult>('POST', '/api/v1/wb-returns/archive', data);
         },
         syncWbReturns(data: { date_from?: string; date_to?: string } = {}) {
             return api.request<WbGoodsReturnsSyncResult>('POST', '/api/v1/wb-returns/sync', data);

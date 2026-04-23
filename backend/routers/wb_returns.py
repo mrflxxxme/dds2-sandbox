@@ -16,6 +16,8 @@ from backend.database import get_db
 from backend.models import Project, SyncLog
 from backend.project_context import get_current_project
 from backend.schemas.wb_returns import (
+    ArchiveReturnsIn,
+    ArchiveReturnsOut,
     CreateReceiptFromReturnsIn,
     CreateReceiptFromReturnsOut,
     WbGoodsReturnPvzGroup,
@@ -103,6 +105,24 @@ async def create_receipt_from_returns(
         warehouse_id=payload.warehouse_id,
         srids=payload.srids,
         comment=payload.comment,
+    )
+
+
+@router.post(
+    "/archive",
+    response_model=ArchiveReturnsOut,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def archive_returns(
+    payload: ArchiveReturnsIn,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Архивировать «забрали без оформления» — возвраты уходят в Историю."""
+    return await wb_returns_service.archive_returns(
+        db,
+        project.id,
+        srids=payload.srids,
     )
 
 

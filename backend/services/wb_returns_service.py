@@ -139,6 +139,7 @@ def classify_ui_state(
     Classify the display state of a return row.
 
     Ordered rules (first match wins):
+      - archived: archived_at IS NOT NULL (ручной архив «забрали без оформления»)
       - expired: inactive AND expired_dt passed AND not completed
       - received: receipt ACCEPTED
       - picked_up_pending_receipt: linked EXPECTED receipt AND completed_dt set
@@ -150,6 +151,9 @@ def classify_ui_state(
     now = now or utcnow()
     has_link = ret.inbound_receipt_id is not None
     status = (receipt_status or "").upper()
+    # archived: пользователь вручную отправил «забрали без оформления» в архив
+    if ret.archived_at is not None:
+        return "archived"
     # expired: inactive, expired date passed, никогда не забран с ПВЗ
     if not ret.is_status_active and ret.expired_dt is not None and ret.expired_dt < now and ret.completed_dt is None:
         return "expired"
@@ -171,10 +175,16 @@ def classify_ui_state(
     return "in_transit_to_pvz"
 
 
-def _enrich_return(ret: WbGoodsReturn, now: datetime) -> dict:
+def _enrich_return(
+    ret: WbGoodsReturn,
+    now: datetime,
+    article_by_barcode: dict[str, str] | None = None,
+) -> dict:
     """Convert WbGoodsReturn + linked receipt to dict for API response.
 
     Soft-deleted приёмка отсекается — фронт не должен видеть её номер/статус.
+    `article_by_barcode` — прекомпюченный маппинг barcode→article_seller
+    (см. list_returns), чтобы не делать N+1 в цикле.
     """
     receipt: InboundReceipt | None = getattr(ret, "inbound_receipt", None)
     if receipt is not None and getattr(receipt, "is_deleted", False):
@@ -186,6 +196,9 @@ def _enrich_return(ret: WbGoodsReturn, now: datetime) -> dict:
     if receipt is not None and getattr(receipt, "warehouse", None) is not None:
         warehouse_name = receipt.warehouse.name
     ui_state = classify_ui_state(ret, receipt_status, now=now)
+    article_seller: str | None = None
+    if article_by_barcode is not None and ret.barcode:
+        article_seller = article_by_barcode.get(ret.barcode)
     return {
         "id": ret.id,
         "srid": ret.srid,
@@ -213,6 +226,8 @@ def _enrich_return(ret: WbGoodsReturn, now: datetime) -> dict:
         "inbound_warehouse_id": warehouse_id,
         "inbound_warehouse_name": warehouse_name,
         "ui_state": ui_state,
+        "archived_at": ret.archived_at,
+        "article_seller": article_seller,
         "synced_at": ret.synced_at,
     }
 
@@ -269,7 +284,9 @@ async def list_returns(
         # - уже забранные с ПВЗ без оформления приёмки (picked_without_receipt —
         #   retro-оформление)
         # Плюс считаем srid свободным если его "линк" ведёт на soft-deleted приёмку.
+        # Архивные (archived_at IS NOT NULL) исключаются — они только в «Истории».
         base_q = base_q.where(
+            WbGoodsReturn.archived_at.is_(None),
             or_(
                 WbGoodsReturn.inbound_receipt_id.is_(None),
                 InboundReceipt.is_deleted.is_(True),
@@ -281,17 +298,27 @@ async def list_returns(
         )
     elif tab == "in_transit":
         base_q = base_q.where(
+            WbGoodsReturn.archived_at.is_(None),
             WbGoodsReturn.inbound_receipt_id.is_not(None),
             InboundReceipt.is_deleted.is_(False),
             InboundReceipt.status == InboundStatus.EXPECTED,
         )
     elif tab == "history":
         now = utcnow()
+        # История: архивные ИЛИ приёмка ACCEPTED/CANCELLED ИЛИ inactive+expired.
+        # Для архивных receipt_live не требуется (могут иметь soft-deleted link —
+        # пользователь архивировал запись с «мёртвым» линком); для остальных
+        # криетриев оставляем фильтр живого линка.
         base_q = base_q.where(
-            receipt_live,
             or_(
-                InboundReceipt.status.in_([InboundStatus.ACCEPTED, InboundStatus.CANCELLED]),
-                (WbGoodsReturn.is_status_active.is_(False) & (WbGoodsReturn.expired_dt < now)),
+                WbGoodsReturn.archived_at.is_not(None),
+                (
+                    receipt_live
+                    & or_(
+                        InboundReceipt.status.in_([InboundStatus.ACCEPTED, InboundStatus.CANCELLED]),
+                        (WbGoodsReturn.is_status_active.is_(False) & (WbGoodsReturn.expired_dt < now)),
+                    )
+                ),
             ),
         )
 
@@ -331,8 +358,21 @@ async def list_returns(
     rows_result = await db.execute(rows_q)
     rows = rows_result.scalars().all()
 
+    # Bulk-load article_seller by barcode (один запрос на весь список — без N+1).
+    barcodes = [r.barcode for r in rows if r.barcode]
+    article_by_barcode: dict[str, str] = {}
+    if barcodes:
+        nom_q = select(Nomenclature.barcode, Nomenclature.article_seller).where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.barcode.in_(barcodes),
+            Nomenclature.article_seller.is_not(None),
+        )
+        for bc, art in (await db.execute(nom_q)).all():
+            if bc and art:
+                article_by_barcode[bc] = art
+
     now = utcnow()
-    return [_enrich_return(r, now) for r in rows], total
+    return [_enrich_return(r, now, article_by_barcode) for r in rows], total
 
 
 async def list_pvz_groups(
@@ -403,6 +443,8 @@ async def get_summary(db: AsyncSession, project_id: int) -> dict:
     has_live_link = InboundReceipt.id.is_not(None) & InboundReceipt.is_deleted.is_(False)
 
     ui_state_expr = case(
+        # archived: ручной архив (приоритет выше всего)
+        (WbGoodsReturn.archived_at.is_not(None), "archived"),
         # expired: inactive, expired_dt < now, not completed
         (
             (WbGoodsReturn.is_status_active.is_(False))
@@ -471,6 +513,7 @@ async def get_summary(db: AsyncSession, project_id: int) -> dict:
         "picked_without_receipt": 0,
         "expired": 0,
         "received": 0,
+        "archived": 0,
     }
     for ui_state, cnt, soon_cnt in rows:
         if ui_state in counters:
@@ -615,6 +658,10 @@ async def create_receipt_from_returns(
             WbGoodsReturn.is_deleted == False,  # noqa: E712
             WbGoodsReturn.srid.in_(unique_srids),
             WbGoodsReturn.inbound_receipt_id.is_(None),
+            # Архивные не должны уходить в приёмку — защита от race-condition
+            # archive↔create-receipt на одном srid. Если archive закоммитится раньше,
+            # второй вызов здесь не увидит архивную запись как «свободную».
+            WbGoodsReturn.archived_at.is_(None),
         )
         .with_for_update()
     )
@@ -626,7 +673,7 @@ async def create_receipt_from_returns(
         preview = ", ".join(missing[:10])
         raise HTTPException(
             status_code=400,
-            detail=f"srids already linked or not found: {preview}",
+            detail=f"srids already linked, archived or not found: {preview}",
         )
 
     # Generate receipt number, create receipt
@@ -687,6 +734,68 @@ async def create_receipt_from_returns(
         "status": receipt.status,
         "items_count": items_count,
         "linked_srids": linked,
+        "skipped_srids": skipped,
+    }
+
+
+# ─── Archive ──────────────────────────────────────────────────────────────
+
+
+async def archive_returns(
+    db: AsyncSession,
+    project_id: int,
+    *,
+    srids: list[str],
+) -> dict:
+    """
+    Пометить возвраты как архивные (archived_at = now).
+
+    Разрешено только для ui_state == picked_without_receipt — т.е. возвраты,
+    которые уже забраны с ПВЗ, но приёмку мы создавать не собираемся (чаще
+    всего безнадёжные — покупатель не донёс товар до ПВЗ, или это фейковая
+    отметка в WB). Других состояний архивировать не даём, чтобы не потерять
+    контроль над активным флоу.
+
+    Returns {archived_count, skipped_srids, archived_srids}.
+    """
+    if not srids:
+        raise HTTPException(status_code=400, detail="Empty srids list")
+    unique_srids = list(dict.fromkeys(srids))
+
+    q = (
+        select(WbGoodsReturn)
+        .where(
+            WbGoodsReturn.project_id == project_id,
+            WbGoodsReturn.is_deleted == False,  # noqa: E712
+            WbGoodsReturn.srid.in_(unique_srids),
+        )
+        .options(selectinload(WbGoodsReturn.inbound_receipt))
+    )
+    rows = (await db.execute(q)).scalars().all()
+    found_srids = {r.srid for r in rows}
+    missing = [s for s in unique_srids if s not in found_srids]
+
+    now = utcnow()
+    archived: list[str] = []
+    skipped: list[str] = list(missing)
+    for r in rows:
+        if r.archived_at is not None:
+            # Уже в архиве — идемпотентно пропускаем.
+            continue
+        # Разрешаем архивировать только picked_without_receipt:
+        # completed_dt set AND (no link OR link → soft-deleted receipt).
+        receipt = r.inbound_receipt
+        link_alive = receipt is not None and not receipt.is_deleted
+        if r.completed_dt is None or link_alive:
+            skipped.append(r.srid)
+            continue
+        r.archived_at = now
+        archived.append(r.srid)
+
+    await db.commit()
+    return {
+        "archived_count": len(archived),
+        "archived_srids": archived,
         "skipped_srids": skipped,
     }
 

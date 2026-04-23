@@ -2501,7 +2501,8 @@ export type WbGoodsReturnUiState =
   | 'picked_up_pending_receipt'
   | 'received'
   | 'expired'
-  | 'picked_without_receipt';
+  | 'picked_without_receipt'
+  | 'archived';
 
 export interface WbGoodsReturn {
   id: number;
@@ -2530,6 +2531,8 @@ export interface WbGoodsReturn {
   inbound_warehouse_id: number | null;
   inbound_warehouse_name: string | null;
   ui_state: WbGoodsReturnUiState;
+  archived_at: string | null;
+  article_seller: string | null;
   synced_at: string;
 }
 
@@ -2542,6 +2545,7 @@ export interface WbGoodsReturnSummary {
   picked_without_receipt: number;
   expired: number;
   received: number;
+  archived: number;
 }
 
 export interface WbGoodsReturnPvzGroup {
@@ -2574,6 +2578,17 @@ export interface CreateReceiptFromReturnsResult {
   items_count: number;
   linked_srids: string[];
   /** srid без barcode — залинкованы в приёмку, но без InboundReceiptItem. */
+  skipped_srids: string[];
+}
+
+export interface ArchiveReturnsInput {
+  srids: string[];
+}
+
+export interface ArchiveReturnsResult {
+  archived_count: number;
+  archived_srids: string[];
+  /** srid не подошли под критерий picked_without_receipt. */
   skipped_srids: string[];
 }
 

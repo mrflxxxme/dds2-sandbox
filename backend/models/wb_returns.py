@@ -1,4 +1,4 @@
-# ruff: noqa: RUF002 — русские комментарии и docstring
+# ruff: noqa: RUF002, RUF003 — русские комментарии и docstring
 """
 WB Goods Returns — отчёт по возвратам и перемещению товаров WB.
 
@@ -66,6 +66,10 @@ class WbGoodsReturn(Base, TimestampMixin, SoftDeleteMixin):
         ForeignKey("inbound_receipts.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Ручная архивация «забрали без оформления» — возврат списан без приёмки.
+    # Не соответствует soft_delete (WB-sync его restore-ит). Пока archived_at
+    # выставлен — запись показывается только на вкладке «История».
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     # Relationships — lazy="raise_on_sql" чтобы не триггерить неявный SQL в async;

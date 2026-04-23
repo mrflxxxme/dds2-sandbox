@@ -1,9 +1,14 @@
-# ruff: noqa: RUF002 — русские комментарии
+# ruff: noqa: RUF002, RUF003 — русские комментарии
 """Pydantic schemas for WB Goods Returns."""
 
 from datetime import date, datetime
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+
+# WB srid — UUID-like строка ≤ 64 символа (см. models/wb_returns.py:43).
+# Ограничение нужно, чтобы атакующий не мог через body заслать 500×10MB.
+SridStr = Annotated[str, StringConstraints(min_length=1, max_length=64)]
 
 
 class WbGoodsReturnOut(BaseModel):
@@ -40,8 +45,12 @@ class WbGoodsReturnOut(BaseModel):
 
     # Derived UI state (см. wb_returns_service.classify_ui_state):
     # "ready_for_pickup" | "in_transit_to_pvz" | "pickup_planned" |
-    # "picked_up_pending_receipt" | "received" | "expired" | "picked_without_receipt"
+    # "picked_up_pending_receipt" | "received" | "expired" |
+    # "picked_without_receipt" | "archived"
     ui_state: str
+    archived_at: datetime | None = None
+    # article_seller из Nomenclature по barcode (если найден).
+    article_seller: str | None = None
     synced_at: datetime
 
 
@@ -69,14 +78,15 @@ class WbGoodsReturnSummary(BaseModel):
     picked_without_receipt: int  # retro-receipt needed
     expired: int
     received: int
+    archived: int = 0
 
 
 class CreateReceiptFromReturnsIn(BaseModel):
     """Input: выбираем несколько srid и создаём pending InboundReceipt."""
 
     warehouse_id: int = Field(..., gt=0)
-    srids: list[str] = Field(..., min_length=1, max_length=500)
-    comment: str | None = None
+    srids: list[SridStr] = Field(..., min_length=1, max_length=500)
+    comment: str | None = Field(None, max_length=1000)
 
 
 class CreateReceiptFromReturnsOut(BaseModel):
@@ -116,3 +126,21 @@ class WbGoodsReturnsListResponse(BaseModel):
 
     items: list[WbGoodsReturnOut]
     total: int
+
+
+class ArchiveReturnsIn(BaseModel):
+    """Input для архивации «забрали без оформления»."""
+
+    srids: list[SridStr] = Field(..., min_length=1, max_length=500)
+
+
+class ArchiveReturnsOut(BaseModel):
+    """Output архивации.
+
+    skipped_srids — srid которые не подошли под критерий picked_without_receipt
+    (завязаны на активную приёмку, ещё не забраны с ПВЗ, не найдены и т.д.).
+    """
+
+    archived_count: int
+    archived_srids: list[str]
+    skipped_srids: list[str] = Field(default_factory=list)
