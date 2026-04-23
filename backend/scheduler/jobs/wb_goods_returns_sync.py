@@ -1,14 +1,20 @@
 """
 Scheduler job: sync WB goods-returns (возвраты на ПВЗ) for all projects.
 
-Runs every 30 minutes. Uses WB Seller Analytics API (rate limit: 1/min).
-Default window = last 7 days (for overlap/safety).
+Runs at 08:00 and 20:00 MSK (see backend/scheduler/__init__.py). Uses WB
+Seller Analytics API (rate limit: 1/min). Default window = last 7 days
+(overlap with prior runs for safety).
+
+On success updates Prometheus gauge dds_wb_goods_returns_last_success_timestamp —
+Grafana/Alertmanager use it to detect stale sync (WbReturnsSyncStale alert).
 """
 
 import asyncio
 import logging
+import time
 
 from backend.database import AsyncSessionLocal
+from backend.metrics import wb_goods_returns_last_success
 from backend.scheduler.helpers import get_sync_project_ids
 from backend.utils.time import utcnow
 
@@ -105,5 +111,11 @@ async def sync_all_projects_wb_returns():
                 exc_info=True,
             )
             errors += 1
+
+    # Update last-success gauge only when at least one project synced OK and
+    # no project failed — matches the semantics of «sync is healthy» used by
+    # the Prometheus alert WbReturnsSyncStale.
+    if ok > 0 and errors == 0:
+        wb_goods_returns_last_success.set(time.time())
 
     logger.info("WB goods returns sync: done — %d ok, %d errors", ok, errors)

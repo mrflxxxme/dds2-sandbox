@@ -228,15 +228,18 @@ def start_scheduler():
         misfire_grace_time=600,
     )
 
-    # WB goods returns (возвраты на ПВЗ): every 30 min (WB publishes updates every 30 min)
+    # WB goods returns (возвраты на ПВЗ): дважды в день — 08:00 (утренний срез)
+    # и 20:00 MSK (вечерний добор). WB публикует отчёт каждые 30 мин, но для
+    # нашего процесса достаточно 2 раза в день. Мониторинг: Prometheus gauge
+    # dds_wb_goods_returns_last_success_timestamp + alert WbReturnsSyncStale.
     _scheduler.add_job(
         sync_all_projects_wb_returns,
-        trigger=IntervalTrigger(minutes=30),
+        trigger=CronTrigger(hour="8,20", minute=0, timezone=MSK),
         id="wb_goods_returns_sync",
-        name="WB goods returns sync (every 30min)",
+        name="WB goods returns sync (08:00 + 20:00 MSK)",
         replace_existing=True,
         max_instances=1,
-        misfire_grace_time=600,
+        misfire_grace_time=3600,
     )
 
     # AI morning digest: daily at 7:00 MSK
@@ -303,6 +306,18 @@ def start_scheduler():
         trigger=DateTrigger(run_date=datetime.now(MSK) + timedelta(seconds=60)),
         id="wb_finance_weekly_catchup",
         name="WB finance weekly catch-up (startup)",
+        replace_existing=True,
+        misfire_grace_time=60,
+    )
+
+    # Startup catch-up: run WB goods-returns sync 90s after start. Cron trigger
+    # fires только в 08:00 и 20:00 MSK, поэтому без catch-up после рестарта
+    # данные устарели бы до следующего слота (до 12 часов).
+    _scheduler.add_job(
+        sync_all_projects_wb_returns,
+        trigger=DateTrigger(run_date=datetime.now(MSK) + timedelta(seconds=90)),
+        id="wb_goods_returns_catchup",
+        name="WB goods returns catch-up (startup)",
         replace_existing=True,
         misfire_grace_time=60,
     )
