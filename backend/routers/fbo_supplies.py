@@ -16,6 +16,9 @@ from backend.schemas.wb_fbo import (
     FboArchiveRequest,
     FboExcessRequest,
     FboExcessResponse,
+    FboReassignCandidatesResponse,
+    FboReassignRequest,
+    FboReassignResponse,
     FboReturnRequest,
     FboReturnResponse,
     FboSyncResultSchema,
@@ -360,3 +363,55 @@ async def create_fbo_excess(
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
     return FboExcessResponse(**result)
+
+
+# ─── Reassignment (link under-delivery micro-supply to parent) ────────────
+
+
+@router.get(
+    "/{supply_id}/reassign/candidates",
+    response_model=FboReassignCandidatesResponse,
+)
+async def get_reassign_candidates(
+    supply_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Список поставок с недоприёмкой по тем же артикулам, что и в текущей поставке.
+    Используется на UI для привязки «микро-доприёмки» к родительской поставке,
+    где WB частично принял товар.
+    """  # noqa: RUF002 — cyrillic product terms
+    try:
+        result = await fbo_supply_service.get_reassignment_candidates(db, project.id, supply_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from None
+    return FboReassignCandidatesResponse(**result)
+
+
+@router.post(
+    "/{supply_id}/reassign",
+    response_model=FboReassignResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def reassign_fbo_supply(
+    supply_id: int,
+    payload: FboReassignRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Привязать текущую поставку (доприёмку) к поставке с недоприёмкой:
+    qty добавляется к target.accepted_qty по совпадающим штрихкодам,
+    source уходит в архив с reassigned_to_supply_id = target.id.
+    """  # noqa: RUF002 — cyrillic product terms
+    try:
+        result = await fbo_supply_service.reassign_to_supply(
+            db,
+            project.id,
+            supply_id,
+            payload.target_supply_id,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    return FboReassignResponse(**result)

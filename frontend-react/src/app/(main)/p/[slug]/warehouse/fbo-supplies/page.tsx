@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatDateTime } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { WbFboSupply, WbFboSupplyItem, Warehouse, FboReturnType, FboPartialSummary } from '@/types/api';
+import type { WbFboSupply, WbFboSupplyItem, Warehouse, FboReturnType, FboPartialSummary, FboReassignCandidate } from '@/types/api';
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -75,6 +75,10 @@ export default function FboSuppliesPage() {
     // Excess modal (overshoot: WB accepted more than we shipped)
     const [excessState, setExcessState] = useState<{
         supply: WbFboSupply; items: WbFboSupplyItem[];
+    } | null>(null);
+    // Reassign modal (доприёмка → поставка с недоприёмкой того же SKU)
+    const [reassignState, setReassignState] = useState<{
+        supply: WbFboSupply;
     } | null>(null);
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
 
@@ -553,6 +557,7 @@ export default function FboSuppliesPage() {
                                                         slug={slug}
                                                         onOpenReturn={() => setReturnState({ supply, items: expandedItems })}
                                                         onOpenExcess={() => setExcessState({ supply, items: expandedItems })}
+                                                        onOpenReassign={() => setReassignState({ supply })}
                                                         onArchive={async () => {
                                                             try {
                                                                 await api.setFboSupplyArchive(supply.id, true);
@@ -634,6 +639,21 @@ export default function FboSuppliesPage() {
                     onClose={() => setExcessState(null)}
                     onDone={async () => {
                         setExcessState(null);
+                        setExpandedId(null);
+                        setExpandedItems([]);
+                        await load();
+                        loadSummary();
+                    }}
+                />
+            )}
+
+            {/* Reassign Modal: привязать доприёмку к поставке с недоприёмкой */}
+            {reassignState !== null && (
+                <FboReassignModal
+                    supply={reassignState.supply}
+                    onClose={() => setReassignState(null)}
+                    onDone={async () => {
+                        setReassignState(null);
                         setExpandedId(null);
                         setExpandedItems([]);
                         await load();
@@ -1120,6 +1140,147 @@ function FboExcessModal({
 }
 
 
+// ─── Reassign modal ──────────────────────────────────────────────────────────
+
+function FboReassignModal({
+    supply, onClose, onDone,
+}: {
+    supply: WbFboSupply;
+    onClose: () => void;
+    onDone: () => Promise<void> | void;
+}) {
+    const [loading, setLoading] = useState(true);
+    const [candidates, setCandidates] = useState<FboReassignCandidate[]>([]);
+    const [err, setErr] = useState('');
+    const [saving, setSaving] = useState<number | null>(null);
+
+    useEffect(() => {
+        let active = true;
+        (async () => {
+            try {
+                const resp = await api.getFboReassignCandidates(supply.id);
+                if (active) {
+                    setCandidates(resp.candidates);
+                }
+            } catch (e: unknown) {
+                if (active) setErr(e instanceof Error ? e.message : 'Ошибка загрузки');
+            } finally {
+                if (active) setLoading(false);
+            }
+        })();
+        return () => { active = false; };
+    }, [supply.id]);
+
+    const submit = async (targetId: number) => {
+        setErr('');
+        setSaving(targetId);
+        try {
+            await api.reassignFboSupply(supply.id, { target_supply_id: targetId });
+            await onDone();
+        } catch (e: unknown) {
+            setErr(e instanceof Error ? e.message : 'Ошибка');
+            setSaving(null);
+        }
+    };
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div
+                className="modal-card"
+                onClick={e => e.stopPropagation()}
+                style={{
+                    maxWidth: 720, width: '92vw', maxHeight: '90vh',
+                    display: 'flex', flexDirection: 'column',
+                    background: '#ffffff',
+                    backdropFilter: 'none',
+                    WebkitBackdropFilter: 'none',
+                }}
+            >
+                <div style={{ marginBottom: 16 }}>
+                    <h2 className="modal-title" style={{ marginBottom: 4 }}>
+                        Привязать доприёмку к поставке с недоприёмкой
+                    </h2>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                        Поставка <strong>FBW-{supply.wb_supply_id}</strong> ({supply.accepted_qty} шт, {supply.warehouse_name || '—'})
+                        {' '}→ будет добавлена к accepted у выбранной поставки и уйдёт в архив.
+                    </div>
+                </div>
+
+                <div style={{
+                    flex: '1 1 auto', overflow: 'auto', marginBottom: 16,
+                    border: '1px solid var(--color-border)', borderRadius: 12,
+                    background: '#ffffff',
+                }}>
+                    {loading ? (
+                        <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                            Поиск кандидатов...
+                        </div>
+                    ) : candidates.length === 0 ? (
+                        <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                            Нет поставок с недоприёмкой по тем же артикулам.
+                            <br /><small>Попробуй «В архив», если эта доприёмка никуда не подходит.</small>
+                        </div>
+                    ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                            {candidates.map(c => (
+                                <div
+                                    key={c.id}
+                                    style={{
+                                        padding: 14, borderBottom: '1px solid var(--color-border)',
+                                        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                                    }}
+                                >
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                                            <strong>FBW-{c.wb_supply_id}</strong>
+                                            {c.same_warehouse && (
+                                                <span className="badge badge-success" style={{ fontSize: 11 }}>
+                                                    тот же склад
+                                                </span>
+                                            )}
+                                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                                {c.warehouse_name || '—'} · {formatDateTime(c.created_at_wb)}
+                                            </span>
+                                        </div>
+                                        <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                            Принято {c.accepted_qty} из {c.total_qty} шт.
+                                            {' '}Совпадает по артикулу: <strong style={{ color: 'var(--color-text)' }}>{c.matched_qty} шт</strong>
+                                        </div>
+                                        {c.matched_items.length > 0 && (
+                                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                                                {c.matched_items.slice(0, 3).map(m =>
+                                                    `${m.product_name || m.article_seller || m.barcode} (−${m.unaccepted_delta})`
+                                                ).join(', ')}
+                                                {c.matched_items.length > 3 && ` и ещё ${c.matched_items.length - 3}`}
+                                            </div>
+                                        )}
+                                    </div>
+                                    <button
+                                        className="btn btn-primary btn-sm"
+                                        onClick={() => submit(c.id)}
+                                        disabled={saving !== null}
+                                    >
+                                        {saving === c.id ? 'Привязка...' : 'Привязать'}
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+
+                {err && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 12 }}>{err}</div>}
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    <button className="btn btn-secondary" onClick={onClose} disabled={saving !== null}>
+                        Отмена
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+
 // ─── Partial-acceptance mini-summary ─────────────────────────────────────────
 
 function PartialSummaryPanel({
@@ -1274,6 +1435,7 @@ function SupplyItemsPanel({
     slug,
     onOpenReturn,
     onOpenExcess,
+    onOpenReassign,
     onArchive,
 }: {
     supply: WbFboSupply;
@@ -1282,6 +1444,7 @@ function SupplyItemsPanel({
     slug: string;
     onOpenReturn: () => void;
     onOpenExcess?: () => void;
+    onOpenReassign?: () => void;
     onArchive?: () => void;
 }) {
     if (loading) {
@@ -1304,8 +1467,43 @@ function SupplyItemsPanel({
     const showReturnBanner = supply.wb_status === 'ACCEPTED' && unacceptedDelta > 0 && !supply.return_processed_at;
     const showExcessBanner = supply.wb_status === 'ACCEPTED' && excessDelta > 0 && !supply.excess_processed_at;
 
+    const reassignedToWb = supply.reassigned_to_wb_supply_id;
+    const reassignedFromWb = supply.reassigned_from_wb_supply_ids ?? [];
+    // Hide reassign button when: already reassigned, has no items, not ACCEPTED,
+    // or when supply has under-acceptance itself (those are targets, not sources).
+    const canReassign = !reassignedToWb
+        && supply.wb_status === 'ACCEPTED'
+        && hasItems
+        && unacceptedDelta === 0
+        && reassignedFromWb.length === 0;
+
     return (
         <div style={{ padding: '16px 24px 20px' }}>
+            {/* Info: эта поставка — доприёмка, уже привязана */}
+            {reassignedToWb && (
+                <div style={{
+                    padding: '10px 14px', marginBottom: 12,
+                    background: 'color-mix(in srgb, var(--color-accent) 8%, transparent)',
+                    border: '1px solid color-mix(in srgb, var(--color-accent) 40%, transparent)',
+                    borderRadius: 8, fontSize: 13,
+                }}>
+                    📦 Эта доприёмка привязана к поставке <strong>#{reassignedToWb}</strong>
+                </div>
+            )}
+
+            {/* Info: в эту поставку добавлены доприёмки */}
+            {reassignedFromWb.length > 0 && (
+                <div style={{
+                    padding: '10px 14px', marginBottom: 12,
+                    background: 'color-mix(in srgb, var(--color-success) 8%, transparent)',
+                    border: '1px solid color-mix(in srgb, var(--color-success) 40%, transparent)',
+                    borderRadius: 8, fontSize: 13,
+                }}>
+                    ✓ В эту поставку добавлены доприёмки:{' '}
+                    <strong>{reassignedFromWb.map(id => `#${id}`).join(', ')}</strong>
+                </div>
+            )}
+
             {/* Недоприёмка banner */}
             {showReturnBanner && (
                 <div style={{
@@ -1362,15 +1560,26 @@ function SupplyItemsPanel({
                 </div>
             )}
 
-            {onArchive && (
-                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
-                    <button
-                        className="btn btn-secondary btn-sm"
-                        onClick={onArchive}
-                        title="Скрыть из основного списка (можно вернуть из архива)"
-                    >
-                        📁 В архив
-                    </button>
+            {(onArchive || onOpenReassign) && (
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 8 }}>
+                    {onOpenReassign && canReassign && (
+                        <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={onOpenReassign}
+                            title="Привязать эту поставку как доприёмку к поставке с недоприёмкой того же артикула"
+                        >
+                            📦 Привязать к недоприёмке
+                        </button>
+                    )}
+                    {onArchive && !reassignedToWb && (
+                        <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={onArchive}
+                            title="Скрыть из основного списка (можно вернуть из архива)"
+                        >
+                            📁 В архив
+                        </button>
+                    )}
                 </div>
             )}
 

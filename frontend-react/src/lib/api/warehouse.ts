@@ -14,6 +14,9 @@ import type {
     DeliveryTimesResponse,
     DeliveryTimesUpdate,
     FboPartialSummary,
+    FboReassignCandidatesResponse,
+    FboReassignRequest,
+    FboReassignResponse,
     FboReturnRequest,
     FboReturnResponse,
     FboSyncResult,
@@ -221,6 +224,19 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         createFboReturn(supplyId: number, payload: FboReturnRequest) {
             return api.request<FboReturnResponse>('POST', `/api/v1/warehouse/fbo-supplies/${supplyId}/return`, payload);
+        },
+        getFboReassignCandidates(supplyId: number) {
+            return api.request<FboReassignCandidatesResponse>(
+                'GET',
+                `/api/v1/warehouse/fbo-supplies/${supplyId}/reassign/candidates`,
+            );
+        },
+        reassignFboSupply(supplyId: number, payload: FboReassignRequest) {
+            return api.request<FboReassignResponse>(
+                'POST',
+                `/api/v1/warehouse/fbo-supplies/${supplyId}/reassign`,
+                payload,
+            );
         },
 
         // ─── WB Warehouse Names ─────────────────────────────────────────

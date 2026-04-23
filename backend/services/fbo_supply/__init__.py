@@ -29,8 +29,10 @@ from .service import (
     get_fbo_summary,
     get_fbo_supply_items,
     get_partial_acceptance_summary,
+    get_reassignment_candidates,
     list_fbo_supplies,
     list_warehouses,
+    reassign_to_supply,
     restore_linked_from_archive,
     set_archive_flag,
 )
@@ -59,8 +61,10 @@ __all__ = [
     "get_fbo_summary",
     "get_fbo_supply_items",
     "get_partial_acceptance_summary",
+    "get_reassignment_candidates",
     "list_fbo_supplies",
     "list_warehouses",
+    "reassign_to_supply",
     "restore_linked_from_archive",
     "set_archive_flag",
     # sync

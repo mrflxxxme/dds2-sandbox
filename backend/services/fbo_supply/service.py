@@ -411,6 +411,29 @@ async def list_fbo_supplies(
             if row.warehouse_id is not None:
                 source_warehouse_map[row.wb_fbo_supply_id] = row.warehouse_id
 
+    # Enrich with reassignment info (single query each direction)
+    reassign_target_wb_id: dict[int, str] = {}
+    target_ids_needed = {s.reassigned_to_supply_id for s in supplies if s.reassigned_to_supply_id}
+    if target_ids_needed:
+        target_result = await db.execute(
+            select(WbFboSupply.id, WbFboSupply.wb_supply_id).where(
+                WbFboSupply.id.in_(target_ids_needed),
+                WbFboSupply.project_id == project_id,
+            )
+        )
+        reassign_target_wb_id = {row.id: row.wb_supply_id for row in target_result.all()}
+
+    reassign_source_wb_ids: dict[int, list[str]] = {}
+    if supply_ids:
+        source_result = await db.execute(
+            select(WbFboSupply.reassigned_to_supply_id, WbFboSupply.wb_supply_id).where(
+                WbFboSupply.reassigned_to_supply_id.in_(supply_ids),
+                WbFboSupply.project_id == project_id,
+            )
+        )
+        for row in source_result.all():
+            reassign_source_wb_ids.setdefault(row.reassigned_to_supply_id, []).append(row.wb_supply_id)
+
     # Enrich with outbound shipment info (single query)
     # supply_id -> (number, status, warehouse_id)
     shipment_map: dict[int, tuple[str, str, int]] = {}
@@ -444,6 +467,10 @@ async def list_fbo_supplies(
         d["outbound_shipment_number"] = ship[0] if ship else None
         d["outbound_shipment_status"] = ship[1] if ship else None
         d["outbound_shipment_warehouse_id"] = ship[2] if ship else None
+        d["reassigned_to_wb_supply_id"] = (
+            reassign_target_wb_id.get(s.reassigned_to_supply_id) if s.reassigned_to_supply_id else None
+        )
+        d["reassigned_from_wb_supply_ids"] = reassign_source_wb_ids.get(s.id, [])
         enriched.append(d)
 
     return enriched, total
@@ -593,3 +620,204 @@ async def get_fbo_supply_items(
             )
 
     return items
+
+
+# ─── Reassignment (link under-delivery micro-supply to parent) ────────────
+
+
+async def get_reassignment_candidates(
+    db: AsyncSession,
+    project_id: int,
+    source_supply_id: int,
+) -> dict[str, Any]:
+    """
+    Find supplies with under-acceptance where at least one item matches the
+    source supply's barcodes. Candidates are returned for the user to pick —
+    we never auto-link, because WB does not tell us which source belongs to
+    which target.
+
+    Ordering: same warehouse first, then FIFO by created_at_wb.
+    """
+    source_result = await db.execute(
+        select(WbFboSupply).where(
+            WbFboSupply.id == source_supply_id,
+            WbFboSupply.project_id == project_id,
+        )
+    )
+    source = source_result.scalar_one_or_none()
+    if source is None:
+        raise ValueError("FBO supply not found")
+
+    if source.reassigned_to_supply_id is not None:
+        return {"source_supply_id": source_supply_id, "candidates": []}
+
+    source_items_result = await db.execute(
+        select(WbFboSupplyItem.barcode).where(
+            WbFboSupplyItem.supply_id == source_supply_id,
+            WbFboSupplyItem.project_id == project_id,
+        )
+    )
+    source_barcodes = {row[0] for row in source_items_result.all() if row[0]}
+    if not source_barcodes:
+        return {"source_supply_id": source_supply_id, "candidates": []}
+
+    target_candidates_result = await db.execute(
+        select(WbFboSupply).where(
+            WbFboSupply.project_id == project_id,
+            WbFboSupply.id != source_supply_id,
+            WbFboSupply.wb_status == WbSupplyStatus.ACCEPTED,
+            WbFboSupply.total_qty > 0,
+            WbFboSupply.accepted_qty < WbFboSupply.total_qty,
+            WbFboSupply.reassigned_to_supply_id.is_(None),
+            WbFboSupply.is_archived.is_not(True),
+        )
+    )
+    targets = list(target_candidates_result.scalars().all())
+    if not targets:
+        return {"source_supply_id": source_supply_id, "candidates": []}
+
+    target_ids = [t.id for t in targets]
+    items_result = await db.execute(
+        select(WbFboSupplyItem).where(
+            WbFboSupplyItem.supply_id.in_(target_ids),
+            WbFboSupplyItem.project_id == project_id,
+            WbFboSupplyItem.barcode.in_(source_barcodes),
+            WbFboSupplyItem.quantity > WbFboSupplyItem.accepted_qty,
+        )
+    )
+    items_by_supply: dict[int, list[WbFboSupplyItem]] = {}
+    for item in items_result.scalars().all():
+        items_by_supply.setdefault(item.supply_id, []).append(item)
+
+    candidates: list[dict[str, Any]] = []
+    for t in targets:
+        matched = items_by_supply.get(t.id, [])
+        if not matched:
+            continue
+        matched_qty = sum(max(0, i.quantity - i.accepted_qty) for i in matched)
+        candidates.append(
+            {
+                "id": t.id,
+                "wb_supply_id": t.wb_supply_id,
+                "warehouse_name": t.warehouse_name,
+                "created_at_wb": t.created_at_wb,
+                "total_qty": t.total_qty,
+                "accepted_qty": t.accepted_qty,
+                "same_warehouse": t.warehouse_name == source.warehouse_name,
+                "matched_qty": matched_qty,
+                "matched_items": [
+                    {
+                        "barcode": i.barcode,
+                        "article_seller": i.article_seller,
+                        "product_name": i.product_name,
+                        "quantity": i.quantity,
+                        "accepted_qty": i.accepted_qty,
+                        "unaccepted_delta": max(0, i.quantity - i.accepted_qty),
+                    }
+                    for i in matched
+                ],
+            }
+        )
+
+    candidates.sort(key=lambda c: (not c["same_warehouse"], c["created_at_wb"]))
+
+    return {"source_supply_id": source_supply_id, "candidates": candidates}
+
+
+async def reassign_to_supply(
+    db: AsyncSession,
+    project_id: int,
+    source_supply_id: int,
+    target_supply_id: int,
+) -> dict[str, Any]:
+    """
+    Link source supply → target supply: add source item accepted qty to target's
+    matching items (by barcode), archive source with reassigned_to_supply_id set.
+
+    Source qty for a barcode is bounded by the target's unaccepted delta for
+    that same barcode — any overflow on that barcode is rejected (user must
+    pick a different target or split manually). This keeps target's
+    accepted_qty consistent with WB's own total_qty.
+    """
+    if source_supply_id == target_supply_id:
+        raise ValueError("Source and target must differ")
+
+    ids = [source_supply_id, target_supply_id]
+    result = await db.execute(
+        select(WbFboSupply).where(
+            WbFboSupply.id.in_(ids),
+            WbFboSupply.project_id == project_id,
+        )
+    )
+    supplies = {s.id: s for s in result.scalars().all()}
+    source = supplies.get(source_supply_id)
+    target = supplies.get(target_supply_id)
+    if source is None or target is None:
+        raise ValueError("FBO supply not found")
+    if source.reassigned_to_supply_id is not None:
+        raise ValueError("Source supply is already reassigned")
+    if target.reassigned_to_supply_id is not None:
+        raise ValueError("Target supply is itself a доприёмка — pick its parent")
+    if target.wb_status != WbSupplyStatus.ACCEPTED:
+        raise ValueError("Target supply must be ACCEPTED")
+
+    source_items_result = await db.execute(
+        select(WbFboSupplyItem).where(
+            WbFboSupplyItem.supply_id == source_supply_id,
+            WbFboSupplyItem.project_id == project_id,
+        )
+    )
+    source_items = list(source_items_result.scalars().all())
+    if not source_items:
+        raise ValueError("Source supply has no items to reassign")
+
+    target_items_result = await db.execute(
+        select(WbFboSupplyItem).where(
+            WbFboSupplyItem.supply_id == target_supply_id,
+            WbFboSupplyItem.project_id == project_id,
+        )
+    )
+    target_items_by_barcode: dict[str, list[WbFboSupplyItem]] = {}
+    for item in target_items_result.scalars().all():
+        target_items_by_barcode.setdefault(item.barcode, []).append(item)
+
+    reassigned_qty = 0
+    for src in source_items:
+        src_qty = int(src.accepted_qty or 0)
+        if src_qty <= 0:
+            continue
+        targets_for_barcode = target_items_by_barcode.get(src.barcode, [])
+        remaining = src_qty
+        for tgt in targets_for_barcode:
+            if remaining <= 0:
+                break
+            unaccepted = max(0, int(tgt.quantity) - int(tgt.accepted_qty or 0))
+            if unaccepted <= 0:
+                continue
+            take = min(remaining, unaccepted)
+            tgt.accepted_qty = int(tgt.accepted_qty or 0) + take
+            remaining -= take
+            reassigned_qty += take
+        if remaining > 0:
+            raise ValueError(
+                f"Barcode {src.barcode}: source has {src_qty} шт but target has "
+                f"only {src_qty - remaining} шт недоприёмки — pick a different target"
+            )
+
+    if reassigned_qty == 0:
+        raise ValueError("No matching barcodes between source and target")
+
+    target.accepted_qty = int(target.accepted_qty or 0) + reassigned_qty
+    source.reassigned_to_supply_id = target.id
+    source.is_archived = True
+
+    await db.commit()
+    await db.refresh(source)
+    await db.refresh(target)
+
+    return {
+        "source_supply_id": source.id,
+        "target_supply_id": target.id,
+        "target_wb_supply_id": target.wb_supply_id,
+        "reassigned_qty": reassigned_qty,
+    }

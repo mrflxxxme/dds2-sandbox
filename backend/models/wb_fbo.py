@@ -87,6 +87,15 @@ class WbFboSupply(Base, TimestampMixin):
     excess_processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     excess_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # Reassignment: when WB creates a separate micro-supply with items actually
+    # belonging to a prior supply's under-acceptance. User links source → target;
+    # target's item.accepted_qty increments, source goes to archive with pointer.
+    reassigned_to_supply_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("wb_fbo_supplies.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     # Relationships
     items: Mapped[list["WbFboSupplyItem"]] = relationship(
         back_populates="supply",
@@ -96,12 +105,24 @@ class WbFboSupply(Base, TimestampMixin):
         "OutboundShipment",
         foreign_keys=[outbound_shipment_id],
     )
+    reassigned_to: Mapped["WbFboSupply | None"] = relationship(
+        "WbFboSupply",
+        remote_side="WbFboSupply.id",
+        foreign_keys=[reassigned_to_supply_id],
+        back_populates="reassigned_from",
+    )
+    reassigned_from: Mapped[list["WbFboSupply"]] = relationship(
+        "WbFboSupply",
+        foreign_keys=[reassigned_to_supply_id],
+        back_populates="reassigned_to",
+    )
 
     __table_args__ = (
         UniqueConstraint("project_id", "wb_supply_id", name="uq_wb_fbo_supply"),
         Index("ix_wb_fbo_supplies_project_id", "project_id"),
         Index("ix_wb_fbo_supplies_wb_status", "wb_status"),
         Index("ix_wb_fbo_supplies_created_at_wb", "created_at_wb"),
+        Index("ix_wb_fbo_supplies_reassigned_to", "reassigned_to_supply_id"),
     )
 
 

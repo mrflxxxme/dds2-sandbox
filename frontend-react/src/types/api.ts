@@ -1292,6 +1292,9 @@ export interface WbFboSupply {
   is_archived?: boolean | null;
   excess_processed_at?: string | null;
   excess_qty?: number | null;
+  reassigned_to_supply_id?: number | null;
+  reassigned_to_wb_supply_id?: string | null;
+  reassigned_from_wb_supply_ids?: string[];
   assembly_request_id?: number;
   assembly_request_number?: string;
   assembly_request_status?: string;
@@ -1362,6 +1365,43 @@ export interface FboSyncResult {
   updated: number;
   errors: number;
   message: string;
+}
+
+export interface FboReassignCandidateItem {
+  barcode: string;
+  article_seller?: string | null;
+  product_name?: string | null;
+  quantity: number;
+  accepted_qty: number;
+  unaccepted_delta: number;
+}
+
+export interface FboReassignCandidate {
+  id: number;
+  wb_supply_id: string;
+  warehouse_name?: string | null;
+  created_at_wb: string;
+  total_qty: number;
+  accepted_qty: number;
+  same_warehouse: boolean;
+  matched_qty: number;
+  matched_items: FboReassignCandidateItem[];
+}
+
+export interface FboReassignCandidatesResponse {
+  source_supply_id: number;
+  candidates: FboReassignCandidate[];
+}
+
+export interface FboReassignRequest {
+  target_supply_id: number;
+}
+
+export interface FboReassignResponse {
+  source_supply_id: number;
+  target_supply_id: number;
+  target_wb_supply_id: string;
+  reassigned_qty: number;
 }
 
 // ─── Assembly Requests ────────────────────────────────────────────────────
