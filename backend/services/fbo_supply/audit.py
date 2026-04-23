@@ -35,7 +35,7 @@ async def log_action(
     db: AsyncSession,
     *,
     project_id: int,
-    supply_id: int,
+    supply_id: int | None,
     action: FboAuditAction | str,
     payload: dict[str, Any] | None = None,
     user_id: int | None = None,

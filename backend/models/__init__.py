@@ -189,11 +189,6 @@ from backend.models.wb_order_cancel import (
     WbOrderCancelDaily,
 )
 
-# WB Goods Returns (отчёт по возвратам на ПВЗ)
-from backend.models.wb_returns import (
-    WbGoodsReturn,
-)
-
 # WB Tariffs (commission rates by subject)
 from backend.models.wb_tariff import (
     WbTariff,
@@ -312,8 +307,6 @@ __all__ = [
     "WbFboSupply",
     "WbFboSupplyItem",
     "WbSupplyStatus",
-    # WB Goods Returns
-    "WbGoodsReturn",
     # Supply Chain
     "FactoryOrder",
     "FactoryOrderHistory",
