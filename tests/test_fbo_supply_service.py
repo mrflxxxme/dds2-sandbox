@@ -799,8 +799,8 @@ class TestEnrichPartialAcceptance:
         assert result["enriched"] == 0
         assert not mock_client.get_fbw_supply_detail.called
 
-    async def test_fully_accepted_is_skipped(self, db_session):
-        """ACCEPTED with accepted_qty == total_qty must not trigger re-enrich."""
+    async def test_fully_accepted_with_items_is_skipped(self, db_session):
+        """ACCEPTED with accepted == total AND items already in DB → no re-enrich."""
         from datetime import timedelta
 
         from backend.services.fbo_supply_service import enrich_fbo_supplies
@@ -817,6 +817,19 @@ class TestEnrichPartialAcceptance:
         )
         db_session.add(supply)
         await db_session.commit()
+        await db_session.refresh(supply)
+        # Pre-existing items — no need to fetch from WB.
+        db_session.add(
+            WbFboSupplyItem(
+                project_id=1,
+                supply_id=supply.id,
+                wb_order_id="ord-1",
+                barcode="bc-1",
+                quantity=100,
+                accepted_qty=100,
+            )
+        )
+        await db_session.commit()
 
         mock_client = AsyncMock()
         result = await enrich_fbo_supplies(db_session, 1, mock_client, max_calls=5)
@@ -824,17 +837,80 @@ class TestEnrichPartialAcceptance:
         assert result["enriched"] == 0
         assert not mock_client.get_fbw_supply_detail.called
 
-    async def test_goods_api_error_preserves_stale_synced_at(self, db_session):
-        """ACCEPTED supply must NOT update synced_at when goods API fails —
-        otherwise 24h cooldown blocks retry indefinitely even after WB recovers.
-        Regression: 2026-04-22, 44 supplies stuck with accepted_qty=0 for 13 days."""
+    async def test_fully_accepted_without_items_is_enriched(self, db_session):
+        """Historical ACCEPTED supply that was never enriched (no items in DB)
+        must be picked up by the scheduler so the UI can show product list."""
         from datetime import timedelta
 
         from backend.services.fbo_supply_service import enrich_fbo_supplies
 
-        stale_synced = datetime.utcnow() - timedelta(hours=36)
         supply = WbFboSupply(
             project_id=1,
+            wb_supply_id="38231504",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 4, 1),
+            warehouse_name="Тула",
+            total_qty=50,
+            accepted_qty=50,
+            synced_at=datetime.utcnow() - timedelta(days=7),
+        )
+        db_session.add(supply)
+        await db_session.commit()
+
+        mock_client = AsyncMock()
+        mock_client.get_fbw_supply_detail.return_value = {
+            "warehouseName": "Тула",
+            "quantity": 50,
+            "acceptedQuantity": 50,
+            "statusID": 5,
+        }
+        mock_client.get_fbw_supply_goods.return_value = [
+            {"barcode": "bc-50", "vendorCode": "X", "nmID": 1, "quantity": 50, "acceptedQuantity": 50},
+        ]
+
+        result = await enrich_fbo_supplies(db_session, 1, mock_client, max_calls=5)
+
+        assert result["enriched"] == 1
+        assert mock_client.get_fbw_supply_goods.called
+
+    async def test_goods_api_error_preserves_stale_synced_at(self, db_session):
+        """ACCEPTED supply must NOT update synced_at when goods API fails —
+        otherwise 24h cooldown blocks retry indefinitely even after WB recovers.
+        Regression: 2026-04-22, 44 supplies stuck with accepted_qty=0 for 13 days.
+
+        Uses unique project_id=7777 to isolate from autouse fixture (project_id=1)
+        under xdist parallel runs.
+        """
+        from datetime import timedelta
+
+        from sqlalchemy import select
+
+        from backend.services.fbo_supply_service import enrich_fbo_supplies
+
+        # Create isolated project (avoid xdist race with autouse ensure_test_project).
+        await db_session.execute(
+            text(
+                "INSERT INTO users (username, email, password_hash, is_active, created_at) "
+                "VALUES ('fbo_goods_err_user', 'fbo_goods_err@test.com', 'nohash', true, NOW()) "
+                "ON CONFLICT (username) DO NOTHING"
+            )
+        )
+        user_row = await db_session.execute(text("SELECT id FROM users WHERE username = 'fbo_goods_err_user'"))
+        user_id = user_row.scalar()
+        await db_session.execute(
+            text(
+                "INSERT INTO projects (id, name, slug, owner_id, created_at) "
+                "VALUES (7777, 'FBO Goods Err Test', 'fbo-goods-err-test', :o, NOW()) "
+                "ON CONFLICT (id) DO NOTHING"
+            ),
+            {"o": user_id},
+        )
+        await db_session.execute(text("DELETE FROM wb_fbo_supplies WHERE project_id = 7777"))
+        await db_session.commit()
+
+        stale_synced = datetime.utcnow() - timedelta(hours=36)
+        supply = WbFboSupply(
+            project_id=7777,
             wb_supply_id="38413056",
             wb_status=WbSupplyStatus.ACCEPTED,
             name="FBW-38413056",
@@ -855,13 +931,15 @@ class TestEnrichPartialAcceptance:
         }
         mock_client.get_fbw_supply_goods.side_effect = Exception("WB API rate limited (429)")
 
-        await enrich_fbo_supplies(db_session, 1, mock_client, max_calls=5)
+        await enrich_fbo_supplies(db_session, 7777, mock_client, max_calls=5)
 
         assert mock_client.get_fbw_supply_goods.called
-        await db_session.refresh(supply)
-        assert supply.synced_at == stale_synced, (
-            "synced_at must not be refreshed when goods API fails — " "else 24h cooldown blocks retry indefinitely"
-        )
+
+        result = await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == supply.id))
+        fresh = result.scalar_one()
+        assert (
+            fresh.synced_at == stale_synced
+        ), "synced_at must not be refreshed when goods API fails — else 24h cooldown blocks retry indefinitely"
 
 
 # ─── Backfill: supply ↔ shipment link via AssemblyRequest ──────────────────

@@ -12,13 +12,13 @@ import logging
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, exists, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.assembly import AssemblyRequest, AssemblyStatus, AssemblyStatusHistory
 from backend.models.integrations import SyncLog
 from backend.models.warehouse import OutboundShipment, OutboundStatus
-from backend.models.wb_fbo import WbFboSupply, WbSupplyStatus
+from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem, WbSupplyStatus
 from backend.utils.time import utcnow
 
 from .mappers import (
@@ -183,8 +183,8 @@ async def enrich_fbo_supplies(
     # Find supplies needing detail:
     #  - no warehouse_name (fresh from list API)
     #  - CANCELLED (WB may accept items after initial cancel)
-    #  - ACCEPTED with accepted_qty < total_qty (partial acceptance: re-sync actual qty
-    #    from detail + goods after cooldown, so items get per-SKU accepted_qty too)
+    #  - ACCEPTED with partial acceptance OR no items in DB yet (historical
+    #    supplies that were never enriched — their items list in UI is empty)
     cooldown_threshold = utcnow() - timedelta(hours=ACCEPTED_REENRICH_COOLDOWN_HOURS)
     result = await db.execute(
         select(WbFboSupply).where(
@@ -194,8 +194,13 @@ async def enrich_fbo_supplies(
                 WbFboSupply.wb_status == WbSupplyStatus.CANCELLED,
                 and_(
                     WbFboSupply.wb_status == WbSupplyStatus.ACCEPTED,
-                    WbFboSupply.total_qty > 0,
-                    WbFboSupply.accepted_qty < WbFboSupply.total_qty,
+                    or_(
+                        and_(
+                            WbFboSupply.total_qty > 0,
+                            WbFboSupply.accepted_qty < WbFboSupply.total_qty,
+                        ),
+                        not_(exists().where(WbFboSupplyItem.supply_id == WbFboSupply.id)),
+                    ),
                     or_(
                         WbFboSupply.synced_at.is_(None),
                         WbFboSupply.synced_at < cooldown_threshold,

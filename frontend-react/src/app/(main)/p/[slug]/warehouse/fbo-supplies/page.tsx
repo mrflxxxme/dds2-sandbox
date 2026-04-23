@@ -151,11 +151,25 @@ export default function FboSuppliesPage() {
             if (items.length > 0) {
                 const totalQty = items.reduce((s, i) => s + i.quantity, 0);
                 const acceptedQty = items.reduce((s, i) => s + i.accepted_qty, 0);
-                setSupplies(prev => prev.map(s =>
-                    s.id === supplyId
-                        ? { ...s, total_qty: totalQty, accepted_qty: acceptedQty }
-                        : s
-                ));
+                // If partial_only filter is active and the supply turned out to
+                // be fully accepted after auto-refresh — drop it from the list
+                // (it no longer matches the server-side filter, but the list
+                // we got was a snapshot before refresh).
+                const fullyAccepted = totalQty > 0 && acceptedQty >= totalQty;
+                setSupplies(prev => {
+                    if (partialOnly && fullyAccepted) {
+                        return prev.filter(s => s.id !== supplyId);
+                    }
+                    return prev.map(s =>
+                        s.id === supplyId
+                            ? { ...s, total_qty: totalQty, accepted_qty: acceptedQty }
+                            : s
+                    );
+                });
+                if (partialOnly && fullyAccepted) {
+                    setExpandedId(null);
+                    setExpandedItems([]);
+                }
             }
         } catch {
             setExpandedItems([]);
