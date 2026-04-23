@@ -209,10 +209,20 @@ export function addWarehouseMethods(api: ApiClient) {
                 payload,
             );
         },
-        getFboPartialSummary() {
+        getFboPartialSummary(params?: {
+            date_from?: string; date_to?: string;
+            warehouse?: string; status?: string; archived_view?: boolean;
+        }) {
+            const query = new URLSearchParams();
+            if (params) {
+                Object.entries(params).forEach(([k, v]) => {
+                    if (v !== undefined && v !== null && v !== '' && v !== false) query.set(k, String(v));
+                });
+            }
+            const qs = query.toString();
             return api.request<FboPartialSummary>(
                 'GET',
-                '/api/v1/warehouse/fbo-supplies/partial-summary',
+                `/api/v1/warehouse/fbo-supplies/partial-summary${qs ? `?${qs}` : ''}`,
             );
         },
         getFboSupplyItems(supplyId: number, refresh?: boolean) {

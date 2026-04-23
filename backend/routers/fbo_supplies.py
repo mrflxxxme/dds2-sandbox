@@ -125,6 +125,10 @@ async def get_fbo_supplies_summary(
 
 @router.get("/partial-summary")
 async def get_partial_summary(
+    date_from: date | None = Query(None, description="Date from"),
+    date_to: date | None = Query(None, description="Date to"),
+    warehouse: str | None = Query(None, description="Filter by warehouse name"),
+    status: str | None = Query(None, description="Filter by WB status (comma-separated)"),
     archived_view: bool = Query(False, description="Count supplies in archive bucket instead of active"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -132,11 +136,17 @@ async def get_partial_summary(
     """
     Недоприёмка dashboard: aggregate qty buckets + per-barcode breakdown.
     Shown as a mini-panel when user enables the 'С недоприёмкой' filter.
+    Mirrors the list-view filters (period/warehouse/status) so the cards
+    don't show всю историю когда видимый список — окно за 30 дней.
     """  # noqa: RUF002 — mixed cyrillic/latin is intentional (product terms)
     return await fbo_supply_service.get_partial_acceptance_summary(
         db,
         project.id,
         accounting_started_at=project.accounting_started_at,
+        date_from=date_from,
+        date_to=date_to,
+        warehouse=warehouse,
+        status=status,
         archived_view=archived_view,
     )
 
