@@ -14,6 +14,7 @@ from backend.services.warehouse_crud import (  # noqa: F401
     delete_warehouse,
     get_delivery_times,
     get_warehouse,
+    link_counterparty,
     list_warehouses,
     reorder_warehouses,
     update_delivery_times,

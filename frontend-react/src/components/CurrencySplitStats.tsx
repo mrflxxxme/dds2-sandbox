@@ -73,10 +73,14 @@ export default function CurrencySplitStats({ rub, cny, loading }: CurrencySplitS
         );
     }
 
+    const showRub = rub.tx_count > 0;
+    const showCny = cny.tx_count > 0;
+    if (!showRub && !showCny) return null;
+
     return (
         <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-            <StatBlock label="Рубли" symbol="₽" stats={rub} color="var(--color-accent)" />
-            <StatBlock label="Юани" symbol="¥" stats={cny} color="var(--color-warning)" />
+            {showRub && <StatBlock label="Рубли" symbol="₽" stats={rub} color="var(--color-accent)" />}
+            {showCny && <StatBlock label="Юани" symbol="¥" stats={cny} color="var(--color-warning)" />}
         </div>
     );
 }

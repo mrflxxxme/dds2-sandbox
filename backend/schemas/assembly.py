@@ -40,6 +40,8 @@ class AssemblyRequestUpdate(BaseModel):
     vehicle_info: str | None = None
     vehicle_brand: str | None = None
     driver_phone: str | None = None
+    carrier_inn: str | None = None
+    carrier_name: str | None = None
 
 
 class AssignVehicle(BaseModel):
@@ -50,6 +52,8 @@ class AssignVehicle(BaseModel):
     pickup_time_slot: str
     pickup_cost: Decimal
     delivery_date: date
+    carrier_inn: str | None = None
+    carrier_name: str | None = None
 
 
 class BulkAssignItem(BaseModel):
@@ -64,6 +68,8 @@ class AssignVehicleBulk(BaseModel):
     vehicle_info: str
     vehicle_brand: str
     driver_phone: str
+    carrier_inn: str | None = None
+    carrier_name: str | None = None
     items: list[BulkAssignItem]
 
 
@@ -116,6 +122,9 @@ class AssemblyRequestResponse(BaseModel):
     delivery_date: date | None = None
     vehicle_assigned_at: datetime | None = None
     shipped_at: datetime | None = None
+    counterparty_id: int | None = None
+    carrier_inn: str | None = None
+    carrier_name: str | None = None
     comment: str | None = None
     wb_warehouse_name_manual: str | None = None
     effective_wb_warehouse: str | None = None  # FBO warehouse_name or manual, whichever is set

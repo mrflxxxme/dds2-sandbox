@@ -17,6 +17,7 @@ from backend.models.assembly import (
     AssemblyStatus,
     AssemblyStatusHistory,
 )
+from backend.models.counterparty import Counterparty
 from backend.models.warehouse import (
     MovementType,
     OutboundShipment,
@@ -27,6 +28,40 @@ from backend.models.wb_fbo import WbFboSupply
 from backend.schemas.assembly import AssignVehicle
 from backend.services.warehouse_service import _next_number, _update_stock
 from backend.utils.time import utcnow
+
+
+async def _resolve_carrier(db: AsyncSession, project_id: int, inn: str | None, name: str | None) -> int | None:
+    """Upsert Counterparty by (project_id, inn), bump OTHER→CARRIER. Returns cp.id or None."""
+    if not inn or not inn.strip():
+        return None
+    clean_inn = inn.strip()
+    cp_name = (name or "").strip() or clean_inn
+    res = await db.execute(
+        select(Counterparty).where(
+            Counterparty.project_id == project_id,
+            Counterparty.inn == clean_inn,
+            Counterparty.is_deleted == False,  # noqa: E712
+        )
+    )
+    cp = res.scalar_one_or_none()
+    if cp is None:
+        cp = Counterparty(
+            project_id=project_id,
+            inn=clean_inn,
+            name=cp_name,
+            primary_type="CARRIER",
+            created_by_import=False,
+        )
+        db.add(cp)
+        await db.flush()
+        return cp.id
+    # Update name only if longer; bump type only if OTHER
+    if cp_name and len(cp_name) > len(cp.name or ""):
+        cp.name = cp_name
+    if cp.primary_type == "OTHER":
+        cp.primary_type = "CARRIER"
+    return cp.id
+
 
 # --- Helpers (used by crud.py via from .status import _log_status_change) ---
 
@@ -133,6 +168,9 @@ async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, pay
     req.pickup_cost = payload.pickup_cost
     req.delivery_date = payload.delivery_date
     req.vehicle_assigned_at = utcnow()
+    cp_id = await _resolve_carrier(db, project_id, payload.carrier_inn, payload.carrier_name)
+    if cp_id is not None:
+        req.counterparty_id = cp_id
     await _log_status_change(db, project_id, req.id, old, AssemblyStatus.VEHICLE_ASSIGNED, comment=payload.vehicle_info)
     await db.commit()
     await db.refresh(req)

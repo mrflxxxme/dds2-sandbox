@@ -63,16 +63,36 @@ def _upsert_counterparties_from_df(db: Session, df, project_id: int) -> tuple[di
     if not unique:
         return {}, {}
 
+    # INNs belonging to warehouses' counterparties → classify as FULFILLMENT on upsert.
+    # Only promotes new rows or existing rows still at OTHER (manual categories preserved).
+    fulfillment_inns: set[str] = set()
+    wh_inn_rows = db.execute(
+        text("""
+            SELECT DISTINCT cp.inn
+            FROM warehouses wh
+            JOIN counterparty cp ON cp.id = wh.counterparty_id
+            WHERE wh.project_id = :pid
+              AND wh.is_deleted = false
+              AND cp.is_deleted = false
+              AND cp.inn IS NOT NULL
+        """),
+        {"pid": project_id},
+    ).fetchall()
+    for (wh_inn,) in wh_inn_rows:
+        if wh_inn:
+            fulfillment_inns.add(str(wh_inn).strip())
+
     # Upsert via ON CONFLICT on partial unique index (project_id, inn) WHERE inn IS NOT NULL AND is_deleted=false
     inn_to_cp_id: dict[str, int] = {}
     for inn, name in unique.items():
+        default_type = "FULFILLMENT" if inn in fulfillment_inns else "OTHER"
         result = db.execute(
             text("""
                 INSERT INTO counterparty (
                     project_id, inn, name, primary_type, created_by_import,
                     is_deleted, created_at, updated_at
                 )
-                VALUES (:pid, :inn, :name, 'OTHER', TRUE, FALSE, :now, :now)
+                VALUES (:pid, :inn, :name, :ptype, TRUE, FALSE, :now, :now)
                 ON CONFLICT (project_id, inn) WHERE inn IS NOT NULL AND is_deleted = false
                 DO UPDATE SET
                     name = CASE
@@ -80,10 +100,15 @@ def _upsert_counterparties_from_df(db: Session, df, project_id: int) -> tuple[di
                         THEN EXCLUDED.name
                         ELSE counterparty.name
                     END,
+                    primary_type = CASE
+                        WHEN counterparty.primary_type = 'OTHER' AND EXCLUDED.primary_type <> 'OTHER'
+                        THEN EXCLUDED.primary_type
+                        ELSE counterparty.primary_type
+                    END,
                     updated_at = EXCLUDED.updated_at
                 RETURNING id
             """),
-            {"pid": project_id, "inn": inn, "name": name, "now": utcnow()},
+            {"pid": project_id, "inn": inn, "name": name, "ptype": default_type, "now": utcnow()},
         ).scalar()
         if result is not None:
             inn_to_cp_id[inn] = result

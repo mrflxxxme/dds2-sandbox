@@ -1,4 +1,5 @@
 'use client';
+import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -38,6 +39,8 @@ export default function AssemblyDetailPage() {
     const [vehicleInfo, setVehicleInfo] = useState('');
     const [vehicleBrand, setVehicleBrand] = useState('');
     const [driverPhone, setDriverPhone] = useState('');
+    const [carrierInn, setCarrierInn] = useState('');
+    const [carrierName, setCarrierName] = useState('');
     const [pickupDate, setPickupDate] = useState('');
     const [pickupTimeSlot, setPickupTimeSlot] = useState('');
     const [pickupCost, setPickupCost] = useState<number | ''>('');
@@ -160,10 +163,14 @@ export default function AssemblyDetailPage() {
                 pickup_time_slot: pickupTimeSlot,
                 pickup_cost: Number(pickupCost),
                 delivery_date: deliveryDate,
+                carrier_inn: carrierInn.trim() || null,
+                carrier_name: carrierName.trim() || null,
             });
             setAssembly(updated);
             setShowVehicleModal(false);
             setVehicleInfo('');
+            setCarrierInn('');
+            setCarrierName('');
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
         }
@@ -238,6 +245,15 @@ export default function AssemblyDetailPage() {
             } else if (field === 'driver_phone') {
                 setAssembly({ ...assembly, driver_phone: String(value) });
                 update.driver_phone = String(value);
+            } else if (field === 'carrier_inn') {
+                setAssembly({ ...assembly, carrier_inn: String(value) });
+                update.carrier_inn = String(value);
+                update.carrier_name = assembly.carrier_name ?? null;
+            } else if (field === 'carrier_name') {
+                setAssembly({ ...assembly, carrier_name: String(value) });
+                // Must also send carrier_inn so backend knows to upsert (not unlink)
+                update.carrier_inn = assembly.carrier_inn ?? '';
+                update.carrier_name = String(value);
             } else {
                 setAssembly({ ...assembly, [field]: value });
                 update[field] = value || undefined;
@@ -554,6 +570,35 @@ export default function AssemblyDetailPage() {
                             onSave={(v) => handleFieldSave('driver_phone', v)}
                         />
                     )}
+                    {(assembly.carrier_inn || canEditAlways) && (
+                        <EditableInfoField
+                            label="ИНН подрядчика"
+                            value={assembly.carrier_inn || ''}
+                            displayValue={
+                                assembly.counterparty_id ? (
+                                    <Link
+                                        href={`/p/${slug}/refs/counterparty/${assembly.counterparty_id}`}
+                                        style={{ color: 'var(--color-accent)' }}
+                                    >
+                                        {assembly.carrier_inn} →
+                                    </Link>
+                                ) : (assembly.carrier_inn || '\u2014')
+                            }
+                            type="text"
+                            editable={!!canEditAlways}
+                            onSave={(v) => handleFieldSave('carrier_inn', v)}
+                        />
+                    )}
+                    {(assembly.carrier_name || canEditAlways) && (
+                        <EditableInfoField
+                            label="Подрядчик"
+                            value={assembly.carrier_name || ''}
+                            displayValue={assembly.carrier_name || '\u2014'}
+                            type="text"
+                            editable={!!canEditAlways}
+                            onSave={(v) => handleFieldSave('carrier_name', v)}
+                        />
+                    )}
                     {assembly.pickup_date && (
                         <InfoField label="Забор" value={`${formatDate(assembly.pickup_date)}${assembly.pickup_time_slot ? ', ' + assembly.pickup_time_slot : ''}`} />
                     )}
@@ -695,6 +740,30 @@ export default function AssemblyDetailPage() {
                                 <label className="form-label">Дата сдачи на WB *</label>
                                 <input className="form-input" type="date" value={deliveryDate} onChange={e => setDeliveryDate(e.target.value)} />
                             </div>
+                            <div className="form-group" style={{ gridColumn: '1 / -1', borderTop: '1px solid var(--color-border)', paddingTop: 12, marginTop: 4 }}>
+                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                                    Подрядчик (опционально) — расходы из выписки с этим ИНН попадут в «Перевозчик».
+                                </div>
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">ИНН подрядчика</label>
+                                <input
+                                    className="form-input"
+                                    value={carrierInn}
+                                    onChange={e => setCarrierInn(e.target.value)}
+                                    placeholder="10 или 12 цифр"
+                                    maxLength={12}
+                                />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Название подрядчика</label>
+                                <input
+                                    className="form-input"
+                                    value={carrierName}
+                                    onChange={e => setCarrierName(e.target.value)}
+                                    placeholder="ООО «ТК» / ИП Иванов"
+                                />
+                            </div>
                         </div>
                         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
                             <button className="btn btn-secondary" onClick={() => setShowVehicleModal(false)}>Отмена</button>
@@ -779,7 +848,7 @@ function InfoField({ label, value }: { label: string; value: string }) {
 function EditableInfoField({
     label, value, displayValue, type, editable, onSave,
 }: {
-    label: string; value: string; displayValue: string;
+    label: string; value: string; displayValue: React.ReactNode;
     type: 'date' | 'number' | 'text'; editable: boolean;
     onSave: (val: string) => void;
 }) {

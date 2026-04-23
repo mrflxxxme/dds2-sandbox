@@ -158,6 +158,20 @@ async def _build_response(
     weight = request.pallet_weight_kg or Decimal("0")
     total_weight = Decimal(str(pallets)) * weight
 
+    carrier_inn: str | None = None
+    carrier_name: str | None = None
+    if request.counterparty_id:
+        from backend.models.counterparty import Counterparty
+
+        cp_row = (
+            await db.execute(
+                select(Counterparty.inn, Counterparty.name).where(Counterparty.id == request.counterparty_id)
+            )
+        ).first()
+        if cp_row is not None:
+            carrier_inn = cp_row.inn
+            carrier_name = cp_row.name
+
     return {
         "id": request.id,
         "warehouse_id": request.warehouse_id,
@@ -191,6 +205,9 @@ async def _build_response(
         "effective_wb_warehouse": (
             request.wb_fbo_supply.warehouse_name if request.wb_fbo_supply else request.wb_warehouse_name_manual
         ),
+        "counterparty_id": request.counterparty_id,
+        "carrier_inn": carrier_inn,
+        "carrier_name": carrier_name,
         "items": (items := await _build_items_with_stock(db, request)),
         "brands": ", ".join(sorted({i["brand"] for i in items if i.get("brand")})) or None,
         "created_at": request.created_at,
@@ -543,6 +560,12 @@ async def update_assembly_request(
         req.vehicle_brand = payload.vehicle_brand
     if payload.driver_phone is not None:
         req.driver_phone = payload.driver_phone
+    if payload.carrier_inn is not None:
+        # carrier_inn == "" → unlink, non-empty → upsert & link
+        from .status import _resolve_carrier
+
+        cp_id = await _resolve_carrier(db, project_id, payload.carrier_inn, payload.carrier_name)
+        req.counterparty_id = cp_id  # None if inn was empty
 
     # Update items: allowed until READY (PENDING and IN_PROGRESS)
     if payload.items is not None:

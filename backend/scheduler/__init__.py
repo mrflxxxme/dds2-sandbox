@@ -36,6 +36,7 @@ from backend.scheduler.jobs.wb_finance import (
     sync_all_projects_wb_finance,
     sync_all_projects_wb_finance_daily,
 )
+from backend.scheduler.jobs.wb_goods_returns_sync import sync_all_projects_wb_returns
 from backend.scheduler.jobs.wb_stocks import sync_all_projects_wb_stocks
 
 logger = logging.getLogger("dds.scheduler")
@@ -224,6 +225,17 @@ def start_scheduler():
         id="wb_stocks_sync",
         name="WB warehouse stocks snapshot (daily 00:00 MSK)",
         replace_existing=True,
+        misfire_grace_time=600,
+    )
+
+    # WB goods returns (возвраты на ПВЗ): every 30 min (WB publishes updates every 30 min)
+    _scheduler.add_job(
+        sync_all_projects_wb_returns,
+        trigger=IntervalTrigger(minutes=30),
+        id="wb_goods_returns_sync",
+        name="WB goods returns sync (every 30min)",
+        replace_existing=True,
+        max_instances=1,
         misfire_grace_time=600,
     )
 

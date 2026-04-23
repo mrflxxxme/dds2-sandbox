@@ -19,6 +19,7 @@ const pages = [
   { path: '/warehouse/assembly', name: 'Assembly' },
   { path: '/warehouse/stock', name: 'Stock Summary' },
   { path: '/warehouse/fbo-supplies', name: 'FBO Supplies' },
+  { path: '/warehouse/wb-returns', name: 'WB Returns (PVZ)' },
   { path: '/warehouse/wb-stocks', name: 'WB Stocks' },
   { path: '/warehouse/analytics', name: 'Stock Analytics' },
   { path: '/warehouse/logistics', name: 'Logistics' },
