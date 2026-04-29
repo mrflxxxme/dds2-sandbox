@@ -87,6 +87,113 @@ async def _validate_stock_for_ship(
     return deficits
 
 
+async def _validate_available_for_assembly(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    items: list[AssemblyRequestItem],
+    exclude_request_id: int | None = None,
+) -> list[dict]:
+    """
+    Check available stock = quantity - reserved by OTHER active assembly requests.
+    Used at create / update / start_assembly to prevent over-commitment.
+
+    exclude_request_id: исключить эту заявку из расчёта резерва (чтобы не вычитать саму себя
+    при редактировании или старте).
+    """
+    nom_ids = [item.nomenclature_id for item in items if item.nomenclature_id]
+    if not nom_ids:
+        return []
+
+    stock_result = await db.execute(
+        select(WarehouseStock.nomenclature_id, WarehouseStock.quantity).where(
+            WarehouseStock.project_id == project_id,
+            WarehouseStock.warehouse_id == warehouse_id,
+            WarehouseStock.nomenclature_id.in_(nom_ids),
+        )
+    )
+    stock_map = {r.nomenclature_id: r.quantity for r in stock_result.all()}
+
+    reserved_q = (
+        select(
+            AssemblyRequestItem.nomenclature_id,
+            func.sum(AssemblyRequestItem.quantity).label("reserved"),
+        )
+        .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.warehouse_id == warehouse_id,
+            AssemblyRequest.is_deleted.is_(False),
+            AssemblyRequest.status.in_(
+                [
+                    AssemblyStatus.PENDING,
+                    AssemblyStatus.IN_PROGRESS,
+                    AssemblyStatus.READY,
+                    AssemblyStatus.VEHICLE_ASSIGNED,
+                ]
+            ),
+            AssemblyRequestItem.nomenclature_id.in_(nom_ids),
+        )
+        .group_by(AssemblyRequestItem.nomenclature_id)
+    )
+    if exclude_request_id is not None:
+        reserved_q = reserved_q.where(AssemblyRequest.id != exclude_request_id)
+    reserved_result = await db.execute(reserved_q)
+    reserved_map = {r.nomenclature_id: r.reserved for r in reserved_result.all()}
+
+    needs: dict[int, int] = {}
+    barcode_for_nom: dict[int, str] = {}
+    for item in items:
+        if item.nomenclature_id is None:
+            continue
+        needs[item.nomenclature_id] = needs.get(item.nomenclature_id, 0) + item.quantity
+        barcode_for_nom.setdefault(item.nomenclature_id, item.barcode)
+
+    deficit_nom_ids: list[int] = []
+    for nom_id, need in needs.items():
+        stock = stock_map.get(nom_id, 0)
+        reserved = reserved_map.get(nom_id, 0)
+        available = max(0, stock - reserved)
+        if available < need:
+            deficit_nom_ids.append(nom_id)
+
+    if not deficit_nom_ids:
+        return []
+
+    nom_result = await db.execute(select(Nomenclature).where(Nomenclature.id.in_(deficit_nom_ids)))
+    nom_map = {n.id: n for n in nom_result.scalars().all()}
+
+    deficits: list[dict] = []
+    for nom_id in deficit_nom_ids:
+        nom = nom_map.get(nom_id)
+        bc = barcode_for_nom[nom_id]
+        name = (nom.subject or nom.article_seller or bc) if nom else bc
+        stock = stock_map.get(nom_id, 0)
+        reserved = reserved_map.get(nom_id, 0)
+        available = max(0, stock - reserved)
+        deficits.append(
+            {
+                "name": name,
+                "barcode": bc,
+                "need": needs[nom_id],
+                "have": available,
+                "stock": stock,
+                "reserved": reserved,
+            }
+        )
+    return deficits
+
+
+def _format_deficit_error(deficits: list[dict]) -> str:
+    """Format deficit list into a human-readable Russian error message."""
+    lines = [
+        f"  {d['name']} (ШК {d['barcode']}): нужно {d['need']}, доступно {d['have']} "
+        f"(на складе {d['stock']}, в работе {d['reserved']})"
+        for d in deficits
+    ]
+    return f"Недостаточно доступных остатков ({len(deficits)} поз.):\n" + "\n".join(lines)
+
+
 async def _build_items_with_stock(
     db: AsyncSession,
     request: AssemblyRequest,
@@ -432,7 +539,7 @@ async def create_assembly_request(
         project_id=project_id,
         warehouse_id=payload.warehouse_id,
         number=number,
-        status=AssemblyStatus.PENDING,
+        status=AssemblyStatus.IN_PROGRESS,
         wb_fbo_supply_id=payload.wb_fbo_supply_id,
         estimated_ready_date=payload.estimated_ready_date,
         pallets_count=payload.pallets_count,
@@ -468,14 +575,16 @@ async def create_assembly_request(
         db.add(item)
         resolved_items.append(item)
 
-    # 6. Validate stock availability
+    # 6. Validate AVAILABLE stock (= warehouse stock - reserved by other active assembly requests).
+    # Заявка не должна резервировать больше чем доступно. Свою же заявку из reserved исключаем.
     await db.flush()
-    deficits = await _validate_stock_for_ship(db, project_id, payload.warehouse_id, resolved_items)
+    deficits = await _validate_available_for_assembly(
+        db, project_id, payload.warehouse_id, resolved_items, exclude_request_id=assembly_req.id
+    )
     if deficits:
-        lines = [f"  {d['name']} (ШК {d['barcode']}): нужно {d['need']}, на складе {d['have']}" for d in deficits]
-        raise ValueError(f"Недостаточно остатков на складе ({len(deficits)} поз.):\n" + "\n".join(lines))
+        raise ValueError(_format_deficit_error(deficits))
 
-    await _log_status_change(db, project_id, assembly_req.id, None, AssemblyStatus.PENDING, changed_by="user")
+    await _log_status_change(db, project_id, assembly_req.id, None, AssemblyStatus.IN_PROGRESS, changed_by="user")
 
     await db.commit()
     await db.refresh(assembly_req)
@@ -585,6 +694,7 @@ async def update_assembly_request(
         )
         barcode_map = {n.barcode: n for n in barcode_result.scalars().all()}
 
+        new_items: list[AssemblyRequestItem] = []
         for item_data in payload.items:
             nom = barcode_map.get(item_data.barcode)
             if not nom:
@@ -597,6 +707,17 @@ async def update_assembly_request(
                 quantity=item_data.quantity,
             )
             db.add(item)
+            new_items.append(item)
+
+        # Validate available stock for active (pre-shipping) statuses.
+        # READY/VEHICLE_ASSIGNED skip — там позиции подгоняют под факт WB (см. комментарий выше).
+        if req.status in (AssemblyStatus.PENDING, AssemblyStatus.IN_PROGRESS):
+            await db.flush()
+            deficits = await _validate_available_for_assembly(
+                db, project_id, req.warehouse_id, new_items, exclude_request_id=req.id
+            )
+            if deficits:
+                raise ValueError(_format_deficit_error(deficits))
 
     await db.commit()
     # Expunge all cached objects so selectinload re-fetches fresh data from DB

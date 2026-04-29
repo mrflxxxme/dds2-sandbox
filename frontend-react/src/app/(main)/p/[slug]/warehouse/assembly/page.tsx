@@ -11,7 +11,8 @@ import type { AssemblyRequest, AssemblyStatus, Warehouse } from '@/types/api';
 // ─── Status config ──────────────────────────────────────────────────────────
 
 const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> = {
-    PENDING:          { label: 'Ожидает сборку',    className: 'badge-warning' },
+    // PENDING — legacy: больше не используется при создании, но может встретиться в истории.
+    PENDING:          { label: 'В сборке',          className: 'badge-info' },
     IN_PROGRESS:      { label: 'В сборке',          className: 'badge-info' },
     READY:            { label: 'Готово',             className: 'badge-success' },
     VEHICLE_ASSIGNED: { label: 'Машина назначена',   className: 'badge-info' },
@@ -20,11 +21,10 @@ const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> =
     CANCELLED:        { label: 'Отменена',           className: 'badge-secondary' },
 };
 
-const EDITABLE_STATUSES: AssemblyStatus[] = ['PENDING', 'IN_PROGRESS', 'READY'];
+const EDITABLE_STATUSES: AssemblyStatus[] = ['IN_PROGRESS', 'READY'];
 
 const STATUS_OPTIONS_FILTER: { value: string; label: string }[] = [
     { value: '', label: 'Все статусы' },
-    { value: 'PENDING', label: 'Ожидает сборку' },
     { value: 'IN_PROGRESS', label: 'В сборке' },
     { value: 'READY', label: 'Готово' },
     { value: 'VEHICLE_ASSIGNED', label: 'Машина назначена' },
@@ -36,7 +36,7 @@ const STATUS_OPTIONS_FILTER: { value: string; label: string }[] = [
 // ─── Status colors for Tailwind badge ────────────────────────────────────────
 
 const STATUS_COLORS: Record<string, string> = {
-    PENDING:          'bg-amber-100 text-amber-700 border-amber-200 focus:ring-amber-400',
+    PENDING:          'bg-blue-100 text-blue-700 border-blue-200 focus:ring-blue-400',
     IN_PROGRESS:      'bg-blue-100 text-blue-700 border-blue-200 focus:ring-blue-400',
     READY:            'bg-green-100 text-green-700 border-green-200 focus:ring-green-400',
     VEHICLE_ASSIGNED: 'bg-sky-100 text-sky-700 border-sky-200',
@@ -92,7 +92,6 @@ function StatusBadge({
                     ${colorClass}
                 `}
             >
-                <option value="PENDING">Ожидает сборку</option>
                 <option value="IN_PROGRESS">В сборке</option>
                 <option value="READY">Готово</option>
             </select>
@@ -367,8 +366,6 @@ export default function AssemblyListPage() {
                 await api.startAssembly(id);
             } else if (newStatus === 'READY') {
                 await api.markAssemblyReady(id);
-            } else if (newStatus === 'PENDING') {
-                await api.updateAssemblyRequest(id, { status: 'PENDING' } as never);
             }
             setToast({ message: `Статус изменён → ${STATUS_MAP[newStatus]?.label || newStatus}`, type: 'success' });
         } catch (e: unknown) {

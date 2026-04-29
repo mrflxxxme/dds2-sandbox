@@ -254,9 +254,9 @@ class TestCreateAssemblyRequest:
     """Tests 1-4: Create assembly request."""
 
     async def test_create_valid(self, db_session):
-        """1. Create with valid data -> status PENDING, items saved."""
+        """1. Create with valid data -> status IN_PROGRESS (PENDING removed), items saved."""
         req = await _create_test_request(db_session)
-        assert req.status == AssemblyStatus.PENDING
+        assert req.status == AssemblyStatus.IN_PROGRESS
         assert req.number.startswith("ASM-")
 
         # Reload to check items
@@ -355,7 +355,7 @@ class TestCreateAssemblyRequest:
             items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=5)],
         )
         req = await create_assembly_request(db_session, PROJECT_ID, payload)
-        assert req.status == AssemblyStatus.PENDING
+        assert req.status == AssemblyStatus.IN_PROGRESS
         assert req.wb_fbo_supply_id == fbo_id
 
     async def test_create_rejects_cancelled_fbo_supply(self, db_session):
@@ -517,11 +517,10 @@ class TestLifecycle:
     """Test 8-9: Full lifecycle and invalid transitions."""
 
     async def test_full_lifecycle(self, db_session):
-        """8. Full lifecycle: PENDING -> IN_PROGRESS -> READY -> VEHICLE_ASSIGNED -> SHIPPED."""
+        """8. Full lifecycle: IN_PROGRESS -> READY -> VEHICLE_ASSIGNED -> SHIPPED.
+        (PENDING removed: новые заявки создаются сразу в IN_PROGRESS.)
+        """
         req = await _create_test_request(db_session)
-        assert req.status == AssemblyStatus.PENDING
-
-        req = await start_assembly(db_session, PROJECT_ID, req.id)
         assert req.status == AssemblyStatus.IN_PROGRESS
 
         req = await mark_ready(db_session, PROJECT_ID, req.id)
@@ -548,15 +547,27 @@ class TestLifecycle:
         assert req.outbound_shipment_id is not None
 
     async def test_skip_status_raises(self, db_session):
-        """9. Skip status (PENDING -> READY directly) -> ValueError."""
+        """9. Skip status (IN_PROGRESS -> VEHICLE_ASSIGNED directly) -> ValueError.
+        Проверяем что пропуск READY не разрешён.
+        """
+        from backend.services.assembly_service import assign_vehicle
+
         req = await _create_test_request(db_session)
+        payload = AssignVehicle(
+            vehicle_info="Truck X",
+            vehicle_brand="GAZ",
+            driver_phone="+79991234567",
+            pickup_date="2026-03-22",
+            pickup_time_slot="08:00-12:00",
+            pickup_cost=1,
+            delivery_date="2026-03-23",
+        )
         with pytest.raises(ValueError, match="Cannot transition"):
-            await mark_ready(db_session, PROJECT_ID, req.id)
+            await assign_vehicle(db_session, PROJECT_ID, req.id, payload)
 
     async def test_reopen_from_ready_to_in_progress(self, db_session):
         """9b. READY -> IN_PROGRESS (reopen): allowed, clears actual_ready_date."""
         req = await _create_test_request(db_session)
-        await start_assembly(db_session, PROJECT_ID, req.id)
         req = await mark_ready(db_session, PROJECT_ID, req.id)
         assert req.status == AssemblyStatus.READY
         assert req.actual_ready_date == date.today()
@@ -761,7 +772,7 @@ class TestInsufficientStock:
     """Test 13: Ship with insufficient stock."""
 
     async def test_create_without_fbo_supply(self, db_session):
-        """14. Create assembly without wb_fbo_supply_id -> should succeed, status PENDING."""
+        """14. Create assembly without wb_fbo_supply_id -> should succeed, status IN_PROGRESS."""
         wh_id = await _get_fulfillment_wh_id(db_session)
         payload = AssemblyRequestCreate(
             warehouse_id=wh_id,
@@ -771,7 +782,7 @@ class TestInsufficientStock:
             items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=5)],
         )
         req = await create_assembly_request(db_session, PROJECT_ID, payload)
-        assert req.status == AssemblyStatus.PENDING
+        assert req.status == AssemblyStatus.IN_PROGRESS
         assert req.wb_fbo_supply_id is None
 
         loaded = await get_assembly_request(db_session, PROJECT_ID, req.id)
@@ -866,3 +877,118 @@ class TestInsufficientStock:
 
         with pytest.raises(ValueError, match="Недостаточно остатков"):
             await ship_request(db_session, PROJECT_ID, req.id)
+
+
+@pytest.mark.asyncio
+class TestAvailableStockValidation:
+    """Tests: создание/изменение заявки учитывает резерв из других активных заявок."""
+
+    async def test_create_blocks_when_exceeds_warehouse_quantity(self, db_session):
+        """Create заявку на больше чем физический stock → ValueError."""
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        # stock = 100 по умолчанию; пробуем 150
+        payload = AssemblyRequestCreate(
+            warehouse_id=wh_id,
+            wb_fbo_supply_id=None,
+            pallets_count=1,
+            pallet_weight_kg=Decimal("10.00"),
+            items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=150)],
+        )
+        with pytest.raises(ValueError, match="Недостаточно доступных остатков"):
+            await create_assembly_request(db_session, PROJECT_ID, payload)
+
+    async def test_create_blocks_when_other_request_holds_reserve(self, db_session):
+        """stock=100, заявка А резервирует 80 → новая на 30 → ValueError (доступно 20)."""
+        # Заявка А: 80 шт.
+        req_a = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=await _get_fulfillment_wh_id(db_session),
+                wb_fbo_supply_id=None,
+                pallets_count=1,
+                pallet_weight_kg=Decimal("10.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=80)],
+            ),
+        )
+        assert req_a.status == AssemblyStatus.IN_PROGRESS
+
+        # Заявка Б: 30 шт. — должна упасть, доступно только 20.
+        with pytest.raises(ValueError, match="Недостаточно доступных остатков"):
+            await create_assembly_request(
+                db_session,
+                PROJECT_ID,
+                AssemblyRequestCreate(
+                    warehouse_id=await _get_fulfillment_wh_id(db_session),
+                    wb_fbo_supply_id=None,
+                    pallets_count=1,
+                    pallet_weight_kg=Decimal("10.00"),
+                    items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=30)],
+                ),
+            )
+
+    async def test_update_excludes_own_reservation(self, db_session):
+        """Update в IN_PROGRESS заявке: при пересчёте резерва не вычитать саму себя.
+        stock=100, заявка резервирует 80, обновляем до 90 → должно пройти (80 от себя
+        исключаются, доступно 100, нужно 90).
+        """
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        req = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh_id,
+                wb_fbo_supply_id=None,
+                pallets_count=1,
+                pallet_weight_kg=Decimal("10.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=80)],
+            ),
+        )
+        # Должно пройти: свой резерв исключается из reserved.
+        updated = await update_assembly_request(
+            db_session,
+            PROJECT_ID,
+            req.id,
+            AssemblyRequestUpdate(
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=90)],
+            ),
+        )
+        assert updated.items[0].quantity == 90
+
+    async def test_update_blocks_when_other_reserve_too_high(self, db_session):
+        """Update заявки А до 50, когда другая заявка Б держит 70 на этом же товаре.
+        stock=100, available_for_A = 100 - 70 = 30 → 50 не пройдёт.
+        """
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        req_a = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh_id,
+                wb_fbo_supply_id=None,
+                pallets_count=1,
+                pallet_weight_kg=Decimal("10.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=20)],
+            ),
+        )
+        await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh_id,
+                wb_fbo_supply_id=None,
+                pallets_count=1,
+                pallet_weight_kg=Decimal("10.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=70)],
+            ),
+        )
+        # Теперь А пытается увеличиться до 50, но доступно 100-70=30
+        with pytest.raises(ValueError, match="Недостаточно доступных остатков"):
+            await update_assembly_request(
+                db_session,
+                PROJECT_ID,
+                req_a.id,
+                AssemblyRequestUpdate(
+                    items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=50)],
+                ),
+            )

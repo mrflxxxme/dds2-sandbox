@@ -12,7 +12,8 @@ import type { AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, RefreshFrom
 // ─── Status config ──────────────────────────────────────────────────────────
 
 const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> = {
-    PENDING:          { label: 'Ожидает сборку',    className: 'badge-warning' },
+    // PENDING — legacy: новые заявки создаются сразу в IN_PROGRESS.
+    PENDING:          { label: 'В сборке',          className: 'badge-info' },
     IN_PROGRESS:      { label: 'В сборке',          className: 'badge-info' },
     READY:            { label: 'Готово',             className: 'badge-success' },
     VEHICLE_ASSIGNED: { label: 'Машина назначена',   className: 'badge-info' },
