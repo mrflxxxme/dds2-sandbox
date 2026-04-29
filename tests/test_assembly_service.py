@@ -428,8 +428,8 @@ class TestUpdateAssemblyRequest:
         assert len(updated.items) == 1
         assert updated.items[0].barcode == TEST_BARCODE_2
 
-    async def test_edit_items_in_ready_raises(self, db_session):
-        """7b. Edit items in READY status -> ValueError."""
+    async def test_edit_items_in_ready_allowed(self, db_session):
+        """7b. Edit items in READY status -> allowed (нужно править факт под WB)."""
         req = await _create_test_request(db_session)
         await start_assembly(db_session, PROJECT_ID, req.id)
         await mark_ready(db_session, PROJECT_ID, req.id)
@@ -437,8 +437,79 @@ class TestUpdateAssemblyRequest:
         payload = AssemblyRequestUpdate(
             items=[AssemblyItemCreate(barcode=TEST_BARCODE_2, quantity=3)],
         )
-        with pytest.raises(ValueError, match="READY"):
-            await update_assembly_request(db_session, PROJECT_ID, req.id, payload)
+        updated = await update_assembly_request(db_session, PROJECT_ID, req.id, payload)
+        assert len(updated.items) == 1
+        assert updated.items[0].barcode == TEST_BARCODE_2
+
+
+@pytest.mark.asyncio
+class TestRefreshFromFbo:
+    """Refresh items from linked WbFboSupply.
+
+    Сценарий: WB принял меньше заявленного — нужно подтянуть accepted_qty
+    в позиции заявки, чтобы остатки сошлись и можно было отгрузить.
+    """
+
+    async def test_refresh_uses_accepted_qty_when_supply_accepted(self, db_session):
+        """ACCEPTED supply: quantity=10, accepted_qty=7 → позиция = 7."""
+        from backend.models.wb_fbo import WbFboSupplyItem
+        from backend.services.assembly.analytics import refresh_from_fbo
+
+        req = await _create_test_request(db_session)  # позиция: 5
+        # Помечаем supply как ACCEPTED и проставляем accepted_qty=7
+        fbo_id = await _get_fbo_supply_id(db_session)
+        supply = (await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == fbo_id))).scalar_one()
+        supply.wb_status = WbSupplyStatus.ACCEPTED
+        item = (
+            await db_session.execute(select(WbFboSupplyItem).where(WbFboSupplyItem.supply_id == fbo_id))
+        ).scalar_one()
+        item.quantity = 10
+        item.accepted_qty = 7
+        await db_session.commit()
+
+        result = await refresh_from_fbo(db_session, PROJECT_ID, req.id)
+        assert result.changed == 1
+        assert len(result.items) == 1
+        assert result.items[0].quantity == 7  # фактически принято, не заявлено
+
+    async def test_refresh_uses_quantity_when_supply_not_accepted(self, db_session):
+        """ACTIVE supply: используем заявленное (quantity), не accepted_qty."""
+        from backend.models.wb_fbo import WbFboSupplyItem
+        from backend.services.assembly.analytics import refresh_from_fbo
+
+        req = await _create_test_request(db_session)  # позиция: 5
+        # Supply остаётся ACTIVE, но accepted_qty=0 (поставка ещё не принята)
+        fbo_id = await _get_fbo_supply_id(db_session)
+        item = (
+            await db_session.execute(select(WbFboSupplyItem).where(WbFboSupplyItem.supply_id == fbo_id))
+        ).scalar_one()
+        item.quantity = 10
+        item.accepted_qty = 0
+        await db_session.commit()
+
+        result = await refresh_from_fbo(db_session, PROJECT_ID, req.id)
+        assert result.changed == 1
+        assert result.items[0].quantity == 10  # заявлено WB
+
+    async def test_refresh_removes_zero_accepted_items(self, db_session):
+        """ACCEPTED supply: accepted_qty=0 → позиция удаляется."""
+        from backend.models.wb_fbo import WbFboSupplyItem
+        from backend.services.assembly.analytics import refresh_from_fbo
+
+        req = await _create_test_request(db_session)
+        fbo_id = await _get_fbo_supply_id(db_session)
+        supply = (await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == fbo_id))).scalar_one()
+        supply.wb_status = WbSupplyStatus.ACCEPTED
+        item = (
+            await db_session.execute(select(WbFboSupplyItem).where(WbFboSupplyItem.supply_id == fbo_id))
+        ).scalar_one()
+        item.quantity = 10
+        item.accepted_qty = 0  # WB не принял ни одной
+        await db_session.commit()
+
+        result = await refresh_from_fbo(db_session, PROJECT_ID, req.id)
+        assert result.removed == 1
+        assert len(result.items) == 0
 
 
 @pytest.mark.asyncio

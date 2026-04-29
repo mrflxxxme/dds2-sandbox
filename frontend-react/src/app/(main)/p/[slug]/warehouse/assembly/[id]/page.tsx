@@ -219,7 +219,7 @@ export default function AssemblyDetailPage() {
 
     const canEditFields = assembly && !['SHIPPED', 'DELIVERED', 'CANCELLED'].includes(assembly.status);
     const canEditAlways = assembly && assembly.status !== 'CANCELLED';
-    const canEditFbo = assembly && ['PENDING', 'IN_PROGRESS'].includes(assembly.status);
+    const canEditFbo = assembly && ['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED'].includes(assembly.status);
 
     const handleFieldSave = async (field: string, value: number | string) => {
         if (!assembly) return;
@@ -339,6 +339,9 @@ export default function AssemblyDetailPage() {
                     <button key="vehicle" className="btn btn-primary" onClick={() => setShowVehicleModal(true)} disabled={actionLoading}>
                         Назначить машину
                     </button>,
+                    <Link key="edit" href={`/p/${slug}/warehouse/assembly/${assembly.id}/edit`}>
+                        <button className="btn btn-secondary">Редактировать</button>
+                    </Link>,
                     <button key="fbo" className="btn btn-secondary" onClick={handleRefreshFromFbo} disabled={actionLoading}>
                         Из FBO
                     </button>,
@@ -353,6 +356,9 @@ export default function AssemblyDetailPage() {
                     <button key="ship" className="btn btn-primary" onClick={() => setShowShipModal(true)} disabled={actionLoading}>
                         Отгрузить
                     </button>,
+                    <Link key="edit" href={`/p/${slug}/warehouse/assembly/${assembly.id}/edit`}>
+                        <button className="btn btn-secondary">Редактировать</button>
+                    </Link>,
                     <button key="fbo" className="btn btn-secondary" onClick={handleRefreshFromFbo} disabled={actionLoading}>
                         Из FBO
                     </button>,

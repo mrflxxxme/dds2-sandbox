@@ -691,8 +691,10 @@ async def get_fbo_supply_items(
                 supply.accepted_qty = sum(int(g.get("acceptedQuantity") or 0) for g in goods)
                 supply.total_qty = sum(int(g.get("quantity") or 0) for g in goods)
 
-            # Also fetch detail (warehouse_name, qty) if missing
-            if not supply.warehouse_name:
+            # Also fetch detail (warehouse_name, qty). Always refresh on
+            # force_refresh — user may have changed destination warehouse in WB
+            # cabinet, and list API never returns warehouseName.
+            if not supply.warehouse_name or force_refresh:
                 try:
                     detail = await api_client.get_fbw_supply_detail(wb_id_int)
                     if detail:

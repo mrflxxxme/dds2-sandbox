@@ -567,10 +567,12 @@ async def update_assembly_request(
         cp_id = await _resolve_carrier(db, project_id, payload.carrier_inn, payload.carrier_name)
         req.counterparty_id = cp_id  # None if inn was empty
 
-    # Update items: allowed until READY (PENDING and IN_PROGRESS)
+    # Update items: allowed everywhere except SHIPPED/DELIVERED/CANCELLED.
+    # READY/VEHICLE_ASSIGNED — позволяем подправить кол-во под факт WB (например,
+    # WB принял меньше заявленного — редактируем позиции до отгрузки).
     if payload.items is not None:
-        if req.status not in (AssemblyStatus.PENDING, AssemblyStatus.IN_PROGRESS):
-            raise ValueError("Items can only be edited before READY status")
+        if req.status in (AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED, AssemblyStatus.CANCELLED):
+            raise ValueError(f"Items cannot be edited in status {req.status}")
         # Delete existing items
         await db.execute(delete(AssemblyRequestItem).where(AssemblyRequestItem.assembly_request_id == req.id))
         # Resolve barcodes (batch) and create new items

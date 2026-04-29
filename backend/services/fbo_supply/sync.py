@@ -33,6 +33,12 @@ from .mappers import (
 # to avoid burning FBW rate-limit (6 req/min).
 ACCEPTED_REENRICH_COOLDOWN_HOURS = 24
 
+# Re-enrich active (IN_PROGRESS / ON_DELIVERY) supplies once per 24h to catch
+# warehouse changes done by user in WB partner cabinet (list API doesn't return
+# warehouseName, so without periodic detail refresh stale data lingers until
+# supply transitions to ACCEPTED). Same cooldown to bound rate-limit usage.
+ACTIVE_REENRICH_COOLDOWN_HOURS = 24
+
 logger = logging.getLogger(__name__)
 
 
@@ -186,12 +192,20 @@ async def enrich_fbo_supplies(
     #  - ACCEPTED with partial acceptance OR no items in DB yet (historical
     #    supplies that were never enriched — their items list in UI is empty)
     cooldown_threshold = utcnow() - timedelta(hours=ACCEPTED_REENRICH_COOLDOWN_HOURS)
+    active_cooldown_threshold = utcnow() - timedelta(hours=ACTIVE_REENRICH_COOLDOWN_HOURS)
     result = await db.execute(
         select(WbFboSupply).where(
             WbFboSupply.project_id == project_id,
             or_(
                 WbFboSupply.warehouse_name.is_(None),
                 WbFboSupply.wb_status == WbSupplyStatus.CANCELLED,
+                and_(
+                    WbFboSupply.wb_status.in_([WbSupplyStatus.IN_PROGRESS, WbSupplyStatus.ON_DELIVERY]),
+                    or_(
+                        WbFboSupply.synced_at.is_(None),
+                        WbFboSupply.synced_at < active_cooldown_threshold,
+                    ),
+                ),
                 and_(
                     WbFboSupply.wb_status == WbSupplyStatus.ACCEPTED,
                     or_(

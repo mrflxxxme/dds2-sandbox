@@ -942,6 +942,107 @@ class TestEnrichPartialAcceptance:
         ), "synced_at must not be refreshed when goods API fails — else 24h cooldown blocks retry indefinitely"
 
 
+@pytest.mark.asyncio
+class TestEnrichActiveWarehouseRefresh:
+    """
+    Active (IN_PROGRESS / ON_DELIVERY) supplies must be re-enriched once per 24h
+    so that warehouse changes done by user in WB partner cabinet propagate to DB
+    (list API never returns warehouseName, only detail does).
+    """
+
+    async def test_in_progress_stale_is_reenriched_with_new_warehouse(self, db_session):
+        from datetime import timedelta
+
+        from backend.services.fbo_supply_service import enrich_fbo_supplies
+
+        stale_synced = datetime.utcnow() - timedelta(hours=36)
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="38782922",
+            wb_status=WbSupplyStatus.IN_PROGRESS,
+            name="FBW-38782922",
+            created_at_wb=datetime(2026, 4, 22, 11, 32),
+            warehouse_name="Екатеринбург - Перспективная 14",
+            total_qty=192,
+            accepted_qty=0,
+            synced_at=stale_synced,
+        )
+        db_session.add(supply)
+        await db_session.commit()
+        await db_session.refresh(supply)
+
+        mock_client = AsyncMock()
+        mock_client.get_fbw_supply_detail.return_value = {
+            "warehouseName": "Коледино",
+            "quantity": 192,
+            "statusID": 3,
+        }
+
+        result = await enrich_fbo_supplies(db_session, 1, mock_client, max_calls=5)
+
+        assert result["enriched"] == 1
+        assert mock_client.get_fbw_supply_detail.called
+        assert not mock_client.get_fbw_supply_goods.called, "goods API only for ACCEPTED"
+
+        await db_session.refresh(supply)
+        assert supply.warehouse_name == "Коледино"
+
+    async def test_in_progress_within_cooldown_is_skipped(self, db_session):
+        """Recently synced IN_PROGRESS supply must not be re-enriched (cooldown)."""
+        from backend.services.fbo_supply_service import enrich_fbo_supplies
+
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="38782923",
+            wb_status=WbSupplyStatus.IN_PROGRESS,
+            created_at_wb=datetime(2026, 4, 22),
+            warehouse_name="Коледино",
+            total_qty=192,
+            accepted_qty=0,
+            synced_at=datetime.utcnow(),
+        )
+        db_session.add(supply)
+        await db_session.commit()
+
+        mock_client = AsyncMock()
+        result = await enrich_fbo_supplies(db_session, 1, mock_client, max_calls=5)
+
+        assert result["enriched"] == 0
+        assert not mock_client.get_fbw_supply_detail.called
+
+    async def test_on_delivery_stale_is_reenriched(self, db_session):
+        from datetime import timedelta
+
+        from backend.services.fbo_supply_service import enrich_fbo_supplies
+
+        stale_synced = datetime.utcnow() - timedelta(hours=36)
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="38782924",
+            wb_status=WbSupplyStatus.ON_DELIVERY,
+            created_at_wb=datetime(2026, 4, 22),
+            warehouse_name="Тула",
+            total_qty=100,
+            accepted_qty=0,
+            synced_at=stale_synced,
+        )
+        db_session.add(supply)
+        await db_session.commit()
+
+        mock_client = AsyncMock()
+        mock_client.get_fbw_supply_detail.return_value = {
+            "warehouseName": "Электросталь",
+            "quantity": 100,
+            "statusID": 2,
+        }
+
+        result = await enrich_fbo_supplies(db_session, 1, mock_client, max_calls=5)
+
+        assert result["enriched"] == 1
+        await db_session.refresh(supply)
+        assert supply.warehouse_name == "Электросталь"
+
+
 # ─── Backfill: supply ↔ shipment link via AssemblyRequest ──────────────────
 
 

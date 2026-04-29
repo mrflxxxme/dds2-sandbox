@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF002, RUF003
 """
 Assembly Request service — FBO sync and logistics analytics.
 
@@ -47,6 +48,17 @@ async def refresh_from_fbo(
     if not req.wb_fbo_supply_id:
         raise ValueError("Cannot refresh items: no FBO supply linked")
 
+    # Load FBO supply (для wb_status — определяет что считать «фактом»)
+    supply_result = await db.execute(
+        select(WbFboSupply).where(
+            WbFboSupply.id == req.wb_fbo_supply_id,
+            WbFboSupply.project_id == project_id,
+        )
+    )
+    supply = supply_result.scalar_one_or_none()
+    if not supply:
+        raise ValueError("Linked FBO supply not found")
+
     # Load FBO supply items
     fbo_items_result = await db.execute(
         select(WbFboSupplyItem).where(
@@ -54,6 +66,13 @@ async def refresh_from_fbo(
         )
     )
     fbo_items = fbo_items_result.scalars().all()
+
+    # Если поставка уже принята WB (ACCEPTED) — подтягиваем фактически принятое
+    # (accepted_qty), а не заявленное (quantity). Иначе синхим по quantity.
+    use_accepted = supply.wb_status == "ACCEPTED"
+
+    def _effective_qty(it: WbFboSupplyItem) -> int:
+        return it.accepted_qty if use_accepted else it.quantity
 
     # Build maps by barcode
     current_map: dict[str, AssemblyRequestItem] = {item.barcode: item for item in req.items}
@@ -71,12 +90,19 @@ async def refresh_from_fbo(
 
     # Add new / update existing
     for barcode, fbo_item in fbo_map.items():
+        qty = _effective_qty(fbo_item)
         if barcode in current_map:
             existing = current_map[barcode]
-            if existing.quantity != fbo_item.quantity:
-                existing.quantity = fbo_item.quantity
+            if qty == 0:
+                # WB не принял эту позицию — убираем из заявки
+                await db.delete(existing)  # no-soft-delete-check: AssemblyRequestItem has no SoftDeleteMixin
+                removed += 1
+            elif existing.quantity != qty:
+                existing.quantity = qty
                 changed += 1
         else:
+            if qty == 0:
+                continue  # новую позицию с 0 не добавляем
             # New barcode - resolve nomenclature
             nom = await _resolve_barcode(db, project_id, barcode)
             new_item = AssemblyRequestItem(
@@ -84,7 +110,7 @@ async def refresh_from_fbo(
                 assembly_request_id=req.id,
                 nomenclature_id=nom.id,
                 barcode=barcode,
-                quantity=fbo_item.quantity,
+                quantity=qty,
             )
             db.add(new_item)
             added += 1
