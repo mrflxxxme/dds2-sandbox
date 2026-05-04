@@ -46,28 +46,46 @@ async def sync_warehouse_stocks(
 
     await db.execute(delete(WbWarehouseStock).where(WbWarehouseStock.project_id == project_id))
 
-    count = 0
-    batch = []
+    # WB API returns rows per barcode/size — multiple rows can share the same
+    # (nm_id, warehouse_name) key. Aggregate them before INSERT to avoid
+    # CardinalityViolationError on ON CONFLICT (one row affected twice).
+    aggregated: dict[tuple[int, str], dict[str, Any]] = {}
     for item in items:
         nm_id = item.get("nmId")
         wh_name = item.get("warehouseName", "")
         if not nm_id or not wh_name:
             continue
-
-        batch.append(
-            {
+        key = (nm_id, wh_name)
+        existing = aggregated.get(key)
+        if existing is None:
+            aggregated[key] = {
                 "project_id": project_id,
                 "nm_id": nm_id,
-                "vendor_code": item.get("supplierArticle", ""),
-                "subject": item.get("subject", ""),
-                "brand": item.get("brand", ""),
+                "vendor_code": item.get("supplierArticle", "") or "",
+                "subject": item.get("subject", "") or "",
+                "brand": item.get("brand", "") or "",
                 "warehouse_name": wh_name,
-                "quantity": item.get("quantity", 0),
-                "quantity_full": item.get("quantityFull", 0),
-                "in_way_to_client": item.get("inWayToClient", 0),
-                "in_way_from_client": item.get("inWayFromClient", 0),
+                "quantity": int(item.get("quantity", 0) or 0),
+                "quantity_full": int(item.get("quantityFull", 0) or 0),
+                "in_way_to_client": int(item.get("inWayToClient", 0) or 0),
+                "in_way_from_client": int(item.get("inWayFromClient", 0) or 0),
             }
-        )
+        else:
+            existing["quantity"] += int(item.get("quantity", 0) or 0)
+            existing["quantity_full"] += int(item.get("quantityFull", 0) or 0)
+            existing["in_way_to_client"] += int(item.get("inWayToClient", 0) or 0)
+            existing["in_way_from_client"] += int(item.get("inWayFromClient", 0) or 0)
+            if not existing["vendor_code"]:
+                existing["vendor_code"] = item.get("supplierArticle", "") or ""
+            if not existing["subject"]:
+                existing["subject"] = item.get("subject", "") or ""
+            if not existing["brand"]:
+                existing["brand"] = item.get("brand", "") or ""
+
+    count = 0
+    batch: list[dict[str, Any]] = []
+    for row in aggregated.values():
+        batch.append(row)
 
         if len(batch) >= 500:
             stmt = pg_insert(WbWarehouseStock).values(batch)
