@@ -2,12 +2,30 @@
 
 ## Активные проблемы
 
-### fbo_supply_service.py — 856 строк
-- **Описание:** Превышает лимит 500 строк более чем вдвое
-- **Риск:** Сложность поддержки, merge conflicts
-- **План:** Разбить по аналогии с warehouse_service.py (crud, sync, enrich)
+_Нет активных. Последняя проверка: 2026-05-04._
 
 ## Исправленные
+
+### Локальная БД: 74k тестовых проектов, worker startup >5 мин
+- **Исправлено:** 2026-05-04
+- **Описание:** Тестовые фикстуры conftest.py (project, other_project) и 20+
+  файлов делали POST /api/v1/projects + commit без teardown. За 2 месяца
+  накопилось 74596 проектов, 524 MB category_ref, 2.2M INSERT в lifespan
+  seed_default_categories через PgBouncer → worker startup 5+ мин →
+  healthcheck failed → autoheal restart loop.
+- **Фикс:**
+  - `tests/conftest.py`: project/other_project теперь yield + teardown
+    (DELETE через session_replication_role=replica)
+  - `tests/conftest.py`: pytest_sessionfinish safety-net hook удаляет
+    остальной мусор после сессии (whitelist id=4 Default, id=15 вяткин)
+  - `backend/seeds/default_categories.py`: skip уже засиженных проектов
+    (один SELECT GROUP BY вместо N×30 INSERT)
+  - `Dockerfile.backend`: mkdir + chown /data/ai_memory
+  - `docker-compose.yml`: named volume ai_memory:
+  - `scripts/cleanup_test_projects.sh`: reusable идемпотентный скрипт
+- **Результат:** DB 1325 MB → 630 MB, worker startup >5 мин → ~3 сек
+
+### WB ad upsert затирал реальные значения нулями (project Вяткин)
 
 ### WB ad upsert затирал реальные значения нулями (project Вяткин)
 - **Исправлено:** 2026-05-04

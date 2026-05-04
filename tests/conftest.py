@@ -321,10 +321,7 @@ def vtb_multi_excel() -> bytes:
 
 
 async def _create_project_with_owner(db_session, project_name: str, slug_prefix: str, user_prefix: str):
-    """Internal helper: create a project + owner via raw SQL.
-
-    Returns (project_id, user_id, slug).
-    """
+    """Create a project + owner via raw SQL. Cleanup handled by pytest_sessionfinish."""
     import uuid
 
     from sqlalchemy import text
@@ -348,56 +345,26 @@ async def _create_project_with_owner(db_session, project_name: str, slug_prefix:
     return project_id, user_id, slug
 
 
-async def _cleanup_project(db_session, project_id: int, user_id: int):
-    """Teardown: delete project + cascade-clean child tables + owner user.
-
-    Uses session_replication_role=replica to skip FK checks during bulk delete
-    (matches the order-independent cleanup pattern used in scripts/cleanup_test_projects.sql).
-    Without this teardown each test prog накапливает мусор → 74k проектов и 5-мин startup.
-    """
-    from sqlalchemy import text
-
-    await db_session.execute(text("SET LOCAL session_replication_role = 'replica'"))
-    await db_session.execute(
-        text(
-            "DO $$ DECLARE rec RECORD; BEGIN "
-            "FOR rec IN SELECT DISTINCT tc.table_name, kcu.column_name "
-            "FROM information_schema.referential_constraints rc "
-            "JOIN information_schema.table_constraints tc ON rc.constraint_name = tc.constraint_name "
-            "JOIN information_schema.key_column_usage kcu ON rc.constraint_name = kcu.constraint_name "
-            "JOIN information_schema.constraint_column_usage ccu ON rc.unique_constraint_name = ccu.constraint_name "
-            "WHERE ccu.table_name = 'projects' AND ccu.column_name = 'id' "
-            "LOOP EXECUTE format('DELETE FROM %I WHERE %I = $1', rec.table_name, rec.column_name) USING :pid; END LOOP; END $$"
-        ),
-        {"pid": project_id},
-    )
-    await db_session.execute(text("DELETE FROM projects WHERE id = :pid"), {"pid": project_id})
-    await db_session.execute(text("DELETE FROM users WHERE id = :uid"), {"uid": user_id})
-    await db_session.commit()
-
-
 @pytest_asyncio.fixture
 async def project(db_session):
-    """Ready project for any test. Cleaned up after the test finishes."""
+    """Ready project for any test. Bulk cleanup happens in pytest_sessionfinish."""
     project_id, user_id, slug = await _create_project_with_owner(
         db_session, "Test Project", "test-project", "proj_user"
     )
     from types import SimpleNamespace
 
-    yield SimpleNamespace(id=project_id, name="Test Project", slug=slug, owner_id=user_id)
-    await _cleanup_project(db_session, project_id, user_id)
+    return SimpleNamespace(id=project_id, name="Test Project", slug=slug, owner_id=user_id)
 
 
 @pytest_asyncio.fixture
 async def other_project(db_session):
-    """Another project for multi-tenancy isolation tests. Cleaned up after the test."""
+    """Another project for multi-tenancy isolation tests. Bulk cleanup in pytest_sessionfinish."""
     project_id, user_id, slug = await _create_project_with_owner(
         db_session, "Other Project", "other-project", "other_user"
     )
     from types import SimpleNamespace
 
-    yield SimpleNamespace(id=project_id, name="Other Project", slug=slug, owner_id=user_id)
-    await _cleanup_project(db_session, project_id, user_id)
+    return SimpleNamespace(id=project_id, name="Other Project", slug=slug, owner_id=user_id)
 
 
 @pytest.fixture
