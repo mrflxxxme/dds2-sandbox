@@ -4,6 +4,7 @@ Supply Chain schemas: Supplier, FactoryOrder, FactoryOrderItem, Vehicle.
 
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -343,19 +344,27 @@ class VehicleItemSchema(BaseModel):
     mix_box_size: str | None = None
     mix_pcs_per_box: int | None = None
     factory_order_number: str | None = None
+    # Drift detection vs FactoryOrderItem (sc17): >0 если суммарное qty по этому foi
+    # в активных машинах превышает план фабрики. Frontend показывает оранжевую точку.
+    qty_drift: int | None = None
+    fo_qty: int | None = None  # FactoryOrderItem.qty (план)
+    fo_assigned: int | None = None  # FactoryOrderItem.assigned_qty (распределено)
 
 
 class VehicleItemUpdate(BaseModel):
     """Per-vehicle edit for a CostOrderItem.
 
-    All fields optional. box_size/pcs_per_box/box_detail are saved as override
-    on the CostOrderItem — FactoryOrderItem plan is not touched.
+    qty: при изменении синхронизирует FactoryOrderItem.assigned_qty (sc17).
+    mode="strict" (default): 422 если delta превышает план фабрики.
+    mode="extend_plan": автоматически расширяет FactoryOrderItem.qty + history запись.
+    box_*_override: сохраняются как per-vehicle override (план фабрики не трогается).
     """
 
     qty: int | None = None
     box_size_override: str | None = None
     pcs_per_box_override: int | None = None
     box_detail_override: list[int] | None = None
+    mode: Literal["strict", "extend_plan"] = "strict"
 
     @field_validator("qty")
     @classmethod

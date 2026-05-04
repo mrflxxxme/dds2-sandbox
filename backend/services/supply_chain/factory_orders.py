@@ -4,6 +4,8 @@ Supply Chain — Factory Orders CRUD and split-to-vehicles logic.
 
 import logging
 import uuid
+from dataclasses import dataclass
+from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -128,6 +130,111 @@ async def refresh_factory_order_statuses(
             changed = True
     if changed:
         await db.commit()
+
+
+# ─── Assigned qty adjustment (sc17 — drift confirm) ──────────────────────────
+
+
+class FactoryQtyExceeded(Exception):
+    """Raised by _adjust_assigned_qty when delta exceeds available and mode=strict.
+
+    detail dict передаётся в HTTPException(422) и потребляется фронтом
+    для отрисовки inline DriftConfirmRow.
+    """
+
+    def __init__(self, detail: dict):
+        self.detail = detail
+        super().__init__(detail.get("error", "exceeds_factory_qty"))
+
+
+@dataclass
+class AdjustResult:
+    new_assigned_qty: int
+    extended_by: int  # 0 если план не расширялся
+    history_entry_id: int | None  # id FactoryOrderHistory если был extend_plan
+
+
+async def _adjust_assigned_qty(
+    db: AsyncSession,
+    fo_item: FactoryOrderItem,
+    delta: int,
+    mode: Literal["strict", "extend_plan"],
+    user_name: str | None,
+    *,
+    cost_order_no: str | None = None,
+) -> AdjustResult:
+    """Скорректировать FactoryOrderItem.assigned_qty на delta.
+
+    - delta > 0 + strict + delta > available → raise FactoryQtyExceeded
+    - delta > 0 + extend_plan → bump fo.qty на (delta - available), запись в history
+    - delta < 0 → уменьшить assigned_qty (clamp на 0)
+    - delta == 0 → no-op
+
+    Управление транзакцией — на стороне caller (без авто-commit).
+    Caller сам вызывает refresh_factory_order_statuses при необходимости.
+    """
+    if delta == 0:
+        return AdjustResult(new_assigned_qty=fo_item.assigned_qty, extended_by=0, history_entry_id=None)
+
+    if delta < 0:
+        fo_item.assigned_qty = max(0, fo_item.assigned_qty + delta)
+        return AdjustResult(new_assigned_qty=fo_item.assigned_qty, extended_by=0, history_entry_id=None)
+
+    # delta > 0
+    available = fo_item.qty - fo_item.assigned_qty
+    extended_by = 0
+    history_id = None
+
+    if delta > available:
+        if mode == "strict":
+            fo_result = await db.execute(
+                select(FactoryOrder).where(
+                    FactoryOrder.id == fo_item.factory_order_id,
+                    FactoryOrder.project_id == fo_item.project_id,
+                    FactoryOrder.is_deleted == False,  # noqa: E712
+                )
+            )
+            fo = fo_result.scalar_one_or_none()
+            raise FactoryQtyExceeded(
+                detail={
+                    "error": "exceeds_factory_qty",
+                    "fo_id": fo_item.factory_order_id,
+                    "fo_number": fo.order_number if fo else None,
+                    "foi_id": fo_item.id,
+                    "barcode": fo_item.barcode,
+                    "subject": fo_item.subject,
+                    "fo_qty": fo_item.qty,
+                    "fo_assigned": fo_item.assigned_qty,
+                    "available": available,
+                    "attempted_delta": delta,
+                    "in_mix_group": fo_item.mix_group_id is not None,
+                    "mix_group_id": fo_item.mix_group_id,
+                }
+            )
+        # mode == "extend_plan"
+        extended_by = delta - available
+        fo_item.qty += extended_by
+        details = f"+{extended_by} шт. в позицию {fo_item.barcode}"
+        if cost_order_no:
+            details += f" (машина {cost_order_no})"
+        history = FactoryOrderHistory(
+            project_id=fo_item.project_id,
+            factory_order_id=fo_item.factory_order_id,
+            event_type="qty_extended_from_vehicle",
+            details=details,
+            changed_at=utcnow(),
+            changed_by=user_name,
+        )
+        db.add(history)
+        await db.flush()
+        history_id = history.id
+
+    fo_item.assigned_qty += delta
+    return AdjustResult(
+        new_assigned_qty=fo_item.assigned_qty,
+        extended_by=extended_by,
+        history_entry_id=history_id,
+    )
 
 
 async def get_factory_order_history(
