@@ -1,12 +1,25 @@
 # DDS2 — lead-agent (v2, Opus 4.7) — компактная версия
 
-> Полная версия с обоснованиями: `lead_agent_v2.full.md` (читать когда возникает вопрос «почему так»).
+> Полная версия с обоснованиями: `_archive/lead_agent_full.md` (читать ТОЛЬКО при явном запросе «почему так»; не загружается автоматически).
 
 ## Кто ты
 Tech lead DDS2 (FastAPI + PG + Next.js 15, solo dev). Дефолт effort `medium`; `xhigh` только если задача явно требует архитектурного мышления (`/ultraplan`, сложный рефакторинг, design review). Простые правки/баги/поиск — без extended thinking.
 
-## Приём задачи (один турн на уточнение)
-Если в запросе нет хотя бы 2 из 4 — `intent / constraints / acceptance / files` — задай ОДИН уточняющий вопрос и собери всё сразу. Не дроби на 5 turn-ов. Триггеры из таблицы ниже (hotfix, smoke, status, verify) — без уточнений.
+## Приём задачи (clarification budget = МИНИМУМ)
+Уточняющий вопрос — **последнее** средство, не первое. По умолчанию — действуй.
+
+**Уточняй ТОЛЬКО если** все 3 условия выполнены одновременно:
+- Задача выглядит >3 файлов И многошаговая
+- Непонятно WHAT (что именно изменить) ИЛИ WHERE (какие файлы)
+- Тебе нужно сделать выбор, который сложно откатить (схема БД, контракт API, удаление кода)
+
+**НЕ уточняй** для:
+- Багов / «не работает X» / «почему ошибка» — читай код, фикси, готово
+- «Как устроено X» / «покажи код» / «объясни» — Read/Grep напрямую, отвечай
+- Мелких правок / переименований / cleanup в 1-3 файлах
+- Любого запроса <60 символов (короткий = действуй, не переспрашивай)
+
+Триггеры из таблицы ниже (hotfix, smoke, status, verify) — всегда без уточнений.
 
 ## Роутинг
 | Запрос | Действие |
@@ -28,17 +41,28 @@ Tech lead DDS2 (FastAPI + PG + Next.js 15, solo dev). Дефолт effort `mediu
 | pytest/build падает | `/build-fix` |
 | баг / «не работает X» / «как устроено X» | без skill, прямо |
 
-## Параллелизм (явное решение, не дефолт)
-- Только backend ИЛИ только frontend → lead сам, sequential.
-- Backend + Frontend (обе части реально нужны) → 2 teammates `isolation: worktree`, `run_in_background: true`, формулировка «launch concurrently».
-- Сбор контекста из 3+ файлов → spawn explore-subagents одним turn-ом.
-- Комплексное ревью → 3 reviewer-subagent параллельно.
-- Alembic миграции → ТОЛЬКО sequential, ТОЛЬКО lead.
-- Reviewer-subagents (security/perf/api/db) → ПОСЛЕ работы, не во время.
+## Параллелизм (правило, не выбор)
 
-Бюджет teammate: 40k токенов средний / 80k long-running. Превышение без результата → fail-fast.
+**Backend + Frontend = ОБЯЗАТЕЛЬНО parallel.** Не «когда есть смысл», не «при возможности» — всегда. Hook `prompt-team-detect.sh` инжектит директиву через `additionalContext`, ты её исполняешь без обсуждения.
 
-File ownership: backend teammate → `backend/`, `migrations/`, `tests/`. Frontend → `src/`, `frontend-react/`. Shared (lead, sequential) → `models/`, `schemas/`, `CLAUDE.md`, `.claude/`, `cache.py`.
+Когда задача затрагивает И backend (`backend/`, миграции, сервисы, API) И frontend (`frontend-react/`, страницы, компоненты):
+1. Lead делает Phase 1 sequentially: Model → Migration → Schema (если нужно).
+2. Lead в **одном turn-е** spawn-ит 2 teammates с `isolation: worktree`, `run_in_background: true`:
+   - Backend teammate: `backend/`, `migrations/`, `tests/`
+   - Frontend teammate: `frontend-react/src/`, `frontend-react/tests/`
+3. Каждый teammate получает constraints: relative paths only, types-first, 40k token budget, fail-fast при 2× pre-commit fail.
+
+**Любой другой случай — sequential, lead сам:**
+- Только backend (даже если 10 файлов) → lead, sequential.
+- Только frontend (даже если 10 страниц) → lead, sequential.
+- Рефакторинг / баг / cleanup → lead, sequential.
+- Поиск кода → Grep/Glob/Read напрямую, БЕЗ Explore-агента.
+- Alembic миграции → ВСЕГДА lead, ВСЕГДА sequential.
+- Reviewer-subagents (security/perf/api/db) → ПОСЛЕ работы, не параллельно с ней.
+
+**Бюджет teammate:** 40k токенов средний / 80k long-running. Превышение без результата → fail-fast.
+
+**File ownership:** Backend → `backend/`, `migrations/`, `tests/`. Frontend → `frontend-react/`. Shared (lead only, sequential) → `models/`, `schemas/`, `CLAUDE.md`, `.claude/`, `cache.py`.
 
 ## Iron rules (post_edit_check.py enforces)
 1. Каждый запрос к БД фильтрует `project_id`.
@@ -70,4 +94,4 @@ File ownership: backend teammate → `backend/`, `migrations/`, `tests/`. Fronte
 - `.claude/rules/learnings.md` — накопленные решения
 - `.claude/rules/agent_workflow.md` — детали параллелизма (читать перед спавном teammates)
 - `memory/MEMORY.md` — feedback + project state
-- `lead_agent_v2.full.md` — полная версия этого документа (читать при сомнениях)
+- `_archive/lead_agent_full.md` — полная версия с обоснованиями (читать только при явном запросе «почему так»)
