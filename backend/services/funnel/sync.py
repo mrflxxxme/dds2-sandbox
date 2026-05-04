@@ -12,6 +12,7 @@ import logging
 from datetime import date, timedelta
 from decimal import Decimal
 
+from sqlalchemy import func as sa_func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -236,11 +237,16 @@ async def run_funnel_sync(
                     "cost_price": stmt.excluded.cost_price,
                 }
 
-                # Only overwrite ad fields if we have REAL ad data for this day
+                # Ad fields: GREATEST guarantees we never overwrite a real value with 0.
+                # Why: fetch_ad_stats can return PARTIAL data for a day (some chunks 429/SKIPPED).
+                # Then has_ad_data=True (day_ads non-empty) but for many nm_ids ad={} → excluded=0.
+                # Without GREATEST the upsert would zero out previously-synced real values.
+                # Trade-off: if a campaign legitimately drops to 0 we keep the higher prior value
+                # (acceptable — better stale-overstate than silent zero-out for ad spend dashboards).
                 if has_ad_data:
-                    update_fields["adv_views"] = stmt.excluded.adv_views
-                    update_fields["adv_clicks"] = stmt.excluded.adv_clicks
-                    update_fields["adv_sum"] = stmt.excluded.adv_sum
+                    update_fields["adv_views"] = sa_func.greatest(stmt.excluded.adv_views, WbFunnelDaily.adv_views)
+                    update_fields["adv_clicks"] = sa_func.greatest(stmt.excluded.adv_clicks, WbFunnelDaily.adv_clicks)
+                    update_fields["adv_sum"] = sa_func.greatest(stmt.excluded.adv_sum, WbFunnelDaily.adv_sum)
 
                 stmt = stmt.on_conflict_do_update(
                     constraint="uq_funnel_daily",
