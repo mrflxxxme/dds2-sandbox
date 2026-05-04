@@ -114,7 +114,7 @@ async def refresh_factory_order_statuses(
         return
     result = await db.execute(
         select(FactoryOrder)
-        .options(selectinload(FactoryOrder.items))
+        .options(selectinload(FactoryOrder.items.and_(FactoryOrderItem.is_deleted == False)))  # noqa: E712
         .where(
             FactoryOrder.id.in_(ids),
             FactoryOrder.project_id == project_id,
@@ -355,7 +355,10 @@ async def get_factory_orders(db: AsyncSession, project_id: int) -> list[FactoryO
     """List all factory orders with items and supplier, filtered by project_id + is_deleted."""
     result = await db.execute(
         select(FactoryOrder)
-        .options(selectinload(FactoryOrder.items), selectinload(FactoryOrder.supplier))
+        .options(
+            selectinload(FactoryOrder.items.and_(FactoryOrderItem.is_deleted == False)),  # noqa: E712
+            selectinload(FactoryOrder.supplier),
+        )
         .where(
             FactoryOrder.project_id == project_id,
             FactoryOrder.is_deleted == False,  # noqa: E712
@@ -372,7 +375,10 @@ async def get_factory_order(db: AsyncSession, project_id: int, order_id: int) ->
     """Get a single factory order with items and supplier."""
     result = await db.execute(
         select(FactoryOrder)
-        .options(selectinload(FactoryOrder.items), selectinload(FactoryOrder.supplier))
+        .options(
+            selectinload(FactoryOrder.items.and_(FactoryOrderItem.is_deleted == False)),  # noqa: E712
+            selectinload(FactoryOrder.supplier),
+        )
         .where(
             FactoryOrder.id == order_id,
             FactoryOrder.project_id == project_id,

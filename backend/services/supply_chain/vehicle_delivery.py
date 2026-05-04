@@ -1142,7 +1142,7 @@ async def get_available_items(
     """
     result = await db.execute(
         select(FactoryOrder)
-        .options(selectinload(FactoryOrder.items))
+        .options(selectinload(FactoryOrder.items.and_(FactoryOrderItem.is_deleted == False)))
         .where(
             FactoryOrder.project_id == project_id,
             FactoryOrder.is_deleted == False,
@@ -1162,7 +1162,7 @@ async def get_available_items(
     for order in orders:
         available_items = []
         for item in order.items:
-            if item.is_deleted:
+            if item.is_deleted:  # safety net — selectinload+identity map can return stale objects
                 continue
             remaining = item.qty - item.assigned_qty
             if remaining > 0:
