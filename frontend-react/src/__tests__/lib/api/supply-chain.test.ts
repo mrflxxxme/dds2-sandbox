@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { ApiClient } from '@/lib/api/client';
 import { addSupplyChainMethods } from '@/lib/api/supply-chain';
+import { FactoryQtyExceededError } from '@/types/api';
 
 const localStorageMock = (() => {
     let store: Record<string, string> = {};
@@ -170,6 +171,77 @@ describe('supply-chain.updateVehicleItemQty', () => {
         expect((init as RequestInit).method).toBe('PATCH');
         const body = JSON.parse((init as RequestInit).body as string);
         expect(body.qty).toBe(15);
+    });
+});
+
+describe('supply-chain.updateVehicleItem (drift confirm)', () => {
+    it('parses_422_into_FactoryQtyExceededError — typed error with full detail', async () => {
+        const detail = {
+            error: 'exceeds_factory_qty',
+            fo_id: 16,
+            fo_number: '16/04',
+            foi_id: 4523,
+            barcode: '2049448537820',
+            subject: 'одеяло_101x152_4кг',
+            fo_qty: 80,
+            fo_assigned: 76,
+            available: 4,
+            attempted_delta: 8,
+            in_mix_group: false,
+            mix_group_id: null,
+        };
+        // client.ts strips structured detail and rethrows as Error(JSON.stringify(detail))
+        vi.spyOn(global, 'fetch').mockResolvedValue({
+            ok: false, status: 422, json: async () => ({ detail }),
+        } as Response);
+
+        const api = makeApi();
+        await expect(
+            api.updateVehicleItem('VH-001', 4523, { qty: 32, mode: 'strict' }),
+        ).rejects.toBeInstanceOf(FactoryQtyExceededError);
+
+        // verify the detail is preserved
+        try {
+            await api.updateVehicleItem('VH-001', 4523, { qty: 32, mode: 'strict' });
+        } catch (e) {
+            expect(e).toBeInstanceOf(FactoryQtyExceededError);
+            const err = e as FactoryQtyExceededError;
+            expect(err.detail.error).toBe('exceeds_factory_qty');
+            expect(err.detail.foi_id).toBe(4523);
+            expect(err.detail.available).toBe(4);
+            expect(err.detail.attempted_delta).toBe(8);
+            expect(err.detail.in_mix_group).toBe(false);
+            expect(err.detail.fo_number).toBe('16/04');
+        }
+    });
+
+    it('passes_through_non_422_errors — generic 500 stays a plain Error', async () => {
+        vi.spyOn(global, 'fetch').mockResolvedValue({
+            ok: false, status: 500, json: async () => ({ detail: 'Internal server error' }),
+        } as Response);
+
+        const api = makeApi();
+        await expect(
+            api.updateVehicleItem('VH-001', 4523, { qty: 32, mode: 'strict' }),
+        ).rejects.toThrow('Internal server error');
+        await expect(
+            api.updateVehicleItem('VH-001', 4523, { qty: 32, mode: 'strict' }),
+        ).rejects.not.toBeInstanceOf(FactoryQtyExceededError);
+    });
+
+    it('success_response_typed — returns ok/item_id/extended_by on 200', async () => {
+        const spy = mockFetch({ ok: true, item_id: 42, extended_by: 4 });
+        const api = makeApi();
+        const result = await api.updateVehicleItem('VH-001', 42, { qty: 32, mode: 'extend_plan' });
+        expect(result.ok).toBe(true);
+        expect(result.item_id).toBe(42);
+        expect(result.extended_by).toBe(4);
+        const [url, init] = spy.mock.calls[0];
+        expect(url).toContain('/api/v1/supply-chain/vehicles/VH-001/items/42');
+        expect((init as RequestInit).method).toBe('PATCH');
+        const body = JSON.parse((init as RequestInit).body as string);
+        expect(body.qty).toBe(32);
+        expect(body.mode).toBe('extend_plan');
     });
 });
 

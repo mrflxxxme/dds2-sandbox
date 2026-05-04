@@ -1960,6 +1960,43 @@ export interface VehicleItemSchema {
   mix_box_size?: string | null;
   mix_pcs_per_box?: number | null;
   factory_order_number?: string;
+  // Drift fields (sc17 — vehicle qty drift confirm)
+  qty_drift?: number | null;
+  fo_qty?: number | null;
+  fo_assigned?: number | null;
+}
+
+// ── Vehicle qty drift (sc17) ─────────────────────────────────────────────
+export interface VehicleItemUpdate {
+  qty?: number;
+  box_size_override?: string | null;
+  pcs_per_box_override?: number | null;
+  box_detail_override?: number[] | null;
+  mode?: 'strict' | 'extend_plan';
+}
+
+export interface FactoryQtyExceededDetail {
+  error: 'exceeds_factory_qty';
+  fo_id: number;
+  fo_number: string | null;
+  foi_id: number;
+  barcode: string;
+  subject: string | null;
+  fo_qty: number;
+  fo_assigned: number;
+  available: number;
+  attempted_delta: number;
+  in_mix_group: boolean;
+  mix_group_id: string | null;
+}
+
+export class FactoryQtyExceededError extends Error {
+  detail: FactoryQtyExceededDetail;
+  constructor(detail: FactoryQtyExceededDetail) {
+    super(`Factory plan exceeded: foi=${detail.foi_id}`);
+    this.name = 'FactoryQtyExceededError';
+    this.detail = detail;
+  }
 }
 
 export interface VehicleSchema {

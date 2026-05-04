@@ -23,9 +23,34 @@ import type {
     Supplier,
     SupplierCatalogResponse,
     ShipmentMatrixResponse,
+    VehicleItemUpdate,
+    FactoryQtyExceededDetail,
 } from '@/types/api';
+import { FactoryQtyExceededError } from '@/types/api';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
+
+/**
+ * Parse a JSON-stringified 422 detail back to FactoryQtyExceededDetail.
+ *
+ * Background: `client.ts` strips structured object detail and rethrows as
+ * `new Error(JSON.stringify(detail))`. This helper recovers it for typed
+ * error handling on the supply-chain side without touching client.ts (shared).
+ *
+ * Returns null if the message is not a parseable drift-confirm detail.
+ */
+export function parseFactoryQtyExceededDetail(message: string): FactoryQtyExceededDetail | null {
+    if (!message || message[0] !== '{') return null;
+    try {
+        const parsed = JSON.parse(message) as Partial<FactoryQtyExceededDetail>;
+        if (parsed && parsed.error === 'exceeds_factory_qty' && typeof parsed.foi_id === 'number') {
+            return parsed as FactoryQtyExceededDetail;
+        }
+    } catch {
+        // not JSON — pass through
+    }
+    return null;
+}
 
 export function addSupplyChainMethods(api: ApiClient) {
     return {
@@ -114,8 +139,28 @@ export function addSupplyChainMethods(api: ApiClient) {
         updateVehicleItemQty(orderNo: string, itemId: number, qty: number) {
             return api.request<{ ok: boolean; item_id: number }>('PATCH', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items/${itemId}`, { qty });
         },
-        updateVehicleItem(orderNo: string, itemId: number, payload: { qty?: number; box_size_override?: string | null; pcs_per_box_override?: number | null; box_detail_override?: number[] | null }) {
-            return api.request<{ ok: boolean; item_id: number }>('PATCH', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items/${itemId}`, payload);
+        async updateVehicleItem(
+            orderNo: string,
+            itemId: number,
+            payload: VehicleItemUpdate,
+        ): Promise<{ ok: true; item_id: number; extended_by: number; noop?: boolean }> {
+            try {
+                return await api.request<{ ok: true; item_id: number; extended_by: number; noop?: boolean }>(
+                    'PATCH',
+                    `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items/${itemId}`,
+                    payload,
+                );
+            } catch (e: unknown) {
+                // client.ts converts structured 422 detail to `Error(JSON.stringify(detail))`.
+                // Try to parse it back to a typed error so the UI can render the drift confirm row.
+                if (e instanceof Error) {
+                    const parsed = parseFactoryQtyExceededDetail(e.message);
+                    if (parsed) {
+                        throw new FactoryQtyExceededError(parsed);
+                    }
+                }
+                throw e;
+            }
         },
         clearAllVehicleItems(orderNo: string) {
             return api.request<{ ok: boolean; removed: number }>('DELETE', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items`);
