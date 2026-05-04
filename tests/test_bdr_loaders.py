@@ -234,8 +234,27 @@ class TestLoadAvgCosts:
 
         result = await load_avg_costs(db_session, project.id)
         # Weighted avg = (100*10 + 200*5) / (10+5) = 2000/15 = 133.33
-        assert "ART-001" in result
-        assert round(result["ART-001"], 2) == round((100 * 10 + 200 * 5) / 15, 2)
+        # Keys are lowercased so callers can do case-insensitive lookup against
+        # WB-side strings (vendor_code/sa_name) that may differ in case.
+        assert "art-001" in result
+        assert round(result["art-001"], 2) == round((100 * 10 + 200 * 5) / 15, 2)
+
+    @pytest.mark.asyncio
+    async def test_case_insensitive_aggregation(self, db_session: AsyncSession, project):
+        """Same article in different casing aggregates into one weighted-avg entry."""
+        import uuid as _uuid
+
+        ono1 = f"ORD-BDR-{_uuid.uuid4().hex[:6]}"
+        ono2 = f"ORD-BDR-{_uuid.uuid4().hex[:6]}"
+        # User entered same article with different casing across two orders
+        await _create_cost_order_with_item(db_session, project.id, ono1, "PALATKA_зеленая", total_rub=100, qty=10)
+        await _create_cost_order_with_item(db_session, project.id, ono2, "palatka_зеленая", total_rub=200, qty=5)
+
+        result = await load_avg_costs(db_session, project.id)
+        # Both orders aggregate into single lowercase key
+        assert "palatka_зеленая" in result
+        assert "PALATKA_зеленая" not in result
+        assert round(result["palatka_зеленая"], 2) == round((100 * 10 + 200 * 5) / 15, 2)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

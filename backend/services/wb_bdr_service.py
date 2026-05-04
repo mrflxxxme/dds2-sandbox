@@ -152,7 +152,7 @@ async def get_wb_bdr(
         if sa_sql:
             sa_result = await db.execute(text(sa_sql), params)
             for r in sa_result.mappings():
-                sa_to_group[r["sa_name"] or ""] = r["group_key"] or ""
+                sa_to_group[(r["sa_name"] or "").lower()] = r["group_key"] or ""
 
     # Pre-aggregate enrichment data by group (brand/subject)
     if group_by in ("brand", "subject"):
@@ -263,7 +263,8 @@ async def get_wb_bdr(
             total_adv += D(str(adv_sum))
 
             # Cost from history (avg), fallback to manual override by nm_id
-            cost_price = cost_map.get(sa_name, 0)
+            # cost_map keyed by lowercased article_seller; sa_name from WB may differ in case
+            cost_price = cost_map.get(sa_name.lower(), 0) if sa_name else 0
             if cost_price == 0 and nm_id in cost_overrides:
                 cost_price = cost_overrides[nm_id]
             sale_qty = metrics["sale_qty"]

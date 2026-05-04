@@ -130,12 +130,20 @@ async def load_avg_costs(db: AsyncSession, pid: int) -> dict[str, float]:
 
     Joins CostOrder to filter by project_id.
     Weighted avg = SUM(total_rub * qty) / SUM(qty) — correct for varying batch sizes.
+
+    Keys are lowercased to allow case-insensitive lookup against WB-side strings
+    (wb_funnel_daily.vendor_code, wb_finance_rows.sa_name, nomenclature.article_seller),
+    which can differ in case from user-entered article_seller in cost_order_items
+    (e.g. 'palatka_зеленая' vs 'PALATKA_зеленая'). All callers must lowercase their
+    lookup key. Aggregation is done on lowercased key in SQL so weighted average
+    stays correct even if same article was entered with different casing.
     """
     from backend.models.cost import CostOrder
 
+    article_lower = func.lower(CostOrderItem.article_seller).label("article_seller_lower")
     result = await db.execute(
         select(
-            CostOrderItem.article_seller,
+            article_lower,
             (func.sum(CostOrderItem.total_rub * CostOrderItem.qty) / func.nullif(func.sum(CostOrderItem.qty), 0)).label(
                 "avg_cost"
             ),
@@ -149,9 +157,9 @@ async def load_avg_costs(db: AsyncSession, pid: int) -> dict[str, float]:
             CostOrderItem.total_rub.isnot(None),
             CostOrderItem.qty > 0,
         )
-        .group_by(CostOrderItem.article_seller)
+        .group_by(article_lower)
     )
-    return {r.article_seller: float(r.avg_cost or 0) for r in result if r.article_seller}
+    return {r.article_seller_lower: float(r.avg_cost or 0) for r in result if r.article_seller_lower}
 
 
 # ─── Cost overrides loader ───────────────────────────────────────────────────
