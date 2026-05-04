@@ -3,32 +3,44 @@ Unified error handling for DDS API.
 Consistent error format for all endpoints.
 """
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Optional, List
 
 
 class ErrorDetail(BaseModel):
-    field: Optional[str] = None
+    field: str | None = None
     issue: str
 
 
 class ErrorResponse(BaseModel):
     code: str
     message: str
-    details: Optional[List[ErrorDetail]] = None
+    details: list[ErrorDetail] | None = None
 
 
 async def http_exception_handler(request: Request, exc: HTTPException):
-    """Unified error response format."""
+    """Unified error response format.
+
+    Когда detail — dict (структурированная ошибка типа FactoryQtyExceeded),
+    кладём его как payload, а в message пишем человекочитаемый код.
+    Frontend читает `error.payload` напрямую без JSON.parse(message).
+    """
+    payload = None
+    if isinstance(exc.detail, dict):
+        payload = exc.detail
+        message = exc.detail.get("error") or _status_to_code(exc.status_code)
+    else:
+        message = str(exc.detail)
+
     return JSONResponse(
         status_code=exc.status_code,
         content={
             "error": {
                 "code": _status_to_code(exc.status_code),
-                "message": str(exc.detail),
+                "message": message,
                 "details": None,
+                "payload": payload,
             }
         },
     )

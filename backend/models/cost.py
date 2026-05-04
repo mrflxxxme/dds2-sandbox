@@ -117,6 +117,7 @@ class CostOrderItem(Base, SoftDeleteMixin):
     box_size_override: Mapped[str | None] = mapped_column(String(50))
     pcs_per_box_override: Mapped[int | None] = mapped_column(Integer)
     box_detail_override: Mapped[list[int] | None] = mapped_column(JSON)
+    added_after_ship: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     order: Mapped["CostOrder"] = relationship(back_populates="items")
     __table_args__ = (
         Index("ix_cost_item_project_id", "project_id"),

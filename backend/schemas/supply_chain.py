@@ -349,6 +349,8 @@ class VehicleItemSchema(BaseModel):
     qty_drift: int | None = None
     fo_qty: int | None = None  # FactoryOrderItem.qty (план)
     fo_assigned: int | None = None  # FactoryOrderItem.assigned_qty (распределено)
+    # sc18: позиция добавлена после отгрузки (vehicle ≥ SHIPPED). Frontend помечает.
+    added_after_ship: bool = False
 
 
 class VehicleItemUpdate(BaseModel):
@@ -481,6 +483,37 @@ class AddItemToVehicle(BaseModel):
     qty: int
     box_size_override: str | None = None
     pcs_per_box_override: int | None = None
+
+
+class PostShipmentAddItem(BaseModel):
+    """Add one item to a vehicle in status >= SHIPPED."""
+
+    factory_order_item_id: int
+    qty: int
+    box_size_override: str | None = None
+    pcs_per_box_override: int | None = None
+    mode: Literal["strict", "extend_plan"] = "strict"
+
+    @field_validator("qty")
+    @classmethod
+    def validate_qty(cls, v: int) -> int:
+        if v <= 0:
+            msg = "qty must be > 0"
+            raise ValueError(msg)
+        return v
+
+
+class PostShipmentItemsRequest(BaseModel):
+    """sc18: добавление позиции в машину после отгрузки.
+
+    Применяется для vehicle.status >= SHIPPED. Создаёт CostOrderItem с
+    `added_after_ship=True`. Логика по статусам:
+    - SHIPPED/CUSTOMS: только cost-side (recalc costs, sync assigned_qty).
+    - DISPATCHED: + добавить в существующий InboundReceipt (expected_qty).
+    - DELIVERED: + создать отдельный InboundReceipt (DRAFT) для ручной приёмки.
+    """
+
+    items: list[PostShipmentAddItem]
 
 
 # --- Mix Groups ---
@@ -627,7 +660,7 @@ class ShipmentMatrixItem(BaseModel):
     pcs_per_box: int | None = None
     remaining_qty: int
     shipped_pct: Decimal
-    # qty уехавших в машинах со статусом >= SHIPPED (реально отгружено с фабрики)  # noqa: RUF003
+    # qty уехавших в машинах со статусом >= SHIPPED (реально отгружено с фабрики)
     really_shipped_qty: int = 0
     # самая свежая дата заказа — для расчёта «возраста» и приоритета в UI
     latest_order_date: date | None = None

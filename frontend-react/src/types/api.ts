@@ -1964,6 +1964,8 @@ export interface VehicleItemSchema {
   qty_drift?: number | null;
   fo_qty?: number | null;
   fo_assigned?: number | null;
+  // sc18: позиция добавлена после отгрузки
+  added_after_ship?: boolean;
 }
 
 // ── Vehicle qty drift (sc17) ─────────────────────────────────────────────
@@ -1986,6 +1988,7 @@ export interface FactoryQtyExceededDetail {
   fo_assigned: number;
   available: number;
   attempted_delta: number;
+  overflow: number;
   in_mix_group: boolean;
   mix_group_id: string | null;
 }
@@ -1997,6 +2000,27 @@ export class FactoryQtyExceededError extends Error {
     this.name = 'FactoryQtyExceededError';
     this.detail = detail;
   }
+}
+
+// ── Post-shipment add (sc18) ─────────────────────────────────────────────
+export interface PostShipmentAddItem {
+  factory_order_item_id: number;
+  qty: number;
+  box_size_override?: string | null;
+  pcs_per_box_override?: number | null;
+  mode?: 'strict' | 'extend_plan';
+}
+
+export interface PostShipmentItemsRequest {
+  items: PostShipmentAddItem[];
+}
+
+export interface PostShipmentItemsResponse {
+  ok: boolean;
+  added: number;
+  receipt_items_added: number;
+  new_receipt_id: number | null;
+  vehicle_status: string;
 }
 
 export interface VehicleSchema {

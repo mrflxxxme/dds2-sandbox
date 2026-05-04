@@ -25,6 +25,8 @@ import type {
     ShipmentMatrixResponse,
     VehicleItemUpdate,
     FactoryQtyExceededDetail,
+    PostShipmentItemsRequest,
+    PostShipmentItemsResponse,
 } from '@/types/api';
 import { FactoryQtyExceededError } from '@/types/api';
 
@@ -132,6 +134,26 @@ export function addSupplyChainMethods(api: ApiClient) {
         },
         addItemsToVehicle(orderNo: string, items: { factory_order_item_id: number; qty: number }[]) {
             return api.request<{ ok: boolean; added: number }>('POST', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items`, { items });
+        },
+        async addPostShipmentItems(
+            orderNo: string,
+            payload: PostShipmentItemsRequest,
+        ): Promise<PostShipmentItemsResponse> {
+            try {
+                return await api.request<PostShipmentItemsResponse>(
+                    'POST',
+                    `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/post-shipment-items`,
+                    payload,
+                );
+            } catch (e: unknown) {
+                if (e instanceof Error) {
+                    const parsed = parseFactoryQtyExceededDetail(e.message);
+                    if (parsed) {
+                        throw new FactoryQtyExceededError(parsed);
+                    }
+                }
+                throw e;
+            }
         },
         removeItemFromVehicle(orderNo: string, itemId: number) {
             return api.request<{ ok: boolean }>('DELETE', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items/${itemId}`);

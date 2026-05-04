@@ -527,6 +527,7 @@ function VehicleDetailContent() {
                                 items={vehicle.items}
                                 isForming={isForming}
                                 vehicleOrderNo={vehicle.order_no}
+                                vehicleStatus={vehicle.status || ''}
                                 totalQty={vehicle.total_qty}
                                 totalCny={vehicle.total_cny}
                                 onRemoved={load}
@@ -536,9 +537,14 @@ function VehicleDetailContent() {
                         )}
                     </div>
 
-                    {/* Add items (FORMING only) — collapsible */}
-                    {isForming && (
-                        <CollapsibleAddItems vehicleOrderNo={vehicle.order_no} onAdded={load} />
+                    {/* Add items: FORMING — обычный flow; SHIPPED/CUSTOMS/DISPATCHED/DELIVERED — post-shipment (sc18) */}
+                    {(isForming || ['SHIPPED', 'CUSTOMS', 'DISPATCHED', 'DELIVERED'].includes(vehicle.status || '')) && (
+                        <CollapsibleAddItems
+                            vehicleOrderNo={vehicle.order_no}
+                            onAdded={load}
+                            isPostShipment={!isForming}
+                            vehicleStatus={vehicle.status || ''}
+                        />
                     )}
                 </>
             )}
@@ -667,7 +673,7 @@ function DriftConfirmRow({ detail, vehicleOrderNo, itemId, colSpan, onResolved }
 }) {
     const { t } = useT();
     const [working, setWorking] = useState(false);
-    const overflow = detail.attempted_delta - detail.available;
+    const overflow = detail.overflow;
     const newPlanQty = detail.fo_qty + overflow;
     const isLargeDelta = overflow > 1000;
 
@@ -746,8 +752,9 @@ function DriftConfirmRow({ detail, vehicleOrderNo, itemId, colSpan, onResolved }
     );
 }
 
-function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRemoved, driftStateById, setDriftStateById }: {
+function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty, totalCny, onRemoved, driftStateById, setDriftStateById }: {
     items: VehicleItemSchema[]; isForming: boolean; vehicleOrderNo: string;
+    vehicleStatus: string;
     totalQty: number; totalCny: number; onRemoved: () => void;
     driftStateById: Record<number, DriftState>;
     setDriftStateById: React.Dispatch<React.SetStateAction<Record<number, DriftState>>>;
@@ -758,10 +765,42 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
     const [perUnit, setPerUnit] = useState(false); // false = total, true = per unit
     const [expandedId, setExpandedId] = useState<number | null>(null);
     const [resyncOpen, setResyncOpen] = useState(false);
+    const [categoryFilter, setCategoryFilter] = useState<string>('');
+    const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+    const [bulkDeleting, setBulkDeleting] = useState(false);
     const hasCosts = items.some(i => i.total_rub);
 
+    // Уникальные категории (subject) для фильтра.
+    const categories = Array.from(new Set(items.map(i => i.subject).filter((s): s is string => Boolean(s)))).sort();
+    const filteredItems = categoryFilter ? items.filter(i => i.subject === categoryFilter) : items;
+    const visibleIds = filteredItems.map(i => i.id);
+    const allVisibleSelected = visibleIds.length > 0 && visibleIds.every(id => selectedIds.has(id));
+    const toggleAll = () => {
+        setSelectedIds(prev => {
+            if (allVisibleSelected) {
+                const next = new Set(prev);
+                visibleIds.forEach(id => next.delete(id));
+                return next;
+            }
+            const next = new Set(prev);
+            visibleIds.forEach(id => next.add(id));
+            return next;
+        });
+    };
+    const toggleOne = (id: number) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id); else next.add(id);
+            return next;
+        });
+    };
+
     const handleRemove = async (itemId: number, isMix?: boolean) => {
-        if (!confirm(t('vehicle_items_confirm_delete'))) return;
+        // sc19: для post-shipment removal — расширенный warning о последствиях.
+        const msg = isForming
+            ? t('vehicle_items_confirm_delete')
+            : t('vehicle_items_confirm_delete_post_shipment').replace('{status}', vehicleStatus);
+        if (!confirm(msg)) return;
         setRemovingId(itemId);
         try {
             await api.removeItemFromVehicle(vehicleOrderNo, itemId);
@@ -770,6 +809,31 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
             alert(e instanceof Error ? e.message : t('msg_error'));
         }
         setRemovingId(null);
+    };
+
+    const handleBulkDelete = async () => {
+        if (selectedIds.size === 0) return;
+        const msg = isForming
+            ? t('vehicle_items_confirm_bulk_delete').replace('{count}', String(selectedIds.size))
+            : t('vehicle_items_confirm_bulk_delete_post_shipment')
+                .replace('{count}', String(selectedIds.size))
+                .replace('{status}', vehicleStatus);
+        if (!confirm(msg)) return;
+        setBulkDeleting(true);
+        const errors: string[] = [];
+        for (const id of selectedIds) {
+            try {
+                await api.removeItemFromVehicle(vehicleOrderNo, id);
+            } catch (e: unknown) {
+                errors.push(`${id}: ${e instanceof Error ? e.message : 'error'}`);
+            }
+        }
+        setBulkDeleting(false);
+        setSelectedIds(new Set());
+        if (errors.length > 0) {
+            alert(`${t('vehicle_items_bulk_delete_partial')}\n${errors.join('\n')}`);
+        }
+        onRemoved();
     };
 
     const handleClearAll = async () => {
@@ -818,12 +882,17 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
     const tdR: React.CSSProperties = { ...td, textAlign: 'right' };
     const tdF: React.CSSProperties = { ...tdR, background: 'rgba(59,130,246,0.02)' };
 
-    // Totals (mix groups deduplicated by max boxes)
-    const totalBoxes = calcTotalBoxesWithMix(items);
+    // Totals — считаем по filteredItems чтобы footer соответствовал активному фильтру.
+    // Когда фильтр выключен, filteredItems === items.
+    const totalBoxes = calcTotalBoxesWithMix(filteredItems);
     let totalWeight = 0, totalVolume = 0;
     let totalRub = 0, totalDelivery = 0, totalDuty = 0, totalVat = 0;
-    for (const item of items) {
+    let totalQtyVisible = 0;
+    let totalCnyVisible = 0;
+    for (const item of filteredItems) {
         const ppb = item.pcs_per_box || 0;
+        totalQtyVisible += item.qty;
+        totalCnyVisible += Number(item.price_cny) * item.qty;
         totalWeight += (item.weight_kg || 0) * item.qty;
         const dims = parseBoxDims(item.box_size);
         if (dims && ppb > 0) totalVolume += (dims.l * dims.w * dims.h) / 1e6 * Math.ceil(item.qty / ppb);
@@ -834,11 +903,50 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
     }
 
     const costCols = hasCosts ? 4 : 0;
-    const baseCols = 11 + (isForming ? 1 : 0);
+    // sc19: kebab/delete column visible for all statuses except DELIVERED.
+    const canDelete = vehicleStatus !== 'DELIVERED';
+    // +1 for checkbox column (when canDelete), already counts the delete button column.
+    const baseCols = 11 + (canDelete ? 2 : 0);
 
     return (
         <>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 8 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+            {/* sc20: фильтр по категории + индикатор bulk-выбора */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {categories.length > 0 && (
+                    <>
+                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{t('vehicle_items_filter_category')}</span>
+                        <select
+                            value={categoryFilter}
+                            onChange={e => setCategoryFilter(e.target.value)}
+                            style={{ fontSize: 12, padding: '4px 8px', borderRadius: 8, border: '1px solid var(--color-border)' }}
+                        >
+                            <option value="">{t('vehicle_items_filter_all_categories')}</option>
+                            {categories.map(cat => (
+                                <option key={cat} value={cat}>{cat}</option>
+                            ))}
+                        </select>
+                    </>
+                )}
+                {selectedIds.size > 0 && (
+                    <span style={{ fontSize: 12, color: 'var(--color-accent)', fontWeight: 600 }}>
+                        {t('vehicle_items_selected_count').replace('{count}', String(selectedIds.size))}
+                    </span>
+                )}
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+            {canDelete && selectedIds.size > 0 && (
+                <button
+                    className="btn btn-danger btn-sm"
+                    onClick={handleBulkDelete}
+                    disabled={bulkDeleting}
+                    style={{ fontSize: 12 }}
+                >
+                    {bulkDeleting
+                        ? '...'
+                        : t('vehicle_items_delete_selected').replace('{count}', String(selectedIds.size))}
+                </button>
+            )}
             {isForming && items.length > 0 && (
                 <button className="btn btn-danger btn-sm" onClick={handleClearAll} disabled={clearingAll} style={{ fontSize: 12 }}>
                     {clearingAll ? '...' : t('vehicle_items_clear_all')}
@@ -852,6 +960,7 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
             <button className="btn btn-secondary btn-sm" onClick={handleExport} style={{ fontSize: 12 }}>
                 📊 Excel
             </button>
+            </div>
         </div>
         {resyncOpen && (
             <PriceResyncModal
@@ -871,7 +980,7 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
             <thead>
                 {hasCosts && (
                     <tr>
-                        <th colSpan={11} style={{ padding: '4px 6px', fontSize: 10, color: 'var(--color-text-muted)', borderBottom: 'none', fontWeight: 400 }}>{t('cost_goods')}</th>
+                        <th colSpan={11 + (canDelete ? 1 : 0)} style={{ padding: '4px 6px', fontSize: 10, color: 'var(--color-text-muted)', borderBottom: 'none', fontWeight: 400 }}>{t('cost_goods')}</th>
                         <th colSpan={costCols} style={{ padding: '4px 6px', fontSize: 10, color: 'var(--color-primary)', borderBottom: 'none', fontWeight: 500, textAlign: 'center', background: 'rgba(59,130,246,0.04)' }}>
                             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
                                 <span>{t('col_cost')} (₽)</span>
@@ -891,10 +1000,20 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                                 </div>
                             </div>
                         </th>
-                        {isForming && <th style={{ borderBottom: 'none' }} />}
+                        {canDelete && <th style={{ borderBottom: 'none' }} />}
                     </tr>
                 )}
                 <tr style={{ borderBottom: '2px solid var(--color-border)' }}>
+                    {canDelete && (
+                        <th style={{ ...th, width: 28, textAlign: 'center' }}>
+                            <input
+                                type="checkbox"
+                                checked={allVisibleSelected}
+                                onChange={toggleAll}
+                                title={t('vehicle_items_select_all')}
+                            />
+                        </th>
+                    )}
                     <th style={th}>{t('col_barcode')}</th>
                     <th style={th}>{t('col_article')}</th>
                     <th style={th}>{t('col_category')}</th>
@@ -910,11 +1029,11 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                     {hasCosts && <th style={thF}>{t('cost_duty')}</th>}
                     {hasCosts && <th style={thF}>{t('cost_vat')}</th>}
                     {hasCosts && <th style={{ ...thF, fontWeight: 600 }}>{t('cost_total')}</th>}
-                    {isForming && <th style={{ width: 28 }} />}
+                    {canDelete && <th style={{ width: 28 }} />}
                 </tr>
             </thead>
             <tbody>
-                {items.map(item => {
+                {filteredItems.map(item => {
                     const ppb = item.pcs_per_box || 0;
                     const boxes = ppb > 0 ? Math.ceil(item.qty / ppb) : 0;
                     const notFull = ppb > 0 && item.qty % ppb !== 0;
@@ -926,8 +1045,28 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
 
                     return (
                     <React.Fragment key={item.id}>
-                        <tr style={{ borderBottom: expandedId === item.id ? 'none' : '1px solid var(--color-border)' }}>
-                            <td style={{ ...td, fontFamily: 'monospace', fontSize: 12 }}>{item.barcode}</td>
+                        <tr style={{ borderBottom: expandedId === item.id ? 'none' : '1px solid var(--color-border)', background: selectedIds.has(item.id) ? 'rgba(0,113,227,0.04)' : undefined }}>
+                            {canDelete && (
+                                <td style={{ ...td, textAlign: 'center', width: 28 }}>
+                                    <input
+                                        type="checkbox"
+                                        checked={selectedIds.has(item.id)}
+                                        onChange={() => toggleOne(item.id)}
+                                    />
+                                </td>
+                            )}
+                            <td style={{ ...td, fontFamily: 'monospace', fontSize: 12 }}>
+                                {item.barcode}
+                                {item.added_after_ship && (
+                                    <span
+                                        className="badge badge-warning"
+                                        style={{ marginLeft: 6, fontSize: 10, padding: '1px 6px' }}
+                                        title={t('vdetail_post_shipment_badge_tooltip')}
+                                    >
+                                        {t('vdetail_post_shipment_badge')}
+                                    </span>
+                                )}
+                            </td>
                             <td style={{ ...td, fontSize: 12, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.article_seller || ''}>{item.article_seller || '—'}</td>
                             <td style={{ ...td, fontSize: 12 }}>{item.subject || '—'}</td>
                             <td style={tdR}>
@@ -942,6 +1081,9 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                                         if (it.qty_drift == null || it.qty_drift <= 0) return;
                                         const fo_qty = it.fo_qty ?? 0;
                                         const fo_assigned = it.fo_assigned ?? 0;
+                                        // Existing drift: overflow is the qty_drift itself (not delta-available).
+                                        // oldQty (revert target) is current cost.qty - drift = qty that fits the plan.
+                                        const oldQtyFit = Math.max(0, it.qty - it.qty_drift);
                                         const synthDetail: DriftState = {
                                             error: 'exceeds_factory_qty',
                                             fo_id: it.factory_order_id ?? 0,
@@ -953,9 +1095,10 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                                             fo_assigned,
                                             available: Math.max(0, fo_qty - fo_assigned),
                                             attempted_delta: it.qty_drift,
+                                            overflow: it.qty_drift,
                                             in_mix_group: Boolean(it.mix_group_id),
                                             mix_group_id: it.mix_group_id ?? null,
-                                            oldQty: it.qty,
+                                            oldQty: oldQtyFit,
                                             newQty: it.qty,
                                         };
                                         setDriftStateById(prev => ({ ...prev, [it.id]: synthDetail }));
@@ -992,7 +1135,7 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                             {hasCosts && <td style={tdF}>{formatNumber(perUnit ? (item.duty_rub || 0) : (item.duty_rub || 0) * item.qty, perUnit ? 2 : 0)}</td>}
                             {hasCosts && <td style={tdF}>{formatNumber(perUnit ? (item.vat_rub || 0) : (item.vat_rub || 0) * item.qty, perUnit ? 2 : 0)}</td>}
                             {hasCosts && <td style={{ ...tdF, fontWeight: 700 }}>{formatNumber(perUnit ? (item.total_rub || 0) : (item.total_rub || 0) * item.qty, perUnit ? 2 : 0)}</td>}
-                            {isForming && (
+                            {canDelete && (
                                 <td style={{ ...td, textAlign: 'center' }}>
                                     <button
                                         onClick={() => handleRemove(item.id, !!item.mix_group_id)}
@@ -1049,20 +1192,21 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
             </tbody>
             <tfoot>
                 <tr style={{ borderTop: '2px solid var(--color-border)', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                    {canDelete && <td />}
                     <td colSpan={3} style={{ padding: '12px 6px', fontSize: 13 }}>{t('cost_total')}</td>
-                    <td style={{ padding: '12px 6px', textAlign: 'right', fontSize: 13 }}>{formatNumber(totalQty, 0)}</td>
+                    <td style={{ padding: '12px 6px', textAlign: 'right', fontSize: 13 }}>{formatNumber(totalQtyVisible, 0)}</td>
                     <td style={{ padding: '12px 6px', textAlign: 'right' }}>{totalBoxes || ''}</td>
                     <td />
                     <td style={{ padding: '12px 6px', textAlign: 'right' }}>{totalWeight > 0 ? formatNumber(totalWeight, 0) : ''} kg</td>
                     <td />
                     <td style={{ padding: '12px 6px', textAlign: 'right' }}>{totalVolume > 0 ? totalVolume.toFixed(2) : ''}</td>
                     <td />
-                    <td style={{ padding: '12px 6px', textAlign: 'right', whiteSpace: 'nowrap' }}>{formatNumber(Number(totalCny), 2)} ¥</td>
+                    <td style={{ padding: '12px 6px', textAlign: 'right', whiteSpace: 'nowrap' }}>{formatNumber(totalCnyVisible, 2)} ¥</td>
                     {hasCosts && <td style={{ ...tdF, padding: '12px 6px', whiteSpace: 'nowrap' }}>{perUnit ? '' : `${formatNumber(totalDelivery, 0)} ₽`}</td>}
                     {hasCosts && <td style={{ ...tdF, padding: '12px 6px', whiteSpace: 'nowrap' }}>{perUnit ? '' : `${formatNumber(totalDuty, 0)} ₽`}</td>}
                     {hasCosts && <td style={{ ...tdF, padding: '12px 6px', whiteSpace: 'nowrap' }}>{perUnit ? '' : `${formatNumber(totalVat, 0)} ₽`}</td>}
                     {hasCosts && <td style={{ ...tdF, padding: '12px 6px', fontWeight: 700, fontSize: 15, color: 'var(--color-primary)', whiteSpace: 'nowrap' }}>{perUnit ? '' : `${formatNumber(totalRub, 0)} ₽`}</td>}
-                    {isForming && <td />}
+                    {canDelete && <td />}
                 </tr>
             </tfoot>
         </table>
@@ -1335,24 +1479,37 @@ function resolveMixSiblings(
     return result;
 }
 
-function CollapsibleAddItems({ vehicleOrderNo, onAdded }: { vehicleOrderNo: string; onAdded: () => void }) {
+function CollapsibleAddItems({ vehicleOrderNo, onAdded, isPostShipment = false, vehicleStatus = '' }: {
+    vehicleOrderNo: string; onAdded: () => void; isPostShipment?: boolean; vehicleStatus?: string;
+}) {
     const { t } = useT();
     const [open, setOpen] = useState(false);
     if (!open) {
         return (
             <div style={{ textAlign: 'center', padding: 16 }}>
-                <button className="btn btn-primary" onClick={() => setOpen(true)}>
-                    {t('vdetail_items_add')}
+                <button className={isPostShipment ? "btn btn-secondary" : "btn btn-primary"} onClick={() => setOpen(true)}>
+                    {isPostShipment ? t('vdetail_items_add_post_shipment') : t('vdetail_items_add')}
                 </button>
             </div>
         );
     }
     return (
         <div>
+            {isPostShipment && (
+                <div className="glass-card" style={{ padding: 12, marginBottom: 12, borderLeft: '4px solid var(--color-warning)', background: 'rgba(255, 159, 10, 0.06)' }}>
+                    <div style={{ fontWeight: 600, color: 'var(--color-warning)', fontSize: 13, marginBottom: 4 }}>
+                        ⚠ {t('vdetail_post_shipment_title')}
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                        {t('vdetail_post_shipment_warning').replace('{status}', vehicleStatus)}
+                    </div>
+                </div>
+            )}
             <AddItemsSection
                 vehicleOrderNo={vehicleOrderNo}
                 onAdded={() => { onAdded(); setOpen(false); }}
                 onPartialAdded={onAdded}
+                isPostShipment={isPostShipment}
             />
             <div style={{ textAlign: 'center', marginTop: 8 }}>
                 <button className="btn btn-secondary btn-sm" onClick={() => setOpen(false)}>{t('items_collapse')}</button>
@@ -1361,7 +1518,7 @@ function CollapsibleAddItems({ vehicleOrderNo, onAdded }: { vehicleOrderNo: stri
     );
 }
 
-function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleOrderNo: string; onAdded: () => void; onPartialAdded: () => void }) {
+function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipment = false }: { vehicleOrderNo: string; onAdded: () => void; onPartialAdded: () => void; isPostShipment?: boolean }) {
     const { t } = useT();
     const [mode, setMode] = useState<'list' | 'paste'>('list');
     const [groups, setGroups] = useState<AvailableItemGroup[]>([]);
@@ -1458,7 +1615,13 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
                 factory_order_item_id: item.id,
                 qty: parseInt(quantities[item.id]?.toString() || '0') || 0,
             }));
-            await api.addItemsToVehicle(vehicleOrderNo, items);
+            if (isPostShipment) {
+                await api.addPostShipmentItems(vehicleOrderNo, {
+                    items: items.map(it => ({ ...it, mode: 'strict' as const })),
+                });
+            } else {
+                await api.addItemsToVehicle(vehicleOrderNo, items);
+            }
             setChecked({});
             setQuantities({});
             onAdded();
@@ -1633,7 +1796,13 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded }: { vehicleO
             return base;
         });
         const validBarcodes = new Set(validRows.map(r => r.barcode.trim()));
-        await api.addItemsToVehicle(vehicleOrderNo, items);
+        if (isPostShipment) {
+            await api.addPostShipmentItems(vehicleOrderNo, {
+                items: items.map(it => ({ ...it, mode: 'strict' as const })),
+            });
+        } else {
+            await api.addItemsToVehicle(vehicleOrderNo, items);
+        }
 
         // Keep rows that weren't successfully added (unfound + exceeded qty)
         const remainingRows = rows.filter(r => {

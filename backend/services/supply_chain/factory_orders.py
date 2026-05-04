@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Literal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -207,6 +207,7 @@ async def _adjust_assigned_qty(
                     "fo_assigned": fo_item.assigned_qty,
                     "available": available,
                     "attempted_delta": delta,
+                    "overflow": delta - available,
                     "in_mix_group": fo_item.mix_group_id is not None,
                     "mix_group_id": fo_item.mix_group_id,
                 }
@@ -230,6 +231,58 @@ async def _adjust_assigned_qty(
         history_id = history.id
 
     fo_item.assigned_qty += delta
+    return AdjustResult(
+        new_assigned_qty=fo_item.assigned_qty,
+        extended_by=extended_by,
+        history_entry_id=history_id,
+    )
+
+
+async def _resolve_existing_drift(
+    db: AsyncSession,
+    fo_item: FactoryOrderItem,
+    cost_order_no: str | None,
+    user_name: str | None,
+) -> AdjustResult:
+    """Резолвить существующий drift между cost_items и FactoryOrderItem.
+
+    Применяется когда mode=extend_plan вызван без изменения qty (existing drift case):
+    - sum_cost = сумма cost_items.qty по этому FOI
+    - fo.qty = max(fo.qty, sum_cost) — расширяем план если он меньше факта
+    - fo.assigned_qty = sum_cost — синхронизируем броню с фактическим распределением
+
+    Записывает qty_extended_from_vehicle history если план расширялся.
+    Возвращает AdjustResult с extended_by = насколько план вырос.
+    """
+    sum_result = await db.execute(
+        select(func.coalesce(func.sum(CostOrderItem.qty), 0)).where(
+            CostOrderItem.factory_order_item_id == fo_item.id,
+            CostOrderItem.is_deleted == False,  # noqa: E712
+        )
+    )
+    sum_cost = int(sum_result.scalar() or 0)
+
+    extended_by = max(0, sum_cost - fo_item.qty)
+    history_id = None
+
+    if extended_by > 0:
+        fo_item.qty = sum_cost
+        details = f"+{extended_by} шт. в позицию {fo_item.barcode} (resolve drift)"
+        if cost_order_no:
+            details += f" (машина {cost_order_no})"
+        history = FactoryOrderHistory(
+            project_id=fo_item.project_id,
+            factory_order_id=fo_item.factory_order_id,
+            event_type="qty_extended_from_vehicle",
+            details=details,
+            changed_at=utcnow(),
+            changed_by=user_name,
+        )
+        db.add(history)
+        await db.flush()
+        history_id = history.id
+
+    fo_item.assigned_qty = sum_cost
     return AdjustResult(
         new_assigned_qty=fo_item.assigned_qty,
         extended_by=extended_by,

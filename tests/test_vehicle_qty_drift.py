@@ -140,6 +140,7 @@ async def test_strict_fail_exceeds_plan(db_session, project):
         "fo_assigned",
         "available",
         "attempted_delta",
+        "overflow",
         "in_mix_group",
         "mix_group_id",
     }
@@ -150,6 +151,7 @@ async def test_strict_fail_exceeds_plan(db_session, project):
     assert detail["fo_assigned"] == 6
     assert detail["available"] == 4
     assert detail["attempted_delta"] == 8
+    assert detail["overflow"] == 4
     assert detail["in_mix_group"] is False
     assert detail["mix_group_id"] is None
     assert detail["fo_number"] is not None  # has order_number
@@ -529,21 +531,13 @@ async def test_router_returns_422_with_structured_detail(client, auth_headers):
     )
     assert resp.status_code == 422, f"Expected 422, got {resp.status_code}: {resp.text}"
     body = resp.json()
-    # DDS unified error handler (backend/exceptions.py) wraps HTTPException as
-    # {"error": {"code": "VALIDATION_ERROR", "message": str(detail), ...}}.
-    # Frontend recovers structured detail by JSON-parsing message string —
-    # see frontend-react/src/lib/api/supply-chain.ts parseFactoryQtyExceededDetail.
-    import ast
-
+    # DDS unified error handler (backend/exceptions.py) wraps structured HTTPException
+    # detail as {"error": {"code": "VALIDATION_ERROR", "message": "exceeds_factory_qty",
+    # "payload": {...}, ...}}. Frontend reads error.payload directly.
     err = body.get("error", body)
-    message = err.get("message", "")
-    # message is a Python-repr/JSON of the dict — parse it back
-    try:
-        detail = ast.literal_eval(message)
-    except (SyntaxError, ValueError):
-        import json
-
-        detail = json.loads(message)
+    detail = err.get("payload")
+    assert detail is not None, f"expected error.payload to contain detail, got: {body}"
+    assert err["message"] == "exceeds_factory_qty"
     assert isinstance(detail, dict)
     assert detail["error"] == "exceeds_factory_qty"
     assert detail["foi_id"] == foi_id
@@ -551,6 +545,7 @@ async def test_router_returns_422_with_structured_detail(client, auth_headers):
     assert detail["fo_assigned"] == 6
     assert detail["available"] == 4
     assert detail["attempted_delta"] == 8
+    assert detail["overflow"] == 4
     assert detail["in_mix_group"] is False
     assert detail["mix_group_id"] is None
     assert "fo_number" in detail
