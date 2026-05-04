@@ -1162,6 +1162,8 @@ async def get_available_items(
     for order in orders:
         available_items = []
         for item in order.items:
+            if item.is_deleted:
+                continue
             remaining = item.qty - item.assigned_qty
             if remaining > 0:
                 nom = nom_map.get(item.barcode)
