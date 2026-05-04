@@ -1483,8 +1483,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                     data={filtered}
                     exportName="unified_stock"
                     enableSorting
-                    enablePagination
-                    pageSize={50}
+                    enablePagination={false}
                     actions={
                         <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
                             {filtered.length} позиций
