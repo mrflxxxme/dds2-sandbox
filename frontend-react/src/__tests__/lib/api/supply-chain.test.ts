@@ -187,12 +187,14 @@ describe('supply-chain.updateVehicleItem (drift confirm)', () => {
             fo_assigned: 76,
             available: 4,
             attempted_delta: 8,
+            overflow: 4,
             in_mix_group: false,
             mix_group_id: null,
         };
-        // client.ts strips structured detail and rethrows as Error(JSON.stringify(detail))
+        // backend/exceptions.py wraps structured detail as { error: { payload: detail, ... } }
+        // client.ts unwraps payload and rethrows as Error(JSON.stringify(payload))
         vi.spyOn(global, 'fetch').mockResolvedValue({
-            ok: false, status: 422, json: async () => ({ detail }),
+            ok: false, status: 422, json: async () => ({ error: { code: 'VALIDATION_ERROR', message: 'exceeds_factory_qty', payload: detail } }),
         } as Response);
 
         const api = makeApi();

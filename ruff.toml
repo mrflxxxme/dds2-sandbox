@@ -72,7 +72,10 @@ ignore = [
 "backend/services/cost/plan_gen.py" = ["E712", "RUF001", "RUF002"]  # SQLAlchemy == False, Cyrillic strings/docstrings
 "backend/services/cost_history_service.py" = ["E712"]  # SQLAlchemy == False
 "backend/services/order_geography_service.py" = ["S112"]  # try-except-continue in date parsing
-"backend/services/supply_chain/vehicle_delivery.py" = ["E712"]  # SQLAlchemy == False
+"backend/services/supply_chain/vehicle_delivery.py" = ["E712", "RUF001", "RUF002", "RUF003"]  # SQLAlchemy == False, Cyrillic in domain docstrings/comments
+"backend/services/supply_chain/factory_orders.py" = ["RUF001", "RUF002", "RUF003"]  # Cyrillic in domain docstrings/comments
+"backend/schemas/supply_chain.py" = ["RUF001", "RUF002", "RUF003"]  # Cyrillic in domain docstrings/comments
+"backend/exceptions.py" = ["RUF002", "RUF003"]  # Cyrillic in error response docstrings
 "backend/services/bdr_loaders.py" = ["E712"]  # SQLAlchemy == False
 "backend/scheduler/helpers.py" = ["E712"]  # SQLAlchemy == True/False
 "backend/scheduler/jobs/funnel.py" = ["E712", "RUF006", "S110", "SIM105"]  # SQLAlchemy == True/False, background tasks, try-except-pass

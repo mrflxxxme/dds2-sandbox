@@ -476,6 +476,23 @@ const ru: TranslationDict = {
     drift_status_blocked_tooltip: 'Решите расхождения qty перед сменой статуса',
     drift_existing_dot_tooltip: 'Расхождение с фабричным заказом',
     drift_extend_toast: 'Заказ {fo_number}: план +{count} шт',
+    // ── Post-shipment add (sc18) ──
+    vdetail_items_add_post_shipment: '+ Добавить позицию (после отгрузки)',
+    vdetail_post_shipment_title: 'Добавление позиции в отгруженную машину',
+    vdetail_post_shipment_warning: 'Машина уже в статусе {status}. Позиция будет помечена как «доп», стоимость машины пересчитается. Для DISPATCHED — позиция добавится в существующую приёмку. Для DELIVERED — будет создана отдельная приёмка (DRAFT).',
+    vdetail_post_shipment_badge: 'доп',
+    vdetail_post_shipment_badge_tooltip: 'Позиция добавлена после отгрузки',
+    // ── Post-shipment delete (sc19) ──
+    vehicle_items_confirm_delete_post_shipment: 'Машина в статусе {status}. Удаление позиции вернёт qty в фабричный заказ, пересчитает стоимость машины. Для DISPATCHED — также уменьшит ожидаемое qty в приёмке. Продолжить?',
+    // ── Filter + bulk select (sc20) ──
+    vehicle_items_filter_category: 'Категория:',
+    vehicle_items_filter_all_categories: 'все',
+    vehicle_items_select_all: 'Выбрать все',
+    vehicle_items_selected_count: 'Выбрано: {count}',
+    vehicle_items_delete_selected: 'Удалить выбранные ({count})',
+    vehicle_items_confirm_bulk_delete: 'Удалить {count} позиций из машины?',
+    vehicle_items_confirm_bulk_delete_post_shipment: 'Удалить {count} позиций из машины (статус {status})? qty вернётся в фабричный заказ, стоимость пересчитается. Продолжить?',
+    vehicle_items_bulk_delete_partial: 'Часть позиций не удалось удалить:',
 };
 
 const zh: TranslationDict = {
@@ -944,6 +961,23 @@ const zh: TranslationDict = {
     drift_status_blocked_tooltip: '更改状态前请解决数量差异',
     drift_existing_dot_tooltip: '与工厂订单存在差异',
     drift_extend_toast: '订单 {fo_number}: 计划 +{count} 件',
+    // ── Post-shipment add (sc18) ──
+    vdetail_items_add_post_shipment: '+ 添加货物（发货后）',
+    vdetail_post_shipment_title: '向已发货车辆添加货物',
+    vdetail_post_shipment_warning: '车辆当前状态为 {status}。新货物将被标记为「补」，车辆成本将重新计算。DISPATCHED — 货物添加到现有接收单；DELIVERED — 创建独立接收单（DRAFT）。',
+    vdetail_post_shipment_badge: '补',
+    vdetail_post_shipment_badge_tooltip: '发货后追加的货物',
+    // ── Post-shipment delete (sc19) ──
+    vehicle_items_confirm_delete_post_shipment: '车辆当前状态为 {status}。删除货物将把数量返回到工厂订单，重新计算车辆成本。DISPATCHED 状态下还会减少接收单中的预期数量。继续？',
+    // ── Filter + bulk select (sc20) ──
+    vehicle_items_filter_category: '类别:',
+    vehicle_items_filter_all_categories: '全部',
+    vehicle_items_select_all: '全选',
+    vehicle_items_selected_count: '已选: {count}',
+    vehicle_items_delete_selected: '删除所选 ({count})',
+    vehicle_items_confirm_bulk_delete: '从车辆中删除 {count} 个货物?',
+    vehicle_items_confirm_bulk_delete_post_shipment: '从车辆中删除 {count} 个货物 (状态 {status})? 数量将返回工厂订单，成本将重新计算。继续？',
+    vehicle_items_bulk_delete_partial: '部分货物删除失败:',
 };
 
 const translations: Record<Lang, TranslationDict> = { ru, zh };

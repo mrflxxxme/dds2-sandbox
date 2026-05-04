@@ -14,7 +14,7 @@ from sqlalchemy.orm import selectinload
 from backend.models.cost import CostOrder, CostOrderItem
 from backend.models.enums import VehicleStatus
 from backend.models.planning import LeadTime
-from backend.models.supply_chain import FactoryOrder, FactoryOrderItem
+from backend.models.supply_chain import FactoryOrder, FactoryOrderHistory, FactoryOrderItem
 from backend.models.warehouse import (
     InboundReceipt,
     InboundReceiptItem,
@@ -23,6 +23,7 @@ from backend.models.warehouse import (
 from backend.schemas.supply_chain import (
     CONTAINER_TRANSPORT_MAP,
     AddItemsToVehicleRequest,
+    PostShipmentItemsRequest,
     VehicleCostSummary,
     VehicleCreate,
     VehicleItemSchema,
@@ -35,6 +36,7 @@ from backend.schemas.supply_chain import (
 from backend.services.supply_chain.factory_orders import (
     FactoryQtyExceeded,
     _adjust_assigned_qty,
+    _resolve_existing_drift,
     refresh_factory_order_statuses,
 )
 from backend.services.supply_chain.supplier_catalog import invalidate_supplier_catalog as _invalidate_supplier_catalog
@@ -404,13 +406,309 @@ async def add_items_to_vehicle(
     return {"ok": True, "added": added}
 
 
+_POST_SHIPMENT_ALLOWED = {
+    VehicleStatus.SHIPPED,
+    VehicleStatus.CUSTOMS,
+    VehicleStatus.DISPATCHED,
+    VehicleStatus.DELIVERED,
+}
+
+
+async def add_items_post_shipment(
+    db: AsyncSession,
+    project_id: int,
+    order_no: str,
+    data: PostShipmentItemsRequest,
+    user_name: str | None = None,
+) -> dict:
+    """sc18: добавить позиции в машину после отгрузки (status >= SHIPPED).
+
+    - Создаёт CostOrderItem с `added_after_ship=True`.
+    - Sync FactoryOrderItem.assigned_qty через `_adjust_assigned_qty` (mode из payload).
+    - Recalc стоимости (duty/vat/delivery) для машины.
+    - DISPATCHED: добавляет item в существующий InboundReceipt (EXPECTED).
+    - DELIVERED: создаёт отдельный InboundReceipt (DRAFT) для ручной приёмки.
+    - History: per-FO событие `item_added_post_shipment`.
+
+    raise FactoryQtyExceeded если strict + delta > available — router транслирует в 422.
+    raise ValueError на статус-нарушение / ненайденный FOI.
+    """
+    result = await db.execute(
+        select(CostOrder).where(
+            CostOrder.order_no == order_no,
+            CostOrder.project_id == project_id,
+            CostOrder.is_deleted == False,
+        )
+    )
+    vehicle = result.scalar_one_or_none()
+    if not vehicle:
+        raise ValueError(f"Vehicle {order_no} not found")
+
+    if vehicle.status not in _POST_SHIPMENT_ALLOWED:
+        raise ValueError(
+            f"Post-shipment add allowed only for status >= SHIPPED (current: {vehicle.status}). "
+            f"Use regular add_items_to_vehicle for FORMING."
+        )
+
+    added = 0
+    affected_fo_ids: set[int] = set()
+    new_cost_items: list[CostOrderItem] = []
+
+    for item_req in data.items:
+        fo_result = await db.execute(
+            select(FactoryOrderItem)
+            .join(FactoryOrder)
+            .where(
+                FactoryOrderItem.id == item_req.factory_order_item_id,
+                FactoryOrderItem.project_id == project_id,
+                FactoryOrderItem.is_deleted == False,
+                FactoryOrder.project_id == project_id,
+                FactoryOrder.is_deleted == False,
+            )
+        )
+        fo_item = fo_result.scalar_one_or_none()
+        if not fo_item:
+            raise ValueError(f"FactoryOrderItem {item_req.factory_order_item_id} not found")
+
+        await _adjust_assigned_qty(
+            db,
+            fo_item,
+            delta=item_req.qty,
+            mode=item_req.mode,
+            user_name=user_name,
+            cost_order_no=order_no,
+        )
+        affected_fo_ids.add(fo_item.factory_order_id)
+
+        subject = fo_item.subject
+        article_seller = fo_item.article_seller
+        if not subject or not article_seller:
+            from backend.models.cost import Nomenclature
+
+            nom_result = await db.execute(
+                select(Nomenclature).where(
+                    Nomenclature.barcode == fo_item.barcode,
+                    Nomenclature.project_id == project_id,
+                )
+            )
+            nom = nom_result.scalar_one_or_none()
+            if nom:
+                subject = subject or nom.subject
+                article_seller = article_seller or nom.article_seller
+
+        from backend.services.cost.helpers import parse_box_volume_m3
+
+        fo_bs = fo_item.mix_box_size if fo_item.mix_group_id and fo_item.mix_box_size else fo_item.box_size
+        fo_ppb = fo_item.mix_pcs_per_box if fo_item.mix_group_id and fo_item.mix_pcs_per_box else fo_item.pcs_per_box
+        effective_bs = item_req.box_size_override or fo_bs
+        effective_ppb = item_req.pcs_per_box_override or fo_ppb
+        vol_m3 = parse_box_volume_m3(effective_bs, effective_ppb)
+
+        cost_item = CostOrderItem(
+            project_id=project_id,
+            order_no=vehicle.order_no,
+            barcode=fo_item.barcode,
+            subject=subject,
+            article_seller=article_seller,
+            qty=item_req.qty,
+            price_cny=fo_item.price_cny,
+            weight_kg=fo_item.weight_kg,
+            volume_m3=vol_m3 if vol_m3 > 0 else None,
+            factory_order_item_id=fo_item.id,
+            box_size_override=item_req.box_size_override,
+            pcs_per_box_override=item_req.pcs_per_box_override,
+            added_after_ship=True,
+        )
+        db.add(cost_item)
+        new_cost_items.append(cost_item)
+
+        history = FactoryOrderHistory(
+            project_id=project_id,
+            factory_order_id=fo_item.factory_order_id,
+            event_type="item_added_post_shipment",
+            details=f"+{item_req.qty} шт. {fo_item.barcode} в машину {order_no} (статус {vehicle.status})",
+            changed_at=utcnow(),
+            changed_by=user_name,
+        )
+        db.add(history)
+        added += 1
+
+    await db.flush()
+
+    receipts_updated = 0
+    new_receipt_id: int | None = None
+
+    if vehicle.status == VehicleStatus.DISPATCHED:
+        existing_receipt_result = await db.execute(
+            select(InboundReceipt).where(
+                InboundReceipt.cost_order_id == vehicle.id,
+                InboundReceipt.project_id == project_id,
+                InboundReceipt.status == InboundStatus.EXPECTED,
+            )
+        )
+        existing_receipt = existing_receipt_result.scalar_one_or_none()
+        if existing_receipt:
+            for cost_item in new_cost_items:
+                try:
+                    nom = await _resolve_barcode(db, project_id, cost_item.barcode)
+                    receipt_item = InboundReceiptItem(
+                        project_id=project_id,
+                        receipt_id=existing_receipt.id,
+                        nomenclature_id=nom.id,
+                        barcode=cost_item.barcode,
+                        expected_qty=cost_item.qty,
+                        actual_qty=0,
+                    )
+                    db.add(receipt_item)
+                    receipts_updated += 1
+                except ValueError:
+                    logger.warning(
+                        "Barcode %s not found in nomenclature for project %d, "
+                        "skipping receipt item add (vehicle %s, post-shipment)",
+                        cost_item.barcode,
+                        project_id,
+                        vehicle.order_no,
+                    )
+
+    elif vehicle.status == VehicleStatus.DELIVERED:
+        new_receipt_number = await _next_number(db, project_id, "IN", InboundReceipt)
+        new_receipt = InboundReceipt(
+            project_id=project_id,
+            warehouse_id=vehicle.target_warehouse_id,
+            number=new_receipt_number,
+            status=InboundStatus.DRAFT,
+            planned_date=utcnow().date(),
+            comment=f"Доп. приёмка после отгрузки машины {vehicle.order_no}",
+            cost_order_id=vehicle.id,
+        )
+        db.add(new_receipt)
+        await db.flush()
+        new_receipt_id = new_receipt.id
+
+        for cost_item in new_cost_items:
+            try:
+                nom = await _resolve_barcode(db, project_id, cost_item.barcode)
+                receipt_item = InboundReceiptItem(
+                    project_id=project_id,
+                    receipt_id=new_receipt.id,
+                    nomenclature_id=nom.id,
+                    barcode=cost_item.barcode,
+                    expected_qty=cost_item.qty,
+                    actual_qty=0,
+                )
+                db.add(receipt_item)
+            except ValueError:
+                logger.warning(
+                    "Barcode %s not found in nomenclature for project %d, "
+                    "skipping receipt item add (vehicle %s, post-shipment delivered)",
+                    cost_item.barcode,
+                    project_id,
+                    vehicle.order_no,
+                )
+
+    await db.commit()
+
+    from backend.services.cost.items import recalculate_order_items
+
+    await recalculate_order_items(db, project_id, order_no)
+    await refresh_factory_order_statuses(db, project_id, affected_fo_ids)
+    await _invalidate_supplier_catalog(project_id)
+
+    return {
+        "ok": True,
+        "added": added,
+        "receipt_items_added": receipts_updated,
+        "new_receipt_id": new_receipt_id,
+        "vehicle_status": vehicle.status,
+    }
+
+
+async def _cleanup_dispatched_receipt_items(
+    db: AsyncSession,
+    project_id: int,
+    vehicle_id: int,
+    barcodes_to_qty: dict[str, int],
+    user_name: str | None = None,
+) -> int:
+    """sc19: при удалении CostOrderItem(s) из машины DISPATCHED — уменьшить
+    expected_qty в InboundReceiptItem (или soft-delete если expected_qty падает до 0).
+
+    barcodes_to_qty: {barcode: total_qty_to_remove} — по сумме всех удаляемых cost_items.
+    Возвращает кол-во затронутых receipt_items.
+    """
+    receipt_result = await db.execute(
+        select(InboundReceipt).where(
+            InboundReceipt.cost_order_id == vehicle_id,
+            InboundReceipt.project_id == project_id,
+            InboundReceipt.status == InboundStatus.EXPECTED,
+        )
+    )
+    receipt = receipt_result.scalar_one_or_none()
+    if not receipt:
+        return 0
+
+    affected = 0
+    for barcode, qty_to_remove in barcodes_to_qty.items():
+        items_result = await db.execute(
+            select(InboundReceiptItem).where(
+                InboundReceiptItem.receipt_id == receipt.id,
+                InboundReceiptItem.project_id == project_id,
+                InboundReceiptItem.barcode == barcode,
+            )
+        )
+        for ri in items_result.scalars().all():
+            if qty_to_remove <= 0:
+                break
+            if ri.expected_qty <= qty_to_remove:
+                qty_to_remove -= ri.expected_qty
+                ri.expected_qty = 0
+                affected += 1
+            else:
+                ri.expected_qty -= qty_to_remove
+                qty_to_remove = 0
+                affected += 1
+    return affected
+
+
+_REMOVE_ALLOWED = {
+    VehicleStatus.FORMING,
+    VehicleStatus.SHIPPED,
+    VehicleStatus.CUSTOMS,
+    VehicleStatus.DISPATCHED,
+}
+
+
 async def remove_item_from_vehicle(
     db: AsyncSession,
     project_id: int,
     order_no: str,
     item_id: int,
+    user_name: str | None = None,
 ) -> dict:
-    """Remove a CostOrderItem from vehicle and restore assigned_qty."""
+    """Remove a CostOrderItem from vehicle and restore assigned_qty.
+
+    sc19: разрешено для FORMING/SHIPPED/CUSTOMS/DISPATCHED. DELIVERED — блокируется
+    (товар уже на складе, требуется отдельный writeoff/return workflow).
+    На DISPATCHED дополнительно: уменьшается `expected_qty` в существующем InboundReceiptItem.
+    """
+    vehicle_result = await db.execute(
+        select(CostOrder).where(
+            CostOrder.order_no == order_no,
+            CostOrder.project_id == project_id,
+            CostOrder.is_deleted == False,
+        )
+    )
+    vehicle = vehicle_result.scalar_one_or_none()
+    if not vehicle:
+        raise ValueError(f"Vehicle {order_no} not found")
+    if vehicle.status not in _REMOVE_ALLOWED:
+        raise ValueError(
+            f"Удаление позиции запрещено для статуса {vehicle.status}. "
+            f"DELIVERED — товар уже на складе, требуется списание/возврат."
+        )
+
+    is_post_shipment = vehicle.status != VehicleStatus.FORMING
+
     result = await db.execute(
         select(CostOrderItem)
         .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)
@@ -476,13 +774,31 @@ async def remove_item_from_vehicle(
 
         removed = 0
         affected_fo_ids: set[int] = set()
+        barcodes_to_qty: dict[str, int] = {}
         for mix_ci in mix_cost_items:
             if mix_ci.factory_order_item_id and mix_ci.factory_order_item_id in fo_items_map:
                 fi = fo_items_map[mix_ci.factory_order_item_id]
                 await _adjust_assigned_qty(db, fi, delta=-mix_ci.qty, mode="strict", user_name=None)
                 affected_fo_ids.add(fi.factory_order_id)
+                if is_post_shipment:
+                    history = FactoryOrderHistory(
+                        project_id=project_id,
+                        factory_order_id=fi.factory_order_id,
+                        event_type="item_removed_post_shipment",
+                        details=f"-{mix_ci.qty} шт. {mix_ci.barcode} из машины {order_no} (статус {vehicle.status})",
+                        changed_at=utcnow(),
+                        changed_by=user_name,
+                    )
+                    db.add(history)
+            barcodes_to_qty[mix_ci.barcode] = barcodes_to_qty.get(mix_ci.barcode, 0) + mix_ci.qty
             mix_ci.soft_delete()
             removed += 1
+
+        receipt_items_affected = 0
+        if vehicle.status == VehicleStatus.DISPATCHED:
+            receipt_items_affected = await _cleanup_dispatched_receipt_items(
+                db, project_id, vehicle.id, barcodes_to_qty, user_name=user_name
+            )
 
         await db.commit()
 
@@ -492,7 +808,7 @@ async def remove_item_from_vehicle(
         await refresh_factory_order_statuses(db, project_id, affected_fo_ids)
         await _invalidate_supplier_catalog(project_id)
 
-        return {"ok": True, "removed": removed}
+        return {"ok": True, "removed": removed, "receipt_items_affected": receipt_items_affected}
 
     # Single-item removal (not in a mix group)
     affected_fo_ids_single: set[int] = set()
@@ -508,6 +824,22 @@ async def remove_item_from_vehicle(
         if fo_item2:
             await _adjust_assigned_qty(db, fo_item2, delta=-cost_item.qty, mode="strict", user_name=None)
             affected_fo_ids_single.add(fo_item2.factory_order_id)
+            if is_post_shipment:
+                history = FactoryOrderHistory(
+                    project_id=project_id,
+                    factory_order_id=fo_item2.factory_order_id,
+                    event_type="item_removed_post_shipment",
+                    details=f"-{cost_item.qty} шт. {cost_item.barcode} из машины {order_no} (статус {vehicle.status})",
+                    changed_at=utcnow(),
+                    changed_by=user_name,
+                )
+                db.add(history)
+
+    receipt_items_affected_single = 0
+    if vehicle.status == VehicleStatus.DISPATCHED:
+        receipt_items_affected_single = await _cleanup_dispatched_receipt_items(
+            db, project_id, vehicle.id, {cost_item.barcode: cost_item.qty}, user_name=user_name
+        )
 
     cost_item.soft_delete()
     await db.commit()
@@ -519,7 +851,7 @@ async def remove_item_from_vehicle(
     await refresh_factory_order_statuses(db, project_id, affected_fo_ids_single)
     await _invalidate_supplier_catalog(project_id)
 
-    return {"ok": True}
+    return {"ok": True, "receipt_items_affected": receipt_items_affected_single}
 
 
 async def update_vehicle_item(
@@ -568,8 +900,12 @@ async def update_vehicle_item(
     qty_changed = new_qty is not None and new_qty != cost_item.qty
     any_override_set = set_box_size_override or set_pcs_per_box_override or set_box_detail_override
 
+    # sc17 resolve-existing-drift: mode=extend_plan без смены qty на позиции с
+    # фабричным заказом — синхронизируем assigned/plan с фактическим sum cost_items.
+    resolve_drift = mode == "extend_plan" and not qty_changed and cost_item.factory_order_item_id is not None
+
     # Early return: nothing to change at all
-    if not qty_changed and not any_override_set:
+    if not qty_changed and not any_override_set and not resolve_drift:
         return {"ok": True, "item_id": item_id, "noop": True}
 
     affected_fo_ids: set[int] = set()
@@ -595,6 +931,24 @@ async def update_vehicle_item(
                 mode=mode,
                 user_name=user_name,
                 cost_order_no=order_no,
+            )
+            extended_by = adjust_result.extended_by
+            affected_fo_ids.add(fo_item.factory_order_id)
+    elif resolve_drift:
+        fo_result = await db.execute(
+            select(FactoryOrderItem).where(
+                FactoryOrderItem.id == cost_item.factory_order_item_id,
+                FactoryOrderItem.project_id == project_id,
+                FactoryOrderItem.is_deleted == False,
+            )
+        )
+        fo_item = fo_result.scalar_one_or_none()
+        if fo_item:
+            adjust_result = await _resolve_existing_drift(
+                db,
+                fo_item,
+                cost_order_no=order_no,
+                user_name=user_name,
             )
             extended_by = adjust_result.extended_by
             affected_fo_ids.add(fo_item.factory_order_id)
@@ -858,9 +1212,12 @@ async def _enrich_vehicle(
     has_weight = False
     has_volume = False
 
+    # selectinload(CostOrder.items) doesn't filter is_deleted — drop them here.
+    active_items = [ci for ci in vehicle.items if not ci.is_deleted]
+
     # Batch-load FactoryOrderItem + FactoryOrder data to avoid N+1.
     # sc17: also fetch FactoryOrderItem.qty + assigned_qty for drift detection.
-    fo_item_ids = [ci.factory_order_item_id for ci in vehicle.items if ci.factory_order_item_id is not None]
+    fo_item_ids = [ci.factory_order_item_id for ci in active_items if ci.factory_order_item_id is not None]
     fo_item_map: dict[int, tuple] = {}
     sum_by_foi: dict[int, int] = {}
     if fo_item_ids:
@@ -903,7 +1260,7 @@ async def _enrich_vehicle(
         )
         sum_by_foi = {row[0]: row[1] for row in sum_by_foi_result}
 
-    for cost_item in vehicle.items:
+    for cost_item in active_items:
         total_qty += cost_item.qty
         total_cny += cost_item.price_cny * cost_item.qty
 

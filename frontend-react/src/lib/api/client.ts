@@ -162,6 +162,12 @@ export class ApiClient {
 
         if (!res.ok) {
             const err = await res.json().catch(() => ({}));
+            // Structured payload (sc17/sc18): backend возвращает error.payload как объект — сериализуем в JSON
+            // чтобы вызывающий мог распарсить через JSON.parse(e.message).
+            const payload = err.error?.payload;
+            if (payload && typeof payload === 'object') {
+                throw new Error(JSON.stringify(payload));
+            }
             const detail = err.detail ?? err.error?.message;
             if (typeof detail === 'string') throw new Error(detail);
             if (Array.isArray(detail)) throw new Error(detail.map((d: any) => d.msg || JSON.stringify(d)).join('; '));

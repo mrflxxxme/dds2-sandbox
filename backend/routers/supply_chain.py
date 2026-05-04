@@ -27,6 +27,7 @@ from backend.schemas.supply_chain import (
     FactoryOrderSchema,
     FactoryOrderStatusUpdate,
     FactoryOrderUpdate,
+    PostShipmentItemsRequest,
     SetMixGroupRequest,
     SetMixGroupResponse,
     SplitToVehiclesRequest,
@@ -428,6 +429,34 @@ async def add_items_to_vehicle(
         raise HTTPException(400, str(e)) from e
 
 
+@router.post("/vehicles/{order_no}/post-shipment-items", dependencies=[Depends(rate_limit_write)])
+async def add_post_shipment_items(
+    order_no: str,
+    payload: PostShipmentItemsRequest,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """sc18: добавить позиции в машину после отгрузки (status >= SHIPPED).
+
+    DISPATCHED — добавляет в существующий InboundReceipt.
+    DELIVERED — создаёт отдельный InboundReceipt (DRAFT) для ручной приёмки.
+    """
+    display_name = user.first_name or user.username or user.email
+    try:
+        return await vehicle_delivery.add_items_post_shipment(
+            db,
+            project.id,
+            order_no,
+            payload,
+            user_name=display_name,
+        )
+    except FactoryQtyExceeded as e:
+        raise HTTPException(422, detail=e.detail) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @router.get("/vehicles/{order_no}/price-resync/preview")
 async def preview_vehicle_price_resync(
     order_no: str,
@@ -459,11 +488,18 @@ async def remove_item_from_vehicle(
     order_no: str,
     item_id: int,
     project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    display_name = user.first_name or user.username or user.email
     try:
-        return await vehicle_delivery.remove_item_from_vehicle(db, project.id, order_no, item_id)
+        return await vehicle_delivery.remove_item_from_vehicle(
+            db, project.id, order_no, item_id, user_name=display_name
+        )
     except ValueError as e:
+        # sc19: статус не разрешает удаление (например DELIVERED) → 400
+        if "запрещено" in str(e).lower():
+            raise HTTPException(400, str(e)) from e
         raise HTTPException(404, str(e)) from e
 
 
