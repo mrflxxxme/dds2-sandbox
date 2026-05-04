@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002
 """
 Assembly Request service — status transitions and audit.
 
@@ -99,17 +100,32 @@ async def _log_status_change(
 
 
 async def start_assembly(db: AsyncSession, project_id: int, request_id: int) -> AssemblyRequest:
-    """PENDING -> IN_PROGRESS, or READY -> IN_PROGRESS (reopen).
+    """PENDING -> IN_PROGRESS (legacy), or READY -> IN_PROGRESS (reopen).
 
     When reopening from READY, clear actual_ready_date (it will be set again on mark_ready).
+    Для legacy PENDING-заявок — проверяем доступные остатки (с учётом резерва других заявок).
     """
-    from .crud import get_assembly_request
+    from .crud import _format_deficit_error, _validate_available_for_assembly, get_assembly_request
 
     req = await get_assembly_request(db, project_id, request_id)
     if not req:
         raise ValueError("Assembly request not found")
 
+    # Idempotent: новые заявки создаются сразу в IN_PROGRESS, повторный клик «Начать сборку» — no-op.
+    if AssemblyStatus(req.status) == AssemblyStatus.IN_PROGRESS:
+        return req
+
     _check_transition(AssemblyStatus(req.status), AssemblyStatus.IN_PROGRESS)
+
+    # Validate stock when starting from PENDING (legacy path: новые заявки уже создаются в IN_PROGRESS).
+    # READY -> IN_PROGRESS skip — позиции уже резервировались, повторно не проверяем.
+    if AssemblyStatus(req.status) == AssemblyStatus.PENDING:
+        deficits = await _validate_available_for_assembly(
+            db, project_id, req.warehouse_id, req.items, exclude_request_id=req.id
+        )
+        if deficits:
+            raise ValueError(_format_deficit_error(deficits))
+
     old = req.status
     req.status = AssemblyStatus.IN_PROGRESS
     if AssemblyStatus(old) == AssemblyStatus.READY:

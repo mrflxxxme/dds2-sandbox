@@ -55,9 +55,9 @@ async def ship_shipment(db, project_id, shipment_id) -> OutboundShipment:
 ## Статусная модель
 
 ```
-PENDING → IN_PROGRESS → READY → VEHICLE_ASSIGNED → SHIPPED
-              ↑           ↓           ↓ (rollback)       ↓ (rollback)
-              └───────────┘         READY             READY
+IN_PROGRESS → READY → VEHICLE_ASSIGNED → SHIPPED
+     ↑          ↓          ↓ (rollback)       ↓ (rollback)
+     └──────────┘        READY             READY
 CANCELLED ← (любой статус)
 ```
 
@@ -65,6 +65,27 @@ CANCELLED ← (любой статус)
 - `READY → IN_PROGRESS` — возврат в сборку (через `start_assembly`); сбрасывается `actual_ready_date`
 - `VEHICLE_ASSIGNED → READY` — отмена назначения машины (`unassign_vehicle`)
 - `SHIPPED → READY` — откат отгрузки (через cancel + повторная сборка)
+
+**PENDING (legacy):** старый промежуточный статус «Ожидает сборки» убран из жизненного цикла
+2026-04-29 (миграция `as02_pending_to_in_progress`). Новые заявки создаются сразу в `IN_PROGRESS`.
+В коде PENDING остаётся в enum для совместимости со `status_history`, но активных заявок в этом
+статусе быть не должно. `start_assembly` идемпотентен (повторный клик «Начать сборку» в IN_PROGRESS = no-op).
+
+## Валидация остатков при создании / изменении
+
+При `create_assembly_request`, `update_assembly_request` (для PENDING/IN_PROGRESS) и `start_assembly`
+(legacy PENDING) проверяется **доступный** остаток:
+
+```
+available = warehouse_stock.quantity − reserved_by_other_active_requests
+```
+
+`reserved_by_other_active_requests` — сумма позиций по этому товару в активных заявках
+(`PENDING/IN_PROGRESS/READY/VEHICLE_ASSIGNED`), исключая текущую заявку. Если заявка просит больше
+доступного — `ValueError("Недостаточно доступных остатков...")` с детализацией по баркодам:
+need / available / stock / reserved.
+
+Реализация: `_validate_available_for_assembly()` в `backend/services/assembly/crud.py`.
 
 ## При Ship (VEHICLE_ASSIGNED → SHIPPED)
 
