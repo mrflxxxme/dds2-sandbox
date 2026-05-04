@@ -302,6 +302,21 @@ class TestGetAvailableItems:
         found = [g for g in available if g["order_id"] == order.id]
         assert found[0]["items"][0]["remaining_qty"] == 40
 
+    @pytest.mark.asyncio
+    async def test_available_items_excludes_soft_deleted(self, db_session, project):
+        order = await _create_factory_order_with_items(
+            db_session, project.id, [("BC-AVD-LIVE", 100), ("BC-AVD-DEAD", 200)]
+        )
+        dead_item = next(i for i in order.items if i.barcode == "BC-AVD-DEAD")
+        dead_item.soft_delete()
+        await db_session.commit()
+
+        available = await get_available_items(db_session, project.id)
+        found = [g for g in available if g["order_id"] == order.id]
+        assert len(found) == 1
+        barcodes = {it["barcode"] for it in found[0]["items"]}
+        assert barcodes == {"BC-AVD-LIVE"}
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Auto-transition of FactoryOrder.status from vehicle-side mutations
