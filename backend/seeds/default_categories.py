@@ -46,14 +46,33 @@ async def seed_default_categories(conn, project_ids: list[int]):
     """
     Insert default category_ref entries for given projects (idempotent).
 
+    Skips projects that already have ANY category_ref rows. Typical case at
+    startup is "everything already seeded" and we don't want N x 30 INSERTs
+    every lifespan call. Per-project granularity is enough: a project either
+    was seeded once (full set) or never (new project).
+
     Args:
         conn: SQLAlchemy async connection (within a transaction)
         project_ids: list of project IDs to seed
     """
-    for pid in project_ids:
-        for d, c1, c2, s in DEFAULT_CATEGORIES:
-            await conn.execute(text(
-                "INSERT INTO category_ref (project_id, direction, cat_lvl1, cat_lvl2, sort_order) "
-                "VALUES (:pid, :d, :c1, :c2, :s) "
-                "ON CONFLICT (project_id, direction, cat_lvl1, cat_lvl2) DO NOTHING"
-            ), {"pid": pid, "d": d, "c1": c1, "c2": c2, "s": s})
+    if not project_ids:
+        return
+
+    seeded_rows = await conn.execute(
+        text("SELECT project_id FROM category_ref WHERE project_id = ANY(:pids) GROUP BY project_id"),
+        {"pids": project_ids},
+    )
+    already_seeded = {r[0] for r in seeded_rows}
+    to_seed = [pid for pid in project_ids if pid not in already_seeded]
+    if not to_seed:
+        return
+
+    rows = [{"pid": pid, "d": d, "c1": c1, "c2": c2, "s": s} for pid in to_seed for d, c1, c2, s in DEFAULT_CATEGORIES]
+    await conn.execute(
+        text(
+            "INSERT INTO category_ref (project_id, direction, cat_lvl1, cat_lvl2, sort_order) "
+            "VALUES (:pid, :d, :c1, :c2, :s) "
+            "ON CONFLICT (project_id, direction, cat_lvl1, cat_lvl2) DO NOTHING"
+        ),
+        rows,
+    )
