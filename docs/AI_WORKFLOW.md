@@ -124,7 +124,6 @@ post-merge.yml → healthcheck → GH issue при fail
 
 - [`CLAUDE.md`](../CLAUDE.md) — главная точка входа, iron rules, архитектура
 - [`.claude/rules/lead_agent_v2.md`](../.claude/rules/lead_agent_v2.md) — **канон lead-agent v2** (роутинг, параллелизм, cloud-команды)
-- [`docs/OPUS_4_7_MIGRATION.md`](OPUS_4_7_MIGRATION.md) — специфика 4.7 (literal понимание, verbosity, task budget)
 - [`docs/AGENT_DEVELOPMENT.md`](AGENT_DEVELOPMENT.md) — детали TDD + Teams workflow
 - [`.claude/rules/agent_workflow.md`](../.claude/rules/agent_workflow.md) — file ownership, параллелизм
 - [`.claude/rules/learnings.md`](../.claude/rules/learnings.md) — накопленные паттерны и антипаттерны
