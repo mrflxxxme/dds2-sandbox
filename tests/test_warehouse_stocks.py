@@ -3,7 +3,12 @@ Tests for warehouse stock analytics — compute_need helper,
 and response structure validation for get_warehouse_stocks / get_warehouse_need.
 """
 
+import pytest
+from sqlalchemy import delete, select, text
+
+from backend.models import WbStockSnapshot, WbWarehouseStock
 from backend.services.stock_analytics_service import compute_need
+from backend.services.warehouse_stock_service import sync_warehouse_stocks
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: compute_need(stock_qty, avg_daily, need_days)
@@ -203,3 +208,146 @@ class TestWarehouseResponseStructure:
         assert results["Коледино"] == 32
         # Казань: nm_1: 5*14-20=50, nm_2: 3*14-10=32 → 82
         assert results["Казань"] == 82
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tests: sync_warehouse_stocks deduplicates rows with same (nm_id, warehouse_name)
+# Regression for CardinalityViolationError on ON CONFLICT (2026-05-04).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+async def _clean_wb_stocks(db_session, project):
+    # Test DB is shared — sync sequence with existing rows so PK INSERTs work.
+    await db_session.execute(delete(WbStockSnapshot).where(WbStockSnapshot.project_id == project.id))
+    await db_session.execute(delete(WbWarehouseStock).where(WbWarehouseStock.project_id == project.id))
+    await db_session.execute(
+        text(
+            "SELECT setval('wb_stock_snapshots_id_seq', COALESCE((SELECT MAX(id) FROM wb_stock_snapshots), 0) + 1, false)"
+        )
+    )
+    await db_session.execute(
+        text(
+            "SELECT setval('wb_warehouse_stocks_id_seq', COALESCE((SELECT MAX(id) FROM wb_warehouse_stocks), 0) + 1, false)"
+        )
+    )
+    await db_session.commit()
+    yield
+
+
+class TestSyncWarehouseStocksDedup:
+    @pytest.mark.asyncio
+    async def test_dedup_same_nm_and_warehouse_aggregates_quantities(self, _clean_wb_stocks, db_session, project):
+        # WB API returns one row per barcode/size — same nm_id + warehouseName
+        # can repeat. Sync must aggregate, not blow up on UPSERT.
+        items = [
+            {
+                "nmId": 100,
+                "warehouseName": "Коледино",
+                "supplierArticle": "art-1",
+                "subject": "Ноутбуки",
+                "brand": "FSPLACE",
+                "barcode": "bc-size-S",
+                "quantity": 5,
+                "quantityFull": 5,
+                "inWayToClient": 1,
+                "inWayFromClient": 0,
+            },
+            {
+                "nmId": 100,
+                "warehouseName": "Коледино",
+                "supplierArticle": "art-1",
+                "subject": "Ноутбуки",
+                "brand": "FSPLACE",
+                "barcode": "bc-size-M",
+                "quantity": 3,
+                "quantityFull": 3,
+                "inWayToClient": 0,
+                "inWayFromClient": 2,
+            },
+            {
+                "nmId": 100,
+                "warehouseName": "Казань",
+                "supplierArticle": "art-1",
+                "subject": "Ноутбуки",
+                "brand": "FSPLACE",
+                "barcode": "bc-size-S",
+                "quantity": 7,
+                "quantityFull": 7,
+                "inWayToClient": 0,
+                "inWayFromClient": 0,
+            },
+        ]
+
+        count = await sync_warehouse_stocks(db_session, project.id, items)
+
+        # 3 input rows aggregated to 2 unique (nm_id, warehouse_name) keys
+        assert count == 2
+
+        rows = (
+            (await db_session.execute(select(WbWarehouseStock).where(WbWarehouseStock.project_id == project.id)))
+            .scalars()
+            .all()
+        )
+        by_wh = {r.warehouse_name: r for r in rows}
+        assert by_wh["Коледино"].quantity == 8  # 5 + 3
+        assert by_wh["Коледино"].quantity_full == 8
+        assert by_wh["Коледино"].in_way_to_client == 1
+        assert by_wh["Коледино"].in_way_from_client == 2
+        assert by_wh["Коледино"].subject == "Ноутбуки"
+        assert by_wh["Казань"].quantity == 7
+
+    @pytest.mark.asyncio
+    async def test_skips_rows_without_nm_or_warehouse(self, _clean_wb_stocks, db_session, project):
+        items = [
+            {"nmId": None, "warehouseName": "Коледино", "quantity": 1},
+            {"nmId": 200, "warehouseName": "", "quantity": 1},
+            {"nmId": 200, "warehouseName": "Коледино", "quantity": 4},
+        ]
+        count = await sync_warehouse_stocks(db_session, project.id, items)
+        assert count == 1
+        rows = (
+            (await db_session.execute(select(WbWarehouseStock).where(WbWarehouseStock.project_id == project.id)))
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].quantity == 4
+
+    @pytest.mark.asyncio
+    async def test_first_nonempty_metadata_wins(self, _clean_wb_stocks, db_session, project):
+        # vendor_code/subject/brand from first row that has a non-empty value.
+        items = [
+            {
+                "nmId": 300,
+                "warehouseName": "Коледино",
+                "supplierArticle": "",
+                "subject": "",
+                "brand": "",
+                "quantity": 1,
+            },
+            {
+                "nmId": 300,
+                "warehouseName": "Коледино",
+                "supplierArticle": "vc-1",
+                "subject": "Диваны бескаркасные",
+                "brand": "FSPLACE",
+                "quantity": 2,
+            },
+            {
+                "nmId": 300,
+                "warehouseName": "Коледино",
+                "supplierArticle": "vc-2",
+                "subject": "OTHER",
+                "brand": "OTHER",
+                "quantity": 3,
+            },
+        ]
+        await sync_warehouse_stocks(db_session, project.id, items)
+        row = (
+            await db_session.execute(select(WbWarehouseStock).where(WbWarehouseStock.project_id == project.id))
+        ).scalar_one()
+        assert row.quantity == 6
+        assert row.vendor_code == "vc-1"
+        assert row.subject == "Диваны бескаркасные"
+        assert row.brand == "FSPLACE"
