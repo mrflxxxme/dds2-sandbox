@@ -219,8 +219,11 @@ async def run_funnel_sync(
             if rows_to_upsert:
                 stmt = pg_insert(WbFunnelDaily).values(rows_to_upsert)
 
-                # Base fields to always update
-                update_fields = {
+                # Base fields to always update.
+                # `Any` type — values are mix of `excluded.<col>` (KeyedColumnElement)
+                # and `func.greatest(...)` (FunctionElement), both valid for set_= in
+                # on_conflict_do_update but mypy needs the union widened.
+                update_fields: dict[str, Any] = {
                     "vendor_code": stmt.excluded.vendor_code,
                     "subject": stmt.excluded.subject,
                     "brand": stmt.excluded.brand,
