@@ -4,6 +4,7 @@ Assembly Request service — CRUD operations and helpers.
 Part of the assembly service package. See backend/DOMAIN_ASSEMBLY.md for spec.
 """
 
+import logging
 from datetime import date, datetime, time
 from decimal import Decimal
 
@@ -32,6 +33,49 @@ from backend.services.warehouse_service import (
 )
 
 from .status import _log_status_change
+
+logger = logging.getLogger(__name__)
+
+
+async def _try_force_enrich_supply(
+    db: AsyncSession,
+    project_id: int,
+    supply: WbFboSupply,
+    force: bool = False,
+) -> None:
+    """
+    On-demand force-pull warehouse_name from WB detail API when supply is linked
+    to an assembly but periodic enrich hasn't filled it yet (race window between
+    list-sync creating supply and enrich job catching up). Best-effort: any error
+    is swallowed — caller proceeds, scheduled enrich will catch up later.
+
+    force=True — pull даже если warehouse_name уже задан (для «Обновить из WB»
+    когда юзер мог сменить склад назначения в кабинете WB).
+    """
+    if not force and supply.warehouse_name:
+        return
+    try:
+        from backend.integrations.wb_api import WBApiClient
+        from backend.services.fbo_supply.mappers import _update_supply_from_fbw_detail
+        from backend.services.integrations_service import _get_wb_key
+
+        try:
+            _key, api_key = await _get_wb_key(db, project_id)
+        except ValueError:
+            return  # no WB key — silent skip
+
+        api_client = WBApiClient(api_key, project_id=project_id)
+        wb_id_int = int(supply.wb_supply_id)
+        detail = await api_client.get_fbw_supply_detail(wb_id_int)
+        if detail:
+            _update_supply_from_fbw_detail(supply, detail)
+            await db.flush()
+    except Exception as e:
+        logger.info(
+            "assembly.force_enrich_skipped",
+            extra={"project_id": project_id, "wb_supply_id": supply.wb_supply_id, "error": str(e)[:200]},
+        )
+
 
 # --- Helpers ----------------------------------------------------------------
 
@@ -531,7 +575,12 @@ async def create_assembly_request(
     number = await _next_number(db, project_id, "ASM", AssemblyRequest)
 
     # 4. Create request
-    # Auto-set wb_warehouse_name_manual from FBO supply if linked
+    # Auto-set wb_warehouse_name_manual from FBO supply if linked.
+    # If supply.warehouse_name is empty (race window between list-sync and enrich),
+    # force-pull WB detail API now so the assembly gets the warehouse immediately.
+    if payload.wb_fbo_supply_id is not None and fbo_supply and not fbo_supply.warehouse_name:
+        await _try_force_enrich_supply(db, project_id, fbo_supply)
+
     wb_wh_manual = payload.wb_warehouse_name_manual
     if payload.wb_fbo_supply_id is not None and fbo_supply and not wb_wh_manual:
         wb_wh_manual = fbo_supply.warehouse_name
@@ -645,6 +694,9 @@ async def update_assembly_request(
             raise ValueError("FBO supply already has an active assembly request")
 
         req.wb_fbo_supply_id = payload.wb_fbo_supply_id
+        # Force-pull WB detail if supply.warehouse_name is missing (race window).
+        if not fbo_supply.warehouse_name:
+            await _try_force_enrich_supply(db, project_id, fbo_supply)
         # Auto-set wb_warehouse_name_manual from FBO supply
         req.wb_warehouse_name_manual = fbo_supply.warehouse_name
 
