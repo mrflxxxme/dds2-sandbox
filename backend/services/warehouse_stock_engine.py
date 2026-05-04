@@ -1352,10 +1352,11 @@ async def get_unified_stock_summary(
 
     cost_map: dict[int, float] = {}
     for nom_id, info in nom_map.items():
-        # Priority 1: CostOrderItem weighted average by article_seller
+        # Priority 1: CostOrderItem weighted average by article_seller (case-insensitive)
         article = info.get("article_seller")
-        if article and article in avg_costs_by_article:
-            cost_map[nom_id] = avg_costs_by_article[article]
+        article_key = article.lower() if article else ""
+        if article_key and article_key in avg_costs_by_article:
+            cost_map[nom_id] = avg_costs_by_article[article_key]
             continue
         # Priority 2: WbCostOverride manual override by nm_id
         nm_id = info.get("article_wb")

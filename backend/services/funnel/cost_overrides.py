@@ -98,12 +98,9 @@ async def get_missing_costs(db: AsyncSession, pid: int) -> list[dict]:
 
         if r.nm_id in cost_ovr and cost_ovr[r.nm_id] >= min_cost and cost_ovr[r.nm_id] > 0:
             continue
-        if (
-            r.vendor_code
-            and r.vendor_code in avg_costs
-            and avg_costs[r.vendor_code] >= min_cost
-            and avg_costs[r.vendor_code] > 0
-        ):
+        # avg_costs keyed by lowercased article_seller; vendor_code from WB may differ in case
+        vc_key = (r.vendor_code or "").lower()
+        if vc_key and vc_key in avg_costs and avg_costs[vc_key] >= min_cost and avg_costs[vc_key] > 0:
             continue
         seen_nm_ids.add(r.nm_id)
         result.append(
@@ -160,10 +157,11 @@ async def get_missing_costs(db: AsyncSession, pid: int) -> list[dict]:
             current_cost = cost_ovr[nm_id]
             if current_cost >= min_cost:
                 continue
-        if sa_name and sa_name in avg_costs and avg_costs[sa_name] > 0:
+        sa_key = sa_name.lower() if sa_name else ""
+        if sa_key and sa_key in avg_costs and avg_costs[sa_key] > 0:
             if not current_cost:
-                current_cost = avg_costs[sa_name]
-            if avg_costs[sa_name] >= min_cost:
+                current_cost = avg_costs[sa_key]
+            if avg_costs[sa_key] >= min_cost:
                 continue
 
         seen_nm_ids.add(nm_id)
@@ -216,7 +214,8 @@ async def get_cost_overrides(db: AsyncSession, pid: int) -> dict:
     for r in no_cost:
         if r.nm_id in cost_ovr and cost_ovr[r.nm_id] > 0:
             continue
-        if r.vendor_code and r.vendor_code in avg_costs and avg_costs[r.vendor_code] > 0:
+        vc_key = (r.vendor_code or "").lower()
+        if vc_key and vc_key in avg_costs and avg_costs[vc_key] > 0:
             continue
         missing.append(
             {

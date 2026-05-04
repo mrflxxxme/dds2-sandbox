@@ -176,7 +176,8 @@ async def get_opiu(
         sa_name = row.sa_name or ""
         nm_id = row.nm_id or 0
         qty = int(row.total_qty or 0)
-        cost_price = cost_map.get(sa_name, 0)
+        # cost_map keyed by lowercased article_seller; sa_name from WB may differ in case
+        cost_price = cost_map.get(sa_name.lower(), 0) if sa_name else 0
         if cost_price == 0 and nm_id in cost_overrides:
             cost_price = cost_overrides[nm_id]
         if mk in monthly_cost:
