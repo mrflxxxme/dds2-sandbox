@@ -25,7 +25,9 @@ COPY alembic.ini .
 COPY entrypoint.sh .
 COPY entrypoint-worker.sh .
 
-RUN chmod +x entrypoint.sh entrypoint-worker.sh && chown -R app:app /app
+RUN chmod +x entrypoint.sh entrypoint-worker.sh \
+    && mkdir -p /data/ai_memory \
+    && chown -R app:app /app /data
 USER app
 
 HEALTHCHECK --interval=10s --timeout=5s --retries=3 \

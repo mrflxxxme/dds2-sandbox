@@ -59,29 +59,8 @@ if [ -s "$PENDING" ]; then
   echo ""
 fi
 
-# 5. Open CI-failure issues (если есть gh auth)
-if command -v gh &>/dev/null && gh auth status &>/dev/null; then
-  CI_ISSUES=$(gh issue list --label "ci-failure,auto" --state open --limit 3 --json number,title 2>/dev/null || echo "[]")
-  if [ "$CI_ISSUES" != "[]" ] && [ -n "$CI_ISSUES" ]; then
-    COUNT=$(echo "$CI_ISSUES" | grep -o '"number"' | wc -l | tr -d ' ')
-    if [ "$COUNT" -gt 0 ]; then
-      echo "## Open CI failures: $COUNT"
-      echo "$CI_ISSUES" | grep -oE '"title":"[^"]+"' | sed 's/"title":"//; s/"$//' | head -3 | sed 's/^/- /'
-      echo ""
-    fi
-  fi
-fi
-
-# 6. Docker health (если запущено)
-if docker compose ps --format '{{.Name}} {{.State}}' 2>/dev/null | grep -q .; then
-  UNHEALTHY=$(docker compose ps --format '{{.Name}} {{.Health}}' 2>/dev/null | grep -cE 'unhealthy|starting' || true)
-  : "${UNHEALTHY:=0}"
-  if [ "$UNHEALTHY" -gt 0 ]; then
-    echo "## ⚠ Docker: $UNHEALTHY unhealthy/starting контейнеров"
-    docker compose ps --format '{{.Name}} {{.Health}}' 2>/dev/null | grep -vE 'healthy|^$'
-    echo ""
-  fi
-fi
+# 5/6. CI-failure issues + Docker health — отключены: gh API + docker ps медленные (3-5 сек на старт),
+# результат используется редко. Запускай /status вручную если нужно.
 
 # Reset session counter при старте
 echo "0" > "$COUNTER_FILE"

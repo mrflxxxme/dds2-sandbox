@@ -12,6 +12,64 @@ import pytest_asyncio
 pytest_plugins = ["tests.conftest_api"]
 
 
+# Real (production-equivalent) projects we never delete in cleanup.
+# id=4 — Default seed; id=15 — main user project (вяткин).
+_KEEP_PROJECT_IDS = (4, 15)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Safety-net cleanup: drop test projects/users left by tests that don't teardown.
+
+    Some tests create projects via POST /api/v1/projects without explicit teardown
+    (test_api_isolation, test_loans_api, test_api_*, etc — 20+ files). Without
+    this hook the local DB accumulated 74k test projects in 2 months (incident
+    2026-05-04). Per-test teardown would be ideal but requires touching every
+    test; this is a pragmatic backstop.
+
+    Uses sync psycopg2 + DATABASE_URL_SYNC to avoid asyncio cleanup hassle in
+    pytest_sessionfinish (runs after the asyncio event loop is closed).
+    """
+    import os
+
+    if os.environ.get("PYTEST_NO_CLEANUP"):
+        return
+    sync_url = os.environ.get("DATABASE_URL_SYNC")
+    if not sync_url:
+        return
+
+    try:
+        import psycopg2
+
+        conn = psycopg2.connect(sync_url)
+        conn.autocommit = False
+        cur = conn.cursor()
+        cur.execute("SET LOCAL session_replication_role = 'replica'")
+        cur.execute(
+            "SELECT DISTINCT tc.table_name, kcu.column_name "
+            "FROM information_schema.referential_constraints rc "
+            "JOIN information_schema.table_constraints tc ON rc.constraint_name = tc.constraint_name "
+            "JOIN information_schema.key_column_usage kcu ON rc.constraint_name = kcu.constraint_name "
+            "JOIN information_schema.constraint_column_usage ccu ON rc.unique_constraint_name = ccu.constraint_name "
+            "WHERE ccu.table_name = 'projects' AND ccu.column_name = 'id'"
+        )
+        for table, col in cur.fetchall():
+            cur.execute(
+                f'DELETE FROM "{table}" WHERE "{col}" NOT IN %s',  # noqa: S608 — table/col come from information_schema
+                (_KEEP_PROJECT_IDS,),
+            )
+        cur.execute("DELETE FROM projects WHERE id NOT IN %s", (_KEEP_PROJECT_IDS,))
+        cur.execute(
+            "DELETE FROM users WHERE id NOT IN (SELECT DISTINCT owner_id FROM projects WHERE owner_id IS NOT NULL) "
+            "AND id NOT IN (SELECT DISTINCT user_id FROM project_members WHERE user_id IS NOT NULL)"
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        # Don't break the test session on cleanup failure — just log
+        print(f"\n[pytest_sessionfinish] cleanup skipped: {type(e).__name__}: {e}")
+
+
 @pytest.fixture
 def vtb_rub_excel() -> bytes:
     """Generate a minimal VTB RUB bank statement Excel file."""
@@ -262,37 +320,37 @@ def vtb_multi_excel() -> bytes:
 # These reduce test setup boilerplate — use them instead of creating projects from scratch
 
 
-@pytest_asyncio.fixture
-async def project(db_session):
-    """Ready project for any test. Creates a minimal user+project via raw SQL."""
+async def _create_project_with_owner(db_session, project_name: str, slug_prefix: str, user_prefix: str):
+    """Create a project + owner via raw SQL. Cleanup handled by pytest_sessionfinish."""
     import uuid
 
     from sqlalchemy import text
 
     suffix = uuid.uuid4().hex[:8]
-    username = f"proj_user_{suffix}"
-    email = f"{username}@test.com"
-    slug = f"test-project-{suffix}"
-
-    # Create owner user if not exists
+    slug = f"{slug_prefix}-{suffix}"
     result = await db_session.execute(
         text(
             "INSERT INTO users (username, email, password_hash, is_active, created_at) "
             "VALUES (:u, :e, :p, true, NOW()) RETURNING id"
         ),
-        {"u": username, "e": email, "p": "nohash"},
+        {"u": f"{user_prefix}_{suffix}", "e": f"{user_prefix}_{suffix}@test.com", "p": "nohash"},
     )
     user_id = result.scalar()
-
-    # Create project
     result = await db_session.execute(
-        text("INSERT INTO projects (name, slug, owner_id, created_at) " "VALUES (:n, :s, :o, NOW()) RETURNING id"),
-        {"n": "Test Project", "s": slug, "o": user_id},
+        text("INSERT INTO projects (name, slug, owner_id, created_at) VALUES (:n, :s, :o, NOW()) RETURNING id"),
+        {"n": project_name, "s": slug, "o": user_id},
     )
     project_id = result.scalar()
     await db_session.commit()
+    return project_id, user_id, slug
 
-    # Return a simple namespace that mimics what tests expect
+
+@pytest_asyncio.fixture
+async def project(db_session):
+    """Ready project for any test. Bulk cleanup happens in pytest_sessionfinish."""
+    project_id, user_id, slug = await _create_project_with_owner(
+        db_session, "Test Project", "test-project", "proj_user"
+    )
     from types import SimpleNamespace
 
     return SimpleNamespace(id=project_id, name="Test Project", slug=slug, owner_id=user_id)
@@ -300,34 +358,10 @@ async def project(db_session):
 
 @pytest_asyncio.fixture
 async def other_project(db_session):
-    """Another project for multi-tenancy isolation tests."""
-    import uuid
-
-    from sqlalchemy import text
-
-    suffix = uuid.uuid4().hex[:8]
-    username = f"other_user_{suffix}"
-    email = f"{username}@test.com"
-    slug = f"other-project-{suffix}"
-
-    # Create owner user
-    result = await db_session.execute(
-        text(
-            "INSERT INTO users (username, email, password_hash, is_active, created_at) "
-            "VALUES (:u, :e, :p, true, NOW()) RETURNING id"
-        ),
-        {"u": username, "e": email, "p": "nohash"},
+    """Another project for multi-tenancy isolation tests. Bulk cleanup in pytest_sessionfinish."""
+    project_id, user_id, slug = await _create_project_with_owner(
+        db_session, "Other Project", "other-project", "other_user"
     )
-    user_id = result.scalar()
-
-    # Create project
-    result = await db_session.execute(
-        text("INSERT INTO projects (name, slug, owner_id, created_at) " "VALUES (:n, :s, :o, NOW()) RETURNING id"),
-        {"n": "Other Project", "s": slug, "o": user_id},
-    )
-    project_id = result.scalar()
-    await db_session.commit()
-
     from types import SimpleNamespace
 
     return SimpleNamespace(id=project_id, name="Other Project", slug=slug, owner_id=user_id)
