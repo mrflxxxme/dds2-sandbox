@@ -1468,6 +1468,7 @@ export interface AssemblyRequest {
   wb_supply_name?: string;
   wb_warehouse_name?: string;
   wb_warehouse_name_manual?: string | null;
+  effective_wb_warehouse?: string | null;
   wb_supply_id_wb?: string;
   wb_fbo_status?: string;
   wb_fbo_planned_date?: string;

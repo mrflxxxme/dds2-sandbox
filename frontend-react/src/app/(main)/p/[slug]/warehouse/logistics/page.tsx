@@ -198,7 +198,7 @@ export default function LogisticsPage() {
 
     const warehouseOptions = (() => {
         const key = groupBy === 'wb_warehouse'
-            ? (i: AssemblyRequest) => i.wb_warehouse_name || ''
+            ? (i: AssemblyRequest) => i.effective_wb_warehouse || ''
             : (i: AssemblyRequest) => i.warehouse_name || '';
         const names = new Set(items.map(key).filter(Boolean));
         return Array.from(names).sort();
@@ -208,7 +208,7 @@ export default function LogisticsPage() {
 
     const filteredItems = warehouseFilter
         ? items.filter(i => {
-            const val = groupBy === 'wb_warehouse' ? i.wb_warehouse_name : i.warehouse_name;
+            const val = groupBy === 'wb_warehouse' ? i.effective_wb_warehouse : i.warehouse_name;
             return val === warehouseFilter;
         })
         : items;
@@ -345,7 +345,7 @@ export default function LogisticsPage() {
             '№': i.number,
             'Статус': STATUS_MAP[i.status]?.label || i.status,
             'Склад': i.warehouse_name || '',
-            'Склад WB': i.wb_warehouse_name || '',
+            'Склад WB': i.effective_wb_warehouse || '',
             'Поставка FBO': i.wb_supply_name || '',
             'Палеты': i.pallets_count,
             'Общий вес': i.total_weight_kg || 0,
@@ -557,7 +557,7 @@ export default function LogisticsPage() {
                                                         </td>
                                                         <td style={{ fontSize: 12 }}>{item.brands || '\u2014'}</td>
                                                         <td style={{ color: 'var(--color-text-muted)' }}>{item.warehouse_name || '\u2014'}</td>
-                                                        <td>{item.wb_warehouse_name || '\u2014'}</td>
+                                                        <td>{item.effective_wb_warehouse || '\u2014'}</td>
                                                         <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{item.wb_supply_id_wb || '\u2014'}</td>
                                                         <td style={{ textAlign: 'right' }}>{item.pallets_count}</td>
                                                         <td style={{ textAlign: 'right' }}>{item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014'}</td>
@@ -669,8 +669,8 @@ export default function LogisticsPage() {
                                                         {item.wb_supply_id_wb && (
                                                             <div style={{ fontFamily: 'monospace', fontSize: 12 }}>Поставка: {item.wb_supply_id_wb}</div>
                                                         )}
-                                                        {item.wb_warehouse_name && (
-                                                            <div>WB: {item.wb_warehouse_name}</div>
+                                                        {item.effective_wb_warehouse && (
+                                                            <div>WB: {item.effective_wb_warehouse}</div>
                                                         )}
                                                     </div>
 
@@ -852,7 +852,7 @@ export default function LogisticsPage() {
                                 { key: 'wb_supply_id_wb', label: 'Поставка WB', render: (v: string) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v || '\u2014'}</span> },
                                 { key: 'wb_fbo_status', label: 'Статус WB', render: (v: string) => { if (!v) return '\u2014'; const cfg = WB_STATUS_MAP[v]; return cfg ? <span className={`badge ${cfg.className}`}>{cfg.label}</span> : '\u2014'; }},
                                 { key: 'warehouse_name', label: 'Склад забора', render: (v: string) => <span style={{ color: 'var(--color-text-muted)' }}>{v || '\u2014'}</span> },
-                                { key: 'wb_warehouse_name', label: 'Склад сдачи', render: (v: string) => <span style={{ color: 'var(--color-text-muted)' }}>{v || '\u2014'}</span> },
+                                { key: 'effective_wb_warehouse', label: 'Склад сдачи', render: (v: string) => <span style={{ color: 'var(--color-text-muted)' }}>{v || '\u2014'}</span> },
                                 { key: 'shipped_at', label: 'Дата отгрузки', format: 'date' },
                                 { key: 'wb_fbo_actual_date', label: 'Дата сдачи', render: (v: string) => v ? formatDate(v) : '\u2014' },
                                 { key: 'wb_fbo_planned_date', label: 'План сдачи', render: (v: string) => v ? formatDate(v) : '\u2014' },
@@ -979,7 +979,7 @@ export default function LogisticsPage() {
                                                 <tr key={id}>
                                                     <td style={{ fontWeight: 500, whiteSpace: 'nowrap' }}>{item?.number || `#${id}`}</td>
                                                     <td style={{ textAlign: 'center' }}>{item?.pallets_count || '\u2014'}</td>
-                                                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>{item?.wb_warehouse_name || '\u2014'}</td>
+                                                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>{item?.effective_wb_warehouse || '\u2014'}</td>
                                                     <td><input className="form-input" type="date" value={p.pickup_date} onChange={e => updateParam(id, 'pickup_date', e.target.value)} style={{ minWidth: 130, padding: '4px 6px', fontSize: 13 }} /></td>
                                                     <td>
                                                         <select className="form-input" value={p.pickup_time_slot} onChange={e => updateParam(id, 'pickup_time_slot', e.target.value)} style={{ minWidth: 110, padding: '4px 6px', fontSize: 13 }}>
@@ -1118,12 +1118,12 @@ interface Group {
 
 function groupItems(items: AssemblyRequest[], groupBy: GroupBy): Group[] {
     const level1Key = groupBy === 'wb_warehouse'
-        ? (i: AssemblyRequest) => i.wb_warehouse_name || ''
+        ? (i: AssemblyRequest) => i.effective_wb_warehouse || ''
         : (i: AssemblyRequest) => i.warehouse_name || '';
 
     const level2Key = groupBy === 'wb_warehouse'
         ? (i: AssemblyRequest) => i.warehouse_name || ''
-        : (i: AssemblyRequest) => i.wb_warehouse_name || '';
+        : (i: AssemblyRequest) => i.effective_wb_warehouse || '';
 
     // Group level 1
     const map1 = new Map<string, AssemblyRequest[]>();

@@ -310,7 +310,8 @@ async def _build_response(
         "comment": request.comment,
         "wb_warehouse_name_manual": request.wb_warehouse_name_manual,
         "effective_wb_warehouse": (
-            request.wb_fbo_supply.warehouse_name if request.wb_fbo_supply else request.wb_warehouse_name_manual
+            (request.wb_fbo_supply.warehouse_name if request.wb_fbo_supply else None)
+            or request.wb_warehouse_name_manual
         ),
         "counterparty_id": request.counterparty_id,
         "carrier_inn": carrier_inn,
