@@ -262,75 +262,84 @@ def vtb_multi_excel() -> bytes:
 # These reduce test setup boilerplate — use them instead of creating projects from scratch
 
 
-@pytest_asyncio.fixture
-async def project(db_session):
-    """Ready project for any test. Creates a minimal user+project via raw SQL."""
+async def _create_project_with_owner(db_session, project_name: str, slug_prefix: str, user_prefix: str):
+    """Internal helper: create a project + owner via raw SQL.
+
+    Returns (project_id, user_id, slug).
+    """
     import uuid
 
     from sqlalchemy import text
 
     suffix = uuid.uuid4().hex[:8]
-    username = f"proj_user_{suffix}"
-    email = f"{username}@test.com"
-    slug = f"test-project-{suffix}"
-
-    # Create owner user if not exists
+    slug = f"{slug_prefix}-{suffix}"
     result = await db_session.execute(
         text(
             "INSERT INTO users (username, email, password_hash, is_active, created_at) "
             "VALUES (:u, :e, :p, true, NOW()) RETURNING id"
         ),
-        {"u": username, "e": email, "p": "nohash"},
+        {"u": f"{user_prefix}_{suffix}", "e": f"{user_prefix}_{suffix}@test.com", "p": "nohash"},
     )
     user_id = result.scalar()
-
-    # Create project
     result = await db_session.execute(
-        text("INSERT INTO projects (name, slug, owner_id, created_at) " "VALUES (:n, :s, :o, NOW()) RETURNING id"),
-        {"n": "Test Project", "s": slug, "o": user_id},
+        text("INSERT INTO projects (name, slug, owner_id, created_at) VALUES (:n, :s, :o, NOW()) RETURNING id"),
+        {"n": project_name, "s": slug, "o": user_id},
     )
     project_id = result.scalar()
     await db_session.commit()
+    return project_id, user_id, slug
 
-    # Return a simple namespace that mimics what tests expect
+
+async def _cleanup_project(db_session, project_id: int, user_id: int):
+    """Teardown: delete project + cascade-clean child tables + owner user.
+
+    Uses session_replication_role=replica to skip FK checks during bulk delete
+    (matches the order-independent cleanup pattern used in scripts/cleanup_test_projects.sql).
+    Without this teardown each test prog накапливает мусор → 74k проектов и 5-мин startup.
+    """
+    from sqlalchemy import text
+
+    await db_session.execute(text("SET LOCAL session_replication_role = 'replica'"))
+    await db_session.execute(
+        text(
+            "DO $$ DECLARE rec RECORD; BEGIN "
+            "FOR rec IN SELECT DISTINCT tc.table_name, kcu.column_name "
+            "FROM information_schema.referential_constraints rc "
+            "JOIN information_schema.table_constraints tc ON rc.constraint_name = tc.constraint_name "
+            "JOIN information_schema.key_column_usage kcu ON rc.constraint_name = kcu.constraint_name "
+            "JOIN information_schema.constraint_column_usage ccu ON rc.unique_constraint_name = ccu.constraint_name "
+            "WHERE ccu.table_name = 'projects' AND ccu.column_name = 'id' "
+            "LOOP EXECUTE format('DELETE FROM %I WHERE %I = $1', rec.table_name, rec.column_name) USING :pid; END LOOP; END $$"
+        ),
+        {"pid": project_id},
+    )
+    await db_session.execute(text("DELETE FROM projects WHERE id = :pid"), {"pid": project_id})
+    await db_session.execute(text("DELETE FROM users WHERE id = :uid"), {"uid": user_id})
+    await db_session.commit()
+
+
+@pytest_asyncio.fixture
+async def project(db_session):
+    """Ready project for any test. Cleaned up after the test finishes."""
+    project_id, user_id, slug = await _create_project_with_owner(
+        db_session, "Test Project", "test-project", "proj_user"
+    )
     from types import SimpleNamespace
 
-    return SimpleNamespace(id=project_id, name="Test Project", slug=slug, owner_id=user_id)
+    yield SimpleNamespace(id=project_id, name="Test Project", slug=slug, owner_id=user_id)
+    await _cleanup_project(db_session, project_id, user_id)
 
 
 @pytest_asyncio.fixture
 async def other_project(db_session):
-    """Another project for multi-tenancy isolation tests."""
-    import uuid
-
-    from sqlalchemy import text
-
-    suffix = uuid.uuid4().hex[:8]
-    username = f"other_user_{suffix}"
-    email = f"{username}@test.com"
-    slug = f"other-project-{suffix}"
-
-    # Create owner user
-    result = await db_session.execute(
-        text(
-            "INSERT INTO users (username, email, password_hash, is_active, created_at) "
-            "VALUES (:u, :e, :p, true, NOW()) RETURNING id"
-        ),
-        {"u": username, "e": email, "p": "nohash"},
+    """Another project for multi-tenancy isolation tests. Cleaned up after the test."""
+    project_id, user_id, slug = await _create_project_with_owner(
+        db_session, "Other Project", "other-project", "other_user"
     )
-    user_id = result.scalar()
-
-    # Create project
-    result = await db_session.execute(
-        text("INSERT INTO projects (name, slug, owner_id, created_at) " "VALUES (:n, :s, :o, NOW()) RETURNING id"),
-        {"n": "Other Project", "s": slug, "o": user_id},
-    )
-    project_id = result.scalar()
-    await db_session.commit()
-
     from types import SimpleNamespace
 
-    return SimpleNamespace(id=project_id, name="Other Project", slug=slug, owner_id=user_id)
+    yield SimpleNamespace(id=project_id, name="Other Project", slug=slug, owner_id=user_id)
+    await _cleanup_project(db_session, project_id, user_id)
 
 
 @pytest.fixture

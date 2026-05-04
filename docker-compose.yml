@@ -120,7 +120,8 @@ services:
       MINIO_BUCKET: ${MINIO_BUCKET:-dds-files}
       MINIO_SECURE: ${MINIO_SECURE:-false}
       DDS_ROLE: api
-    # volumes: host-mount removed for production (code is COPY'd into image)
+    volumes:
+      - ai_memory:/data/ai_memory
     deploy:
       resources:
         limits:
@@ -157,6 +158,8 @@ services:
       DDS_ROLE: worker
       DB_POOL_SIZE: 5
       DB_MAX_OVERFLOW: 10
+    volumes:
+      - ai_memory:/data/ai_memory
     entrypoint: ["./entrypoint-worker.sh"]
     command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "120"]
     deploy:
@@ -368,6 +371,7 @@ volumes:
   pgdata:
   redisdata:
   miniodata:
+  ai_memory:
   certbot-webroot:
   certbot-certs:
   prometheusdata:

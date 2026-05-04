@@ -39,3 +39,4 @@ tests/loadtest/results_*.csv
 # Ad-hoc мокапы в корне (постоянные — в docs/mockups/)
 /mockup-*.png
 /warehouse-stock-*.png
+.local-backup-*.sql.gz
