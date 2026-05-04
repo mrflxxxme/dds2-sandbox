@@ -41,6 +41,7 @@ from backend.schemas.supply_chain import (
     VehicleUpdate,
 )
 from backend.services.supply_chain import factory_orders, supplier_catalog, supplier_service, vehicle_delivery
+from backend.services.supply_chain.factory_orders import FactoryQtyExceeded
 from backend.services.supply_chain.vehicle_documents import (
     delete_document,
     download_document,
@@ -472,10 +473,12 @@ async def update_vehicle_item(
     item_id: int,
     payload: VehicleItemUpdate,
     project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     try:
         fields = payload.model_dump(exclude_unset=True)
+        display_name = user.first_name or user.username or user.email
         return await vehicle_delivery.update_vehicle_item(
             db,
             project.id,
@@ -488,7 +491,11 @@ async def update_vehicle_item(
             set_box_size_override="box_size_override" in fields,
             set_pcs_per_box_override="pcs_per_box_override" in fields,
             set_box_detail_override="box_detail_override" in fields,
+            mode=payload.mode,
+            user_name=display_name,
         )
+    except FactoryQtyExceeded as e:
+        raise HTTPException(422, detail=e.detail) from e
     except ValueError as e:
         raise HTTPException(404, str(e)) from e
 

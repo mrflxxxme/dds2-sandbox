@@ -5,6 +5,7 @@ Supply Chain — Vehicle (CostOrder) CRUD, status management and overview.
 import logging
 from datetime import timedelta
 from decimal import Decimal
+from typing import Literal
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,7 +32,11 @@ from backend.schemas.supply_chain import (
     VehicleStatusUpdate,
     VehicleUpdate,
 )
-from backend.services.supply_chain.factory_orders import refresh_factory_order_statuses
+from backend.services.supply_chain.factory_orders import (
+    FactoryQtyExceeded,
+    _adjust_assigned_qty,
+    refresh_factory_order_statuses,
+)
 from backend.services.supply_chain.supplier_catalog import invalidate_supplier_catalog as _invalidate_supplier_catalog
 from backend.services.warehouse_stock_engine import _next_number, _resolve_barcode
 from backend.utils.time import utcnow
@@ -327,9 +332,19 @@ async def add_items_to_vehicle(
         if not fo_item:
             raise ValueError(f"FactoryOrderItem {item_req.factory_order_item_id} not found")
 
-        remaining = fo_item.qty - fo_item.assigned_qty
-        if item_req.qty > remaining:
-            raise ValueError(f"Cannot assign {item_req.qty} of {fo_item.barcode}: " f"only {remaining} remaining")
+        # Use shared utility — strict mode for add (route still maps to 400)
+        try:
+            await _adjust_assigned_qty(
+                db,
+                fo_item,
+                delta=item_req.qty,
+                mode="strict",
+                user_name=None,
+                cost_order_no=order_no,
+            )
+        except FactoryQtyExceeded as e:
+            available = e.detail.get("available", 0)
+            raise ValueError(f"Cannot assign {item_req.qty} of {fo_item.barcode}: only {available} remaining") from e
 
         affected_fo_ids.add(fo_item.factory_order_id)
 
@@ -375,7 +390,6 @@ async def add_items_to_vehicle(
             pcs_per_box_override=item_req.pcs_per_box_override,
         )
         db.add(cost_item)
-        fo_item.assigned_qty += item_req.qty
         added += 1
 
     await db.commit()
@@ -465,7 +479,7 @@ async def remove_item_from_vehicle(
         for mix_ci in mix_cost_items:
             if mix_ci.factory_order_item_id and mix_ci.factory_order_item_id in fo_items_map:
                 fi = fo_items_map[mix_ci.factory_order_item_id]
-                fi.assigned_qty = max(0, fi.assigned_qty - mix_ci.qty)
+                await _adjust_assigned_qty(db, fi, delta=-mix_ci.qty, mode="strict", user_name=None)
                 affected_fo_ids.add(fi.factory_order_id)
             mix_ci.soft_delete()
             removed += 1
@@ -492,7 +506,7 @@ async def remove_item_from_vehicle(
         )
         fo_item2 = fo_item_result2.scalar_one_or_none()
         if fo_item2:
-            fo_item2.assigned_qty = max(0, fo_item2.assigned_qty - cost_item.qty)
+            await _adjust_assigned_qty(db, fo_item2, delta=-cost_item.qty, mode="strict", user_name=None)
             affected_fo_ids_single.add(fo_item2.factory_order_id)
 
     cost_item.soft_delete()
@@ -520,11 +534,20 @@ async def update_vehicle_item(
     set_box_size_override: bool = False,
     set_pcs_per_box_override: bool = False,
     set_box_detail_override: bool = False,
+    mode: Literal["strict", "extend_plan"] = "strict",
+    user_name: str | None = None,
 ) -> dict:
-    """Update a CostOrderItem (per-vehicle).
+    """Update a CostOrderItem (per-vehicle) and sync FactoryOrderItem.assigned_qty.
 
-    Intentionally does NOT adjust FactoryOrderItem fields — these are facts
-    about this vehicle only. box_* overrides let users record actual packing
+    sc17: when qty changes and the cost item is linked to a FactoryOrderItem,
+    we synchronize assigned_qty via `_adjust_assigned_qty`. Two modes:
+
+    - mode="strict" (default): if delta exceeds available, raise FactoryQtyExceeded
+      (router maps to 422 with structured detail for inline drift confirm in UI).
+    - mode="extend_plan": if delta exceeds available, bump FactoryOrderItem.qty by
+      the overflow and write a `qty_extended_from_vehicle` history entry.
+
+    box_* overrides do not touch FactoryOrderItem — they record actual packing
     that differs from the factory order plan.
     """
     result = await db.execute(
@@ -541,6 +564,40 @@ async def update_vehicle_item(
     cost_item = result.scalar_one_or_none()
     if not cost_item:
         raise ValueError(f"Item {item_id} not found in vehicle {order_no}")
+
+    qty_changed = new_qty is not None and new_qty != cost_item.qty
+    any_override_set = set_box_size_override or set_pcs_per_box_override or set_box_detail_override
+
+    # Early return: nothing to change at all
+    if not qty_changed and not any_override_set:
+        return {"ok": True, "item_id": item_id, "noop": True}
+
+    affected_fo_ids: set[int] = set()
+    extended_by = 0
+
+    # Sync FactoryOrderItem.assigned_qty if qty changed and item is linked
+    if qty_changed and cost_item.factory_order_item_id:
+        fo_result = await db.execute(
+            select(FactoryOrderItem).where(
+                FactoryOrderItem.id == cost_item.factory_order_item_id,
+                FactoryOrderItem.project_id == project_id,
+                FactoryOrderItem.is_deleted == False,
+            )
+        )
+        fo_item = fo_result.scalar_one_or_none()
+        if fo_item:
+            delta = new_qty - cost_item.qty  # type: ignore[operator]
+            # raises FactoryQtyExceeded if strict and delta > available
+            adjust_result = await _adjust_assigned_qty(
+                db,
+                fo_item,
+                delta=delta,
+                mode=mode,
+                user_name=user_name,
+                cost_order_no=order_no,
+            )
+            extended_by = adjust_result.extended_by
+            affected_fo_ids.add(fo_item.factory_order_id)
 
     if new_qty is not None:
         cost_item.qty = new_qty
@@ -559,17 +616,20 @@ async def update_vehicle_item(
         fo_bs = None
         fo_ppb = None
         if cost_item.factory_order_item_id:
-            fo_result = await db.execute(
+            fo_result2 = await db.execute(
                 select(FactoryOrderItem).where(
                     FactoryOrderItem.id == cost_item.factory_order_item_id,
+                    FactoryOrderItem.project_id == project_id,
                     FactoryOrderItem.is_deleted == False,
                 )
             )
-            fo_item = fo_result.scalar_one_or_none()
-            if fo_item:
-                fo_bs = fo_item.mix_box_size if fo_item.mix_group_id and fo_item.mix_box_size else fo_item.box_size
+            fo_item2 = fo_result2.scalar_one_or_none()
+            if fo_item2:
+                fo_bs = fo_item2.mix_box_size if fo_item2.mix_group_id and fo_item2.mix_box_size else fo_item2.box_size
                 fo_ppb = (
-                    fo_item.mix_pcs_per_box if fo_item.mix_group_id and fo_item.mix_pcs_per_box else fo_item.pcs_per_box
+                    fo_item2.mix_pcs_per_box
+                    if fo_item2.mix_group_id and fo_item2.mix_pcs_per_box
+                    else fo_item2.pcs_per_box
                 )
         effective_bs = cost_item.box_size_override or fo_bs
         effective_ppb = cost_item.pcs_per_box_override or fo_ppb
@@ -578,12 +638,17 @@ async def update_vehicle_item(
 
     await db.commit()
 
-    from backend.services.cost.items import recalculate_order_items
+    if qty_changed or set_box_size_override or set_pcs_per_box_override:
+        from backend.services.cost.items import recalculate_order_items
 
-    await recalculate_order_items(db, project_id, order_no)
+        await recalculate_order_items(db, project_id, order_no)
+
+    if affected_fo_ids:
+        await refresh_factory_order_statuses(db, project_id, affected_fo_ids)
+
     await _invalidate_supplier_catalog(project_id)
 
-    return {"ok": True, "item_id": item_id}
+    return {"ok": True, "item_id": item_id, "extended_by": extended_by}
 
 
 # Backward-compatible alias (kept for any existing callers/tests)
@@ -641,7 +706,7 @@ async def clear_all_vehicle_items(
     for cost_item in active_items:
         if cost_item.factory_order_item_id and cost_item.factory_order_item_id in fo_items_map:
             fo_item = fo_items_map[cost_item.factory_order_item_id]
-            fo_item.assigned_qty = max(0, fo_item.assigned_qty - cost_item.qty)
+            await _adjust_assigned_qty(db, fo_item, delta=-cost_item.qty, mode="strict", user_name=None)
             affected_fo_ids.add(fo_item.factory_order_id)
         cost_item.soft_delete()
         removed += 1
@@ -698,7 +763,7 @@ async def delete_vehicle(
         for cost_item in active_items:
             if cost_item.factory_order_item_id and cost_item.factory_order_item_id in fo_items_map:
                 fo_item = fo_items_map[cost_item.factory_order_item_id]
-                fo_item.assigned_qty = max(0, fo_item.assigned_qty - cost_item.qty)
+                await _adjust_assigned_qty(db, fo_item, delta=-cost_item.qty, mode="strict", user_name=None)
                 affected_fo_ids.add(fo_item.factory_order_id)
 
     # Soft-delete CostOrderItems when removing vehicle
@@ -793,9 +858,11 @@ async def _enrich_vehicle(
     has_weight = False
     has_volume = False
 
-    # Batch-load FactoryOrderItem + FactoryOrder data to avoid N+1
+    # Batch-load FactoryOrderItem + FactoryOrder data to avoid N+1.
+    # sc17: also fetch FactoryOrderItem.qty + assigned_qty for drift detection.
     fo_item_ids = [ci.factory_order_item_id for ci in vehicle.items if ci.factory_order_item_id is not None]
     fo_item_map: dict[int, tuple] = {}
+    sum_by_foi: dict[int, int] = {}
     if fo_item_ids:
         fo_batch_result = await db.execute(
             select(
@@ -808,6 +875,8 @@ async def _enrich_vehicle(
                 FactoryOrderItem.mix_group_id,
                 FactoryOrderItem.mix_box_size,
                 FactoryOrderItem.mix_pcs_per_box,
+                FactoryOrderItem.qty,
+                FactoryOrderItem.assigned_qty,
             )
             .join(FactoryOrder, FactoryOrderItem.factory_order_id == FactoryOrder.id)
             .where(
@@ -817,7 +886,22 @@ async def _enrich_vehicle(
             )
         )
         for row in fo_batch_result:
-            fo_item_map[row[0]] = (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8])
+            fo_item_map[row[0]] = (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10])
+
+        # sc17: batch sum of active CostOrderItem.qty per foi — single query, O(1)
+        sum_by_foi_result = await db.execute(
+            select(
+                CostOrderItem.factory_order_item_id,
+                func.coalesce(func.sum(CostOrderItem.qty), 0),
+            )
+            .where(
+                CostOrderItem.factory_order_item_id.in_(fo_item_ids),
+                CostOrderItem.project_id == project_id,
+                CostOrderItem.is_deleted == False,
+            )
+            .group_by(CostOrderItem.factory_order_item_id)
+        )
+        sum_by_foi = {row[0]: row[1] for row in sum_by_foi_result}
 
     for cost_item in vehicle.items:
         total_qty += cost_item.qty
@@ -832,6 +916,9 @@ async def _enrich_vehicle(
         mix_group_id = None
         mix_box_size = None
         mix_pcs_per_box = None
+        fo_qty: int | None = None
+        fo_assigned: int | None = None
+        qty_drift: int | None = None
 
         if cost_item.factory_order_item_id:
             fo_data = fo_item_map.get(cost_item.factory_order_item_id)
@@ -845,7 +932,19 @@ async def _enrich_vehicle(
                     mix_group_id,
                     mix_box_size,
                     mix_pcs_per_box,
+                    fo_qty,
+                    fo_assigned,
                 ) = fo_data
+
+                # sc17: compute qty_drift on this row.
+                # other_vehicles_qty = sum across foi MINUS this row.
+                # room_for_this = max(0, fo_qty - other_vehicles_qty)
+                # qty_drift = max(0, cost_item.qty - room_for_this)
+                if fo_qty is not None:
+                    sum_total = int(sum_by_foi.get(cost_item.factory_order_item_id, 0))
+                    other_vehicles_qty = sum_total - cost_item.qty
+                    room_for_this = max(0, fo_qty - other_vehicles_qty)
+                    qty_drift = max(0, cost_item.qty - room_for_this)
 
         # Apply per-vehicle overrides if present
         if cost_item.box_size_override:
@@ -889,6 +988,9 @@ async def _enrich_vehicle(
                 mix_pcs_per_box=mix_pcs_per_box,
                 factory_order_id=fo_order_id,
                 factory_order_number=fo_order_number,
+                qty_drift=qty_drift,
+                fo_qty=fo_qty,
+                fo_assigned=fo_assigned,
             )
         )
 

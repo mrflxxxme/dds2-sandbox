@@ -91,6 +91,22 @@ FORMING | DISTRIBUTED | CLOSED
 1. **Ресинк из заказа в машину** — кнопка «🔄 Пересинхр. цены» на странице машины. Preview показывает расхождения (qty × old→new, Δ сумма), apply обновляет `CostOrderItem.price_cny` + `recalculate_order_items` + `invalidate_project_reports`. Работает для любого статуса (для не-FORMING — предупреждение о пересчёте БДР).
 2. **Переписать в заказе из paste** — при добавлении товара через paste обязательна колонка Цена ¥. Если введённая цена ≠ `FactoryOrderItem.price_cny`, модалка предлагает: «использовать цены заказа» (paste игнорируется) ИЛИ «переписать в заказе и добавить» (bulk-price endpoint → FOI обновляется → history `price_updated` → новые CostOrderItem создаются с уже новой ценой). Не трогает `CostOrderItem` других машин.
 
+### Редактирование позиций машины (sc17, фикс 2026-05-04)
+До sc17 PATCH `/vehicles/{order_no}/items/{id}` тихо рассинхронизировал `CostOrderItem.qty` с `FactoryOrderItem.assigned_qty` — превышение плана не валидировалось, фабричный заказ оставался в прежнем `qty`. Прецедент: машина 16.04, барод 2049448537820, qty 24→32, фабричный заказ #16 не вырос (8 шт «потеряны» для аналитики).
+
+**Решение:**
+- Единая utility `_adjust_assigned_qty(db, fo_item, delta, mode, user_name, *, cost_order_no)` в `services/supply_chain/factory_orders.py` — все точки изменения qty (`update_vehicle_item`, `add_items_to_vehicle`, `remove_item_from_vehicle`, `clear_all_vehicle_items`, `delete_vehicle`) идут через неё.
+- `mode="strict"` (default для PATCH): превышение `available = fo.qty - fo.assigned_qty` → `FactoryQtyExceeded` → роутер маппит в 422 со structured detail (`fo_id, fo_number, foi_id, barcode, subject, fo_qty, fo_assigned, available, attempted_delta, in_mix_group, mix_group_id`). Frontend парсит → `DriftConfirmRow` под строкой qty с двумя кнопками («Расширить план» / «Откатить ввод»).
+- `mode="extend_plan"`: расширяет `FactoryOrderItem.qty` на `(delta - available)`, пишет `FactoryOrderHistory(event_type="qty_extended_from_vehicle", changed_by=user_name)`. После commit вызывает `refresh_factory_order_statuses` (статус заказа может перейти `PARTIAL → DISTRIBUTED` если plan догнал assigned).
+- `delta == 0` без override-флагов → ранний return `{noop: true}` без commit/recalc.
+- Уменьшение qty (`delta < 0`) уменьшает `assigned_qty` с clamp на 0 (раньше тоже было багом — не уменьшалось).
+
+**`qty_drift` в GET `/vehicles/{order_no}`:**
+- Per-row `qty_drift = max(0, cost_item.qty - max(0, fo_qty - other_vehicles_qty))` — показывает по этой позиции «лишних» штук поверх плана.
+- `sum_by_foi` — единый batch query (один SELECT GROUP BY на машину, не N+1).
+- Frontend: оранжевая точка в ячейке qty при `qty_drift > 0` (existing рассинхрон). Click → поповер с `fo_number, fo_qty, fo_assigned`.
+- Кнопка «Изменить статус» disabled при `pendingDriftCount > 0` + tooltip.
+
 ### Кросс-заказный поиск (paste mode)
 При вставке баркодов из буфера — поиск идёт по ВСЕМ фабричным заказам (не только выбранному).
 - `allItemMap` строится из всех AvailableItemGroups (FIFO: первый заказ приоритетнее)
@@ -116,7 +132,7 @@ Prefix: `/api/v1/supply-chain`
 | POST | /vehicles | Создать машину. `order_no` опционален — если не задан, генерируется `V-NNNN` (sc15/sc16) |
 | PUT | /vehicles/{order_no}/status | Изменить статус машины |
 | POST | /vehicles/{order_no}/items | Добавить товар в машину. Принимает `box_size_override`, `pcs_per_box_override` — per-vehicle override, не меняет план фабричного заказа (sc16) |
-| PATCH | /vehicles/{order_no}/items/{id} | Обновить qty позиции (факт прихода). НЕ трогает `FactoryOrderItem.assigned_qty` (sc15) |
+| PATCH | /vehicles/{order_no}/items/{id} | Обновить qty позиции. Синхронизирует `FactoryOrderItem.assigned_qty` с `CostOrderItem.qty` (sc17). Принимает `mode: "strict"\|"extend_plan"` (default `strict`) — strict при превышении плана возвращает 422 structured, extend_plan расширяет `FactoryOrderItem.qty` + history `qty_extended_from_vehicle` |
 | GET | /vehicles/{order_no}/price-resync/preview | Превью расхождений цен `CostOrderItem.price_cny` vs `FactoryOrderItem.price_cny` |
 | POST | /vehicles/{order_no}/price-resync | Синк цен в CostOrderItem из связанного FactoryOrderItem + recalc + invalidate reports |
 | DELETE | /vehicles/{order_no} | Удалить машину (только FORMING) |

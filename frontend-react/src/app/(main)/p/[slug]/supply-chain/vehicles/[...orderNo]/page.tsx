@@ -18,9 +18,18 @@ import type {
     AvailableItem,
     VehicleDocument,
     VehicleStatusHistoryEntry,
+    FactoryQtyExceededDetail,
 } from '@/types/api';
+import { FactoryQtyExceededError } from '@/types/api';
 import { CONTAINERS } from '@/app/(main)/p/[slug]/container-loader/lib/packer';
 import { LanguageProvider, useT, LanguageToggle } from '../../i18n';
+
+// ─── Types ─────────────────────────────────────────────────────────────────
+
+// Drift state for inline qty edit confirmation (sc17).
+// Combines server detail with locally captured oldQty (for revert) and newQty
+// (for the extend_plan retry call).
+type DriftState = FactoryQtyExceededDetail & { oldQty: number; newQty: number };
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
@@ -142,8 +151,9 @@ function CostKpi({ label, value, color, pct }: { label: string; value: string; c
 
 // ─── Vehicle Info Card (editable header) ───────────────────────────────────
 
-function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, warehouses, onUpdated }: {
+function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, warehouses, onUpdated, pendingDriftCount = 0 }: {
     vehicle: VehicleSchema; containerLabel: string; totalBoxes: number; isForming: boolean; warehouses: { id: number; name: string }[]; onUpdated: () => void;
+    pendingDriftCount?: number;
 }) {
     const { t } = useT();
     const canEdit = true; // always editable — backend controls field restrictions
@@ -241,14 +251,19 @@ function VehicleInfoCard({ vehicle, containerLabel, totalBoxes, isForming, wareh
                     {!editing && vehicle.items.length > 0 && (
                         <RecalcButton orderNo={vehicle.order_no} onDone={onUpdated} />
                     )}
+                    {pendingDriftCount > 0 && (
+                        <span className="badge badge-danger" style={{ fontSize: 12 }} title={t('drift_status_blocked_tooltip')}>
+                            ⚠ {t('drift_pending_badge').replace('{count}', String(pendingDriftCount))}
+                        </span>
+                    )}
                     {isForming && !editing && vehicle.items.length > 0 && (
-                        <ShipButton orderNo={vehicle.order_no} onDone={onUpdated} />
+                        <ShipButton orderNo={vehicle.order_no} onDone={onUpdated} disabled={pendingDriftCount > 0} disabledTooltip={t('drift_status_blocked_tooltip')} />
                     )}
                     {vehicle.status === 'SHIPPED' && (
-                        <StatusTransitionButton orderNo={vehicle.order_no} nextStatus="CUSTOMS" label={t('transition_to_customs')} icon="🏛" onDone={onUpdated} />
+                        <StatusTransitionButton orderNo={vehicle.order_no} nextStatus="CUSTOMS" label={t('transition_to_customs')} icon="🏛" onDone={onUpdated} disabled={pendingDriftCount > 0} disabledTooltip={t('drift_status_blocked_tooltip')} />
                     )}
                     {vehicle.status === 'CUSTOMS' && (
-                        <StatusTransitionButton orderNo={vehicle.order_no} nextStatus="DISPATCHED" label={t('transition_dispatched')} icon="🚛" onDone={onUpdated} />
+                        <StatusTransitionButton orderNo={vehicle.order_no} nextStatus="DISPATCHED" label={t('transition_dispatched')} icon="🚛" onDone={onUpdated} disabled={pendingDriftCount > 0} disabledTooltip={t('drift_status_blocked_tooltip')} />
                     )}
                     {canEdit && !editing && (
                         <button className="btn btn-secondary btn-sm" onClick={() => setEditing(true)}>{t('btn_edit')}</button>
@@ -348,6 +363,9 @@ function VehicleDetailContent() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [tab, setTab] = useState('main');
+    // Drift state per item (sc17). Pending = unsaved drift confirmation needed.
+    // Set by QtyEditCell on FactoryQtyExceededError; cleared on extend / revert.
+    const [driftStateById, setDriftStateById] = useState<Record<number, DriftState>>({});
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -442,7 +460,15 @@ function VehicleDetailContent() {
             {tab === 'main' && (
                 <>
                     {/* Info card — editable fields + action buttons */}
-                    <VehicleInfoCard vehicle={vehicle} containerLabel={containerLabel} totalBoxes={totalBoxes} isForming={isForming} warehouses={warehouses} onUpdated={load} />
+                    <VehicleInfoCard
+                        vehicle={vehicle}
+                        containerLabel={containerLabel}
+                        totalBoxes={totalBoxes}
+                        isForming={isForming}
+                        warehouses={warehouses}
+                        onUpdated={load}
+                        pendingDriftCount={Object.keys(driftStateById).length}
+                    />
 
                     {/* Cost summary — detailed breakdown */}
                     {cs && (
@@ -497,7 +523,16 @@ function VehicleDetailContent() {
                         {vehicle.items.length === 0 ? (
                             <div style={{ textAlign: 'center', padding: 24, opacity: 0.5 }}>{t('vehicle_items_empty')}</div>
                         ) : (
-                            <ItemsTable items={vehicle.items} isForming={isForming} vehicleOrderNo={vehicle.order_no} totalQty={vehicle.total_qty} totalCny={vehicle.total_cny} onRemoved={load} />
+                            <ItemsTable
+                                items={vehicle.items}
+                                isForming={isForming}
+                                vehicleOrderNo={vehicle.order_no}
+                                totalQty={vehicle.total_qty}
+                                totalCny={vehicle.total_cny}
+                                onRemoved={load}
+                                driftStateById={driftStateById}
+                                setDriftStateById={setDriftStateById}
+                            />
                         )}
                     </div>
 
@@ -530,14 +565,18 @@ function parseBoxDims(boxSize: string | undefined): { l: number; w: number; h: n
     return null;
 }
 
-function QtyEditCell({ vehicleOrderNo, item, onSaved }: {
+function QtyEditCell({ vehicleOrderNo, item, onSaved, hasDrift, onOpenExistingDrift, onDriftDetected }: {
     vehicleOrderNo: string; item: VehicleItemSchema; onSaved: () => void;
+    hasDrift?: boolean;
+    onOpenExistingDrift?: (item: VehicleItemSchema) => void;
+    onDriftDetected?: (detail: FactoryQtyExceededDetail, oldQty: number, newQty: number) => void;
 }) {
     const { t } = useT();
     const [editing, setEditing] = useState(false);
     const [value, setValue] = useState<string>(String(item.qty));
     const [saving, setSaving] = useState(false);
     const isMix = Boolean(item.mix_group_id);
+    const existingDrift = item.qty_drift != null && item.qty_drift > 0;
 
     useEffect(() => { setValue(String(item.qty)); }, [item.qty]);
 
@@ -547,12 +586,18 @@ function QtyEditCell({ vehicleOrderNo, item, onSaved }: {
         if (next === item.qty) { setEditing(false); return; }
         setSaving(true);
         try {
-            await api.updateVehicleItemQty(vehicleOrderNo, item.id, next);
+            await api.updateVehicleItem(vehicleOrderNo, item.id, { qty: next, mode: 'strict' });
             setEditing(false);
             onSaved();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Error');
-            setValue(String(item.qty));
+            if (e instanceof FactoryQtyExceededError && onDriftDetected) {
+                // Server detected qty > available — surface DriftConfirmRow under the row.
+                onDriftDetected(e.detail, item.qty, next);
+                setEditing(false);
+            } else {
+                alert(e instanceof Error ? e.message : 'Error');
+                setValue(String(item.qty));
+            }
         }
         setSaving(false);
     };
@@ -570,7 +615,7 @@ function QtyEditCell({ vehicleOrderNo, item, onSaved }: {
                     onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') cancel(); }}
                     autoFocus
                     disabled={saving}
-                    style={{ width: 70, padding: '3px 6px', fontSize: 13, textAlign: 'right', border: '1px solid var(--color-accent)', borderRadius: 6, background: 'var(--color-bg)', color: 'var(--color-text)' }}
+                    style={{ width: 70, padding: '3px 6px', fontSize: 13, textAlign: 'right', border: `1px solid ${hasDrift ? 'var(--color-warning)' : 'var(--color-accent)'}`, borderRadius: 6, background: 'var(--color-bg)', color: 'var(--color-text)' }}
                 />
                 <button type="button" onClick={save} disabled={saving} title={t('qty_edit_save')}
                     style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 14, padding: '0 2px', color: 'var(--color-success)' }}>✓</button>
@@ -581,8 +626,20 @@ function QtyEditCell({ vehicleOrderNo, item, onSaved }: {
     }
 
     return (
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, justifyContent: 'flex-end' }}>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, justifyContent: 'flex-end', position: 'relative' }}>
             <span style={{ fontWeight: 600 }}>{formatNumber(item.qty, 0)}</span>
+            {existingDrift && (
+                <button
+                    type="button"
+                    onClick={() => onOpenExistingDrift?.(item)}
+                    title={`${t('drift_existing_dot_tooltip')}: +${item.qty_drift}`}
+                    aria-label={t('drift_existing_dot_tooltip')}
+                    style={{
+                        border: 'none', background: 'var(--color-warning)', cursor: 'pointer',
+                        width: 8, height: 8, borderRadius: '50%', padding: 0, flexShrink: 0,
+                    }}
+                />
+            )}
             {!isMix && (
                 <button
                     type="button"
@@ -599,9 +656,101 @@ function QtyEditCell({ vehicleOrderNo, item, onSaved }: {
     );
 }
 
-function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRemoved }: {
+// ─── Drift Confirm Row (sc17) ──────────────────────────────────────────────
+
+function DriftConfirmRow({ detail, vehicleOrderNo, itemId, colSpan, onResolved }: {
+    detail: DriftState;
+    vehicleOrderNo: string;
+    itemId: number;
+    colSpan: number;
+    onResolved: (action: 'extended' | 'reverted') => void;
+}) {
+    const { t } = useT();
+    const [working, setWorking] = useState(false);
+    const overflow = detail.attempted_delta - detail.available;
+    const newPlanQty = detail.fo_qty + overflow;
+    const isLargeDelta = overflow > 1000;
+
+    const onExtend = async () => {
+        setWorking(true);
+        try {
+            await api.updateVehicleItem(vehicleOrderNo, itemId, {
+                qty: detail.newQty,
+                mode: 'extend_plan',
+            });
+            const fo = detail.fo_number || `#${detail.fo_id}`;
+            // Toast component is not standardized for this page — use alert for visibility.
+            // Replace with toast() if a global toast provider becomes available.
+            alert(`${t('drift_extend_toast').replace('{fo_number}', fo).replace('{count}', String(overflow))}`);
+            onResolved('extended');
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Error');
+        }
+        setWorking(false);
+    };
+
+    const onRevert = () => {
+        // Local revert only — qty in DB never changed (strict PATCH was rejected).
+        onResolved('reverted');
+    };
+
+    return (
+        <tr style={{ background: 'rgba(255, 159, 10, 0.08)', borderLeft: '4px solid var(--color-warning)' }}>
+            <td colSpan={colSpan} style={{ padding: 12 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div style={{ fontWeight: 600, color: 'var(--color-warning)', fontSize: 13 }}>
+                        ⚠ {t('drift_warning_title')
+                            .replace('{fo_number}', detail.fo_number || `#${detail.fo_id}`)
+                            .replace('{subject}', detail.subject || detail.barcode)
+                            .replace('{count}', String(overflow))}
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                        {t('drift_warning_details')
+                            .replace('{plan}', String(detail.fo_qty))
+                            .replace('{assigned}', String(detail.fo_assigned))
+                            .replace('{available}', String(detail.available))
+                            .replace('{old}', String(detail.oldQty))
+                            .replace('{new}', String(detail.newQty))}
+                    </div>
+                    {detail.in_mix_group && (
+                        <div style={{ fontSize: 12, color: 'var(--color-accent)', background: 'rgba(0,113,227,0.06)', padding: '6px 10px', borderRadius: 8 }}>
+                            ⓘ {t('drift_mix_group_note').replace('{barcode}', detail.barcode)}
+                        </div>
+                    )}
+                    {isLargeDelta && (
+                        <div style={{ fontSize: 12, color: 'var(--color-danger)', background: 'rgba(255,59,48,0.08)', padding: '6px 10px', borderRadius: 8 }}>
+                            ⚠ {t('drift_large_delta_warning').replace('{count}', String(overflow))}
+                        </div>
+                    )}
+                    <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                        <button
+                            type="button"
+                            className="btn btn-primary btn-sm"
+                            onClick={onExtend}
+                            disabled={working}
+                        >
+                            {working ? '...' : `➕ ${t('drift_extend_button').replace('{newQty}', String(newPlanQty))}`}
+                        </button>
+                        <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={onRevert}
+                            disabled={working}
+                        >
+                            ↩ {t('drift_revert_button').replace('{old}', String(detail.oldQty))}
+                        </button>
+                    </div>
+                </div>
+            </td>
+        </tr>
+    );
+}
+
+function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRemoved, driftStateById, setDriftStateById }: {
     items: VehicleItemSchema[]; isForming: boolean; vehicleOrderNo: string;
     totalQty: number; totalCny: number; onRemoved: () => void;
+    driftStateById: Record<number, DriftState>;
+    setDriftStateById: React.Dispatch<React.SetStateAction<Record<number, DriftState>>>;
 }) {
     const { t } = useT();
     const [removingId, setRemovingId] = useState<number | null>(null);
@@ -782,7 +931,42 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                             <td style={{ ...td, fontSize: 12, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.article_seller || ''}>{item.article_seller || '—'}</td>
                             <td style={{ ...td, fontSize: 12 }}>{item.subject || '—'}</td>
                             <td style={tdR}>
-                                <QtyEditCell vehicleOrderNo={vehicleOrderNo} item={item} onSaved={onRemoved} />
+                                <QtyEditCell
+                                    vehicleOrderNo={vehicleOrderNo}
+                                    item={item}
+                                    onSaved={onRemoved}
+                                    hasDrift={Boolean(driftStateById[item.id])}
+                                    onOpenExistingDrift={(it) => {
+                                        // Synthesize drift detail from server-enriched fields
+                                        // (set by backend _enrich_vehicle for existing DB drift).
+                                        if (it.qty_drift == null || it.qty_drift <= 0) return;
+                                        const fo_qty = it.fo_qty ?? 0;
+                                        const fo_assigned = it.fo_assigned ?? 0;
+                                        const synthDetail: DriftState = {
+                                            error: 'exceeds_factory_qty',
+                                            fo_id: it.factory_order_id ?? 0,
+                                            fo_number: it.factory_order_number ?? null,
+                                            foi_id: it.factory_order_item_id ?? 0,
+                                            barcode: it.barcode,
+                                            subject: it.subject ?? null,
+                                            fo_qty,
+                                            fo_assigned,
+                                            available: Math.max(0, fo_qty - fo_assigned),
+                                            attempted_delta: it.qty_drift,
+                                            in_mix_group: Boolean(it.mix_group_id),
+                                            mix_group_id: it.mix_group_id ?? null,
+                                            oldQty: it.qty,
+                                            newQty: it.qty,
+                                        };
+                                        setDriftStateById(prev => ({ ...prev, [it.id]: synthDetail }));
+                                    }}
+                                    onDriftDetected={(detail, oldQty, newQty) => {
+                                        setDriftStateById(prev => ({
+                                            ...prev,
+                                            [item.id]: { ...detail, oldQty, newQty },
+                                        }));
+                                    }}
+                                />
                             </td>
                             <td style={tdR}>
                                 {item.mix_group_id ? (
@@ -842,6 +1026,22 @@ function ItemsTable({ items, isForming, vehicleOrderNo, totalQty, totalCny, onRe
                                     onSaved={onRemoved}
                                 />
                             </tr>
+                        )}
+                        {driftStateById[item.id] && (
+                            <DriftConfirmRow
+                                detail={driftStateById[item.id]}
+                                vehicleOrderNo={vehicleOrderNo}
+                                itemId={item.id}
+                                colSpan={baseCols + costCols}
+                                onResolved={(action) => {
+                                    setDriftStateById(prev => {
+                                        const next = { ...prev };
+                                        delete next[item.id];
+                                        return next;
+                                    });
+                                    if (action === 'extended') onRemoved();
+                                }}
+                            />
                         )}
                     </React.Fragment>
                     );
@@ -2337,7 +2537,9 @@ function RecalcButton({ orderNo, onDone }: { orderNo: string; onDone: () => void
     );
 }
 
-function ShipButton({ orderNo, onDone }: { orderNo: string; onDone: () => void }) {
+function ShipButton({ orderNo, onDone, disabled = false, disabledTooltip }: {
+    orderNo: string; onDone: () => void; disabled?: boolean; disabledTooltip?: string;
+}) {
     const { t } = useT();
     const [loading, setLoading] = useState(false);
     const handleClick = async () => {
@@ -2352,14 +2554,20 @@ function ShipButton({ orderNo, onDone }: { orderNo: string; onDone: () => void }
         setLoading(false);
     };
     return (
-        <button className="btn btn-primary btn-sm" onClick={handleClick} disabled={loading}>
+        <button
+            className="btn btn-primary btn-sm"
+            onClick={handleClick}
+            disabled={loading || disabled}
+            title={disabled ? disabledTooltip : undefined}
+        >
             {loading ? '...' : `🚛 ${t('btn_ship')}`}
         </button>
     );
 }
 
-function StatusTransitionButton({ orderNo, nextStatus, label, icon, onDone }: {
+function StatusTransitionButton({ orderNo, nextStatus, label, icon, onDone, disabled = false, disabledTooltip }: {
     orderNo: string; nextStatus: VehicleStatus; label: string; icon: string; onDone: () => void;
+    disabled?: boolean; disabledTooltip?: string;
 }) {
     const { t } = useT();
     const [loading, setLoading] = useState(false);
@@ -2378,7 +2586,12 @@ function StatusTransitionButton({ orderNo, nextStatus, label, icon, onDone }: {
         setLoading(false);
     };
     return (
-        <button className="btn btn-secondary btn-sm" onClick={handleClick} disabled={loading}>
+        <button
+            className="btn btn-secondary btn-sm"
+            onClick={handleClick}
+            disabled={loading || disabled}
+            title={disabled ? disabledTooltip : undefined}
+        >
             {loading ? '...' : `${icon} ${label}`}
         </button>
     );

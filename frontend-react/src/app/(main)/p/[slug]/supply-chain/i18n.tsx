@@ -464,6 +464,18 @@ const ru: TranslationDict = {
     matrix_total_row: 'Итого',
     matrix_of_total: 'из {total}',
     matrix_click_vehicle_hint: 'Кликните, чтобы открыть машину',
+
+    // ── Vehicle qty drift confirm (sc17) ──
+    drift_warning_title: 'Заказ {fo_number} ({subject}): план фабрики превышен на {count} шт.',
+    drift_warning_details: 'Фабричный заказ: план {plan} шт, распределено {assigned}, остаток {available}. В этой машине: было {old} → стало {new}',
+    drift_extend_button: 'Расширить план до {newQty}',
+    drift_revert_button: 'Откатить к {old}',
+    drift_mix_group_note: 'Позиция в mix-группе. Расширение коснётся только этого баркода ({barcode})',
+    drift_large_delta_warning: 'Большая дельта: +{count}. Проверьте ввод!',
+    drift_pending_badge: 'Несохранённые расхождения: {count}',
+    drift_status_blocked_tooltip: 'Решите расхождения qty перед сменой статуса',
+    drift_existing_dot_tooltip: 'Расхождение с фабричным заказом',
+    drift_extend_toast: 'Заказ {fo_number}: план +{count} шт',
 };
 
 const zh: TranslationDict = {
@@ -920,6 +932,18 @@ const zh: TranslationDict = {
     matrix_total_row: '合计',
     matrix_of_total: '共 {total}',
     matrix_click_vehicle_hint: '点击以打开车辆',
+
+    // ── Vehicle qty drift confirm (sc17) ──
+    drift_warning_title: '订单 {fo_number} ({subject}): 工厂计划超出 {count} 件',
+    drift_warning_details: '工厂订单: 计划 {plan} 件, 已分配 {assigned}, 剩余 {available}。本车辆: 原 {old} → 新 {new}',
+    drift_extend_button: '扩展计划至 {newQty}',
+    drift_revert_button: '恢复为 {old}',
+    drift_mix_group_note: '该项属于混装组。扩展仅影响此条码 ({barcode})',
+    drift_large_delta_warning: '差异较大: +{count}。请检查输入!',
+    drift_pending_badge: '未保存的差异: {count}',
+    drift_status_blocked_tooltip: '更改状态前请解决数量差异',
+    drift_existing_dot_tooltip: '与工厂订单存在差异',
+    drift_extend_toast: '订单 {fo_number}: 计划 +{count} 件',
 };
 
 const translations: Record<Lang, TranslationDict> = { ru, zh };
