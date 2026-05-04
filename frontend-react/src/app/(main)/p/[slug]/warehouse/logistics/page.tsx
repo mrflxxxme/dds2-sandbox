@@ -41,7 +41,6 @@ export default function LogisticsPage() {
     const [items, setItems] = useState<AssemblyRequest[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
-    const [wbWarehouseNames, setWbWarehouseNames] = useState<string[]>([]);
 
     // Tab
     const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
@@ -157,25 +156,6 @@ export default function LogisticsPage() {
     }, [showSoonReady, showInProgress]);
 
     useEffect(() => { load(); }, [load]);
-
-    useEffect(() => {
-        api.getWbWarehouseNames().then(setWbWarehouseNames).catch(() => { /* ignore */ });
-    }, []);
-
-    const handleSetManualWarehouse = useCallback(async (id: number, value: string) => {
-        const trimmed = value.trim();
-        try {
-            await api.updateAssemblyRequest(id, { wb_warehouse_name_manual: trimmed || null });
-            setItems(prev => prev.map(it => it.id === id
-                ? { ...it, wb_warehouse_name_manual: trimmed || null, effective_wb_warehouse: trimmed || it.wb_warehouse_name || null }
-                : it));
-            if (trimmed && !wbWarehouseNames.includes(trimmed)) {
-                setWbWarehouseNames(prev => [...prev, trimmed].sort());
-            }
-        } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка сохранения склада сдачи');
-        }
-    }, [wbWarehouseNames]);
 
     // ─── Load history ───────────────────────────────────────────────────────
 
@@ -577,13 +557,7 @@ export default function LogisticsPage() {
                                                         </td>
                                                         <td style={{ fontSize: 12 }}>{item.brands || '\u2014'}</td>
                                                         <td style={{ color: 'var(--color-text-muted)' }}>{item.warehouse_name || '\u2014'}</td>
-                                                        <td onClick={e => e.stopPropagation()}>
-                                                            <WbWarehouseEditor
-                                                                value={item.effective_wb_warehouse || ''}
-                                                                options={wbWarehouseNames}
-                                                                onSave={v => handleSetManualWarehouse(item.id, v)}
-                                                            />
-                                                        </td>
+                                                        <td>{item.effective_wb_warehouse || '—'}</td>
                                                         <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{item.wb_supply_id_wb || '\u2014'}</td>
                                                         <td style={{ textAlign: 'right' }}>{item.pallets_count}</td>
                                                         <td style={{ textAlign: 'right' }}>{item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014'}</td>
@@ -695,14 +669,9 @@ export default function LogisticsPage() {
                                                         {item.wb_supply_id_wb && (
                                                             <div style={{ fontFamily: 'monospace', fontSize: 12 }}>Поставка: {item.wb_supply_id_wb}</div>
                                                         )}
-                                                        <div onClick={e => e.stopPropagation()} style={{ marginTop: 4 }}>
-                                                            <span style={{ color: 'var(--color-text-muted)' }}>WB: </span>
-                                                            <WbWarehouseEditor
-                                                                value={item.effective_wb_warehouse || ''}
-                                                                options={wbWarehouseNames}
-                                                                onSave={v => handleSetManualWarehouse(item.id, v)}
-                                                            />
-                                                        </div>
+                                                        {item.effective_wb_warehouse && (
+                                                            <div>WB: {item.effective_wb_warehouse}</div>
+                                                        )}
                                                     </div>
 
                                                     {!soon && (
@@ -1190,57 +1159,4 @@ function groupItems(items: AssemblyRequest[], groupBy: GroupBy): Group[] {
     }
 
     return groups;
-}
-
-// ─── Inline editor for wb_warehouse_name_manual ─────────────────────────────
-
-function WbWarehouseEditor({ value, options, onSave }: { value: string; options: string[]; onSave: (v: string) => void | Promise<void> }) {
-    const [editing, setEditing] = useState(false);
-    const [draft, setDraft] = useState(value);
-    const listId = useMemo(() => `wb-wh-list-${Math.random().toString(36).slice(2, 9)}`, []);
-
-    useEffect(() => { setDraft(value); }, [value]);
-
-    if (!editing) {
-        return (
-            <span
-                onClick={() => setEditing(true)}
-                style={{
-                    cursor: 'pointer',
-                    borderBottom: value ? 'none' : '1px dashed var(--color-text-muted)',
-                    color: value ? 'inherit' : 'var(--color-text-muted)',
-                }}
-                title="Клик — задать склад сдачи WB"
-            >
-                {value || 'указать…'}
-            </span>
-        );
-    }
-
-    const commit = () => {
-        if (draft.trim() !== value.trim()) onSave(draft);
-        setEditing(false);
-    };
-
-    return (
-        <>
-            <input
-                className="form-input"
-                value={draft}
-                onChange={e => setDraft(e.target.value)}
-                onBlur={commit}
-                onKeyDown={e => {
-                    if (e.key === 'Enter') { e.currentTarget.blur(); }
-                    if (e.key === 'Escape') { setDraft(value); setEditing(false); }
-                }}
-                list={listId}
-                autoFocus
-                style={{ minWidth: 160, padding: '4px 6px', fontSize: 13 }}
-                placeholder="Склад WB"
-            />
-            <datalist id={listId}>
-                {options.map(o => <option key={o} value={o} />)}
-            </datalist>
-        </>
-    );
 }

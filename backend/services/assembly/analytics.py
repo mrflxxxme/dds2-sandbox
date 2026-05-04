@@ -59,6 +59,14 @@ async def refresh_from_fbo(
     if not supply:
         raise ValueError("Linked FBO supply not found")
 
+    # Force-pull WB detail to refresh warehouse_name (если изменился в WB
+    # либо ещё не enriched). Best-effort, не блокирующее.
+    from .crud import _try_force_enrich_supply
+
+    await _try_force_enrich_supply(db, project_id, supply, force=True)
+    if supply.warehouse_name and req.wb_warehouse_name_manual != supply.warehouse_name:
+        req.wb_warehouse_name_manual = supply.warehouse_name
+
     # Load FBO supply items
     fbo_items_result = await db.execute(
         select(WbFboSupplyItem).where(
