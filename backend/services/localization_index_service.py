@@ -389,5 +389,8 @@ async def get_by_sku(
         if by_nm is None:
             r["districts"] = []
         else:
-            r["districts"] = _district_list_for_nm(by_nm.get(int(r["nm_id"])))
+            # Cache JSON-сериализация переводит int ключи в str → пробуем оба
+            nm_key = r["nm_id"]
+            entry = by_nm.get(nm_key) or by_nm.get(str(nm_key)) or by_nm.get(int(nm_key))
+            r["districts"] = _district_list_for_nm(entry)
     return sku_rows
