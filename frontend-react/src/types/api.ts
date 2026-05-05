@@ -1546,6 +1546,52 @@ export interface RefreshFromFboResponse {
   items: AssemblyRequestItem[];
 }
 
+// ─── Assembly Drafts (distribution) ────────────────────────────────────────
+
+export interface AssemblyDraftRow {
+  nm_id: number;
+  barcode: string;
+  vendor_code: string;
+  src: Record<string, number>;  // warehouse_id (string key) → qty
+  tgt: Record<string, number>;  // wb_warehouse_name → qty
+}
+
+export interface AssemblyDraftDistribution {
+  source_warehouse_ids: number[];
+  target_warehouse_names: string[];
+  rows: AssemblyDraftRow[];
+  pallets_count: number;
+  pallet_weight_kg: number;
+  estimated_ready_date: string | null;  // YYYY-MM-DD
+}
+
+export interface AssemblyDraft {
+  id: number;
+  project_id: number;
+  name: string;
+  distribution: AssemblyDraftDistribution;
+  comment: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AssemblyDraftCreate {
+  name?: string;
+  distribution: AssemblyDraftDistribution;
+  comment?: string | null;
+}
+
+export interface AssemblyDraftUpdate {
+  name?: string | null;
+  distribution?: AssemblyDraftDistribution | null;
+  comment?: string | null;
+}
+
+export interface AssemblyDraftCommitResponse {
+  created_request_ids: number[];
+  draft_id: number;
+}
+
 // ─── Logistics Analytics ───────────────────────────────────────────────────
 
 export interface LogisticsCostSummary {

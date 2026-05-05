@@ -1,6 +1,10 @@
 /** Warehouse API methods */
 import { ApiClient } from './client';
 import type {
+    AssemblyDraft,
+    AssemblyDraftCommitResponse,
+    AssemblyDraftCreate,
+    AssemblyDraftUpdate,
     AssemblyHistoryEntry,
     AssemblyListResponse,
     AssemblyRequest,
@@ -370,6 +374,26 @@ export function addWarehouseMethods(api: ApiClient) {
             }
             const qs = query.toString();
             return api.request<LogisticsAnalyticsResponse>('GET', `/api/v1/warehouse/assembly/shipments/analytics${qs ? `?${qs}` : ''}`);
+        },
+
+        // ─── Assembly Drafts ────────────────────────────────────────────
+        listAssemblyDrafts() {
+            return api.request<AssemblyDraft[]>('GET', '/api/v1/assembly/drafts');
+        },
+        getAssemblyDraft(id: number) {
+            return api.request<AssemblyDraft>('GET', `/api/v1/assembly/drafts/${id}`);
+        },
+        createAssemblyDraft(payload: AssemblyDraftCreate) {
+            return api.request<AssemblyDraft>('POST', '/api/v1/assembly/drafts', payload);
+        },
+        updateAssemblyDraft(id: number, payload: AssemblyDraftUpdate) {
+            return api.request<AssemblyDraft>('PUT', `/api/v1/assembly/drafts/${id}`, payload);
+        },
+        deleteAssemblyDraft(id: number) {
+            return api.request<void>('DELETE', `/api/v1/assembly/drafts/${id}`);
+        },
+        commitAssemblyDraft(id: number) {
+            return api.request<AssemblyDraftCommitResponse>('POST', `/api/v1/assembly/drafts/${id}/commit`);
         },
     };
 }

@@ -120,9 +120,9 @@ from backend.models.mixins import SoftDeleteMixin
 | Что ищу | Где |
 |---------|-----|
 | Модель таблицы | `models/{domain}.py` + `models/__init__.py` |
-| API endpoint | `routers/` (ai_chat, assembly, auth, cost, counterparty, fbo_supplies, funnel, import_txn, integrations, loans, monitoring, planning, planning_customs, planning_wb_payouts, projects, refs, reports, reports_stock, reports_wb, supply_chain, telegram, telegram_miniapp, telegram_webhook, warehouse, wb_returns, ws) |
-| Бизнес-логика | `services/` (domain services + `ai_chat_service.py` для web AI chat + `project_settings_service.py` для мутаций настроек проекта). NB: `assembly/`, `fbo_supply/`, `supply_chain/` — пакеты (разбиты из монолитов) |
-| Pydantic schemas | `schemas/` (ai_chat, anomaly, assembly, auth, capital, common, cost, counterparty, imports, integrations, loan, monitoring, planning, refs, reports, supply_chain, tariff, tax, telegram, transactions, warehouse, wb_fbo, wb_returns) |
+| API endpoint | `routers/` (ai_chat, assembly, assembly_drafts, auth, cost, counterparty, fbo_supplies, funnel, import_txn, integrations, loans, monitoring, planning, planning_customs, planning_wb_payouts, projects, refs, reports, reports_stock, reports_wb, supply_chain, telegram, telegram_miniapp, telegram_webhook, warehouse, wb_returns, ws) |
+| Бизнес-логика | `services/` (domain services + `ai_chat_service.py` для web AI chat + `assembly_draft_service.py` для черновиков распределения сборки + `project_settings_service.py` для мутаций настроек проекта). NB: `assembly/`, `fbo_supply/`, `supply_chain/` — пакеты (разбиты из монолитов) |
+| Pydantic schemas | `schemas/` (ai_chat, anomaly, assembly, assembly_draft, auth, capital, common, cost, counterparty, imports, integrations, loan, monitoring, planning, refs, reports, supply_chain, tariff, tax, telegram, transactions, warehouse, wb_fbo, wb_returns) |
 | Импорт файлов / ETL | `etl/` |
 | WB HTTP клиент | `integrations/wb_api.py` |
 | Telegram бот | `integrations/telegram_bot.py` |

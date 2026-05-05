@@ -1,0 +1,835 @@
+'use client';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
+import { api } from '@/lib/api';
+import { formatNumber } from '@/lib/utils';
+import { Toast } from '@/components';
+import type {
+    AssemblyDraft,
+    AssemblyDraftDistribution,
+    AssemblyDraftRow,
+    Warehouse,
+} from '@/types/api';
+
+interface StockNeedArticle {
+    nm_id: number;
+    vendor_code: string;
+    barcode?: string;
+    total_need: number;
+    rf_stocks: Record<number, { stock: number; available: number }>;
+}
+
+interface StockNeedWarehouseRow {
+    name: string;
+    articles: Record<number, { need: number; stock: number; avg_daily: number }>;
+}
+
+interface StockNeedResponse {
+    warehouses: StockNeedWarehouseRow[];
+    articles: StockNeedArticle[];
+}
+
+const AUTOSAVE_DEBOUNCE_MS = 5000;
+
+export default function AssemblyDistributePage() {
+    const params = useParams();
+    const router = useRouter();
+    const searchParams = useSearchParams();
+    const slug = params.slug as string;
+
+    const draftIdParam = searchParams.get('draft');
+    const draftId = draftIdParam ? Number(draftIdParam) : null;
+
+    // ─── State ───────────────────────────────────────────────────────────
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [saving, setSaving] = useState(false);
+    const [committing, setCommitting] = useState(false);
+    const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+    const [draft, setDraft] = useState<AssemblyDraft | null>(null);
+    const [name, setName] = useState('');
+    const [editingName, setEditingName] = useState(false);
+    const [comment, setComment] = useState('');
+    const [estimatedReadyDate, setEstimatedReadyDate] = useState<string>('');
+    const [palletsCount, setPalletsCount] = useState<number>(1);
+    const [palletWeightKg, setPalletWeightKg] = useState<number>(0);
+
+    const [sourceWarehouseIds, setSourceWarehouseIds] = useState<number[]>([]);
+    const [targetWarehouseNames, setTargetWarehouseNames] = useState<string[]>([]);
+    const [rows, setRows] = useState<AssemblyDraftRow[]>([]);
+
+    // Reference data
+    const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+    const [stockNeed, setStockNeed] = useState<StockNeedResponse | null>(null);
+
+    // Track what's saved so we don't loop autosaves
+    const lastSavedJsonRef = useRef<string>('');
+    const initialLoadRef = useRef(false);
+
+    // ─── Load draft + reference data ─────────────────────────────────────
+    useEffect(() => {
+        if (!draftId) {
+            setError('Не указан ID черновика');
+            setLoading(false);
+            return;
+        }
+
+        let cancelled = false;
+        const load = async () => {
+            setLoading(true);
+            setError(null);
+            try {
+                const [draftResp, whs, stockNeedResp] = await Promise.all([
+                    api.getAssemblyDraft(draftId),
+                    api.getWarehouses(),
+                    api.getStockNeed(14, 14, 'actual').catch(() => null) as Promise<StockNeedResponse | null>,
+                ]);
+                if (cancelled) return;
+                setDraft(draftResp);
+                setName(draftResp.name);
+                setComment(draftResp.comment || '');
+                setEstimatedReadyDate(draftResp.distribution.estimated_ready_date || '');
+                setPalletsCount(draftResp.distribution.pallets_count || 1);
+                setPalletWeightKg(draftResp.distribution.pallet_weight_kg || 0);
+                setSourceWarehouseIds(draftResp.distribution.source_warehouse_ids || []);
+                setTargetWarehouseNames(draftResp.distribution.target_warehouse_names || []);
+                setRows(draftResp.distribution.rows || []);
+                setWarehouses(whs);
+                setStockNeed(stockNeedResp);
+                lastSavedJsonRef.current = JSON.stringify(draftResp.distribution);
+                initialLoadRef.current = true;
+            } catch (e: unknown) {
+                if (!cancelled) {
+                    setError(e instanceof Error ? e.message : 'Ошибка загрузки черновика');
+                }
+            } finally {
+                if (!cancelled) setLoading(false);
+            }
+        };
+
+        load();
+        return () => { cancelled = true; };
+    }, [draftId]);
+
+    // ─── Build current distribution snapshot ─────────────────────────────
+    const buildDistribution = useCallback((): AssemblyDraftDistribution => ({
+        source_warehouse_ids: sourceWarehouseIds,
+        target_warehouse_names: targetWarehouseNames,
+        rows,
+        pallets_count: palletsCount,
+        pallet_weight_kg: palletWeightKg,
+        estimated_ready_date: estimatedReadyDate || null,
+    }), [sourceWarehouseIds, targetWarehouseNames, rows, palletsCount, palletWeightKg, estimatedReadyDate]);
+
+    // ─── Save draft (manual + autosave) ──────────────────────────────────
+    const saveDraft = useCallback(async (silent = false): Promise<boolean> => {
+        if (!draftId) return false;
+        const dist = buildDistribution();
+        const json = JSON.stringify(dist);
+        if (json === lastSavedJsonRef.current && !silent) return true;
+
+        setSaving(true);
+        try {
+            const updated = await api.updateAssemblyDraft(draftId, {
+                name,
+                distribution: dist,
+                comment: comment || null,
+            });
+            lastSavedJsonRef.current = JSON.stringify(updated.distribution);
+            if (!silent) setToast({ message: 'Черновик сохранён', type: 'success' });
+            return true;
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка сохранения', type: 'error' });
+            return false;
+        } finally {
+            setSaving(false);
+        }
+    }, [draftId, buildDistribution, name, comment]);
+
+    // ─── Autosave: debounce 5s after any change ──────────────────────────
+    useEffect(() => {
+        if (!initialLoadRef.current || !draftId) return;
+        const timer = setTimeout(() => {
+            const json = JSON.stringify(buildDistribution());
+            if (json !== lastSavedJsonRef.current) {
+                saveDraft(true).catch(() => {});
+            }
+        }, AUTOSAVE_DEBOUNCE_MS);
+        return () => clearTimeout(timer);
+    }, [rows, sourceWarehouseIds, targetWarehouseNames, palletsCount, palletWeightKg, estimatedReadyDate, name, comment, draftId, buildDistribution, saveDraft]);
+
+    // ─── Lookup helpers ──────────────────────────────────────────────────
+    const warehouseNameById = useCallback((id: number): string => {
+        const wh = warehouses.find(w => w.id === id);
+        return wh ? wh.name : `Склад ${id}`;
+    }, [warehouses]);
+
+    const initialNeedByNmId = useMemo(() => {
+        const m: Record<number, number> = {};
+        if (stockNeed?.articles) {
+            for (const a of stockNeed.articles) {
+                m[a.nm_id] = a.total_need || 0;
+            }
+        }
+        return m;
+    }, [stockNeed]);
+
+    const wbNeedByNmIdAndWh = useCallback((nmId: number, whName: string): number => {
+        if (!stockNeed?.warehouses) return 0;
+        const wh = stockNeed.warehouses.find(w => w.name === whName);
+        return wh?.articles?.[nmId]?.need || 0;
+    }, [stockNeed]);
+
+    const availableAtFf = useCallback((nmId: number, ffId: number): number => {
+        if (!stockNeed?.articles) return 0;
+        const a = stockNeed.articles.find(art => art.nm_id === nmId);
+        return a?.rf_stocks?.[ffId]?.available || 0;
+    }, [stockNeed]);
+
+    // ─── Aggregate Σ src per FF (across all rows) ───────────────────────
+    const srcSumPerFf = useMemo(() => {
+        const m: Record<number, number> = {};
+        for (const r of rows) {
+            for (const [ffIdStr, qty] of Object.entries(r.src)) {
+                const ffId = Number(ffIdStr);
+                m[ffId] = (m[ffId] || 0) + (qty || 0);
+            }
+        }
+        return m;
+    }, [rows]);
+
+    // ─── Aggregate Σ tgt per WB (across all rows) ───────────────────────
+    const tgtSumPerWb = useMemo(() => {
+        const m: Record<string, number> = {};
+        for (const r of rows) {
+            for (const [whName, qty] of Object.entries(r.tgt)) {
+                m[whName] = (m[whName] || 0) + (qty || 0);
+            }
+        }
+        return m;
+    }, [rows]);
+
+    // ─── Cell editors ────────────────────────────────────────────────────
+    const setRowSrc = useCallback((nmId: number, ffId: number, qty: number) => {
+        setRows(prev => prev.map(r => {
+            if (r.nm_id !== nmId) return r;
+            const next = { ...r.src };
+            if (qty > 0) next[String(ffId)] = qty;
+            else delete next[String(ffId)];
+            return { ...r, src: next };
+        }));
+    }, []);
+
+    const setRowTgt = useCallback((nmId: number, whName: string, qty: number) => {
+        setRows(prev => prev.map(r => {
+            if (r.nm_id !== nmId) return r;
+            const next = { ...r.tgt };
+            if (qty > 0) next[whName] = qty;
+            else delete next[whName];
+            return { ...r, tgt: next };
+        }));
+    }, []);
+
+    // ─── Auto-balance ────────────────────────────────────────────────────
+    const handleAutoBalance = useCallback(() => {
+        const newRows: AssemblyDraftRow[] = rows.map(r => {
+            // Quote = sum of currently planned src (or tgt — pick max as desired qty)
+            const srcSum = Object.values(r.src).reduce((s, v) => s + (v || 0), 0);
+            const tgtSum = Object.values(r.tgt).reduce((s, v) => s + (v || 0), 0);
+            const quote = Math.max(srcSum, tgtSum, 0);
+            if (quote <= 0) {
+                return { ...r, src: {}, tgt: {} };
+            }
+
+            // src: greedy by descending available_at_ff
+            const srcCandidates = sourceWarehouseIds
+                .map(ffId => ({ ffId, avail: availableAtFf(r.nm_id, ffId) }))
+                .sort((a, b) => b.avail - a.avail);
+
+            const newSrc: Record<string, number> = {};
+            let remainingSrc = quote;
+            for (const c of srcCandidates) {
+                if (remainingSrc <= 0) break;
+                const take = Math.min(remainingSrc, c.avail);
+                if (take > 0) {
+                    newSrc[String(c.ffId)] = take;
+                    remainingSrc -= take;
+                }
+            }
+
+            // tgt: pro-rata по per-WB need из stock_need
+            const wbNeeds = targetWarehouseNames
+                .map(whName => ({ whName, need: wbNeedByNmIdAndWh(r.nm_id, whName) }))
+                .filter(x => x.need > 0);
+            const totalNeed = wbNeeds.reduce((s, x) => s + x.need, 0);
+            const newTgt: Record<string, number> = {};
+            const actualSent = quote - remainingSrc;
+            if (totalNeed > 0 && actualSent > 0) {
+                let allocated = 0;
+                for (let i = 0; i < wbNeeds.length; i++) {
+                    const x = wbNeeds[i];
+                    const isLast = i === wbNeeds.length - 1;
+                    const portion = isLast
+                        ? actualSent - allocated
+                        : Math.floor((x.need / totalNeed) * actualSent);
+                    if (portion > 0) {
+                        newTgt[x.whName] = portion;
+                        allocated += portion;
+                    }
+                }
+            } else if (actualSent > 0 && targetWarehouseNames.length > 0) {
+                newTgt[targetWarehouseNames[0]] = actualSent;
+            }
+
+            return { ...r, src: newSrc, tgt: newTgt };
+        });
+        setRows(newRows);
+        setToast({ message: 'Распределено автоматически', type: 'success' });
+    }, [rows, sourceWarehouseIds, targetWarehouseNames, availableAtFf, wbNeedByNmIdAndWh]);
+
+    // ─── Commit ──────────────────────────────────────────────────────────
+    const uniqueAssemblyCount = useMemo(() => {
+        const pairs = new Set<string>();
+        for (const r of rows) {
+            for (const [ffId, srcQty] of Object.entries(r.src)) {
+                if ((srcQty || 0) <= 0) continue;
+                for (const [wbName, tgtQty] of Object.entries(r.tgt)) {
+                    if ((tgtQty || 0) <= 0) continue;
+                    pairs.add(`${ffId}::${wbName}`);
+                }
+            }
+        }
+        return pairs.size;
+    }, [rows]);
+
+    const handleCommit = useCallback(async () => {
+        if (!draftId) return;
+        // Save any pending changes first
+        const ok = await saveDraft(true);
+        if (!ok) return;
+        setCommitting(true);
+        try {
+            const resp = await api.commitAssemblyDraft(draftId);
+            const ids = resp.created_request_ids || [];
+            setToast({ message: `Создано сборок: ${ids.length}`, type: 'success' });
+            setTimeout(() => {
+                if (ids.length === 1) {
+                    router.push(`/p/${slug}/warehouse/assembly/${ids[0]}`);
+                } else if (ids.length > 1) {
+                    router.push(`/p/${slug}/warehouse/assembly?just_created=${ids.join(',')}`);
+                } else {
+                    router.push(`/p/${slug}/warehouse/assembly`);
+                }
+            }, 600);
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка создания сборок', type: 'error' });
+        } finally {
+            setCommitting(false);
+        }
+    }, [draftId, saveDraft, router, slug]);
+
+    // ─── Render ──────────────────────────────────────────────────────────
+    if (loading) {
+        return (
+            <div className="animate-in">
+                <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>
+                    Загрузка распределения...
+                </div>
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="animate-in">
+                <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>
+                    {error}
+                    <div style={{ marginTop: 12 }}>
+                        <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => router.push(`/p/${slug}/warehouse/assembly`)}
+                        >
+                            К списку сборок
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    if (!draft) {
+        return (
+            <div className="animate-in">
+                <div className="glass-card" style={{ padding: 32 }}>Черновик не найден</div>
+            </div>
+        );
+    }
+
+    return (
+        <div className="animate-in">
+            {toast && (
+                <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />
+            )}
+
+            {/* Header */}
+            <div className="page-header" style={{ marginBottom: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1 }}>
+                    <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => router.push(`/p/${slug}/warehouse/assembly`)}
+                    >
+                        ← Назад
+                    </button>
+                    <div style={{ flex: 1 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <h1 className="page-title" style={{ margin: 0 }}>Распределение сборки</h1>
+                            {editingName ? (
+                                <input
+                                    className="form-input"
+                                    autoFocus
+                                    value={name}
+                                    onChange={e => setName(e.target.value)}
+                                    onBlur={() => setEditingName(false)}
+                                    onKeyDown={e => {
+                                        if (e.key === 'Enter') setEditingName(false);
+                                        if (e.key === 'Escape') {
+                                            setName(draft.name);
+                                            setEditingName(false);
+                                        }
+                                    }}
+                                    style={{ maxWidth: 320, fontSize: 14 }}
+                                />
+                            ) : (
+                                <button
+                                    className="btn btn-secondary btn-sm"
+                                    onClick={() => setEditingName(true)}
+                                    title="Изменить название черновика"
+                                >
+                                    {name || 'Без названия'}
+                                </button>
+                            )}
+                        </div>
+                        <p className="page-subtitle" style={{ margin: 0 }}>
+                            Источников: {sourceWarehouseIds.length} · Целей: {targetWarehouseNames.length} · Артикулов: {rows.length}
+                        </p>
+                    </div>
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                        className="btn btn-secondary"
+                        onClick={() => saveDraft(false)}
+                        disabled={saving}
+                    >
+                        {saving ? 'Сохранение...' : '💾 Сохранить'}
+                    </button>
+                    <button
+                        className="btn btn-primary"
+                        onClick={handleCommit}
+                        disabled={committing || uniqueAssemblyCount === 0}
+                    >
+                        {committing ? 'Создание...' : `✓ Создать сборки (${uniqueAssemblyCount})`}
+                    </button>
+                </div>
+            </div>
+
+            {/* Settings row */}
+            <div className="glass-card" style={{ padding: 16, marginBottom: 16, display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'end' }}>
+                <div className="form-group">
+                    <label className="form-label" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                        Дата готовности
+                    </label>
+                    <input
+                        type="date"
+                        className="form-input"
+                        value={estimatedReadyDate}
+                        onChange={e => setEstimatedReadyDate(e.target.value)}
+                    />
+                </div>
+                <div className="form-group">
+                    <label className="form-label" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                        Палеты (шт)
+                    </label>
+                    <input
+                        type="number"
+                        min={1}
+                        className="form-input"
+                        value={palletsCount}
+                        onChange={e => setPalletsCount(Math.max(1, Number(e.target.value) || 1))}
+                        style={{ width: 100 }}
+                    />
+                </div>
+                <div className="form-group">
+                    <label className="form-label" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                        Вес палеты (кг)
+                    </label>
+                    <input
+                        type="number"
+                        min={0}
+                        step={0.1}
+                        className="form-input"
+                        value={palletWeightKg}
+                        onChange={e => setPalletWeightKg(Math.max(0, Number(e.target.value) || 0))}
+                        style={{ width: 120 }}
+                    />
+                </div>
+                <div className="form-group" style={{ flex: 1, minWidth: 200 }}>
+                    <label className="form-label" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                        Комментарий
+                    </label>
+                    <input
+                        type="text"
+                        className="form-input"
+                        value={comment}
+                        onChange={e => setComment(e.target.value)}
+                        placeholder="Необязательно"
+                    />
+                </div>
+                <div>
+                    <button className="btn btn-secondary" onClick={handleAutoBalance}>
+                        ↺ Авто-баланс
+                    </button>
+                </div>
+            </div>
+
+            {/* Matrix */}
+            {rows.length === 0 ? (
+                <div className="glass-card" style={{ padding: 64, textAlign: 'center' }}>
+                    <div style={{ fontSize: 48, marginBottom: 16 }}>📋</div>
+                    <div style={{ fontSize: 16, fontWeight: 500, marginBottom: 8 }}>Нет позиций для распределения</div>
+                    <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
+                        Добавьте позиции из &laquo;Потребности по складам&raquo;
+                    </div>
+                </div>
+            ) : (
+                <div className="glass-card" style={{ overflowX: 'auto', padding: 0 }}>
+                    <DistributeMatrix
+                        rows={rows}
+                        sourceWarehouseIds={sourceWarehouseIds}
+                        targetWarehouseNames={targetWarehouseNames}
+                        warehouseNameById={warehouseNameById}
+                        srcSumPerFf={srcSumPerFf}
+                        tgtSumPerWb={tgtSumPerWb}
+                        availableAtFf={availableAtFf}
+                        initialNeedByNmId={initialNeedByNmId}
+                        onSrcChange={setRowSrc}
+                        onTgtChange={setRowTgt}
+                    />
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ─── Distribute Matrix Component ────────────────────────────────────────────
+
+interface DistributeMatrixProps {
+    rows: AssemblyDraftRow[];
+    sourceWarehouseIds: number[];
+    targetWarehouseNames: string[];
+    warehouseNameById: (id: number) => string;
+    srcSumPerFf: Record<number, number>;
+    tgtSumPerWb: Record<string, number>;
+    availableAtFf: (nmId: number, ffId: number) => number;
+    initialNeedByNmId: Record<number, number>;
+    onSrcChange: (nmId: number, ffId: number, qty: number) => void;
+    onTgtChange: (nmId: number, whName: string, qty: number) => void;
+}
+
+function DistributeMatrix({
+    rows,
+    sourceWarehouseIds,
+    targetWarehouseNames,
+    warehouseNameById,
+    srcSumPerFf,
+    tgtSumPerWb,
+    availableAtFf,
+    initialNeedByNmId,
+    onSrcChange,
+    onTgtChange,
+}: DistributeMatrixProps) {
+    const thStyle: React.CSSProperties = {
+        textAlign: 'right', fontSize: 11, fontWeight: 600,
+        padding: '10px 8px', whiteSpace: 'nowrap',
+        borderBottom: '2px solid var(--color-border)',
+        background: '#f5f5f7',
+    };
+    const tdStyle: React.CSSProperties = {
+        padding: '6px 8px', textAlign: 'right', fontSize: 12,
+        borderBottom: '1px solid var(--color-border)',
+    };
+
+    return (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+                {/* Group headers */}
+                <tr>
+                    <th style={{ ...thStyle, textAlign: 'left', minWidth: 200, position: 'sticky', left: 0, zIndex: 3 }}>
+                        Артикул
+                    </th>
+                    <th style={{ ...thStyle, minWidth: 80 }}>N / M</th>
+                    <th
+                        colSpan={sourceWarehouseIds.length + 1}
+                        style={{ ...thStyle, textAlign: 'center', background: 'rgba(59,130,246,0.08)', letterSpacing: 1, fontWeight: 700 }}
+                    >
+                        ИСТОЧНИКИ (ФФ)
+                    </th>
+                    <th
+                        colSpan={targetWarehouseNames.length + 1}
+                        style={{ ...thStyle, textAlign: 'center', background: 'rgba(245,158,11,0.08)', letterSpacing: 1, fontWeight: 700 }}
+                    >
+                        ЦЕЛИ (WB)
+                    </th>
+                </tr>
+                {/* Column headers */}
+                <tr>
+                    <th style={{ ...thStyle, textAlign: 'left', position: 'sticky', left: 0, zIndex: 3 }} />
+                    <th style={thStyle} />
+                    {sourceWarehouseIds.map(ffId => (
+                        <th key={`hdr-src-${ffId}`} style={{ ...thStyle, background: 'rgba(59,130,246,0.04)' }}>
+                            {warehouseNameById(ffId)}
+                        </th>
+                    ))}
+                    <th style={{ ...thStyle, background: 'rgba(59,130,246,0.04)' }}>Σ ист</th>
+                    {targetWarehouseNames.map(whName => (
+                        <th key={`hdr-tgt-${whName}`} style={{ ...thStyle, background: 'rgba(245,158,11,0.04)' }}>
+                            {whName.length > 14 ? whName.slice(0, 14) + '…' : whName}
+                        </th>
+                    ))}
+                    <th style={{ ...thStyle, background: 'rgba(245,158,11,0.04)' }}>Σ цель</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows.map(row => {
+                    const srcSum = Object.values(row.src).reduce((s, v) => s + (v || 0), 0);
+                    const tgtSum = Object.values(row.tgt).reduce((s, v) => s + (v || 0), 0);
+                    const balanced = srcSum === tgtSum;
+                    const initialNeed = initialNeedByNmId[row.nm_id] || 0;
+                    const overflow = initialNeed > 0 && srcSum > initialNeed;
+
+                    return (
+                        <tr key={`row-${row.nm_id}`}>
+                            <td
+                                style={{
+                                    ...tdStyle,
+                                    textAlign: 'left',
+                                    position: 'sticky',
+                                    left: 0,
+                                    background: '#fff',
+                                    zIndex: 2,
+                                    fontWeight: 500,
+                                }}
+                            >
+                                <div>{row.vendor_code || `nm:${row.nm_id}`}</div>
+                                <div style={{ fontSize: 10, color: 'var(--color-text-muted)' }}>
+                                    {row.barcode}
+                                </div>
+                            </td>
+                            <td
+                                style={{
+                                    ...tdStyle,
+                                    fontWeight: 600,
+                                    background: overflow ? 'rgba(255,159,10,0.12)' : undefined,
+                                    color: overflow ? 'var(--color-warning)' : undefined,
+                                }}
+                                title={overflow ? `Лишек: ${srcSum - initialNeed}` : undefined}
+                            >
+                                {srcSum}/{initialNeed > 0 ? initialNeed : '?'}
+                            </td>
+
+                            {sourceWarehouseIds.map(ffId => {
+                                const qty = row.src[String(ffId)] || 0;
+                                const avail = availableAtFf(row.nm_id, ffId);
+                                const usedOnFf = srcSumPerFf[ffId] || 0;
+                                const overload = avail > 0 && usedOnFf > avail;
+                                return (
+                                    <td
+                                        key={`src-${row.nm_id}-${ffId}`}
+                                        style={{
+                                            ...tdStyle,
+                                            background: !balanced && qty > 0 ? 'rgba(255,59,48,0.06)' : 'rgba(59,130,246,0.02)',
+                                        }}
+                                    >
+                                        <NumericCell
+                                            value={qty}
+                                            onChange={(v) => onSrcChange(row.nm_id, ffId, v)}
+                                            invalid={!balanced && qty > 0}
+                                        />
+                                        <div
+                                            style={{
+                                                fontSize: 10,
+                                                color: overload ? 'var(--color-danger)' : 'var(--color-text-muted)',
+                                                marginTop: 2,
+                                            }}
+                                            title={`На ФФ свободно: ${formatNumber(avail, 0)} · Σ занято: ${formatNumber(usedOnFf, 0)}`}
+                                        >
+                                            {formatNumber(usedOnFf, 0)}/{formatNumber(avail, 0)}
+                                        </div>
+                                    </td>
+                                );
+                            })}
+                            <td
+                                style={{
+                                    ...tdStyle,
+                                    fontWeight: 700,
+                                    background: 'rgba(59,130,246,0.04)',
+                                    color: balanced ? 'var(--color-success)' : 'var(--color-danger)',
+                                }}
+                            >
+                                {srcSum} {balanced ? '✓' : '!'}
+                            </td>
+
+                            {targetWarehouseNames.map(whName => {
+                                const qty = row.tgt[whName] || 0;
+                                return (
+                                    <td
+                                        key={`tgt-${row.nm_id}-${whName}`}
+                                        style={{
+                                            ...tdStyle,
+                                            background: !balanced && qty > 0 ? 'rgba(255,59,48,0.06)' : 'rgba(245,158,11,0.02)',
+                                        }}
+                                    >
+                                        <NumericCell
+                                            value={qty}
+                                            onChange={(v) => onTgtChange(row.nm_id, whName, v)}
+                                            invalid={!balanced && qty > 0}
+                                        />
+                                    </td>
+                                );
+                            })}
+                            <td
+                                style={{
+                                    ...tdStyle,
+                                    fontWeight: 700,
+                                    background: 'rgba(245,158,11,0.04)',
+                                    color: balanced ? 'var(--color-success)' : 'var(--color-danger)',
+                                }}
+                            >
+                                {tgtSum} {balanced ? '✓' : '!'}
+                            </td>
+                        </tr>
+                    );
+                })}
+
+                {/* Totals row */}
+                <tr style={{ background: 'rgba(59,130,246,0.06)', fontWeight: 700 }}>
+                    <td
+                        style={{
+                            ...tdStyle,
+                            textAlign: 'left',
+                            position: 'sticky',
+                            left: 0,
+                            background: 'rgba(59,130,246,0.06)',
+                            zIndex: 2,
+                            fontWeight: 700,
+                        }}
+                    >
+                        ИТОГО
+                    </td>
+                    <td style={tdStyle} />
+                    {sourceWarehouseIds.map(ffId => (
+                        <td key={`tot-src-${ffId}`} style={{ ...tdStyle, fontWeight: 700 }}>
+                            {formatNumber(srcSumPerFf[ffId] || 0, 0)}
+                        </td>
+                    ))}
+                    <td style={{ ...tdStyle, fontWeight: 700 }}>
+                        {formatNumber(
+                            Object.values(srcSumPerFf).reduce((s, v) => s + v, 0),
+                            0,
+                        )}
+                    </td>
+                    {targetWarehouseNames.map(whName => (
+                        <td key={`tot-tgt-${whName}`} style={{ ...tdStyle, fontWeight: 700 }}>
+                            {formatNumber(tgtSumPerWb[whName] || 0, 0)}
+                        </td>
+                    ))}
+                    <td style={{ ...tdStyle, fontWeight: 700 }}>
+                        {formatNumber(
+                            Object.values(tgtSumPerWb).reduce((s, v) => s + v, 0),
+                            0,
+                        )}
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    );
+}
+
+// ─── Numeric Cell ──────────────────────────────────────────────────────────
+
+interface NumericCellProps {
+    value: number;
+    onChange: (v: number) => void;
+    invalid?: boolean;
+}
+
+function NumericCell({ value, onChange, invalid }: NumericCellProps) {
+    const [editing, setEditing] = useState(false);
+    const [text, setText] = useState('');
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (editing && inputRef.current) {
+            inputRef.current.focus();
+            inputRef.current.select();
+        }
+    }, [editing]);
+
+    const commit = () => {
+        setEditing(false);
+        const n = parseInt(text, 10);
+        if (!isNaN(n) && n !== value) {
+            onChange(Math.max(0, n));
+        }
+    };
+
+    if (editing) {
+        return (
+            <input
+                ref={inputRef}
+                type="number"
+                min={0}
+                value={text}
+                onChange={e => setText(e.target.value)}
+                onBlur={commit}
+                onKeyDown={e => {
+                    if (e.key === 'Enter') inputRef.current?.blur();
+                    if (e.key === 'Escape') {
+                        setText(String(value || ''));
+                        setEditing(false);
+                    }
+                }}
+                style={{
+                    width: 70,
+                    padding: '3px 6px',
+                    borderRadius: 6,
+                    border: '2px solid var(--color-accent)',
+                    fontSize: 12,
+                    textAlign: 'right',
+                    outline: 'none',
+                }}
+            />
+        );
+    }
+
+    return (
+        <div
+            onClick={() => {
+                setText(String(value || ''));
+                setEditing(true);
+            }}
+            style={{
+                cursor: 'pointer',
+                padding: '3px 6px',
+                borderRadius: 6,
+                border: invalid ? '1px solid var(--color-danger)' : '1px solid transparent',
+                color: value > 0 ? 'var(--color-text)' : 'var(--color-text-muted)',
+                fontWeight: value > 0 ? 600 : 400,
+                minHeight: 22,
+            }}
+            title="Нажмите для редактирования"
+        >
+            {value > 0 ? formatNumber(value, 0) : '—'}
+        </div>
+    );
+}
