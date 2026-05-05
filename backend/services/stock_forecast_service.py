@@ -740,10 +740,9 @@ async def get_stock_analytics(
         rf_avg_days: int | None = None
         rf_synthetic: list[dict] = []
         if mode in ("wb_rf", "wb_rf_transit") and free_rf > 0 and rf_per_wh:
-            wh_days = [rf_total_days_map.get(wh_id) for wh_id in rf_per_wh if rf_total_days_map.get(wh_id) is not None]
-            wh_days = [d for d in wh_days if d is not None]
-            if wh_days:
-                rf_avg_days = max(0, int(round(sum(wh_days) / len(wh_days))))
+            wh_days_typed: list[int] = [d for wh_id in rf_per_wh if (d := rf_total_days_map.get(wh_id)) is not None]
+            if wh_days_typed:
+                rf_avg_days = max(0, int(round(sum(wh_days_typed) / len(wh_days_typed))))
                 rf_synthetic.append(
                     {
                         "qty": free_rf,
