@@ -346,11 +346,17 @@ async def _load_in_assembly_with_eta(
         if ready is None:
             placement = r.created_at.date() if r.created_at else today_date
             ready = placement + timedelta(days=_DEFAULT_ASSEMBLY_DAYS)
+        # If batch is "ready" in the past but not SHIPPED yet (no delivery_date),
+        # it's physically still on our warehouse waiting for a vehicle. Schedule
+        # delivery from today: max(ready, today) + post_assembly_days. Otherwise
+        # stale READY/IN_PROGRESS would land in day-0 of the matrix (past-due
+        # fallback in _build_forecast_with_transit) and look like "magic arrivals".
+        effective_ready = max(ready, today_date)
         post_days = post_assembly_days_map.get(int(r.warehouse_id))
         if post_days is None:
             # warehouse has no delivery-time rows AND no fallback resolved earlier
             continue
-        eta = ready + timedelta(days=int(post_days))
+        eta = effective_ready + timedelta(days=int(post_days))
         nm_id = int(r.article_wb)
         out.setdefault(nm_id, []).append(
             {
