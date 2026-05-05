@@ -340,6 +340,9 @@ export function addWarehouseMethods(api: ApiClient) {
         cancelAssembly(id: number) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/cancel`);
         },
+        deleteAssembly(id: number) {
+            return api.request<void>('DELETE', `/api/v1/warehouse/assembly/${id}`);
+        },
         assignVehicleBulk(data: {
             vehicle_info: string;
             vehicle_brand: string;

@@ -51,14 +51,17 @@ function StatusBadge({
     item,
     onStatusChange,
     onShip,
+    onDelete,
 }: {
     item: AssemblyRequest;
     onStatusChange: (id: number, newStatus: AssemblyStatus) => void;
     onShip?: (item: AssemblyRequest) => void;
+    onDelete?: (item: AssemblyRequest) => void;
 }) {
     const status = STATUS_MAP[item.status] || { label: item.status, className: '' };
     const canEdit = EDITABLE_STATUSES.includes(item.status);
     const colorClass = STATUS_COLORS[item.status] || 'bg-slate-100 text-slate-700 border-slate-200';
+    const canDelete = item.status === 'CANCELLED' || item.status === 'PENDING';
 
     if (!canEdit) {
         return (
@@ -72,6 +75,15 @@ function StatusBadge({
                         onClick={(e) => { e.stopPropagation(); onShip(item); }}
                     >
                         Отгрузить
+                    </button>
+                )}
+                {canDelete && onDelete && (
+                    <button
+                        className="text-xs rounded-full py-1.5 px-2.5 border bg-red-50 text-red-600 border-red-200 hover:bg-red-100 transition-colors"
+                        title="Удалить заявку"
+                        onClick={(e) => { e.stopPropagation(); onDelete(item); }}
+                    >
+                        🗑️
                     </button>
                 )}
             </div>
@@ -312,6 +324,13 @@ export default function AssemblyListPage() {
 
     useEffect(() => { loadDrafts(); }, [loadDrafts]);
 
+    // Refresh drafts when returning to the tab (e.g. after committing on /distribute)
+    useEffect(() => {
+        const handler = () => { loadDrafts(); };
+        window.addEventListener('focus', handler);
+        return () => window.removeEventListener('focus', handler);
+    }, [loadDrafts]);
+
     const handleDeleteDraft = useCallback(async (draftId: number) => {
         if (!confirm('Удалить черновик?')) return;
         try {
@@ -319,7 +338,14 @@ export default function AssemblyListPage() {
             setDrafts(prev => prev.filter(d => d.id !== draftId));
             setToast({ message: 'Черновик удалён', type: 'success' });
         } catch (e: unknown) {
-            setToast({ message: e instanceof Error ? e.message : 'Ошибка удаления', type: 'error' });
+            const msg = e instanceof Error ? e.message : 'Ошибка удаления';
+            // 404 → черновик уже удалён в БД (commit / параллельная вкладка); идемпотентно убираем из UI
+            if (/not found|404/i.test(msg)) {
+                setDrafts(prev => prev.filter(d => d.id !== draftId));
+                setToast({ message: 'Черновик уже был удалён', type: 'success' });
+            } else {
+                setToast({ message: msg, type: 'error' });
+            }
         }
     }, []);
 
@@ -486,6 +512,17 @@ export default function AssemblyListPage() {
         } catch (e: unknown) {
             updateItemLocal(item.id, { status: oldStatus });
             setToast({ message: e instanceof Error ? e.message : 'Ошибка отгрузки', type: 'error' });
+        }
+    };
+
+    const handleDeleteAssembly = async (item: AssemblyRequest) => {
+        if (!confirm(`Удалить заявку ${item.number}? Это действие нельзя отменить.`)) return;
+        try {
+            await api.deleteAssembly(item.id);
+            setItems(prev => prev.filter(i => i.id !== item.id));
+            setToast({ message: `Заявка ${item.number} удалена`, type: 'success' });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка удаления', type: 'error' });
         }
     };
 
@@ -679,7 +716,7 @@ export default function AssemblyListPage() {
                                     >
                                         <td style={{ fontWeight: 500 }}>{item.number}</td>
                                         <td>
-                                            <StatusBadge item={item} onStatusChange={handleStatusChange} onShip={handleShipFromList} />
+                                            <StatusBadge item={item} onStatusChange={handleStatusChange} onShip={handleShipFromList} onDelete={handleDeleteAssembly} />
                                         </td>
                                         <td style={{ fontSize: 13 }}>
                                             {item.brands || '\u2014'}
