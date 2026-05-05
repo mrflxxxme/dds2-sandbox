@@ -70,6 +70,11 @@
 
 ### Stock Forecast (Аналитика остатков)
 - **Источник:** `stock_forecast_service.get_stock_analytics` (router `reports_stock.py /stock_analytics`).
+- **Режимы (`mode`):**
+  - `wb` — только полезный остаток WB
+  - `wb_rf` — WB + свободный РФ (РФ как scheduled delivery)
+  - `wb_rf_transit` — WB + свободный РФ + on-assembly + in-transit (полный pipeline)
+  - `wb_assembly_transit` — WB + on-assembly + in-transit (БЕЗ свободного РФ; «что прилетит на WB при условии что РФ-остаток никуда не двинется»)
 - **Стартовая точка матрицы прогноза:** ВСЕГДА только полезный остаток WB (`quantity + in_way_from_client + in_way_to_client × (1 − buyout%)`). РФ / on-assembly / in-transit НЕ плюсуются в день 0.
 - **Свободный РФ → WB:** `free_rf = stocks_rf − in_assembly_total` приходит синтетической поставкой через `total_days = assembly + avg(delivery) + wb_acceptance` ([WarehouseDeliveryTime](models/warehouse.py)). Если qty на нескольких складах — арифметическое среднее `total_days` (вариант B). Поле API: `articles[].rf_avg_days`. Fallback при пустой `warehouse_delivery_times` — `forecast_rf_default_days` (default 8).
 - **On-assembly (PENDING/IN_PROGRESS/READY/VEHICLE_ASSIGNED):** каждая `AssemblyRequestItem` идёт отдельной поставкой с собственной ETA. `ready = COALESCE(actual_ready_date, estimated_ready_date, created_at + 3 дн)`, далее `eta = ready + post_assembly_days[warehouse_id]`, где `post_assembly_days = avg(delivery) + wb_acceptance` (без assembly — оно уже в `ready_date`). Fallback: `max(0, forecast_rf_default_days − 3)`. Просроченные ETA (`eta < today`) попадают в день 0.

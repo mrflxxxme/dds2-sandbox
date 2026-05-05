@@ -460,7 +460,8 @@ async def get_stock_analytics(
     Modes:
       - wb: only WB stocks
       - wb_rf: WB + fulfillment warehouse stocks
-      - wb_rf_transit: WB + RF + in-transit assembly requests
+      - wb_rf_transit: WB + RF + on-assembly + in-transit (full pipeline)
+      - wb_assembly_transit: WB + on-assembly + in-transit (исключает свободный РФ)
     """
     today = date.today()
     date_30d_ago = today - timedelta(days=30)
@@ -575,7 +576,7 @@ async def get_stock_analytics(
     transit_map: dict[int, list[dict]] = {}
     in_assembly_map: dict[int, list[dict]] = {}
 
-    if mode in ("wb_rf", "wb_rf_transit"):
+    if mode in ("wb_rf", "wb_rf_transit", "wb_assembly_transit"):
         from backend.services.settings_service import get_forecast_rf_default_days
 
         rf_stocks_per_wh = await _load_rf_stocks_per_warehouse(db, project_id)
@@ -583,7 +584,7 @@ async def get_stock_analytics(
         rf_total_days_map = await _load_warehouse_total_days(db, project_id, fallback_days)
         rf_post_assembly_days_map = await _load_warehouse_post_assembly_days(db, project_id, fallback_days)
 
-    if mode == "wb_rf_transit":
+    if mode in ("wb_rf_transit", "wb_assembly_transit"):
         transit_map = await _load_in_transit(db, project_id)
         in_assembly_map = await _load_in_assembly_with_eta(db, project_id, rf_post_assembly_days_map, today)
 
@@ -641,6 +642,9 @@ async def get_stock_analytics(
             total_stock = stocks_wb + stocks_rf_total + in_transit_total
         elif mode == "wb_rf":
             total_stock = stocks_wb + stocks_rf_total
+        elif mode == "wb_assembly_transit":
+            # Только то что физически уже движется/собирается в сторону WB.
+            total_stock = stocks_wb + in_assembly_total + in_transit_total
         else:
             total_stock = stocks_wb
 
@@ -669,9 +673,20 @@ async def get_stock_analytics(
                     }
                 )
 
-        # Forecast — base = WB only; free-RF + on-assembly + in-transit feed delivery_map.
-        deliveries_for_matrix = rf_synthetic + assembly_entries + transit_entries
-        if mode in ("wb_rf", "wb_rf_transit") and deliveries_for_matrix:
+        # Forecast — base = WB only; deliveries depend on mode:
+        #   wb_rf            → free-RF only
+        #   wb_rf_transit    → free-RF + on-assembly + in-transit
+        #   wb_assembly_transit → on-assembly + in-transit (БЕЗ свободного РФ)
+        if mode == "wb_assembly_transit":
+            deliveries_for_matrix = assembly_entries + transit_entries
+        elif mode == "wb_rf":
+            deliveries_for_matrix = rf_synthetic
+        elif mode == "wb_rf_transit":
+            deliveries_for_matrix = rf_synthetic + assembly_entries + transit_entries
+        else:
+            deliveries_for_matrix = []
+
+        if mode != "wb" and deliveries_for_matrix:
             forecast = _build_forecast_with_transit(
                 stocks_wb,
                 avg_daily,
@@ -713,6 +728,11 @@ async def get_stock_analytics(
             # Physical total (for days_left) remains unchanged — same goods,
             # just split between "free RF", "on assembly", "in transit" columns.
             article_data["stocks_rf"] = free_rf
+            article_data["in_assembly"] = in_assembly_total
+            article_data["in_transit"] = in_transit_total
+        if mode == "wb_assembly_transit":
+            # Свободный РФ намеренно не показываем — режим отвечает на вопрос
+            # «что прилетит на WB при условии что РФ-остаток никуда не двинется».
             article_data["in_assembly"] = in_assembly_total
             article_data["in_transit"] = in_transit_total
 

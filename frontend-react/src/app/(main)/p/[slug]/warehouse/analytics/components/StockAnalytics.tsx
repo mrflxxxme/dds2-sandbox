@@ -85,7 +85,9 @@ export function StockAnalytics() {
     const [perPage, setPerPage] = useState(25);
     const [sortKey, setSortKey] = useState<SortKey>('days_left');
     const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
-    const [stockMode, setStockMode] = useState<'wb' | 'wb_rf' | 'wb_rf_transit'>('wb');
+    const [stockMode, setStockMode] = useState<'wb' | 'wb_rf' | 'wb_rf_transit' | 'wb_assembly_transit'>('wb');
+    const showRfColumn = stockMode === 'wb_rf' || stockMode === 'wb_rf_transit';
+    const showPipelineColumns = stockMode === 'wb_rf_transit' || stockMode === 'wb_assembly_transit';
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -178,8 +180,8 @@ export function StockAnalytics() {
                 [`Ср ${trendDays}д`]: a.avg_daily,
                 'Остатки WB': a.stocks_wb,
             };
-            if (stockMode !== 'wb') row['Остатки РФ'] = a.stocks_rf ?? 0;
-            if (stockMode === 'wb_rf_transit') {
+            if (showRfColumn) row['Остатки РФ'] = a.stocks_rf ?? 0;
+            if (showPipelineColumns) {
                 row['На сборке'] = a.in_assembly ?? 0;
                 row['В пути'] = a.in_transit ?? 0;
             }
@@ -256,6 +258,7 @@ export function StockAnalytics() {
                             { key: 'wb' as const, label: 'WB' },
                             { key: 'wb_rf' as const, label: 'WB + РФ' },
                             { key: 'wb_rf_transit' as const, label: 'WB + РФ + Поставки' },
+                            { key: 'wb_assembly_transit' as const, label: 'WB + Сборка + Путь' },
                         ]).map(m => (
                             <button key={m.key} className={`btn btn-sm ${stockMode === m.key ? 'btn-primary' : 'btn-secondary'}`}
                                 onClick={() => setStockMode(m.key)}>{m.label}</button>
@@ -344,7 +347,7 @@ export function StockAnalytics() {
                         {c.label}
                     </button>
                 ))}
-                {stockMode !== 'wb' && noWbCount > 0 && (
+                {showRfColumn && noWbCount > 0 && (
                     <button
                         style={{
                             padding: '4px 12px', borderRadius: 12, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: 'none',
@@ -382,19 +385,19 @@ export function StockAnalytics() {
                                 title="Полезный остаток WB = на складе + от клиента + к клиенту × (1 − выкуп%). Выкуп% берётся средний за выбранный период.">
                                 WB{sortIcon('stocks_wb')}
                             </th>
-                            {stockMode !== 'wb' && (
+                            {showRfColumn && (
                                 <th style={thStyle('stocks_rf')} onClick={() => handleSort('stocks_rf')}
                                     title="Остатки на РФ-складах. В прогнозе прибавляются к WB через средний срок «сборка + доставка + приёмка WB» (см. вкладку «Время доставки» каждого склада или настройку по умолчанию).">
                                     РФ{sortIcon('stocks_rf')}
                                 </th>
                             )}
-                            {stockMode === 'wb_rf_transit' && (
+                            {showPipelineColumns && (
                                 <th style={thStyle('in_assembly')} onClick={() => handleSort('in_assembly')}
                                     title="В заявках на сборку (PENDING/IN_PROGRESS/READY/VEHICLE_ASSIGNED). Вычтено из РФ. В прогноз попадает на дату ready_date + (доставка + приёмка WB). Если ready_date не задана — берётся дата размещения заявки + 3 дня (по умолчанию).">
                                     НА СБОРКЕ{sortIcon('in_assembly')}
                                 </th>
                             )}
-                            {stockMode === 'wb_rf_transit' && (
+                            {showPipelineColumns && (
                                 <th style={thStyle('in_transit')} onClick={() => handleSort('in_transit')}
                                     title="Отгруженные заявки (SHIPPED). В прогноз попадают на дату «Дата сдачи» из листа логиста.">
                                     В ПУТИ{sortIcon('in_transit')}
@@ -419,13 +422,13 @@ export function StockAnalytics() {
                             <td></td>
                             <td style={{ textAlign: 'right' }}>{formatNumber(totals.avg_daily)}</td>
                             <td style={{ textAlign: 'right' }}>{formatNumber(totals.stocks_wb, 0)}</td>
-                            {stockMode !== 'wb' && (
+                            {showRfColumn && (
                                 <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s, a) => s + (a.stocks_rf ?? 0), 0), 0)}</td>
                             )}
-                            {stockMode === 'wb_rf_transit' && (
+                            {showPipelineColumns && (
                                 <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s, a) => s + (a.in_assembly ?? 0), 0), 0)}</td>
                             )}
-                            {stockMode === 'wb_rf_transit' && (
+                            {showPipelineColumns && (
                                 <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s, a) => s + (a.in_transit ?? 0), 0), 0)}</td>
                             )}
                             <td></td>
@@ -436,7 +439,7 @@ export function StockAnalytics() {
 
                         {/* Data rows */}
                         {pageArticles.map(a => {
-                            const isNoWb = stockMode !== 'wb' && a.stocks_wb === 0 && (a.stocks_rf ?? 0) > 0 && (a.in_transit ?? 0) === 0;
+                            const isNoWb = showRfColumn && a.stocks_wb === 0 && (a.stocks_rf ?? 0) > 0 && (a.in_transit ?? 0) === 0;
                             const rowBg = isNoWb ? 'rgba(255, 159, 10, 0.08)' : undefined;
                             return (
                             <tr key={a.nm_id} style={rowBg ? { background: rowBg } : undefined}>
@@ -459,18 +462,18 @@ export function StockAnalytics() {
                                     title={a.wb_buyout_pct !== undefined ? `Выкуп ${a.wb_buyout_pct}% (за ${trendDays}д)` : undefined}>
                                     {formatNumber(a.stocks_wb, 0)}
                                 </td>
-                                {stockMode !== 'wb' && (
+                                {showRfColumn && (
                                     <td style={{ textAlign: 'right', color: (a.stocks_rf ?? 0) > 0 ? '#4caf50' : undefined }}
                                         title={(a.stocks_rf ?? 0) > 0 && a.rf_avg_days != null ? `Прибудет на WB через ~${a.rf_avg_days} дн (среднее по складам, где лежит остаток)` : undefined}>
                                         {formatNumber(a.stocks_rf ?? 0, 0)}
                                     </td>
                                 )}
-                                {stockMode === 'wb_rf_transit' && (
+                                {showPipelineColumns && (
                                     <td style={{ textAlign: 'right', color: (a.in_assembly ?? 0) > 0 ? '#ff9f0a' : undefined }} title="В заявках на сборку (ещё на РФ-складе)">
                                         {formatNumber(a.in_assembly ?? 0, 0)}
                                     </td>
                                 )}
-                                {stockMode === 'wb_rf_transit' && (
+                                {showPipelineColumns && (
                                     <td style={{ textAlign: 'right', color: (a.in_transit ?? 0) > 0 ? '#2196f3' : undefined }}>
                                         {formatNumber(a.in_transit ?? 0, 0)}
                                     </td>
