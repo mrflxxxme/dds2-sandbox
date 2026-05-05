@@ -95,6 +95,10 @@ class WbFunnelDaily(Base):
     # Cost price (filled from last order or override)
     cost_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
 
+    # Localization Index (WB v3 sales-funnel: localizationPercent, timeToReady)
+    localization_percent: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    time_to_ready_minutes: Mapped[int | None] = mapped_column(Integer)
+
     __table_args__ = (
         UniqueConstraint("project_id", "date", "nm_id", name="uq_funnel_daily"),
         Index("ix_funnel_project_date", "project_id", "date"),

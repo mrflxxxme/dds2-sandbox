@@ -37,6 +37,7 @@
 - HTTP клиент: `integrations/wb_api.py`
 - Resilience (per-project circuit breaker, retry): `integrations/resilience.py`
 - Воронка/реклама: `services/funnel/` (sync.py — `get_recent_sync_logs()`, unified_sync.py, wb_funnel_api.py, wb_advertising_api.py, ad_campaigns_service.py)
+- Локализация (ИЛ + ИРП, с 23.03.2026): `services/localization_tariff.py` (таблицы КТР/КРП), `services/localization_index_service.py` (расчёт индекса), `routers/localization.py` (`/localization`, `/localization/summary`, `/localization/skus`)
 - Финансы WB: `wb_finance_sync.py` (в корне `services/`, не в funnel/) + `wb_finance_helpers.py` (parse_review_target, enrich_review_rows — обогащение строк-удержаний за отзывы товарными полями)
 - WB акции/остатки: `scheduler/jobs/wb_stocks.py`
 - Scheduler jobs: `scheduler/jobs/`
@@ -120,9 +121,9 @@ from backend.models.mixins import SoftDeleteMixin
 | Что ищу | Где |
 |---------|-----|
 | Модель таблицы | `models/{domain}.py` + `models/__init__.py` |
-| API endpoint | `routers/` (ai_chat, assembly, assembly_drafts, auth, cost, counterparty, fbo_supplies, funnel, import_txn, integrations, loans, monitoring, planning, planning_customs, planning_wb_payouts, projects, refs, reports, reports_stock, reports_wb, supply_chain, telegram, telegram_miniapp, telegram_webhook, warehouse, wb_returns, ws) |
-| Бизнес-логика | `services/` (domain services + `ai_chat_service.py` для web AI chat + `assembly_draft_service.py` для черновиков распределения сборки + `project_settings_service.py` для мутаций настроек проекта). NB: `assembly/`, `fbo_supply/`, `supply_chain/` — пакеты (разбиты из монолитов) |
-| Pydantic schemas | `schemas/` (ai_chat, anomaly, assembly, assembly_draft, auth, capital, common, cost, counterparty, imports, integrations, loan, monitoring, planning, refs, reports, supply_chain, tariff, tax, telegram, transactions, warehouse, wb_fbo, wb_returns) |
+| API endpoint | `routers/` (ai_chat, assembly, auth, cost, counterparty, fbo_supplies, funnel, import_txn, integrations, loans, monitoring, planning, planning_customs, planning_wb_payouts, projects, refs, reports, reports_stock, reports_wb, supply_chain, telegram, telegram_miniapp, telegram_webhook, warehouse, wb_returns, ws) |
+| Бизнес-логика | `services/` (domain services + `ai_chat_service.py` для web AI chat + `project_settings_service.py` для мутаций настроек проекта). NB: `assembly/`, `fbo_supply/`, `supply_chain/` — пакеты (разбиты из монолитов) |
+| Pydantic schemas | `schemas/` (ai_chat, anomaly, assembly, auth, capital, common, cost, counterparty, imports, integrations, loan, monitoring, planning, refs, reports, supply_chain, tariff, tax, telegram, transactions, warehouse, wb_fbo, wb_returns) |
 | Импорт файлов / ETL | `etl/` |
 | WB HTTP клиент | `integrations/wb_api.py` |
 | Telegram бот | `integrations/telegram_bot.py` |

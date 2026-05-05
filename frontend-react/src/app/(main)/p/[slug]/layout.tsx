@@ -59,6 +59,7 @@ const navGroups = [
             { href: '/funnel', label: 'Воронка продаж', icon: '📊', pageKey: 'funnel' },
             { href: '/trends', label: 'Метрики и тренды', icon: '📈', pageKey: 'trends' },
             { href: '/order-geography', label: 'Куда заказывают', icon: '🗺️', pageKey: 'geography' },
+            { href: '/localization', label: 'Индекс локализации', icon: '📍', pageKey: 'geography' },
             { href: '/opiu', label: 'ОПИУ', icon: '📋', pageKey: 'opiu' },
             { href: '/plan-fact', label: 'План-Факт', icon: '🎯', pageKey: 'plan-fact' },
         ],

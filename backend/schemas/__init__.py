@@ -43,6 +43,13 @@ from backend.schemas.integrations import (
     SyncLogSchema,
 )
 
+# Localization (ИЛ + ИРП)
+from backend.schemas.localization import (
+    LocalizationByPeriod,
+    LocalizationSkuRow,
+    LocalizationSummary,
+)
+
 # Monitoring
 from backend.schemas.monitoring import (
     MonitoringOverview,
@@ -230,6 +237,10 @@ __all__ = [
     # Integrations
     "IntegrationKeySchema",
     "SyncLogSchema",
+    # Localization
+    "LocalizationByPeriod",
+    "LocalizationSkuRow",
+    "LocalizationSummary",
     # Monitoring
     "MonitoringOverview",
     "SchedulerJobInfo",

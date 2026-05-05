@@ -22,7 +22,6 @@ from backend.database import AsyncSessionLocal, async_engine
 from backend.routers import (
     ai_chat,
     assembly,
-    assembly_drafts,
     auth,
     cost,
     counterparty,
@@ -31,6 +30,7 @@ from backend.routers import (
     import_txn,
     integrations,
     loans,
+    localization,
     monitoring,
     planning,
     projects,
@@ -487,12 +487,6 @@ app.include_router(
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
-    assembly_drafts.router,
-    prefix="/api/v1",
-    tags=["Assembly Drafts"],
-    dependencies=[Depends(get_current_user)],
-)
-app.include_router(
     warehouse.router,
     prefix="/api/v1",
     tags=["Warehouse"],
@@ -526,6 +520,12 @@ app.include_router(
     loans.router,
     prefix="/api/v1",
     tags=["Loans"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    localization.router,
+    prefix="/api/v1",
+    tags=["Localization"],
     dependencies=[Depends(get_current_user)],
 )
 
