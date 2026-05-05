@@ -237,15 +237,15 @@ export default function LocalizationPage() {
         let local = 0, nonLocal = 0, total = 0, contribution = 0;
         const districtAgg: Record<string, { local: number; non_local: number; total: number }> = {};
         filteredRows.forEach(r => {
-            local += r.local;
-            nonLocal += r.non_local;
-            total += r.total;
-            contribution += r.contribution;
+            local += Number(r.local) || 0;
+            nonLocal += Number(r.non_local) || 0;
+            total += Number(r.total) || 0;
+            contribution += Number(r.contribution) || 0;
             (r.districts ?? []).forEach(d => {
                 if (!districtAgg[d.district]) districtAgg[d.district] = { local: 0, non_local: 0, total: 0 };
-                districtAgg[d.district].local += d.local;
-                districtAgg[d.district].non_local += d.non_local;
-                districtAgg[d.district].total += d.total;
+                districtAgg[d.district].local += Number(d.local) || 0;
+                districtAgg[d.district].non_local += Number(d.non_local) || 0;
+                districtAgg[d.district].total += Number(d.total) || 0;
             });
         });
         return {
