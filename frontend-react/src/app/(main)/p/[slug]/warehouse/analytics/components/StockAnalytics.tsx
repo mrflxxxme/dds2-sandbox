@@ -19,7 +19,12 @@ interface Article {
     traffic_light: string;
     forecast: number[];
     stocks_rf?: number;
+    in_assembly?: number;
     in_transit?: number;
+    wb_buyout_pct?: number;
+    revenue_bdr?: number;
+    margin_pct?: number | null;
+    rf_avg_days?: number | null;
 }
 
 interface StockData {
@@ -65,7 +70,7 @@ const forecastCellStyle = (projected: number, avgDaily: number): React.CSSProper
     return {};
 };
 
-type SortKey = 'orders_30d' | 'avg_daily' | 'stocks_wb' | 'days_left' | 'vendor_code';
+type SortKey = 'orders_30d' | 'avg_daily' | 'stocks_wb' | 'days_left' | 'vendor_code' | 'revenue_bdr' | 'margin_pct' | 'stocks_rf' | 'in_assembly' | 'in_transit';
 
 /* ─── Main Component ─────────────────────────────────────── */
 export function StockAnalytics() {
@@ -81,7 +86,9 @@ export function StockAnalytics() {
     const [perPage, setPerPage] = useState(25);
     const [sortKey, setSortKey] = useState<SortKey>('days_left');
     const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
-    const [stockMode, setStockMode] = useState<'wb' | 'wb_rf' | 'wb_rf_transit'>('wb');
+    const [stockMode, setStockMode] = useState<'wb' | 'wb_rf' | 'wb_rf_transit' | 'wb_assembly_transit'>('wb');
+    const showRfColumn = stockMode !== 'wb';
+    const showPipelineColumns = stockMode === 'wb_rf_transit' || stockMode === 'wb_assembly_transit';
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -119,8 +126,8 @@ export function StockAnalytics() {
                 : data.articles;
 
         list = [...list].sort((a, b) => {
-            const av = a[sortKey];
-            const bv = b[sortKey];
+            const av = (a[sortKey] ?? 0);
+            const bv = (b[sortKey] ?? 0);
             if (typeof av === 'string' && typeof bv === 'string') {
                 return sortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
             }
@@ -169,12 +176,17 @@ export function StockAnalytics() {
                 'Предмет': a.subject,
                 'Бренд': a.brand,
                 'Заказы 30д': a.orders_30d,
+                [`Реализ. БДР ${trendDays}д, ₽`]: a.revenue_bdr ?? 0,
+                'Маржа %': a.margin_pct ?? '',
                 'Тренд %': a.trend_pct,
                 [`Ср ${trendDays}д`]: a.avg_daily,
                 'Остатки WB': a.stocks_wb,
             };
-            if (stockMode !== 'wb') row['Остатки РФ'] = a.stocks_rf ?? 0;
-            if (stockMode === 'wb_rf_transit') row['В пути'] = a.in_transit ?? 0;
+            if (showRfColumn) row['Остатки РФ'] = a.stocks_rf ?? 0;
+            if (showPipelineColumns) {
+                row['На сборке'] = a.in_assembly ?? 0;
+                row['В пути'] = a.in_transit ?? 0;
+            }
             row['Хватит дн'] = a.days_left;
             (data?.dates || []).forEach((d, i) => {
                 row[d] = (a.forecast || [])[i] ?? 0;
@@ -248,6 +260,7 @@ export function StockAnalytics() {
                             { key: 'wb' as const, label: 'WB' },
                             { key: 'wb_rf' as const, label: 'WB + РФ' },
                             { key: 'wb_rf_transit' as const, label: 'WB + РФ + Поставки' },
+                            { key: 'wb_assembly_transit' as const, label: 'WB + Сборка + Путь' },
                         ]).map(m => (
                             <button key={m.key} className={`btn btn-sm ${stockMode === m.key ? 'btn-primary' : 'btn-secondary'}`}
                                 onClick={() => setStockMode(m.key)}>{m.label}</button>
@@ -336,7 +349,7 @@ export function StockAnalytics() {
                         {c.label}
                     </button>
                 ))}
-                {stockMode !== 'wb' && noWbCount > 0 && (
+                {showRfColumn && noWbCount > 0 && (
                     <button
                         style={{
                             padding: '4px 12px', borderRadius: 12, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: 'none',
@@ -362,18 +375,41 @@ export function StockAnalytics() {
                             <th style={thStyle('orders_30d')} onClick={() => handleSort('orders_30d')}>
                                 ЗАКАЗЫ 30Д{sortIcon('orders_30d')}
                             </th>
+                            <th style={thStyle('revenue_bdr')} onClick={() => handleSort('revenue_bdr')}
+                                title={`Реализация (БДР) за ${trendDays}д — продажи минус возвраты по retail_price_withdisc_rub.`}>
+                                РЕАЛИЗ. БДР {trendDays}Д{sortIcon('revenue_bdr')}
+                            </th>
+                            <th style={thStyle('margin_pct')} onClick={() => handleSort('margin_pct')}
+                                title="Маржа % = profit / revenue × 100 за выбранный период (та же формула что в Сводных остатках). Учитывает себестоимость, налоги, удержания WB.">
+                                МАРЖА %{sortIcon('margin_pct')}
+                            </th>
                             <th style={{ textAlign: 'right' }}>ТРЕНД</th>
                             <th style={thStyle('avg_daily')} onClick={() => handleSort('avg_daily')}>
                                 СР {trendDays}Д{sortIcon('avg_daily')}
                             </th>
-                            <th style={thStyle('stocks_wb')} onClick={() => handleSort('stocks_wb')}>
+                            <th style={thStyle('stocks_wb')} onClick={() => handleSort('stocks_wb')}
+                                title="Полезный остаток WB = на складе + от клиента + к клиенту × (1 − выкуп%). Выкуп% берётся средний за выбранный период.">
                                 WB{sortIcon('stocks_wb')}
                             </th>
-                            {stockMode !== 'wb' && (
-                                <th style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>РФ</th>
+                            {showRfColumn && (
+                                <th style={thStyle('stocks_rf')} onClick={() => handleSort('stocks_rf')}
+                                    title={stockMode === 'wb_assembly_transit'
+                                        ? 'Остатки на РФ-складах (info-only). В этом режиме НЕ участвуют в прогноз-матрице — она показывает «что прилетит на WB, если РФ-остаток никуда не двинется».'
+                                        : 'Остатки на РФ-складах. В прогнозе прибавляются к WB через средний срок «сборка + доставка + приёмка WB» (см. вкладку «Время доставки» каждого склада или настройку по умолчанию).'}>
+                                    РФ{sortIcon('stocks_rf')}
+                                </th>
                             )}
-                            {stockMode === 'wb_rf_transit' && (
-                                <th style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>В ПУТИ</th>
+                            {showPipelineColumns && (
+                                <th style={thStyle('in_assembly')} onClick={() => handleSort('in_assembly')}
+                                    title="В заявках на сборку (PENDING/IN_PROGRESS/READY/VEHICLE_ASSIGNED). Вычтено из РФ. В прогноз попадает на дату ready_date + (доставка + приёмка WB). Если ready_date не задана — берётся дата размещения заявки + 3 дня (по умолчанию).">
+                                    НА СБОРКЕ{sortIcon('in_assembly')}
+                                </th>
+                            )}
+                            {showPipelineColumns && (
+                                <th style={thStyle('in_transit')} onClick={() => handleSort('in_transit')}
+                                    title="Отгруженные заявки (SHIPPED). В прогноз попадают на дату «Дата сдачи» из листа логиста.">
+                                    В ПУТИ{sortIcon('in_transit')}
+                                </th>
                             )}
                             <th style={thStyle('days_left', 'center')} onClick={() => handleSort('days_left')}>
                                 ХВАТИТ ДН{sortIcon('days_left')}
@@ -390,13 +426,23 @@ export function StockAnalytics() {
                         <tr style={{ fontWeight: 700, background: 'var(--color-bg-tertiary)' }}>
                             <td style={{ ...stickyTd, background: 'var(--color-bg-tertiary)' }}>ИТОГО</td>
                             <td style={{ textAlign: 'right' }}>{formatNumber(totals.orders_30d, 0)}</td>
+                            <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s, a) => s + (a.revenue_bdr ?? 0), 0), 0)}{' ₽'}</td>
+                            <td style={{ textAlign: 'right' }}>{(() => {
+                                const totalRev = filteredArticles.reduce((s, a) => s + (a.revenue_bdr ?? 0), 0);
+                                if (totalRev <= 0) return '—';
+                                const weighted = filteredArticles.reduce((s, a) => s + ((a.margin_pct ?? 0) * (a.revenue_bdr ?? 0)), 0) / totalRev;
+                                return formatNumber(weighted, 1) + '%';
+                            })()}</td>
                             <td></td>
                             <td style={{ textAlign: 'right' }}>{formatNumber(totals.avg_daily)}</td>
                             <td style={{ textAlign: 'right' }}>{formatNumber(totals.stocks_wb, 0)}</td>
-                            {stockMode !== 'wb' && (
+                            {showRfColumn && (
                                 <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s, a) => s + (a.stocks_rf ?? 0), 0), 0)}</td>
                             )}
-                            {stockMode === 'wb_rf_transit' && (
+                            {showPipelineColumns && (
+                                <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s, a) => s + (a.in_assembly ?? 0), 0), 0)}</td>
+                            )}
+                            {showPipelineColumns && (
                                 <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s, a) => s + (a.in_transit ?? 0), 0), 0)}</td>
                             )}
                             <td></td>
@@ -407,7 +453,7 @@ export function StockAnalytics() {
 
                         {/* Data rows */}
                         {pageArticles.map(a => {
-                            const isNoWb = stockMode !== 'wb' && a.stocks_wb === 0 && (a.stocks_rf ?? 0) > 0 && (a.in_transit ?? 0) === 0;
+                            const isNoWb = showRfColumn && a.stocks_wb === 0 && (a.stocks_rf ?? 0) > 0 && (a.in_transit ?? 0) === 0;
                             const rowBg = isNoWb ? 'rgba(255, 159, 10, 0.08)' : undefined;
                             return (
                             <tr key={a.nm_id} style={rowBg ? { background: rowBg } : undefined}>
@@ -416,6 +462,16 @@ export function StockAnalytics() {
                                     {a.vendor_code || `#${a.nm_id}`}
                                 </td>
                                 <td style={{ textAlign: 'right' }}>{formatNumber(a.orders_30d, 0)}</td>
+                                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                    {(a.revenue_bdr ?? 0) > 0 ? formatNumber(a.revenue_bdr ?? 0, 0) + ' ₽' : '—'}
+                                </td>
+                                <td style={{
+                                    textAlign: 'right',
+                                    color: a.margin_pct == null ? undefined : a.margin_pct >= 0 ? 'var(--color-success)' : 'var(--color-danger)',
+                                    fontWeight: a.margin_pct != null ? 600 : undefined,
+                                }}>
+                                    {a.margin_pct == null ? '—' : formatNumber(a.margin_pct, 1) + '%'}
+                                </td>
                                 <td style={{
                                     textAlign: 'right',
                                     color: a.trend_pct > 0 ? '#4caf50' : a.trend_pct < 0 ? '#ff4444' : undefined,
@@ -423,13 +479,22 @@ export function StockAnalytics() {
                                     {a.trend_pct > 0 ? '↑' : a.trend_pct < 0 ? '↓' : ''}{a.trend_pct}%
                                 </td>
                                 <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_daily)}</td>
-                                <td style={{ textAlign: 'right' }}>{formatNumber(a.stocks_wb, 0)}</td>
-                                {stockMode !== 'wb' && (
-                                    <td style={{ textAlign: 'right', color: (a.stocks_rf ?? 0) > 0 ? '#4caf50' : undefined }}>
+                                <td style={{ textAlign: 'right' }}
+                                    title={a.wb_buyout_pct !== undefined ? `Выкуп ${a.wb_buyout_pct}% (за ${trendDays}д)` : undefined}>
+                                    {formatNumber(a.stocks_wb, 0)}
+                                </td>
+                                {showRfColumn && (
+                                    <td style={{ textAlign: 'right', color: (a.stocks_rf ?? 0) > 0 ? '#4caf50' : undefined }}
+                                        title={(a.stocks_rf ?? 0) > 0 && a.rf_avg_days != null ? `Прибудет на WB через ~${a.rf_avg_days} дн (среднее по складам, где лежит остаток)` : undefined}>
                                         {formatNumber(a.stocks_rf ?? 0, 0)}
                                     </td>
                                 )}
-                                {stockMode === 'wb_rf_transit' && (
+                                {showPipelineColumns && (
+                                    <td style={{ textAlign: 'right', color: (a.in_assembly ?? 0) > 0 ? '#ff9f0a' : undefined }} title="В заявках на сборку (ещё на РФ-складе)">
+                                        {formatNumber(a.in_assembly ?? 0, 0)}
+                                    </td>
+                                )}
+                                {showPipelineColumns && (
                                     <td style={{ textAlign: 'right', color: (a.in_transit ?? 0) > 0 ? '#2196f3' : undefined }}>
                                         {formatNumber(a.in_transit ?? 0, 0)}
                                     </td>

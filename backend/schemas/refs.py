@@ -120,3 +120,10 @@ class ExcludedWarehousesPayload(BaseModel):
     """Input payload for setting excluded warehouses."""
 
     warehouses: list[str]
+
+
+class ForecastRfDefaultDaysPayload(BaseModel):
+    """Input payload for default RF→WB lead time (days), used when
+    `WarehouseDeliveryTime` rows are missing for a fulfillment warehouse."""
+
+    days: int

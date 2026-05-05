@@ -29,13 +29,28 @@ services:
       DDS_ROLE: worker
 
   frontend-react:
+    # Override prod build → run Next.js dev server (HMR, no rebuild required)
+    entrypoint: []
+    command: sh -c "npm install --legacy-peer-deps --silent && npx --no-install next dev --turbopack -p 3000"
+    user: root
+    working_dir: /app
     volumes:
-      - ./frontend-react/src:/app/src
-      - ./frontend-react/public:/app/public
+      - ./frontend-react:/app
+      - frontend_node_modules:/app/node_modules
+      - frontend_next_cache:/app/.next
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8000
+      NODE_ENV: development
+      NEXT_TELEMETRY_DISABLED: 1
     ports:
       - "3000:3000"
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    healthcheck:
+      disable: true
+    restart: "no"
 
   # Expose DB for local tools (DBeaver, pgAdmin, etc.) — port 5433 to avoid pgbouncer conflict
   db:
@@ -51,3 +66,7 @@ services:
   redis:
     ports:
       - "6379:6379"
+
+volumes:
+  frontend_node_modules:
+  frontend_next_cache:

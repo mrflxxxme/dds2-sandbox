@@ -37,10 +37,12 @@ export function addRefMethods(api: ApiClient) {
         addCategoryRef(data: Partial<CategoryRef>) { return api.request<CategoryRef>('POST', '/api/v1/refs/categories', data); },
         deleteCategoryRef(id: number) { return api.request<MessageResponse>('DELETE', `/api/v1/refs/categories/${id}`); },
 
-        // Warehouses
-        getWarehouses() { return api.request<Array<{ name: string; lat: number; lng: number }>>('GET', '/api/v1/refs/warehouses'); },
+        // WB Warehouses (all WB-side names: WAREHOUSE_COORDS + DB observed). NB: project FF warehouses are in warehouse.getWarehouses().
+        getAllWbWarehouses() { return api.request<Array<{ name: string; lat: number; lng: number; is_sorting_center?: boolean }>>('GET', '/api/v1/refs/warehouses'); },
         getExcludedWarehouses() { return api.request<string[]>('GET', '/api/v1/refs/excluded-warehouses'); },
         setExcludedWarehouses(warehouses: string[]) { return api.request<{ ok: boolean; excluded: string[] }>('PUT', '/api/v1/refs/excluded-warehouses', { warehouses }); },
+        getForecastRfDefaultDays() { return api.request<{ days: number }>('GET', '/api/v1/refs/forecast-rf-default-days'); },
+        setForecastRfDefaultDays(days: number) { return api.request<{ ok: boolean; days: number }>('PUT', '/api/v1/refs/forecast-rf-default-days', { days }); },
 
         // Product Tags
         getProductTags() { return api.request<ProductTag[]>('GET', '/api/v1/refs/tags'); },

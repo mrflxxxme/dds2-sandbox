@@ -1,12 +1,12 @@
 'use client';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
 import { Toast } from '@/components';
 import { usePermissions } from '@/lib/hooks/usePermissions';
-import type { AssemblyRequest, AssemblyStatus, Warehouse } from '@/types/api';
+import type { AssemblyDraft, AssemblyRequest, AssemblyStatus, Warehouse } from '@/types/api';
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -51,14 +51,17 @@ function StatusBadge({
     item,
     onStatusChange,
     onShip,
+    onDelete,
 }: {
     item: AssemblyRequest;
     onStatusChange: (id: number, newStatus: AssemblyStatus) => void;
     onShip?: (item: AssemblyRequest) => void;
+    onDelete?: (item: AssemblyRequest) => void;
 }) {
     const status = STATUS_MAP[item.status] || { label: item.status, className: '' };
     const canEdit = EDITABLE_STATUSES.includes(item.status);
     const colorClass = STATUS_COLORS[item.status] || 'bg-slate-100 text-slate-700 border-slate-200';
+    const canDelete = item.status === 'CANCELLED' || item.status === 'PENDING';
 
     if (!canEdit) {
         return (
@@ -72,6 +75,15 @@ function StatusBadge({
                         onClick={(e) => { e.stopPropagation(); onShip(item); }}
                     >
                         Отгрузить
+                    </button>
+                )}
+                {canDelete && onDelete && (
+                    <button
+                        className="text-xs rounded-full py-1.5 px-2.5 border bg-red-50 text-red-600 border-red-200 hover:bg-red-100 transition-colors"
+                        title="Удалить заявку"
+                        onClick={(e) => { e.stopPropagation(); onDelete(item); }}
+                    >
+                        🗑️
                     </button>
                 )}
             </div>
@@ -271,6 +283,7 @@ function EditableDateCell({
 export default function AssemblyListPage() {
     const params = useParams();
     const router = useRouter();
+    const searchParams = useSearchParams();
     const slug = params.slug as string;
     const { canEdit } = usePermissions();
 
@@ -280,6 +293,61 @@ export default function AssemblyListPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+    // Drafts
+    const [drafts, setDrafts] = useState<AssemblyDraft[]>([]);
+
+    // Highlight just-created request ids (from query string)
+    const justCreatedIds = useMemo(() => {
+        const raw = searchParams.get('just_created');
+        if (!raw) return new Set<number>();
+        const ids = raw.split(',').map(s => Number(s.trim())).filter(n => !isNaN(n) && n > 0);
+        return new Set(ids);
+    }, [searchParams]);
+
+    const [highlightActive, setHighlightActive] = useState(false);
+    useEffect(() => {
+        if (justCreatedIds.size === 0) return;
+        setHighlightActive(true);
+        const t = setTimeout(() => setHighlightActive(false), 3000);
+        return () => clearTimeout(t);
+    }, [justCreatedIds]);
+
+    const loadDrafts = useCallback(async () => {
+        try {
+            const list = await api.listAssemblyDrafts();
+            setDrafts(list);
+        } catch {
+            setDrafts([]);
+        }
+    }, []);
+
+    useEffect(() => { loadDrafts(); }, [loadDrafts]);
+
+    // Refresh drafts when returning to the tab (e.g. after committing on /distribute)
+    useEffect(() => {
+        const handler = () => { loadDrafts(); };
+        window.addEventListener('focus', handler);
+        return () => window.removeEventListener('focus', handler);
+    }, [loadDrafts]);
+
+    const handleDeleteDraft = useCallback(async (draftId: number) => {
+        if (!confirm('Удалить черновик?')) return;
+        try {
+            await api.deleteAssemblyDraft(draftId);
+            setDrafts(prev => prev.filter(d => d.id !== draftId));
+            setToast({ message: 'Черновик удалён', type: 'success' });
+        } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : 'Ошибка удаления';
+            // 404 → черновик уже удалён в БД (commit / параллельная вкладка); идемпотентно убираем из UI
+            if (/not found|404/i.test(msg)) {
+                setDrafts(prev => prev.filter(d => d.id !== draftId));
+                setToast({ message: 'Черновик уже был удалён', type: 'success' });
+            } else {
+                setToast({ message: msg, type: 'error' });
+            }
+        }
+    }, []);
 
     // Filters
     const [warehouseId, setWarehouseId] = useState<number | ''>('');
@@ -447,6 +515,17 @@ export default function AssemblyListPage() {
         }
     };
 
+    const handleDeleteAssembly = async (item: AssemblyRequest) => {
+        if (!confirm(`Удалить заявку ${item.number}? Это действие нельзя отменить.`)) return;
+        try {
+            await api.deleteAssembly(item.id);
+            setItems(prev => prev.filter(i => i.id !== item.id));
+            setToast({ message: `Заявка ${item.number} удалена`, type: 'success' });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка удаления', type: 'error' });
+        }
+    };
+
     // ─── Render ───────────────────────────────────────────────────────────
 
     return (
@@ -468,6 +547,50 @@ export default function AssemblyListPage() {
                     </Link>
                 )}
             </div>
+
+            {/* Drafts */}
+            {drafts.length > 0 && (
+                <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--color-text)' }}>
+                        Незавершённые черновики ({drafts.length})
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        {drafts.map(draft => (
+                            <div
+                                key={draft.id}
+                                style={{
+                                    display: 'flex', alignItems: 'center', gap: 8,
+                                    padding: '8px 12px',
+                                    border: '1px solid var(--color-border)',
+                                    borderRadius: 12,
+                                    background: 'var(--color-bg)',
+                                    fontSize: 12,
+                                }}
+                            >
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                    <span style={{ fontWeight: 600 }}>{draft.name || `Черновик #${draft.id}`}</span>
+                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                        {draft.distribution.rows.length} поз. · обновлён {formatDate(draft.updated_at)}
+                                    </span>
+                                </div>
+                                <button
+                                    className="btn btn-secondary btn-sm"
+                                    onClick={() => router.push(`/p/${slug}/warehouse/assembly/distribute?draft=${draft.id}`)}
+                                >
+                                    Открыть
+                                </button>
+                                <button
+                                    className="btn btn-danger btn-sm"
+                                    onClick={() => handleDeleteDraft(draft.id)}
+                                    title="Удалить черновик"
+                                >
+                                    ×
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             {/* Filters */}
             <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
@@ -580,15 +703,20 @@ export default function AssemblyListPage() {
                             {items.map(item => {
                                 const canEdit = EDITABLE_STATUSES.includes(item.status);
                                 const needsHighlight = item.status === 'IN_PROGRESS';
+                                const isJustCreated = highlightActive && justCreatedIds.has(item.id);
                                 return (
                                     <tr
                                         key={item.id}
-                                        style={{ cursor: 'pointer' }}
+                                        style={{
+                                            cursor: 'pointer',
+                                            background: isJustCreated ? 'rgba(52,199,89,0.15)' : undefined,
+                                            transition: 'background 0.5s ease',
+                                        }}
                                         onClick={() => router.push(`/p/${slug}/warehouse/assembly/${item.id}`)}
                                     >
                                         <td style={{ fontWeight: 500 }}>{item.number}</td>
                                         <td>
-                                            <StatusBadge item={item} onStatusChange={handleStatusChange} onShip={handleShipFromList} />
+                                            <StatusBadge item={item} onStatusChange={handleStatusChange} onShip={handleShipFromList} onDelete={handleDeleteAssembly} />
                                         </td>
                                         <td style={{ fontSize: 13 }}>
                                             {item.brands || '\u2014'}

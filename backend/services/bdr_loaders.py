@@ -8,11 +8,10 @@ import logging
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import case, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import CostOrderItem, WbCostOverride, WbFunnelDaily
-from backend.models.wb_order_cancel import WbOrderCancelDaily
 
 logger = logging.getLogger("dds.bdr_loaders")
 
@@ -224,21 +223,47 @@ async def load_tax_settings(db: AsyncSession, pid: int, d_from: date, d_to: date
 
 
 async def load_cancel_stats(db: AsyncSession, pid: int, d_from: date, d_to: date) -> dict[int, dict[str, int]]:
-    """Load order cancel stats per nm_id from wb_order_cancel_daily.
+    """Load weighted buyout stats per nm_id from wb_funnel_daily.
 
-    Returns: {nm_id: {"total": N, "cancelled": M}, ...}
+    Returns: {nm_id: {"total": N, "cancelled": M}}, where
+      total     = Σ orders_count over days WHERE buyout_percent > 0
+      cancelled = total - Σ(orders_count * buyout_percent / 100) over the same days
+
+    Preserves the contract used by wb_bdr_service: `(total - cancelled) / total`
+    yields the weighted buyout fraction. Days with buyout_percent == 0 (fresh
+    days where buyout has not formed yet — orders shipped today, customer hasn't
+    accepted yet) are excluded so they don't drag the rate to 0%. Matches WB
+    Partners cabinet (e.g. PLANSHET1 28.04-04.05 = 92%).
+
+    Previously read wb_order_cancel_daily — abandoned because supplier/orders
+    API with flag=0 returns ALL change events, breaking cancelled ⊂ total
+    invariant (cancelled > total observed: 498 vs 137 for PLANSHET1 / 30d).
     """
+    has_buyout = WbFunnelDaily.buyout_percent > 0
     result = await db.execute(
         select(
-            WbOrderCancelDaily.nm_id,
-            func.sum(WbOrderCancelDaily.total_orders).label("total"),
-            func.sum(WbOrderCancelDaily.cancelled_orders).label("cancelled"),
+            WbFunnelDaily.nm_id,
+            func.sum(case((has_buyout, WbFunnelDaily.orders_count), else_=0)).label("total"),
+            func.sum(
+                case(
+                    (has_buyout, WbFunnelDaily.orders_count * WbFunnelDaily.buyout_percent),
+                    else_=0,
+                )
+            ).label("weighted"),
         )
         .where(
-            WbOrderCancelDaily.project_id == pid,
-            WbOrderCancelDaily.dt >= d_from,
-            WbOrderCancelDaily.dt <= d_to,
+            WbFunnelDaily.project_id == pid,
+            WbFunnelDaily.date >= d_from,
+            WbFunnelDaily.date <= d_to,
         )
-        .group_by(WbOrderCancelDaily.nm_id)
+        .group_by(WbFunnelDaily.nm_id)
     )
-    return {r.nm_id: {"total": int(r.total or 0), "cancelled": int(r.cancelled or 0)} for r in result}
+    out: dict[int, dict[str, int]] = {}
+    for r in result:
+        total = int(r.total or 0)
+        if total <= 0:
+            continue
+        delivered = int(round(float(r.weighted or 0) / 100.0))
+        cancelled = max(0, total - delivered)
+        out[r.nm_id] = {"total": total, "cancelled": cancelled}
+    return out

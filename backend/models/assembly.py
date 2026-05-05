@@ -8,7 +8,7 @@ TZ: see backend/DOMAIN_ASSEMBLY.md for full spec.
 import enum
 from datetime import date, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     Date,
@@ -20,6 +20,7 @@ from sqlalchemy import (
     String,
     Text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -188,3 +189,42 @@ class AssemblyStatusHistory(Base):
         Index("ix_assembly_status_history_project_id", "project_id"),
         Index("ix_assembly_status_history_request_id", "assembly_request_id"),
     )
+
+
+# ─── Assembly Draft ─────────────────────────────────────────────────────────
+
+
+class AssemblyDraft(Base, TimestampMixin, SoftDeleteMixin):
+    """
+    Draft of an assembly distribution: source FF warehouses x WB target warehouses.
+
+    Lives until commit_draft() turns it into N AssemblyRequests (one per
+    unique source/target pair). Soft-deleted afterwards. Persisted in DB so
+    the user can reopen across devices and survive accidental tab close.
+
+    distribution JSON shape:
+    {
+      "source_warehouse_ids": [int, ...],   # selected RF warehouses
+      "target_warehouse_names": [str, ...], # selected WB warehouse names
+      "rows": [
+        {
+          "nm_id": int,
+          "barcode": str,
+          "vendor_code": str,
+          "src": {"<warehouse_id>": qty, ...},  # how much to take per FF
+          "tgt": {"<wb_warehouse_name>": qty, ...},  # how much to ship per WB
+        },
+        ...
+      ]
+    }
+    """
+
+    __tablename__ = "assembly_drafts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, default="Черновик сборки")
+    distribution: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (Index("ix_assembly_drafts_project_id", "project_id"),)

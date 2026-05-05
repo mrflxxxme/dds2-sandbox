@@ -133,19 +133,50 @@ Endpoint: `GET /warehouse/assembly/shipments/analytics`
 
 | Файл | Назначение |
 |------|-----------|
-| models/assembly.py | ORM: AssemblyRequest + Item + StatusHistory |
+| models/assembly.py | ORM: AssemblyRequest + Item + StatusHistory + AssemblyDraft |
 | schemas/assembly.py | Pydantic: CRUD + LogisticsAnalytics DTOs |
+| schemas/assembly_draft.py | Pydantic для AssemblyDraft (Distribution / Row / Create / Update / Read / CommitResponse) |
 | services/assembly_service.py | Бизнес-логика + аналитика |
+| services/assembly_draft_service.py | CRUD черновика + commit_draft (валидация, pro-rata, NxAssemblyRequest, atomic rollback) |
 | routers/assembly.py | 14 HTTP endpoints (CRUD + workflow + analytics) |
+| routers/assembly_drafts.py | 6 endpoints под /api/v1/assembly/drafts (list/get/create/update/delete/commit) |
+
+## AssemblyDraft (распределение N×M)
+
+Черновик распределения с экрана «Потребность по складам» → «Создать сборку». Юзер выбирает чекбоксами артикулы, попадает на матрицу `ФФ-источники × WB-целевые`, редактирует кол-ва, балансирует Σ src ↔ Σ tgt per row, потом «Создать сборки» создаёт N `AssemblyRequest` (по одной на каждую уникальную пару `(source_ff, target_wb)` с qty>0).
+
+`distribution` JSONB:
+```jsonc
+{
+  "source_warehouse_ids": [int, ...],
+  "target_warehouse_names": ["Электросталь", ...],
+  "rows": [
+    { "nm_id": int, "barcode": str, "vendor_code": str,
+      "src": {"<warehouse_id>": qty, ...},
+      "tgt": {"<wb_warehouse_name>": qty, ...} }
+  ],
+  "pallets_count": int,
+  "pallet_weight_kg": float,
+  "estimated_ready_date": "YYYY-MM-DD" | null
+}
+```
+
+`commit_draft`:
+- per-row валидация `Σ src == Σ tgt > 0`, иначе 400
+- pro-rata распределение в пары (largest-remainder для целочисленности)
+- создаёт `AssemblyRequest(status=IN_PROGRESS, wb_warehouse_name_manual=<target>, wb_fbo_supply_id=None)` + items
+- atomic: исключение → rollback всех созданных, draft остаётся
+- успех → soft-delete draft
 
 ## Frontend
 
 | Файл | Назначение |
 |------|-----------|
-| warehouse/assembly/page.tsx | Список заявок |
-| warehouse/assembly/new/page.tsx | Создание (Ctrl+V paste) |
+| warehouse/assembly/page.tsx | Список заявок + блок «Незавершённые черновики» + подсветка `?just_created=ids` 3 сек |
+| warehouse/assembly/new/page.tsx | Создание одной сборки вручную (Ctrl+V paste) |
 | warehouse/assembly/[id]/page.tsx | Детали + inline edit |
 | warehouse/assembly/[id]/edit/page.tsx | Форма редактирования |
+| warehouse/assembly/distribute/page.tsx | Двух-сторонняя матрица ФФ × WB; live-валидация балансов; «↺ Авто-баланс» (greedy src + pro-rata tgt); autosave 5s; commit → редирект на сборку или список с `just_created` |
 | warehouse/logistics/page.tsx | Лист логиста + аналитика (KPI, график, матрица) |
 
 ## Полное ТЗ и UX

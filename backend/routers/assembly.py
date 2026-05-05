@@ -244,6 +244,21 @@ async def cancel_request(
         raise HTTPException(400, str(e)) from None
 
 
+@router.delete("/{request_id}", status_code=204, dependencies=[Depends(rate_limit_write)])
+async def delete_request(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Soft-delete a PENDING or CANCELLED assembly request."""
+    try:
+        await assembly_service.delete_request(db, project.id, request_id)
+    except ValueError as e:
+        msg = str(e)
+        status = 404 if "not found" in msg.lower() else 400
+        raise HTTPException(status, msg) from None
+
+
 # --- Bulk operations --------------------------------------------------------
 
 

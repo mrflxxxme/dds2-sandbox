@@ -6,17 +6,34 @@ Uses compute_need() from warehouse_stock_service for the core formula.
 """
 
 import logging
+import re
 from datetime import date, timedelta
 
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.cache import cached
 from backend.models import WbFunnelDaily, WbWarehouseStock
 from backend.services.warehouse_stock_service import compute_need
 
 logger = logging.getLogger("dds.stock_analytics")
 
+_WH_PARENS_RE = re.compile(r"\s*\([^)]*\)\s*$")
 
+
+def _normalize_wb_warehouse(name: str | None) -> str:
+    """Strip trailing parenthesized suffix so FBO and order/stock names match.
+
+    'Краснодар (Тихорецкая)' -> 'Краснодар'
+    'Самара (Новосемейкино)' -> 'Самара'
+    'СЦ Симферополь (Молодежненское)' -> 'СЦ Симферополь'
+    """
+    if not name:
+        return ""
+    return _WH_PARENS_RE.sub("", name).strip()
+
+
+@cached(prefix="reports:warehouse_need", ttl=300)
 async def get_warehouse_need(
     db: AsyncSession,
     project_id: int,
@@ -44,6 +61,7 @@ async def get_warehouse_need(
         WarehouseStock,
         WarehouseType,
     )
+    from backend.models.wb_fbo import WbFboSupply
     from backend.services.funnel.wb_api_client import (
         fetch_supplier_orders,
         get_wb_key,
@@ -69,6 +87,17 @@ async def get_warehouse_need(
     open_warehouses: list[str] = list(WAREHOUSE_COORDS.keys())
     city_map: dict[str, str] = {}
     okrug_map: dict[str, str] = {}
+
+    # Excluded warehouses apply to BOTH modes — used to skip e.g. all SC (sorting
+    # centers) from per-WB demand. Stored already-normalized (no parens).
+    from backend.services.settings_service import get_excluded_warehouses
+
+    excluded_list = await get_excluded_warehouses(db, project_id)
+    excluded_set = {_normalize_wb_warehouse(w) for w in excluded_list if w}
+    if excluded_set:
+        open_warehouses = [w for w in open_warehouses if w not in excluded_set]
+        logger.info("Excluded warehouses for project %s: %s", project_id, sorted(excluded_set))
+
     if mode == "hypothetical":
         from backend.models.order_city import OrderCityMap
 
@@ -81,13 +110,6 @@ async def get_warehouse_need(
             city_map[row.srid] = row.city
             if row.okrug:
                 okrug_map[row.srid] = row.okrug
-
-        from backend.services.settings_service import get_excluded_warehouses
-
-        excluded = await get_excluded_warehouses(db, project_id)
-        if excluded:
-            open_warehouses = [w for w in open_warehouses if w not in excluded]
-            logger.info("Excluded warehouses for project %s: %s", project_id, excluded)
 
     if api_key:
         orders = await fetch_supplier_orders(api_key, trend_start.isoformat())
@@ -113,7 +135,8 @@ async def get_warehouse_need(
             else:
                 wh_name = order.get("warehouseName", "")
 
-            if not wh_name:
+            wh_name = _normalize_wb_warehouse(wh_name)
+            if not wh_name or wh_name in excluded_set:
                 continue
 
             key = (wh_name, nm_id)
@@ -164,7 +187,13 @@ async def get_warehouse_need(
     all_nm_ids: set[int] = set()
 
     for r in wh_result:  # type: ignore[assignment]
-        stock_lookup[(r.warehouse_name, r.nm_id)] = int(r.quantity or 0)
+        wh_norm = _normalize_wb_warehouse(r.warehouse_name)
+        if not wh_norm or wh_norm in excluded_set:
+            continue
+        key = (wh_norm, r.nm_id)
+        # Several physical sub-warehouses can collapse into one normalized name;
+        # sum their quantities so the analytics view sees a single column.
+        stock_lookup[key] = stock_lookup.get(key, 0) + int(r.quantity or 0)
         all_nm_ids.add(r.nm_id)
         if r.nm_id not in vendor_map:
             vendor_map[r.nm_id] = r.vendor_code or f"#{r.nm_id}"
@@ -182,33 +211,12 @@ async def get_warehouse_need(
     else:
         wh_names_to_show = set(wh for (wh, _) in stock_lookup)
 
-    # 4. Build warehouse -> articles need map
+    # raw_need_per_article[nm_id] = full demand across all WB warehouses (pre-allocation)
+    # wh_data[wh][articles][nm].need = post-allocation (minus already-allocated assemblies/transit)
+    # The actual build of wh_data happens after we know target-warehouse allocations
+    # (assembly_target_map / transit_target_map below).
+    raw_need_per_article: dict[int, int] = {}
     wh_data: dict[str, dict] = {}
-
-    for wh_name in wh_names_to_show:
-        if wh_name not in wh_data:
-            wh_data[wh_name] = {"name": wh_name, "total_need": 0, "articles": {}}
-
-        for nm_id in all_nm_ids:
-            stock = stock_lookup.get((wh_name, nm_id), 0)
-            total_orders_at_wh = wh_orders_map.get((wh_name, nm_id), 0)
-
-            if total_orders_at_wh == 0 and stock == 0:
-                continue
-
-            avg_d = round(total_orders_at_wh / max(actual_days, 1), 2)
-            need = compute_need(stock, avg_d, supply_days)
-
-            wh_data[wh_name]["articles"][nm_id] = {
-                "nm_id": nm_id,
-                "vendor_code": vendor_map.get(nm_id, f"#{nm_id}"),
-                "stock": stock,
-                "avg_daily": avg_d,
-                "need": need,
-            }
-            wh_data[wh_name]["total_need"] += need
-
-    warehouses = sorted(wh_data.values(), key=lambda w: w["total_need"], reverse=True)
 
     # -- RF (fulfillment) warehouses --
     rf_warehouses_result = await db.execute(
@@ -223,6 +231,20 @@ async def get_warehouse_need(
     )
     rf_warehouses = rf_warehouses_result.scalars().all()
     rf_wh_ids = [w.id for w in rf_warehouses]
+
+    # -- One representative barcode per nm_id (for prefilled assembly form) --
+    barcode_map: dict[int, str] = {}
+    barcode_result = await db.execute(
+        select(Nomenclature.article_wb, func.min(Nomenclature.barcode).label("barcode"))
+        .where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.article_wb.isnot(None),
+        )
+        .group_by(Nomenclature.article_wb)
+    )
+    for row in barcode_result:  # type: ignore[assignment]
+        if row.barcode:
+            barcode_map[row.article_wb] = row.barcode
 
     # -- RF stock per warehouse per nm_id --
     rf_stock_map: dict[int, dict[int, int]] = {}  # nm_id -> {warehouse_id: qty}
@@ -307,6 +329,79 @@ async def get_warehouse_need(
             "date": row.delivery_date.isoformat() if row.delivery_date else None,
         }
 
+    # -- Allocation per target WB warehouse: assembly + in-transit --
+    # target = COALESCE(WbFboSupply.warehouse_name, AssemblyRequest.wb_warehouse_name_manual)
+    target_label = func.coalesce(
+        WbFboSupply.warehouse_name,
+        AssemblyRequest.wb_warehouse_name_manual,
+    ).label("target_wh")
+
+    assembly_target_map: dict[int, dict[str, int]] = {}  # nm_id -> {wb_warehouse: qty}
+    transit_target_map: dict[int, dict[str, int]] = {}
+
+    target_alloc_result = await db.execute(
+        select(
+            Nomenclature.article_wb,
+            AssemblyRequest.status,
+            target_label,
+            func.sum(AssemblyRequestItem.quantity).label("qty"),
+        )
+        .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .join(Nomenclature, Nomenclature.id == AssemblyRequestItem.nomenclature_id)
+        .outerjoin(WbFboSupply, WbFboSupply.id == AssemblyRequest.wb_fbo_supply_id)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted.is_(False),
+            AssemblyRequest.status.in_([*active_statuses, AssemblyStatus.SHIPPED]),
+            Nomenclature.article_wb.isnot(None),
+        )
+        .group_by(Nomenclature.article_wb, AssemblyRequest.status, target_label)
+    )
+    for row in target_alloc_result:  # type: ignore[assignment]
+        nm = row.article_wb
+        target = _normalize_wb_warehouse(row.target_wh)
+        qty = int(row.qty or 0)
+        if not target or qty <= 0:
+            continue
+        bucket = transit_target_map if row.status == AssemblyStatus.SHIPPED else assembly_target_map
+        if nm not in bucket:
+            bucket[nm] = {}
+        bucket[nm][target] = bucket[nm].get(target, 0) + qty
+
+    # 4. Build warehouse -> articles need map (per-warehouse need is post-allocation)
+    for wh_name in wh_names_to_show:
+        if wh_name not in wh_data:
+            wh_data[wh_name] = {"name": wh_name, "total_need": 0, "articles": {}}
+
+        for nm_id in all_nm_ids:
+            stock = stock_lookup.get((wh_name, nm_id), 0)
+            total_orders_at_wh = wh_orders_map.get((wh_name, nm_id), 0)
+
+            if total_orders_at_wh == 0 and stock == 0:
+                continue
+
+            avg_d = round(total_orders_at_wh / max(actual_days, 1), 2)
+            raw_need = compute_need(stock, avg_d, supply_days)
+
+            # Full (pre-allocation) demand goes into the per-article total
+            raw_need_per_article[nm_id] = raw_need_per_article.get(nm_id, 0) + raw_need
+
+            # Subtract assemblies and in-transit already heading to THIS WB warehouse
+            target_asm = assembly_target_map.get(nm_id, {}).get(wh_name, 0)
+            target_transit = transit_target_map.get(nm_id, {}).get(wh_name, 0)
+            need = max(0, raw_need - target_asm - target_transit)
+
+            wh_data[wh_name]["articles"][nm_id] = {
+                "nm_id": nm_id,
+                "vendor_code": vendor_map.get(nm_id, f"#{nm_id}"),
+                "stock": stock,
+                "avg_daily": avg_d,
+                "need": need,
+            }
+            wh_data[wh_name]["total_need"] += need
+
+    warehouses = sorted(wh_data.values(), key=lambda w: w["total_need"], reverse=True)
+
     # -- Revenue for analysis_days from wb_finance_rows (sales - returns) --
     from backend.models.wb_finance import WbFinanceRow
 
@@ -358,11 +453,8 @@ async def get_warehouse_need(
         avg_delivery_days = round(total_days_sum / len(dt_rows))
 
     # -- Build enriched article list with need totals --
-    # Pre-compute total_need per nm_id across all WB warehouses
-    article_need_map: dict[int, int] = {}
-    for wh_info in wh_data.values():
-        for nm_id, art_info in wh_info["articles"].items():
-            article_need_map[nm_id] = article_need_map.get(nm_id, 0) + art_info["need"]
+    # total_need per article = full pre-allocation demand (built in step 4 above)
+    article_need_map = raw_need_per_article
 
     # Summary accumulators
     sum_total_need = 0
@@ -374,7 +466,7 @@ async def get_warehouse_need(
 
     enriched_articles = []
     for nm_id in all_nm_ids:
-        total_need = article_need_map.get(nm_id, 0)
+        raw_demand = article_need_map.get(nm_id, 0)
 
         # RF stocks per warehouse
         rf_stocks_for_nm: dict[int, dict] = {}
@@ -393,12 +485,10 @@ async def get_warehouse_need(
         in_transit_qty = transit_info["qty"]
         in_transit_date = transit_info["date"]
 
-        # can_send = MIN(total_available_rf, total_need) rounded DOWN to nearest 10
-        can_send_raw = min(total_rf_available, total_need)
-        can_send = max(0, (can_send_raw // 10) * 10)
-
-        # deficit = MAX(0, total_need - in_transit - can_send)
-        deficit = max(0, total_need - in_transit_qty - can_send)
+        # total_need = what is STILL left to ship (raw demand minus in-assembly + in-transit)
+        total_need = max(0, raw_demand - in_asm_total - in_transit_qty)
+        can_send = min(total_rf_available, total_need)
+        deficit = max(0, total_need - can_send)
 
         stocks_wb = wb_stock_total.get(nm_id, 0)
 
@@ -406,6 +496,7 @@ async def get_warehouse_need(
             {
                 "nm_id": nm_id,
                 "vendor_code": vendor_map.get(nm_id, f"#{nm_id}"),
+                "barcode": barcode_map.get(nm_id, ""),
                 "brand": brand_map.get(nm_id, ""),
                 "subject": subject_map.get(nm_id, ""),
                 "total_need": total_need,

@@ -370,6 +370,30 @@ async def cancel_request(db: AsyncSession, project_id: int, request_id: int) -> 
     return req
 
 
+async def delete_request(db: AsyncSession, project_id: int, request_id: int) -> None:
+    """
+    Permanently remove (soft-delete) an assembly request.
+
+    Allowed only for PENDING or CANCELLED requests — anything that has consumed
+    or moved stock must remain visible for audit. To delete a SHIPPED/IN_PROGRESS
+    request, cancel it first (which rolls back stock), then delete.
+    """
+    from .crud import get_assembly_request
+
+    req = await get_assembly_request(db, project_id, request_id)
+    if not req:
+        raise ValueError("Assembly request not found")
+
+    current = AssemblyStatus(req.status)
+    if current not in {AssemblyStatus.PENDING, AssemblyStatus.CANCELLED}:
+        raise ValueError(f"Заявку в статусе «{current.value}» нельзя удалить. Сначала отмените её.")
+
+    req.soft_delete()
+    await db.commit()
+
+    await invalidate_cache("reports:balance")
+
+
 # --- Bulk operations --------------------------------------------------------
 
 

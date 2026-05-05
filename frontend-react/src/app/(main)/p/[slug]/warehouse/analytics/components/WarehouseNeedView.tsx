@@ -1,7 +1,9 @@
 'use client';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, exportToExcel } from '@/lib/utils';
+import type { AssemblyDraftRow } from '@/types/api';
 
 /* ── Types ── */
 
@@ -19,6 +21,7 @@ interface ArticleRfStock {
 interface NeedArticle {
     nm_id: number;
     vendor_code: string;
+    barcode: string;
     brand: string;
     subject: string;
     total_need: number;
@@ -94,9 +97,14 @@ interface OrderCitiesStatus {
 }
 
 export function WarehouseNeedView() {
+    const params = useParams();
+    const router = useRouter();
+    const slug = params?.slug as string | undefined;
+
     const [data, setData] = useState<StockNeedResponse | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [creatingAssembly, setCreatingAssembly] = useState(false);
     const [supplyDays, setSupplyDays] = useState(14);
     const [analysisDays, setAnalysisDays] = useState(14);
     const [mode, setMode] = useState<'actual' | 'hypothetical'>('actual');
@@ -325,6 +333,84 @@ export function WarehouseNeedView() {
         return sum;
     }, [checkedIds, assemblyWarehouseId, data]);
 
+    /* ── Create assembly draft ── */
+
+    const handleCreateAssembly = useCallback(async () => {
+        if (!data || !assemblyWarehouseId || checkedIds.size === 0) return;
+        setCreatingAssembly(true);
+
+        try {
+            const draftRows: AssemblyDraftRow[] = [];
+            for (const nmId of checkedIds) {
+                const article = data.articles.find(a => a.nm_id === nmId);
+                if (!article) continue;
+                const barcode = article.barcode;
+                if (!barcode) continue;
+
+                const available = article.rf_stocks[assemblyWarehouseId]?.available || 0;
+                const need = article.total_need;
+                const qty = Math.min(available, need);
+                if (qty <= 0) continue;
+
+                // Default tgt: pro-rata by per-WB need from data.warehouses
+                const tgt: Record<string, number> = {};
+                let remaining = qty;
+                for (const wh of data.warehouses) {
+                    const wbNeed = wh.articles?.[nmId]?.need || 0;
+                    if (wbNeed > 0 && remaining > 0) {
+                        const give = Math.min(remaining, wbNeed);
+                        tgt[wh.name] = give;
+                        remaining -= give;
+                    }
+                }
+                if (remaining > 0 && Object.keys(tgt).length > 0) {
+                    const firstKey = Object.keys(tgt)[0];
+                    tgt[firstKey] = (tgt[firstKey] || 0) + remaining;
+                }
+
+                draftRows.push({
+                    nm_id: nmId,
+                    barcode,
+                    vendor_code: article.vendor_code,
+                    src: { [String(assemblyWarehouseId)]: qty },
+                    tgt,
+                });
+            }
+
+            if (draftRows.length === 0) {
+                alert('Не удалось собрать позиции (нет barcode или нечего отправлять)');
+                setCreatingAssembly(false);
+                return;
+            }
+
+            const targetNames = Object.keys(
+                draftRows.reduce<Record<string, true>>((acc, r) => {
+                    for (const k of Object.keys(r.tgt)) acc[k] = true;
+                    return acc;
+                }, {}),
+            );
+
+            const draft = await api.createAssemblyDraft({
+                distribution: {
+                    source_warehouse_ids: [assemblyWarehouseId],
+                    target_warehouse_names: targetNames,
+                    rows: draftRows,
+                    pallets_count: 1,
+                    pallet_weight_kg: 0,
+                    estimated_ready_date: null,
+                },
+            });
+
+            if (slug) {
+                router.push(`/p/${slug}/warehouse/assembly/distribute?draft=${draft.id}`);
+            }
+        } catch (e: unknown) {
+            alert(`Ошибка создания черновика: ${e instanceof Error ? e.message : String(e)}`);
+        } finally {
+            setCreatingAssembly(false);
+        }
+    }, [data, assemblyWarehouseId, checkedIds, router, slug]);
+
     /* ── Sort ── */
 
     const handleSort = (col: string) => {
@@ -535,11 +621,11 @@ export function WarehouseNeedView() {
 
                 <button
                     className="btn btn-sm btn-primary"
-                    disabled={checkedCount === 0}
-                    onClick={() => alert('Создание сборки будет доступно после привязки FBO поставки')}
-                    style={{ opacity: checkedCount === 0 ? 0.5 : 1 }}
+                    disabled={checkedCount === 0 || creatingAssembly}
+                    onClick={handleCreateAssembly}
+                    style={{ opacity: (checkedCount === 0 || creatingAssembly) ? 0.5 : 1 }}
                 >
-                    Создать сборку ({checkedCount})
+                    {creatingAssembly ? 'Создание...' : `Создать сборку (${checkedCount})`}
                 </button>
 
                 <button className="btn btn-sm btn-secondary" onClick={handleExport} title="Экспорт в Excel">Excel</button>
@@ -955,9 +1041,10 @@ export function WarehouseNeedView() {
                     </span>
                     <button
                         className="btn btn-sm btn-primary"
-                        onClick={() => alert('Создание сборки будет доступно после привязки FBO поставки')}
+                        onClick={handleCreateAssembly}
+                        disabled={creatingAssembly}
                     >
-                        Создать сборку
+                        {creatingAssembly ? 'Создание...' : 'Создать сборку'}
                     </button>
                 </div>
             )}

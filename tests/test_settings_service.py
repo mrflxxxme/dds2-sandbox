@@ -63,8 +63,7 @@ class TestExcludedWarehouses:
     @pytest.mark.asyncio
     async def test_set_and_get(self, db_session, project):
         """Set excluded warehouses and read back."""
-        # Use actual warehouse names from WAREHOUSE_COORDS
-        all_wh = get_all_warehouses()
+        all_wh = await get_all_warehouses()
         if not all_wh:
             pytest.skip("No warehouses defined in WAREHOUSE_COORDS")
         wh_name = all_wh[0]["name"]
@@ -74,15 +73,29 @@ class TestExcludedWarehouses:
         assert wh_name in result
 
     @pytest.mark.asyncio
-    async def test_invalid_warehouse_filtered(self, db_session, project):
-        """Invalid warehouse names are filtered out."""
-        result = await set_excluded_warehouses(db_session, project.id, ["NONEXISTENT_WH_12345"])
-        assert result == []
+    async def test_arbitrary_names_accepted(self, db_session, project):
+        """Validation against WAREHOUSE_COORDS removed: any non-empty name persists,
+        because real WB warehouse names (e.g. «СЦ Барнаул») are not in coords."""
+        result = await set_excluded_warehouses(db_session, project.id, ["СЦ Барнаул", "WhateverNew"])
+        assert "СЦ Барнаул" in result
+        assert "WhateverNew" in result
+
+    @pytest.mark.asyncio
+    async def test_empty_and_whitespace_filtered(self, db_session, project):
+        """Empty / whitespace-only names are dropped."""
+        result = await set_excluded_warehouses(db_session, project.id, ["", "   ", "Москва"])
+        assert result == ["Москва"]
+
+    @pytest.mark.asyncio
+    async def test_parens_normalized(self, db_session, project):
+        """Parenthesized suffixes are stripped (Краснодар (Тихорецкая) -> Краснодар)."""
+        result = await set_excluded_warehouses(db_session, project.id, ["Краснодар (Тихорецкая)"])
+        assert result == ["Краснодар"]
 
     @pytest.mark.asyncio
     async def test_project_isolation(self, db_session, project, other_project):
         """Excluded warehouses are project-specific."""
-        all_wh = get_all_warehouses()
+        all_wh = await get_all_warehouses()
         if not all_wh:
             pytest.skip("No warehouses defined in WAREHOUSE_COORDS")
         wh_name = all_wh[0]["name"]
@@ -97,17 +110,20 @@ class TestExcludedWarehouses:
 
 
 class TestGetAllWarehouses:
-    def test_returns_list_of_dicts(self):
-        """Returns list with name/lat/lng keys."""
-        result = get_all_warehouses()
+    @pytest.mark.asyncio
+    async def test_returns_list_of_dicts(self):
+        """Returns list with name/lat/lng/is_sorting_center keys."""
+        result = await get_all_warehouses()
         assert isinstance(result, list)
         if result:
             assert "name" in result[0]
             assert "lat" in result[0]
             assert "lng" in result[0]
+            assert "is_sorting_center" in result[0]
 
-    def test_sorted_by_name(self):
+    @pytest.mark.asyncio
+    async def test_sorted_by_name(self):
         """Warehouses are sorted alphabetically."""
-        result = get_all_warehouses()
+        result = await get_all_warehouses()
         names = [w["name"] for w in result]
         assert names == sorted(names)

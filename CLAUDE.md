@@ -34,12 +34,14 @@ cd frontend-react && npx playwright test tests/e2e/smoke.spec.ts  # smoke E2E
 **Frontend:** типы → `types/api.ts`, API → `lib/api/`, числа → `formatNumber()`, обязательно loading/error/empty states.
 
 ## Workflow (детали в `.claude/rules/lead_agent_v2.md`)
-- Фича → уточни ТЗ → ТЗ approved → код
-- Баг/мелочь → сразу
-- Backend+Frontend (обе части) → 2 параллельных teammate
-- Только backend ИЛИ frontend → lead сам, sequential
-- Subagents (`code-reviewer`, `security-reviewer` etc.) → ПОСЛЕ работы, по триггеру
-- Alembic миграции → ТОЛЬКО sequential, lead
+- Фича → уточни ТЗ при 3 условиях (>3 файлов, неясно WHAT/WHERE, hard-to-revert) → код. Иначе сразу.
+- Баг/мелочь / explain → сразу, без вопросов.
+- Backend+Frontend (обе части) → 2 параллельных teammate **в одном turn-е** (hook требует).
+- Только backend ИЛИ frontend → lead сам, sequential.
+- Fan-out (3+ файла контекста / комплексное ревью) → spawn в одном turn-е.
+- Subagents (`code-reviewer`, `security-reviewer` etc.) → ПОСЛЕ работы, по триггеру.
+- Alembic миграции → ТОЛЬКО sequential, lead.
+- **После работы → docs-sync → atomic коммит** (DOMAIN_*.md / CLAUDE.md / learnings). Push — по запросу.
 
 ## Технические заметки
 - **PgBouncer:** `prepared_statement_cache_size=0`, `DATABASE_URL_SYNC` для Alembic/ETL

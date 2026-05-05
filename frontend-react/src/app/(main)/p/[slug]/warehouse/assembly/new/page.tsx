@@ -19,6 +19,7 @@ export default function AssemblyNewPage() {
     const slug = params.slug as string;
 
     const preselectedFboId = searchParams.get('fbo_supply_id');
+    const prefillFromAnalytics = searchParams.get('prefill') === '1';
 
     // Form state
     const [warehouseId, setWarehouseId] = useState<number | ''>('');
@@ -115,6 +116,31 @@ export default function AssemblyNewPage() {
             })
             .catch(() => setStockMap(new Map()));
     }, [warehouseId]);
+
+    // ─── Prefill from analytics (sessionStorage handoff) ──────────────────
+
+    useEffect(() => {
+        if (!prefillFromAnalytics) return;
+        const raw = sessionStorage.getItem('pending_assembly');
+        if (!raw) return;
+        try {
+            const parsed = JSON.parse(raw) as {
+                warehouse_id: number;
+                items: { barcode: string; quantity: number; product_name?: string }[];
+            };
+            if (parsed.warehouse_id) setWarehouseId(parsed.warehouse_id);
+            if (Array.isArray(parsed.items) && parsed.items.length > 0) {
+                setFormItems(parsed.items.map(i => ({
+                    barcode: i.barcode,
+                    quantity: i.quantity,
+                    product_name: i.product_name,
+                })));
+            }
+        } catch {
+            // ignore malformed payload
+        }
+        sessionStorage.removeItem('pending_assembly');
+    }, [prefillFromAnalytics]);
 
     // ─── Pre-select FBO supply from URL ───────────────────────────────────
 
