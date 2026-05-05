@@ -19,6 +19,8 @@ from backend.schemas.localization import (
     LocalizationSummary,
 )
 from backend.services import localization_index_service
+from backend.services.wb_orders_sync_service import sync_wb_orders
+from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter()
 
@@ -76,3 +78,18 @@ async def get_localization_full(
         date_to.isoformat(),
     )
     return {"summary": summary, "rows": rows}
+
+
+@router.post("/localization/sync", dependencies=[Depends(rate_limit_write)])
+async def sync_localization_now(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Manual trigger: пересинк wb_orders за последние 30 дней + invalidate кэш.
+
+    Используется кнопкой «Обновить» в UI отчёта локализации. Под
+    rate_limit_write — защищает от бомбёжки WB Statistics API
+    (rate-limit ~1 req/min на ключ).
+    """
+    stats = await sync_wb_orders(db, project.id, days_back=30)
+    return {"ok": True, **stats}

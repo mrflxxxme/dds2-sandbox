@@ -45,6 +45,7 @@ from backend.schemas.integrations import (
 
 # Localization (ИЛ + ИРП)
 from backend.schemas.localization import (
+    DistrictBreakdown,
     LocalizationByPeriod,
     LocalizationSkuRow,
     LocalizationSummary,
@@ -241,6 +242,7 @@ __all__ = [
     "LocalizationByPeriod",
     "LocalizationSkuRow",
     "LocalizationSummary",
+    "DistrictBreakdown",
     # Monitoring
     "MonitoringOverview",
     "SchedulerJobInfo",

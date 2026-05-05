@@ -2665,6 +2665,18 @@ export interface WbGoodsReturnsSyncResult {
 
 // ─── Localization Index (КТР / ИРП) ────────────────────────────────────────────
 
+export interface DistrictBreakdown {
+  /** Ключ округа (central, south_caucasus, volga, ural, far_east_siberia, northwest, abroad, unknown) */
+  district: string;
+  /** Локализованное название (ru) */
+  label: string;
+  local: number;
+  non_local: number;
+  total: number;
+  /** Процент локализации в округе: local / total * 100 */
+  local_pct: number;
+}
+
 export interface LocalizationSummary {
   /** Средневзвешенный КТР по проекту (Индекс Локализации) */
   localization_index: number;
@@ -2680,6 +2692,8 @@ export interface LocalizationSummary {
   articles_local_count: number;
   /** Количество артикулов с КРП > 0 (есть нелокальные продажи) */
   articles_critical_count: number;
+  /** Распределение заказов по федеральным округам (агрегат по проекту) */
+  district_totals: DistrictBreakdown[];
 }
 
 export interface LocalizationSkuRow {
@@ -2700,4 +2714,13 @@ export interface LocalizationSkuRow {
   /** Вклад в общий индекс: total × ktr */
   contribution: number;
   status: 'excellent' | 'neutral' | 'weak' | 'critical';
+  /** Распределение по округам для этого артикула. Пустой массив = sync wb_orders ещё не запускался. */
+  districts: DistrictBreakdown[];
+}
+
+export interface LocalizationSyncResult {
+  ok: true;
+  total_fetched: number;
+  inserted: number;
+  updated: number;
 }

@@ -17,15 +17,21 @@
 
 import logging
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached
-from backend.models import WbFunnelDaily
+from backend.models import WbFunnelDaily, WbOrder
 from backend.services.localization_tariff import get_krp, get_ktr, status_label
+from backend.services.warehouse_district import (
+    DISTRICT_LABELS,
+    DISTRICT_ORDER,
+    okrug_to_district,
+    warehouse_to_district,
+)
 
 logger = logging.getLogger("dds.localization")
 
@@ -181,6 +187,160 @@ def _build_summary(sku_rows: list[dict]) -> dict:
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Per-district breakdown (из таблицы wb_orders)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _empty_district_map() -> dict[str, dict[str, int]]:
+    """Канонический словарь {district_key: {local: 0, non_local: 0}} для всех ФО.
+
+    Используется как «нулевая» заготовка чтобы UI всегда видел все 7 ключей.
+    """
+    return {key: {"local": 0, "non_local": 0} for key in DISTRICT_ORDER}
+
+
+async def _load_district_breakdown(
+    db: AsyncSession,
+    project_id: int,
+    date_from: str,
+    date_to: str,
+) -> dict[int, dict[str, dict[str, int]]]:
+    """Поднять per-(nm_id, district) счётчики local/non_local из wb_orders.
+
+    Фильтры:
+    - project_id == project_id (multi-tenancy)
+    - order_date BETWEEN date_from и date_to (включительно)
+    - is_cancel == False
+    - country_name == 'Россия' (зарубежные склады обрабатываются отдельно
+      через district=abroad — но обычные WB-РФ заказы идут только если
+      countryName='Россия')
+    - warehouse_type == 'Склад WB' (FBO; FBS / маркетплейс не считаем)
+
+    Логика:
+    - district = okrug_to_district(oblast_okrug_name, country_name)
+    - source_district = warehouse_to_district(warehouse_name)
+    - local если district == source_district, иначе non_local
+
+    Возвращает {nm_id: {district: {"local": N, "non_local": M}}}.
+    """
+    d_from = date.fromisoformat(date_from)
+    d_to = date.fromisoformat(date_to)
+    q = (
+        select(
+            WbOrder.nm_id,
+            WbOrder.warehouse_name,
+            WbOrder.oblast_okrug_name,
+            WbOrder.country_name,
+        )
+        .where(WbOrder.project_id == project_id)
+        .where(WbOrder.order_date >= d_from)
+        .where(WbOrder.order_date < d_to + timedelta(days=1))
+        .where(WbOrder.is_cancel == False)  # noqa: E712 — SQLAlchemy expression
+        .where(WbOrder.country_name == "Россия")
+        .where(WbOrder.warehouse_type == "Склад WB")
+    )
+    res = await db.execute(q)
+
+    by_nm: dict[int, dict[str, dict[str, int]]] = defaultdict(_empty_district_map)
+    for nm_id, warehouse_name, okrug, country in res.all():
+        if nm_id is None:
+            continue
+        delivery_district = okrug_to_district(okrug, country)
+        source_district = warehouse_to_district(warehouse_name)
+        # «Местным» считаем заказ доставки = округ склада-источника.
+        # При unknown с любой стороны — non_local (консервативно).
+        is_local = (
+            delivery_district == source_district
+            and delivery_district in DISTRICT_ORDER
+            and source_district in DISTRICT_ORDER
+        )
+        # Кладём счётчик в district получателя (так пользователь видит «куда»).
+        bucket_key = delivery_district if delivery_district in DISTRICT_ORDER else "abroad"
+        bucket = by_nm[int(nm_id)][bucket_key]
+        if is_local:
+            bucket["local"] += 1
+        else:
+            bucket["non_local"] += 1
+    return dict(by_nm)
+
+
+def _district_list_for_nm(
+    nm_breakdown: dict[str, dict[str, int]] | None,
+) -> list[dict]:
+    """Преобразовать {district: {local, non_local}} → list[DistrictBreakdown]
+    в порядке DISTRICT_ORDER. Все 7 ключей всегда присутствуют (нулями).
+
+    Если breakdown == None (нет wb_orders за период) — возвращает пустой список,
+    чтобы UI отрисовал «нет данных».
+    """
+    if nm_breakdown is None:
+        return []
+    out: list[dict] = []
+    for key in DISTRICT_ORDER:
+        cnt = nm_breakdown.get(key) or {"local": 0, "non_local": 0}
+        local = int(cnt.get("local", 0))
+        non_local = int(cnt.get("non_local", 0))
+        total = local + non_local
+        if total > 0:
+            local_pct = (Decimal(local) * _HUNDRED / Decimal(total)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        else:
+            local_pct = _ZERO
+        out.append(
+            {
+                "district": key,
+                "label": DISTRICT_LABELS.get(key, key),
+                "local": local,
+                "non_local": non_local,
+                "total": total,
+                "local_pct": local_pct,
+            }
+        )
+    return out
+
+
+def _aggregate_district_totals(
+    by_nm: dict[int, dict[str, dict[str, int]]],
+) -> list[dict]:
+    """Сложить per-nm районные счётчики в общий total per district."""
+    if not by_nm:
+        return []
+    totals: dict[str, dict[str, int]] = _empty_district_map()
+    for nm_breakdown in by_nm.values():
+        for district, cnt in nm_breakdown.items():
+            if district in totals:
+                totals[district]["local"] += int(cnt.get("local", 0))
+                totals[district]["non_local"] += int(cnt.get("non_local", 0))
+    return _district_list_for_nm(totals)
+
+
+@cached(prefix="reports:localization_districts", ttl=300)
+async def get_district_breakdown(
+    db: AsyncSession,
+    project_id: int,
+    date_from: str,
+    date_to: str,
+) -> dict:
+    """Per-(nm_id, district) breakdown + агрегаты по всем артикулам.
+
+    Кэш 300 сек, ключ включает project_id + dates. После sync wb_orders —
+    invalidate_cache("reports:localization_districts").
+
+    Returns:
+        {
+            "by_nm": {nm_id: {district_key: {"local": N, "non_local": M}}},
+            "totals": list[DistrictBreakdown-dict],  # упорядочено DISTRICT_ORDER
+            "has_data": bool,  # True если хоть один заказ в wb_orders за период
+        }
+    """
+    by_nm = await _load_district_breakdown(db, project_id, date_from, date_to)
+    return {
+        "by_nm": by_nm,
+        "totals": _aggregate_district_totals(by_nm),
+        "has_data": bool(by_nm),
+    }
+
+
 @cached(prefix="reports:localization", ttl=300)
 async def get_summary(
     db: AsyncSession,
@@ -190,13 +350,19 @@ async def get_summary(
 ) -> dict:
     """Top-block отчёта локализации за период.
 
-    Кэш 300 сек. После мутаций (sync wb_funnel_daily) надо вызвать
-    invalidate_cache("reports:localization").
+    Кэш 300 сек. После мутаций (sync wb_funnel_daily / sync wb_orders) надо
+    вызвать invalidate_cache("reports:localization") и
+    invalidate_cache("reports:localization_districts").
     """
     rows = await _load_rows(db, project_id, date_from, date_to)
     agg = _aggregate_by_sku(rows)
     sku_rows = _build_sku_rows(agg)
-    return _build_summary(sku_rows)
+    summary = _build_summary(sku_rows)
+
+    # Per-district агрегаты (из wb_orders)
+    districts = await get_district_breakdown(db, project_id, date_from, date_to)
+    summary["district_totals"] = districts.get("totals", []) if districts.get("has_data") else []
+    return summary
 
 
 @cached(prefix="reports:localization_skus", ttl=300)
@@ -208,8 +374,20 @@ async def get_by_sku(
 ) -> list[dict]:
     """Таблица отчёта локализации (per-SKU) за период.
 
-    Кэш 300 сек.
+    Кэш 300 сек. Каждой строке добавляется поле `districts` —
+    list[DistrictBreakdown] упорядоченный как DISTRICT_ORDER (или [] если
+    wb_orders пуст за период).
     """
     rows = await _load_rows(db, project_id, date_from, date_to)
     agg = _aggregate_by_sku(rows)
-    return _build_sku_rows(agg)
+    sku_rows = _build_sku_rows(agg)
+
+    districts = await get_district_breakdown(db, project_id, date_from, date_to)
+    by_nm = districts.get("by_nm", {}) if districts.get("has_data") else None
+
+    for r in sku_rows:
+        if by_nm is None:
+            r["districts"] = []
+        else:
+            r["districts"] = _district_list_for_nm(by_nm.get(int(r["nm_id"])))
+    return sku_rows

@@ -9,6 +9,23 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict
 
 
+class DistrictBreakdown(BaseModel):
+    """Локально/нелокально по одному федеральному округу.
+
+    Используется в составе LocalizationSkuRow.districts (per nm_id) и
+    в LocalizationSummary.district_totals (агрегаты по всем артикулам).
+    """
+
+    district: str  # ключ ФО: central / northwest / south_caucasus / volga / ural / far_east_siberia / abroad / unknown
+    label: str  # человекочитаемая подпись («Центральный»)
+    local: int  # заказы из склада того же ФО, что и доставка
+    non_local: int  # заказы из склада другого ФО
+    total: int  # local + non_local
+    local_pct: Decimal  # local / total × 100, 2 знака
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class LocalizationSummary(BaseModel):
     """Top-block (агрегаты по периоду) для отчёта локализации."""
 
@@ -28,6 +45,10 @@ class LocalizationSummary(BaseModel):
     articles_count: int  # уникальных nm_id
     articles_local_count: int  # с КРП = 0 (loc ≥ 60%)
     articles_critical_count: int  # с КРП > 0
+
+    # Региональная разбивка (по всем артикулам). Список упорядочен
+    # как DISTRICT_ORDER из warehouse_district.py.
+    district_totals: list[DistrictBreakdown] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -51,6 +72,10 @@ class LocalizationSkuRow(BaseModel):
 
     contribution: Decimal  # orders × ktr — вклад в индекс локализации
     status: str  # excellent / neutral / weak / critical
+
+    # Per-district breakdown (упорядочено как DISTRICT_ORDER).
+    # Пустой список если sync wb_orders ещё не запускался для проекта.
+    districts: list[DistrictBreakdown] = []
 
     model_config = ConfigDict(from_attributes=True)
 

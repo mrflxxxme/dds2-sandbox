@@ -1,6 +1,10 @@
 /** Localization Index API methods (КТР / ИРП — индекс локализации). */
 import { ApiClient } from './client';
-import type { LocalizationSummary, LocalizationSkuRow } from '@/types/api';
+import type {
+    LocalizationSummary,
+    LocalizationSkuRow,
+    LocalizationSyncResult,
+} from '@/types/api';
 
 export function addLocalizationMethods(api: ApiClient) {
     return {
@@ -20,6 +24,17 @@ export function addLocalizationMethods(api: ApiClient) {
             return api.request<LocalizationSkuRow[]>(
                 'GET',
                 `/api/v1/localization/skus?${q.toString()}`,
+            );
+        },
+        /**
+         * Manual refresh — триггерит синк wb_orders + пересчёт КТР/КРП.
+         * Возвращает счётчики обработанных строк.
+         */
+        syncLocalizationNow() {
+            return api.request<LocalizationSyncResult>(
+                'POST',
+                '/api/v1/localization/sync',
+                {},
             );
         },
     };
