@@ -6,6 +6,28 @@ _Нет активных. Последняя проверка: 2026-05-04._
 
 ## Исправленные
 
+### WB stocks UPSERT падал с CardinalityViolationError (project Вяткин)
+- **Исправлено:** 2026-05-04 (commit 01a9cd9)
+- **Описание:** `services/warehouse_stock_service.sync_warehouse_stocks` делал bulk UPSERT в `wb_warehouse_stocks` с unique key `(project_id, nm_id, warehouse_name)`. WB API `/supplier/stocks` отдаёт строки per barcode/size — для одного (nm_id, warehouseName) приходит несколько записей. Postgres падал «ON CONFLICT DO UPDATE command cannot affect row a second time». В результате у проекта 15 (Вяткин) `wb_warehouse_stocks` оставался пустой, страницы `/warehouse/wb-stocks` и группировка по категориям в «Единых остатках» не работали.
+- **Фикс:** дедуп в Python ДО executemany — агрегировать в `dict[(nm_id, wh_name)]` с суммированием `quantity/quantity_full/in_way_*` и first-non-empty для `vendor_code/subject/brand`. Снапшоты в `wb_stock_snapshots` остаются per-barcode (там PK=id).
+- **Файл:** `backend/services/warehouse_stock_service.py`
+
+### Assembly «Без склада» — race с FBO enrich-job 3h
+- **Исправлено:** 2026-05-04 (commit 6927649)
+- **Описание:** Если ASM создавалась сразу после list-sync FBO supply (до enrich-job), `supply.warehouse_name=NULL` → `wb_warehouse_name_manual` копировался NULL и оставался пустым до следующего enrich-цикла, в листе логиста заявка висела «Без склада».
+- **Фикс:** `_try_force_enrich_supply` (best-effort, try/except) в `assembly/crud.py` create/update и `assembly/analytics.refresh_from_fbo` (`force=True` ловит смену склада в кабинете WB). Inline-editor «Сдача WB» откатили — склад только pull from WB API.
+- **Файл:** `backend/services/assembly/crud.py`, `backend/services/assembly/analytics.py`, frontend logistics page
+
+### Cost lookup чувствителен к регистру (PALATKA_зеленая vs palatka_зеленая)
+- **Исправлено:** 2026-05-04 (commit b2f6b4a)
+- **Описание:** Артикулы в `avg_costs` и в источнике сравнения шли в разных регистрах → тихий KeyError, нулевая себестоимость в отчётах.
+- **Фикс:** case-insensitive lookup (нормализация ключа перед match). Дополняет существующее правило P26 в learnings.md о case-sensitive JOINs.
+
+### Supply-chain: soft-deleted FOI протекали в get_available_*
+- **Исправлено:** 2026-05-04 (commits b36b7bc, 8f97da7)
+- **Описание:** В `selectinload(FactoryOrder.items)` и `get_available_*` запросах не было фильтра `is_deleted == False` → удалённые items участвовали в расчётах доступного к привязке остатка.
+- **Фикс:** добавили фильтр soft-delete в `selectinload` через `lambda` и в base-query сервиса. Iron rule №2 — каждый запрос к SoftDelete-модели должен фильтровать `is_deleted`.
+
 ### Локальная БД: 74k тестовых проектов, worker startup >5 мин
 - **Исправлено:** 2026-05-04
 - **Описание:** Тестовые фикстуры conftest.py (project, other_project) и 20+
@@ -24,8 +46,6 @@ _Нет активных. Последняя проверка: 2026-05-04._
   - `docker-compose.yml`: named volume ai_memory:
   - `scripts/cleanup_test_projects.sh`: reusable идемпотентный скрипт
 - **Результат:** DB 1325 MB → 630 MB, worker startup >5 мин → ~3 сек
-
-### WB ad upsert затирал реальные значения нулями (project Вяткин)
 
 ### WB ad upsert затирал реальные значения нулями (project Вяткин)
 - **Исправлено:** 2026-05-04
