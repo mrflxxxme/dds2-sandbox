@@ -24,14 +24,16 @@ paths:
 
 ## Фазы (для фичи backend+frontend)
 ```
-Фаза 0:   Lead (opus): EnterPlanMode → уточняет → ТЗ → ExitPlanMode (только при approval)
+Фаза 0:   Lead (opus): уточнение по 3-условному правилу из lead_agent_v2.md (НЕ EnterPlanMode по умолчанию)
 Фаза 1:   Lead (opus): Model → Migration → Schema (последовательно)
-Фаза 2:   Backend ‖ Frontend (2 агента, opus, isolation: worktree)
+Фаза 2:   Backend ‖ Frontend (2 агента, opus, isolation: worktree, run_in_background)
 Фаза 2.5: code-reviewer / security-reviewer ПО ТРИГГЕРУ (последовательно, не параллельно)
-Фаза 3:   Bash напрямую — pytest && vitest && check_conventions.sh → коммит
+Фаза 3:   Bash напрямую — pytest && vitest && check_conventions.sh → коммит (atomic с docs)
 ```
 
 **Если задача только backend или только frontend** — Фаза 2 делается lead'ом без спавна агентов. Фазы 1 и 3 — те же.
+
+**`/spec` или `/ultraplan`** используются только когда явно нужен формальный план (крупная фича, cross-domain). Дефолт — без Plan Mode.
 
 **Model policy: opus 4.7 везде** (Max подписка, требование владельца 2026-04-21, см. `memory/feedback_model_always_opus.md`).
 
@@ -59,8 +61,8 @@ paths:
 
 **Правило cloud-offload:** если `/ultraplan` или `/ultrareview` запущены — lead **не дублирует** их работу локально. См. `lead_agent_v2.md` §5.
 
-## Plan Mode для фич
-Lead вызывает `EnterPlanMode` ПЕРЕД любыми правками. Без `ExitPlanMode` (approval пользователя) код не пишется. Решает «агент сразу кодит» из `feedback_ask_questions`.
+## Plan Mode (только по явному запросу)
+`EnterPlanMode` вызывается только когда пользователь явно просит «сначала план», `/spec`, `/ultraplan`. Дефолт — действовать сразу по правилу 3-условного уточнения из `lead_agent_v2.md`.
 
 Баги и мелкие изменения — без ТЗ, сразу анализ → фикс → тесты → коммит.
 

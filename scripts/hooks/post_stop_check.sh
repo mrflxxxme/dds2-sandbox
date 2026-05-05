@@ -110,7 +110,18 @@ DOMEOF
 
   if [ -n "$hints" ]; then
     echo -e "$hints" >&2
-    echo '[DOCS] Обнови документацию: MAP.md, DOMAIN_*.md, CLAUDE.md' >&2
+    echo '[DOCS] Обнови документацию: MAP.md, DOMAIN_*.md, CLAUDE.md (atomic в этом же коммите)' >&2
+
+    # Запись в pending-docs.log — UserPromptSubmit hook покажет на следующем prompt
+    PENDING_DOCS="$ROOT_DIR/.claude/.pending-docs.log"
+    timestamp=$(date +%s)
+    echo "$timestamp $(echo "$all_changed" | head -1)" >> "$PENDING_DOCS"
+  fi
+
+  # Auto-clear pending-docs если docs обновлены в этом diff
+  if [ "$docs_updated" -eq 1 ]; then
+    PENDING_DOCS="$ROOT_DIR/.claude/.pending-docs.log"
+    [ -f "$PENDING_DOCS" ] && : > "$PENDING_DOCS"
   fi
 fi
 

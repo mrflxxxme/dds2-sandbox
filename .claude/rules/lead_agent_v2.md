@@ -43,7 +43,13 @@ Tech lead DDS2 (FastAPI + PG + Next.js 15, solo dev). Дефолт effort `mediu
 
 ## Параллелизм (правило, не выбор)
 
-**Backend + Frontend = ОБЯЗАТЕЛЬНО parallel.** Не «когда есть смысл», не «при возможности» — всегда. Hook `prompt-team-detect.sh` инжектит директиву через `additionalContext`, ты её исполняешь без обсуждения.
+**Backend + Frontend = ОБЯЗАТЕЛЬНО parallel.** Hook `prompt-team-detect.sh` инжектит директиву — исполняешь без обсуждения.
+
+**Auto-fan-out (всегда параллельно в одном turn-е):**
+- Backend + Frontend → 2 teammates `isolation: worktree`, `run_in_background: true`
+- Сбор контекста из 3+ файлов перед решением → spawn explore-subagents одним turn-ом
+- Комплексное ревью (security + perf + api-design) → 3 reviewer одним turn-ом
+- Независимые расследования бага в разных слоях → spawn в одном turn-е
 
 Когда задача затрагивает И backend (`backend/`, миграции, сервисы, API) И frontend (`frontend-react/`, страницы, компоненты):
 1. Lead делает Phase 1 sequentially: Model → Migration → Schema (если нужно).
@@ -52,13 +58,12 @@ Tech lead DDS2 (FastAPI + PG + Next.js 15, solo dev). Дефолт effort `mediu
    - Frontend teammate: `frontend-react/src/`, `frontend-react/tests/`
 3. Каждый teammate получает constraints: relative paths only, types-first, 40k token budget, fail-fast при 2× pre-commit fail.
 
-**Любой другой случай — sequential, lead сам:**
-- Только backend (даже если 10 файлов) → lead, sequential.
-- Только frontend (даже если 10 страниц) → lead, sequential.
-- Рефакторинг / баг / cleanup → lead, sequential.
-- Поиск кода → Grep/Glob/Read напрямую, БЕЗ Explore-агента.
+**Sequential только когда:**
+- Только backend ИЛИ только frontend (даже 10 файлов) → lead sam.
 - Alembic миграции → ВСЕГДА lead, ВСЕГДА sequential.
-- Reviewer-subagents (security/perf/api/db) → ПОСЛЕ работы, не параллельно с ней.
+- Поиск кода в 1-2 местах → Grep/Glob/Read напрямую (без Explore-агента).
+- Reviewer-subagents → ПОСЛЕ работы, не параллельно с ней.
+- Shared-файлы (`models/`, `schemas/`, `cache.py`, `CLAUDE.md`, `.claude/`) → lead sequentially.
 
 **Бюджет teammate:** 40k токенов средний / 80k long-running. Превышение без результата → fail-fast.
 
@@ -75,14 +80,28 @@ Tech lead DDS2 (FastAPI + PG + Next.js 15, solo dev). Дефолт effort `mediu
 8. Логика в `services/`, роутер только HTTP.
 9. Write endpoints → `Depends(rate_limit_write)`.
 
+## Auto-docs sync (atomic коммит)
+После работы перед коммитом проверить `git diff --stat`. Если затронуты:
+- Новый домен → создать `backend/DOMAIN_<NAME>.md` + строка в таблице `CLAUDE.md`
+- Изменён endpoint/схема домена → обновить `backend/DOMAIN_*.md`
+- Новый Skill / hook / правило → обновить `CLAUDE.md`
+- Новый паттерн/антипаттерн → `learnings.md` / `check_conventions.sh`
+- Исправлен баг → `memory/project_known_bugs.md`
+
+Docs-обновления идут в **тот же коммит** что и код (atomic). **Push — только по запросу пользователя**, не авто.
+
+Hook `post_stop_check.sh` напоминает; pending пишется в `.claude/.pending-docs.log`.
+
 ## Анти-паттерны
 - НЕ писать мета-объяснения («сейчас сделаю X, потом Y») — 4.7 verbosity сама калибруется.
-- НЕ ослаблять параллелизм «на всякий» и НЕ форсить fan-out без явной нужды.
+- НЕ ослаблять параллелизм «на всякий».
 - НЕ применять блокирующий security-фикс без чтения `memory/feedback_register_enabled_prod.md` и аналогов.
 - НЕ дублировать локально работу `/ultraplan` или `/ultrareview` пока они идут.
 - НЕ деплоить через SSH — только CI/CD.
-- НЕ создавать `.md` файлы кроме явно требуемых.
+- НЕ создавать `.md` файлы кроме явно требуемых (DOMAIN_*.md / docs обновления).
 - НЕ коммитить без `/verify` (или хотя бы `/smoke`) на крупных изменениях.
+- НЕ оставлять docs устаревшими после изменения домена — синк в том же коммите.
+- НЕ пушить без явного запроса пользователя.
 
 ## Cloud-offload (когда есть смысл)
 - `/ultraplan` — план дороже реализации (cross-domain, auth, новый домен, большая интеграция). Локально работай параллельно над другим, не дублируй.
