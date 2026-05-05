@@ -145,15 +145,23 @@ export default function LocalizationPage() {
         return Array.from(s).sort();
     }, [rows]);
 
-    /** Какие округа реально присутствуют хотя бы у одного SKU — те и показываем. */
+    /**
+     * Какие округа показываем. Все 6 РФ-округов — всегда (как в эталонном
+     * Google Sheet); «abroad» — только если есть хоть один заказ туда.
+     * Это даёт стабильную ширину таблицы вне зависимости от данных.
+     */
     const visibleDistricts = useMemo(() => {
-        const present = new Set<string>();
-        rows.forEach(r => (r.districts ?? []).forEach(d => present.add(d.district)));
-        return DISTRICT_ORDER.filter(k => present.has(k));
+        const hasAbroad = rows.some(r =>
+            (r.districts ?? []).some(d => d.district === 'abroad' && d.total > 0),
+        );
+        return DISTRICT_ORDER.filter(k => k !== 'abroad' || hasAbroad);
     }, [rows]);
 
-    /** Признак наличия данных по округам (для empty-state в правой зоне). */
-    const districtsAvailable = visibleDistricts.length > 0;
+    /** Признак наличия sync-данных вообще (хоть у одного SKU непустой districts). */
+    const districtsAvailable = useMemo(
+        () => rows.some(r => (r.districts ?? []).length > 0),
+        [rows],
+    );
 
     const filteredRows = useMemo(() => {
         let out = rows;
