@@ -444,7 +444,14 @@ def _build_forecast_with_transit(
         remaining += delivery_map.get(i, 0)
         # Subtract daily sales
         remaining -= avg_daily
-        forecast.append(max(0, int(remaining + 0.5)))
+        # Floor at 0: marketplace stocks=0 не копит «отложенный спрос». Без клампа
+        # дни между поступлениями уводили remaining в минус, и новая партия гасила
+        # этот виртуальный дефицит (85 шт после 5 пустых дней показывались как 20).
+        # Семантика: пустой остаток просто не продаётся — продажа не теряется в виде
+        # отложенной потребности.
+        if remaining < 0:
+            remaining = 0
+        forecast.append(int(remaining + 0.5))
 
     return forecast
 
