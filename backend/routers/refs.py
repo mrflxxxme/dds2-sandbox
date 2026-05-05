@@ -18,6 +18,7 @@ from backend.schemas import (
 )
 from backend.schemas.refs import (
     ExcludedWarehousesPayload,
+    ForecastRfDefaultDaysPayload,
     ImtAliasPayload,
     ProductStatusBulkPayload,
     ProductStatusPayload,
@@ -223,6 +224,37 @@ async def set_excluded_warehouses(
 
     result = await settings_service.set_excluded_warehouses(db, project.id, payload.warehouses)
     return {"ok": True, "excluded": result}
+
+
+@router.get("/forecast-rf-default-days")
+async def get_forecast_rf_default_days(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get default RF→WB lead time (days) used as a fallback when
+    `WarehouseDeliveryTime` is empty for a warehouse."""
+    from backend.services import settings_service
+
+    days = await settings_service.get_forecast_rf_default_days(db, project.id)
+    return {"days": days}
+
+
+@router.put("/forecast-rf-default-days")
+async def set_forecast_rf_default_days(
+    payload: ForecastRfDefaultDaysPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    """Set default RF→WB lead time (days). Range 0..365."""
+    from backend.cache import invalidate_cache
+    from backend.services import settings_service
+
+    days = await settings_service.set_forecast_rf_default_days(db, project.id, payload.days)
+    # Forecast/matrix is recomputed on every request (no cache prefix), but report-level
+    # caches that include forecast snapshots may need invalidation.
+    await invalidate_cache(f"reports:stock_analytics:project_id={project.id}")
+    return {"ok": True, "days": days}
 
 
 # ─── Product Tags ────────────────────────────────────────────────────────────

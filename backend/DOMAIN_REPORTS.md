@@ -68,6 +68,15 @@
 - Курсы извлекаются из конвертационных транзакций ВТБ (backfill)
 - PnL использует AVG rate за год (ИЗВЕСТНЫЙ БАГ — нужен daily rate)
 
+### Stock Forecast (Аналитика остатков)
+- **Источник:** `stock_forecast_service.get_stock_analytics` (router `reports_stock.py /stock_analytics`).
+- **Стартовая точка матрицы прогноза:** ВСЕГДА только полезный остаток WB (`quantity + in_way_from_client + in_way_to_client × (1 − buyout%)`). РФ и In-Transit не плюсуются в день 0.
+- **РФ → WB как scheduled delivery:** в режимах `wb_rf` и `wb_rf_transit` остаток РФ-склада рассматривается как поставка, прибывающая через `total_days = assembly_days + avg(delivery_days по WB-складам) + wb_acceptance_days` ([WarehouseDeliveryTime](models/warehouse.py)). Если у фулфилмент-склада нет ни одной строки в `warehouse_delivery_times` — fallback на project setting `forecast_rf_default_days` (default 8 дн).
+- **Если qty распределено по нескольким нашим складам** — берём **арифметическое среднее `total_days`** по складам, где лежит остаток (вариант В — без взвешивания по qty). Один синтетический `delivery_entry` на `today + avg_days`, qty = sum(stocks_rf). Поле API: `articles[].rf_avg_days` (показывается в tooltip колонки РФ).
+- **In-Transit (SHIPPED заявки сборки):** добавляются как реальные поставки на свой `delivery_date` (per-request). При статусах PENDING/IN_PROGRESS/READY/VEHICLE_ASSIGNED qty уже учтена в `stocks_rf` (вычитается через `in_assembly` для отображения), отдельной поставкой НЕ идёт.
+- **`days_left` / traffic-light** считаются по `total_stock = WB + RF + in_transit` (как было) — это «когда физически кончится». Дневная матрица показывает «когда обнулится на WB конкретно», что может быть раньше чем `days_left`, если РФ далеко.
+- **Настройка по умолчанию:** `GET/PUT /api/v1/refs/forecast-rf-default-days` (settings_service `get/set_forecast_rf_default_days`, ключ `forecast_rf_default_days`, валидация 0..365). UI: страница `warehouse/analytics` → вкладка «⚙️ Настройки» → карточка «📦 Время РФ → WB по умолчанию».
+
 ## Dependencies
 - `transactions` — все отчёты строятся на транзакциях
 - `wb_finance_rows` — данные из WB Finance API для БДР/ОПИУ

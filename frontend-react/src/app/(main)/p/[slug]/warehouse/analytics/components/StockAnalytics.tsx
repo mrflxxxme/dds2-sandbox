@@ -23,6 +23,7 @@ interface Article {
     in_transit?: number;
     wb_buyout_pct?: number;
     revenue_bdr?: number;
+    rf_avg_days?: number | null;
 }
 
 interface StockData {
@@ -382,7 +383,8 @@ export function StockAnalytics() {
                                 WB{sortIcon('stocks_wb')}
                             </th>
                             {stockMode !== 'wb' && (
-                                <th style={thStyle('stocks_rf')} onClick={() => handleSort('stocks_rf')}>
+                                <th style={thStyle('stocks_rf')} onClick={() => handleSort('stocks_rf')}
+                                    title="Остатки на РФ-складах. В прогнозе прибавляются к WB через средний срок «сборка + доставка + приёмка WB» (см. вкладку «Время доставки» каждого склада или настройку по умолчанию).">
                                     РФ{sortIcon('stocks_rf')}
                                 </th>
                             )}
@@ -457,7 +459,8 @@ export function StockAnalytics() {
                                     {formatNumber(a.stocks_wb, 0)}
                                 </td>
                                 {stockMode !== 'wb' && (
-                                    <td style={{ textAlign: 'right', color: (a.stocks_rf ?? 0) > 0 ? '#4caf50' : undefined }}>
+                                    <td style={{ textAlign: 'right', color: (a.stocks_rf ?? 0) > 0 ? '#4caf50' : undefined }}
+                                        title={(a.stocks_rf ?? 0) > 0 && a.rf_avg_days != null ? `Прибудет на WB через ~${a.rf_avg_days} дн (среднее по складам, где лежит остаток)` : undefined}>
                                         {formatNumber(a.stocks_rf ?? 0, 0)}
                                     </td>
                                 )}

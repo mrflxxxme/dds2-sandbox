@@ -63,11 +63,12 @@ def build_traffic_light_counts(articles: list[dict]) -> dict[str, int]:
 # ─── Extra stock loaders ─────────────────────────────────────────────────────
 
 
-async def _load_rf_stocks(db: AsyncSession, project_id: int) -> dict[int, int]:
-    """Load RF warehouse stocks grouped by nm_id.
+async def _load_rf_stocks_per_warehouse(db: AsyncSession, project_id: int) -> dict[int, dict[int, int]]:
+    """Load RF warehouse stocks grouped by nm_id and warehouse_id.
 
-    Links WarehouseStock (nomenclature_id) → Nomenclature (article_wb = nm_id).
-    Only FULFILLMENT warehouses.
+    Returns {nm_id: {warehouse_id: qty, ...}}. Only FULFILLMENT warehouses.
+    Per-warehouse split is required to compute average ETA to WB based on
+    `WarehouseDeliveryTime` (different warehouses → different lead times).
     """
     from backend.models.cost import Nomenclature
     from backend.models.warehouse import Warehouse, WarehouseStock, WarehouseType
@@ -75,6 +76,7 @@ async def _load_rf_stocks(db: AsyncSession, project_id: int) -> dict[int, int]:
     result = await db.execute(
         select(
             Nomenclature.article_wb,
+            WarehouseStock.warehouse_id,
             func.sum(WarehouseStock.quantity).label("qty"),
         )
         .join(Nomenclature, Nomenclature.id == WarehouseStock.nomenclature_id)
@@ -85,9 +87,65 @@ async def _load_rf_stocks(db: AsyncSession, project_id: int) -> dict[int, int]:
             Warehouse.is_deleted.is_(False),
             Nomenclature.article_wb.isnot(None),
         )
-        .group_by(Nomenclature.article_wb)
+        .group_by(Nomenclature.article_wb, WarehouseStock.warehouse_id)
     )
-    return {int(r.article_wb): int(r.qty or 0) for r in result.all()}
+    out: dict[int, dict[int, int]] = {}
+    for r in result.all():
+        nm = int(r.article_wb)
+        wh = int(r.warehouse_id)
+        qty = int(r.qty or 0)
+        if qty <= 0:
+            continue
+        out.setdefault(nm, {})[wh] = qty
+    return out
+
+
+async def _load_warehouse_total_days(db: AsyncSession, project_id: int, fallback_days: int) -> dict[int, int]:
+    """For each FULFILLMENT warehouse, return total days RF→WB.
+
+    total_days = assembly_days + avg(delivery_days across wb_warehouses) + wb_acceptance_days.
+    If no `WarehouseDeliveryTime` rows exist for a warehouse, falls back to
+    `fallback_days` (project setting).
+    """
+    from backend.models.warehouse import (
+        Warehouse,
+        WarehouseDeliveryTime,
+        WarehouseType,
+    )
+
+    wh_result = await db.execute(
+        select(
+            Warehouse.id,
+            Warehouse.assembly_days,
+            Warehouse.wb_acceptance_days,
+        ).where(
+            Warehouse.project_id == project_id,
+            Warehouse.warehouse_type == WarehouseType.FULFILLMENT,
+            Warehouse.is_deleted.is_(False),
+        )
+    )
+    warehouses = wh_result.all()
+
+    avg_delivery_result = await db.execute(
+        select(
+            WarehouseDeliveryTime.warehouse_id,
+            func.avg(WarehouseDeliveryTime.delivery_days).label("avg_days"),
+        )
+        .where(WarehouseDeliveryTime.project_id == project_id)
+        .group_by(WarehouseDeliveryTime.warehouse_id)
+    )
+    avg_delivery: dict[int, float] = {int(r.warehouse_id): float(r.avg_days or 0) for r in avg_delivery_result.all()}
+
+    out: dict[int, int] = {}
+    for wh in warehouses:
+        avg_d = avg_delivery.get(int(wh.id))
+        if avg_d is None or avg_d <= 0:
+            out[int(wh.id)] = max(0, int(fallback_days))
+            continue
+        assembly = int(wh.assembly_days or 0)
+        acceptance = int(wh.wb_acceptance_days or 0)
+        out[int(wh.id)] = max(0, int(assembly + round(avg_d) + acceptance))
+    return out
 
 
 async def _load_wb_breakdown(db: AsyncSession, project_id: int) -> dict[int, dict]:
@@ -428,12 +486,17 @@ async def get_stock_analytics(
         prev_avg_map[r.nm_id] = round(int(r.total_orders or 0) / max(days, 1), 2)
 
     # 6. Load extra stock data based on mode
-    rf_stocks_map: dict[int, int] = {}
+    rf_stocks_per_wh: dict[int, dict[int, int]] = {}
+    rf_total_days_map: dict[int, int] = {}
     transit_map: dict[int, list[dict]] = {}
     in_assembly_map: dict[int, int] = {}
 
     if mode in ("wb_rf", "wb_rf_transit"):
-        rf_stocks_map = await _load_rf_stocks(db, project_id)
+        from backend.services.settings_service import get_forecast_rf_default_days
+
+        rf_stocks_per_wh = await _load_rf_stocks_per_warehouse(db, project_id)
+        fallback_days = await get_forecast_rf_default_days(db, project_id)
+        rf_total_days_map = await _load_warehouse_total_days(db, project_id, fallback_days)
 
     if mode == "wb_rf_transit":
         transit_map = await _load_in_transit(db, project_id)
@@ -476,11 +539,13 @@ async def get_stock_analytics(
             )
         else:
             stocks_wb = stock_info["stocks_wb"]
-        stocks_rf = rf_stocks_map.get(nm_id, 0)
+        rf_per_wh = rf_stocks_per_wh.get(nm_id, {})
+        stocks_rf = sum(rf_per_wh.values())
         transit_entries = transit_map.get(nm_id, [])
         in_transit_total = sum(e["qty"] for e in transit_entries)
 
-        # Total stock depends on mode
+        # Total stock depends on mode (used for days_left / traffic-light KPI only;
+        # in matrix we redistribute RF as a scheduled delivery on avg_total_days).
         if mode == "wb_rf_transit":
             total_stock = stocks_wb + stocks_rf + in_transit_total
         elif mode == "wb_rf":
@@ -496,14 +561,30 @@ async def get_stock_analytics(
         trend_pct = compute_trend_pct(avg_daily, prev_avg)
         traffic = classify_traffic_light(days_left)
 
-        # Forecast
-        if mode == "wb_rf_transit" and transit_entries:
-            # Smart forecast: deliveries arrive on specific dates
-            base_stock = stocks_wb + stocks_rf
+        # RF arrives on WB after avg(total_days) — synthetic transit entry.
+        # Simple arithmetic mean across warehouses that hold any qty
+        # (no qty-weighting; per user spec, variant B).
+        rf_avg_days: int | None = None
+        rf_synthetic: list[dict] = []
+        if mode in ("wb_rf", "wb_rf_transit") and stocks_rf > 0 and rf_per_wh:
+            wh_days = [rf_total_days_map.get(wh_id) for wh_id in rf_per_wh if rf_total_days_map.get(wh_id) is not None]
+            wh_days = [d for d in wh_days if d is not None]
+            if wh_days:
+                rf_avg_days = max(0, int(round(sum(wh_days) / len(wh_days))))
+                rf_synthetic.append(
+                    {
+                        "qty": stocks_rf,
+                        "delivery_date": today_date + timedelta(days=rf_avg_days),
+                    }
+                )
+
+        # Forecast — base stock = WB only; RF + in-transit feed delivery_map.
+        if mode in ("wb_rf", "wb_rf_transit") and (rf_synthetic or transit_entries):
+            combined_deliveries = rf_synthetic + transit_entries
             forecast = _build_forecast_with_transit(
-                base_stock,
+                stocks_wb,
                 avg_daily,
-                transit_entries,
+                combined_deliveries,
                 forecast_days,
                 today_date,
             )
@@ -531,6 +612,8 @@ async def get_stock_analytics(
         }
 
         # Extra fields for modes
+        if mode in ("wb_rf", "wb_rf_transit"):
+            article_data["rf_avg_days"] = rf_avg_days
         if mode == "wb_rf":
             article_data["stocks_rf"] = stocks_rf
         if mode == "wb_rf_transit":

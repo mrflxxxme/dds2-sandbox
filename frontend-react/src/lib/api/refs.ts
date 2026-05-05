@@ -41,6 +41,8 @@ export function addRefMethods(api: ApiClient) {
         getWarehouses() { return api.request<Array<{ name: string; lat: number; lng: number }>>('GET', '/api/v1/refs/warehouses'); },
         getExcludedWarehouses() { return api.request<string[]>('GET', '/api/v1/refs/excluded-warehouses'); },
         setExcludedWarehouses(warehouses: string[]) { return api.request<{ ok: boolean; excluded: string[] }>('PUT', '/api/v1/refs/excluded-warehouses', { warehouses }); },
+        getForecastRfDefaultDays() { return api.request<{ days: number }>('GET', '/api/v1/refs/forecast-rf-default-days'); },
+        setForecastRfDefaultDays(days: number) { return api.request<{ ok: boolean; days: number }>('PUT', '/api/v1/refs/forecast-rf-default-days', { days }); },
 
         // Product Tags
         getProductTags() { return api.request<ProductTag[]>('GET', '/api/v1/refs/tags'); },

@@ -5,6 +5,10 @@ import { api } from '@/lib/api';
 export function WarehouseExclusionSettings() {
     const [warehouses, setWarehouses] = useState<Array<{ name: string }>>([]);
     const [excluded, setExcluded] = useState<string[]>([]);
+    const [rfDefaultDays, setRfDefaultDays] = useState<number>(8);
+    const [rfDefaultDaysSaved, setRfDefaultDaysSaved] = useState<number>(8);
+    const [savingRf, setSavingRf] = useState(false);
+    const [rfMsg, setRfMsg] = useState('');
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [msg, setMsg] = useState('');
@@ -13,12 +17,15 @@ export function WarehouseExclusionSettings() {
     useEffect(() => {
         (async () => {
             try {
-                const [wh, ex] = await Promise.all([
+                const [wh, ex, rf] = await Promise.all([
                     api.getWarehouses(),
                     api.getExcludedWarehouses(),
+                    api.getForecastRfDefaultDays(),
                 ]);
                 setWarehouses(wh);
                 setExcluded(ex);
+                setRfDefaultDays(rf.days);
+                setRfDefaultDaysSaved(rf.days);
             } catch {
                 setMsg('Ошибка загрузки складов');
             } finally {
@@ -26,6 +33,21 @@ export function WarehouseExclusionSettings() {
             }
         })();
     }, []);
+
+    const saveRfDefaultDays = async () => {
+        setSavingRf(true);
+        setRfMsg('');
+        try {
+            const { days } = await api.setForecastRfDefaultDays(rfDefaultDays);
+            setRfDefaultDaysSaved(days);
+            setRfDefaultDays(days);
+            setRfMsg('✅ Сохранено');
+        } catch {
+            setRfMsg('❌ Ошибка сохранения');
+        } finally {
+            setSavingRf(false);
+        }
+    };
 
     const toggle = (name: string) => {
         setExcluded(prev => {
@@ -56,6 +78,42 @@ export function WarehouseExclusionSettings() {
 
     return (
         <div>
+            <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+                <h3 style={{ margin: '0 0 8px' }}>📦 Время РФ → WB по умолчанию</h3>
+                <p style={{ color: 'var(--color-text-muted)', margin: '0 0 16px', fontSize: 14 }}>
+                    Используется в прогнозе остатков, если у склада не заполнена вкладка «Время доставки» (сборка + доставка + приёмка WB). Текущее значение применяется ко всем фулфилмент-складам без расписания.
+                </p>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14 }}>
+                        <span>Дней до прибытия на WB:</span>
+                        <input
+                            type="number"
+                            min={0}
+                            max={365}
+                            value={rfDefaultDays}
+                            onChange={(e) => setRfDefaultDays(Math.max(0, Math.min(365, parseInt(e.target.value || '0', 10))))}
+                            style={{
+                                width: 80,
+                                padding: '8px 12px',
+                                borderRadius: 8,
+                                border: '1px solid var(--color-border)',
+                                background: 'var(--color-bg-card)',
+                                color: 'var(--color-text)',
+                                fontSize: 14,
+                            }}
+                        />
+                    </label>
+                    <button
+                        className="btn btn-primary btn-sm"
+                        onClick={saveRfDefaultDays}
+                        disabled={savingRf || rfDefaultDays === rfDefaultDaysSaved}
+                    >
+                        {savingRf ? 'Сохранение...' : '💾 Сохранить'}
+                    </button>
+                    {rfMsg && <span style={{ fontSize: 14 }}>{rfMsg}</span>}
+                </div>
+            </div>
+
             <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
                 <h3 style={{ margin: '0 0 8px' }}>🏭 Исключение складов</h3>
                 <p style={{ color: 'var(--color-text-muted)', margin: '0 0 16px', fontSize: 14 }}>
