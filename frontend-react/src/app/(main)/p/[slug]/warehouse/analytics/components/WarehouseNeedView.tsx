@@ -1,5 +1,6 @@
 'use client';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, exportToExcel } from '@/lib/utils';
 
@@ -19,6 +20,7 @@ interface ArticleRfStock {
 interface NeedArticle {
     nm_id: number;
     vendor_code: string;
+    barcode: string;
     brand: string;
     subject: string;
     total_need: number;
@@ -94,6 +96,9 @@ interface OrderCitiesStatus {
 }
 
 export function WarehouseNeedView() {
+    const params = useParams();
+    const router = useRouter();
+    const slug = params.slug as string;
     const [data, setData] = useState<StockNeedResponse | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -320,10 +325,51 @@ export function WarehouseNeedView() {
             if (!article) continue;
             const available = article.rf_stocks[assemblyWarehouseId]?.available || 0;
             const need = article.total_need;
-            sum += Math.floor(Math.min(available, need) / 10) * 10;
+            sum += Math.min(available, need);
         }
         return sum;
     }, [checkedIds, assemblyWarehouseId, data]);
+
+    /* ── Create assembly ── */
+
+    const handleCreateAssembly = useCallback(() => {
+        if (!data || !assemblyWarehouseId || checkedIds.size === 0) return;
+
+        const items: { barcode: string; quantity: number; product_name?: string }[] = [];
+        const skippedNoBarcode: string[] = [];
+        const skippedZeroQty: string[] = [];
+
+        for (const nmId of checkedIds) {
+            const article = data.articles.find(a => a.nm_id === nmId);
+            if (!article) continue;
+            const available = article.rf_stocks[assemblyWarehouseId]?.available || 0;
+            const need = article.total_need;
+            const qty = Math.min(available, need);
+            if (!article.barcode) {
+                skippedNoBarcode.push(article.vendor_code);
+                continue;
+            }
+            if (qty <= 0) {
+                skippedZeroQty.push(article.vendor_code);
+                continue;
+            }
+            items.push({ barcode: article.barcode, quantity: qty, product_name: article.vendor_code });
+        }
+
+        if (items.length === 0) {
+            const reasons: string[] = [];
+            if (skippedNoBarcode.length) reasons.push(`нет barcode: ${skippedNoBarcode.join(', ')}`);
+            if (skippedZeroQty.length) reasons.push(`нечего отправлять: ${skippedZeroQty.join(', ')}`);
+            alert(`Не удалось собрать позиции${reasons.length ? '. ' + reasons.join('; ') : ''}`);
+            return;
+        }
+
+        sessionStorage.setItem('pending_assembly', JSON.stringify({
+            warehouse_id: assemblyWarehouseId,
+            items,
+        }));
+        router.push(`/p/${slug}/warehouse/assembly/new?prefill=1`);
+    }, [data, assemblyWarehouseId, checkedIds, router, slug]);
 
     /* ── Sort ── */
 
@@ -536,7 +582,7 @@ export function WarehouseNeedView() {
                 <button
                     className="btn btn-sm btn-primary"
                     disabled={checkedCount === 0}
-                    onClick={() => alert('Создание сборки будет доступно после привязки FBO поставки')}
+                    onClick={handleCreateAssembly}
                     style={{ opacity: checkedCount === 0 ? 0.5 : 1 }}
                 >
                     Создать сборку ({checkedCount})
@@ -955,7 +1001,7 @@ export function WarehouseNeedView() {
                     </span>
                     <button
                         className="btn btn-sm btn-primary"
-                        onClick={() => alert('Создание сборки будет доступно после привязки FBO поставки')}
+                        onClick={handleCreateAssembly}
                     >
                         Создать сборку
                     </button>
