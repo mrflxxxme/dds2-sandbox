@@ -11,10 +11,11 @@ Supports 3 modes:
 import logging
 from datetime import date, timedelta
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import and_, case, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import WbFunnelDaily
+from backend.models import WbFunnelDaily, WbWarehouseStock
+from backend.models.wb_finance import WbFinanceRow
 
 logger = logging.getLogger("dds.stock_analytics")
 
@@ -82,6 +83,137 @@ async def _load_rf_stocks(db: AsyncSession, project_id: int) -> dict[int, int]:
             WarehouseStock.project_id == project_id,
             Warehouse.warehouse_type == WarehouseType.FULFILLMENT,
             Warehouse.is_deleted.is_(False),
+            Nomenclature.article_wb.isnot(None),
+        )
+        .group_by(Nomenclature.article_wb)
+    )
+    return {int(r.article_wb): int(r.qty or 0) for r in result.all()}
+
+
+async def _load_wb_breakdown(db: AsyncSession, project_id: int) -> dict[int, dict]:
+    """Load WB stock breakdown per nm_id (sum across all WB warehouses).
+
+    Returns {nm_id: {"quantity", "in_way_to_client", "in_way_from_client"}}.
+    """
+    result = await db.execute(
+        select(
+            WbWarehouseStock.nm_id,
+            func.sum(WbWarehouseStock.quantity).label("qty"),
+            func.sum(WbWarehouseStock.in_way_to_client).label("to_client"),
+            func.sum(WbWarehouseStock.in_way_from_client).label("from_client"),
+        )
+        .where(WbWarehouseStock.project_id == project_id)
+        .group_by(WbWarehouseStock.nm_id)
+    )
+    return {
+        int(r.nm_id): {
+            "quantity": int(r.qty or 0),
+            "in_way_to_client": int(r.to_client or 0),
+            "in_way_from_client": int(r.from_client or 0),
+        }
+        for r in result.all()
+    }
+
+
+async def _load_realization(
+    db: AsyncSession,
+    project_id: int,
+    date_from: date,
+    date_to: date,
+) -> dict[int, float]:
+    """Load realization (BDR-style revenue) per nm_id for the period.
+
+    Same formula as wb_bdr_service / warehouse_stock_engine:
+    SUM(Продажа.retail_price_withdisc_rub) - SUM(Возврат.retail_price_withdisc_rub).
+    Excludes 'Неопознанный товар' for parity with BDR. Returns {nm_id: revenue_rub}.
+    """
+    R = WbFinanceRow
+    effective_dt = func.coalesce(R.sale_dt, R.rr_dt)
+    date_filter = or_(
+        effective_dt.between(date_from, date_to),
+        and_(
+            R.sale_dt.is_(None),
+            R.rr_dt.is_(None),
+            R.date_from >= date_from,
+            R.date_to <= date_to,
+        ),
+    )
+    result = await db.execute(
+        select(
+            R.nm_id,
+            func.coalesce(
+                func.sum(case((R.doc_type_name == "Продажа", R.retail_price_withdisc_rub), else_=0))
+                - func.sum(case((R.doc_type_name == "Возврат", R.retail_price_withdisc_rub), else_=0)),
+                0,
+            ).label("realization"),
+        )
+        .where(
+            R.project_id == project_id,
+            date_filter,
+            func.lower(func.coalesce(R.sa_name, "")) != "неопознанный товар",
+        )
+        .group_by(R.nm_id)
+        .limit(10000)
+    )
+    return {int(r.nm_id): float(r.realization or 0) for r in result.all() if r.nm_id}
+
+
+async def _load_buyout_pct(
+    db: AsyncSession,
+    project_id: int,
+    date_from: date,
+    date_to: date,
+) -> dict[int, float]:
+    """Load weighted avg buyout fraction (0..1) per nm_id.
+
+    Wraps the single source-of-truth `bdr_loaders.load_cancel_stats` so BDR,
+    warehouse summary and stock analytics all use identical buyout numbers.
+    """
+    from backend.services.bdr_loaders import load_cancel_stats
+
+    stats = await load_cancel_stats(db, project_id, date_from, date_to)
+    out: dict[int, float] = {}
+    for nm_id, cs in stats.items():
+        total = cs["total"]
+        if total <= 0:
+            continue
+        delivered = total - cs["cancelled"]
+        out[int(nm_id)] = max(0.0, min(1.0, delivered / total))
+    return out
+
+
+async def _load_in_assembly(db: AsyncSession, project_id: int) -> dict[int, int]:
+    """Load quantities reserved in active assembly requests (excluding SHIPPED).
+
+    Returns {nm_id: total_qty}.
+    Statuses: PENDING / IN_PROGRESS / READY / VEHICLE_ASSIGNED (still physically on RF).
+    Info-only metric: these qty are ALREADY in stocks_rf (no double-counting in totals).
+    """
+    from backend.models.assembly import (
+        AssemblyRequest,
+        AssemblyRequestItem,
+        AssemblyStatus,
+    )
+    from backend.models.cost import Nomenclature
+
+    in_progress_statuses = [
+        AssemblyStatus.PENDING,
+        AssemblyStatus.IN_PROGRESS,
+        AssemblyStatus.READY,
+        AssemblyStatus.VEHICLE_ASSIGNED,
+    ]
+
+    result = await db.execute(
+        select(
+            Nomenclature.article_wb,
+            func.sum(AssemblyRequestItem.quantity).label("qty"),
+        )
+        .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .join(Nomenclature, Nomenclature.id == AssemblyRequestItem.nomenclature_id)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted.is_(False),
+            AssemblyRequest.status.in_(in_progress_statuses),
             Nomenclature.article_wb.isnot(None),
         )
         .group_by(Nomenclature.article_wb)
@@ -298,12 +430,23 @@ async def get_stock_analytics(
     # 6. Load extra stock data based on mode
     rf_stocks_map: dict[int, int] = {}
     transit_map: dict[int, list[dict]] = {}
+    in_assembly_map: dict[int, int] = {}
 
     if mode in ("wb_rf", "wb_rf_transit"):
         rf_stocks_map = await _load_rf_stocks(db, project_id)
 
     if mode == "wb_rf_transit":
         transit_map = await _load_in_transit(db, project_id)
+        in_assembly_map = await _load_in_assembly(db, project_id)
+
+    # 6b. Effective WB stock = quantity + in_way_from_client + in_way_to_client * (1 - buyout)
+    # Reflects "useful stock" — what is on warehouse + guaranteed returns from clients.
+    wb_breakdown_map = await _load_wb_breakdown(db, project_id)
+    buyout_map = await _load_buyout_pct(db, project_id, actual_trend_start, data_date)
+
+    # 6c. BDR realization (revenue rub) per nm_id over the trend window — same
+    # formula as warehouse summary "Реализ. БДР" column.
+    realization_map = await _load_realization(db, project_id, actual_trend_start, data_date)
 
     # 7. Stock forecast for 30 future days
     forecast_days = 30
@@ -324,7 +467,15 @@ async def get_stock_analytics(
         if article_filter and article_filter.lower() not in vendor_code.lower():
             continue
 
-        stocks_wb = stock_info["stocks_wb"]
+        # Effective WB stock — prefer per-warehouse breakdown; fallback to funnel value.
+        wb_b = wb_breakdown_map.get(nm_id)
+        buyout_pct = buyout_map.get(nm_id, 1.0)
+        if wb_b is not None:
+            stocks_wb = int(
+                wb_b["quantity"] + wb_b["in_way_from_client"] + wb_b["in_way_to_client"] * (1.0 - buyout_pct) + 0.5
+            )
+        else:
+            stocks_wb = stock_info["stocks_wb"]
         stocks_rf = rf_stocks_map.get(nm_id, 0)
         transit_entries = transit_map.get(nm_id, [])
         in_transit_total = sum(e["qty"] for e in transit_entries)
@@ -372,15 +523,23 @@ async def get_stock_analytics(
             "trend_pct": trend_pct,
             "avg_daily": avg_daily,
             "stocks_wb": stocks_wb,
+            "wb_buyout_pct": round(buyout_pct * 100, 2),
+            "revenue_bdr": round(realization_map.get(nm_id, 0.0), 2),
             "days_left": days_left,
             "traffic_light": traffic,
             "forecast": forecast,
         }
 
         # Extra fields for modes
-        if mode in ("wb_rf", "wb_rf_transit"):
+        if mode == "wb_rf":
             article_data["stocks_rf"] = stocks_rf
         if mode == "wb_rf_transit":
+            in_assembly_qty = in_assembly_map.get(nm_id, 0)
+            # Show RF as free stock (physical RF minus reserved in assembly requests).
+            # Physical total (for forecast/days_left) remains unchanged — same goods,
+            # just split between "free RF" and "on assembly" columns.
+            article_data["stocks_rf"] = max(0, stocks_rf - in_assembly_qty)
+            article_data["in_assembly"] = in_assembly_qty
             article_data["in_transit"] = in_transit_total
 
         articles.append(article_data)

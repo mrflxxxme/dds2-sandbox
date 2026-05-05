@@ -19,7 +19,10 @@ interface Article {
     traffic_light: string;
     forecast: number[];
     stocks_rf?: number;
+    in_assembly?: number;
     in_transit?: number;
+    wb_buyout_pct?: number;
+    revenue_bdr?: number;
 }
 
 interface StockData {
@@ -65,7 +68,7 @@ const forecastCellStyle = (projected: number, avgDaily: number): React.CSSProper
     return {};
 };
 
-type SortKey = 'orders_30d' | 'avg_daily' | 'stocks_wb' | 'days_left' | 'vendor_code';
+type SortKey = 'orders_30d' | 'avg_daily' | 'stocks_wb' | 'days_left' | 'vendor_code' | 'revenue_bdr' | 'stocks_rf' | 'in_assembly' | 'in_transit';
 
 /* ─── Main Component ─────────────────────────────────────── */
 export function StockAnalytics() {
@@ -119,8 +122,8 @@ export function StockAnalytics() {
                 : data.articles;
 
         list = [...list].sort((a, b) => {
-            const av = a[sortKey];
-            const bv = b[sortKey];
+            const av = (a[sortKey] ?? 0);
+            const bv = (b[sortKey] ?? 0);
             if (typeof av === 'string' && typeof bv === 'string') {
                 return sortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
             }
@@ -169,12 +172,16 @@ export function StockAnalytics() {
                 'Предмет': a.subject,
                 'Бренд': a.brand,
                 'Заказы 30д': a.orders_30d,
+                [`Реализ. БДР ${trendDays}д, ₽`]: a.revenue_bdr ?? 0,
                 'Тренд %': a.trend_pct,
                 [`Ср ${trendDays}д`]: a.avg_daily,
                 'Остатки WB': a.stocks_wb,
             };
             if (stockMode !== 'wb') row['Остатки РФ'] = a.stocks_rf ?? 0;
-            if (stockMode === 'wb_rf_transit') row['В пути'] = a.in_transit ?? 0;
+            if (stockMode === 'wb_rf_transit') {
+                row['На сборке'] = a.in_assembly ?? 0;
+                row['В пути'] = a.in_transit ?? 0;
+            }
             row['Хватит дн'] = a.days_left;
             (data?.dates || []).forEach((d, i) => {
                 row[d] = (a.forecast || [])[i] ?? 0;
@@ -362,18 +369,33 @@ export function StockAnalytics() {
                             <th style={thStyle('orders_30d')} onClick={() => handleSort('orders_30d')}>
                                 ЗАКАЗЫ 30Д{sortIcon('orders_30d')}
                             </th>
+                            <th style={thStyle('revenue_bdr')} onClick={() => handleSort('revenue_bdr')}
+                                title={`Реализация (БДР) за ${trendDays}д — продажи минус возвраты по retail_price_withdisc_rub.`}>
+                                РЕАЛИЗ. БДР {trendDays}Д{sortIcon('revenue_bdr')}
+                            </th>
                             <th style={{ textAlign: 'right' }}>ТРЕНД</th>
                             <th style={thStyle('avg_daily')} onClick={() => handleSort('avg_daily')}>
                                 СР {trendDays}Д{sortIcon('avg_daily')}
                             </th>
-                            <th style={thStyle('stocks_wb')} onClick={() => handleSort('stocks_wb')}>
+                            <th style={thStyle('stocks_wb')} onClick={() => handleSort('stocks_wb')}
+                                title="Полезный остаток WB = на складе + от клиента + к клиенту × (1 − выкуп%). Выкуп% берётся средний за выбранный период.">
                                 WB{sortIcon('stocks_wb')}
                             </th>
                             {stockMode !== 'wb' && (
-                                <th style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>РФ</th>
+                                <th style={thStyle('stocks_rf')} onClick={() => handleSort('stocks_rf')}>
+                                    РФ{sortIcon('stocks_rf')}
+                                </th>
                             )}
                             {stockMode === 'wb_rf_transit' && (
-                                <th style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>В ПУТИ</th>
+                                <th style={thStyle('in_assembly')} onClick={() => handleSort('in_assembly')}
+                                    title="В заявках на сборку (PENDING/IN_PROGRESS/READY/VEHICLE_ASSIGNED). Вычтено из РФ.">
+                                    НА СБОРКЕ{sortIcon('in_assembly')}
+                                </th>
+                            )}
+                            {stockMode === 'wb_rf_transit' && (
+                                <th style={thStyle('in_transit')} onClick={() => handleSort('in_transit')}>
+                                    В ПУТИ{sortIcon('in_transit')}
+                                </th>
                             )}
                             <th style={thStyle('days_left', 'center')} onClick={() => handleSort('days_left')}>
                                 ХВАТИТ ДН{sortIcon('days_left')}
@@ -390,11 +412,15 @@ export function StockAnalytics() {
                         <tr style={{ fontWeight: 700, background: 'var(--color-bg-tertiary)' }}>
                             <td style={{ ...stickyTd, background: 'var(--color-bg-tertiary)' }}>ИТОГО</td>
                             <td style={{ textAlign: 'right' }}>{formatNumber(totals.orders_30d, 0)}</td>
+                            <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s, a) => s + (a.revenue_bdr ?? 0), 0), 0)}{' ₽'}</td>
                             <td></td>
                             <td style={{ textAlign: 'right' }}>{formatNumber(totals.avg_daily)}</td>
                             <td style={{ textAlign: 'right' }}>{formatNumber(totals.stocks_wb, 0)}</td>
                             {stockMode !== 'wb' && (
                                 <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s, a) => s + (a.stocks_rf ?? 0), 0), 0)}</td>
+                            )}
+                            {stockMode === 'wb_rf_transit' && (
+                                <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s, a) => s + (a.in_assembly ?? 0), 0), 0)}</td>
                             )}
                             {stockMode === 'wb_rf_transit' && (
                                 <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s, a) => s + (a.in_transit ?? 0), 0), 0)}</td>
@@ -416,6 +442,9 @@ export function StockAnalytics() {
                                     {a.vendor_code || `#${a.nm_id}`}
                                 </td>
                                 <td style={{ textAlign: 'right' }}>{formatNumber(a.orders_30d, 0)}</td>
+                                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                    {(a.revenue_bdr ?? 0) > 0 ? formatNumber(a.revenue_bdr ?? 0, 0) + ' ₽' : '—'}
+                                </td>
                                 <td style={{
                                     textAlign: 'right',
                                     color: a.trend_pct > 0 ? '#4caf50' : a.trend_pct < 0 ? '#ff4444' : undefined,
@@ -423,10 +452,18 @@ export function StockAnalytics() {
                                     {a.trend_pct > 0 ? '↑' : a.trend_pct < 0 ? '↓' : ''}{a.trend_pct}%
                                 </td>
                                 <td style={{ textAlign: 'right' }}>{formatNumber(a.avg_daily)}</td>
-                                <td style={{ textAlign: 'right' }}>{formatNumber(a.stocks_wb, 0)}</td>
+                                <td style={{ textAlign: 'right' }}
+                                    title={a.wb_buyout_pct !== undefined ? `Выкуп ${a.wb_buyout_pct}% (за ${trendDays}д)` : undefined}>
+                                    {formatNumber(a.stocks_wb, 0)}
+                                </td>
                                 {stockMode !== 'wb' && (
                                     <td style={{ textAlign: 'right', color: (a.stocks_rf ?? 0) > 0 ? '#4caf50' : undefined }}>
                                         {formatNumber(a.stocks_rf ?? 0, 0)}
+                                    </td>
+                                )}
+                                {stockMode === 'wb_rf_transit' && (
+                                    <td style={{ textAlign: 'right', color: (a.in_assembly ?? 0) > 0 ? '#ff9f0a' : undefined }} title="В заявках на сборку (ещё на РФ-складе)">
+                                        {formatNumber(a.in_assembly ?? 0, 0)}
                                     </td>
                                 )}
                                 {stockMode === 'wb_rf_transit' && (
