@@ -18,7 +18,7 @@ export function WarehouseExclusionSettings() {
         (async () => {
             try {
                 const [wh, ex, rf] = await Promise.all([
-                    api.getWarehouses(),
+                    api.getAllWbWarehouses(),
                     api.getExcludedWarehouses(),
                     api.getForecastRfDefaultDays(),
                 ]);
