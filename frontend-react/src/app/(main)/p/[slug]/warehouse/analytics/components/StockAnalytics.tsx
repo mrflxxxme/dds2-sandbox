@@ -390,12 +390,13 @@ export function StockAnalytics() {
                             )}
                             {stockMode === 'wb_rf_transit' && (
                                 <th style={thStyle('in_assembly')} onClick={() => handleSort('in_assembly')}
-                                    title="В заявках на сборку (PENDING/IN_PROGRESS/READY/VEHICLE_ASSIGNED). Вычтено из РФ.">
+                                    title="В заявках на сборку (PENDING/IN_PROGRESS/READY/VEHICLE_ASSIGNED). Вычтено из РФ. В прогноз попадает на дату ready_date + (доставка + приёмка WB). Если ready_date не задана — берётся дата размещения заявки + 3 дня (по умолчанию).">
                                     НА СБОРКЕ{sortIcon('in_assembly')}
                                 </th>
                             )}
                             {stockMode === 'wb_rf_transit' && (
-                                <th style={thStyle('in_transit')} onClick={() => handleSort('in_transit')}>
+                                <th style={thStyle('in_transit')} onClick={() => handleSort('in_transit')}
+                                    title="Отгруженные заявки (SHIPPED). В прогноз попадают на дату «Дата сдачи» из листа логиста.">
                                     В ПУТИ{sortIcon('in_transit')}
                                 </th>
                             )}

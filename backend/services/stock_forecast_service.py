@@ -19,6 +19,10 @@ from backend.models.wb_finance import WbFinanceRow
 
 logger = logging.getLogger("dds.stock_analytics")
 
+# Default assembly time (days from request placement → ready_date) used when
+# AssemblyRequest has neither estimated_ready_date nor actual_ready_date.
+_DEFAULT_ASSEMBLY_DAYS = 3
+
 
 # ─── Pure computation helpers (testable without DB) ──────────────────────────
 
@@ -148,6 +152,52 @@ async def _load_warehouse_total_days(db: AsyncSession, project_id: int, fallback
     return out
 
 
+async def _load_warehouse_post_assembly_days(db: AsyncSession, project_id: int, fallback_days: int) -> dict[int, int]:
+    """Per warehouse: days from ready_date to WB arrival = avg(delivery) + wb_acceptance.
+
+    Used for in-assembly ETA (ready_date already includes assembly time).
+    Fallback if `WarehouseDeliveryTime` is empty: max(0, fallback_days - default_assembly_days).
+    """
+    from backend.models.warehouse import (
+        Warehouse,
+        WarehouseDeliveryTime,
+        WarehouseType,
+    )
+
+    wh_result = await db.execute(
+        select(
+            Warehouse.id,
+            Warehouse.wb_acceptance_days,
+        ).where(
+            Warehouse.project_id == project_id,
+            Warehouse.warehouse_type == WarehouseType.FULFILLMENT,
+            Warehouse.is_deleted.is_(False),
+        )
+    )
+    warehouses = wh_result.all()
+
+    avg_delivery_result = await db.execute(
+        select(
+            WarehouseDeliveryTime.warehouse_id,
+            func.avg(WarehouseDeliveryTime.delivery_days).label("avg_days"),
+        )
+        .where(WarehouseDeliveryTime.project_id == project_id)
+        .group_by(WarehouseDeliveryTime.warehouse_id)
+    )
+    avg_delivery: dict[int, float] = {int(r.warehouse_id): float(r.avg_days or 0) for r in avg_delivery_result.all()}
+
+    fallback_post = max(0, int(fallback_days) - _DEFAULT_ASSEMBLY_DAYS)
+    out: dict[int, int] = {}
+    for wh in warehouses:
+        avg_d = avg_delivery.get(int(wh.id))
+        if avg_d is None or avg_d <= 0:
+            out[int(wh.id)] = fallback_post
+            continue
+        acceptance = int(wh.wb_acceptance_days or 0)
+        out[int(wh.id)] = max(0, int(round(avg_d) + acceptance))
+    return out
+
+
 async def _load_wb_breakdown(db: AsyncSession, project_id: int) -> dict[int, dict]:
     """Load WB stock breakdown per nm_id (sum across all WB warehouses).
 
@@ -240,12 +290,21 @@ async def _load_buyout_pct(
     return out
 
 
-async def _load_in_assembly(db: AsyncSession, project_id: int) -> dict[int, int]:
-    """Load quantities reserved in active assembly requests (excluding SHIPPED).
+async def _load_in_assembly_with_eta(
+    db: AsyncSession,
+    project_id: int,
+    post_assembly_days_map: dict[int, int],
+    today_date: date,
+) -> dict[int, list[dict]]:
+    """Load active assembly requests as scheduled deliveries with ETA on WB.
 
-    Returns {nm_id: total_qty}.
+    Returns {nm_id: [{qty, delivery_date, request_id}, ...]}.
     Statuses: PENDING / IN_PROGRESS / READY / VEHICLE_ASSIGNED (still physically on RF).
-    Info-only metric: these qty are ALREADY in stocks_rf (no double-counting in totals).
+
+    ETA = ready_date + post_assembly_days[warehouse_id], где
+    ready_date = estimated_ready_date OR (created_at + 3 дня по умолчанию),
+    post_assembly_days = avg(delivery_days) + wb_acceptance_days (без assembly_days,
+    т.к. ready_date уже учитывает время сборки).
     """
     from backend.models.assembly import (
         AssemblyRequest,
@@ -264,7 +323,12 @@ async def _load_in_assembly(db: AsyncSession, project_id: int) -> dict[int, int]
     result = await db.execute(
         select(
             Nomenclature.article_wb,
-            func.sum(AssemblyRequestItem.quantity).label("qty"),
+            AssemblyRequestItem.quantity,
+            AssemblyRequest.id.label("request_id"),
+            AssemblyRequest.warehouse_id,
+            AssemblyRequest.estimated_ready_date,
+            AssemblyRequest.actual_ready_date,
+            AssemblyRequest.created_at,
         )
         .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
         .join(Nomenclature, Nomenclature.id == AssemblyRequestItem.nomenclature_id)
@@ -274,9 +338,28 @@ async def _load_in_assembly(db: AsyncSession, project_id: int) -> dict[int, int]
             AssemblyRequest.status.in_(in_progress_statuses),
             Nomenclature.article_wb.isnot(None),
         )
-        .group_by(Nomenclature.article_wb)
     )
-    return {int(r.article_wb): int(r.qty or 0) for r in result.all()}
+
+    out: dict[int, list[dict]] = {}
+    for r in result.all():
+        ready = r.actual_ready_date or r.estimated_ready_date
+        if ready is None:
+            placement = r.created_at.date() if r.created_at else today_date
+            ready = placement + timedelta(days=_DEFAULT_ASSEMBLY_DAYS)
+        post_days = post_assembly_days_map.get(int(r.warehouse_id))
+        if post_days is None:
+            # warehouse has no delivery-time rows AND no fallback resolved earlier
+            continue
+        eta = ready + timedelta(days=int(post_days))
+        nm_id = int(r.article_wb)
+        out.setdefault(nm_id, []).append(
+            {
+                "qty": int(r.quantity or 0),
+                "delivery_date": eta,
+                "request_id": int(r.request_id),
+            }
+        )
+    return out
 
 
 async def _load_in_transit(db: AsyncSession, project_id: int) -> dict[int, list[dict]]:
@@ -488,8 +571,9 @@ async def get_stock_analytics(
     # 6. Load extra stock data based on mode
     rf_stocks_per_wh: dict[int, dict[int, int]] = {}
     rf_total_days_map: dict[int, int] = {}
+    rf_post_assembly_days_map: dict[int, int] = {}
     transit_map: dict[int, list[dict]] = {}
-    in_assembly_map: dict[int, int] = {}
+    in_assembly_map: dict[int, list[dict]] = {}
 
     if mode in ("wb_rf", "wb_rf_transit"):
         from backend.services.settings_service import get_forecast_rf_default_days
@@ -497,10 +581,11 @@ async def get_stock_analytics(
         rf_stocks_per_wh = await _load_rf_stocks_per_warehouse(db, project_id)
         fallback_days = await get_forecast_rf_default_days(db, project_id)
         rf_total_days_map = await _load_warehouse_total_days(db, project_id, fallback_days)
+        rf_post_assembly_days_map = await _load_warehouse_post_assembly_days(db, project_id, fallback_days)
 
     if mode == "wb_rf_transit":
         transit_map = await _load_in_transit(db, project_id)
-        in_assembly_map = await _load_in_assembly(db, project_id)
+        in_assembly_map = await _load_in_assembly_with_eta(db, project_id, rf_post_assembly_days_map, today)
 
     # 6b. Effective WB stock = quantity + in_way_from_client + in_way_to_client * (1 - buyout)
     # Reflects "useful stock" — what is on warehouse + guaranteed returns from clients.
@@ -540,16 +625,22 @@ async def get_stock_analytics(
         else:
             stocks_wb = stock_info["stocks_wb"]
         rf_per_wh = rf_stocks_per_wh.get(nm_id, {})
-        stocks_rf = sum(rf_per_wh.values())
+        stocks_rf_total = sum(rf_per_wh.values())
         transit_entries = transit_map.get(nm_id, [])
         in_transit_total = sum(e["qty"] for e in transit_entries)
+        assembly_entries = in_assembly_map.get(nm_id, [])
+        in_assembly_total = sum(e["qty"] for e in assembly_entries)
+        # Free RF = qty NOT yet reserved by an active assembly request.
+        # On-assembly qty физически на РФ, но в матрицу заходит отдельной поставкой
+        # на ready_date + post_assembly_days, поэтому из «свободный РФ → WB»
+        # исключаем чтобы не получить двойной счёт.
+        free_rf = max(0, stocks_rf_total - in_assembly_total)
 
-        # Total stock depends on mode (used for days_left / traffic-light KPI only;
-        # in matrix we redistribute RF as a scheduled delivery on avg_total_days).
+        # Total stock — used for days_left / traffic-light KPI.
         if mode == "wb_rf_transit":
-            total_stock = stocks_wb + stocks_rf + in_transit_total
+            total_stock = stocks_wb + stocks_rf_total + in_transit_total
         elif mode == "wb_rf":
-            total_stock = stocks_wb + stocks_rf
+            total_stock = stocks_wb + stocks_rf_total
         else:
             total_stock = stocks_wb
 
@@ -566,25 +657,25 @@ async def get_stock_analytics(
         # (no qty-weighting; per user spec, variant B).
         rf_avg_days: int | None = None
         rf_synthetic: list[dict] = []
-        if mode in ("wb_rf", "wb_rf_transit") and stocks_rf > 0 and rf_per_wh:
+        if mode in ("wb_rf", "wb_rf_transit") and free_rf > 0 and rf_per_wh:
             wh_days = [rf_total_days_map.get(wh_id) for wh_id in rf_per_wh if rf_total_days_map.get(wh_id) is not None]
             wh_days = [d for d in wh_days if d is not None]
             if wh_days:
                 rf_avg_days = max(0, int(round(sum(wh_days) / len(wh_days))))
                 rf_synthetic.append(
                     {
-                        "qty": stocks_rf,
+                        "qty": free_rf,
                         "delivery_date": today_date + timedelta(days=rf_avg_days),
                     }
                 )
 
-        # Forecast — base stock = WB only; RF + in-transit feed delivery_map.
-        if mode in ("wb_rf", "wb_rf_transit") and (rf_synthetic or transit_entries):
-            combined_deliveries = rf_synthetic + transit_entries
+        # Forecast — base = WB only; free-RF + on-assembly + in-transit feed delivery_map.
+        deliveries_for_matrix = rf_synthetic + assembly_entries + transit_entries
+        if mode in ("wb_rf", "wb_rf_transit") and deliveries_for_matrix:
             forecast = _build_forecast_with_transit(
                 stocks_wb,
                 avg_daily,
-                combined_deliveries,
+                deliveries_for_matrix,
                 forecast_days,
                 today_date,
             )
@@ -615,14 +706,14 @@ async def get_stock_analytics(
         if mode in ("wb_rf", "wb_rf_transit"):
             article_data["rf_avg_days"] = rf_avg_days
         if mode == "wb_rf":
-            article_data["stocks_rf"] = stocks_rf
+            # Free RF only (in-assembly не виден в этом режиме).
+            article_data["stocks_rf"] = free_rf
         if mode == "wb_rf_transit":
-            in_assembly_qty = in_assembly_map.get(nm_id, 0)
             # Show RF as free stock (physical RF minus reserved in assembly requests).
-            # Physical total (for forecast/days_left) remains unchanged — same goods,
-            # just split between "free RF" and "on assembly" columns.
-            article_data["stocks_rf"] = max(0, stocks_rf - in_assembly_qty)
-            article_data["in_assembly"] = in_assembly_qty
+            # Physical total (for days_left) remains unchanged — same goods,
+            # just split between "free RF", "on assembly", "in transit" columns.
+            article_data["stocks_rf"] = free_rf
+            article_data["in_assembly"] = in_assembly_total
             article_data["in_transit"] = in_transit_total
 
         articles.append(article_data)
