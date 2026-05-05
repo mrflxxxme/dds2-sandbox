@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react';
 import { api } from '@/lib/api';
 
 export function WarehouseExclusionSettings() {
-    const [warehouses, setWarehouses] = useState<Array<{ name: string }>>([]);
+    const [warehouses, setWarehouses] = useState<Array<{ name: string; is_sorting_center?: boolean }>>([]);
     const [excluded, setExcluded] = useState<string[]>([]);
     const [rfDefaultDays, setRfDefaultDays] = useState<number>(8);
     const [rfDefaultDaysSaved, setRfDefaultDaysSaved] = useState<number>(8);
@@ -120,7 +120,7 @@ export function WarehouseExclusionSettings() {
                     Исключённые склады не участвуют в расчёте потребностей. Заказы из их регионов перераспределяются на ближайшие оставшиеся склады.
                 </p>
 
-                <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center' }}>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
                     <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
                         Активных: <strong>{active.length}</strong> / {warehouses.length}
                     </span>
@@ -129,6 +129,30 @@ export function WarehouseExclusionSettings() {
                             ⛔ Исключено: {excluded.length}
                         </span>
                     )}
+                    <span style={{ flex: 1 }} />
+                    <button
+                        className="btn btn-secondary btn-sm"
+                        type="button"
+                        onClick={() => {
+                            const scNames = warehouses
+                                .filter(w => w.is_sorting_center || w.name.startsWith('СЦ '))
+                                .map(w => w.name);
+                            const allExcluded = scNames.length > 0 && scNames.every(n => excluded.includes(n));
+                            if (allExcluded) {
+                                setExcluded(prev => prev.filter(n => !scNames.includes(n)));
+                            } else {
+                                setExcluded(prev => Array.from(new Set([...prev, ...scNames])));
+                            }
+                            setHasChanges(true);
+                        }}
+                        title="Сортировочные центры (СЦ) — это транзитные пункты WB, на них нельзя долго хранить запас"
+                    >
+                        🛂 Все СЦ {(() => {
+                            const scNames = warehouses.filter(w => w.is_sorting_center || w.name.startsWith('СЦ ')).map(w => w.name);
+                            const allExcluded = scNames.length > 0 && scNames.every(n => excluded.includes(n));
+                            return allExcluded ? '— включить' : '— исключить';
+                        })()}
+                    </button>
                 </div>
 
                 <div style={{

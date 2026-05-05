@@ -47,16 +47,49 @@ async def get_excluded_warehouses(db: AsyncSession, project_id: int) -> list[str
 
 
 async def set_excluded_warehouses(db: AsyncSession, project_id: int, warehouses: list[str]) -> list[str]:
-    """Set excluded warehouses. Validates names against WAREHOUSE_COORDS."""
-    valid = [w for w in warehouses if w in WAREHOUSE_COORDS]
+    """Set excluded warehouses. Normalizes names (strips parenthesized suffix)."""
+    import re
+
+    parens_re = re.compile(r"\s*\([^)]*\)\s*$")
+    valid = sorted({parens_re.sub("", w).strip() for w in warehouses if w and w.strip()})
     await set_setting(db, project_id, "excluded_warehouses", json.dumps(valid, ensure_ascii=False))
     logger.info("Set excluded warehouses for project %s: %s", project_id, valid)
     return valid
 
 
-def get_all_warehouses() -> list[dict]:
-    """Return all warehouses from WAREHOUSE_COORDS with their coordinates."""
-    return [{"name": name, "lat": coords[0], "lng": coords[1]} for name, coords in sorted(WAREHOUSE_COORDS.items())]
+async def get_all_warehouses(db: AsyncSession | None = None, project_id: int | None = None) -> list[dict]:
+    """Return all known WB warehouses: union of WAREHOUSE_COORDS keys and any
+    warehouse names that appear in wb_warehouse_stocks for this project.
+
+    Names are normalized (parenthesized suffix stripped). For warehouses without
+    coordinates, lat/lng are 0 (UI may show them but not on the map).
+    """
+    import re
+
+    parens_re = re.compile(r"\s*\([^)]*\)\s*$")
+
+    def norm(name: str) -> str:
+        return parens_re.sub("", name or "").strip()
+
+    by_name: dict[str, dict] = {}
+    for raw_name, (lat, lng) in WAREHOUSE_COORDS.items():
+        n = norm(raw_name)
+        if n and n not in by_name:
+            by_name[n] = {"name": n, "lat": lat, "lng": lng, "is_sorting_center": n.startswith("СЦ ")}
+
+    if db is not None and project_id is not None:
+        from backend.models import WbWarehouseStock
+
+        result = await db.execute(
+            select(WbWarehouseStock.warehouse_name).where(WbWarehouseStock.project_id == project_id).distinct()
+        )
+        for (raw,) in result:
+            n = norm(raw)
+            if not n or n in by_name:
+                continue
+            by_name[n] = {"name": n, "lat": 0.0, "lng": 0.0, "is_sorting_center": n.startswith("СЦ ")}
+
+    return sorted(by_name.values(), key=lambda x: x["name"])
 
 
 # ─── Stock forecast: default RF→WB lead time (used when WarehouseDeliveryTime is empty)

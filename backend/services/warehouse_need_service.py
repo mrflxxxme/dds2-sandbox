@@ -12,6 +12,7 @@ from datetime import date, timedelta
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.cache import cached
 from backend.models import WbFunnelDaily, WbWarehouseStock
 from backend.services.warehouse_stock_service import compute_need
 
@@ -32,6 +33,7 @@ def _normalize_wb_warehouse(name: str | None) -> str:
     return _WH_PARENS_RE.sub("", name).strip()
 
 
+@cached(prefix="reports:warehouse_need", ttl=300)
 async def get_warehouse_need(
     db: AsyncSession,
     project_id: int,
@@ -85,6 +87,17 @@ async def get_warehouse_need(
     open_warehouses: list[str] = list(WAREHOUSE_COORDS.keys())
     city_map: dict[str, str] = {}
     okrug_map: dict[str, str] = {}
+
+    # Excluded warehouses apply to BOTH modes — used to skip e.g. all SC (sorting
+    # centers) from per-WB demand. Stored already-normalized (no parens).
+    from backend.services.settings_service import get_excluded_warehouses
+
+    excluded_list = await get_excluded_warehouses(db, project_id)
+    excluded_set = {_normalize_wb_warehouse(w) for w in excluded_list if w}
+    if excluded_set:
+        open_warehouses = [w for w in open_warehouses if w not in excluded_set]
+        logger.info("Excluded warehouses for project %s: %s", project_id, sorted(excluded_set))
+
     if mode == "hypothetical":
         from backend.models.order_city import OrderCityMap
 
@@ -97,13 +110,6 @@ async def get_warehouse_need(
             city_map[row.srid] = row.city
             if row.okrug:
                 okrug_map[row.srid] = row.okrug
-
-        from backend.services.settings_service import get_excluded_warehouses
-
-        excluded = await get_excluded_warehouses(db, project_id)
-        if excluded:
-            open_warehouses = [w for w in open_warehouses if w not in excluded]
-            logger.info("Excluded warehouses for project %s: %s", project_id, excluded)
 
     if api_key:
         orders = await fetch_supplier_orders(api_key, trend_start.isoformat())
@@ -130,7 +136,7 @@ async def get_warehouse_need(
                 wh_name = order.get("warehouseName", "")
 
             wh_name = _normalize_wb_warehouse(wh_name)
-            if not wh_name:
+            if not wh_name or wh_name in excluded_set:
                 continue
 
             key = (wh_name, nm_id)
@@ -182,7 +188,7 @@ async def get_warehouse_need(
 
     for r in wh_result:  # type: ignore[assignment]
         wh_norm = _normalize_wb_warehouse(r.warehouse_name)
-        if not wh_norm:
+        if not wh_norm or wh_norm in excluded_set:
             continue
         key = (wh_norm, r.nm_id)
         # Several physical sub-warehouses can collapse into one normalized name;

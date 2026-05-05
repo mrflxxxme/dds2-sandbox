@@ -194,11 +194,12 @@ async def delete_category(
 @router.get("/warehouses")
 async def get_warehouses(
     project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
 ):
-    """List all available warehouses from WAREHOUSE_COORDS."""
+    """List all available WB warehouses (WAREHOUSE_COORDS + any seen in this project's stocks)."""
     from backend.services import settings_service
 
-    return settings_service.get_all_warehouses()
+    return await settings_service.get_all_warehouses(db, project.id)
 
 
 @router.get("/excluded-warehouses")
