@@ -223,6 +223,68 @@ async def _load_wb_breakdown(db: AsyncSession, project_id: int) -> dict[int, dic
     }
 
 
+async def _load_margin_pct(
+    db: AsyncSession,
+    project_id: int,
+    trend_days: int,
+) -> dict[int, float]:
+    """Return {nm_id: margin_pct} for trend window.
+
+    Reuses the same BDR pipeline as Сводные остатки so margin numbers match
+    one-to-one. Window picked by closest of {7, 14, 30} ≥ trend_days.
+    """
+    from backend.models.cost import Nomenclature
+    from backend.services.bdr_loaders import load_avg_costs, load_cost_overrides
+    from backend.services.warehouse_stock_engine import _load_bdr_metrics
+
+    nom_result = await db.execute(
+        select(Nomenclature.id, Nomenclature.article_seller, Nomenclature.article_wb).where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.article_wb.isnot(None),
+        )
+    )
+    nm_id_to_nom_id: dict[int, int] = {}
+    nom_to_article: dict[int, str | None] = {}
+    nom_to_nm: dict[int, int] = {}
+    for n in nom_result.all():
+        nm_id_to_nom_id[int(n.article_wb)] = int(n.id)
+        nom_to_article[int(n.id)] = n.article_seller
+        nom_to_nm[int(n.id)] = int(n.article_wb)
+
+    avg_costs = await load_avg_costs(db, project_id)
+    overrides = await load_cost_overrides(db, project_id)
+    cost_map: dict[int, float] = {}
+    for nom_id, article in nom_to_article.items():
+        key = (article or "").lower()
+        if key and key in avg_costs:
+            cost_map[nom_id] = avg_costs[key]
+            continue
+        nm_id = nom_to_nm.get(nom_id)
+        if nm_id and overrides.get(nm_id, 0) > 0:
+            cost_map[nom_id] = overrides[nm_id]
+
+    bdr_map = await _load_bdr_metrics(db, project_id, nm_id_to_nom_id, cost_map)
+
+    if trend_days <= 7:
+        period_key = "trend_7"
+    elif trend_days <= 14:
+        period_key = "trend_14"
+    else:
+        period_key = "trend_30"
+
+    out: dict[int, float] = {}
+    for nom_id, metrics in bdr_map.items():
+        nm_id = nom_to_nm.get(nom_id)
+        if nm_id is None:
+            continue
+        trend = metrics.get(period_key) or {}
+        rev = float(trend.get("revenue") or 0)
+        pft = float(trend.get("profit") or 0)
+        if rev > 0:
+            out[nm_id] = round(pft / rev * 100, 1)
+    return out
+
+
 async def _load_realization(
     db: AsyncSession,
     project_id: int,
@@ -609,6 +671,9 @@ async def get_stock_analytics(
     # 6c. BDR realization (revenue rub) per nm_id over the trend window — same
     # formula as warehouse summary "Реализ. БДР" column.
     realization_map = await _load_realization(db, project_id, actual_trend_start, data_date)
+    # 6d. BDR margin % per nm_id — reuses Сводные остатки pipeline so numbers
+    # match one-to-one. Independent of mode (loaded always).
+    margin_pct_map = await _load_margin_pct(db, project_id, trend_days)
 
     # 7. Stock forecast for 30 future days
     forecast_days = 30
@@ -725,6 +790,7 @@ async def get_stock_analytics(
             "stocks_wb": stocks_wb,
             "wb_buyout_pct": round(buyout_pct * 100, 2),
             "revenue_bdr": round(realization_map.get(nm_id, 0.0), 2),
+            "margin_pct": margin_pct_map.get(nm_id),
             "days_left": days_left,
             "traffic_light": traffic,
             "forecast": forecast,
@@ -744,8 +810,10 @@ async def get_stock_analytics(
             article_data["in_assembly"] = in_assembly_total
             article_data["in_transit"] = in_transit_total
         if mode == "wb_assembly_transit":
-            # Свободный РФ намеренно не показываем — режим отвечает на вопрос
-            # «что прилетит на WB при условии что РФ-остаток никуда не двинется».
+            # RF shown info-only — does NOT feed deliveries_for_matrix in this mode
+            # (mode answers "what arrives on WB if RF stays put"), but the column
+            # must still be visible so the user sees the full warehouse picture.
+            article_data["stocks_rf"] = free_rf
             article_data["in_assembly"] = in_assembly_total
             article_data["in_transit"] = in_transit_total
 
