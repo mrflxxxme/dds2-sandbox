@@ -526,8 +526,8 @@ export default function LocalizationPage() {
                         <div className="loc-table-wrap">
                             <table className="loc-table" data-testid="localization-table">
                                 <thead>
-                                    {/* Group-headers row (only district group spans 4 sub-cols each) */}
-                                    {districtsAvailable && (
+                                    {/* Group-headers row — рендерим всегда когда есть колонки округов */}
+                                    {visibleDistricts.length > 0 && (
                                         <tr>
                                             <th colSpan={11} style={{ background: '#f5f5f7' }} />
                                             {visibleDistricts.map(k => (
