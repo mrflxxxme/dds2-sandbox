@@ -231,6 +231,21 @@ export default function AssemblyDistributePage() {
         }));
     }, []);
 
+    // ─── Merge two WB target columns (drag & drop) ────────────────────────
+    const handleMergeWb = useCallback((sourceWb: string, targetWb: string) => {
+        if (sourceWb === targetWb) return;
+        setRows(prev => prev.map(r => {
+            const srcQty = r.tgt[sourceWb] || 0;
+            const next = { ...r.tgt };
+            delete next[sourceWb];
+            if (srcQty > 0) {
+                next[targetWb] = (next[targetWb] || 0) + srcQty;
+            }
+            return { ...r, tgt: next };
+        }));
+        setTargetWarehouseNames(prev => prev.filter(n => n !== sourceWb));
+    }, []);
+
     // ─── Auto-balance ────────────────────────────────────────────────────
     const handleAutoBalance = useCallback(() => {
         const newRows: AssemblyDraftRow[] = rows.map(r => {
@@ -514,6 +529,7 @@ export default function AssemblyDistributePage() {
                         initialNeedByNmId={initialNeedByNmId}
                         onSrcChange={setRowSrc}
                         onTgtChange={setRowTgt}
+                        onMergeWb={handleMergeWb}
                     />
                 </div>
             )}
@@ -534,6 +550,7 @@ interface DistributeMatrixProps {
     initialNeedByNmId: Record<number, number>;
     onSrcChange: (nmId: number, ffId: number, qty: number) => void;
     onTgtChange: (nmId: number, whName: string, qty: number) => void;
+    onMergeWb: (sourceWb: string, targetWb: string) => void;
 }
 
 function DistributeMatrix({
@@ -547,7 +564,11 @@ function DistributeMatrix({
     initialNeedByNmId,
     onSrcChange,
     onTgtChange,
+    onMergeWb,
 }: DistributeMatrixProps) {
+    const [dragSourceWb, setDragSourceWb] = useState<string | null>(null);
+    const [dragOverWb, setDragOverWb] = useState<string | null>(null);
+
     const thStyle: React.CSSProperties = {
         textAlign: 'right', fontSize: 11, fontWeight: 600,
         padding: '10px 8px', whiteSpace: 'nowrap',
@@ -577,8 +598,9 @@ function DistributeMatrix({
                     <th
                         colSpan={targetWarehouseNames.length + 1}
                         style={{ ...thStyle, textAlign: 'center', background: 'rgba(245,158,11,0.08)', letterSpacing: 1, fontWeight: 700 }}
+                        title="Перетащи заголовок WB-склада на другой, чтобы объединить колонки"
                     >
-                        ЦЕЛИ (WB)
+                        ЦЕЛИ (WB) <span style={{ fontWeight: 400, fontSize: 10, opacity: 0.6, letterSpacing: 0 }}>· перетащи столбец чтобы объединить</span>
                     </th>
                 </tr>
                 {/* Column headers */}
@@ -591,11 +613,57 @@ function DistributeMatrix({
                         </th>
                     ))}
                     <th style={{ ...thStyle, background: 'rgba(59,130,246,0.04)' }}>Σ ист</th>
-                    {targetWarehouseNames.map(whName => (
-                        <th key={`hdr-tgt-${whName}`} style={{ ...thStyle, background: 'rgba(245,158,11,0.04)' }}>
-                            {whName.length > 14 ? whName.slice(0, 14) + '…' : whName}
-                        </th>
-                    ))}
+                    {targetWarehouseNames.map(whName => {
+                        const isDragging = dragSourceWb === whName;
+                        const isOver = dragOverWb === whName && dragSourceWb !== null && dragSourceWb !== whName;
+                        return (
+                            <th
+                                key={`hdr-tgt-${whName}`}
+                                draggable
+                                onDragStart={e => {
+                                    e.dataTransfer.effectAllowed = 'move';
+                                    e.dataTransfer.setData('text/plain', whName);
+                                    setDragSourceWb(whName);
+                                }}
+                                onDragEnd={() => {
+                                    setDragSourceWb(null);
+                                    setDragOverWb(null);
+                                }}
+                                onDragOver={e => {
+                                    if (dragSourceWb && dragSourceWb !== whName) {
+                                        e.preventDefault();
+                                        e.dataTransfer.dropEffect = 'move';
+                                        setDragOverWb(whName);
+                                    }
+                                }}
+                                onDragLeave={() => {
+                                    if (dragOverWb === whName) setDragOverWb(null);
+                                }}
+                                onDrop={e => {
+                                    e.preventDefault();
+                                    const src = e.dataTransfer.getData('text/plain') || dragSourceWb;
+                                    if (src && src !== whName) {
+                                        if (window.confirm(`Объединить «${src}» в «${whName}»? Все количества будут перенесены.`)) {
+                                            onMergeWb(src, whName);
+                                        }
+                                    }
+                                    setDragSourceWb(null);
+                                    setDragOverWb(null);
+                                }}
+                                title={`Перетащи на другой WB-склад чтобы объединить колонки\n${whName}`}
+                                style={{
+                                    ...thStyle,
+                                    background: isOver ? 'rgba(34,197,94,0.18)' : 'rgba(245,158,11,0.04)',
+                                    opacity: isDragging ? 0.4 : 1,
+                                    cursor: 'grab',
+                                    transition: 'background 0.12s',
+                                    border: isOver ? '2px dashed var(--color-success, #22c55e)' : undefined,
+                                }}
+                            >
+                                {whName.length > 14 ? whName.slice(0, 14) + '…' : whName}
+                            </th>
+                        );
+                    })}
                     <th style={{ ...thStyle, background: 'rgba(245,158,11,0.04)' }}>Σ цель</th>
                 </tr>
             </thead>

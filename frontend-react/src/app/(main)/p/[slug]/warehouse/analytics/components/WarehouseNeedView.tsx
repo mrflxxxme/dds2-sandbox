@@ -21,6 +21,7 @@ interface ArticleRfStock {
 interface NeedArticle {
     nm_id: number;
     vendor_code: string;
+    barcode: string;
     brand: string;
     subject: string;
     total_need: number;
@@ -339,20 +340,11 @@ export function WarehouseNeedView() {
         setCreatingAssembly(true);
 
         try {
-            // Fetch barcodes from warehouse stock — stock_need response doesn't include barcode
-            const stockRows = await api.getWarehouseStock(assemblyWarehouseId);
-            const barcodeByNm = new Map<number, string>();
-            for (const row of stockRows) {
-                if (!barcodeByNm.has(row.nomenclature_id) && row.barcode) {
-                    barcodeByNm.set(row.nomenclature_id, row.barcode);
-                }
-            }
-
             const draftRows: AssemblyDraftRow[] = [];
             for (const nmId of checkedIds) {
                 const article = data.articles.find(a => a.nm_id === nmId);
                 if (!article) continue;
-                const barcode = barcodeByNm.get(nmId);
+                const barcode = article.barcode;
                 if (!barcode) continue;
 
                 const available = article.rf_stocks[assemblyWarehouseId]?.available || 0;
