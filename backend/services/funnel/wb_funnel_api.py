@@ -43,6 +43,8 @@ def _parse_localization_percent(raw: object) -> float | None:
     """Coerce localizationPercent to float (None if missing or invalid)."""
     if raw is None:
         return None
+    if not isinstance(raw, int | float | str):
+        return None
     try:
         return float(raw)
     except (TypeError, ValueError):
