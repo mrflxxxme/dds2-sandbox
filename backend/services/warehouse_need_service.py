@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002, RUF003
 """
 Warehouse Need Service — restocking need calculation per warehouse per article.
 
@@ -40,6 +41,8 @@ async def get_warehouse_need(
     supply_days: int = 14,
     analysis_days: int = 14,
     mode: str = "actual",
+    localization_optimized: bool = False,
+    only_available: bool = False,
 ) -> dict:
     """Compute restocking need per warehouse per article.
 
@@ -48,6 +51,17 @@ async def get_warehouse_need(
         analysis_days: lookback period for avg daily orders
         mode="actual": uses WB supplier/orders warehouseName
         mode="hypothetical": maps order regionName -> nearest open warehouse via geo
+        localization_optimized: if True — игнорируем фактический warehouseName и
+            всегда привязываем заказ к ближайшему ДОСТУПНОМУ (не excluded)
+            складу по координатам региона покупателя. Дополнительно делает
+            DISTRICT-POOLING сборок и транзита: assembly+transit, направленные
+            на ЛЮБОЙ склад одного ФО, вычитаются пропорционально из спроса
+            всех складов того же ФО (а не только из конкретного склада-цели).
+            Имеет приоритет над `mode`.
+        only_available: if True — каждый need в матрице урезается жадно по
+            фактическому ФФ-остатку артикула. Сумма needs артикула во всех
+            WB-колонках ≤ available_at_ff. Используется чтобы в матрице
+            показывать «реально могу отправить», а не «идеальную потребность».
     """
     from backend.models.assembly import (
         AssemblyRequest,
@@ -98,7 +112,9 @@ async def get_warehouse_need(
         open_warehouses = [w for w in open_warehouses if w not in excluded_set]
         logger.info("Excluded warehouses for project %s: %s", project_id, sorted(excluded_set))
 
-    if mode == "hypothetical":
+    # city_map нужен для hypothetical (точнее по городу) И для
+    # localization_optimized (если region не дал nearest — пробуем по городу).
+    if mode == "hypothetical" or localization_optimized:
         from backend.models.order_city import OrderCityMap
 
         city_rows = await db.execute(
@@ -119,7 +135,27 @@ async def get_warehouse_need(
             if not nm_id:
                 continue
 
-            if mode == "hypothetical":
+            if localization_optimized:
+                # Игнорируем фактический warehouseName — берём ближайший
+                # доступный склад по координатам покупателя. open_warehouses
+                # уже отфильтрован от excluded (см. выше). Цепочка fallback:
+                # city → region → пропускаем заказ (нет доступного склада).
+                srid = str(order.get("srid", ""))
+                wh_name = None
+                okrug = okrug_map.get(srid)
+                country_wh = get_country_filtered_warehouses(okrug, open_warehouses)
+                city = city_map.get(srid)
+                if city:
+                    wh_name = find_nearest_warehouse_by_city(city, country_wh)
+                if not wh_name:
+                    region = order.get("regionName", "")
+                    wh_name = find_nearest_warehouse(region, country_wh)
+                # Если ни city, ни region не дали nearest (например, region
+                # отсутствует в REGION_COORDS) — заказ некуда привязать,
+                # пропускаем (а не падаем на excluded warehouseName).
+                if not wh_name:
+                    continue
+            elif mode == "hypothetical":
                 srid = str(order.get("srid", ""))
                 wh_name = None
                 okrug = okrug_map.get(srid)
@@ -201,8 +237,14 @@ async def get_warehouse_need(
     for _wh, nm in wh_orders_map:
         all_nm_ids.add(nm)
 
+    # WB stock totals per nm_id — нужно ДО district-pooling и only_available
+    # блоков, которые суммируют общий WB-сток для total_need_global.
+    wb_stock_total: dict[int, int] = {}
+    for (_wh, nm), qty in stock_lookup.items():
+        wb_stock_total[nm] = wb_stock_total.get(nm, 0) + qty
+
     # 3. Determine which warehouses to show
-    if mode == "hypothetical":
+    if mode == "hypothetical" or localization_optimized:
         wh_names_to_show = set()
         for wh, _ in wh_orders_map:
             wh_names_to_show.add(wh)
@@ -233,18 +275,36 @@ async def get_warehouse_need(
     rf_wh_ids = [w.id for w in rf_warehouses]
 
     # -- One representative barcode per nm_id (for prefilled assembly form) --
+    # Primary: nomenclature. Fallback: WbFboSupplyItem — covers nm_ids that
+    # appear in WB stocks/orders but were not yet imported into local catalog.
+    from backend.models.wb_fbo import WbFboSupplyItem
+
     barcode_map: dict[int, str] = {}
     barcode_result = await db.execute(
         select(Nomenclature.article_wb, func.min(Nomenclature.barcode).label("barcode"))
         .where(
             Nomenclature.project_id == project_id,
             Nomenclature.article_wb.isnot(None),
+            Nomenclature.barcode != "",
         )
         .group_by(Nomenclature.article_wb)
     )
     for row in barcode_result:  # type: ignore[assignment]
         if row.barcode:
             barcode_map[row.article_wb] = row.barcode
+
+    fbo_bc_result = await db.execute(
+        select(WbFboSupplyItem.nm_id, func.min(WbFboSupplyItem.barcode).label("barcode"))
+        .where(
+            WbFboSupplyItem.project_id == project_id,
+            WbFboSupplyItem.nm_id.isnot(None),
+            WbFboSupplyItem.barcode != "",
+        )
+        .group_by(WbFboSupplyItem.nm_id)
+    )
+    for row in fbo_bc_result:  # type: ignore[assignment]
+        if row.nm_id and row.barcode and row.nm_id not in barcode_map:
+            barcode_map[row.nm_id] = row.barcode
 
     # -- RF stock per warehouse per nm_id --
     rf_stock_map: dict[int, dict[int, int]] = {}  # nm_id -> {warehouse_id: qty}
@@ -400,6 +460,94 @@ async def get_warehouse_need(
             }
             wh_data[wh_name]["total_need"] += need
 
+    # 4.5. District-pooling (idealized localization only)
+    # Перераспределяем учёт сборок+транзита по ФО: если в ЦФО есть сборка 100
+    # шт в Электросталь, то спрос всех складов ЦФО (Коледино, Подольск, Эл-сталь)
+    # уменьшается пропорционально, а не только Электросталь.
+    if localization_optimized:
+        from backend.services.warehouse_district import warehouse_to_district
+
+        # Восстанавливаем raw_need_at_wh (отменяем per-wh вычитание из шага 4)
+        for wh_name in list(wh_data.keys()):
+            for nm_id, art in wh_data[wh_name]["articles"].items():
+                target_asm = assembly_target_map.get(nm_id, {}).get(wh_name, 0)
+                target_transit = transit_target_map.get(nm_id, {}).get(wh_name, 0)
+                art["need"] += target_asm + target_transit
+
+        # Группируем asm+transit по (district, nm)
+        district_pool: dict[tuple[str, int], int] = {}
+        for nm, wh_qty in assembly_target_map.items():
+            for wh, q in wh_qty.items():
+                d = warehouse_to_district(wh)
+                district_pool[(d, nm)] = district_pool.get((d, nm), 0) + q
+        for nm, wh_qty in transit_target_map.items():
+            for wh, q in wh_qty.items():
+                d = warehouse_to_district(wh)
+                district_pool[(d, nm)] = district_pool.get((d, nm), 0) + q
+
+        # Группируем raw_need по (district, nm) — для пропорционального дележа
+        raw_need_district: dict[tuple[str, int], int] = {}
+        for wh_name in list(wh_data.keys()):
+            d = warehouse_to_district(wh_name)
+            for nm_id, art in wh_data[wh_name]["articles"].items():
+                raw_need_district[(d, nm_id)] = raw_need_district.get((d, nm_id), 0) + art["need"]
+
+        # Применяем pooled-subtraction пропорционально доле склада в спросе ФО
+        for wh_name in list(wh_data.keys()):
+            d = warehouse_to_district(wh_name)
+            for nm_id, art in wh_data[wh_name]["articles"].items():
+                district_total = raw_need_district.get((d, nm_id), 0)
+                district_alloc = district_pool.get((d, nm_id), 0)
+                if district_total > 0 and district_alloc > 0:
+                    share = art["need"] / district_total
+                    art["need"] = max(0, art["need"] - round(share * district_alloc))
+
+        # Пересчитываем total_need per warehouse
+        for wh_name in list(wh_data.keys()):
+            wh_data[wh_name]["total_need"] = sum(a["need"] for a in wh_data[wh_name]["articles"].values())
+
+    # 4.6. Only-available: жадный cap по can_send артикула (= min(rf_avail,
+    # total_need_global)). Если total_need_global=0 (профицит покрыт другими
+    # складами) — все клетки артикула обнуляются. Если total_need=N>0 —
+    # распределяем N шт между WB-складами в порядке убывания их per-cell need.
+    if only_available:
+        # Считаем can_send_per_nm = min(rf_avail, total_need_global)
+        can_send_per_nm: dict[int, int] = {}
+        for nm_id in all_nm_ids:
+            total_rf_stock_local = 0
+            for wh in rf_warehouses:  # type: ignore[assignment]
+                stock_qty = rf_stock_map.get(nm_id, {}).get(wh.id, 0)  # type: ignore[attr-defined]
+                total_rf_stock_local += stock_qty
+            in_asm_total_local = in_assembly_map.get(nm_id, 0)
+            rf_avail_local = max(0, total_rf_stock_local - in_asm_total_local)
+
+            total_orders_local = sum(qty for (wh, nm), qty in wh_orders_map.items() if nm == nm_id)
+            avg_d_local = total_orders_local / max(actual_days, 1)
+            total_wb_stock_local = wb_stock_total.get(nm_id, 0)
+            transit_local = in_transit_map.get(nm_id, {"qty": 0}).get("qty", 0)
+            global_need = max(
+                0,
+                round(avg_d_local * supply_days - total_wb_stock_local - in_asm_total_local - transit_local),
+            )
+            can_send_per_nm[nm_id] = min(rf_avail_local, global_need)
+
+        # Greedy: больше всего «нуждающемуся» WB-складу — первому.
+        for nm_id, cap_total in can_send_per_nm.items():
+            wbs = []
+            for wh_name in list(wh_data.keys()):
+                arts = wh_data[wh_name]["articles"]
+                if nm_id in arts and arts[nm_id]["need"] > 0:
+                    wbs.append((wh_name, arts[nm_id]["need"]))
+            wbs.sort(key=lambda x: -x[1])
+            remaining = cap_total
+            for wh_name, n in wbs:
+                cap = min(n, remaining)
+                wh_data[wh_name]["articles"][nm_id]["need"] = cap
+                remaining = max(0, remaining - cap)
+
+        for wh_name in list(wh_data.keys()):
+            wh_data[wh_name]["total_need"] = sum(a["need"] for a in wh_data[wh_name]["articles"].values())
+
     warehouses = sorted(wh_data.values(), key=lambda w: w["total_need"], reverse=True)
 
     # -- Revenue for analysis_days from wb_finance_rows (sales - returns) --
@@ -427,11 +575,6 @@ async def get_warehouse_need(
     )
     revenue_map: dict[int, float] = {r.nm_id: float(r.realization or 0) for r in revenue_result}
 
-    # -- WB stock totals per nm_id --
-    wb_stock_total: dict[int, int] = {}
-    for (_wh, nm), qty in stock_lookup.items():
-        wb_stock_total[nm] = wb_stock_total.get(nm, 0) + qty
-
     # -- Average delivery time --
     avg_delivery_days = 0
     dt_result = await db.execute(
@@ -453,8 +596,10 @@ async def get_warehouse_need(
         avg_delivery_days = round(total_days_sum / len(dt_rows))
 
     # -- Build enriched article list with need totals --
-    # total_need per article = full pre-allocation demand (built in step 4 above)
-    article_need_map = raw_need_per_article
+    # total_need per article теперь считается из глобального баланса
+    # (avg_d * supply_days - WB_stock - in_assembly - in_transit) ниже,
+    # raw_need_per_article использовался только в старой формуле и больше
+    # не нужен на этом уровне.
 
     # Summary accumulators
     sum_total_need = 0
@@ -466,8 +611,6 @@ async def get_warehouse_need(
 
     enriched_articles = []
     for nm_id in all_nm_ids:
-        raw_demand = article_need_map.get(nm_id, 0)
-
         # RF stocks per warehouse
         rf_stocks_for_nm: dict[int, dict] = {}
         total_rf_stock = 0
@@ -485,8 +628,17 @@ async def get_warehouse_need(
         in_transit_qty = transit_info["qty"]
         in_transit_date = transit_info["date"]
 
-        # total_need = what is STILL left to ship (raw demand minus in-assembly + in-transit)
-        total_need = max(0, raw_demand - in_asm_total - in_transit_qty)
+        # total_need = ОБЩАЯ потребность артикула на supply_days вперёд минус
+        # ВСЕ доступные источники (любой WB-склад, сборка, транзит). Это
+        # отличается от sum(per-WB needs) тем, что профицит на одном WB-складе
+        # компенсирует дефицит на другом — для KPI «сколько ещё закупить».
+        # Per-cell needs в матрице остаются per-WB-локализованными (показ
+        # идеальной раскладки независимо от общего профицита).
+        total_orders_for_nm = sum(qty for (wh, nm), qty in wh_orders_map.items() if nm == nm_id)
+        total_avg_daily = total_orders_for_nm / max(actual_days, 1)
+        total_wb_stock = wb_stock_total.get(nm_id, 0)
+        gross_demand = total_avg_daily * supply_days
+        total_need = max(0, round(gross_demand - total_wb_stock - in_asm_total - in_transit_qty))
         can_send = min(total_rf_available, total_need)
         deficit = max(0, total_need - can_send)
 

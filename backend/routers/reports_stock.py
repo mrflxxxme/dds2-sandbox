@@ -176,6 +176,24 @@ async def get_stock_need(
     supply_days: int = Query(14, ge=1, le=90, description="Target stock level in days"),
     analysis_days: int = Query(14, ge=1, le=90, description="Lookback period for avg daily orders"),
     mode: str = Query("actual", pattern="^(actual|hypothetical)$"),
+    localization_optimized: bool = Query(
+        False,
+        description=(
+            "Если True — потребность распределяется по ближайшим доступным "
+            "WB-складам по координатам покупателя (идеальная локализация). "
+            "Исключённые склады автоматически перебрасываются на следующие "
+            "ближайшие available по haversine. Дополнительно делается "
+            "district-pooling: сборки/транзит вычитаются из спроса всех "
+            "складов того же ФО пропорционально, не только из конкретного."
+        ),
+    ),
+    only_available: bool = Query(
+        False,
+        description=(
+            "Если True — каждая клетка матрицы урезается жадно по ФФ-остатку "
+            "артикула: «реально могу отправить» вместо «идеальная потребность»."
+        ),
+    ),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -185,7 +203,15 @@ async def get_stock_need(
 
     from backend.services.warehouse_need_service import get_warehouse_need
 
-    return await get_warehouse_need(db, project.id, supply_days, analysis_days, mode)
+    return await get_warehouse_need(
+        db,
+        project.id,
+        supply_days,
+        analysis_days,
+        mode,
+        localization_optimized=localization_optimized,
+        only_available=only_available,
+    )
 
 
 @router.post("/stock_analytics/upload_order_cities")

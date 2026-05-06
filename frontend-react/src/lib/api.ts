@@ -27,6 +27,7 @@ import { addAiChatMethods } from './api/ai-chat';
 import { addCounterpartyMethods } from './api/counterparty';
 import { addLoanMethods } from './api/loans';
 import { addWbReturnsMethods } from './api/wb-returns';
+import { addLocalizationMethods } from './api/localization';
 
 const client = new ApiClient();
 
@@ -49,4 +50,5 @@ export const api = Object.assign(client, {
     ...addCounterpartyMethods(client),
     ...addLoanMethods(client),
     ...addWbReturnsMethods(client),
+    ...addLocalizationMethods(client),
 });

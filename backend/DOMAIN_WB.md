@@ -13,6 +13,10 @@
 - `services/funnel/backfill.py` — загрузка исторических данных
 - `services/funnel/cost_overrides.py` — ручные себестоимости
 - `services/funnel/queries.py` — SQL-запросы для воронки
+- `services/localization_tariff.py` — таблицы КТР/КРП Wildberries (с 23.03.2026)
+- `services/localization_index_service.py` — расчёт индекса локализации (ИЛ) и ИРП
+- `routers/localization.py` — HTTP endpoints отчёта Локализация
+- `schemas/localization.py` — Pydantic схемы (LocalizationSummary, LocalizationSkuRow, LocalizationByPeriod)
 - `services/wb_finance_sync.py` — синхронизация WB Finance Report
 - `services/integrations_service.py` — управление API-ключами
 - `services/warehouse_stock_service.py` — остатки на складах WB
@@ -86,6 +90,16 @@
 - Воронка: transitions → add_to_cart → orders_count → orders_sum → buyout_count
 - Реклама: ad_spend, ad_views, ad_clicks → CTR, CPC, CPM
 - Unit-экономика: revenue - cost - ads - tax = profit per unit
+
+### Локализация (ИЛ + ИРП), с 23.03.2026
+- Источник: WB Analytics v3 sales-funnel/products → поля `localizationPercent` и `timeToReady`
+- Хранение: `wb_funnel_daily.localization_percent` (Numeric(5,2)) + `time_to_ready_minutes` (int)
+- Расчёт per-SKU: `loc_pct = Σ(orders × loc_pct) / Σ(orders)` (взвеш. среднее)
+- КТР: таблица 18 диапазонов 0..100% (см. `services/localization_tariff.py`)
+- КРП: таблица 13 диапазонов; КРП=0 при loc≥60%
+- Top-block KPI: ИЛ = средневзвеш. КТР по orders; ИРП = средневзвеш. КРП по orders
+- Эталон (WB-инструкция): 2 SKU по 100 заказов с loc=37% и 62% → ИРП = 1.05%
+- Кэш: `reports:localization`, `reports:localization_skus` (ttl 300с) — оба сбрасываются в `invalidate_project_reports`
 
 ## Known Issues & Gotchas
 - ~~**Глобальный CircuitBreaker:**~~ исправлено — теперь per-project CircuitBreakerRegistry (`_wb_circuits`), каждый проект имеет свой circuit breaker

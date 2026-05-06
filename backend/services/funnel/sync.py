@@ -211,6 +211,8 @@ async def run_funnel_sync(
                     "avg_price": fd.get("avg_price", 0),
                     "stocks_wb": fd.get("stocks_wb", 0),
                     "stocks_mp": fd.get("stocks_mp", 0),
+                    "localization_percent": fd.get("localization_percent"),
+                    "time_to_ready_minutes": fd.get("time_to_ready_minutes"),
                     "adv_views": ad.get("views", 0),
                     "adv_clicks": ad.get("clicks", 0),
                     "adv_sum": ad.get("sum", 0),
@@ -239,6 +241,8 @@ async def run_funnel_sync(
                     "avg_price": stmt.excluded.avg_price,
                     "stocks_wb": stmt.excluded.stocks_wb,
                     "stocks_mp": stmt.excluded.stocks_mp,
+                    "localization_percent": stmt.excluded.localization_percent,
+                    "time_to_ready_minutes": stmt.excluded.time_to_ready_minutes,
                     "cost_price": stmt.excluded.cost_price,
                 }
 

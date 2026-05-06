@@ -184,6 +184,11 @@ from backend.models.wb_finance import (
     WbFinanceSyncLog,
 )
 
+# WB Orders (per-srid feed from /api/v1/supplier/orders)
+from backend.models.wb_order import (
+    WbOrder,
+)
+
 # WB Order Cancel Stats
 from backend.models.wb_order_cancel import (
     WbOrderCancelDaily,
@@ -301,6 +306,7 @@ __all__ = [
     "DefectMarkStatus",
     # WB Order Cancel Stats
     "WbOrderCancelDaily",
+    "WbOrder",
     # WB FBO Supplies
     "FboAuditAction",
     "FboSupplyAudit",

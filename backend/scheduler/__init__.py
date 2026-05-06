@@ -37,6 +37,7 @@ from backend.scheduler.jobs.wb_finance import (
     sync_all_projects_wb_finance_daily,
 )
 from backend.scheduler.jobs.wb_goods_returns_sync import sync_all_projects_wb_returns
+from backend.scheduler.jobs.wb_orders_sync import sync_all_projects_wb_orders
 from backend.scheduler.jobs.wb_stocks import sync_all_projects_wb_stocks
 
 logger = logging.getLogger("dds.scheduler")
@@ -249,6 +250,20 @@ def start_scheduler():
         id="ai_daily_digest",
         name="AI daily digest (07:00 MSK)",
         replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # WB supplier orders sync (для отчёта «Индекс локализации»):
+    # 03:30 / 09:30 / 15:30 MSK — 3 раза в день. Тянем последние 30 дней,
+    # UPSERT по (project_id, srid). После sync кэш reports:localization*
+    # инвалидируется внутри sync_wb_orders.
+    _scheduler.add_job(
+        sync_all_projects_wb_orders,
+        trigger=CronTrigger(hour="3,9,15", minute=30, timezone=MSK),
+        id="wb_orders_sync",
+        name="WB supplier orders sync (03:30 + 09:30 + 15:30 MSK)",
+        replace_existing=True,
+        max_instances=1,
         misfire_grace_time=3600,
     )
 

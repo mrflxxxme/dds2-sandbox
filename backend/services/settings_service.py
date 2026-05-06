@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002, RUF003
 """Settings service — project-level key-value settings."""
 
 import json
@@ -50,9 +51,19 @@ async def set_excluded_warehouses(db: AsyncSession, project_id: int, warehouses:
     """Set excluded warehouses. Normalizes names (strips parenthesized suffix)."""
     import re
 
+    from backend.cache import invalidate_cache
+
     parens_re = re.compile(r"\s*\([^)]*\)\s*$")
     valid = sorted({parens_re.sub("", w).strip() for w in warehouses if w and w.strip()})
     await set_setting(db, project_id, "excluded_warehouses", json.dumps(valid, ensure_ascii=False))
+    # Iron rule #7: после мутации настроек, влияющих на отчёт, инвалидируем кэш.
+    # Без этого 5-минутный TTL отдавал бы старый снимок с уже исключёнными
+    # складами (прецедент: пользователь убрал Обухово в excluded, но оно
+    # оставалось в матрице потребности до истечения кэша).
+    try:
+        await invalidate_cache("reports:warehouse_need")
+    except Exception as e:
+        logger.warning("invalidate reports:warehouse_need failed: %s", e)
     logger.info("Set excluded warehouses for project %s: %s", project_id, valid)
     return valid
 

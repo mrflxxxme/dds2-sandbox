@@ -1,15 +1,54 @@
+# ruff: noqa: RUF002
 """WB Analytics API — sales funnel data fetching.
 
 Handles:
 - fetch_funnel: per-day product analytics
 - fetch_funnel_history: multi-day history (requires WB Джем)
+
+С 23.03.2026 ответ содержит дополнительно:
+- localizationPercent (доля локальных заказов, %)
+- timeToReady ({days, hours, mins}) — ВГП (время готовности) на FBS
+
+Эти поля складываются в wb_funnel_daily.localization_percent и
+time_to_ready_minutes — индекс локализации (ИЛ) и ИРП считаются
+поверх них в localization_index_service.
 """
 
-import logging
 import asyncio
+import logging
+
 import httpx
 
 logger = logging.getLogger("dds.funnel")
+
+
+def _parse_time_to_ready(raw: object) -> int | None:
+    """Parse WB timeToReady payload {days, hours, mins} → total minutes.
+
+    Returns None if the payload is missing or malformed.
+    """
+    if not isinstance(raw, dict):
+        return None
+    try:
+        days = int(raw.get("days") or 0)
+        hours = int(raw.get("hours") or 0)
+        mins = int(raw.get("mins") or 0)
+    except (TypeError, ValueError):
+        return None
+    total = days * 1440 + hours * 60 + mins
+    return total if total >= 0 else None
+
+
+def _parse_localization_percent(raw: object) -> float | None:
+    """Coerce localizationPercent to float (None if missing or invalid)."""
+    if raw is None:
+        return None
+    if not isinstance(raw, int | float | str):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 async def fetch_funnel(api_key: str, date_str: str) -> dict:
@@ -42,10 +81,9 @@ async def fetch_funnel(api_key: str, date_str: str) -> dict:
                     json=payload,
                 )
                 if resp.status_code == 429:
-                    wait = 10 * (2 ** attempt)
+                    wait = 10 * (2**attempt)
                     logger.warning(
-                        f"WB funnel API 429 rate limited, waiting {wait}s "
-                        f"(attempt {attempt+1}/3, offset={offset})"
+                        f"WB funnel API 429 rate limited, waiting {wait}s " f"(attempt {attempt+1}/3, offset={offset})"
                     )
                     await asyncio.sleep(wait)
                     continue
@@ -85,18 +123,33 @@ async def fetch_funnel(api_key: str, date_str: str) -> dict:
                     "avg_price": s.get("avgPrice", 0),
                     "stocks_wb": stocks.get("wb", 0),
                     "stocks_mp": stocks.get("mp", 0),
+                    "localization_percent": _parse_localization_percent(s.get("localizationPercent")),
+                    "time_to_ready_minutes": _parse_time_to_ready(s.get("timeToReady")),
                 }
             offset += len(products)
 
     return all_items
 
 
-async def fetch_funnel_history(api_key: str, date_from: str, date_to: str) -> dict | None:
+async def fetch_funnel_history(
+    api_key: str,
+    date_from: str,
+    date_to: str,
+    nm_ids: list[int] | None = None,
+) -> dict | None:
     """Fetch sales funnel data with per-day breakdown using /history endpoint.
 
-    Requires WB Джем subscription. Returns None if not available (402).
+    WB API требует непустой список nmIds (без него — 400 "at least 1 nmId
+    is expected"). Если nm_ids не переданы или пуст — возвращаем None,
+    вызывающая сторона делает fallback на per-day endpoint.
+
+    Returns None если nm_ids пуст / 402 / 400.
     Returns {date_str: {nm_id: {vendor_code, subject, brand, open_card, ...}}}.
     """
+    if not nm_ids:
+        logger.info("history: no nm_ids passed, skipping (use per-day fallback)")
+        return None
+
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -110,7 +163,7 @@ async def fetch_funnel_history(api_key: str, date_from: str, date_to: str) -> di
         while True:
             payload = {
                 "selectedPeriod": {"start": date_from, "end": date_to},
-                "nmIds": [],
+                "nmIds": list(nm_ids),
                 "skipDeletedNm": True,
                 "aggregationLevel": "day",
                 "limit": limit,
@@ -120,17 +173,13 @@ async def fetch_funnel_history(api_key: str, date_from: str, date_to: str) -> di
             resp = None
             for attempt in range(3):
                 resp = await client.post(
-                    "https://seller-analytics-api.wildberries.ru"
-                    "/api/analytics/v3/sales-funnel/products/history",
+                    "https://seller-analytics-api.wildberries.ru" "/api/analytics/v3/sales-funnel/products/history",
                     headers=headers,
                     json=payload,
                 )
                 if resp.status_code == 429:
-                    wait = 10 * (2 ** attempt)
-                    logger.warning(
-                        f"WB history API 429, waiting {wait}s "
-                        f"(attempt {attempt+1}/3, offset={offset})"
-                    )
+                    wait = 10 * (2**attempt)
+                    logger.warning(f"WB history API 429, waiting {wait}s " f"(attempt {attempt+1}/3, offset={offset})")
                     await asyncio.sleep(wait)
                     continue
                 break
@@ -151,7 +200,11 @@ async def fetch_funnel_history(api_key: str, date_from: str, date_to: str) -> di
                 break
 
             data = resp.json()
-            products = data if isinstance(data, list) else ((data.get("data") or {}).get("products") if isinstance(data, dict) else None) or data
+            products = (
+                data
+                if isinstance(data, list)
+                else ((data.get("data") or {}).get("products") if isinstance(data, dict) else None) or data
+            )
             if not isinstance(products, list) or not products:
                 break
 
@@ -187,14 +240,13 @@ async def fetch_funnel_history(api_key: str, date_from: str, date_to: str) -> di
                         "avg_price": 0,
                         "stocks_wb": 0,
                         "stocks_mp": 0,
+                        "localization_percent": _parse_localization_percent(day.get("localizationPercent")),
+                        "time_to_ready_minutes": _parse_time_to_ready(day.get("timeToReady")),
                     }
 
             offset += len(products)
 
     if result:
         total_items = sum(len(v) for v in result.values())
-        logger.info(
-            f"WB history: {date_from}→{date_to} — "
-            f"{len(result)} days, {total_items} product-days"
-        )
+        logger.info(f"WB history: {date_from}→{date_to} — " f"{len(result)} days, {total_items} product-days")
     return result
