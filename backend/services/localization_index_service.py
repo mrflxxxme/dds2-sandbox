@@ -20,10 +20,11 @@ from collections import defaultdict
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.cache import cached
+from backend.cache import cached, invalidate_cache
 from backend.models import WbFunnelDaily, WbOrder
 from backend.services.localization_tariff import get_krp, get_ktr, status_label
 from backend.services.warehouse_district import (
@@ -216,6 +217,10 @@ async def _load_district_breakdown(
       через district=abroad — но обычные WB-РФ заказы идут только если
       countryName='Россия')
     - warehouse_type == 'Склад WB' (FBO; FBS / маркетплейс не считаем)
+    - INNER JOIN с wb_funnel_daily по (project_id, nm_id, date_msk):
+      берём только те заказы, для которых есть `localization_percent`
+      в funnel — иначе расходится с топ-блоком (top-block считается
+      по wb_funnel_daily, который покрывает не все дни).
 
     Логика:
     - district = okrug_to_district(oblast_okrug_name, country_name)
@@ -226,12 +231,23 @@ async def _load_district_breakdown(
     """
     d_from = date.fromisoformat(date_from)
     d_to = date.fromisoformat(date_to)
+    # order_date хранится как DateTime(timezone=True); funnel.date — календарная
+    # дата по MSK (как в WB-кабинете). Приводим order_date к MSK-дате для JOIN.
+    order_date_msk = func.date(func.timezone("Europe/Moscow", WbOrder.order_date))
     q = (
         select(
             WbOrder.nm_id,
             WbOrder.warehouse_name,
             WbOrder.oblast_okrug_name,
             WbOrder.country_name,
+        )
+        .join(
+            WbFunnelDaily,
+            (WbFunnelDaily.project_id == WbOrder.project_id)
+            & (WbFunnelDaily.nm_id == WbOrder.nm_id)
+            & (WbFunnelDaily.date == order_date_msk)
+            & (WbFunnelDaily.localization_percent.isnot(None))
+            & (WbFunnelDaily.orders_count > 0),
         )
         .where(WbOrder.project_id == project_id)
         .where(WbOrder.order_date >= d_from)
@@ -341,6 +357,193 @@ async def get_district_breakdown(
     }
 
 
+async def sync_localization_only(
+    project_id: int,
+    date_from: str,
+    date_to: str,
+) -> dict:
+    """Облегчённый синк ТОЛЬКО `localization_percent` за период.
+
+    Зачем: полный `run_funnel_sync` тянет рекламную статистику (минуты из-за
+    WB rate-limit 429). Для отчёта локализации нужно только поле
+    `localizationPercent` от sales-funnel — значит делаем минимум:
+    history-batch (5 дней) или per-day fallback, UPSERT только этого поля.
+
+    Запускается background-task'ом из endpoint /localization/sync.
+    """
+    import asyncio
+
+    import httpx
+
+    from backend.database import AsyncSessionLocal
+    from backend.services.funnel.wb_api_client import get_wb_key
+    from backend.services.funnel.wb_funnel_api import (
+        fetch_funnel,
+        fetch_funnel_history,
+    )
+
+    started_at = date.today().isoformat()
+    logger.info(
+        "localization-only sync: project=%d period=%s..%s started=%s",
+        project_id,
+        date_from,
+        date_to,
+        started_at,
+    )
+
+    async with AsyncSessionLocal() as db:
+        api_key = await get_wb_key(db, project_id, "wb_analytics")
+        if not api_key:
+            api_key = await get_wb_key(db, project_id, "wb")
+        if not api_key:
+            logger.warning("localization-only sync: no WB key for project=%d", project_id)
+            return {"status": "error", "error": "no WB key"}
+
+        d_from = date.fromisoformat(date_from)
+        d_to = date.fromisoformat(date_to)
+        all_dates: list[str] = []
+        d = d_from
+        while d <= d_to:
+            all_dates.append(d.isoformat())
+            d += timedelta(days=1)
+        if not all_dates:
+            return {"status": "ok", "days": 0, "rows_updated": 0}
+
+        # Список nm_ids проекта — обязателен для /history (без них 400).
+        nm_ids_rows = (
+            await db.execute(
+                select(WbFunnelDaily.nm_id)
+                .where(WbFunnelDaily.project_id == project_id)
+                .where(WbFunnelDaily.nm_id.isnot(None))
+                .distinct()
+            )
+        ).all()
+        nm_ids = [r[0] for r in nm_ids_rows]
+        logger.info("localization-only sync: %d nm_ids loaded", len(nm_ids))
+
+        async def _upsert_day(ds: str, day_data: dict) -> int:
+            """Upsert one day's funnel data — точечно, только нужные поля."""
+            rows = []
+            for nm_id, fd in day_data.items():
+                rows.append(
+                    {
+                        "project_id": project_id,
+                        "date": date.fromisoformat(ds),
+                        "nm_id": nm_id,
+                        "vendor_code": fd.get("vendor_code") or "",
+                        "subject": fd.get("subject") or "",
+                        "brand": fd.get("brand") or "",
+                        "open_card": fd.get("open_card", 0),
+                        "add_to_cart": fd.get("add_to_cart", 0),
+                        "orders_count": fd.get("orders_count", 0),
+                        "orders_sum_rub": fd.get("orders_sum_rub", 0),
+                        "buyout_percent": fd.get("buyout_percent", 0),
+                        "cart_to_order_pct": fd.get("cart_to_order_pct", 0),
+                        "add_to_cart_pct": fd.get("add_to_cart_pct", 0),
+                        "localization_percent": fd.get("localization_percent"),
+                        "time_to_ready_minutes": fd.get("time_to_ready_minutes"),
+                    }
+                )
+            if not rows:
+                return 0
+            stmt = pg_insert(WbFunnelDaily).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_funnel_daily",
+                set_={
+                    "vendor_code": stmt.excluded.vendor_code,
+                    "subject": stmt.excluded.subject,
+                    "brand": stmt.excluded.brand,
+                    "orders_count": stmt.excluded.orders_count,
+                    "localization_percent": stmt.excluded.localization_percent,
+                    "time_to_ready_minutes": stmt.excluded.time_to_ready_minutes,
+                },
+            )
+            await db.execute(stmt)
+            await db.commit()
+            return len(rows)
+
+        # 1) /history endpoint — один большой батч (с nm_ids WB позволяет
+        #    запросить весь период сразу, обычно до ~30 дней). Если WB вернёт
+        #    400/402 за длинное окно — fallback per-day.
+        total = 0
+        days_done = 0
+        use_history = True
+        WINDOW = 30
+        for i in range(0, len(all_dates), WINDOW):
+            window = all_dates[i : i + WINDOW]
+            w_from, w_to = window[0], window[-1]
+            if use_history:
+                try:
+                    data = await fetch_funnel_history(api_key, w_from, w_to, nm_ids=nm_ids)
+                except (TimeoutError, httpx.HTTPError) as e:
+                    logger.warning("history fetch error %s..%s: %s", w_from, w_to, e)
+                    data = None
+                if data is None:
+                    use_history = False
+                    logger.info("history unavailable, falling back to per-day")
+                else:
+                    for ds, dd in data.items():
+                        total += await _upsert_day(ds, dd)
+                        days_done += 1
+                    logger.info("history batch %s..%s: %d days saved", w_from, w_to, len(data))
+                    await asyncio.sleep(1)
+                    continue
+            # Per-day fallback с инкрементальным save после каждого дня
+            for ds in window:
+                try:
+                    day_data = await fetch_funnel(api_key, ds)
+                    if day_data:
+                        total += await _upsert_day(ds, day_data)
+                        days_done += 1
+                        logger.info("per-day saved %s: %d nm_ids", ds, len(day_data))
+                except (TimeoutError, httpx.HTTPError) as e:
+                    logger.warning("per-day fetch error %s: %s", ds, e)
+                await asyncio.sleep(1)
+
+    # Инвалидация кэша
+    for prefix in (
+        "reports:localization",
+        "reports:localization_skus",
+        "reports:localization_districts",
+        "reports:localization_dates",
+        "reports:localization_daily",
+    ):
+        try:
+            await invalidate_cache(prefix)
+        except Exception as e:
+            logger.warning("invalidate %s failed: %s", prefix, e)
+
+    logger.info(
+        "localization-only sync done: project=%d days=%d rows=%d",
+        project_id,
+        days_done,
+        total,
+    )
+    return {"status": "ok", "days": days_done, "rows_updated": total}
+
+
+@cached(prefix="reports:localization_dates", ttl=300)
+async def get_available_dates(
+    db: AsyncSession,
+    project_id: int,
+) -> list[str]:
+    """Список ISO-дат, за которые в funnel есть `localization_percent`.
+
+    UI использует для блокировки недоступных дат в date-picker'е.
+    Multi-tenancy: фильтр project_id обязателен.
+    """
+    q = (
+        select(WbFunnelDaily.date)
+        .where(WbFunnelDaily.project_id == project_id)
+        .where(WbFunnelDaily.localization_percent.isnot(None))
+        .where(WbFunnelDaily.orders_count > 0)
+        .group_by(WbFunnelDaily.date)
+        .order_by(WbFunnelDaily.date)
+    )
+    res = await db.execute(q)
+    return [d.isoformat() for d in res.scalars()]
+
+
 @cached(prefix="reports:localization", ttl=300)
 async def get_summary(
     db: AsyncSession,
@@ -363,6 +566,75 @@ async def get_summary(
     districts = await get_district_breakdown(db, project_id, date_from, date_to)
     summary["district_totals"] = districts.get("totals", []) if districts.get("has_data") else []
     return summary
+
+
+@cached(prefix="reports:localization_daily", ttl=300)
+async def get_daily(
+    db: AsyncSession,
+    project_id: int,
+    date_from: str,
+    date_to: str,
+    subject: str | None = None,
+    brand: str | None = None,
+) -> list[dict]:
+    """Динамика ИЛ/ИРП по дням за период.
+
+    Логика — та же что в `_build_summary`, но per-day: для каждой даты в
+    `wb_funnel_daily` с непустым `localization_percent` считается взвешенное
+    среднее КТР/КРП по `orders_count`.
+
+    Фильтры:
+    - subject (предмет) — `WbFunnelDaily.subject == subject` если задан
+    - brand   — аналогично
+
+    Кэш 300 сек, ключ включает project_id + dates + subject + brand. После
+    sync funnel/wb_orders инвалидируется через `reports:localization_daily`.
+
+    Returns:
+        list[{date, localization_index, irp_percent, total_orders, articles_count}]
+        упорядочено по date ASC. Дни без orders с localization_percent
+        в результате не появляются (UI показывает «нет данных» как пропуск).
+    """
+    d_from = date.fromisoformat(date_from)
+    d_to = date.fromisoformat(date_to)
+    q = (
+        select(WbFunnelDaily)
+        .where(WbFunnelDaily.project_id == project_id)
+        .where(WbFunnelDaily.date >= d_from)
+        .where(WbFunnelDaily.date <= d_to)
+        .where(WbFunnelDaily.localization_percent.isnot(None))
+        .where(WbFunnelDaily.orders_count > 0)
+    )
+    if subject:
+        q = q.where(WbFunnelDaily.subject == subject)
+    if brand:
+        q = q.where(WbFunnelDaily.brand == brand)
+    res = await db.execute(q)
+    all_rows = list(res.scalars())
+
+    by_date: dict[date, list[WbFunnelDaily]] = defaultdict(list)
+    for r in all_rows:
+        if r.date is None:
+            continue
+        by_date[r.date].append(r)
+
+    points: list[dict] = []
+    for d in sorted(by_date.keys()):
+        agg = _aggregate_by_sku(by_date[d])
+        sku_rows = _build_sku_rows(agg)
+        summary = _build_summary(sku_rows)
+        if summary["total_orders"] <= 0:
+            continue
+        points.append(
+            {
+                "date": d.isoformat(),
+                "localization_index": summary["localization_index"],
+                "irp_percent": summary["irp_percent"],
+                "total_orders": summary["total_orders"],
+                "articles_count": summary["articles_count"],
+            }
+        )
+    return points
 
 
 @cached(prefix="reports:localization_skus", ttl=300)

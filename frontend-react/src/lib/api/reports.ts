@@ -172,8 +172,20 @@ export function addReportMethods(api: ApiClient) {
             if (warehouse) q.set('warehouse', warehouse);
             return api.request<WbStockHistoryResponse>('GET', `/api/v1/reports/stock_warehouses/history?${q.toString()}`);
         },
-        getStockNeed(supplyDays: number = 14, analysisDays: number = 14, mode: string = 'actual') {
-            return api.request<any>('GET', `/api/v1/reports/stock_need?supply_days=${supplyDays}&analysis_days=${analysisDays}&mode=${mode}`);
+        getStockNeed(
+            supplyDays: number = 14,
+            analysisDays: number = 14,
+            mode: string = 'actual',
+            localizationOptimized: boolean = false,
+            onlyAvailable: boolean = false,
+        ) {
+            const q = new URLSearchParams();
+            q.set('supply_days', String(supplyDays));
+            q.set('analysis_days', String(analysisDays));
+            q.set('mode', mode);
+            if (localizationOptimized) q.set('localization_optimized', 'true');
+            if (onlyAvailable) q.set('only_available', 'true');
+            return api.request<any>('GET', `/api/v1/reports/stock_need?${q.toString()}`);
         },
         getOrderCitiesStatus() {
             return api.request<{ has_data: boolean; total_mappings: number; date_from: string | null; date_to: string | null; last_updated: string | null }>('GET', '/api/v1/reports/stock_analytics/order_cities_status');

@@ -1,4 +1,4 @@
-# ruff: noqa: RUF003
+# ruff: noqa: RUF002, RUF003
 """Schemas для отчёта «Индекс локализации» (ИЛ + ИРП).
 
 См. backend/services/localization_index_service.py.
@@ -85,3 +85,20 @@ class LocalizationByPeriod(BaseModel):
 
     summary: LocalizationSummary
     rows: list[LocalizationSkuRow]
+
+
+class LocalizationDailyPoint(BaseModel):
+    """Одна точка графика «Динамика ИЛ/ИРП по дням».
+
+    Логика расчёта — та же что в LocalizationSummary, но для одного дня:
+    взвешенное среднее КТР/КРП по orders_count за день. Поддерживает
+    фильтрацию по subject/brand (для реактивности UI-фильтров).
+    """
+
+    date: str  # ISO-дата (YYYY-MM-DD)
+    localization_index: Decimal  # средневзвешенный КТР за день
+    irp_percent: Decimal  # средневзвешенный КРП за день
+    total_orders: int  # объём заказов за день (для tooltip / прозрачности)
+    articles_count: int  # уникальных nm_id за день
+
+    model_config = ConfigDict(from_attributes=True)

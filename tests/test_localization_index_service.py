@@ -19,6 +19,7 @@ from backend.services.localization_index_service import (
     _build_sku_rows,
     _build_summary,
     get_by_sku,
+    get_daily,
     get_summary,
 )
 
@@ -351,3 +352,147 @@ class TestGetSummaryDB:
         assert Decimal(str(row["ktr"])) == D("0.60")
         assert Decimal(str(row["krp"])) == D("0.00")
         assert row["status"] == "excellent"
+
+
+class TestGetDailyDB:
+    """get_daily — динамика ИЛ/ИРП по дням за период."""
+
+    @pytest.mark.asyncio
+    async def test_empty_period(self, db_session: AsyncSession, project):
+        """Нет данных → пустой список (UI рисует «нет данных»)."""
+        result = await get_daily(db_session, project.id, "2026-04-01", "2026-04-30")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_two_days_separate_points(self, db_session: AsyncSession, project):
+        """Каждая дата — отдельная точка с собственным взвешенным КТР/КРП."""
+        # День 1: 1 SKU, 100 заказов, 37% → КТР=1.40, КРП=2.10, ИЛ=1.40, ИРП=2.10
+        await _create_loc_funnel_row(
+            db_session,
+            project.id,
+            nm_id=1,
+            funnel_date=date(2026, 4, 10),
+            orders_count=100,
+            localization_percent=37.00,
+            vendor_code="A",
+        )
+        # День 2: 1 SKU, 50 заказов, 90% → КТР=0.60, КРП=0.00, ИЛ=0.60, ИРП=0.00
+        await _create_loc_funnel_row(
+            db_session,
+            project.id,
+            nm_id=1,
+            funnel_date=date(2026, 4, 11),
+            orders_count=50,
+            localization_percent=90.00,
+            vendor_code="A",
+        )
+        result = await get_daily(db_session, project.id, "2026-04-01", "2026-04-30")
+        assert len(result) == 2
+        assert result[0]["date"] == "2026-04-10"
+        assert Decimal(str(result[0]["localization_index"])) == D("1.40")
+        assert Decimal(str(result[0]["irp_percent"])) == D("2.10")
+        assert result[0]["total_orders"] == 100
+        assert result[1]["date"] == "2026-04-11"
+        assert Decimal(str(result[1]["localization_index"])) == D("0.60")
+        assert Decimal(str(result[1]["irp_percent"])) == D("0.00")
+        assert result[1]["total_orders"] == 50
+
+    @pytest.mark.asyncio
+    async def test_multi_tenancy(self, db_session: AsyncSession, project, other_project):
+        """Другой проект не попадает в выборку."""
+        await _create_loc_funnel_row(
+            db_session,
+            project.id,
+            nm_id=1,
+            funnel_date=date(2026, 4, 10),
+            orders_count=100,
+            localization_percent=80.00,
+        )
+        await _create_loc_funnel_row(
+            db_session,
+            other_project.id,
+            nm_id=1,
+            funnel_date=date(2026, 4, 10),
+            orders_count=999,
+            localization_percent=10.00,
+        )
+        result = await get_daily(db_session, project.id, "2026-04-01", "2026-04-30")
+        assert len(result) == 1
+        assert result[0]["total_orders"] == 100
+
+    @pytest.mark.asyncio
+    async def test_subject_filter(self, db_session: AsyncSession, project):
+        """Фильтр по subject отсекает строки с другим предметом."""
+        await _create_loc_funnel_row(
+            db_session,
+            project.id,
+            nm_id=1,
+            funnel_date=date(2026, 4, 10),
+            orders_count=100,
+            localization_percent=80.00,
+            subject="Платья",
+        )
+        await _create_loc_funnel_row(
+            db_session,
+            project.id,
+            nm_id=2,
+            funnel_date=date(2026, 4, 10),
+            orders_count=50,
+            localization_percent=20.00,
+            subject="Брюки",
+        )
+        result = await get_daily(
+            db_session,
+            project.id,
+            "2026-04-01",
+            "2026-04-30",
+            subject="Платья",
+        )
+        assert len(result) == 1
+        assert result[0]["total_orders"] == 100
+
+    @pytest.mark.asyncio
+    async def test_brand_filter(self, db_session: AsyncSession, project):
+        """Фильтр по brand отсекает строки с другим брендом."""
+        await _create_loc_funnel_row(
+            db_session,
+            project.id,
+            nm_id=1,
+            funnel_date=date(2026, 4, 10),
+            orders_count=100,
+            localization_percent=80.00,
+            brand="X",
+        )
+        await _create_loc_funnel_row(
+            db_session,
+            project.id,
+            nm_id=2,
+            funnel_date=date(2026, 4, 10),
+            orders_count=50,
+            localization_percent=20.00,
+            brand="Y",
+        )
+        result = await get_daily(
+            db_session,
+            project.id,
+            "2026-04-01",
+            "2026-04-30",
+            brand="Y",
+        )
+        assert len(result) == 1
+        assert result[0]["total_orders"] == 50
+
+    @pytest.mark.asyncio
+    async def test_dates_sorted_asc(self, db_session: AsyncSession, project):
+        """Точки возвращаются упорядоченными по дате (ASC)."""
+        for d in [date(2026, 4, 15), date(2026, 4, 10), date(2026, 4, 12)]:
+            await _create_loc_funnel_row(
+                db_session,
+                project.id,
+                nm_id=1,
+                funnel_date=d,
+                orders_count=10,
+                localization_percent=80.00,
+            )
+        result = await get_daily(db_session, project.id, "2026-04-01", "2026-04-30")
+        assert [p["date"] for p in result] == ["2026-04-10", "2026-04-12", "2026-04-15"]

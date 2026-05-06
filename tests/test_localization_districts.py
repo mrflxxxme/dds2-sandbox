@@ -51,8 +51,15 @@ async def _insert_wb_order(
     warehouse_type: str = "Склад WB",
     is_cancel: bool = False,
     days_ago: int = 5,
+    with_funnel: bool = True,
 ) -> None:
-    """Минимальный INSERT в wb_orders для тестов."""
+    """Минимальный INSERT в wb_orders для тестов.
+
+    `with_funnel=True` — также создаёт строку в wb_funnel_daily за тот же
+    календарный день (MSK) с непустым localization_percent. Это нужно после
+    добавления INNER JOIN funnel ⨯ wb_orders в `_load_district_breakdown`
+    (для согласованности с top-block по периодам с funnel-данными).
+    """
     order_dt = datetime.now(_MSK) - timedelta(days=days_ago)
     await db.execute(
         text(
@@ -80,6 +87,29 @@ async def _insert_wb_order(
         },
     )
     await db.commit()
+
+    if with_funnel:
+        # ON CONFLICT — несколько заказов одного nm_id за один день не должны
+        # дублировать funnel-строку.
+        await db.execute(
+            text(
+                "INSERT INTO wb_funnel_daily "
+                "(project_id, nm_id, date, orders_count, orders_sum_rub, "
+                "localization_percent, vendor_code, "
+                "open_card, add_to_cart, stocks_wb, stocks_mp, "
+                "adv_views, adv_clicks, adv_sum) "
+                "VALUES (:pid, :nm, :d, 1, 0, "
+                "50.0, 'VC', "
+                "0, 0, 0, 0, 0, 0, 0) "
+                "ON CONFLICT ON CONSTRAINT uq_funnel_daily DO NOTHING"
+            ),
+            {
+                "pid": project_id,
+                "nm": nm_id,
+                "d": order_dt.date(),
+            },
+        )
+        await db.commit()
 
 
 async def _insert_funnel_row(

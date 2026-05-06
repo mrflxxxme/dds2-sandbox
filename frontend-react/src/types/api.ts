@@ -2724,3 +2724,65 @@ export interface LocalizationSyncResult {
   inserted: number;
   updated: number;
 }
+
+export interface LocalizationDailyPoint {
+  /** ISO-дата (YYYY-MM-DD) */
+  date: string;
+  /** Средневзвешенный КТР за день — Индекс Локализации */
+  localization_index: number;
+  /** Средневзвешенный КРП в процентах — Индекс Распределения Продаж */
+  irp_percent: number;
+  /** Объём заказов за день — для tooltip и фильтра «дни без шума» */
+  total_orders: number;
+  /** Уникальных артикулов за день */
+  articles_count: number;
+}
+
+// ─── Assembly Drafts (NxM distribution: RF source × WB target) ──────────────────
+
+export interface AssemblyDraftRow {
+  nm_id: number;
+  barcode: string;
+  vendor_code: string;
+  /** warehouse_id (str) -> qty (источник, ФФ-склад) */
+  src: Record<string, number>;
+  /** wb_warehouse_name -> qty (цель, WB-склад) */
+  tgt: Record<string, number>;
+}
+
+export interface AssemblyDraftDistribution {
+  source_warehouse_ids: number[];
+  target_warehouse_names: string[];
+  rows: AssemblyDraftRow[];
+  pallets_count: number;
+  pallet_weight_kg: number;
+  /** YYYY-MM-DD or null */
+  estimated_ready_date: string | null;
+}
+
+export interface AssemblyDraft {
+  id: number;
+  project_id: number;
+  name: string;
+  distribution: AssemblyDraftDistribution;
+  comment: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AssemblyDraftCreate {
+  name?: string;
+  distribution: AssemblyDraftDistribution;
+  comment?: string | null;
+}
+
+export interface AssemblyDraftUpdate {
+  name?: string | null;
+  distribution?: AssemblyDraftDistribution | null;
+  comment?: string | null;
+}
+
+export interface AssemblyDraftCommitResponse {
+  created_request_ids: number[];
+  draft_id: number;
+}

@@ -108,6 +108,15 @@ export function WarehouseNeedView() {
     const [supplyDays, setSupplyDays] = useState(14);
     const [analysisDays, setAnalysisDays] = useState(14);
     const [mode, setMode] = useState<'actual' | 'hypothetical'>('actual');
+    /** Идеальная локализация: распределяем потребность по ближайшим доступным
+     *  WB-складам (по координатам региона покупателя). Исключённые склады
+     *  автоматически перебрасываются на ближайшие available по haversine.
+     *  Дополнительно: district-pooling сборок и транзита (asm в Электросталь
+     *  снижает потребность всех складов ЦФО пропорционально, не только Эл-сталь). */
+    const [localizationOptimized, setLocalizationOptimized] = useState(false);
+    /** Только реально могу отправить: каждая клетка урезана greedy по
+     *  ФФ-остатку артикула — сумма needs во всех WB-колонках ≤ available. */
+    const [onlyAvailable, setOnlyAvailable] = useState(false);
     const [hypoMode, setHypoMode] = useState<HypoMode>('region');
     const [showHypoMenu, setShowHypoMenu] = useState(false);
     const [citiesStatus, setCitiesStatus] = useState<OrderCitiesStatus | null>(null);
@@ -181,7 +190,13 @@ export function WarehouseNeedView() {
         setError(null);
         try {
             const actualMode = mode === 'hypothetical' ? 'hypothetical' : 'actual';
-            const resp = await api.getStockNeed(supplyDays, analysisDays, actualMode) as StockNeedResponse;
+            const resp = await api.getStockNeed(
+                supplyDays,
+                analysisDays,
+                actualMode,
+                localizationOptimized,
+                onlyAvailable,
+            ) as StockNeedResponse;
             setData(resp);
             if (resp.rf_warehouses?.length && !assemblyWarehouseId) {
                 setAssemblyWarehouseId(resp.rf_warehouses[0].id);
@@ -191,7 +206,7 @@ export function WarehouseNeedView() {
             setError(message);
         }
         setLoading(false);
-    }, [supplyDays, analysisDays, mode, assemblyWarehouseId]);
+    }, [supplyDays, analysisDays, mode, localizationOptimized, onlyAvailable, assemblyWarehouseId]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -341,16 +356,24 @@ export function WarehouseNeedView() {
 
         try {
             const draftRows: AssemblyDraftRow[] = [];
+            const skippedNoBarcode: string[] = [];
+            const skippedNoQty: string[] = [];
             for (const nmId of checkedIds) {
                 const article = data.articles.find(a => a.nm_id === nmId);
                 if (!article) continue;
                 const barcode = article.barcode;
-                if (!barcode) continue;
+                if (!barcode) {
+                    skippedNoBarcode.push(article.vendor_code || `nm=${nmId}`);
+                    continue;
+                }
 
                 const available = article.rf_stocks[assemblyWarehouseId]?.available || 0;
                 const need = article.total_need;
                 const qty = Math.min(available, need);
-                if (qty <= 0) continue;
+                if (qty <= 0) {
+                    skippedNoQty.push(`${article.vendor_code || `nm=${nmId}`} (свободно ${available}, нужно ${need})`);
+                    continue;
+                }
 
                 // Default tgt: pro-rata by per-WB need from data.warehouses
                 const tgt: Record<string, number> = {};
@@ -378,7 +401,16 @@ export function WarehouseNeedView() {
             }
 
             if (draftRows.length === 0) {
-                alert('Не удалось собрать позиции (нет barcode или нечего отправлять)');
+                const lines: string[] = ['Не удалось собрать ни одной позиции:'];
+                if (skippedNoBarcode.length) {
+                    lines.push('', `Нет barcode (${skippedNoBarcode.length}):`, ...skippedNoBarcode.slice(0, 10).map(s => `  • ${s}`));
+                    if (skippedNoBarcode.length > 10) lines.push(`  …и ещё ${skippedNoBarcode.length - 10}`);
+                }
+                if (skippedNoQty.length) {
+                    lines.push('', `Нечего отправлять (${skippedNoQty.length}):`, ...skippedNoQty.slice(0, 10).map(s => `  • ${s}`));
+                    if (skippedNoQty.length > 10) lines.push(`  …и ещё ${skippedNoQty.length - 10}`);
+                }
+                alert(lines.join('\n'));
                 setCreatingAssembly(false);
                 return;
             }
@@ -602,6 +634,24 @@ export function WarehouseNeedView() {
                         </div>
                     )}
                 </div>
+
+                <button
+                    className={`btn btn-sm ${localizationOptimized ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ borderRadius: 8, fontSize: 11, whiteSpace: 'nowrap' }}
+                    onClick={() => setLocalizationOptimized(v => !v)}
+                    title="Распределить потребность по ближайшим доступным WB-складам по координатам покупателя. Исключённые склады переезжают на ближайшие available. Сборки/транзит pool'ятся по ФО."
+                >
+                    🎯 Идеальная локализация {localizationOptimized ? 'ON' : 'OFF'}
+                </button>
+
+                <button
+                    className={`btn btn-sm ${onlyAvailable ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ borderRadius: 8, fontSize: 11, whiteSpace: 'nowrap' }}
+                    onClick={() => setOnlyAvailable(v => !v)}
+                    title="Каждая клетка матрицы урезана по ФФ-остатку артикула. Сумма needs во всех WB-колонках ≤ available на ФФ. Показывает «реально могу отправить» вместо «идеальная потребность»."
+                >
+                    📦 Только могу отправить {onlyAvailable ? 'ON' : 'OFF'}
+                </button>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                     <span style={{ fontSize: 11, opacity: 0.6, whiteSpace: 'nowrap' }}>Запас:</span>

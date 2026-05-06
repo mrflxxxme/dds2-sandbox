@@ -129,12 +129,25 @@ async def fetch_funnel(api_key: str, date_str: str) -> dict:
     return all_items
 
 
-async def fetch_funnel_history(api_key: str, date_from: str, date_to: str) -> dict | None:
+async def fetch_funnel_history(
+    api_key: str,
+    date_from: str,
+    date_to: str,
+    nm_ids: list[int] | None = None,
+) -> dict | None:
     """Fetch sales funnel data with per-day breakdown using /history endpoint.
 
-    Requires WB Джем subscription. Returns None if not available (402).
+    WB API требует непустой список nmIds (без него — 400 "at least 1 nmId
+    is expected"). Если nm_ids не переданы или пуст — возвращаем None,
+    вызывающая сторона делает fallback на per-day endpoint.
+
+    Returns None если nm_ids пуст / 402 / 400.
     Returns {date_str: {nm_id: {vendor_code, subject, brand, open_card, ...}}}.
     """
+    if not nm_ids:
+        logger.info("history: no nm_ids passed, skipping (use per-day fallback)")
+        return None
+
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -148,7 +161,7 @@ async def fetch_funnel_history(api_key: str, date_from: str, date_to: str) -> di
         while True:
             payload = {
                 "selectedPeriod": {"start": date_from, "end": date_to},
-                "nmIds": [],
+                "nmIds": list(nm_ids),
                 "skipDeletedNm": True,
                 "aggregationLevel": "day",
                 "limit": limit,

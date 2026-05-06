@@ -316,6 +316,7 @@ async def sync_wb_orders(
         "reports:localization",
         "reports:localization_skus",
         "reports:localization_districts",
+        "reports:localization_daily",
     ):
         try:
             await invalidate_cache(prefix)
