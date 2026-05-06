@@ -9,8 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from backend.schemas.counterparty import CounterpartyCreate
-from backend.services.counterparty_service import CounterpartyService
+from backend.models.counterparty import Counterparty
 from backend.services.reports.counterparty_turnovers import CounterpartyTurnoversReport
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -30,22 +29,27 @@ async def _create_project(client, auth_headers) -> int:
 
 
 async def _seed_turnovers_data(db_session, project_id: int) -> list[int]:
-    """Seed 5 counterparties and transactions for 3 months. Returns cp_ids."""
-    svc = CounterpartyService(db_session)
+    """Seed 5 counterparties and transactions for 3 months. Returns cp_ids.
 
+    Все вставки идут в одну транзакцию (flush + commit в конце), чтобы не
+    давать окно между created counterparty.commit() и transaction insert,
+    в которое параллельный воркер xdist может затереть FK target.
+    """
     cp_types = ["FULFILLMENT", "CARRIER", "SUPPLIER", "MARKETPLACE", "OTHER"]
-    cp_ids = []
+    cps: list[Counterparty] = []
     for i, cp_type in enumerate(cp_types):
-        inn = _inn()
-        cp = await svc.create(
-            CounterpartyCreate(
-                inn=inn,
-                name=f"КА Тест {i+1} {cp_type}",
-                primary_type=cp_type,
-            ),
+        cp = Counterparty(
             project_id=project_id,
+            inn=_inn(),
+            name=f"КА Тест {i+1} {cp_type}",
+            primary_type=cp_type,
+            secondary_types=[],
+            created_by_import=False,
         )
-        cp_ids.append(cp.id)
+        db_session.add(cp)
+        cps.append(cp)
+    await db_session.flush()  # получаем cp.id, но без commit — атомарно с tx
+    cp_ids = [cp.id for cp in cps]
 
     # Create transactions for each CP across 3 months
     from backend.models.transactions import Transaction
