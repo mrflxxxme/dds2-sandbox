@@ -19,6 +19,9 @@
     "github": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"]
+    },
+    "dds": {
+      "command": "mcp-servers/dds-mcp/run.sh"
     }
   }
 }
