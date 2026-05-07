@@ -19,8 +19,14 @@ import {
 import Toast from '@/components/Toast';
 import DateRangePicker from '@/components/DateRangePicker';
 import LocalizationDailyChart from '@/components/LocalizationDailyChart';
+import LocalizationInsights from '@/components/LocalizationInsights';
 
 type StatusKey = LocalizationSkuRow['status'];
+type DistrictMetric = 'local' | 'non_local' | 'total' | 'pct';
+/** Префикс для динамических district-ключей: `district:<key>:<metric>`.
+ *  Разделитель `:` нужен потому что ключи округов содержат `_`
+ *  (south_caucasus, far_east_siberia) — split по `_` сломал бы парсинг. */
+type DistrictSortKey = `district:${string}:${DistrictMetric}`;
 type SortKey =
     | keyof Pick<
         LocalizationSkuRow,
@@ -41,7 +47,8 @@ type SortKey =
     | 'stock_wb'
     | 'stock_rf'
     | 'stock_assembly'
-    | 'stock_transit';
+    | 'stock_transit'
+    | DistrictSortKey;
 
 const STATUS_META: Record<StatusKey, { label: string; cls: string; range: string; color: string }> = {
     excellent: { label: 'Отличная', cls: 'badge-success', range: 'КТР ≤ 0.90', color: 'var(--color-success)' },
@@ -253,6 +260,19 @@ export default function LocalizationPage() {
         // Достаём значение для сортировки. Поля finance/stock не лежат в
         // самой строке — берём их из funnelByNm/stockByNm по nm_id.
         const sortValue = (r: LocalizationSkuRow): number | string => {
+            // District-колонки: ключ вида `district:<key>:<metric>`
+            if (typeof sortKey === 'string' && sortKey.startsWith('district:')) {
+                const [, dKey, metric] = sortKey.split(':');
+                const d = (r.districts ?? []).find(x => x.district === dKey);
+                if (!d) return 0;
+                switch (metric as DistrictMetric) {
+                    case 'local':     return Number(d.local) || 0;
+                    case 'non_local': return Number(d.non_local) || 0;
+                    case 'total':     return Number(d.total) || 0;
+                    case 'pct':       return Number(d.local_pct) || 0;
+                    default:          return 0;
+                }
+            }
             switch (sortKey) {
                 case 'revenue':       return Number(funnelByNm.get(r.nm_id)?.revenue) || 0;
                 case 'margin':        return Number(funnelByNm.get(r.nm_id)?.margin) || 0;
@@ -486,6 +506,8 @@ export default function LocalizationPage() {
                 /* District group headers */
                 .loc-district-group { color: white !important; text-align: center; padding: 6px 8px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; font-size: 10px; }
                 .loc-district-sub { background: #fafafa; font-size: 10px; text-align: center; padding: 4px 6px; color: var(--color-text) !important; font-weight: 600; }
+                .loc-district-sub.sortable { cursor: pointer; user-select: none; }
+                .loc-district-sub.sortable:hover { color: var(--color-accent) !important; background: #f0f4ff; }
 
                 .loc-section-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: var(--color-text); }
 
@@ -644,6 +666,15 @@ export default function LocalizationPage() {
                     {/* Daily chart — динамика ИЛ/ИРП с реакцией на subject/brand */}
                     <LocalizationDailyChart data={dailyData} />
 
+                    {/* Insights: топ-10 на развоз + бренды + Pareto-симулятор.
+                     *  Реагирует на фильтры (rows) — если выбрали бренд, видим
+                     *  только его. baseline — безфильтровая сводка для сравнения. */}
+                    <LocalizationInsights
+                        rows={filteredRows}
+                        baselineLoc={summary ? Number(summary.localization_index) : undefined}
+                        baselineIrp={summary ? Number(summary.irp_percent) : undefined}
+                    />
+
                     {/* Filters */}
                     <div className="glass-card" style={{ padding: 20 }}>
                         <div className="loc-section-title">
@@ -714,12 +745,39 @@ export default function LocalizationPage() {
                                         <th className="sortable num" onClick={() => handleSort('krp')}>КРП, %{sortArrow('krp')}</th>
                                         <th className="sortable num" onClick={() => handleSort('contribution')}>Вклад шт×КТР{sortArrow('contribution')}</th>
                                         <th className="sortable" onClick={() => handleSort('status')}>Статус{sortArrow('status')}</th>
-                                        {visibleDistricts.flatMap(k => [
-                                            <th key={`${k}-l`} className="loc-district-sub num">Лок.</th>,
-                                            <th key={`${k}-n`} className="loc-district-sub num">Нелок.</th>,
-                                            <th key={`${k}-t`} className="loc-district-sub num">Всего</th>,
-                                            <th key={`${k}-p`} className="loc-district-sub num">% лок.</th>,
-                                        ])}
+                                        {visibleDistricts.flatMap(k => {
+                                            const sk = (m: DistrictMetric): SortKey => `district:${k}:${m}`;
+                                            return [
+                                                <th
+                                                    key={`${k}-l`}
+                                                    className="loc-district-sub num sortable"
+                                                    onClick={() => handleSort(sk('local'))}
+                                                >
+                                                    Лок.{sortArrow(sk('local'))}
+                                                </th>,
+                                                <th
+                                                    key={`${k}-n`}
+                                                    className="loc-district-sub num sortable"
+                                                    onClick={() => handleSort(sk('non_local'))}
+                                                >
+                                                    Нелок.{sortArrow(sk('non_local'))}
+                                                </th>,
+                                                <th
+                                                    key={`${k}-t`}
+                                                    className="loc-district-sub num sortable"
+                                                    onClick={() => handleSort(sk('total'))}
+                                                >
+                                                    Всего{sortArrow(sk('total'))}
+                                                </th>,
+                                                <th
+                                                    key={`${k}-p`}
+                                                    className="loc-district-sub num sortable"
+                                                    onClick={() => handleSort(sk('pct'))}
+                                                >
+                                                    % лок.{sortArrow(sk('pct'))}
+                                                </th>,
+                                            ];
+                                        })}
                                         <th className="sortable num" onClick={() => handleSort('contribution')}>Вклад в ИЛ{sortArrow('contribution')}</th>
                                     </tr>
                                 </thead>
