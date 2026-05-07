@@ -2715,6 +2715,8 @@ export interface LocalizationSkuRow {
   /** Вклад в общий индекс: total × ktr */
   contribution: number;
   status: 'excellent' | 'neutral' | 'weak' | 'critical';
+  /** Дата первой продажи (ISO YYYY-MM-DD) — UI рассчитывает «Новинка / Активный / Без продаж». */
+  first_sale_date?: string | null;
   /** Распределение по округам для этого артикула. Пустой массив = sync wb_orders ещё не запускался. */
   districts: DistrictBreakdown[];
 }

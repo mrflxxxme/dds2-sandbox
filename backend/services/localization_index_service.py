@@ -657,6 +657,24 @@ async def get_by_sku(
     districts = await get_district_breakdown(db, project_id, date_from, date_to)
     by_nm = districts.get("by_nm", {}) if districts.get("has_data") else None
 
+    # first_sale_date считаем напрямую из wb_funnel_daily.MIN(date) WHERE
+    # orders_count > 0 — та же формула что в backfill (cost/first_sale.py),
+    # но БЕЗ зависимости от Nomenclature. Иначе товары без записи в
+    # nomenclature (или с другим nm_id после ребренда WB) теряли статус.
+    nm_ids = [int(r["nm_id"]) for r in sku_rows]
+    first_sale_map: dict[int, date] = {}
+    if nm_ids:
+        fs_result = await db.execute(
+            select(WbFunnelDaily.nm_id, func.min(WbFunnelDaily.date))
+            .where(
+                WbFunnelDaily.project_id == project_id,
+                WbFunnelDaily.nm_id.in_(nm_ids),
+                WbFunnelDaily.orders_count > 0,
+            )
+            .group_by(WbFunnelDaily.nm_id)
+        )
+        first_sale_map = {int(nm): dt for nm, dt in fs_result.all() if nm is not None and dt is not None}
+
     for r in sku_rows:
         if by_nm is None:
             r["districts"] = []
@@ -665,4 +683,6 @@ async def get_by_sku(
             nm_key = r["nm_id"]
             entry = by_nm.get(nm_key) or by_nm.get(str(nm_key)) or by_nm.get(int(nm_key))
             r["districts"] = _district_list_for_nm(entry)
+        dt = first_sale_map.get(int(r["nm_id"]))
+        r["first_sale_date"] = dt.isoformat() if dt is not None else None
     return sku_rows

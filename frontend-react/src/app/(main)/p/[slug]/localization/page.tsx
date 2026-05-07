@@ -16,6 +16,7 @@ import {
     DISTRICT_LABELS,
     DISTRICT_COLORS,
 } from '@/lib/constants/localization';
+import { computeProductStatus } from '@/lib/utils/productStatus';
 import Toast from '@/components/Toast';
 import DateRangePicker from '@/components/DateRangePicker';
 import LocalizationDailyChart from '@/components/LocalizationDailyChart';
@@ -313,6 +314,7 @@ export default function LocalizationPage() {
                     'Название': r.title,
                     'Предмет': r.subject,
                     'Бренд': r.brand,
+                    'Тип товара': computeProductStatus(r.first_sale_date).label,
                     'ВБ Лок (РФ)': r.local,
                     'ВБ Нелок (РФ)': r.non_local,
                     'Всего WB (РФ)': r.total,
@@ -710,7 +712,7 @@ export default function LocalizationPage() {
                                     {/* Group-headers row — рендерим всегда когда есть колонки округов */}
                                     {visibleDistricts.length > 0 && (
                                         <tr>
-                                            <th colSpan={3} style={{ background: '#f5f5f7' }} />
+                                            <th colSpan={4} style={{ background: '#f5f5f7' }} />
                                             <th colSpan={2} className="loc-district-group" style={{ background: '#7c3aed' }}>Финансы (период)</th>
                                             <th colSpan={4} className="loc-district-group" style={{ background: '#0891b2' }}>Остатки (текущие)</th>
                                             <th colSpan={8} style={{ background: '#f5f5f7' }} />
@@ -731,6 +733,7 @@ export default function LocalizationPage() {
                                         <th className="sortable" onClick={() => handleSort('vendor_code')}>Артикул{sortArrow('vendor_code')}</th>
                                         <th className="sortable" onClick={() => handleSort('title')}>Название{sortArrow('title')}</th>
                                         <th className="sortable" onClick={() => handleSort('subject')}>Предмет{sortArrow('subject')}</th>
+                                        <th title="Новинка ≤40д с первой продажи / Активный >40д / Без продаж — нет orders в wb_funnel_daily">Тип товара</th>
                                         <th className="sortable num" onClick={() => handleSort('revenue')}>Реализация ₽{sortArrow('revenue')}</th>
                                         <th className="sortable num" onClick={() => handleSort('margin')}>Маржа %{sortArrow('margin')}</th>
                                         <th className="sortable num" onClick={() => handleSort('stock_wb')}>WB (РФ){sortArrow('stock_wb')}</th>
@@ -786,7 +789,7 @@ export default function LocalizationPage() {
                                     {filteredTotals && (
                                         <tr className="totals-row" data-testid="totals-row">
                                             <td>ИТОГО</td>
-                                            <td colSpan={2} style={{ color: 'var(--color-text-muted)' }}>
+                                            <td colSpan={3} style={{ color: 'var(--color-text-muted)' }}>
                                                 {formatNumber(filteredRows.length, 0)} арт.
                                             </td>
                                             <td className="num">{formatNumber(filteredTotals.revenue, 0)}</td>
@@ -822,7 +825,7 @@ export default function LocalizationPage() {
                                     {filteredRows.length === 0 ? (
                                         <tr>
                                             <td
-                                                colSpan={18 + visibleDistricts.length * 4}
+                                                colSpan={19 + visibleDistricts.length * 4}
                                                 style={{ textAlign: 'center', padding: 32, color: 'var(--color-text-muted)' }}
                                             >
                                                 Нет данных за выбранный период
@@ -830,6 +833,7 @@ export default function LocalizationPage() {
                                         </tr>
                                     ) : filteredRows.slice(0, 1000).map(r => {
                                         const meta = STATUS_META[r.status];
+                                        const productStatus = computeProductStatus(r.first_sale_date);
                                         const rowCls = r.krp > 0 ? 'row-krp' : 'row-default';
                                         const noDistricts = !r.districts || r.districts.length === 0;
                                         return (
@@ -837,6 +841,9 @@ export default function LocalizationPage() {
                                                 <td>{r.vendor_code}</td>
                                                 <td className="loc-title-cell" title={r.title}>{r.title}</td>
                                                 <td style={{ color: 'var(--color-text-muted)' }}>{r.subject}</td>
+                                                <td>
+                                                    <span className={productStatus.className}>{productStatus.label}</span>
+                                                </td>
                                                 {(() => {
                                                     const f = funnelByNm.get(r.nm_id);
                                                     const s = stockByNm.get(r.nm_id);
