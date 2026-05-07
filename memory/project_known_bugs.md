@@ -2,9 +2,17 @@
 
 ## Активные проблемы
 
-_Нет активных. Последняя проверка: 2026-05-04._
+_Нет активных. Последняя проверка: 2026-05-07._
 
 ## Исправленные
+
+### Vehicle target_warehouse_id ↔ inbound_receipt warehouse_id рассинхрон (project default, V-0001)
+- **Исправлено:** 2026-05-07
+- **Описание:** Поле `target_warehouse_id` есть в `always_editable` для CostOrder (vehicle) — можно править даже после DISPATCHED. При DISPATCHED-переходе `_create_inbound_from_vehicle` создаёт `InboundReceipt(warehouse_id=vehicle.target_warehouse_id)`. После — если юзер меняет `target_warehouse_id` на машине, привязанная приёмка остаётся на старом складе. Vehicle висит в «Ожидаемых поставках» нового склада (фильтр по `cost_orders.target_warehouse_id`), но приёмка не показывается в табе «Приёмки» (фильтр по `inbound_receipts.warehouse_id`), кнопка «Принять» недоступна.
+- **Фикс:**
+  - `backend/services/supply_chain/vehicle_delivery.py::update_vehicle`: при изменении `target_warehouse_id` синхронизирует `inbound_receipts.warehouse_id`. Если приёмка `ACCEPTED` — `ValueError` (товар уже в stock_movements).
+  - `scripts/fix_inbound_warehouse_drift.py`: одноразовый recovery-скрипт. Безопасен — ACCEPTED не трогает.
+  - Тесты: `test_change_target_warehouse_syncs_inbound_receipt`, `test_change_target_warehouse_blocked_when_receipt_accepted` в `test_vehicle_delivery.py`.
 
 ### WB stocks UPSERT падал с CardinalityViolationError (project Вяткин)
 - **Исправлено:** 2026-05-04 (commit 01a9cd9)

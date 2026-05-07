@@ -70,6 +70,7 @@ cd frontend-react && npx playwright test tests/e2e/smoke.spec.ts  # smoke E2E
 - `.claude/rules/learnings.md` — накопленные решения
 - `docs/KNOWN_PITFALLS.md` — повторяющиеся грабли
 - `memory/MEMORY.md` — feedback + project state
+- `mcp-servers/dds-mcp/` — read-only MCP для PG/Redis инспекции (tools: `mcp__dds__*`)
 - `/status` — диагностика (git, docker, миграции)
 
 ## Subagents (по триггеру, всё на opus 4.7)

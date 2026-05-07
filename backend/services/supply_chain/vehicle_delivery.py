@@ -275,6 +275,24 @@ async def update_vehicle(
     needs_recalc = bool(cost_fields & set(update_data.keys()))
     has_items = bool(vehicle.items)
 
+    new_target_wh = update_data.get("target_warehouse_id")
+    if new_target_wh is not None and vehicle.inbound_receipt_id and new_target_wh != vehicle.target_warehouse_id:
+        receipt_result = await db.execute(
+            select(InboundReceipt).where(
+                InboundReceipt.id == vehicle.inbound_receipt_id,
+                InboundReceipt.project_id == project_id,
+                InboundReceipt.is_deleted == False,
+            )
+        )
+        linked_receipt = receipt_result.scalar_one_or_none()
+        if linked_receipt and linked_receipt.status == InboundStatus.ACCEPTED:
+            raise ValueError(
+                f"Нельзя сменить склад: приёмка {linked_receipt.number} уже принята. "
+                f"Создайте корректировочное движение или новую машину."
+            )
+        if linked_receipt and linked_receipt.warehouse_id != new_target_wh:
+            linked_receipt.warehouse_id = new_target_wh
+
     for field, value in update_data.items():
         if field == "container_type" and value:
             vehicle.container_type = value
