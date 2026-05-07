@@ -17,13 +17,13 @@
 - `tests/test_api_cost.py`
 
 ## Tables
-- `nomenclature` — справочник товаров (barcode, brand, article_wb, volume_l)
+- `nomenclature` — справочник товаров (barcode, brand, article_wb, volume_l, **first_sale_date** — дата первой продажи, заполняется из `wb_funnel_daily`)
 - `duty_rules` — правила пошлин по категориям (basis: weight/volume/amount)
 - `cost_orders` — заказы с расчётом себестоимости
 - `cost_order_items` — позиции заказа (qty, price_cny, weight, volume, calculated costs). **SoftDeleteMixin** — фильтровать `is_deleted == False` во всех SELECT
 
 ## Business Rules
-1. **Nomenclature:** синхронизируется из WB Content API (get_cards_list → parse_wb_cards_to_nomenclature)
+1. **Nomenclature:** синхронизируется из WB Content API (get_cards_list → parse_wb_cards_to_nomenclature). После каждого синка вызывается `services.cost.first_sale.backfill_first_sale_dates(only_missing=True)` — заполняет `first_sale_date` через `MIN(wb_funnel_daily.date) WHERE orders_count > 0` (best-effort, локальный SQL, без WB API). Frontend на основе этого поля рендерит бейдж «Новинка ≤40 дней / Активный >40 / Без продаж».
 2. **Cost calculation:**
    - Цена товара (price_cny) × курс
    - + Доставка (пропорционально весу/объёму)

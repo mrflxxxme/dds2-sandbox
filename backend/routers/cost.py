@@ -21,7 +21,7 @@ router = APIRouter(prefix="/cost")
 
 @router.get("/nomenclature")
 async def get_nomenclature(
-    limit: int = Query(1000),
+    limit: int = Query(10000),
     offset: int = Query(0),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -37,6 +37,7 @@ async def get_nomenclature(
             "article_wb": n.article_wb,
             "volume_l": float(n.volume_l or 0),
             "area_m2": float(n.area_m2) if n.area_m2 else None,
+            "first_sale_date": n.first_sale_date.isoformat() if n.first_sale_date else None,
         }
         for n in items
     ]
