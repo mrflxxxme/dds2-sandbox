@@ -4,6 +4,7 @@
 См. backend/services/localization_index_service.py.
 """
 
+from datetime import date
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict
@@ -72,6 +73,10 @@ class LocalizationSkuRow(BaseModel):
 
     contribution: Decimal  # orders × ktr — вклад в индекс локализации
     status: str  # excellent / neutral / weak / critical
+
+    # Дата первой продажи (из Nomenclature.first_sale_date) — UI вычисляет
+    # «Новинка / Активный / Без продаж» через computeProductStatus().
+    first_sale_date: date | None = None
 
     # Per-district breakdown (упорядочено как DISTRICT_ORDER).
     # Пустой список если sync wb_orders ещё не запускался для проекта.

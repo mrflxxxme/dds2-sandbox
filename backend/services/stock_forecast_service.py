@@ -675,6 +675,23 @@ async def get_stock_analytics(
     # match one-to-one. Independent of mode (loaded always).
     margin_pct_map = await _load_margin_pct(db, project_id, trend_days)
 
+    # 6e. first_sale_date per nm_id — для UI-бейджа «Новинка / Активный / Без продаж».
+    # Считаем напрямую из wb_funnel_daily MIN(date) WHERE orders_count > 0 —
+    # та же формула что backfill в Nomenclature, но без зависимости от того,
+    # засинкана ли номенклатура (товар может быть в funnel, но отсутствовать
+    # в Nomenclature после ребренда WB → backfill промахнётся).
+    fs_result = await db.execute(
+        select(WbFunnelDaily.nm_id, func.min(WbFunnelDaily.date))
+        .where(
+            WbFunnelDaily.project_id == project_id,
+            WbFunnelDaily.orders_count > 0,
+        )
+        .group_by(WbFunnelDaily.nm_id)
+    )
+    first_sale_map: dict[int, str] = {
+        int(nm): dt.isoformat() for nm, dt in fs_result.all() if nm is not None and dt is not None
+    }
+
     # 7. Stock forecast for 30 future days
     forecast_days = 30
     today_date = date.today()
@@ -793,6 +810,7 @@ async def get_stock_analytics(
             "days_left": days_left,
             "traffic_light": traffic,
             "forecast": forecast,
+            "first_sale_date": first_sale_map.get(nm_id),
         }
 
         # Extra fields for modes

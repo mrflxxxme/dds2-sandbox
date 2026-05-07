@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, exportToExcel } from '@/lib/utils';
+import { computeProductStatus } from '@/lib/utils/productStatus';
 import { WarehouseNeedView } from './WarehouseNeedView';
 import { WarehouseExclusionSettings } from './WarehouseExclusionSettings';
 
@@ -25,6 +26,7 @@ interface Article {
     revenue_bdr?: number;
     margin_pct?: number | null;
     rf_avg_days?: number | null;
+    first_sale_date?: string | null;
 }
 
 interface StockData {
@@ -175,6 +177,7 @@ export function StockAnalytics() {
                 'Артикул': a.vendor_code,
                 'Предмет': a.subject,
                 'Бренд': a.brand,
+                'Тип товара': computeProductStatus(a.first_sale_date).label,
                 'Заказы 30д': a.orders_30d,
                 [`Реализ. БДР ${trendDays}д, ₽`]: a.revenue_bdr ?? 0,
                 'Маржа %': a.margin_pct ?? '',
@@ -372,6 +375,12 @@ export function StockAnalytics() {
                             <th style={stickyTh} onClick={() => handleSort('vendor_code')}>
                                 АРТИКУЛ{sortIcon('vendor_code')}
                             </th>
+                            <th
+                                style={{ textAlign: 'left', whiteSpace: 'nowrap' }}
+                                title="Новинка ≤40д с первой продажи / Активный >40д / Без продаж — нет orders в wb_funnel_daily"
+                            >
+                                ТИП ТОВАРА
+                            </th>
                             <th style={thStyle('orders_30d')} onClick={() => handleSort('orders_30d')}>
                                 ЗАКАЗЫ 30Д{sortIcon('orders_30d')}
                             </th>
@@ -425,6 +434,7 @@ export function StockAnalytics() {
                         {/* ИТОГО */}
                         <tr style={{ fontWeight: 700, background: 'var(--color-bg-tertiary)' }}>
                             <td style={{ ...stickyTd, background: 'var(--color-bg-tertiary)' }}>ИТОГО</td>
+                            <td />
                             <td style={{ textAlign: 'right' }}>{formatNumber(totals.orders_30d, 0)}</td>
                             <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s, a) => s + (a.revenue_bdr ?? 0), 0), 0)}{' ₽'}</td>
                             <td style={{ textAlign: 'right' }}>{(() => {
@@ -460,6 +470,12 @@ export function StockAnalytics() {
                                 <td style={{ ...stickyTd, ...(isNoWb ? { background: 'rgba(255, 239, 204, 1)' } : {}) }}>
                                     {isNoWb && <span title="Есть на РФ, нет на WB">⚠️ </span>}
                                     {a.vendor_code || `#${a.nm_id}`}
+                                </td>
+                                <td>
+                                    {(() => {
+                                        const ps = computeProductStatus(a.first_sale_date);
+                                        return <span className={ps.className}>{ps.label}</span>;
+                                    })()}
                                 </td>
                                 <td style={{ textAlign: 'right' }}>{formatNumber(a.orders_30d, 0)}</td>
                                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
