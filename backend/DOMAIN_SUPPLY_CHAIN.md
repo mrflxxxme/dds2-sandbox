@@ -43,6 +43,14 @@ FORMING | DISTRIBUTED | CLOSED
 3. Машина меняет статусы: FORMING → IN_TRANSIT → CUSTOMS → DELIVERED
 4. При DELIVERED + target_warehouse_id → auto-create InboundReceipt
 
+## Sync target_warehouse_id ↔ inbound_receipts.warehouse_id (фикс 2026-05-07)
+`target_warehouse_id` остаётся `always_editable` после DISPATCHED, но `update_vehicle` теперь синхронизирует `warehouse_id` привязанной приёмки:
+- приёмка `EXPECTED` → её `warehouse_id` обновляется на новый `target_warehouse_id` (приёмка «переезжает» на новый склад вместе с машиной)
+- приёмка `ACCEPTED` → `update_vehicle` падает с `ValueError("Нельзя сменить склад: приёмка ... уже принята")` (товар уже в stock_movements, перенос требует отдельной отмены/корректировки)
+- приёмки нет — обновляется только `cost_orders.target_warehouse_id`
+
+Прецедент: V-0001 (project default) — был на «Транзит» (id=9), при DISPATCHED создалась IN-76, потом юзер сменил склад на «натали» (id=1), но IN-76 осталась на 9 → приёмка не показывалась на странице натали, кнопки «Принять» не было. Recovery — `scripts/fix_inbound_warehouse_drift.py` (находит все рассинхронизированные пары, чинит EXPECTED, warning по ACCEPTED).
+
 ## Автопересчёт статусов FactoryOrder (фикс 2026-04-15)
 `factory_orders.refresh_factory_order_statuses(db, project_id, factory_order_ids)` — единая точка, которая симметрично двигает FactoryOrder.status между FORMING ↔ DISTRIBUTED на основе фактического `assigned_qty`. **CLOSED не откатывается** (terminal state).
 

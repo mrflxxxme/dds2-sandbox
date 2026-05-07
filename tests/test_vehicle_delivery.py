@@ -166,6 +166,110 @@ class TestUpdateVehicle:
         )
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_change_target_warehouse_syncs_inbound_receipt(self, db_session, project):
+        """Смена target_warehouse_id у DISPATCHED-машины тащит за собой
+        warehouse_id привязанной приёмки (EXPECTED). Иначе приёмка теряется
+        для нового склада (инцидент 2026-05-07: V-0001 → IN-76).
+        """
+        from sqlalchemy import select
+
+        from backend.models.warehouse import InboundReceipt, InboundStatus
+        from backend.services.warehouse_crud import create_warehouse
+
+        wh_old = await create_warehouse(db_session, project.id, {"name": f"old-{_uid()}", "warehouse_type": "EXTERNAL"})
+        wh_new = await create_warehouse(
+            db_session, project.id, {"name": f"new-{_uid()}", "warehouse_type": "FULFILLMENT"}
+        )
+
+        order = await _create_factory_order_with_items(db_session, project.id, [(f"BC-WS-{_uid()}", 10)])
+        item_id = order.items[0].id
+        order_no = f"V-WS-{_uid()}"
+        await create_vehicle(db_session, project.id, VehicleCreate(order_no=order_no, rate_cny=Decimal("12.5")))
+        await split_to_vehicles(
+            db_session,
+            project.id,
+            order.id,
+            SplitToVehiclesRequest(
+                assignments=[
+                    SplitItem(factory_order_item_id=item_id, qty=10, vehicle_order_no=order_no),
+                ]
+            ),
+        )
+        await update_vehicle_status(db_session, project.id, order_no, VehicleStatusUpdate(status=VehicleStatus.SHIPPED))
+        await update_vehicle_status(
+            db_session, project.id, order_no, VehicleStatusUpdate(status=VehicleStatus.CUSTOMS, dt_number="DT-1")
+        )
+        await update_vehicle(
+            db_session, project.id, order_no, VehicleUpdate(invoice_no="INV-1", target_warehouse_id=wh_old.id)
+        )
+        result = await update_vehicle_status(
+            db_session, project.id, order_no, VehicleStatusUpdate(status=VehicleStatus.DISPATCHED)
+        )
+        receipt_id = result["inbound_receipt_id"]
+
+        receipt_before = (
+            await db_session.execute(select(InboundReceipt).where(InboundReceipt.id == receipt_id))
+        ).scalar_one()
+        assert receipt_before.warehouse_id == wh_old.id
+        assert receipt_before.status == InboundStatus.EXPECTED
+
+        await update_vehicle(db_session, project.id, order_no, VehicleUpdate(target_warehouse_id=wh_new.id))
+
+        receipt_after = (
+            await db_session.execute(select(InboundReceipt).where(InboundReceipt.id == receipt_id))
+        ).scalar_one()
+        assert (
+            receipt_after.warehouse_id == wh_new.id
+        ), "warehouse_id приёмки должен синхронизироваться при смене target_warehouse_id"
+
+    @pytest.mark.asyncio
+    async def test_change_target_warehouse_blocked_when_receipt_accepted(self, db_session, project):
+        """Если приёмка уже ACCEPTED (товар оприходован) — смена склада запрещена."""
+        from backend.models.warehouse import InboundReceipt, InboundStatus
+        from backend.services.warehouse_crud import create_warehouse
+
+        wh_old = await create_warehouse(db_session, project.id, {"name": f"old-{_uid()}", "warehouse_type": "EXTERNAL"})
+        wh_new = await create_warehouse(
+            db_session, project.id, {"name": f"new-{_uid()}", "warehouse_type": "FULFILLMENT"}
+        )
+
+        order = await _create_factory_order_with_items(db_session, project.id, [(f"BC-WSA-{_uid()}", 5)])
+        item_id = order.items[0].id
+        order_no = f"V-WSA-{_uid()}"
+        await create_vehicle(db_session, project.id, VehicleCreate(order_no=order_no, rate_cny=Decimal("12.5")))
+        await split_to_vehicles(
+            db_session,
+            project.id,
+            order.id,
+            SplitToVehiclesRequest(
+                assignments=[
+                    SplitItem(factory_order_item_id=item_id, qty=5, vehicle_order_no=order_no),
+                ]
+            ),
+        )
+        await update_vehicle_status(db_session, project.id, order_no, VehicleStatusUpdate(status=VehicleStatus.SHIPPED))
+        await update_vehicle_status(
+            db_session, project.id, order_no, VehicleStatusUpdate(status=VehicleStatus.CUSTOMS, dt_number="DT-2")
+        )
+        await update_vehicle(
+            db_session, project.id, order_no, VehicleUpdate(invoice_no="INV-2", target_warehouse_id=wh_old.id)
+        )
+        result = await update_vehicle_status(
+            db_session, project.id, order_no, VehicleStatusUpdate(status=VehicleStatus.DISPATCHED)
+        )
+        receipt_id = result["inbound_receipt_id"]
+
+        from sqlalchemy import update as sql_update
+
+        await db_session.execute(
+            sql_update(InboundReceipt).where(InboundReceipt.id == receipt_id).values(status=InboundStatus.ACCEPTED)
+        )
+        await db_session.commit()
+
+        with pytest.raises(ValueError, match="уже принята"):
+            await update_vehicle(db_session, project.id, order_no, VehicleUpdate(target_warehouse_id=wh_new.id))
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # update_vehicle_status — FORMING → SHIPPED → CUSTOMS → DELIVERED
