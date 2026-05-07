@@ -315,6 +315,18 @@ async def sync_wb_nomenclature(db: AsyncSession, project_id: int) -> SyncLog:
         )
 
         key.last_sync_at = utcnow()
+
+        # Best-effort: backfill first_sale_date for nm_ids that don't have it yet.
+        # Failure here MUST NOT break nomenclature sync (WB /sales is rate-limited
+        # ~1 req/min — 429 is normal). We log and continue.
+        try:
+            from backend.services.cost.first_sale import backfill_first_sale_dates
+
+            fs_result = await backfill_first_sale_dates(db, project_id, only_missing=True)
+            sync_log.error_msg = (sync_log.error_msg or "") + f", first_sale_backfill={fs_result}"
+        except Exception as fs_err:  # — best-effort
+            logger.warning("first_sale_date backfill skipped: %s", fs_err)
+
         await db.commit()
         await db.refresh(sync_log)
 

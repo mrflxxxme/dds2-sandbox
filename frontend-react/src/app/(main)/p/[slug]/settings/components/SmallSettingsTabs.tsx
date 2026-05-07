@@ -2,7 +2,8 @@
 import { useEffect, useState, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
-import { formatNumber, exportToExcel } from '@/lib/utils';
+import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
+import { computeProductStatus } from '@/lib/utils/productStatus';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
 
@@ -36,14 +37,26 @@ export function Nomenclature() {
 
     const formatSyncTime = (iso: string) => new Date(iso).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 
-    const autoColumns: Column[] = useMemo(() => {
-        if (data.length === 0) return [];
-        return Object.keys(data[0]).map(k => ({
-            key: k,
-            label: k,
-            render: (v: any) => typeof v === 'number' ? formatNumber(v) : v ?? '—',
-        }));
-    }, [data]);
+    const nomenclatureColumns: Column[] = useMemo(() => [
+        { key: 'barcode', label: 'Баркод', render: (v: any) => v ?? '—' },
+        { key: 'brand', label: 'Бренд', render: (v: any) => v ?? '—' },
+        { key: 'subject', label: 'Предмет', render: (v: any) => v ?? '—' },
+        { key: 'article_seller', label: 'Артикул продавца', render: (v: any) => v ?? '—' },
+        { key: 'article_wb', label: 'Артикул WB', align: 'right', render: (v: any) => typeof v === 'number' ? formatNumber(v, 0) : (v ?? '—') },
+        { key: 'volume_l', label: 'Объем, л', align: 'right', render: (v: any) => typeof v === 'number' ? formatNumber(v) : (v ?? '—') },
+        { key: 'area_m2', label: 'Площадь, м²', align: 'right', render: (v: any) => typeof v === 'number' ? formatNumber(v) : '—' },
+        { key: 'first_sale_date', label: 'Первая продажа', render: (v: any) => formatDate(v) },
+        {
+            key: '__status',
+            label: 'Статус',
+            getValue: (row: any) => computeProductStatus(row?.first_sale_date).label,
+            exportValue: (row: any) => computeProductStatus(row?.first_sale_date).label,
+            render: (_v: any, row: any) => {
+                const status = computeProductStatus(row?.first_sale_date);
+                return <span className={status.className}>{status.label}</span>;
+            },
+        },
+    ], []);
 
     if (loading) return <div style={{ padding: 20, color: 'var(--color-text-muted)' }}>Загрузка...</div>;
 
@@ -63,7 +76,7 @@ export function Nomenclature() {
             {syncMsg && <div style={{ fontSize: 13, marginBottom: 12, padding: '8px 12px', borderRadius: 6, background: syncMsg.startsWith('✅') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', color: syncMsg.startsWith('✅') ? 'var(--color-success)' : 'var(--color-danger)' }}>{syncMsg}</div>}
             {data.length > 0 ? (
                 <TanStackDataTable
-                    columns={autoColumns}
+                    columns={nomenclatureColumns}
                     data={data}
                     enableSorting
                     enablePagination

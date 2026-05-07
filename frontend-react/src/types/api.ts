@@ -278,6 +278,7 @@ export interface Nomenclature {
   subject?: string;
   volume_l?: number;
   area_m2?: number | null;
+  first_sale_date?: string | null;
 }
 
 export interface DutyRule {
