@@ -1771,26 +1771,27 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
     // Normalize box size separators: "62*32*60" / "62×32×60" / "62x32x60" → canonical
     const normalizeBox = (s: string): string => s.trim().toLowerCase().replace(/[*xхх×]/g, '×');
 
-    // Mismatch: paste params (price, box_size, pcs_per_box) don't match ANY FOI of this barcode.
-    // sc20: with multiple FOIs per barcode, mismatch only if no FOI matches all three params.
-    const rowHasMismatch = (r: PasteRow): boolean => {
-        const fois = foisByBarcode[r.barcode.trim()];
-        if (!fois || fois.length === 0) return false;
-        const pastePrice = parseFloat(r.price);
-        const pasteBoxNorm = normalizeBox(r.box_size || '');
-        const pastePpb = parseInt(r.pcs_per_box) || 0;
-        const anyMatch = fois.some(f => {
-            const fp = parseFloat(f.price_cny) || 0;
-            if (Math.abs(pastePrice - fp) > 0.0001) return false;
-            const fbox = normalizeBox(f.box_size || '');
-            if (pasteBoxNorm && pasteBoxNorm !== fbox) return false;
-            const fppb = f.pcs_per_box || 0;
-            if (pastePpb && pastePpb !== fppb) return false;
-            return true;
-        });
-        return !anyMatch;
-    };
-    const mismatchRows = validRows.filter(rowHasMismatch);
+    // Mismatch: matching FOIs (same price/box/ppb) don't have enough remaining qty
+    // to cover the paste row — even cumulatively across rows of the same barcode.
+    // sc20.2: previously triggered only when zero matching FOIs existed; now also
+    // when matching pool is partially insufficient. Surfacing this prevents silent
+    // split onto placeholder/different-price FOIs (V-0008 prod incident, May 2026).
+    const consumedMatchingValidate: Record<number, number> = {};
+    const mismatchRows = validRows.filter(r => {
+        const bc = r.barcode.trim();
+        const fois = foisByBarcode[bc] || [];
+        const qty = parseInt(r.qty) || 0;
+        if (fois.length === 0 || qty <= 0) return false;
+        const params = {
+            qty,
+            price: parseFloat(r.price) || 0,
+            boxRaw: r.box_size || '',
+            pcsPerBox: parseInt(r.pcs_per_box) || 0,
+        };
+        const split = splitRowAcrossFois(fois, params, false, consumedMatchingValidate);
+        const taken = split.reduce((s, it) => s + it.qty, 0);
+        return taken < qty;
+    });
 
     const performAdd = async (overridesFromPaste = false) => {
         // sc20: split user qty across multiple FOIs of the same barcode (FIFO),
