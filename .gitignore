@@ -25,6 +25,7 @@ backend/*_mockup.png
 .claude/.pending-docs.log
 .claude/.session-counter
 .claude/.cache/
+.claude/scheduled_tasks.lock
 nginx/ssl/
 
 # Node modules в корне (frontend-react/node_modules игнорится отдельно)
@@ -39,4 +40,6 @@ tests/loadtest/results_*.csv
 # Ad-hoc мокапы в корне (постоянные — в docs/mockups/)
 /mockup-*.png
 /warehouse-stock-*.png
+/cold-start-*.png
+/distribute-*.png
 .local-backup-*.sql.gz

@@ -13,6 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import AsyncSessionLocal, get_db
 from backend.models import Project
 from backend.project_context import get_current_project
+from backend.schemas.cold_start import (
+    ColdStartTableResponse,
+    DistributeRequest,
+    DistributeResponse,
+)
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.routers.reports_stock")
@@ -283,4 +288,58 @@ async def order_geography(
         brand=brand,
         category=category,
         article=article,
+    )
+
+
+# ─── Cold-start: распределение SKU по WB-складам без своей истории ─────────
+
+
+@router.post("/distribute_cold_start", response_model=DistributeResponse)
+async def distribute_cold_start(
+    req: DistributeRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> DistributeResponse:
+    """Cold-start: рассчитать план распределения SKU по WB-складам.
+
+    MVP "холодного старта" для новинок и SKU без своей истории заказов.
+    Использует bench соседнего проекта-донора (`bench_from_project_id`)
+    или общероссийский WB-фолбэк (если своих заказов <100 за окно).
+
+    Read-only расчёт (никаких записей в БД), rate_limit_write не требуется.
+    """
+    from backend.services.cold_start_distribution_service import compute_distribution
+
+    return await compute_distribution(db, project.id, req)
+
+
+@router.get("/cold_start_table", response_model=ColdStartTableResponse)
+async def cold_start_table(
+    window_days: int = Query(30, ge=1, le=180),
+    min_pack: int = Query(5, ge=1, le=1000),
+    bench_from_project_id: int | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> ColdStartTableResponse:
+    """Cold-start table: newcomer SKUs with FF-stock + per-warehouse allocation.
+
+    Returns only SKUs where:
+      - rf_qty > 0 (FF-stock present, qty to distribute), AND
+      - first_sale_date IS NULL OR first_sale_date >= today-14
+        (no sales history — regular localization can't work).
+
+    For each SKU computes distribution of its rf_qty across the main warehouses
+    of each federal district (excluded warehouses + min_pack + active assemblies
+    are taken into account).
+    """
+    from backend.services.cold_start_distribution_service import (
+        compute_cold_start_table,
+    )
+
+    return await compute_cold_start_table(
+        db,
+        project.id,
+        window_days,
+        min_pack,
+        bench_from_project_id,
     )

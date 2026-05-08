@@ -58,6 +58,7 @@ export default function AssemblyDistributePage() {
     const [sourceWarehouseIds, setSourceWarehouseIds] = useState<number[]>([]);
     const [targetWarehouseNames, setTargetWarehouseNames] = useState<string[]>([]);
     const [rows, setRows] = useState<AssemblyDraftRow[]>([]);
+    const [coldStartShares, setColdStartShares] = useState<Record<string, number> | null>(null);
 
     // Reference data
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
@@ -95,6 +96,7 @@ export default function AssemblyDistributePage() {
                 setSourceWarehouseIds(draftResp.distribution.source_warehouse_ids || []);
                 setTargetWarehouseNames(draftResp.distribution.target_warehouse_names || []);
                 setRows(draftResp.distribution.rows || []);
+                setColdStartShares(draftResp.distribution.cold_start_shares || null);
                 setWarehouses(whs);
                 setStockNeed(stockNeedResp);
                 lastSavedJsonRef.current = JSON.stringify(draftResp.distribution);
@@ -120,7 +122,8 @@ export default function AssemblyDistributePage() {
         pallets_count: palletsCount,
         pallet_weight_kg: palletWeightKg,
         estimated_ready_date: estimatedReadyDate || null,
-    }), [sourceWarehouseIds, targetWarehouseNames, rows, palletsCount, palletWeightKg, estimatedReadyDate]);
+        cold_start_shares: coldStartShares,
+    }), [sourceWarehouseIds, targetWarehouseNames, rows, palletsCount, palletWeightKg, estimatedReadyDate, coldStartShares]);
 
     // ─── Save draft (manual + autosave) ──────────────────────────────────
     const saveDraft = useCallback(async (silent = false): Promise<boolean> => {
@@ -249,10 +252,12 @@ export default function AssemblyDistributePage() {
     // ─── Auto-balance ────────────────────────────────────────────────────
     const handleAutoBalance = useCallback(() => {
         const newRows: AssemblyDraftRow[] = rows.map(r => {
-            // Quote = sum of currently planned src (or tgt — pick max as desired qty)
+            // Quote: src приоритетнее tgt. Если пользователь явно ввёл src qty
+            // (например уменьшил с 36 до 32), используем именно эту цифру —
+            // tgt пересчитается. Если src=0, fallback на tgt как «желаемое».
             const srcSum = Object.values(r.src).reduce((s, v) => s + (v || 0), 0);
             const tgtSum = Object.values(r.tgt).reduce((s, v) => s + (v || 0), 0);
-            const quote = Math.max(srcSum, tgtSum, 0);
+            const quote = srcSum > 0 ? srcSum : tgtSum;
             if (quote <= 0) {
                 return { ...r, src: {}, tgt: {} };
             }
@@ -273,26 +278,41 @@ export default function AssemblyDistributePage() {
                 }
             }
 
-            // tgt: pro-rata по per-WB need из stock_need
+            const newTgt: Record<string, number> = {};
+            const actualSent = quote - remainingSrc;
+
+            // Приоритет: cold_start_shares (для cold-start сборок без wbNeed),
+            // далее wbNeed pro-rata, далее fallback в первый склад.
+            const coldStartCandidates = coldStartShares
+                ? targetWarehouseNames
+                    .map(whName => ({ whName, share: coldStartShares[whName] || 0 }))
+                    .filter(x => x.share > 0)
+                : [];
             const wbNeeds = targetWarehouseNames
                 .map(whName => ({ whName, need: wbNeedByNmIdAndWh(r.nm_id, whName) }))
                 .filter(x => x.need > 0);
             const totalNeed = wbNeeds.reduce((s, x) => s + x.need, 0);
-            const newTgt: Record<string, number> = {};
-            const actualSent = quote - remainingSrc;
-            if (totalNeed > 0 && actualSent > 0) {
+
+            const proRata = (items: Array<{ whName: string; weight: number }>, total: number): void => {
+                const sumW = items.reduce((s, x) => s + x.weight, 0) || 1;
                 let allocated = 0;
-                for (let i = 0; i < wbNeeds.length; i++) {
-                    const x = wbNeeds[i];
-                    const isLast = i === wbNeeds.length - 1;
+                for (let i = 0; i < items.length; i++) {
+                    const x = items[i];
+                    const isLast = i === items.length - 1;
                     const portion = isLast
-                        ? actualSent - allocated
-                        : Math.floor((x.need / totalNeed) * actualSent);
+                        ? total - allocated
+                        : Math.floor((x.weight / sumW) * total);
                     if (portion > 0) {
                         newTgt[x.whName] = portion;
                         allocated += portion;
                     }
                 }
+            };
+
+            if (actualSent > 0 && coldStartCandidates.length > 0) {
+                proRata(coldStartCandidates.map(x => ({ whName: x.whName, weight: x.share })), actualSent);
+            } else if (totalNeed > 0 && actualSent > 0) {
+                proRata(wbNeeds.map(x => ({ whName: x.whName, weight: x.need })), actualSent);
             } else if (actualSent > 0 && targetWarehouseNames.length > 0) {
                 newTgt[targetWarehouseNames[0]] = actualSent;
             }
@@ -300,8 +320,9 @@ export default function AssemblyDistributePage() {
             return { ...r, src: newSrc, tgt: newTgt };
         });
         setRows(newRows);
-        setToast({ message: 'Распределено автоматически', type: 'success' });
-    }, [rows, sourceWarehouseIds, targetWarehouseNames, availableAtFf, wbNeedByNmIdAndWh]);
+        const mode = coldStartShares ? 'по cold-start долям' : 'по wbNeed';
+        setToast({ message: `Распределено автоматически (${mode})`, type: 'success' });
+    }, [rows, sourceWarehouseIds, targetWarehouseNames, availableAtFf, wbNeedByNmIdAndWh, coldStartShares]);
 
     // ─── Commit ──────────────────────────────────────────────────────────
     const uniqueAssemblyCount = useMemo(() => {
