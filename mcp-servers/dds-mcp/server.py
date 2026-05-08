@@ -20,10 +20,13 @@ import asyncpg
 import redis.asyncio as aioredis
 from mcp.server.fastmcp import FastMCP
 
-# 5434 — read-only host port for MCP, mapped in docker-compose.yml (db service)
+# 5434 — read-only host port for MCP, mapped in docker-compose.yml (db service).
+# Connect as `readonly_agent` (created by postgres/init-readonly-user.sql) so
+# even if the DML rejection in _check_no_dml is bypassed, Postgres permission
+# system blocks any write at the role level.
 DB_DSN = os.environ.get(
     "DDS_DB_DSN",
-    "postgresql://dds:dds_secret@127.0.0.1:5434/dds_db",
+    "postgresql://readonly_agent:readonly_dds_2026@127.0.0.1:5434/dds_db",
 )
 REDIS_URL = os.environ.get(
     "DDS_REDIS_URL",

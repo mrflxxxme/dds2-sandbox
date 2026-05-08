@@ -22,6 +22,7 @@ import type {
 } from '@/types/api';
 import { FactoryQtyExceededError } from '@/types/api';
 import { CONTAINERS } from '@/app/(main)/p/[slug]/container-loader/lib/packer';
+import { splitRowAcrossFois } from '@/lib/supply-chain/splitPaste';
 import { LanguageProvider, useT, LanguageToggle } from '../../i18n';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -1554,18 +1555,21 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
         }
     }
 
-    // Cross-order map for paste mode: search across ALL orders (FIFO — first order wins)
+    // Cross-order map for paste mode: representative FOI for display (FIFO — first wins).
+    // sc20: also aggregate ALL FOIs per barcode — paste must consider total remaining
+    // across all factory orders and auto-split user qty between FOIs by FIFO.
     const allItemMap: Record<string, AvailableItem & { source_order: string; source_factory: string }> = {};
+    const foisByBarcode: Record<string, (AvailableItem & { source_order: string; source_factory: string })[]> = {};
     for (const group of groups) {
         for (const item of group.items) {
-            if (!(item.barcode in allItemMap)) {
-                allItemMap[item.barcode] = {
-                    ...item,
-                    source_order: group.order_number,
-                    source_factory: group.factory_name || '',
-                };
-            }
+            const enriched = { ...item, source_order: group.order_number, source_factory: group.factory_name || '' };
+            if (!(item.barcode in allItemMap)) allItemMap[item.barcode] = enriched;
+            (foisByBarcode[item.barcode] ||= []).push(enriched);
         }
+    }
+    const remainingByBarcode: Record<string, number> = {};
+    for (const [bc, fois] of Object.entries(foisByBarcode)) {
+        remainingByBarcode[bc] = fois.reduce((s, f) => s + f.remaining_qty, 0);
     }
 
     const inputStyle: React.CSSProperties = {
@@ -1738,20 +1742,23 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
     const filledRows = rows.filter(r => r.barcode.trim());
     const invalidRows = filledRows.filter(r => !(r.barcode.trim() in allItemMap));
     const exceededRows = filledRows.filter(r => {
-        const item = allItemMap[r.barcode.trim()];
+        const bc = r.barcode.trim();
+        const item = allItemMap[bc];
         const qty = parseInt(r.qty) || 0;
-        return item && qty > 0 && qty > item.remaining_qty;
+        return item && qty > 0 && qty > (remainingByBarcode[bc] || 0);
     });
     const missingPriceRows = filledRows.filter(r => {
-        const item = allItemMap[r.barcode.trim()];
+        const bc = r.barcode.trim();
+        const item = allItemMap[bc];
         const qty = parseInt(r.qty) || 0;
-        return item && qty > 0 && qty <= item.remaining_qty && !(parseFloat(r.price) > 0);
+        return item && qty > 0 && qty <= (remainingByBarcode[bc] || 0) && !(parseFloat(r.price) > 0);
     });
     const validRows = filledRows.filter(r => {
-        const item = allItemMap[r.barcode.trim()];
+        const bc = r.barcode.trim();
+        const item = allItemMap[bc];
         const qty = parseInt(r.qty) || 0;
         const price = parseFloat(r.price);
-        return item && qty > 0 && qty <= item.remaining_qty && price > 0;
+        return item && qty > 0 && qty <= (remainingByBarcode[bc] || 0) && price > 0;
     });
     // Allow adding found items even if some are not found (fallback A)
     const pasteCanSave = validRows.length > 0;
@@ -1760,40 +1767,42 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
     // Normalize box size separators: "62*32*60" / "62×32×60" / "62x32x60" → canonical
     const normalizeBox = (s: string): string => s.trim().toLowerCase().replace(/[*xхх×]/g, '×');
 
-    // Mismatch: price, box_size, or pcs_per_box differs from factory order values
+    // Mismatch: paste params (price, box_size, pcs_per_box) don't match ANY FOI of this barcode.
+    // sc20: with multiple FOIs per barcode, mismatch only if no FOI matches all three params.
     const rowHasMismatch = (r: PasteRow): boolean => {
-        const item = allItemMap[r.barcode.trim()];
-        if (!item) return false;
+        const fois = foisByBarcode[r.barcode.trim()];
+        if (!fois || fois.length === 0) return false;
         const pastePrice = parseFloat(r.price);
-        const orderPrice = parseFloat(item.price_cny) || 0;
-        if (Math.abs(pastePrice - orderPrice) > 0.0001) return true;
-        const orderBox = normalizeBox(item.box_size || '');
-        const pasteBox = normalizeBox(r.box_size || '');
-        if (pasteBox && pasteBox !== orderBox) return true;
-        const orderPpb = item.pcs_per_box || 0;
+        const pasteBoxNorm = normalizeBox(r.box_size || '');
         const pastePpb = parseInt(r.pcs_per_box) || 0;
-        if (pastePpb && pastePpb !== orderPpb) return true;
-        return false;
+        const anyMatch = fois.some(f => {
+            const fp = parseFloat(f.price_cny) || 0;
+            if (Math.abs(pastePrice - fp) > 0.0001) return false;
+            const fbox = normalizeBox(f.box_size || '');
+            if (pasteBoxNorm && pasteBoxNorm !== fbox) return false;
+            const fppb = f.pcs_per_box || 0;
+            if (pastePpb && pastePpb !== fppb) return false;
+            return true;
+        });
+        return !anyMatch;
     };
     const mismatchRows = validRows.filter(rowHasMismatch);
 
     const performAdd = async (overridesFromPaste = false) => {
-        const items = validRows.map(r => {
-            const item = allItemMap[r.barcode.trim()];
-            const base: { factory_order_item_id: number; qty: number; box_size_override?: string; pcs_per_box_override?: number } = {
-                factory_order_item_id: item.id,
-                qty: parseInt(r.qty) || 0,
-            };
-            if (overridesFromPaste) {
-                const pasteBoxRaw = (r.box_size || '').trim();
-                const pasteBoxNorm = normalizeBox(pasteBoxRaw);
-                const orderBoxNorm = normalizeBox(item.box_size || '');
-                if (pasteBoxRaw && pasteBoxNorm !== orderBoxNorm) base.box_size_override = pasteBoxRaw;
-                const pastePpb = parseInt(r.pcs_per_box) || 0;
-                const orderPpb = item.pcs_per_box || 0;
-                if (pastePpb && pastePpb !== orderPpb) base.pcs_per_box_override = pastePpb;
-            }
-            return base;
+        // sc20: split user qty across multiple FOIs of the same barcode (FIFO),
+        // preferring FOIs whose params (price/box/ppb) match the paste row.
+        const items = validRows.flatMap(r => {
+            const bc = r.barcode.trim();
+            return splitRowAcrossFois(
+                foisByBarcode[bc] || [],
+                {
+                    qty: parseInt(r.qty) || 0,
+                    price: parseFloat(r.price) || 0,
+                    boxRaw: r.box_size || '',
+                    pcsPerBox: parseInt(r.pcs_per_box) || 0,
+                },
+                overridesFromPaste,
+            );
         });
         const validBarcodes = new Set(validRows.map(r => r.barcode.trim()));
         if (isPostShipment) {
@@ -2105,7 +2114,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
 
                             {exceededRows.length > 0 && (
                                 <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 13, color: '#b45309' }}>
-                                    ! <b>{exceededRows.length}</b> ({formatNumber(exceededRows.reduce((s, r) => s + (parseInt(r.qty) || 0), 0), 0)} {t('unit_pcs')}, {t('col_available')}: {formatNumber(exceededRows.reduce((s, r) => s + (allItemMap[r.barcode.trim()]?.remaining_qty || 0), 0), 0)} {t('unit_pcs')})
+                                    ! <b>{exceededRows.length}</b> ({formatNumber(exceededRows.reduce((s, r) => s + (parseInt(r.qty) || 0), 0), 0)} {t('unit_pcs')}, {t('col_available')}: {formatNumber(exceededRows.reduce((s, r) => s + (remainingByBarcode[r.barcode.trim()] || 0), 0), 0)} {t('unit_pcs')})
                                 </div>
                             )}
 
@@ -2146,7 +2155,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
                                             const item = allItemMap[bc];
                                             const unknown = bc && !item;
                                             const qty = parseInt(row.qty) || 0;
-                                            const exceeds = item && qty > item.remaining_qty;
+                                            const exceeds = item && qty > (remainingByBarcode[bc] || 0);
                                             const { boxes, notFull } = calcBoxes(qty, item?.pcs_per_box);
                                             const isAutoAdded = row.autoAdded;
                                             return (
@@ -2197,7 +2206,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
                                                         })()}
                                                     </td>
                                                     <td style={{ fontSize: 12, textAlign: 'right', color: 'var(--color-text-muted)' }}>
-                                                        {item ? item.remaining_qty : bc ? '—' : ''}
+                                                        {item ? (remainingByBarcode[bc] ?? item.remaining_qty) : bc ? '—' : ''}
                                                     </td>
                                                     <td>
                                                         <input type="number" value={row.qty} onChange={e => updateRow(i, 'qty', e.target.value)}

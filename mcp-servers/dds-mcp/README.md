@@ -15,12 +15,14 @@ Read-only MCP server для быстрой инспекции DDS2 (PostgreSQL +
 | `sync_status(project_id, service, limit)` | Последние записи `sync_log` через JOIN `integration_keys` |
 | `migration_status()` | Текущие alembic heads |
 
-## Безопасность
+## Безопасность (defense-in-depth)
 
-- Подключение **только через `127.0.0.1:5434`** — read-only хост-порт `db` (не PgBouncer)
-- DML/DDL токены отбиваются в user-supplied фрагментах (`where`, `order_by`, `pattern`)
-- `query_project` параметризует все значения, имя таблицы валидируется через `information_schema`
-- Соединение с Redis через `decode_responses=True`, операции только чтение (`SCAN`, `TTL`, `TYPE`)
+1. **PG роль `readonly_agent`** — `GRANT SELECT` only, `INSERT/UPDATE/DELETE` блокируются на уровне Postgres (создаётся `postgres/init-readonly-user.sql`)
+2. **Хост-порт `127.0.0.1:5434`** — read-only mapping `db` (не PgBouncer), localhost-only
+3. **DML/DDL token rejection** в user-supplied фрагментах (`where`, `order_by`, `pattern`)
+4. **`information_schema` валидация** имени таблицы перед SELECT
+5. **Параметризованные значения** (asyncpg `$1, $2, ...`)
+6. **Redis read-only** операции (`SCAN`, `TTL`, `TYPE`, `decode_responses=True`)
 
 ## Установка
 
