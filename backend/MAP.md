@@ -77,6 +77,7 @@
 - Cleanup legacy defect (одноразово): `scripts/cleanup_legacy_defect.py --dry-run | --commit`
 - Расчёт потребности: `services/warehouse_need_service.py`
 - Прогноз остатков: `services/stock_forecast_service.py` — прогноз выбытия по трендам продаж (wb / wb_rf / wb_rf_transit), светофор
+- Cold-start распределение для новинок: `services/cold_start_distribution_service.py` — bootstrap-распределение SKU-новинок (нет статистики продаж) по WB-складам пропорционально долям ФО проекта; `pick_warehouses_per_district` (top-3 на округ) + `distribute_multi` (qty внутри округа делится по трафику + min_pack pool); endpoints `routers/reports_stock.py`: `POST /distribute_cold_start` (per-SKU), `GET /cold_start_table` (сегмент целиком). Бенчмарк: свои данные → соседний проект (`bench_from_project_id`) → общероссийский WB-фолбэк
 - FBO поставки WB: `services/fbo_supply_service.py`
 - Гео данные складов: `services/warehouse_geo.py`, `services/warehouse_geo_data.py`
 - WB возвраты на ПВЗ: `services/wb_returns_service.py` (~650 строк) — sync (WB Seller Analytics API) + list/summary + classify_ui_state + create_receipt_from_returns → InboundReceipt(EXPECTED, is_defect=true). Scheduler job: `scheduler/jobs/wb_goods_returns_sync.py`

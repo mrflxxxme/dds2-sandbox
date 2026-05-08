@@ -29,6 +29,10 @@ class AssemblyDraftDistribution(BaseModel):
     pallets_count: int = 1
     pallet_weight_kg: float = 0.0
     estimated_ready_date: str | None = None  # YYYY-MM-DD
+    # Cold-start доли по WB-складам (warehouse_name → доля 0..1, не проценты).
+    # Если задано — Авто-баланс на странице distribute распределяет qty
+    # пропорционально этим долям (вместо wbNeed). None для обычных сборок.
+    cold_start_shares: dict[str, float] | None = None
 
 
 class AssemblyDraftCreate(BaseModel):

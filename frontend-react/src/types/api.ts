@@ -2761,6 +2761,9 @@ export interface AssemblyDraftDistribution {
   pallet_weight_kg: number;
   /** YYYY-MM-DD or null */
   estimated_ready_date: string | null;
+  /** Cold-start доли по WB-складам (name → 0..1). Если задано —
+   *  Авто-баланс распределяет qty пропорционально этим долям, не по wbNeed. */
+  cold_start_shares?: Record<string, number> | null;
 }
 
 export interface AssemblyDraft {
@@ -2788,4 +2791,33 @@ export interface AssemblyDraftUpdate {
 export interface AssemblyDraftCommitResponse {
   created_request_ids: number[];
   draft_id: number;
+}
+
+// Cold-start table — сегмент SKU «новинки + без продаж за 14д с остатком»
+export interface ColdStartMainWarehouse {
+  district_key: string;
+  district_label: string;
+  warehouse: string;
+  share_pct: number;
+}
+export interface ColdStartTableRow {
+  nm_id: number;
+  article_seller: string | null;
+  subject: string | null;
+  brand: string | null;
+  rf_qty: number;
+  wb_qty: number;
+  in_assembly_total: number;
+  sales_14d: number;
+  revenue_30d: number;
+  is_newcomer: boolean;
+  allocations: Record<string, number>;
+  total_allocated: number;
+}
+export interface ColdStartTableResponse {
+  rows: ColdStartTableRow[];
+  main_warehouses: ColdStartMainWarehouse[];
+  bench_source: string;
+  bench_total_orders: number;
+  meta: { min_pack: number; window_days: number; excluded_warehouses: string[] };
 }

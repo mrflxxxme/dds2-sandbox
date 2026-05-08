@@ -5,6 +5,7 @@ import type {
     WbStocksResponse, WbStocksArticlesResponse, WbStockHistoryResponse,
     CostDnaResponse,
     CounterpartyTurnoversResponse, CounterpartyType,
+    ColdStartTableResponse,
 } from '@/types/api';
 
 export function addReportMethods(api: ApiClient) {
@@ -218,6 +219,15 @@ export function addReportMethods(api: ApiClient) {
             if (params.currency) q.set('currency', params.currency);
             return api.request<CounterpartyTurnoversResponse>(
                 'GET', `/api/v1/reports/counterparty-turnovers?${q.toString()}`
+            );
+        },
+        getColdStartTable(windowDays: number = 30, minPack: number = 5, benchFromProjectId?: number) {
+            const q = new URLSearchParams();
+            q.set('window_days', String(windowDays));
+            q.set('min_pack', String(minPack));
+            if (benchFromProjectId) q.set('bench_from_project_id', String(benchFromProjectId));
+            return api.request<ColdStartTableResponse>(
+                'GET', `/api/v1/reports/cold_start_table?${q.toString()}`
             );
         },
     };

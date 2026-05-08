@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, exportToExcel } from '@/lib/utils';
-import type { AssemblyDraftRow } from '@/types/api';
+import type { AssemblyDraftRow, ColdStartMainWarehouse, ColdStartTableResponse } from '@/types/api';
 
 /* ── Types ── */
 
@@ -84,6 +84,49 @@ function formatTransitDate(dateStr: string | null): string {
 
 type QuickFilter = 'all' | 'deficit' | 'can_send' | 'no_wb';
 
+// Cold-start клиентский pro-rata: qty распределяется между всеми main_warehouses
+// пропорционально share_pct, с min_pack pool внутри округа (склады < min_pack →
+// крупнейший склад того же округа). Эквивалент backend distribute_multi.
+function recomputeColdStartAlloc(
+    qty: number,
+    mainWarehouses: ColdStartMainWarehouse[],
+    minPack: number,
+): { alloc: Record<string, number>; total: number } {
+    if (qty <= 0 || mainWarehouses.length === 0) return { alloc: {}, total: 0 };
+    const totalShare = mainWarehouses.reduce((s, w) => s + w.share_pct, 0) || 1;
+    const raw: Record<string, number> = {};
+    for (const w of mainWarehouses) {
+        raw[w.warehouse] = Math.floor((qty * w.share_pct) / totalShare);
+    }
+    const sumRaw = Object.values(raw).reduce((s, v) => s + v, 0);
+    const leftover = qty - sumRaw;
+    if (leftover > 0) {
+        const biggest = mainWarehouses.reduce((a, b) => (a.share_pct > b.share_pct ? a : b));
+        raw[biggest.warehouse] += leftover;
+    }
+    // Pool внутри округа
+    const byDistrict: Record<string, ColdStartMainWarehouse[]> = {};
+    for (const w of mainWarehouses) {
+        (byDistrict[w.district_key] ||= []).push(w);
+    }
+    for (const whs of Object.values(byDistrict)) {
+        const biggestInDistrict = whs.reduce((a, b) => (a.share_pct > b.share_pct ? a : b)).warehouse;
+        let pool = 0;
+        for (const w of whs) {
+            if (w.warehouse !== biggestInDistrict && raw[w.warehouse] < minPack) {
+                pool += raw[w.warehouse];
+                raw[w.warehouse] = 0;
+            }
+        }
+        if (pool > 0) raw[biggestInDistrict] += pool;
+    }
+    const alloc: Record<string, number> = {};
+    for (const [k, v] of Object.entries(raw)) {
+        if (v > 0) alloc[k] = v;
+    }
+    return { alloc, total: Object.values(alloc).reduce((s, v) => s + v, 0) };
+}
+
 /* ── Component ── */
 
 type HypoMode = 'region' | 'city';
@@ -113,7 +156,7 @@ export function WarehouseNeedView() {
      *  автоматически перебрасываются на ближайшие available по haversine.
      *  Дополнительно: district-pooling сборок и транзита (asm в Электросталь
      *  снижает потребность всех складов ЦФО пропорционально, не только Эл-сталь). */
-    const [localizationOptimized, setLocalizationOptimized] = useState(false);
+    const [localizationOptimized] = useState(true);
     /** Только реально могу отправить: каждая клетка урезана greedy по
      *  ФФ-остатку артикула — сумма needs во всех WB-колонках ≤ available. */
     const [onlyAvailable, setOnlyAvailable] = useState(false);
@@ -130,6 +173,35 @@ export function WarehouseNeedView() {
     const [checkedIds, setCheckedIds] = useState<Set<number>>(new Set());
     const [assemblyWarehouseId, setAssemblyWarehouseId] = useState<number | null>(null);
     const hypoMenuRef = useRef<HTMLDivElement>(null);
+
+    /* ── Cold-start режим ── */
+    const [coldStartMode, setColdStartMode] = useState(false);
+    const [coldStartData, setColdStartData] = useState<ColdStartTableResponse | null>(null);
+    const [coldStartMinPack, setColdStartMinPack] = useState(5);
+    const [coldStartLoading, setColdStartLoading] = useState(false);
+    const [coldStartQtyOverrides, setColdStartQtyOverrides] = useState<Record<number, number>>({});
+
+    useEffect(() => {
+        // Сброс overrides при перезагрузке cold-start данных
+        setColdStartQtyOverrides({});
+    }, [coldStartData?.bench_source, coldStartData?.bench_total_orders]);
+
+    useEffect(() => {
+        if (!coldStartMode) return;
+        let cancelled = false;
+        (async () => {
+            setColdStartLoading(true);
+            try {
+                const resp = await api.getColdStartTable(analysisDays, coldStartMinPack);
+                if (!cancelled) setColdStartData(resp);
+            } catch (e) {
+                if (!cancelled) console.error('cold-start load failed', e);
+            } finally {
+                if (!cancelled) setColdStartLoading(false);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [coldStartMode, analysisDays, coldStartMinPack]);
 
     /* ── Close hypo menu on outside click ── */
     useEffect(() => {
@@ -443,6 +515,92 @@ export function WarehouseNeedView() {
         }
     }, [data, assemblyWarehouseId, checkedIds, router, slug]);
 
+    /* ── Create assembly draft from cold-start distribution ── */
+
+    const handleCreateAssemblyFromColdStart = useCallback(async () => {
+        if (!coldStartData || !assemblyWarehouseId || !data) {
+            alert('Нет данных или не выбран склад-источник');
+            return;
+        }
+        // Effective qty/alloc: либо override, либо backend allocations
+        const effectiveRows = coldStartData.rows.map(r => {
+            const overrideQty = coldStartQtyOverrides[r.nm_id];
+            if (overrideQty !== undefined && overrideQty !== r.total_allocated) {
+                const eff = recomputeColdStartAlloc(
+                    overrideQty, coldStartData.main_warehouses, coldStartMinPack,
+                );
+                return { row: r, alloc: eff.alloc, total: eff.total };
+            }
+            return { row: r, alloc: r.allocations, total: r.total_allocated };
+        }).filter(x => x.total > 0);
+
+        if (effectiveRows.length === 0) {
+            alert('Нет SKU с распределением (total = 0)');
+            return;
+        }
+        setCreatingAssembly(true);
+        try {
+            const draftRows: AssemblyDraftRow[] = [];
+            const skippedNoBarcode: string[] = [];
+            for (const { row, alloc, total } of effectiveRows) {
+                const article = data.articles.find(a => a.nm_id === row.nm_id);
+                const barcode = article?.barcode;
+                if (!barcode) {
+                    skippedNoBarcode.push(row.article_seller || `nm=${row.nm_id}`);
+                    continue;
+                }
+                draftRows.push({
+                    nm_id: row.nm_id,
+                    barcode,
+                    vendor_code: row.article_seller || article?.vendor_code || '',
+                    src: { [String(assemblyWarehouseId)]: total },
+                    tgt: { ...alloc },
+                });
+            }
+            if (draftRows.length === 0) {
+                const lines: string[] = ['Не удалось собрать ни одной позиции.'];
+                if (skippedNoBarcode.length) {
+                    lines.push('', `Нет barcode (${skippedNoBarcode.length}):`,
+                        ...skippedNoBarcode.slice(0, 10).map(s => `  • ${s}`));
+                    if (skippedNoBarcode.length > 10) {
+                        lines.push(`  …и ещё ${skippedNoBarcode.length - 10}`);
+                    }
+                }
+                alert(lines.join('\n'));
+                setCreatingAssembly(false);
+                return;
+            }
+            // ВСЕ склады округов (включая 0-qty) — чтобы на странице distribute
+            // были все колонки и пользователь мог вручную перекладывать qty.
+            const targetNames = coldStartData.main_warehouses.map(w => w.warehouse);
+            // Cold-start доли (name → 0..1) — чтобы Авто-баланс на distribute page
+            // распределял qty пропорционально этим долям, а не по wbNeed (которого
+            // нет у новинок).
+            const coldStartShares: Record<string, number> = {};
+            for (const w of coldStartData.main_warehouses) {
+                coldStartShares[w.warehouse] = w.share_pct / 100;
+            }
+            const draft = await api.createAssemblyDraft({
+                distribution: {
+                    source_warehouse_ids: [assemblyWarehouseId],
+                    target_warehouse_names: targetNames,
+                    rows: draftRows,
+                    pallets_count: 1,
+                    pallet_weight_kg: 0,
+                    estimated_ready_date: null,
+                    cold_start_shares: coldStartShares,
+                },
+            });
+            if (slug) {
+                router.push(`/p/${slug}/warehouse/assembly/distribute?draft=${draft.id}`);
+            }
+        } catch (e: unknown) {
+            alert(`Ошибка создания черновика: ${e instanceof Error ? e.message : String(e)}`);
+        } finally {
+            setCreatingAssembly(false);
+        }
+    }, [coldStartData, coldStartQtyOverrides, coldStartMinPack, assemblyWarehouseId, data, slug, router]);
+
     /* ── Sort ── */
 
     const handleSort = (col: string) => {
@@ -596,54 +754,6 @@ export function WarehouseNeedView() {
                     </select>
                 )}
 
-                <div ref={hypoMenuRef} style={{ display: 'flex', gap: 2, background: 'var(--color-border)', borderRadius: 8, padding: 2, position: 'relative' }}>
-                    <button className={`btn btn-sm ${mode === 'actual' ? 'btn-primary' : 'btn-secondary'}`}
-                        style={{ borderRadius: 6, fontSize: 11 }}
-                        onClick={() => { setMode('actual'); setShowHypoMenu(false); }}>Факт</button>
-                    <button className={`btn btn-sm ${mode === 'hypothetical' ? 'btn-primary' : 'btn-secondary'}`}
-                        style={{ borderRadius: 6, fontSize: 11 }}
-                        onClick={() => setShowHypoMenu(v => !v)}>
-                        Гипотез. {mode === 'hypothetical' ? (hypoMode === 'city' ? '(города)' : '(регионы)') : ''} &#9662;
-                    </button>
-                    {showHypoMenu && (
-                        <div style={{
-                            position: 'absolute', top: '100%', left: 0, marginTop: 4, zIndex: 100,
-                            background: 'var(--color-bg)', border: '1px solid var(--color-border)',
-                            borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.15)', minWidth: 260, padding: 4,
-                        }}>
-                            <button
-                                className={`btn btn-sm ${mode === 'hypothetical' && hypoMode === 'region' ? 'btn-primary' : 'btn-secondary'}`}
-                                style={{ width: '100%', textAlign: 'left', borderRadius: 6, fontSize: 11, marginBottom: 2, padding: '8px 10px' }}
-                                onClick={() => { setMode('hypothetical'); setHypoMode('region'); setShowHypoMenu(false); }}
-                            >
-                                По регионам (из API)
-                                <div style={{ fontSize: 10, opacity: 0.6, marginTop: 2 }}>Работает сразу, точность ~150 км</div>
-                            </button>
-                            <button
-                                className={`btn btn-sm ${mode === 'hypothetical' && hypoMode === 'city' ? 'btn-primary' : 'btn-secondary'}`}
-                                style={{ width: '100%', textAlign: 'left', borderRadius: 6, fontSize: 11, padding: '8px 10px' }}
-                                onClick={() => {
-                                    setMode('hypothetical'); setHypoMode('city'); setShowHypoMenu(false);
-                                }}
-                            >
-                                По городам (лента заказов)
-                                <div style={{ fontSize: 10, opacity: 0.6, marginTop: 2 }}>
-                                    {citiesStatus?.has_data ? `Точность ~3 км` : 'Требует загрузки Excel'}
-                                </div>
-                            </button>
-                        </div>
-                    )}
-                </div>
-
-                <button
-                    className={`btn btn-sm ${localizationOptimized ? 'btn-primary' : 'btn-secondary'}`}
-                    style={{ borderRadius: 8, fontSize: 11, whiteSpace: 'nowrap' }}
-                    onClick={() => setLocalizationOptimized(v => !v)}
-                    title="Распределить потребность по ближайшим доступным WB-складам по координатам покупателя. Исключённые склады переезжают на ближайшие available. Сборки/транзит pool'ятся по ФО."
-                >
-                    🎯 Идеальная локализация {localizationOptimized ? 'ON' : 'OFF'}
-                </button>
-
                 <button
                     className={`btn btn-sm ${onlyAvailable ? 'btn-primary' : 'btn-secondary'}`}
                     style={{ borderRadius: 8, fontSize: 11, whiteSpace: 'nowrap' }}
@@ -709,6 +819,14 @@ export function WarehouseNeedView() {
                     onClick={() => setQuickFilter('no_wb')}
                 >
                     Нет на WB ({summary?.no_wb_count || 0})
+                </button>
+                <button
+                    className={`btn btn-sm ${coldStartMode ? 'btn-primary' : 'btn-secondary'}`}
+                    style={!coldStartMode ? { borderColor: '#a855f7', color: '#a855f7' } : {}}
+                    onClick={() => setColdStartMode(v => !v)}
+                    title="Новинки с остатком (нет данных для автоматической локализации): распределить по бенчмарку проекта"
+                >
+                    🆕 Новинки ({coldStartData?.rows.length ?? '…'})
                 </button>
 
                 <input
@@ -798,8 +916,161 @@ export function WarehouseNeedView() {
                 </div>
             )}
 
+            {/* Cold-start таблица — отдельный режим */}
+            {coldStartMode && (
+                <div className="glass-card" style={{ padding: 16, marginBottom: 12 }}>
+                    <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+                        <span style={{
+                            padding: '4px 10px', borderRadius: 24, fontSize: 11, fontWeight: 600,
+                            background: coldStartData?.bench_source === 'own' ? '#22c55e' : '#f59e0b',
+                            color: '#fff',
+                        }}>
+                            {coldStartData?.bench_source === 'own'
+                                ? `Свои данные: ${formatNumber(coldStartData?.bench_total_orders || 0, 0)} заказов за ${analysisDays}д`
+                                : coldStartData?.bench_source?.startsWith('neighbor')
+                                ? `Соседний проект: ${coldStartData?.bench_total_orders} заказов`
+                                : 'Фолбэк: общероссийский WB'}
+                        </span>
+                        <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+                            Min pack:
+                            <input
+                                type="number" min={1} max={1000}
+                                value={coldStartMinPack}
+                                onChange={e => setColdStartMinPack(Math.max(1, Number(e.target.value) || 5))}
+                                style={{
+                                    padding: '4px 8px', borderRadius: 6, border: '1px solid var(--color-border)',
+                                    width: 70, fontSize: 12,
+                                }}
+                            />
+                        </label>
+                        {coldStartLoading && <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Считаю…</span>}
+                        {coldStartData && coldStartData.meta.excluded_warehouses.length > 0 && (
+                            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                Исключено складов: {coldStartData.meta.excluded_warehouses.length}
+                            </span>
+                        )}
+                        <button
+                            className="btn btn-sm btn-primary"
+                            onClick={handleCreateAssemblyFromColdStart}
+                            disabled={
+                                creatingAssembly ||
+                                !assemblyWarehouseId ||
+                                !coldStartData?.rows.some(r => {
+                                    const ov = coldStartQtyOverrides[r.nm_id];
+                                    return (ov !== undefined ? ov : r.total_allocated) > 0;
+                                })
+                            }
+                            title={!assemblyWarehouseId ? 'Выберите склад-источник в шапке таблицы' : 'Создать черновик сборки из cold-start распределения'}
+                            style={{ marginLeft: 'auto' }}
+                        >
+                            {creatingAssembly
+                                ? 'Создание...'
+                                : `📦 Создать сборку (${coldStartData?.rows.filter(r => {
+                                    const ov = coldStartQtyOverrides[r.nm_id];
+                                    return (ov !== undefined ? ov : r.total_allocated) > 0;
+                                }).length ?? 0})`}
+                        </button>
+                    </div>
+                    {coldStartData && coldStartData.rows.length > 0 ? (
+                        <div style={{ overflowX: 'auto' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                                <thead>
+                                    <tr style={{ borderBottom: '2px solid var(--color-border)', background: '#f5f5f7' }}>
+                                        <th style={{ padding: '8px 10px', textAlign: 'left' }}>Артикул</th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right' }}>Реализ. 30д</th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right' }}>ФФ</th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right' }}>WB</th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right' }}>В сборке</th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                            Распределить
+                                            <div style={{ fontSize: 10, color: 'var(--color-text-muted)', fontWeight: 400 }}>
+                                                ✏️ редактируй
+                                            </div>
+                                        </th>
+                                        {coldStartData.main_warehouses.map(w => (
+                                            <th key={w.warehouse} style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                                <div style={{ fontSize: 11 }}>{w.warehouse}</div>
+                                                <div style={{ fontSize: 10, color: 'var(--color-text-muted)', fontWeight: 400 }}>
+                                                    {w.share_pct.toFixed(1)}%
+                                                </div>
+                                            </th>
+                                        ))}
+                                        <th style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700 }}>Итого</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {coldStartData.rows.map(row => {
+                                        const overrideQty = coldStartQtyOverrides[row.nm_id];
+                                        const useOverride = overrideQty !== undefined && overrideQty !== row.total_allocated;
+                                        const effective = useOverride
+                                            ? recomputeColdStartAlloc(overrideQty, coldStartData.main_warehouses, coldStartMinPack)
+                                            : { alloc: row.allocations, total: row.total_allocated };
+                                        const inputValue = overrideQty !== undefined ? overrideQty : row.total_allocated;
+                                        return (
+                                        <tr key={row.nm_id} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                            <td style={{ padding: '8px 10px' }}>
+                                                <div style={{ fontWeight: 500 }}>{row.article_seller || '—'}</div>
+                                                <div style={{ fontSize: 10, color: 'var(--color-text-muted)' }}>
+                                                    {[row.brand, row.subject].filter(Boolean).join(' · ')}
+                                                </div>
+                                            </td>
+                                            <td style={{ padding: '8px 10px', textAlign: 'right', color: row.revenue_30d > 0 ? 'var(--color-text)' : 'var(--color-text-muted)' }}>
+                                                {row.revenue_30d > 0 ? `₽${formatNumber(row.revenue_30d, 0)}` : '—'}
+                                            </td>
+                                            <td style={{ padding: '8px 10px', textAlign: 'right' }}>{formatNumber(row.rf_qty, 0)}</td>
+                                            <td style={{ padding: '8px 10px', textAlign: 'right' }}>{formatNumber(row.wb_qty, 0)}</td>
+                                            <td style={{ padding: '8px 10px', textAlign: 'right' }}>
+                                                {row.in_assembly_total > 0 ? formatNumber(row.in_assembly_total, 0) : '—'}
+                                            </td>
+                                            <td style={{ padding: '6px 8px', textAlign: 'right' }}>
+                                                <input
+                                                    type="number" min={0} max={100000}
+                                                    value={inputValue}
+                                                    onChange={e => {
+                                                        const v = Math.max(0, Number(e.target.value) || 0);
+                                                        setColdStartQtyOverrides(prev => ({ ...prev, [row.nm_id]: v }));
+                                                    }}
+                                                    title="Распределить столько штук пропорционально долям ФО (округление + min_pack pool)"
+                                                    style={{
+                                                        padding: '3px 6px', borderRadius: 6,
+                                                        border: useOverride ? '1px solid #a855f7' : '1px solid var(--color-border)',
+                                                        background: useOverride ? '#faf5ff' : 'var(--color-bg)',
+                                                        width: 64, fontSize: 12, textAlign: 'right',
+                                                        fontWeight: useOverride ? 600 : 400,
+                                                    }}
+                                                />
+                                            </td>
+                                            {coldStartData.main_warehouses.map(w => {
+                                                const v = effective.alloc[w.warehouse] || 0;
+                                                return (
+                                                    <td key={w.warehouse} style={{
+                                                        padding: '8px 10px', textAlign: 'right',
+                                                        color: v > 0 ? '#16a34a' : 'var(--color-text-muted)',
+                                                        fontWeight: v > 0 ? 500 : 400,
+                                                    }}>
+                                                        {v > 0 ? formatNumber(v, 0) : '—'}
+                                                    </td>
+                                                );
+                                            })}
+                                            <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700 }}>
+                                                {effective.total > 0 ? formatNumber(effective.total, 0) : '—'}
+                                            </td>
+                                        </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    ) : !coldStartLoading ? (
+                        <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                            Нет новинок с остатком — все SKU имеют историю продаж, для них работает обычная локализация
+                        </div>
+                    ) : null}
+                </div>
+            )}
+
             {/* Table */}
-            {data && sortedArticles.length > 0 ? (
+            {!coldStartMode && data && sortedArticles.length > 0 ? (
                 <div className="glass-card" style={{ overflowX: 'auto', padding: 0, position: 'relative' }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                         {/* Level 1: Group Headers */}
@@ -1051,7 +1322,7 @@ export function WarehouseNeedView() {
                         </tbody>
                     </table>
                 </div>
-            ) : (
+            ) : !coldStartMode ? (
                 <div className="glass-card">
                     <div className="empty-state">
                         <div className="empty-state-text">
@@ -1059,7 +1330,7 @@ export function WarehouseNeedView() {
                         </div>
                     </div>
                 </div>
-            )}
+            ) : null}
 
             {/* Floating Action Bar */}
             {checkedCount > 0 && (
@@ -1098,6 +1369,7 @@ export function WarehouseNeedView() {
                     </button>
                 </div>
             )}
+
         </div>
     );
 }

@@ -20,6 +20,7 @@
 - `services/warehouse_geo.py` — координаты складов
 - `services/warehouse_geo_data.py` — данные координат складов
 - `services/stock_analytics_service.py` — ре-экспорт stock_forecast + warehouse
+- `services/cold_start_distribution_service.py` — cold-start распределение SKU-новинок по WB-складам (см. секцию «Cold-start распределение» ниже)
 - `routers/reports.py` — HTTP endpoints отчётов
 - `routers/reports_wb.py` — WB-специфичные отчёты
 - `routers/reports_stock.py` — складские отчёты и прогноз
@@ -103,3 +104,42 @@ reports:opiu:project_id={pid}:...
 reports:wb_bdr:project_id={pid}:...
 reports:cost_dna:project_id={pid}:period_days={n}:date_from={d1}:date_to={d2}:snapshot_date={s}
 ```
+
+## Cold-start распределение (новинки SKU)
+
+### Зачем
+SKU-новинка имеет ФФ-остаток, но **нет статистики продаж** — обычная
+локализация не работает (нечего из чего считать долю по складам). Cold-start
+распределяет ФФ-остаток по WB-складам пропорционально **долям ФО** проекта
+(где у проекта реально заказывают), без оглядки на per-SKU историю.
+
+### Файлы
+- `services/cold_start_distribution_service.py` — pure-логика + DB-fetchers
+- `routers/reports_stock.py` — endpoints
+- `schemas/cold_start.py` — Pydantic-схемы
+- `tests/test_cold_start_distribution.py` — 20 тестов на pure logic
+
+### Endpoints
+- `POST /api/v1/reports/distribute_cold_start` — per-SKU расчёт распределения
+  (вход: `nm_id`, `total_qty`, `window_days`, `min_pack`, `bench_from_project_id`)
+- `GET /api/v1/reports/cold_start_table` — сегмент целиком
+  (только SKU-новинки с `rf_qty > 0`)
+
+### Алгоритм (`distribute_multi`)
+1. **Сегмент:** `first_sale_date IS NULL OR first_sale_date >= today-14`
+   и `rf_qty > 0` (ФФ-остаток есть). SKU "🐢 без продаж 14д с историей"
+   НЕ попадают — у них есть собственная статистика.
+2. **Бенчмарк** (доли ФО): свои данные (≥ MIN_ORDERS_FOR_OWN_BENCH)
+   → соседний проект (`bench_from_project_id`) → общероссийский WB-фолбэк.
+3. **Топ-3 склада на округ** (`pick_warehouses_per_district`) — не из excluded.
+4. Сырое распределение по округам по share, leftover крупнейшему ФО.
+5. Pool: ФО с qty < `min_pack` → крупнейший ФО.
+6. Внутри округа qty делится между складами пропорционально трафику; склады
+   с qty < `min_pack` пуляются в крупнейший склад того же округа.
+7. Учёт активных сборок: `final_qty = max(0, allocated - already_in_assembly)`.
+
+### Связь с распределением сборки
+При создании сборки из cold-start UI передаётся `cold_start_shares: {warehouse: 0..1}`
+в `assembly_drafts.distribution` (JSONB). На странице `/warehouse/assembly/distribute`
+кнопка «Авто-баланс» приоритезирует cold-start доли (если есть) над `wbNeed`,
+поэтому при изменении src qty распределение пересчитывается по тем же долям ФО.
