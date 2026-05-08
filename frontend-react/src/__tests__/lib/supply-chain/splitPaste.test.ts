@@ -108,6 +108,36 @@ describe('splitRowAcrossFois — the core paste-mode bug fix', () => {
         ).toEqual([]);
     });
 
+    it('shared consumed map prevents double-booking same FOI across multiple paste rows of one barcode', () => {
+        // Real prod scenario: paste contains several rows for the same barcode.
+        // Without `consumed`, each call sees full remaining and bug repeats —
+        // backend then rejects later items as exceeded.
+        const fois: AvailableItem[] = [foi({ id: 429, remaining_qty: 286 })];
+        const consumed: Record<number, number> = {};
+        const r1 = splitRowAcrossFois(fois, { qty: 30, price: 48, boxRaw: '60x40x50', pcsPerBox: 15 }, false, consumed);
+        const r2 = splitRowAcrossFois(fois, { qty: 285, price: 48, boxRaw: '60x40x50', pcsPerBox: 15 }, false, consumed);
+        expect(r1).toEqual([{ factory_order_item_id: 429, qty: 30 }]);
+        // Only 256 remaining for the second row — and it gets exactly that, not 285.
+        expect(r2).toEqual([{ factory_order_item_id: 429, qty: 256 }]);
+        expect(consumed[429]).toBe(286);
+    });
+
+    it('shared consumed spills over to second FOI when first is exhausted by previous rows', () => {
+        const fois: AvailableItem[] = [
+            foi({ id: 1, remaining_qty: 100 }),
+            foi({ id: 2, remaining_qty: 100 }),
+        ];
+        const consumed: Record<number, number> = {};
+        const r1 = splitRowAcrossFois(fois, { qty: 90, price: 58.88, boxRaw: '60x40x50', pcsPerBox: 12 }, false, consumed);
+        const r2 = splitRowAcrossFois(fois, { qty: 50, price: 58.88, boxRaw: '60x40x50', pcsPerBox: 12 }, false, consumed);
+        expect(r1).toEqual([{ factory_order_item_id: 1, qty: 90 }]);
+        // Row 2 takes remaining 10 from FOI #1, then 40 from FOI #2.
+        expect(r2).toEqual([
+            { factory_order_item_id: 1, qty: 10 },
+            { factory_order_item_id: 2, qty: 40 },
+        ]);
+    });
+
     it('emits per-vehicle overrides only when paste params differ AND overrides flag set', () => {
         const fois: AvailableItem[] = [
             foi({ id: 1, remaining_qty: 100, box_size: '60×40×50', pcs_per_box: 12 }),

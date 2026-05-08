@@ -33,6 +33,12 @@ export const matchesPasteParams = (foi: AvailableItem, p: PasteParams): boolean 
  * Preference order: FOIs whose params (price/box/ppb) match the paste row, then FIFO.
  * Consumes each FOI's `remaining_qty` greedily.
  *
+ * `consumed` (optional, mutable) tracks how much was already booked from each
+ * FOI by previous calls in the same submit batch. The function reads
+ * `foi.remaining_qty - (consumed[foi.id] || 0)` as the effective availability
+ * and increments `consumed[foi.id]` after taking. Pass the same map across all
+ * paste rows so multiple rows of the same barcode don't double-book one FOI.
+ *
  * Returns API items ready for `addItemsToVehicle` / `addPostShipmentItems`.
  * `withOverrides` controls whether mismatched box/ppb leak as per-vehicle overrides.
  */
@@ -40,6 +46,7 @@ export const splitRowAcrossFois = (
     fois: AvailableItem[],
     p: PasteParams,
     withOverrides: boolean,
+    consumed: Record<number, number> = {},
 ): SplitItem[] => {
     const sorted = [...fois].sort(
         (a, b) => (matchesPasteParams(b, p) ? 1 : 0) - (matchesPasteParams(a, p) ? 1 : 0),
@@ -49,7 +56,10 @@ export const splitRowAcrossFois = (
     const pasteBoxNorm = normalizeBox(p.boxRaw);
     for (const foi of sorted) {
         if (left <= 0) break;
-        const take = Math.min(left, foi.remaining_qty);
+        const already = consumed[foi.id] || 0;
+        const availableNow = foi.remaining_qty - already;
+        if (availableNow <= 0) continue;
+        const take = Math.min(left, availableNow);
         if (take <= 0) continue;
         const it: SplitItem = { factory_order_item_id: foi.id, qty: take };
         if (withOverrides) {
@@ -59,6 +69,7 @@ export const splitRowAcrossFois = (
             if (p.pcsPerBox && p.pcsPerBox !== fppb) it.pcs_per_box_override = p.pcsPerBox;
         }
         out.push(it);
+        consumed[foi.id] = already + take;
         left -= take;
     }
     return out;
