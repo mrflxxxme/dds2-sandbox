@@ -80,16 +80,68 @@ describe('splitRowAcrossFois — the core paste-mode bug fix', () => {
         expect(out).toEqual([{ factory_order_item_id: 2, qty: 24 }]);
     });
 
-    it('falls back to FIFO when no FOI matches paste params (consumes all needed FOIs)', () => {
+    it('without overrides: returns empty when no FOI matches paste params (no silent fallback to FIFO)', () => {
+        // sc20.2: split must NOT leak qty onto non-matching FOIs in default mode.
+        // The mismatch modal surfaces this, then user opts into withOverrides=true.
         const fois: AvailableItem[] = [
             foi({ id: 1, remaining_qty: 5, price_cny: '50.00' }),
             foi({ id: 2, remaining_qty: 30, price_cny: '40.00' }),
         ];
         const out = splitRowAcrossFois(fois, { qty: 24, price: 58.88, boxRaw: '60x40x50', pcsPerBox: 12 }, false);
-        expect(out).toEqual([
-            { factory_order_item_id: 1, qty: 5 },
-            { factory_order_item_id: 2, qty: 19 },
-        ]);
+        expect(out).toEqual([]);
+    });
+
+    it('with overrides: falls back to FIFO when no FOI matches paste params (consumes all needed FOIs)', () => {
+        const fois: AvailableItem[] = [
+            foi({ id: 1, remaining_qty: 5, price_cny: '50.00' }),
+            foi({ id: 2, remaining_qty: 30, price_cny: '40.00' }),
+        ];
+        const out = splitRowAcrossFois(fois, { qty: 24, price: 58.88, boxRaw: '60x40x50', pcsPerBox: 12 }, true);
+        expect(out).toHaveLength(2);
+        expect(out[0].factory_order_item_id).toBe(1);
+        expect(out[0].qty).toBe(5);
+        expect(out[1].factory_order_item_id).toBe(2);
+        expect(out[1].qty).toBe(19);
+    });
+
+    it('without overrides: prod V-0008 bug — matching FOI exhausted, leftover does NOT spill onto zero-price FOI', () => {
+        // Real prod scenario (project 4, V-0008, barcode 2044388594698):
+        // FO 35 has matching FOI (price 58.88, box 60x40x50, ppb 12) with remaining=174.
+        // FO 76 has placeholder FOI (price 0, no box, no ppb) with remaining=54.
+        // User pastes qty=228 at price=58.88. Old behavior: split 174 + 54 (silently
+        // booking 54 against price=0 FOI). New behavior: take only matching 174,
+        // surface mismatch in UI so user explicitly chooses overrides.
+        const fois: AvailableItem[] = [
+            foi({ id: 1500, remaining_qty: 54, price_cny: '0.00', box_size: '', pcs_per_box: 0 }),
+            foi({ id: 750, remaining_qty: 174, price_cny: '58.88', box_size: '60×40×50', pcs_per_box: 12 }),
+        ];
+        const out = splitRowAcrossFois(fois, { qty: 228, price: 58.88, boxRaw: '60x40x50', pcsPerBox: 12 }, false);
+        expect(out).toEqual([{ factory_order_item_id: 750, qty: 174 }]);
+    });
+
+    it('without overrides: prod V-0008 bug — matching FOI exhausted, leftover does NOT spill onto different-price FOI', () => {
+        // Real prod scenario (project 4, V-0008, barcode 2049989649853):
+        // FO 76 matching FOI (price 77) remaining=5, FO 20 non-matching (price 99.36) remaining=100.
+        // User pastes qty=105 at price=77. Old behavior silently took 100 from price=99.36 FOI.
+        const fois: AvailableItem[] = [
+            foi({ id: 1513, remaining_qty: 5, price_cny: '77.00', box_size: '', pcs_per_box: 0 }),
+            foi({ id: 489, remaining_qty: 100, price_cny: '99.36', box_size: '', pcs_per_box: 0 }),
+        ];
+        const out = splitRowAcrossFois(fois, { qty: 105, price: 77, boxRaw: '', pcsPerBox: 0 }, false);
+        expect(out).toEqual([{ factory_order_item_id: 1513, qty: 5 }]);
+    });
+
+    it('without overrides: splits across multiple matching FOIs (cross-factory same price)', () => {
+        // V-0008 group A — same barcode in 2 factory orders, identical params.
+        // Should still split (this is the legitimate by-design case).
+        const fois: AvailableItem[] = [
+            foi({ id: 1508, remaining_qty: 4 }),
+            foi({ id: 784, remaining_qty: 40 }),
+        ];
+        const out = splitRowAcrossFois(fois, { qty: 44, price: 58.88, boxRaw: '60x40x50', pcsPerBox: 12 }, false);
+        expect(out).toHaveLength(2);
+        const total = out.reduce((s, x) => s + x.qty, 0);
+        expect(total).toBe(44);
     });
 
     it('skips FOIs with zero remaining', () => {
@@ -112,7 +164,9 @@ describe('splitRowAcrossFois — the core paste-mode bug fix', () => {
         // Real prod scenario: paste contains several rows for the same barcode.
         // Without `consumed`, each call sees full remaining and bug repeats —
         // backend then rejects later items as exceeded.
-        const fois: AvailableItem[] = [foi({ id: 429, remaining_qty: 286 })];
+        const fois: AvailableItem[] = [
+            foi({ id: 429, remaining_qty: 286, price_cny: '48.00', box_size: '60×40×50', pcs_per_box: 15 }),
+        ];
         const consumed: Record<number, number> = {};
         const r1 = splitRowAcrossFois(fois, { qty: 30, price: 48, boxRaw: '60x40x50', pcsPerBox: 15 }, false, consumed);
         const r2 = splitRowAcrossFois(fois, { qty: 285, price: 48, boxRaw: '60x40x50', pcsPerBox: 15 }, false, consumed);
@@ -139,17 +193,28 @@ describe('splitRowAcrossFois — the core paste-mode bug fix', () => {
     });
 
     it('emits per-vehicle overrides only when paste params differ AND overrides flag set', () => {
+        // Box/ppb mismatch: withOverrides=false skips this FOI entirely
+        // (mismatch surfaces in UI), withOverrides=true takes it with overrides.
         const fois: AvailableItem[] = [
             foi({ id: 1, remaining_qty: 100, box_size: '60×40×50', pcs_per_box: 12 }),
         ];
         const params = { qty: 10, price: 58.88, boxRaw: '70*40*50', pcsPerBox: 8 };
 
         const noOverrides = splitRowAcrossFois(fois, params, false);
-        expect(noOverrides[0].box_size_override).toBeUndefined();
-        expect(noOverrides[0].pcs_per_box_override).toBeUndefined();
+        expect(noOverrides).toEqual([]);
 
         const withOverrides = splitRowAcrossFois(fois, params, true);
         expect(withOverrides[0].box_size_override).toBe('70*40*50');
         expect(withOverrides[0].pcs_per_box_override).toBe(8);
+    });
+
+    it('does NOT emit overrides when paste matches FOI even with withOverrides=true', () => {
+        const fois: AvailableItem[] = [
+            foi({ id: 1, remaining_qty: 100, box_size: '60×40×50', pcs_per_box: 12, price_cny: '58.88' }),
+        ];
+        const params = { qty: 10, price: 58.88, boxRaw: '60x40x50', pcsPerBox: 12 };
+        const withOverrides = splitRowAcrossFois(fois, params, true);
+        expect(withOverrides[0].box_size_override).toBeUndefined();
+        expect(withOverrides[0].pcs_per_box_override).toBeUndefined();
     });
 });

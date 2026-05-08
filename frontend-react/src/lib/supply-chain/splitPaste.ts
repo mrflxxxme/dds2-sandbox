@@ -30,17 +30,21 @@ export const matchesPasteParams = (foi: AvailableItem, p: PasteParams): boolean 
 
 /**
  * Split user-entered qty across multiple FactoryOrderItems of the same barcode.
- * Preference order: FOIs whose params (price/box/ppb) match the paste row, then FIFO.
- * Consumes each FOI's `remaining_qty` greedily.
  *
- * `consumed` (optional, mutable) tracks how much was already booked from each
- * FOI by previous calls in the same submit batch. The function reads
- * `foi.remaining_qty - (consumed[foi.id] || 0)` as the effective availability
- * and increments `consumed[foi.id]` after taking. Pass the same map across all
- * paste rows so multiple rows of the same barcode don't double-book one FOI.
+ * `withOverrides=false` (default paste): consume ONLY FOIs whose params
+ * (price/box/ppb) match the paste row. If matching FOIs don't cover qty,
+ * the remainder is left unbooked and the UI surfaces a mismatch modal so
+ * the user explicitly opts into overrides. This prevents silent split onto
+ * placeholder FOIs (price=0) or FOIs from older orders with different prices.
  *
- * Returns API items ready for `addItemsToVehicle` / `addPostShipmentItems`.
- * `withOverrides` controls whether mismatched box/ppb leak as per-vehicle overrides.
+ * `withOverrides=true` (post-modal "overwrite"): matching first, then FIFO
+ * across non-matching FOIs, attaching per-vehicle overrides for box/ppb
+ * differences. Used when the user explicitly accepts override semantics.
+ *
+ * `consumed` (optional, mutable) tracks how much was already booked from
+ * each FOI by previous calls in the same submit batch — pass the same map
+ * across all paste rows so multiple rows of the same barcode don't
+ * double-book one FOI.
  */
 export const splitRowAcrossFois = (
     fois: AvailableItem[],
@@ -48,13 +52,15 @@ export const splitRowAcrossFois = (
     withOverrides: boolean,
     consumed: Record<number, number> = {},
 ): SplitItem[] => {
-    const sorted = [...fois].sort(
-        (a, b) => (matchesPasteParams(b, p) ? 1 : 0) - (matchesPasteParams(a, p) ? 1 : 0),
-    );
+    const eligible = withOverrides
+        ? [...fois].sort(
+              (a, b) => (matchesPasteParams(b, p) ? 1 : 0) - (matchesPasteParams(a, p) ? 1 : 0),
+          )
+        : fois.filter(f => matchesPasteParams(f, p));
     const out: SplitItem[] = [];
     let left = p.qty;
     const pasteBoxNorm = normalizeBox(p.boxRaw);
-    for (const foi of sorted) {
+    for (const foi of eligible) {
         if (left <= 0) break;
         const already = consumed[foi.id] || 0;
         const availableNow = foi.remaining_qty - already;
