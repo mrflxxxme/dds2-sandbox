@@ -1741,25 +1741,29 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
 
     const filledRows = rows.filter(r => r.barcode.trim());
     const invalidRows = filledRows.filter(r => !(r.barcode.trim() in allItemMap));
-    const exceededRows = filledRows.filter(r => {
+    // sc20.1: cumulative qty fit — multiple paste rows of one barcode share the
+    // same total remaining; consume in row order, mark later rows as exceeded
+    // once the running sum exceeds remainingByBarcode[bc].
+    const usedByBarcode: Record<string, number> = {};
+    const rowQtyFits = filledRows.map(r => {
         const bc = r.barcode.trim();
         const item = allItemMap[bc];
         const qty = parseInt(r.qty) || 0;
-        return item && qty > 0 && qty > (remainingByBarcode[bc] || 0);
+        if (!item || qty <= 0) return false;
+        const totalRem = remainingByBarcode[bc] || 0;
+        const usedSoFar = usedByBarcode[bc] || 0;
+        if (usedSoFar + qty > totalRem) return false;
+        usedByBarcode[bc] = usedSoFar + qty;
+        return true;
     });
-    const missingPriceRows = filledRows.filter(r => {
+    const exceededRows = filledRows.filter((r, i) => {
         const bc = r.barcode.trim();
-        const item = allItemMap[bc];
         const qty = parseInt(r.qty) || 0;
-        return item && qty > 0 && qty <= (remainingByBarcode[bc] || 0) && !(parseFloat(r.price) > 0);
+        return !!allItemMap[bc] && qty > 0 && !rowQtyFits[i];
     });
-    const validRows = filledRows.filter(r => {
-        const bc = r.barcode.trim();
-        const item = allItemMap[bc];
-        const qty = parseInt(r.qty) || 0;
-        const price = parseFloat(r.price);
-        return item && qty > 0 && qty <= (remainingByBarcode[bc] || 0) && price > 0;
-    });
+    const missingPriceRows = filledRows.filter((r, i) => rowQtyFits[i] && !(parseFloat(r.price) > 0));
+    const validRows = filledRows.filter((r, i) => rowQtyFits[i] && parseFloat(r.price) > 0);
+    const exceededRowSet = new Set<PasteRow>(exceededRows);
     // Allow adding found items even if some are not found (fallback A)
     const pasteCanSave = validRows.length > 0;
     const hasUnfound = invalidRows.length > 0 || exceededRows.length > 0;
@@ -1791,6 +1795,9 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
     const performAdd = async (overridesFromPaste = false) => {
         // sc20: split user qty across multiple FOIs of the same barcode (FIFO),
         // preferring FOIs whose params (price/box/ppb) match the paste row.
+        // sc20.1: shared `consumed` across all rows so multiple paste rows of
+        // one barcode don't double-book the same FOI.
+        const consumed: Record<number, number> = {};
         const items = validRows.flatMap(r => {
             const bc = r.barcode.trim();
             return splitRowAcrossFois(
@@ -1802,6 +1809,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
                     pcsPerBox: parseInt(r.pcs_per_box) || 0,
                 },
                 overridesFromPaste,
+                consumed,
             );
         });
         const validBarcodes = new Set(validRows.map(r => r.barcode.trim()));
@@ -2155,7 +2163,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
                                             const item = allItemMap[bc];
                                             const unknown = bc && !item;
                                             const qty = parseInt(row.qty) || 0;
-                                            const exceeds = item && qty > (remainingByBarcode[bc] || 0);
+                                            const exceeds = exceededRowSet.has(row);
                                             const { boxes, notFull } = calcBoxes(qty, item?.pcs_per_box);
                                             const isAutoAdded = row.autoAdded;
                                             return (
