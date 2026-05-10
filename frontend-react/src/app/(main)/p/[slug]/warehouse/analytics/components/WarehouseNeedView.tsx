@@ -334,44 +334,73 @@ export function WarehouseNeedView() {
 
     /* ── Derived data ── */
 
+    // Спец-склады (СГТ/Питание/Горючее/виртуальные/СЦ) — для крупногабаритки и
+    // спец-товаров. На основном экране и в новинках для обычной FBO-поставки
+    // они не нужны. includes() вместо regex \b: \b в JS работает только с
+    // ASCII \w, для кириллицы (Ярославль СГТ) word-boundary не срабатывает.
+    const isSpecWarehouse = useCallback((name: string): boolean => {
+        if (name.startsWith('Виртуальный ')) return true;
+        if (name.startsWith('СЦ ')) return true;
+        if (name.includes(' СГТ')) return true;
+        if (name.includes(': Питание') || name.includes(':Питание')) return true;
+        if (name.includes(': Горючее') || name.includes(':Горючее')) return true;
+        return false;
+    }, []);
+
+    // Filtered cold-start main_warehouses: убираем спец-склады и share=0%
+    // (Виртуальный Челябинск etc.). Используется и в основной таблице, и в
+    // вкладке «Новинки», и во всех вызовах recomputeColdStartAlloc.
+    const filteredMainWarehouses = useMemo(() => {
+        if (!coldStartData?.main_warehouses?.length) return [];
+        return coldStartData.main_warehouses.filter(
+            w => w.share_pct > 0 && !isSpecWarehouse(w.warehouse),
+        );
+    }, [coldStartData, isSpecWarehouse]);
+
     const wbWarehouses = useMemo(() => {
-        const main = (data?.warehouses ?? []).filter(w => w.total_need > 0);
+        const main = (data?.warehouses ?? []).filter(w => w.total_need > 0 && !isSpecWarehouse(w.name));
         const have = new Set(main.map(w => w.name));
         // (1) Cold-start главные склады округов (новинки без истории).
-        if (coldStartData?.main_warehouses?.length) {
-            for (const cs of coldStartData.main_warehouses) {
-                if (!have.has(cs.warehouse) && cs.share_pct > 0) {
-                    main.push({ name: cs.warehouse, total_need: 0, articles: {} });
-                    have.add(cs.warehouse);
-                }
+        for (const cs of filteredMainWarehouses) {
+            if (!have.has(cs.warehouse)) {
+                main.push({ name: cs.warehouse, total_need: 0, articles: {} });
+                have.add(cs.warehouse);
             }
         }
         // (2) Склады, в которые после acceptance redistribute уехал qty
-        // (Невинномысск, Пенза СГТ и т.д. — открытые соседи по ФО, изначально
-        // не в нашем раскладе). Без этого qty виден только во внутреннем
-        // distribution, а столбец в таблице отсутствует.
+        // (Невинномысск и т.д. — открытые соседи по ФО, изначально не в нашем
+        // раскладе). СГТ/виртуальные пропускаем тут тоже.
         for (const it of acceptanceMap.values()) {
             for (const [wh, q] of Object.entries(it.distribution || {})) {
-                if (q > 0 && !have.has(wh)) {
+                if (q > 0 && !have.has(wh) && !isSpecWarehouse(wh)) {
                     main.push({ name: wh, total_need: 0, articles: {} });
                     have.add(wh);
                 }
             }
         }
         return main;
-    }, [data, coldStartData, acceptanceMap]);
+    }, [data, filteredMainWarehouses, acceptanceMap, isSpecWarehouse]);
 
     const getArticleWbNeed = useCallback((article: NeedArticle, whName: string): number => {
-        // Если acceptance-check был запущен — берём redistributed qty из ответа.
+        // Если acceptance-check был запущен — суммируем qty по ВСЕМ splits.
+        // primary distribution содержит только самый большой split (обычно BOX),
+        // а Владивосток / Великий Камень / Хабаровск (canMonopallet=true, canBox=false)
+        // живут в отдельном MONOPALLET split — без суммы они скрываются.
         const checked = acceptanceMap.get(article.nm_id);
-        if (checked) return checked.distribution?.[whName] || 0;
+        if (checked) {
+            const fromSplits = (checked.splits || []).reduce(
+                (sum, s) => sum + (s.distribution?.[whName] || 0), 0,
+            );
+            if (fromSplits > 0) return fromSplits;
+            return checked.distribution?.[whName] || 0;
+        }
         // Для cold-start новинок (нет истории продаж) — allocations из cold-start.
         const newcomer = coldStartData?.rows.find(r => r.nm_id === article.nm_id);
         if (newcomer) {
             const overrideQty = coldStartQtyOverrides[article.nm_id];
             const useOverride = overrideQty !== undefined && overrideQty !== newcomer.total_allocated;
             const alloc = useOverride
-                ? recomputeColdStartAlloc(overrideQty, coldStartData!.main_warehouses, coldStartMinPack).alloc
+                ? recomputeColdStartAlloc(overrideQty, filteredMainWarehouses, coldStartMinPack).alloc
                 : newcomer.allocations;
             return alloc[whName] || 0;
         }
@@ -379,13 +408,15 @@ export function WarehouseNeedView() {
         if (!data?.warehouses) return 0;
         const wh = data.warehouses.find(w => w.name === whName);
         return wh?.articles?.[article.nm_id]?.need || 0;
-    }, [data, acceptanceMap, coldStartData, coldStartQtyOverrides, coldStartMinPack]);
+    }, [data, acceptanceMap, coldStartData, filteredMainWarehouses, coldStartQtyOverrides, coldStartMinPack]);
 
     /** Returns 'box' | 'mono' | 'super' | 'closed' | null (null = не проверяли). */
     const getCellAcceptanceMarks = useCallback(
         (nmId: number, whName: string): {
             box: boolean; mono: boolean; super: boolean; closed: boolean; checked: boolean;
             box_free?: number; mono_free?: number; super_free?: number;
+            box_paid?: number; mono_paid?: number; super_paid?: number;
+            box_min?: number | null; mono_min?: number | null; super_min?: number | null;
         } => {
             const checked = acceptanceMap.get(nmId);
             if (!checked) return { box: false, mono: false, super: false, closed: false, checked: false };
@@ -403,6 +434,12 @@ export function WarehouseNeedView() {
                 box_free: flags.box_meta?.free_days_14,
                 mono_free: flags.mono_meta?.free_days_14,
                 super_free: flags.super_meta?.free_days_14,
+                box_paid: flags.box_meta?.paid_days_14,
+                mono_paid: flags.mono_meta?.paid_days_14,
+                super_paid: flags.super_meta?.paid_days_14,
+                box_min: flags.box_meta?.min_coefficient ?? null,
+                mono_min: flags.mono_meta?.min_coefficient ?? null,
+                super_min: flags.super_meta?.min_coefficient ?? null,
             };
         },
         [acceptanceMap],
@@ -555,7 +592,7 @@ export function WarehouseNeedView() {
                 const overrideQty = coldStartQtyOverrides[nmId];
                 const useOverride = overrideQty !== undefined && overrideQty !== newcomer.total_allocated;
                 const total = useOverride
-                    ? recomputeColdStartAlloc(overrideQty, coldStartData!.main_warehouses, coldStartMinPack).total
+                    ? recomputeColdStartAlloc(overrideQty, filteredMainWarehouses, coldStartMinPack).total
                     : newcomer.total_allocated;
                 sum += total;
                 continue;
@@ -567,7 +604,7 @@ export function WarehouseNeedView() {
             sum += Math.floor(Math.min(available, need) / 10) * 10;
         }
         return sum;
-    }, [checkedIds, assemblyWarehouseId, data, coldStartData, coldStartQtyOverrides, coldStartMinPack]);
+    }, [checkedIds, assemblyWarehouseId, data, coldStartData, filteredMainWarehouses, coldStartQtyOverrides, coldStartMinPack]);
 
     const checkedNewcomersCount = useMemo(() => {
         let n = 0;
@@ -588,10 +625,8 @@ export function WarehouseNeedView() {
             const newcomerByNm = new Map<number, ColdStartTableRow>();
             for (const r of coldStartData?.rows ?? []) newcomerByNm.set(r.nm_id, r);
             const coldStartShares: Record<string, number> = {};
-            if (coldStartData) {
-                for (const w of coldStartData.main_warehouses) {
-                    coldStartShares[w.warehouse] = w.share_pct / 100;
-                }
+            for (const w of filteredMainWarehouses) {
+                coldStartShares[w.warehouse] = w.share_pct / 100;
             }
 
             for (const nmId of checkedIds) {
@@ -612,7 +647,7 @@ export function WarehouseNeedView() {
                     const overrideQty = coldStartQtyOverrides[nmId];
                     const useOverride = overrideQty !== undefined && overrideQty !== newcomer.total_allocated;
                     const eff = useOverride
-                        ? recomputeColdStartAlloc(overrideQty, coldStartData.main_warehouses, coldStartMinPack)
+                        ? recomputeColdStartAlloc(overrideQty, filteredMainWarehouses, coldStartMinPack)
                         : { alloc: newcomer.allocations, total: newcomer.total_allocated };
                     qty = eff.total;
                     tgt = { ...eff.alloc };
@@ -691,8 +726,8 @@ export function WarehouseNeedView() {
             // Если в draft есть новинки — добавляем все cold-start склады (даже 0-qty),
             // чтобы distribute page показала колонки и cold_start_shares работали.
             const hasNewcomers = draftRows.some(r => newcomerByNm.has(r.nm_id));
-            const allColdStartTargets = hasNewcomers && coldStartData
-                ? coldStartData.main_warehouses.map(w => w.warehouse)
+            const allColdStartTargets = hasNewcomers
+                ? filteredMainWarehouses.map(w => w.warehouse)
                 : [];
             const targetNames = Array.from(new Set([
                 ...allColdStartTargets,
@@ -720,7 +755,7 @@ export function WarehouseNeedView() {
             setCreatingAssembly(false);
         }
     }, [data, assemblyWarehouseId, checkedIds, router, slug, acceptanceMap,
-        coldStartData, coldStartQtyOverrides, coldStartMinPack]);
+        coldStartData, filteredMainWarehouses, coldStartQtyOverrides, coldStartMinPack]);
 
     /* (cold-start теперь идёт через объединённый handleCreateAssembly выше) */
 
@@ -756,16 +791,36 @@ export function WarehouseNeedView() {
             const items: { nm_id: number; barcode: string; distribution: Record<string, number> }[] = [];
             const skippedNoBarcode: number[] = [];
 
-            // Обычные SKU: distribution = per-WB-need
+            // Обычные SKU: distribution полностью пересчитываем через cold-start
+            // share_pct округов (если cold_start доступен), а не only own-need.
+            // Зачем: warehouse_need_service считает need только по складам где у
+            // пользователя есть продажи. Для одеяла нет продаж в ДВ → need[Владивосток]=0,
+            // хотя WB кабинет рекомендует моно туда (ДВ = 18% продаж проекта).
+            // Распределение через share_pct даёт qty на ВСЕ main_warehouses
+            // пропорционально доле округа, без double-counting (sum = total_need).
             for (const a of data.articles) {
                 if (!a.barcode) {
                     if ((a.total_need || 0) > 0) skippedNoBarcode.push(a.nm_id);
                     continue;
                 }
-                const distribution: Record<string, number> = {};
-                for (const wh of data.warehouses) {
-                    const need = wh.articles?.[a.nm_id]?.need || 0;
-                    if (need > 0) distribution[wh.name] = need;
+                let distribution: Record<string, number> = {};
+                const totalNeed = a.total_need || 0;
+                // Используем filteredCs (тот же фильтр что и filteredMainWarehouses, но
+                // на локальном lazy-fetched coldStart — он может не совпадать с coldStartData).
+                const filteredCs = coldStart?.main_warehouses?.filter(
+                    w => w.share_pct > 0 && !isSpecWarehouse(w.warehouse),
+                ) || [];
+                if (filteredCs.length > 0 && totalNeed > 0) {
+                    // Replace own-need with share_pct distribution.
+                    distribution = recomputeColdStartAlloc(
+                        totalNeed, filteredCs, coldStartMinPack,
+                    ).alloc;
+                } else {
+                    // Fallback: own-need (без cold-start доступного).
+                    for (const wh of data.warehouses) {
+                        const need = wh.articles?.[a.nm_id]?.need || 0;
+                        if (need > 0) distribution[wh.name] = need;
+                    }
                 }
                 if (Object.keys(distribution).length > 0) {
                     items.push({ nm_id: a.nm_id, barcode: a.barcode, distribution });
@@ -785,8 +840,11 @@ export function WarehouseNeedView() {
                     if (items.some(x => x.nm_id === row.nm_id)) continue; // dedupe
                     const overrideQty = coldStartQtyOverrides[row.nm_id];
                     const useOverride = overrideQty !== undefined && overrideQty !== row.total_allocated;
+                    const filteredCs = coldStart?.main_warehouses?.filter(
+                        w => w.share_pct > 0 && !isSpecWarehouse(w.warehouse),
+                    ) || [];
                     const alloc = useOverride
-                        ? recomputeColdStartAlloc(overrideQty, coldStart.main_warehouses, coldStartMinPack).alloc
+                        ? recomputeColdStartAlloc(overrideQty, filteredCs, coldStartMinPack).alloc
                         : row.allocations;
                     const distribution: Record<string, number> = {};
                     for (const [wh, q] of Object.entries(alloc)) {
@@ -1343,7 +1401,7 @@ export function WarehouseNeedView() {
                                                 ✏️ редактируй
                                             </div>
                                         </th>
-                                        {coldStartData.main_warehouses.map(w => (
+                                        {filteredMainWarehouses.map(w => (
                                             <th key={w.warehouse} style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
                                                 <div style={{ fontSize: 11 }}>{w.warehouse}</div>
                                                 <div style={{ fontSize: 10, color: 'var(--color-text-muted)', fontWeight: 400 }}>
@@ -1359,7 +1417,7 @@ export function WarehouseNeedView() {
                                         const overrideQty = coldStartQtyOverrides[row.nm_id];
                                         const useOverride = overrideQty !== undefined && overrideQty !== row.total_allocated;
                                         const effective = useOverride
-                                            ? recomputeColdStartAlloc(overrideQty, coldStartData.main_warehouses, coldStartMinPack)
+                                            ? recomputeColdStartAlloc(overrideQty, filteredMainWarehouses, coldStartMinPack)
                                             : { alloc: row.allocations, total: row.total_allocated };
                                         const inputValue = overrideQty !== undefined ? overrideQty : row.total_allocated;
                                         return (
@@ -1411,7 +1469,7 @@ export function WarehouseNeedView() {
                                                     }}
                                                 />
                                             </td>
-                                            {coldStartData.main_warehouses.map(w => {
+                                            {filteredMainWarehouses.map(w => {
                                                 const v = effective.alloc[w.warehouse] || 0;
                                                 const m = getCellAcceptanceMarks(row.nm_id, w.warehouse);
                                                 const onlyMono = m.checked && !m.box && m.mono;
@@ -1441,9 +1499,20 @@ export function WarehouseNeedView() {
                                                 const tipParts: string[] = [];
                                                 if (m.closed) tipParts.push(`WB не принимает на «${w.warehouse}» в ближайшие 14 дней`);
                                                 else {
-                                                    if (m.box) tipParts.push(`коробом${m.box_free !== undefined ? ` (свободно ${m.box_free}/14 дн)` : ''}`);
-                                                    if (m.mono) tipParts.push(`моно-паллетой${m.mono_free !== undefined ? ` (свободно ${m.mono_free}/14 дн)` : ''}`);
-                                                    if (m.super) tipParts.push(`super-safe${m.super_free !== undefined ? ` (свободно ${m.super_free}/14 дн)` : ''}`);
+                                                    // Tooltip с разделением free/paid/quota — пользователь видит всё что
+                                                    // принимает склад, даже если бесплатных слотов нет (платные квоты).
+                                                    const slotsLabel = (free?: number, paid?: number, min?: number | null): string => {
+                                                        const f = free ?? 0;
+                                                        const p = paid ?? 0;
+                                                        if (f > 0 && p > 0) return ` (бесплатно ${f}/14 + платно ${p}/14, мин ×${min})`;
+                                                        if (f > 0) return ` (бесплатно ${f}/14 дн)`;
+                                                        if (p > 0) return ` (только платно ${p}/14 дн, мин ×${min})`;
+                                                        if (free === undefined && paid === undefined) return '';
+                                                        return ' (по индивидуальной квоте)';
+                                                    };
+                                                    if (m.box) tipParts.push(`коробом${slotsLabel(m.box_free, m.box_paid, m.box_min)}`);
+                                                    if (m.mono) tipParts.push(`моно-паллетой${slotsLabel(m.mono_free, m.mono_paid, m.mono_min)}`);
+                                                    if (m.super) tipParts.push(`super-safe${slotsLabel(m.super_free, m.super_paid, m.super_min)}`);
                                                 }
                                                 const tip = tipParts.length ? (m.closed ? tipParts[0] : `Принимает: ${tipParts.join(', ')}`) : '';
                                                 return (
