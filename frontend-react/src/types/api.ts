@@ -2897,6 +2897,10 @@ export interface BoxMultiplicityRow {
   box_qty_from_factory: number | null;    // из активного FOI (fallback)
   effective_box_qty: number | null;       // override → vehicle → factory
   use_box_multiplicity: boolean;          // учитывать ли ppb при распределении
+  rf_stock: number;                       // суммарный остаток на ФФ-складах
+  in_assembly: number;                    // в активной сборке (PENDING..VEHICLE_ASSIGNED)
+  in_transit: number;                     // в пути на WB (SHIPPED)
+  wb_stock: number;                       // суммарный остаток на WB-складах
 }
 
 export interface BoxMultiplicityResponse {

@@ -19,6 +19,11 @@ class BoxMultiplicityRow(BaseModel):
     box_qty_from_factory: int | None = None  # latest factory_order_item
     effective_box_qty: int | None = None  # priority: override → vehicle → factory
     use_box_multiplicity: bool = True  # whether to round assembly distribution to ppb
+    # ─── stock metrics for filters ────────────────────────────────────────
+    rf_stock: int = 0  # total qty across active fulfillment warehouses
+    in_assembly: int = 0  # reserved in PENDING/IN_PROGRESS/READY/VEHICLE_ASSIGNED
+    in_transit: int = 0  # SHIPPED assemblies en-route to WB
+    wb_stock: int = 0  # total qty across all WB warehouses
 
 
 class BoxMultiplicityResponse(BaseModel):

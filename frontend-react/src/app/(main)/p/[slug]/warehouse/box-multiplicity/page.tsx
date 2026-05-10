@@ -7,6 +7,8 @@ import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
 import type { BoxMultiplicityRow } from '@/types/api';
 
+type StockFilter = 'all' | 'rf' | 'in_assembly' | 'in_transit' | 'no_wb' | 'no_stock';
+
 export default function BoxMultiplicityPage() {
     useParams() as { slug: string };  // route guard — slug used by API client
     const [rows, setRows] = useState<BoxMultiplicityRow[]>([]);
@@ -15,6 +17,12 @@ export default function BoxMultiplicityPage() {
     const [editingNm, setEditingNm] = useState<number | null>(null);
     const [editValue, setEditValue] = useState('');
     const [saving, setSaving] = useState(false);
+
+    // Filters
+    const [brandFilter, setBrandFilter] = useState('');
+    const [subjectFilter, setSubjectFilter] = useState('');
+    const [stockFilter, setStockFilter] = useState<StockFilter>('all');
+    const [search, setSearch] = useState('');
 
     const load = useCallback(async () => {
         try {
@@ -69,14 +77,56 @@ export default function BoxMultiplicityPage() {
         }
     };
 
+    // ─── Filter options ────────────────────────────────────────────────────
+    const brandOptions = useMemo(() => {
+        const set = new Set<string>();
+        for (const r of rows) if (r.brand) set.add(r.brand);
+        return Array.from(set).sort();
+    }, [rows]);
+
+    const subjectOptions = useMemo(() => {
+        const set = new Set<string>();
+        for (const r of rows) if (r.subject) set.add(r.subject);
+        return Array.from(set).sort();
+    }, [rows]);
+
+    // ─── Filtered rows ─────────────────────────────────────────────────────
+    const filteredRows = useMemo(() => {
+        const q = search.trim().toLowerCase();
+        return rows.filter(r => {
+            if (brandFilter && r.brand !== brandFilter) return false;
+            if (subjectFilter && r.subject !== subjectFilter) return false;
+            if (q) {
+                const haystack = `${r.vendor_code || ''} ${r.barcode} ${r.nm_id}`.toLowerCase();
+                if (!haystack.includes(q)) return false;
+            }
+            switch (stockFilter) {
+                case 'rf': return r.rf_stock > 0;
+                case 'in_assembly': return r.in_assembly > 0;
+                case 'in_transit': return r.in_transit > 0;
+                case 'no_wb': return r.wb_stock === 0;
+                case 'no_stock': return r.rf_stock === 0 && r.wb_stock === 0 && r.in_assembly === 0 && r.in_transit === 0;
+                default: return true;
+            }
+        });
+    }, [rows, brandFilter, subjectFilter, stockFilter, search]);
+
     const stats = useMemo(() => {
+        // KPI считаем по ВСЕМ строкам (не по фильтру) — чтобы было видно тотал
         const total = rows.length;
         const withEffective = rows.filter(r => r.effective_box_qty !== null).length;
         const withManual = rows.filter(r => r.box_qty_override !== null).length;
         const fromVehicle = rows.filter(r => r.box_qty_override === null && r.box_qty_from_vehicle !== null).length;
         const empty = total - withEffective;
         const active = rows.filter(r => r.use_box_multiplicity && r.effective_box_qty !== null).length;
-        return { total, withEffective, withManual, fromVehicle, empty, active };
+        const filterCounts = {
+            rf: rows.filter(r => r.rf_stock > 0).length,
+            in_assembly: rows.filter(r => r.in_assembly > 0).length,
+            in_transit: rows.filter(r => r.in_transit > 0).length,
+            no_wb: rows.filter(r => r.wb_stock === 0).length,
+            no_stock: rows.filter(r => r.rf_stock === 0 && r.wb_stock === 0 && r.in_assembly === 0 && r.in_transit === 0).length,
+        };
+        return { total, withEffective, withManual, fromVehicle, empty, active, filterCounts };
     }, [rows]);
 
     const columns: Column[] = [
@@ -84,6 +134,34 @@ export default function BoxMultiplicityPage() {
         { key: 'nm_id', label: 'nm_id', format: 'number', align: 'right', width: '100px' },
         { key: 'brand', label: 'Бренд', width: '120px' },
         { key: 'subject', label: 'Предмет', width: '140px' },
+        {
+            key: 'rf_stock',
+            label: 'Остатки',
+            align: 'right',
+            width: '180px',
+            getValue: (r: BoxMultiplicityRow) => r.rf_stock + r.wb_stock + r.in_assembly + r.in_transit,
+            render: (_v: unknown, r: BoxMultiplicityRow) => {
+                const parts: Array<{ label: string; value: number; color: string }> = [];
+                if (r.rf_stock > 0) parts.push({ label: 'ФФ', value: r.rf_stock, color: 'var(--color-success)' });
+                if (r.in_assembly > 0) parts.push({ label: 'сборка', value: r.in_assembly, color: 'var(--color-warning)' });
+                if (r.in_transit > 0) parts.push({ label: 'путь', value: r.in_transit, color: 'var(--color-accent)' });
+                if (r.wb_stock > 0) parts.push({ label: 'WB', value: r.wb_stock, color: 'var(--color-text)' });
+                if (parts.length === 0) {
+                    return <span style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>—</span>;
+                }
+                return (
+                    <div style={{ fontSize: 12, lineHeight: 1.4 }}>
+                        {parts.map(p => (
+                            <div key={p.label} style={{ color: p.color }}>
+                                {p.label}: <strong>{formatNumber(p.value)}</strong>
+                            </div>
+                        ))}
+                    </div>
+                );
+            },
+            exportValue: (r: BoxMultiplicityRow) =>
+                `ФФ:${r.rf_stock} | сборка:${r.in_assembly} | путь:${r.in_transit} | WB:${r.wb_stock}`,
+        },
         {
             key: 'box_qty_from_vehicle',
             label: 'Из машины',
@@ -309,13 +387,75 @@ export default function BoxMultiplicityPage() {
                     <div>Нет SKU с привязкой к WB</div>
                 </div>
             ) : (
-                <TanStackDataTable
-                    columns={columns}
-                    data={rows}
-                    exportName="box_multiplicity"
-                    emptyText="Нет данных"
-                    pageSize={100}
-                />
+                <>
+                    {/* Filter row 1: brand + subject + search */}
+                    <div className="glass-card" style={{ padding: 12, marginBottom: 12, display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <select
+                            value={brandFilter}
+                            onChange={e => setBrandFilter(e.target.value)}
+                            style={{ padding: '6px 10px', fontSize: 13, border: '1px solid var(--color-border)', borderRadius: 8, minWidth: 160 }}
+                        >
+                            <option value="">Все бренды ({brandOptions.length})</option>
+                            {brandOptions.map(b => <option key={b} value={b}>{b}</option>)}
+                        </select>
+                        <select
+                            value={subjectFilter}
+                            onChange={e => setSubjectFilter(e.target.value)}
+                            style={{ padding: '6px 10px', fontSize: 13, border: '1px solid var(--color-border)', borderRadius: 8, minWidth: 160 }}
+                        >
+                            <option value="">Все предметы ({subjectOptions.length})</option>
+                            {subjectOptions.map(s => <option key={s} value={s}>{s}</option>)}
+                        </select>
+                        <input
+                            type="text"
+                            placeholder="Поиск по артикулу / barcode / nm_id"
+                            value={search}
+                            onChange={e => setSearch(e.target.value)}
+                            style={{ padding: '6px 10px', fontSize: 13, border: '1px solid var(--color-border)', borderRadius: 8, flex: 1, minWidth: 200 }}
+                        />
+                        {(brandFilter || subjectFilter || search || stockFilter !== 'all') && (
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => { setBrandFilter(''); setSubjectFilter(''); setSearch(''); setStockFilter('all'); }}
+                            >✕ Сброс</button>
+                        )}
+                    </div>
+
+                    {/* Filter row 2: stock chips */}
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
+                        {([
+                            { key: 'all', label: 'Все', count: rows.length },
+                            { key: 'rf', label: 'Есть на ФФ', count: stats.filterCounts.rf },
+                            { key: 'in_assembly', label: 'В сборке', count: stats.filterCounts.in_assembly },
+                            { key: 'in_transit', label: 'В пути', count: stats.filterCounts.in_transit },
+                            { key: 'no_wb', label: 'Нет на WB', count: stats.filterCounts.no_wb },
+                            { key: 'no_stock', label: 'Нет нигде', count: stats.filterCounts.no_stock },
+                        ] as Array<{ key: StockFilter; label: string; count: number }>).map(c => (
+                            <button
+                                key={c.key}
+                                className={`btn btn-sm ${stockFilter === c.key ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setStockFilter(c.key)}
+                            >
+                                {c.label} ({formatNumber(c.count)})
+                            </button>
+                        ))}
+                    </div>
+
+                    {filteredRows.length === 0 ? (
+                        <div className="empty-state">
+                            <div className="empty-state-icon">🔍</div>
+                            <div>Под текущие фильтры ничего не подходит</div>
+                        </div>
+                    ) : (
+                        <TanStackDataTable
+                            columns={columns}
+                            data={filteredRows}
+                            exportName="box_multiplicity"
+                            emptyText="Нет данных"
+                            pageSize={100}
+                        />
+                    )}
+                </>
             )}
         </div>
     );

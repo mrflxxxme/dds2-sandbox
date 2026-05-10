@@ -14,13 +14,16 @@ that SKU.
 
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import invalidate_cache
+from backend.models import WbWarehouseStock
+from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.cost import CostOrder, CostOrderItem, Nomenclature
 from backend.models.enums import VehicleStatus
 from backend.models.supply_chain import FactoryOrderItem
+from backend.models.warehouse import Warehouse, WarehouseStock, WarehouseType
 
 logger = logging.getLogger("dds.box_multiplicity")
 
@@ -118,6 +121,87 @@ async def get_box_multiplicity_table(
         if ppb and ppb > 0:
             foi_by_bc[row.barcode] = int(ppb)
 
+    # ─── Stock metrics per nm_id (для фильтров на странице) ───────────────
+    nm_ids = [n.article_wb for n in nomenclatures if n.article_wb is not None]
+
+    # FF (RF fulfillment) сток — сумма по всем активным RF-складам проекта.
+    rf_stock_map: dict[int, int] = {}
+    if nm_ids:
+        rf_wh_subq = (
+            select(Warehouse.id)
+            .where(
+                Warehouse.project_id == project_id,
+                Warehouse.warehouse_type == WarehouseType.FULFILLMENT,
+                Warehouse.is_deleted == False,  # noqa: E712
+                Warehouse.is_active == True,  # noqa: E712
+            )
+            .scalar_subquery()
+        )
+        rf_stock_result = await db.execute(
+            select(
+                Nomenclature.article_wb,
+                func.coalesce(func.sum(WarehouseStock.quantity), 0).label("qty"),
+            )
+            .join(Nomenclature, Nomenclature.id == WarehouseStock.nomenclature_id)
+            .where(
+                WarehouseStock.project_id == project_id,
+                WarehouseStock.warehouse_id.in_(rf_wh_subq),
+                Nomenclature.article_wb.in_(nm_ids),
+            )
+            .group_by(Nomenclature.article_wb)
+        )
+        for row in rf_stock_result:  # type: ignore[assignment]
+            rf_stock_map[row.article_wb] = int(row.qty or 0)
+
+    # In-assembly (резерв в активных сборках до отгрузки) per nm_id.
+    in_assembly_map: dict[int, int] = {}
+    in_transit_map: dict[int, int] = {}
+    if nm_ids:
+        active_statuses = [
+            AssemblyStatus.PENDING,
+            AssemblyStatus.IN_PROGRESS,
+            AssemblyStatus.READY,
+            AssemblyStatus.VEHICLE_ASSIGNED,
+        ]
+        asm_result = await db.execute(
+            select(
+                Nomenclature.article_wb,
+                AssemblyRequest.status,
+                func.sum(AssemblyRequestItem.quantity).label("qty"),
+            )
+            .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+            .join(Nomenclature, Nomenclature.id == AssemblyRequestItem.nomenclature_id)
+            .where(
+                AssemblyRequest.project_id == project_id,
+                AssemblyRequest.is_deleted == False,  # noqa: E712
+                AssemblyRequest.status.in_([*active_statuses, AssemblyStatus.SHIPPED]),
+                Nomenclature.article_wb.in_(nm_ids),
+            )
+            .group_by(Nomenclature.article_wb, AssemblyRequest.status)
+        )
+        for row in asm_result:  # type: ignore[assignment]
+            nm = row.article_wb
+            qty = int(row.qty or 0)
+            target = in_transit_map if row.status == AssemblyStatus.SHIPPED else in_assembly_map
+            target[nm] = target.get(nm, 0) + qty
+
+    # WB warehouses сток — сумма по всем WB-складам проекта.
+    wb_stock_map: dict[int, int] = {}
+    if nm_ids:
+        wb_result = await db.execute(
+            select(
+                WbWarehouseStock.nm_id,
+                func.coalesce(func.sum(WbWarehouseStock.quantity), 0).label("qty"),
+            )
+            .where(
+                WbWarehouseStock.project_id == project_id,
+                WbWarehouseStock.nm_id.in_(nm_ids),
+            )
+            .group_by(WbWarehouseStock.nm_id)
+        )
+        for row in wb_result:  # type: ignore[assignment]
+            wb_stock_map[row.nm_id] = int(row.qty or 0)
+
     # ─── Build rows ────────────────────────────────────────────────────────
     rows: list[dict] = []
     for n in nomenclatures:
@@ -125,6 +209,11 @@ async def get_box_multiplicity_table(
         veh_ppb = veh["ppb"] if veh else None
         foi_ppb = foi_by_bc.get(n.barcode)
         effective = n.box_qty_override or veh_ppb or foi_ppb
+
+        rf_stock = rf_stock_map.get(n.article_wb, 0) if n.article_wb else 0
+        in_asm = in_assembly_map.get(n.article_wb, 0) if n.article_wb else 0
+        in_tr = in_transit_map.get(n.article_wb, 0) if n.article_wb else 0
+        wb_stock = wb_stock_map.get(n.article_wb, 0) if n.article_wb else 0
 
         rows.append(
             {
@@ -140,6 +229,10 @@ async def get_box_multiplicity_table(
                 "box_qty_from_factory": foi_ppb,
                 "effective_box_qty": effective,
                 "use_box_multiplicity": n.use_box_multiplicity,
+                "rf_stock": rf_stock,
+                "in_assembly": in_asm,
+                "in_transit": in_tr,
+                "wb_stock": wb_stock,
             }
         )
 
