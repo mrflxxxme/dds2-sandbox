@@ -1,8 +1,10 @@
 'use client';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, exportToExcel } from '@/lib/utils';
+import { distributeByBoxMultiple } from '@/lib/utils/boxDistribution';
 import type {
     AcceptanceCheckPerItem,
     AssemblyDraftRow,
@@ -201,6 +203,28 @@ export function WarehouseNeedView() {
     const [acceptanceMap, setAcceptanceMap] = useState<Map<number, AcceptanceCheckPerItem>>(new Map());
     const [acceptanceMoves, setAcceptanceMoves] = useState<RedistributionMove[]>([]);
     const [acceptanceCheckedAt, setAcceptanceCheckedAt] = useState<string | null>(null);
+
+    /* ── Box-multiplicity (кратность коробки per nm_id) ── */
+    const [boxMultiplicityMap, setBoxMultiplicityMap] = useState<Map<number, number>>(new Map());
+
+    useEffect(() => {
+        let cancelled = false;
+        api.getBoxMultiplicity()
+            .then(resp => {
+                if (cancelled) return;
+                const m = new Map<number, number>();
+                for (const r of resp.items) {
+                    if (r.effective_box_qty && r.effective_box_qty > 0) {
+                        m.set(r.nm_id, r.effective_box_qty);
+                    }
+                }
+                setBoxMultiplicityMap(m);
+            })
+            .catch(() => {
+                // best-effort: если кратности нет — fallback на старую логику без округления
+            });
+        return () => { cancelled = true; };
+    }, []);
 
     /* ── Restore acceptance state from localStorage on mount (5 min TTL) ── */
     useEffect(() => {
@@ -657,18 +681,31 @@ export function WarehouseNeedView() {
                     const need = article.total_need;
                     qty = Math.min(available, need);
                     if (qty > 0) {
-                        let remaining = qty;
-                        for (const wh of data.warehouses) {
-                            const wbNeed = wh.articles?.[nmId]?.need || 0;
-                            if (wbNeed > 0 && remaining > 0) {
-                                const give = Math.min(remaining, wbNeed);
-                                tgt[wh.name] = give;
-                                remaining -= give;
+                        const ppb = boxMultiplicityMap.get(nmId);
+                        const whNeeds = data.warehouses
+                            .map(wh => ({ name: wh.name, need: wh.articles?.[nmId]?.need || 0 }))
+                            .filter(w => w.need > 0);
+
+                        if (ppb && ppb > 0 && qty >= ppb) {
+                            // Кратность задана — раздаём целыми коробками,
+                            // минимум 1 коробка каждому нуждающемуся складу.
+                            tgt = distributeByBoxMultiple(whNeeds, qty, ppb);
+                            qty = Object.values(tgt).reduce((s, v) => s + v, 0);
+                        } else {
+                            // Fallback: текущая логика без округления.
+                            let remaining = qty;
+                            for (const wh of data.warehouses) {
+                                const wbNeed = wh.articles?.[nmId]?.need || 0;
+                                if (wbNeed > 0 && remaining > 0) {
+                                    const give = Math.min(remaining, wbNeed);
+                                    tgt[wh.name] = give;
+                                    remaining -= give;
+                                }
                             }
-                        }
-                        if (remaining > 0 && Object.keys(tgt).length > 0) {
-                            const firstKey = Object.keys(tgt)[0];
-                            tgt[firstKey] = (tgt[firstKey] || 0) + remaining;
+                            if (remaining > 0 && Object.keys(tgt).length > 0) {
+                                const firstKey = Object.keys(tgt)[0];
+                                tgt[firstKey] = (tgt[firstKey] || 0) + remaining;
+                            }
                         }
                     }
                 }
@@ -1001,13 +1038,18 @@ export function WarehouseNeedView() {
     return (
         <div>
             {/* Header */}
-            <div className="page-header" style={{ marginBottom: 16 }}>
+            <div className="page-header" style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
+                <div>
                 <h2 className="page-title">Потребность по складам</h2>
                 <p className="page-subtitle">
                     {data
                         ? `${data.total_warehouses} складов \u00B7 ${data.total_articles} артикулов \u00B7 запас ${supplyDays} дн`
                         : 'Нет данных'}
                 </p>
+                </div>
+                <Link href={`/p/${slug}/warehouse/box-multiplicity`} className="btn btn-secondary btn-sm">
+                    📦 Кратность коробок
+                </Link>
             </div>
 
             {/* KPI Cards */}

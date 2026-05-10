@@ -2882,3 +2882,23 @@ export interface AcceptanceCheckResponse {
   checked_at: string;
   cache_hit: boolean;
 }
+
+// ─── Box multiplicity (кратность коробки) ────────────────────────────────────
+export interface BoxMultiplicityRow {
+  nm_id: number;
+  vendor_code: string | null;
+  barcode: string;
+  brand: string | null;
+  subject: string | null;
+  box_qty_override: number | null;        // ручной ввод (Nomenclature)
+  box_qty_from_vehicle: number | null;    // из последней DELIVERED машины
+  vehicle_order_no: string | null;
+  vehicle_received_at: string | null;     // ISO-date или null
+  box_qty_from_factory: number | null;    // из активного FOI (fallback)
+  effective_box_qty: number | null;       // override → vehicle → factory
+}
+
+export interface BoxMultiplicityResponse {
+  items: BoxMultiplicityRow[];
+  total: number;
+}

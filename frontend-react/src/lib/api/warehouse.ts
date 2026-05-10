@@ -12,6 +12,8 @@ import type {
     AssemblyRequest,
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
+    BoxMultiplicityResponse,
+    BoxMultiplicityRow,
     DefectBulkOperation,
     DefectBulkResponse,
     DefectMarkCancelResponse,
@@ -408,6 +410,18 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         commitAssemblyDraft(id: number) {
             return api.request<AssemblyDraftCommitResponse>('POST', `/api/v1/assembly/drafts/${id}/commit`);
+        },
+
+        // ─── Box-multiplicity (кратность коробки) ────────────────────────
+        getBoxMultiplicity() {
+            return api.request<BoxMultiplicityResponse>('GET', '/api/v1/warehouse/box-multiplicity');
+        },
+        setBoxMultiplicity(nmId: number, boxQtyOverride: number | null) {
+            return api.request<BoxMultiplicityRow>(
+                'PATCH',
+                `/api/v1/warehouse/box-multiplicity/${nmId}`,
+                { box_qty_override: boxQtyOverride },
+            );
         },
     };
 }

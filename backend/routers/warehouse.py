@@ -8,6 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
+from backend.schemas.box_multiplicity import (
+    BoxMultiplicityResponse,
+    BoxMultiplicityRow,
+    BoxMultiplicityUpdate,
+)
 from backend.schemas.warehouse import (
     AcceptanceCheckRequest,
     AcceptanceCheckResponse,
@@ -34,7 +39,12 @@ from backend.schemas.warehouse import (
     WarehouseStockSchema,
     WarehouseUpdate,
 )
-from backend.services import warehouse_acceptance_service, warehouse_defect, warehouse_service
+from backend.services import (
+    box_multiplicity_service,
+    warehouse_acceptance_service,
+    warehouse_defect,
+    warehouse_service,
+)
 from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/warehouse", tags=["Warehouse"])
@@ -811,3 +821,46 @@ async def update_cost_price(
     if not stock:
         raise HTTPException(404, "Stock record not found")
     return WarehouseStockSchema.model_validate(stock)
+
+
+# ─── Box-multiplicity (кратность коробки) ───────────────────────────────────
+
+
+@router.get("/box-multiplicity", response_model=BoxMultiplicityResponse)
+async def get_box_multiplicity(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-SKU box quantity table: manual override + last vehicle ppb + factory fallback."""
+    items = await box_multiplicity_service.get_box_multiplicity_table(db, project.id)
+    return {"items": items, "total": len(items)}
+
+
+@router.patch(
+    "/box-multiplicity/{nm_id}",
+    response_model=BoxMultiplicityRow,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def patch_box_multiplicity(
+    nm_id: int,
+    payload: BoxMultiplicityUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set or clear (`box_qty_override=null`) the manual ppb for a SKU."""
+    ok = await box_multiplicity_service.set_box_qty_override(
+        db,
+        project.id,
+        nm_id,
+        payload.box_qty_override,
+    )
+    if not ok:
+        raise HTTPException(404, "SKU not found")
+    items = await box_multiplicity_service.get_box_multiplicity_table(
+        db,
+        project.id,
+        nm_id_filter=nm_id,
+    )
+    if not items:
+        raise HTTPException(404, "SKU not found after update")
+    return items[0]
