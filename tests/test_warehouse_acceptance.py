@@ -296,6 +296,60 @@ class TestNormalizeAcceptanceWh:
         assert _normalize_acceptance_wh("СЦ Симферополь (Молодежненское)") == "СЦ Симферополь"
 
 
+class TestNormalizeWbWarehouse:
+    """warehouse_need_service._normalize_wb_warehouse — единый канонизатор для
+    orders/stocks/assembly. Должен сливать acceptance-форму («Новосемейкино»),
+    canonical-форму («Самара (Новосемейкино)») и short-форму («Самара») в одну
+    колонку, иначе в матрице потребности появляются дубли по одному физ. складу.
+    """
+
+    def test_acceptance_short_name_collapses_with_canonical_long(self):
+        # Bug repro: «Новосемейкино» (acceptance API) и «Самара (Новосемейкино)»
+        # (stocks API) ранее давали 2 разные колонки. После фикса обе → «Самара».
+        from backend.services.warehouse_need_service import _normalize_wb_warehouse
+
+        assert _normalize_wb_warehouse("Новосемейкино") == "Самара"
+        assert _normalize_wb_warehouse("Самара (Новосемейкино)") == "Самара"
+        assert _normalize_wb_warehouse("Самара") == "Самара"
+        assert _normalize_wb_warehouse("Новосемейкино: Питание") == "Самара"
+
+    def test_acceptance_alias_then_paren_strip(self):
+        from backend.services.warehouse_need_service import _normalize_wb_warehouse
+
+        # Acceptance-форма с «Склад »-префиксом мапится на каноническое имя,
+        # потом скобки (если есть) режутся.
+        assert _normalize_wb_warehouse("Склад Шушары") == "СПБ Шушары"
+        assert _normalize_wb_warehouse("Склад Владивосток") == "Владивосток"
+        assert _normalize_wb_warehouse("Владивосток СГТ") == "Владивосток"
+
+    def test_paren_strip_for_existing_canonical(self):
+        from backend.services.warehouse_need_service import _normalize_wb_warehouse
+
+        # Регрессия: фикс не должен ломать ранее работавшие случаи.
+        assert _normalize_wb_warehouse("Краснодар (Тихорецкая)") == "Краснодар"
+        assert _normalize_wb_warehouse("СЦ Симферополь (Молодежненское)") == "СЦ Симферополь"
+
+    def test_food_suffix_collapses(self):
+        from backend.services.warehouse_need_service import _normalize_wb_warehouse
+
+        # «: Питание» — отдельный sub-warehouse, физически тот же склад.
+        assert _normalize_wb_warehouse("Электросталь: Питание") == "Электросталь"
+        assert _normalize_wb_warehouse("Воронеж: Питание") == "Воронеж"
+
+    def test_empty_input(self):
+        from backend.services.warehouse_need_service import _normalize_wb_warehouse
+
+        assert _normalize_wb_warehouse(None) == ""
+        assert _normalize_wb_warehouse("") == ""
+
+    def test_unknown_name_passes_through_with_paren_strip(self):
+        from backend.services.warehouse_need_service import _normalize_wb_warehouse
+
+        # Неизвестный склад → нет в алиасах → только parens-strip.
+        assert _normalize_wb_warehouse("Неизвестный склад X") == "Неизвестный склад X"
+        assert _normalize_wb_warehouse("Какой-то (Питание)") == "Какой-то"
+
+
 class TestFlagsForWarehouseAlias:
     """Алиасы должны срабатывать при сборке availability."""
 

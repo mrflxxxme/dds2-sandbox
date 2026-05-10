@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached
 from backend.models import WbFunnelDaily, WbWarehouseStock
+from backend.services.warehouse_geo_data import ACCEPTANCE_TO_STOCK_NAME
 from backend.services.warehouse_stock_service import compute_need
 
 logger = logging.getLogger("dds.stock_analytics")
@@ -23,15 +24,31 @@ _WH_PARENS_RE = re.compile(r"\s*\([^)]*\)\s*$")
 
 
 def _normalize_wb_warehouse(name: str | None) -> str:
-    """Strip trailing parenthesized suffix so FBO and order/stock names match.
+    """Canonicalize warehouse name so all sources collapse into one column.
 
-    'Краснодар (Тихорецкая)' -> 'Краснодар'
-    'Самара (Новосемейкино)' -> 'Самара'
-    'СЦ Симферополь (Молодежненское)' -> 'СЦ Симферополь'
+    Step 1: apply ACCEPTANCE_TO_STOCK_NAME to map acceptance-API short forms
+    («Новосемейкино», «Склад Шушары», «Электросталь: Питание») to the canonical
+    name from WAREHOUSE_COORDS. Without this step the supplier/orders feed
+    («Новосемейкино») and the stocks feed («Самара (Новосемейкино)») produce
+    two separate columns for the same physical warehouse.
+
+    Step 2: strip any trailing «(...)» so FBO/orders short names («Самара»)
+    merge with stocks long names («Самара (Новосемейкино)»).
+
+    Examples:
+      'Новосемейкино'             -> 'Самара (Новосемейкино)' -> 'Самара'
+      'Новосемейкино: Питание'    -> 'Самара (Новосемейкино)' -> 'Самара'
+      'Самара (Новосемейкино)'    -> 'Самара'
+      'Самара'                    -> 'Самара'
+      'Краснодар (Тихорецкая)'    -> 'Краснодар'
+      'Склад Шушары'              -> 'СПБ Шушары'
+      'Электросталь: Питание'     -> 'Электросталь'
+      'СЦ Симферополь (Молодежненское)' -> 'СЦ Симферополь'
     """
     if not name:
         return ""
-    return _WH_PARENS_RE.sub("", name).strip()
+    canonical = ACCEPTANCE_TO_STOCK_NAME.get(name, name)
+    return _WH_PARENS_RE.sub("", canonical).strip()
 
 
 @cached(prefix="reports:warehouse_need", ttl=300)
