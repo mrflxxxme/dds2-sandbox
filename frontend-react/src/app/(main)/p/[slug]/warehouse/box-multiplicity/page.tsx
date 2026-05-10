@@ -77,18 +77,25 @@ export default function BoxMultiplicityPage() {
         }
     };
 
-    // ─── Filter options ────────────────────────────────────────────────────
+    // ─── Filter options (учитывают друг друга — если выбран предмет, бренды
+    // сужаются до тех что встречаются в этом предмете и наоборот) ──────────
     const brandOptions = useMemo(() => {
         const set = new Set<string>();
-        for (const r of rows) if (r.brand) set.add(r.brand);
+        for (const r of rows) {
+            if (subjectFilter && r.subject !== subjectFilter) continue;
+            if (r.brand) set.add(r.brand);
+        }
         return Array.from(set).sort();
-    }, [rows]);
+    }, [rows, subjectFilter]);
 
     const subjectOptions = useMemo(() => {
         const set = new Set<string>();
-        for (const r of rows) if (r.subject) set.add(r.subject);
+        for (const r of rows) {
+            if (brandFilter && r.brand !== brandFilter) continue;
+            if (r.subject) set.add(r.subject);
+        }
         return Array.from(set).sort();
-    }, [rows]);
+    }, [rows, brandFilter]);
 
     // ─── Filtered rows ─────────────────────────────────────────────────────
     const filteredRows = useMemo(() => {
@@ -111,27 +118,61 @@ export default function BoxMultiplicityPage() {
         });
     }, [rows, brandFilter, subjectFilter, stockFilter, search]);
 
+    // KPI и chip-каунты — по scope бренд+предмет (без чипов остатков и без search),
+    // чтобы при выборе предмета шапка показывала числа в рамках этого предмета.
+    const scopeRows = useMemo(() => rows.filter(r => {
+        if (brandFilter && r.brand !== brandFilter) return false;
+        if (subjectFilter && r.subject !== subjectFilter) return false;
+        return true;
+    }), [rows, brandFilter, subjectFilter]);
+
     const stats = useMemo(() => {
-        // KPI считаем по ВСЕМ строкам (не по фильтру) — чтобы было видно тотал
-        const total = rows.length;
-        const withEffective = rows.filter(r => r.effective_box_qty !== null).length;
-        const withManual = rows.filter(r => r.box_qty_override !== null).length;
-        const fromVehicle = rows.filter(r => r.box_qty_override === null && r.box_qty_from_vehicle !== null).length;
+        const total = scopeRows.length;
+        const withEffective = scopeRows.filter(r => r.effective_box_qty !== null).length;
+        const withManual = scopeRows.filter(r => r.box_qty_override !== null).length;
+        const fromVehicle = scopeRows.filter(r => r.box_qty_override === null && r.box_qty_from_vehicle !== null).length;
         const empty = total - withEffective;
-        const active = rows.filter(r => r.use_box_multiplicity && r.effective_box_qty !== null).length;
+        const active = scopeRows.filter(r => r.use_box_multiplicity && r.effective_box_qty !== null).length;
         const filterCounts = {
-            rf: rows.filter(r => r.rf_stock > 0).length,
-            in_assembly: rows.filter(r => r.in_assembly > 0).length,
-            in_transit: rows.filter(r => r.in_transit > 0).length,
-            no_wb: rows.filter(r => r.wb_stock === 0).length,
-            no_stock: rows.filter(r => r.rf_stock === 0 && r.wb_stock === 0 && r.in_assembly === 0 && r.in_transit === 0).length,
+            rf: scopeRows.filter(r => r.rf_stock > 0).length,
+            in_assembly: scopeRows.filter(r => r.in_assembly > 0).length,
+            in_transit: scopeRows.filter(r => r.in_transit > 0).length,
+            no_wb: scopeRows.filter(r => r.wb_stock === 0).length,
+            no_stock: scopeRows.filter(r => r.rf_stock === 0 && r.wb_stock === 0 && r.in_assembly === 0 && r.in_transit === 0).length,
         };
         return { total, withEffective, withManual, fromVehicle, empty, active, filterCounts };
-    }, [rows]);
+    }, [scopeRows]);
 
     const columns: Column[] = [
-        { key: 'vendor_code', label: 'Артикул', width: '160px' },
-        { key: 'nm_id', label: 'nm_id', format: 'number', align: 'right', width: '100px' },
+        {
+            key: 'vendor_code',
+            label: 'Артикул',
+            width: '240px',
+            render: (_v: unknown, r: BoxMultiplicityRow) => (
+                <span style={{ wordBreak: 'break-word', whiteSpace: 'normal', display: 'inline-block', maxWidth: 230 }}>
+                    {r.vendor_code || <span style={{ color: 'var(--color-text-dim)' }}>—</span>}
+                </span>
+            ),
+        },
+        {
+            key: 'barcode',
+            label: 'Barcode',
+            width: '140px',
+            render: (_v: unknown, r: BoxMultiplicityRow) => (
+                <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{r.barcode}</span>
+            ),
+        },
+        {
+            key: 'nm_id',
+            label: 'nm_id',
+            align: 'right',
+            width: '110px',
+            // НЕ format: 'number' — иначе ru-RU локаль рендерит ID с пробелами/запятой
+            render: (_v: unknown, r: BoxMultiplicityRow) => (
+                <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{r.nm_id}</span>
+            ),
+            exportValue: (r: BoxMultiplicityRow) => r.nm_id,
+        },
         { key: 'brand', label: 'Бренд', width: '120px' },
         { key: 'subject', label: 'Предмет', width: '140px' },
         {
