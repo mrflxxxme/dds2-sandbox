@@ -2896,9 +2896,15 @@ export interface BoxMultiplicityRow {
   vehicle_received_at: string | null;     // ISO-date или null
   box_qty_from_factory: number | null;    // из активного FOI (fallback)
   effective_box_qty: number | null;       // override → vehicle → factory
+  use_box_multiplicity: boolean;          // учитывать ли ppb при распределении
 }
 
 export interface BoxMultiplicityResponse {
   items: BoxMultiplicityRow[];
   total: number;
+}
+
+export interface BoxMultiplicityPatch {
+  box_qty_override?: number | null;
+  use_box_multiplicity?: boolean;
 }

@@ -41,6 +41,12 @@ class Nomenclature(Base):
     area_m2: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     first_sale_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     box_qty_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    use_box_multiplicity: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+    )
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     __table_args__ = (UniqueConstraint("project_id", "barcode", name="uq_nomenclature_project_barcode"),)

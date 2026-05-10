@@ -18,6 +18,7 @@ class BoxMultiplicityRow(BaseModel):
     vehicle_received_at: str | None = None  # ISO date or None
     box_qty_from_factory: int | None = None  # latest factory_order_item
     effective_box_qty: int | None = None  # priority: override → vehicle → factory
+    use_box_multiplicity: bool = True  # whether to round assembly distribution to ppb
 
 
 class BoxMultiplicityResponse(BaseModel):
@@ -26,6 +27,10 @@ class BoxMultiplicityResponse(BaseModel):
 
 
 class BoxMultiplicityUpdate(BaseModel):
-    """`null` clears the override; positive int sets manual ppb."""
+    """Either field optional. `box_qty_override=null` clears manual ppb;
+    positive int sets it. `use_box_multiplicity` toggles whether ppb is
+    applied during assembly distribution.
+    """
 
     box_qty_override: int | None = Field(default=None, ge=1, le=10000)
+    use_box_multiplicity: bool | None = None

@@ -57,13 +57,26 @@ export default function BoxMultiplicityPage() {
         }
     };
 
+    const toggleUse = async (nmId: number, next: boolean) => {
+        // Optimistic flip — откат при ошибке
+        setRows(prev => prev.map(r => r.nm_id === nmId ? { ...r, use_box_multiplicity: next } : r));
+        try {
+            const updated = await api.patchBoxMultiplicity(nmId, { use_box_multiplicity: next });
+            setRows(prev => prev.map(r => r.nm_id === nmId ? updated : r));
+        } catch (e: any) {
+            setRows(prev => prev.map(r => r.nm_id === nmId ? { ...r, use_box_multiplicity: !next } : r));
+            alert(e?.message || 'Ошибка сохранения');
+        }
+    };
+
     const stats = useMemo(() => {
         const total = rows.length;
         const withEffective = rows.filter(r => r.effective_box_qty !== null).length;
         const withManual = rows.filter(r => r.box_qty_override !== null).length;
         const fromVehicle = rows.filter(r => r.box_qty_override === null && r.box_qty_from_vehicle !== null).length;
         const empty = total - withEffective;
-        return { total, withEffective, withManual, fromVehicle, empty };
+        const active = rows.filter(r => r.use_box_multiplicity && r.effective_box_qty !== null).length;
+        return { total, withEffective, withManual, fromVehicle, empty, active };
     }, [rows]);
 
     const columns: Column[] = [
@@ -163,6 +176,40 @@ export default function BoxMultiplicityPage() {
             },
         },
         {
+            key: 'use_box_multiplicity',
+            label: 'Учитывать',
+            align: 'center',
+            width: '110px',
+            getValue: (r: BoxMultiplicityRow) => (r.use_box_multiplicity ? 1 : 0),
+            render: (_v: unknown, r: BoxMultiplicityRow) => {
+                const disabled = r.effective_box_qty === null;
+                return (
+                    <label
+                        title={disabled
+                            ? 'Сначала задай кратность (вручную или примем машину)'
+                            : (r.use_box_multiplicity
+                                ? 'Кратность учитывается при создании сборки'
+                                : 'Кратность игнорируется — раздаём без округления')}
+                        style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 6, cursor: disabled ? 'not-allowed' : 'pointer',
+                            opacity: disabled ? 0.4 : 1,
+                        }}
+                    >
+                        <input
+                            type="checkbox"
+                            checked={r.use_box_multiplicity}
+                            disabled={disabled}
+                            onChange={e => toggleUse(r.nm_id, e.target.checked)}
+                            style={{ width: 16, height: 16, cursor: disabled ? 'not-allowed' : 'pointer' }}
+                        />
+                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                            {r.use_box_multiplicity ? 'да' : 'нет'}
+                        </span>
+                    </label>
+                );
+            },
+        },
+        {
             key: 'effective_box_qty',
             label: 'Применяется',
             align: 'right',
@@ -170,6 +217,16 @@ export default function BoxMultiplicityPage() {
             render: (_v: unknown, r: BoxMultiplicityRow) => {
                 if (r.effective_box_qty === null) {
                     return <span style={{ color: 'var(--color-warning)', fontSize: 12 }}>не задана</span>;
+                }
+                if (!r.use_box_multiplicity) {
+                    return (
+                        <div style={{ textAlign: 'right' }}>
+                            <div style={{ color: 'var(--color-text-dim)', textDecoration: 'line-through' }}>
+                                {formatNumber(r.effective_box_qty)} шт
+                            </div>
+                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>отключено</div>
+                        </div>
+                    );
                 }
                 const source = r.box_qty_override !== null
                     ? 'ручной'
@@ -221,6 +278,12 @@ export default function BoxMultiplicityPage() {
                         {formatNumber(stats.withEffective)}
                     </div>
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>С кратностью</div>
+                </div>
+                <div className="glass-card" style={{ padding: '14px 18px', textAlign: 'center' }}>
+                    <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--color-success)' }}>
+                        {formatNumber(stats.active)}
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Учитывается</div>
                 </div>
                 <div className="glass-card" style={{ padding: '14px 18px', textAlign: 'center' }}>
                     <div style={{ fontSize: 26, fontWeight: 700 }}>{formatNumber(stats.fromVehicle)}</div>

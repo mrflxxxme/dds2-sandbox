@@ -139,19 +139,30 @@ async def get_box_multiplicity_table(
                 "vehicle_received_at": veh["received_at"] if veh else None,
                 "box_qty_from_factory": foi_ppb,
                 "effective_box_qty": effective,
+                "use_box_multiplicity": n.use_box_multiplicity,
             }
         )
 
     return rows
 
 
-async def set_box_qty_override(
+_UNSET = object()
+
+
+async def update_box_multiplicity(
     db: AsyncSession,
     project_id: int,
     nm_id: int,
-    value: int | None,
+    *,
+    box_qty_override: object = _UNSET,  # only applied if not _UNSET
+    use_box_multiplicity: object = _UNSET,
 ) -> bool:
-    """Set or clear the manual box_qty_override for a SKU. Returns False if SKU not found."""
+    """Partial update: only fields explicitly passed are touched.
+
+    Returns False if no nomenclature row matches (project_id, article_wb).
+    """
+    if box_qty_override is _UNSET and use_box_multiplicity is _UNSET:
+        return True  # nothing to update — no-op success
     result = await db.execute(
         select(Nomenclature).where(
             Nomenclature.project_id == project_id,
@@ -162,15 +173,33 @@ async def set_box_qty_override(
     if not rows:
         return False
     for nom in rows:
-        nom.box_qty_override = value
+        if box_qty_override is not _UNSET:
+            nom.box_qty_override = box_qty_override  # type: ignore[assignment]
+        if use_box_multiplicity is not _UNSET:
+            nom.use_box_multiplicity = bool(use_box_multiplicity)
     await db.commit()
-    # warehouse_need cache embeds per-SKU distribution → invalidate.
     await invalidate_cache("reports:warehouse_need")
     logger.info(
-        "box_qty_override updated: project=%s nm_id=%s value=%s rows=%s",
+        "box_multiplicity updated: project=%s nm_id=%s ppb=%s use=%s rows=%s",
         project_id,
         nm_id,
-        value,
+        box_qty_override,
+        use_box_multiplicity,
         len(rows),
     )
     return True
+
+
+# Backward-compat shim for existing callers/tests — delegates to update_box_multiplicity.
+async def set_box_qty_override(
+    db: AsyncSession,
+    project_id: int,
+    nm_id: int,
+    value: int | None,
+) -> bool:
+    return await update_box_multiplicity(
+        db,
+        project_id,
+        nm_id,
+        box_qty_override=value,
+    )

@@ -847,12 +847,23 @@ async def patch_box_multiplicity(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Set or clear (`box_qty_override=null`) the manual ppb for a SKU."""
-    ok = await box_multiplicity_service.set_box_qty_override(
+    """Partial update: any subset of {box_qty_override, use_box_multiplicity}.
+
+    Send only fields you want to change; omit others. `box_qty_override=null`
+    inside the body explicitly clears the manual ppb.
+    """
+    fields = payload.model_dump(exclude_unset=True)
+    kwargs: dict = {}
+    if "box_qty_override" in fields:
+        kwargs["box_qty_override"] = fields["box_qty_override"]
+    if "use_box_multiplicity" in fields:
+        kwargs["use_box_multiplicity"] = fields["use_box_multiplicity"]
+
+    ok = await box_multiplicity_service.update_box_multiplicity(
         db,
         project.id,
         nm_id,
-        payload.box_qty_override,
+        **kwargs,
     )
     if not ok:
         raise HTTPException(404, "SKU not found")

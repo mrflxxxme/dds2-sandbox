@@ -16,6 +16,7 @@ from backend.models.supply_chain import FactoryOrder, FactoryOrderItem
 from backend.services.box_multiplicity_service import (
     get_box_multiplicity_table,
     set_box_qty_override,
+    update_box_multiplicity,
 )
 
 
@@ -380,3 +381,124 @@ class TestSetBoxQtyOverride:
             )
         ).scalar_one()
         assert other.box_qty_override is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# update_box_multiplicity (partial: ppb + use flag)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestUpdateBoxMultiplicity:
+    @pytest.mark.asyncio
+    async def test_default_use_flag_is_true(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        nom = await _create_nomenclature(
+            db_session,
+            project.id,
+            barcode=bc,
+            article_seller="A",
+            article_wb=30001,
+        )
+        assert nom.use_box_multiplicity is True
+
+    @pytest.mark.asyncio
+    async def test_toggle_use_flag_off(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(
+            db_session,
+            project.id,
+            barcode=bc,
+            article_seller="A",
+            article_wb=30002,
+        )
+
+        ok = await update_box_multiplicity(
+            db_session,
+            project.id,
+            30002,
+            use_box_multiplicity=False,
+        )
+        assert ok is True
+
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=30002)
+        assert rows[0]["use_box_multiplicity"] is False
+
+    @pytest.mark.asyncio
+    async def test_partial_update_does_not_touch_omitted_field(
+        self,
+        db_session: AsyncSession,
+        project,
+    ):
+        """Toggle use=False — box_qty_override должен остаться 50."""
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(
+            db_session,
+            project.id,
+            barcode=bc,
+            article_seller="A",
+            article_wb=30003,
+            box_qty_override=50,
+        )
+
+        await update_box_multiplicity(
+            db_session,
+            project.id,
+            30003,
+            use_box_multiplicity=False,
+        )
+
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=30003)
+        assert rows[0]["box_qty_override"] == 50  # not cleared
+        assert rows[0]["use_box_multiplicity"] is False
+
+    @pytest.mark.asyncio
+    async def test_set_both_fields_at_once(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(
+            db_session,
+            project.id,
+            barcode=bc,
+            article_seller="A",
+            article_wb=30004,
+        )
+
+        await update_box_multiplicity(
+            db_session,
+            project.id,
+            30004,
+            box_qty_override=12,
+            use_box_multiplicity=True,
+        )
+
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=30004)
+        assert rows[0]["box_qty_override"] == 12
+        assert rows[0]["use_box_multiplicity"] is True
+
+    @pytest.mark.asyncio
+    async def test_no_op_when_nothing_passed(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(
+            db_session,
+            project.id,
+            barcode=bc,
+            article_seller="A",
+            article_wb=30005,
+            box_qty_override=10,
+        )
+
+        ok = await update_box_multiplicity(db_session, project.id, 30005)
+        assert ok is True
+
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=30005)
+        assert rows[0]["box_qty_override"] == 10
+        assert rows[0]["use_box_multiplicity"] is True
+
+    @pytest.mark.asyncio
+    async def test_unknown_nm_returns_false(self, db_session: AsyncSession, project):
+        ok = await update_box_multiplicity(
+            db_session,
+            project.id,
+            99999998,
+            use_box_multiplicity=False,
+        )
+        assert ok is False

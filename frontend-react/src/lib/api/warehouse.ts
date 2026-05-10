@@ -12,6 +12,7 @@ import type {
     AssemblyRequest,
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
+    BoxMultiplicityPatch,
     BoxMultiplicityResponse,
     BoxMultiplicityRow,
     DefectBulkOperation,
@@ -416,11 +417,20 @@ export function addWarehouseMethods(api: ApiClient) {
         getBoxMultiplicity() {
             return api.request<BoxMultiplicityResponse>('GET', '/api/v1/warehouse/box-multiplicity');
         },
+        /** Partial update — pass only fields you want to change. */
+        patchBoxMultiplicity(nmId: number, patch: BoxMultiplicityPatch) {
+            return api.request<BoxMultiplicityRow>(
+                'PATCH',
+                `/api/v1/warehouse/box-multiplicity/${nmId}`,
+                patch,
+            );
+        },
+        /** Convenience: set/clear manual ppb, leaves use-flag untouched. */
         setBoxMultiplicity(nmId: number, boxQtyOverride: number | null) {
             return api.request<BoxMultiplicityRow>(
                 'PATCH',
                 `/api/v1/warehouse/box-multiplicity/${nmId}`,
-                { box_qty_override: boxQtyOverride },
+                { box_qty_override: boxQtyOverride } satisfies BoxMultiplicityPatch,
             );
         },
     };

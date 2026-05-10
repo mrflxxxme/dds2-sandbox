@@ -214,7 +214,8 @@ export function WarehouseNeedView() {
                 if (cancelled) return;
                 const m = new Map<number, number>();
                 for (const r of resp.items) {
-                    if (r.effective_box_qty && r.effective_box_qty > 0) {
+                    // Учитываем только если ppb известен И флаг включён.
+                    if (r.use_box_multiplicity && r.effective_box_qty && r.effective_box_qty > 0) {
                         m.set(r.nm_id, r.effective_box_qty);
                     }
                 }
