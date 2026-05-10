@@ -12,6 +12,8 @@ import type {
     AssemblyRequest,
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
+    BoxMultiplicityBulkRequest,
+    BoxMultiplicityBulkResponse,
     BoxMultiplicityPatch,
     BoxMultiplicityResponse,
     BoxMultiplicityRow,
@@ -431,6 +433,14 @@ export function addWarehouseMethods(api: ApiClient) {
                 'PATCH',
                 `/api/v1/warehouse/box-multiplicity/${nmId}`,
                 { box_qty_override: boxQtyOverride } satisfies BoxMultiplicityPatch,
+            );
+        },
+        /** Bulk paste-update by barcode (partial — только переданные поля). */
+        bulkBoxMultiplicity(items: BoxMultiplicityBulkRequest['items']) {
+            return api.request<BoxMultiplicityBulkResponse>(
+                'POST',
+                '/api/v1/warehouse/box-multiplicity/bulk',
+                { items } satisfies BoxMultiplicityBulkRequest,
             );
         },
     };

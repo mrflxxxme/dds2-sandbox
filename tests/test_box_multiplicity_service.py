@@ -14,6 +14,7 @@ from backend.models.cost import CostOrder, Nomenclature
 from backend.models.enums import VehicleStatus
 from backend.models.supply_chain import FactoryOrder, FactoryOrderItem
 from backend.services.box_multiplicity_service import (
+    bulk_update_by_barcode,
     get_box_multiplicity_table,
     set_box_qty_override,
     update_box_multiplicity,
@@ -502,3 +503,132 @@ class TestUpdateBoxMultiplicity:
             use_box_multiplicity=False,
         )
         assert ok is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# bulk_update_by_barcode (paste из буфера)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBulkUpdateByBarcode:
+    @pytest.mark.asyncio
+    async def test_match_by_barcode_updates_ppb(self, db_session: AsyncSession, project):
+        bc1 = f"BC-{_uid()}"
+        bc2 = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc1, article_seller="A1", article_wb=40001)
+        await _create_nomenclature(db_session, project.id, barcode=bc2, article_seller="A2", article_wb=40002)
+
+        result = await bulk_update_by_barcode(
+            db_session,
+            project.id,
+            [
+                {"barcode": bc1, "box_qty_override": 10},
+                {"barcode": bc2, "box_qty_override": 20, "use_box_multiplicity": False},
+            ],
+        )
+        assert result["matched_barcodes"] == {bc1, bc2}
+        assert result["not_found"] == []
+        assert result["updated_nm_ids"] == {40001, 40002}
+
+        rows = await get_box_multiplicity_table(db_session, project.id)
+        by_nm = {r["nm_id"]: r for r in rows}
+        assert by_nm[40001]["box_qty_override"] == 10
+        assert by_nm[40001]["use_box_multiplicity"] is True  # not changed
+        assert by_nm[40002]["box_qty_override"] == 20
+        assert by_nm[40002]["use_box_multiplicity"] is False
+
+    @pytest.mark.asyncio
+    async def test_unknown_barcode_in_not_found(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=40010)
+
+        result = await bulk_update_by_barcode(
+            db_session,
+            project.id,
+            [
+                {"barcode": bc, "box_qty_override": 5},
+                {"barcode": "NOT-EXIST-1", "box_qty_override": 5},
+                {"barcode": "NOT-EXIST-2"},
+            ],
+        )
+        assert bc in result["matched_barcodes"]
+        assert sorted(result["not_found"]) == ["NOT-EXIST-1", "NOT-EXIST-2"]
+
+    @pytest.mark.asyncio
+    async def test_partial_only_use_flag(self, db_session: AsyncSession, project):
+        """Если в строке только use — ppb не трогается."""
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(
+            db_session,
+            project.id,
+            barcode=bc,
+            article_seller="A",
+            article_wb=40020,
+            box_qty_override=99,
+        )
+
+        await bulk_update_by_barcode(
+            db_session,
+            project.id,
+            [{"barcode": bc, "use_box_multiplicity": False}],
+        )
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=40020)
+        assert rows[0]["box_qty_override"] == 99  # not cleared
+        assert rows[0]["use_box_multiplicity"] is False
+
+    @pytest.mark.asyncio
+    async def test_no_change_no_commit(self, db_session: AsyncSession, project):
+        """Если значения не отличаются — updated_nm_ids пустой."""
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(
+            db_session,
+            project.id,
+            barcode=bc,
+            article_seller="A",
+            article_wb=40030,
+            box_qty_override=15,
+        )
+
+        result = await bulk_update_by_barcode(
+            db_session,
+            project.id,
+            [{"barcode": bc, "box_qty_override": 15, "use_box_multiplicity": True}],
+        )
+        # Barcode matched but nothing changed
+        assert bc in result["matched_barcodes"]
+        assert result["updated_nm_ids"] == set()
+
+    @pytest.mark.asyncio
+    async def test_other_project_isolation(
+        self,
+        db_session: AsyncSession,
+        project,
+        other_project,
+    ):
+        """SKU с тем же barcode в other_project не должен затрагиваться."""
+        bc = f"BC-SHARED-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=40040)
+        await _create_nomenclature(db_session, other_project.id, barcode=bc, article_seller="A", article_wb=40041)
+
+        await bulk_update_by_barcode(
+            db_session,
+            project.id,
+            [{"barcode": bc, "box_qty_override": 77}],
+        )
+
+        other = (
+            await db_session.execute(
+                select(Nomenclature).where(
+                    Nomenclature.project_id == other_project.id,
+                    Nomenclature.barcode == bc,
+                )
+            )
+        ).scalar_one()
+        assert other.box_qty_override is None
+
+    @pytest.mark.asyncio
+    async def test_empty_items_list(self, db_session: AsyncSession, project):
+        result = await bulk_update_by_barcode(db_session, project.id, [])
+        assert result["matched_barcodes"] == set()
+        assert result["not_found"] == []
+        assert result["updated_nm_ids"] == set()

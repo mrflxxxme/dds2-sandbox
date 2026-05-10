@@ -5,7 +5,8 @@ import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { BoxMultiplicityRow } from '@/types/api';
+import type { BoxMultiplicityRow, BoxMultiplicityBulkItem } from '@/types/api';
+import { parseBoxMultiplicityPaste } from '@/lib/utils/boxMultiplicityPaste';
 
 type StockFilter = 'all' | 'rf' | 'in_assembly' | 'in_transit' | 'no_wb' | 'no_stock';
 
@@ -23,6 +24,12 @@ export default function BoxMultiplicityPage() {
     const [subjectFilter, setSubjectFilter] = useState('');
     const [stockFilter, setStockFilter] = useState<StockFilter>('all');
     const [search, setSearch] = useState('');
+
+    // Bulk-paste modal
+    const [pasteOpen, setPasteOpen] = useState(false);
+    const [pasteText, setPasteText] = useState('');
+    const [pasteApplying, setPasteApplying] = useState(false);
+    const [pasteResult, setPasteResult] = useState<{ matched: number; updated: number; notFound: string[] } | null>(null);
 
     const load = useCallback(async () => {
         try {
@@ -62,6 +69,50 @@ export default function BoxMultiplicityPage() {
             alert(e?.message || 'Ошибка сохранения');
         } finally {
             setSaving(false);
+        }
+    };
+
+    // ─── Bulk paste ────────────────────────────────────────────────────────
+    const parsedPaste = useMemo(() => parseBoxMultiplicityPaste(pasteText), [pasteText]);
+
+    const openPaste = () => {
+        setPasteOpen(true);
+        setPasteText('');
+        setPasteResult(null);
+    };
+
+    const closePaste = () => {
+        setPasteOpen(false);
+        setPasteText('');
+        setPasteResult(null);
+    };
+
+    const applyPaste = async () => {
+        if (parsedPaste.rows.length === 0) return;
+        setPasteApplying(true);
+        try {
+            const items: BoxMultiplicityBulkItem[] = parsedPaste.rows.map(r => {
+                const item: BoxMultiplicityBulkItem = { barcode: r.barcode };
+                if (r.box_qty_override !== undefined) item.box_qty_override = r.box_qty_override;
+                if (r.use_box_multiplicity !== undefined) item.use_box_multiplicity = r.use_box_multiplicity;
+                return item;
+            });
+            const resp = await api.bulkBoxMultiplicity(items);
+            // Merge updated rows back into state
+            if (resp.updated.length > 0) {
+                const updMap = new Map(resp.updated.map(r => [r.nm_id, r]));
+                setRows(prev => prev.map(r => updMap.get(r.nm_id) || r));
+            }
+            setPasteResult({
+                matched: resp.matched_count,
+                updated: resp.updated.length,
+                notFound: resp.not_found,
+            });
+            setPasteText('');
+        } catch (e: any) {
+            alert(e?.message || 'Ошибка применения');
+        } finally {
+            setPasteApplying(false);
         }
     };
 
@@ -377,7 +428,7 @@ export default function BoxMultiplicityPage() {
 
     return (
         <div className="animate-in">
-            <div className="page-header">
+            <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
                 <div>
                     <h1 className="page-title">📦 Кратность коробок</h1>
                     <p className="page-subtitle">
@@ -385,6 +436,9 @@ export default function BoxMultiplicityPage() {
                         Используется в распределении при создании сборки.
                     </p>
                 </div>
+                <button className="btn btn-primary btn-sm" onClick={openPaste}>
+                    📋 Вставить из буфера
+                </button>
             </div>
 
             <div className="stats-grid" style={{ marginBottom: 16 }}>
@@ -497,6 +551,165 @@ export default function BoxMultiplicityPage() {
                         />
                     )}
                 </>
+            )}
+
+            {/* ─── Bulk paste modal ─────────────────────────────────────── */}
+            {pasteOpen && (
+                <div
+                    onClick={closePaste}
+                    style={{
+                        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        zIndex: 1000, padding: 24,
+                    }}
+                >
+                    <div
+                        onClick={e => e.stopPropagation()}
+                        className="glass-card"
+                        style={{ maxWidth: 720, width: '100%', maxHeight: '90vh', overflowY: 'auto', padding: 24 }}
+                    >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+                            <div>
+                                <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>📋 Массовое редактирование</h2>
+                                <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                    Вставь TAB-разделённые данные (как из Excel).
+                                </p>
+                            </div>
+                            <button className="btn btn-secondary btn-sm" onClick={closePaste}>✕</button>
+                        </div>
+
+                        <div style={{
+                            background: 'var(--color-bg)', border: '1px solid var(--color-border)',
+                            borderRadius: 8, padding: 12, marginBottom: 12, fontSize: 12,
+                            color: 'var(--color-text-muted)', lineHeight: 1.6,
+                        }}>
+                            <div><strong style={{ color: 'var(--color-text)' }}>Формат колонок:</strong> barcode &lt;TAB&gt; кратность &lt;TAB&gt; учитывать</div>
+                            <div>· Кратность: число <code>1–10000</code>, либо <code>-</code>/<code>null</code>/<code>0</code> = очистить, либо пусто = не менять</div>
+                            <div>· Учитывать: <code>да/нет</code>, <code>1/0</code>, <code>+/-</code>, <code>true/false</code>, либо пусто = не менять</div>
+                            <div>· SKU матчатся по barcode внутри проекта</div>
+                        </div>
+
+                        {pasteResult ? (
+                            <div className="glass-card" style={{ padding: 16, marginBottom: 12, borderLeft: '3px solid var(--color-success)' }}>
+                                <div style={{ fontSize: 14, marginBottom: 8 }}>
+                                    ✅ Готово — обновлено <strong>{pasteResult.updated}</strong> SKU,
+                                    {' '}найдено по barcode <strong>{pasteResult.matched}</strong>
+                                </div>
+                                {pasteResult.notFound.length > 0 && (
+                                    <details style={{ fontSize: 12 }}>
+                                        <summary style={{ cursor: 'pointer', color: 'var(--color-warning)' }}>
+                                            Не найдено barcode ({pasteResult.notFound.length})
+                                        </summary>
+                                        <div style={{ fontFamily: 'monospace', marginTop: 6, maxHeight: 120, overflowY: 'auto' }}>
+                                            {pasteResult.notFound.join(', ')}
+                                        </div>
+                                    </details>
+                                )}
+                                <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+                                    <button className="btn btn-secondary btn-sm" onClick={() => setPasteResult(null)}>
+                                        Ещё одна вставка
+                                    </button>
+                                    <button className="btn btn-primary btn-sm" onClick={closePaste}>Закрыть</button>
+                                </div>
+                            </div>
+                        ) : (
+                            <>
+                                <textarea
+                                    value={pasteText}
+                                    onChange={e => setPasteText(e.target.value)}
+                                    placeholder={'2043740032052\t12\tда\n2043788808268\t6\tнет\n2044778634607\t-\t'}
+                                    rows={10}
+                                    style={{
+                                        width: '100%', padding: 10, fontFamily: 'monospace', fontSize: 13,
+                                        border: '1px solid var(--color-border)', borderRadius: 8,
+                                        resize: 'vertical', boxSizing: 'border-box',
+                                    }}
+                                    autoFocus
+                                />
+
+                                {/* Preview */}
+                                {pasteText && (
+                                    <div style={{ marginTop: 12, fontSize: 13 }}>
+                                        <div style={{ marginBottom: 6 }}>
+                                            <span style={{ color: 'var(--color-success)', fontWeight: 600 }}>
+                                                ✓ Распознано: {parsedPaste.rows.length}
+                                            </span>
+                                            {parsedPaste.errors.length > 0 && (
+                                                <span style={{ color: 'var(--color-danger)', marginLeft: 12, fontWeight: 600 }}>
+                                                    ✗ Ошибки: {parsedPaste.errors.length}
+                                                </span>
+                                            )}
+                                        </div>
+
+                                        {parsedPaste.errors.length > 0 && (
+                                            <details style={{ marginBottom: 8 }}>
+                                                <summary style={{ cursor: 'pointer', color: 'var(--color-danger)', fontSize: 12 }}>
+                                                    Подробности ошибок
+                                                </summary>
+                                                <div style={{ fontSize: 12, fontFamily: 'monospace', marginTop: 6, maxHeight: 120, overflowY: 'auto' }}>
+                                                    {parsedPaste.errors.map((err, i) => (
+                                                        <div key={i} style={{ color: 'var(--color-danger)', marginBottom: 2 }}>
+                                                            строка {err.line}: {err.reason}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </details>
+                                        )}
+
+                                        {parsedPaste.rows.length > 0 && (
+                                            <details>
+                                                <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                                    Превью ({Math.min(parsedPaste.rows.length, 20)})
+                                                </summary>
+                                                <table style={{ width: '100%', fontSize: 12, fontFamily: 'monospace', marginTop: 6 }}>
+                                                    <thead>
+                                                        <tr style={{ color: 'var(--color-text-muted)' }}>
+                                                            <th style={{ textAlign: 'left' }}>barcode</th>
+                                                            <th style={{ textAlign: 'right' }}>кратность</th>
+                                                            <th style={{ textAlign: 'center' }}>учитывать</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {parsedPaste.rows.slice(0, 20).map((r, i) => (
+                                                            <tr key={i}>
+                                                                <td>{r.barcode}</td>
+                                                                <td style={{ textAlign: 'right' }}>
+                                                                    {r.box_qty_override === null
+                                                                        ? <span style={{ color: 'var(--color-warning)' }}>очистить</span>
+                                                                        : r.box_qty_override !== undefined
+                                                                            ? r.box_qty_override
+                                                                            : <span style={{ color: 'var(--color-text-dim)' }}>—</span>}
+                                                                </td>
+                                                                <td style={{ textAlign: 'center' }}>
+                                                                    {r.use_box_multiplicity === undefined
+                                                                        ? <span style={{ color: 'var(--color-text-dim)' }}>—</span>
+                                                                        : r.use_box_multiplicity ? 'да' : 'нет'}
+                                                                </td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </details>
+                                        )}
+                                    </div>
+                                )}
+
+                                <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end' }}>
+                                    <button className="btn btn-secondary btn-sm" onClick={closePaste} disabled={pasteApplying}>
+                                        Отмена
+                                    </button>
+                                    <button
+                                        className="btn btn-primary btn-sm"
+                                        onClick={applyPaste}
+                                        disabled={pasteApplying || parsedPaste.rows.length === 0}
+                                    >
+                                        {pasteApplying ? 'Применяю…' : `Применить (${parsedPaste.rows.length})`}
+                                    </button>
+                                </div>
+                            </>
+                        )}
+                    </div>
+                </div>
             )}
         </div>
     );

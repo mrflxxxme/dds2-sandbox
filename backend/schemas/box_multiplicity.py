@@ -39,3 +39,21 @@ class BoxMultiplicityUpdate(BaseModel):
 
     box_qty_override: int | None = Field(default=None, ge=1, le=10000)
     use_box_multiplicity: bool | None = None
+
+
+class BoxMultiplicityBulkItem(BaseModel):
+    """One paste row: match by barcode, partial update."""
+
+    barcode: str = Field(min_length=1, max_length=50)
+    box_qty_override: int | None = Field(default=None, ge=1, le=10000)
+    use_box_multiplicity: bool | None = None
+
+
+class BoxMultiplicityBulkRequest(BaseModel):
+    items: list[BoxMultiplicityBulkItem] = Field(default_factory=list, max_length=5000)
+
+
+class BoxMultiplicityBulkResponse(BaseModel):
+    updated: list[BoxMultiplicityRow]  # rows actually changed
+    not_found: list[str]  # barcodes that don't exist in this project
+    matched_count: int  # how many barcodes matched (some may have had no diff)

@@ -9,6 +9,8 @@ from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.box_multiplicity import (
+    BoxMultiplicityBulkRequest,
+    BoxMultiplicityBulkResponse,
     BoxMultiplicityResponse,
     BoxMultiplicityRow,
     BoxMultiplicityUpdate,
@@ -875,3 +877,39 @@ async def patch_box_multiplicity(
     if not items:
         raise HTTPException(404, "SKU not found after update")
     return items[0]
+
+
+@router.post(
+    "/box-multiplicity/bulk",
+    response_model=BoxMultiplicityBulkResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def bulk_box_multiplicity(
+    payload: BoxMultiplicityBulkRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk paste-update by barcode. Each item is partial: только переданные
+    поля применяются (Pydantic `exclude_unset`-семантика)."""
+    items_dicts = [it.model_dump(exclude_unset=True) for it in payload.items]
+
+    result = await box_multiplicity_service.bulk_update_by_barcode(
+        db,
+        project.id,
+        items_dicts,
+    )
+
+    updated_rows: list[dict] = []
+    if result["updated_nm_ids"]:
+        all_rows = await box_multiplicity_service.get_box_multiplicity_table(
+            db,
+            project.id,
+        )
+        upd_set = result["updated_nm_ids"]
+        updated_rows = [r for r in all_rows if r["nm_id"] in upd_set]
+
+    return {
+        "updated": updated_rows,
+        "not_found": result["not_found"],
+        "matched_count": len(result["matched_barcodes"]),
+    }

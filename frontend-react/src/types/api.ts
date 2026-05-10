@@ -2912,3 +2912,19 @@ export interface BoxMultiplicityPatch {
   box_qty_override?: number | null;
   use_box_multiplicity?: boolean;
 }
+
+export interface BoxMultiplicityBulkItem {
+  barcode: string;
+  box_qty_override?: number | null;
+  use_box_multiplicity?: boolean;
+}
+
+export interface BoxMultiplicityBulkRequest {
+  items: BoxMultiplicityBulkItem[];
+}
+
+export interface BoxMultiplicityBulkResponse {
+  updated: BoxMultiplicityRow[];
+  not_found: string[];        // barcodes that don't exist in the project
+  matched_count: number;      // how many barcodes matched (some may have had no diff)
+}

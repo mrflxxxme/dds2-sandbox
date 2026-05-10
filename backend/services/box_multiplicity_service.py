@@ -296,3 +296,88 @@ async def set_box_qty_override(
         nm_id,
         box_qty_override=value,
     )
+
+
+async def bulk_update_by_barcode(
+    db: AsyncSession,
+    project_id: int,
+    items: list[dict],
+) -> dict:
+    """Bulk paste-update: match by barcode, partial-update fields.
+
+    Each item is `{barcode, box_qty_override?, use_box_multiplicity?}`.
+    Only fields explicitly present (not _UNSET) are touched per row.
+
+    Returns:
+      {
+        "matched_barcodes": set of barcodes that existed,
+        "not_found": list of barcodes that don't exist (sorted, dedup),
+        "updated_nm_ids": set of nm_ids whose row was actually changed,
+      }
+    """
+    if not items:
+        return {"matched_barcodes": set(), "not_found": [], "updated_nm_ids": set()}
+
+    requested_bcs = [it["barcode"] for it in items if it.get("barcode")]
+    if not requested_bcs:
+        return {"matched_barcodes": set(), "not_found": [], "updated_nm_ids": set()}
+
+    # Fetch all matching Nomenclature rows in one query (project_id + barcode).
+    nom_result = await db.execute(
+        select(Nomenclature).where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.barcode.in_(set(requested_bcs)),
+        )
+    )
+    by_bc: dict[str, list[Nomenclature]] = {}
+    for nom in nom_result.scalars().all():
+        by_bc.setdefault(nom.barcode, []).append(nom)
+
+    matched_barcodes: set[str] = set()
+    updated_nm_ids: set[int] = set()
+
+    for it in items:
+        bc = it.get("barcode")
+        if not bc:
+            continue
+        noms = by_bc.get(bc)
+        if not noms:
+            continue
+        matched_barcodes.add(bc)
+
+        ppb_set = "box_qty_override" in it
+        use_set = "use_box_multiplicity" in it
+        if not ppb_set and not use_set:
+            continue
+
+        for nom in noms:
+            changed = False
+            if ppb_set and nom.box_qty_override != it["box_qty_override"]:
+                nom.box_qty_override = it["box_qty_override"]
+                changed = True
+            if use_set and nom.use_box_multiplicity != bool(it["use_box_multiplicity"]):
+                nom.use_box_multiplicity = bool(it["use_box_multiplicity"])
+                changed = True
+            if changed and nom.article_wb is not None:
+                updated_nm_ids.add(nom.article_wb)
+
+    if updated_nm_ids:
+        await db.commit()
+        await invalidate_cache("reports:warehouse_need")
+    else:
+        await db.rollback()
+
+    not_found = sorted({bc for bc in requested_bcs if bc not in matched_barcodes})
+    logger.info(
+        "bulk_update_by_barcode: project=%s requested=%s matched=%s changed=%s not_found=%s",
+        project_id,
+        len(requested_bcs),
+        len(matched_barcodes),
+        len(updated_nm_ids),
+        len(not_found),
+    )
+    return {
+        "matched_barcodes": matched_barcodes,
+        "not_found": not_found,
+        "updated_nm_ids": updated_nm_ids,
+    }
