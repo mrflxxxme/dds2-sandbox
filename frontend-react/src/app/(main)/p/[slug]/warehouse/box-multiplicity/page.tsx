@@ -5,7 +5,7 @@ import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { BoxMultiplicityRow, BoxMultiplicityBulkItem } from '@/types/api';
+import type { BoxMultiplicityRow, BoxMultiplicityBulkItem, BoxMultiplicityPerWarehouseRow } from '@/types/api';
 import { parseBoxMultiplicityPaste } from '@/lib/utils/boxMultiplicityPaste';
 
 type StockFilter = 'all' | 'rf' | 'in_assembly' | 'in_transit' | 'no_wb' | 'no_stock';
@@ -18,6 +18,11 @@ export default function BoxMultiplicityPage() {
     const [editingNm, setEditingNm] = useState<number | null>(null);
     const [editValue, setEditValue] = useState('');
     const [saving, setSaving] = useState(false);
+
+    // Per-RF expansion state: nm_id → expanded?
+    const [expandedNm, setExpandedNm] = useState<Set<number>>(new Set());
+    // Per-RF inline edit: "{nm_id}:{warehouse_id}" → string value
+    const [perRfEdit, setPerRfEdit] = useState<Record<string, string>>({});
 
     // Filters
     const [brandFilter, setBrandFilter] = useState('');
@@ -166,6 +171,71 @@ export default function BoxMultiplicityPage() {
             alert(e?.message || 'Ошибка применения');
         } finally {
             setPasteApplying(false);
+        }
+    };
+
+    // ─── Per-RF handlers ───────────────────────────────────────────────────
+    const toggleExpand = (nmId: number) => {
+        setExpandedNm(prev => {
+            const next = new Set(prev);
+            if (next.has(nmId)) next.delete(nmId);
+            else next.add(nmId);
+            return next;
+        });
+    };
+
+    const savePerRfPpb = async (row: BoxMultiplicityRow, wh: BoxMultiplicityPerWarehouseRow) => {
+        const key = `${row.nm_id}:${wh.warehouse_id}`;
+        const raw = perRfEdit[key] ?? '';
+        const trimmed = raw.trim();
+        const value = trimmed === '' ? null : parseInt(trimmed, 10);
+        if (value !== null && (Number.isNaN(value) || value < 1)) {
+            alert('Кратность должна быть положительным числом или пустой');
+            return;
+        }
+        try {
+            const updated = await api.patchPerWarehouseBoxMultiplicity(
+                row.barcode, wh.warehouse_id, { box_qty: value },
+            );
+            setRows(prev => prev.map(r => r.nm_id === row.nm_id ? updated : r));
+            setPerRfEdit(prev => {
+                const next = { ...prev };
+                delete next[key];
+                return next;
+            });
+        } catch (e: any) {
+            alert(e?.message || 'Ошибка сохранения');
+        }
+    };
+
+    const togglePerRfUse = async (row: BoxMultiplicityRow, wh: BoxMultiplicityPerWarehouseRow, next: boolean) => {
+        // Optimistic
+        setRows(prev => prev.map(r => {
+            if (r.nm_id !== row.nm_id) return r;
+            return {
+                ...r,
+                per_warehouse: r.per_warehouse.map(p =>
+                    p.warehouse_id === wh.warehouse_id ? { ...p, use_box_multiplicity: next } : p,
+                ),
+            };
+        }));
+        try {
+            const updated = await api.patchPerWarehouseBoxMultiplicity(
+                row.barcode, wh.warehouse_id, { use_box_multiplicity: next },
+            );
+            setRows(prev => prev.map(r => r.nm_id === row.nm_id ? updated : r));
+        } catch (e: any) {
+            // rollback
+            setRows(prev => prev.map(r => {
+                if (r.nm_id !== row.nm_id) return r;
+                return {
+                    ...r,
+                    per_warehouse: r.per_warehouse.map(p =>
+                        p.warehouse_id === wh.warehouse_id ? { ...p, use_box_multiplicity: !next } : p,
+                    ),
+                };
+            }));
+            alert(e?.message || 'Ошибка сохранения');
         }
     };
 
@@ -431,6 +501,136 @@ export default function BoxMultiplicityPage() {
                     </label>
                 );
             },
+        },
+        {
+            key: 'per_warehouse',
+            label: 'По ФФ-складам',
+            width: '320px',
+            getValue: (r: BoxMultiplicityRow) =>
+                r.per_warehouse.filter(p => p.box_qty !== null).length,
+            render: (_v: unknown, r: BoxMultiplicityRow) => {
+                const expanded = expandedNm.has(r.nm_id);
+                const overridesCount = r.per_warehouse.filter(p => p.box_qty !== null).length;
+                const usedOff = r.per_warehouse.filter(p => !p.use_box_multiplicity).length;
+
+                if (!expanded) {
+                    return (
+                        <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => toggleExpand(r.nm_id)}
+                            style={{ width: '100%', textAlign: 'left', fontSize: 12 }}
+                        >
+                            ▸ {r.per_warehouse.length} ФФ
+                            {overridesCount > 0 && (
+                                <span style={{ color: 'var(--color-accent)', marginLeft: 6 }}>
+                                    · override: {overridesCount}
+                                </span>
+                            )}
+                            {usedOff > 0 && (
+                                <span style={{ color: 'var(--color-warning)', marginLeft: 6 }}>
+                                    · откл: {usedOff}
+                                </span>
+                            )}
+                        </button>
+                    );
+                }
+                return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => toggleExpand(r.nm_id)}
+                            style={{ fontSize: 12, marginBottom: 4 }}
+                        >▾ Свернуть</button>
+                        {r.per_warehouse.map(wh => {
+                            const editKey = `${r.nm_id}:${wh.warehouse_id}`;
+                            const editVal = perRfEdit[editKey];
+                            const showEdit = editVal !== undefined;
+                            return (
+                                <div
+                                    key={wh.warehouse_id}
+                                    style={{
+                                        display: 'grid', gridTemplateColumns: '1fr auto auto auto',
+                                        alignItems: 'center', gap: 6, fontSize: 12,
+                                        padding: '4px 6px', borderRadius: 6,
+                                        background: 'var(--color-bg)',
+                                    }}
+                                >
+                                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                        {wh.warehouse_name}
+                                        {wh.rf_stock > 0 && (
+                                            <span style={{ color: 'var(--color-success)', marginLeft: 4 }}>
+                                                ({formatNumber(wh.rf_stock)})
+                                            </span>
+                                        )}
+                                    </span>
+                                    {showEdit ? (
+                                        <input
+                                            type="text"
+                                            inputMode="numeric"
+                                            value={editVal}
+                                            onChange={e => setPerRfEdit(p => ({ ...p, [editKey]: e.target.value }))}
+                                            onKeyDown={e => {
+                                                if (e.key === 'Enter') savePerRfPpb(r, wh);
+                                                else if (e.key === 'Escape') {
+                                                    setPerRfEdit(p => {
+                                                        const next = { ...p };
+                                                        delete next[editKey];
+                                                        return next;
+                                                    });
+                                                }
+                                            }}
+                                            placeholder="—"
+                                            autoFocus
+                                            style={{
+                                                width: 60, padding: '2px 6px', fontSize: 12,
+                                                border: '1px solid var(--color-border)', borderRadius: 4,
+                                                textAlign: 'right',
+                                            }}
+                                        />
+                                    ) : (
+                                        <span
+                                            onClick={() => setPerRfEdit(p => ({
+                                                ...p, [editKey]: wh.box_qty !== null ? String(wh.box_qty) : '',
+                                            }))}
+                                            style={{
+                                                cursor: 'pointer', textAlign: 'right',
+                                                color: wh.box_qty !== null ? 'var(--color-accent)' : 'var(--color-text-dim)',
+                                                fontWeight: wh.box_qty !== null ? 600 : 400,
+                                                minWidth: 50, padding: '2px 4px',
+                                            }}
+                                            title={wh.box_qty !== null ? 'Изменить' : 'Задать'}
+                                        >
+                                            {wh.box_qty !== null ? `${wh.box_qty} шт` : '—'}
+                                        </span>
+                                    )}
+                                    {showEdit ? (
+                                        <button
+                                            className="btn btn-success btn-sm"
+                                            onClick={() => savePerRfPpb(r, wh)}
+                                            style={{ padding: '2px 6px' }}
+                                        >✓</button>
+                                    ) : (
+                                        <span style={{ width: 24 }} />
+                                    )}
+                                    <input
+                                        type="checkbox"
+                                        checked={wh.use_box_multiplicity}
+                                        onChange={e => togglePerRfUse(r, wh, e.target.checked)}
+                                        title={wh.use_box_multiplicity
+                                            ? 'Учитывается при сборке с этого ФФ'
+                                            : 'Игнорируется — раздаём без округления'}
+                                        style={{ width: 14, height: 14, cursor: 'pointer' }}
+                                    />
+                                </div>
+                            );
+                        })}
+                    </div>
+                );
+            },
+            exportValue: (r: BoxMultiplicityRow) => r.per_warehouse
+                .filter(p => p.box_qty !== null)
+                .map(p => `${p.warehouse_name}:${p.box_qty}${p.use_box_multiplicity ? '' : '*'}`)
+                .join(' | '),
         },
         {
             key: 'effective_box_qty',

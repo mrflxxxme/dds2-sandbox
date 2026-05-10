@@ -2884,6 +2884,14 @@ export interface AcceptanceCheckResponse {
 }
 
 // ─── Box multiplicity (кратность коробки) ────────────────────────────────────
+export interface BoxMultiplicityPerWarehouseRow {
+  warehouse_id: number;
+  warehouse_name: string;
+  box_qty: number | null;                 // per-RF override
+  use_box_multiplicity: boolean;          // per-RF флаг
+  rf_stock: number;                       // сток на этом RF
+}
+
 export interface BoxMultiplicityRow {
   nm_id: number;
   vendor_code: string | null;
@@ -2891,16 +2899,18 @@ export interface BoxMultiplicityRow {
   brand: string | null;
   subject: string | null;
   box_qty_override: number | null;        // ручной ввод (Nomenclature)
-  box_qty_from_vehicle: number | null;    // из последней DELIVERED машины
+  box_qty_from_vehicle: number | null;    // из последней DELIVERED машины (qty-weighted mode)
+  box_qty_from_vehicle_alts: number[];    // другие ppb из той же машины (если несколько)
   vehicle_order_no: string | null;
   vehicle_received_at: string | null;     // ISO-date или null
   box_qty_from_factory: number | null;    // из активного FOI (fallback)
   effective_box_qty: number | null;       // override → vehicle → factory
-  use_box_multiplicity: boolean;          // учитывать ли ppb при распределении
+  use_box_multiplicity: boolean;          // SKU-level флаг (default для RF без per-RF override)
   rf_stock: number;                       // суммарный остаток на ФФ-складах
   in_assembly: number;                    // в активной сборке (PENDING..VEHICLE_ASSIGNED)
   in_transit: number;                     // в пути на WB (SHIPPED)
   wb_stock: number;                       // суммарный остаток на WB-складах
+  per_warehouse: BoxMultiplicityPerWarehouseRow[];  // overrides по RF-складам
 }
 
 export interface BoxMultiplicityResponse {
@@ -2915,7 +2925,13 @@ export interface BoxMultiplicityPatch {
 
 export interface BoxMultiplicityBulkItem {
   barcode: string;
+  warehouse_id?: number | null;            // если задан — per-RF override; иначе SKU-level
   box_qty_override?: number | null;
+  use_box_multiplicity?: boolean;
+}
+
+export interface BoxMultiplicityPerWarehousePatch {
+  box_qty?: number | null;
   use_box_multiplicity?: boolean;
 }
 

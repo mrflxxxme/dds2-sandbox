@@ -15,6 +15,7 @@ import type {
     BoxMultiplicityBulkRequest,
     BoxMultiplicityBulkResponse,
     BoxMultiplicityPatch,
+    BoxMultiplicityPerWarehousePatch,
     BoxMultiplicityResponse,
     BoxMultiplicityRow,
     DefectBulkOperation,
@@ -441,6 +442,16 @@ export function addWarehouseMethods(api: ApiClient) {
                 'POST',
                 '/api/v1/warehouse/box-multiplicity/bulk',
                 { items } satisfies BoxMultiplicityBulkRequest,
+            );
+        },
+        /** Per-RF override: создаёт строку если её нет. URL-encode barcode на случай чужих символов. */
+        patchPerWarehouseBoxMultiplicity(
+            barcode: string, warehouseId: number, patch: BoxMultiplicityPerWarehousePatch,
+        ) {
+            return api.request<BoxMultiplicityRow>(
+                'PATCH',
+                `/api/v1/warehouse/box-multiplicity/per-warehouse/${encodeURIComponent(barcode)}/${warehouseId}`,
+                patch,
             );
         },
     };

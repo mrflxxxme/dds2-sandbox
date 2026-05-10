@@ -52,6 +52,41 @@ class Nomenclature(Base):
     __table_args__ = (UniqueConstraint("project_id", "barcode", name="uq_nomenclature_project_barcode"),)
 
 
+class BoxQtyPerWarehouse(Base):
+    """Per-RF override кратности коробки.
+
+    Резолюция при сборке для (barcode, RF-склад):
+      box_qty_per_warehouse.box_qty   ← если задан
+      → Nomenclature.box_qty_override ← глобальный SKU-override
+      → последняя DELIVERED машина (cost_order_items.pcs_per_box_override)
+      → активный FactoryOrderItem.pcs_per_box
+
+    use_box_multiplicity флаг тоже per-RF: если выключен — для этого SKU+RF
+    распределение идёт без округления, даже если box_qty задан.
+    """
+
+    __tablename__ = "box_qty_per_warehouse"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    barcode: Mapped[str] = mapped_column(String(50), nullable=False)
+    warehouse_id: Mapped[int] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=False)
+    box_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    use_box_multiplicity: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "barcode", "warehouse_id", name="uq_box_qty_pw_project_bc_wh"),
+        Index("ix_box_qty_pw_project_bc", "project_id", "barcode"),
+    )
+
+
 class DutyRule(Base, SoftDeleteMixin):
     __tablename__ = "duty_rules"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

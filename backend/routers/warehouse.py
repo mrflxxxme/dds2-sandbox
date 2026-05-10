@@ -11,6 +11,7 @@ from backend.project_context import get_current_project
 from backend.schemas.box_multiplicity import (
     BoxMultiplicityBulkRequest,
     BoxMultiplicityBulkResponse,
+    BoxMultiplicityPerWarehouseUpdate,
     BoxMultiplicityResponse,
     BoxMultiplicityRow,
     BoxMultiplicityUpdate,
@@ -913,3 +914,41 @@ async def bulk_box_multiplicity(
         "not_found": result["not_found"],
         "matched_count": len(result["matched_barcodes"]),
     }
+
+
+@router.patch(
+    "/box-multiplicity/per-warehouse/{barcode}/{warehouse_id}",
+    response_model=BoxMultiplicityRow,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def patch_per_warehouse_box_multiplicity(
+    barcode: str,
+    warehouse_id: int,
+    payload: BoxMultiplicityPerWarehouseUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-RF override partial update. Создаёт строку если её нет."""
+    fields = payload.model_dump(exclude_unset=True)
+    kwargs: dict = {}
+    if "box_qty" in fields:
+        kwargs["box_qty"] = fields["box_qty"]
+    if "use_box_multiplicity" in fields:
+        kwargs["use_box_multiplicity"] = fields["use_box_multiplicity"]
+
+    ok = await box_multiplicity_service.update_per_warehouse(
+        db,
+        project.id,
+        barcode,
+        warehouse_id,
+        **kwargs,
+    )
+    if not ok:
+        raise HTTPException(404, "barcode or warehouse not found in project")
+
+    # Вернём целую строку SKU (по barcode → nm_id) с обновлённым per_warehouse.  # noqa: RUF003
+    items = await box_multiplicity_service.get_box_multiplicity_table(db, project.id)
+    row = next((r for r in items if r["barcode"] == barcode), None)
+    if not row:
+        raise HTTPException(404, "SKU not found after update")
+    return row

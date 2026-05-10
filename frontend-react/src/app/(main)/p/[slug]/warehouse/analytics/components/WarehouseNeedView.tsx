@@ -204,28 +204,61 @@ export function WarehouseNeedView() {
     const [acceptanceMoves, setAcceptanceMoves] = useState<RedistributionMove[]>([]);
     const [acceptanceCheckedAt, setAcceptanceCheckedAt] = useState<string | null>(null);
 
-    /* ── Box-multiplicity (кратность коробки per nm_id) ── */
-    const [boxMultiplicityMap, setBoxMultiplicityMap] = useState<Map<number, number>>(new Map());
+    /* ── Box-multiplicity (кратность коробки per nm_id, с per-RF override) ── */
+    // Для каждого SKU храним ppb в зависимости от выбранного RF-источника.
+    // Структура: Map<nm_id, { default: ppb|null, perRf: Map<warehouseId, {ppb, use}> }>
+    type BoxMultEntry = {
+        skuPpb: number | null;
+        skuUse: boolean;
+        perRf: Map<number, { ppb: number | null; use: boolean }>;
+    };
+    const [boxMultiplicityData, setBoxMultiplicityData] = useState<Map<number, BoxMultEntry>>(new Map());
 
     useEffect(() => {
         let cancelled = false;
         api.getBoxMultiplicity()
             .then(resp => {
                 if (cancelled) return;
-                const m = new Map<number, number>();
+                const m = new Map<number, BoxMultEntry>();
                 for (const r of resp.items) {
-                    // Учитываем только если ppb известен И флаг включён.
-                    if (r.use_box_multiplicity && r.effective_box_qty && r.effective_box_qty > 0) {
-                        m.set(r.nm_id, r.effective_box_qty);
+                    const perRf = new Map<number, { ppb: number | null; use: boolean }>();
+                    for (const p of r.per_warehouse) {
+                        perRf.set(p.warehouse_id, { ppb: p.box_qty, use: p.use_box_multiplicity });
                     }
+                    m.set(r.nm_id, {
+                        skuPpb: r.effective_box_qty,
+                        skuUse: r.use_box_multiplicity,
+                        perRf,
+                    });
                 }
-                setBoxMultiplicityMap(m);
+                setBoxMultiplicityData(m);
             })
             .catch(() => {
                 // best-effort: если кратности нет — fallback на старую логику без округления
             });
         return () => { cancelled = true; };
     }, []);
+
+    // Резолвит (ppb, use) для выбранного RF-склада.
+    // Per-RF override побеждает SKU-level если задан.
+    const resolveBoxMult = useCallback((nmId: number, rfWarehouseId: number | null): { ppb: number | null; use: boolean } => {
+        const entry = boxMultiplicityData.get(nmId);
+        if (!entry) return { ppb: null, use: true };
+        if (rfWarehouseId !== null) {
+            const perRf = entry.perRf.get(rfWarehouseId);
+            if (perRf?.ppb && perRf.ppb > 0) {
+                return { ppb: perRf.ppb, use: perRf.use };
+            }
+            // RF-row может задавать только use-flag без override ppb → его флаг важнее
+            if (perRf && entry.skuPpb && entry.skuPpb > 0) {
+                return { ppb: entry.skuPpb, use: perRf.use };
+            }
+        }
+        if (entry.skuPpb && entry.skuPpb > 0) {
+            return { ppb: entry.skuPpb, use: entry.skuUse };
+        }
+        return { ppb: null, use: entry.skuUse };
+    }, [boxMultiplicityData]);
 
     /* ── Restore acceptance state from localStorage on mount (5 min TTL) ── */
     useEffect(() => {
@@ -682,12 +715,13 @@ export function WarehouseNeedView() {
                     const need = article.total_need;
                     qty = Math.min(available, need);
                     if (qty > 0) {
-                        const ppb = boxMultiplicityMap.get(nmId);
+                        // Резолвим ppb с учётом выбранного RF-источника (per-RF override).
+                        const { ppb, use } = resolveBoxMult(nmId, assemblyWarehouseId);
                         const whNeeds = data.warehouses
                             .map(wh => ({ name: wh.name, need: wh.articles?.[nmId]?.need || 0 }))
                             .filter(w => w.need > 0);
 
-                        if (ppb && ppb > 0 && qty >= ppb) {
+                        if (ppb && ppb > 0 && use && qty >= ppb) {
                             // Кратность задана — раздаём целыми коробками,
                             // минимум 1 коробка каждому нуждающемуся складу.
                             tgt = distributeByBoxMultiple(whNeeds, qty, ppb);
