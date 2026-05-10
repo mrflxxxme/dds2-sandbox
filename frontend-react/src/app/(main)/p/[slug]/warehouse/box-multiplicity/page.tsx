@@ -25,9 +25,11 @@ export default function BoxMultiplicityPage() {
     const [stockFilter, setStockFilter] = useState<StockFilter>('all');
     const [search, setSearch] = useState('');
 
-    // Bulk-paste modal
+    // Bulk-paste inline editor (как в приёмке) — 5+ редактируемых строк.
+    type PasteRow = { barcode: string; ppb: string; use: string };
+    const emptyPasteRow = (): PasteRow => ({ barcode: '', ppb: '', use: '' });
     const [pasteOpen, setPasteOpen] = useState(false);
-    const [pasteText, setPasteText] = useState('');
+    const [pasteRows, setPasteRows] = useState<PasteRow[]>(() => Array.from({ length: 5 }, emptyPasteRow));
     const [pasteApplying, setPasteApplying] = useState(false);
     const [pasteResult, setPasteResult] = useState<{ matched: number; updated: number; notFound: string[] } | null>(null);
 
@@ -72,19 +74,71 @@ export default function BoxMultiplicityPage() {
         }
     };
 
-    // ─── Bulk paste ────────────────────────────────────────────────────────
+    // ─── Bulk paste (inline editor, не модалка) ───────────────────────────
+    // Конвертируем текущие inline-строки в TSV → парсер → распознанные items.
+    const pasteText = useMemo(
+        () => pasteRows
+            .filter(r => r.barcode.trim() || r.ppb.trim() || r.use.trim())
+            .map(r => `${r.barcode}\t${r.ppb}\t${r.use}`)
+            .join('\n'),
+        [pasteRows],
+    );
     const parsedPaste = useMemo(() => parseBoxMultiplicityPaste(pasteText), [pasteText]);
 
     const openPaste = () => {
         setPasteOpen(true);
-        setPasteText('');
+        setPasteRows(Array.from({ length: 5 }, emptyPasteRow));
         setPasteResult(null);
     };
 
     const closePaste = () => {
         setPasteOpen(false);
-        setPasteText('');
+        setPasteRows(Array.from({ length: 5 }, emptyPasteRow));
         setPasteResult(null);
+    };
+
+    const updatePasteRow = (idx: number, field: keyof PasteRow, value: string) => {
+        setPasteRows(prev => {
+            const next = [...prev];
+            next[idx] = { ...next[idx], [field]: value };
+            // Авто-добавляем буферные строки если последняя строка тронута.
+            const last = next[next.length - 1];
+            if (last.barcode.trim() || last.ppb.trim() || last.use.trim()) {
+                next.push(emptyPasteRow());
+            }
+            return next;
+        });
+    };
+
+    // Excel-paste: TSV в первую пустую строку → распарсить и заполнить начиная отсюда.
+    const handleRowsPaste = (e: React.ClipboardEvent, startIdx: number) => {
+        const text = e.clipboardData.getData('text/plain');
+        if (!text.includes('\t') && !text.includes('\n')) return;
+        e.preventDefault();
+        const lines = text.replace(/\r\n/g, '\n').split('\n').filter(l => l.length > 0);
+        if (lines.length === 0) return;
+        const parsed: PasteRow[] = lines.map(l => {
+            const cols = l.split('\t');
+            return {
+                barcode: (cols[0] ?? '').trim(),
+                ppb: (cols[1] ?? '').trim(),
+                use: (cols[2] ?? '').trim(),
+            };
+        });
+        setPasteRows(prev => {
+            const next = [...prev];
+            // Заменяем строки начиная с startIdx
+            for (let i = 0; i < parsed.length; i++) {
+                next[startIdx + i] = parsed[i];
+            }
+            // Гарантируем 2 буферные пустые строки в конце
+            while (next.length < startIdx + parsed.length + 2 ||
+                   (next[next.length - 1].barcode || next[next.length - 1].ppb || next[next.length - 1].use)) {
+                next.push(emptyPasteRow());
+                if (next.length > startIdx + parsed.length + 5) break;  // safety
+            }
+            return next;
+        });
     };
 
     const applyPaste = async () => {
@@ -98,7 +152,6 @@ export default function BoxMultiplicityPage() {
                 return item;
             });
             const resp = await api.bulkBoxMultiplicity(items);
-            // Merge updated rows back into state
             if (resp.updated.length > 0) {
                 const updMap = new Map(resp.updated.map(r => [r.nm_id, r]));
                 setRows(prev => prev.map(r => updMap.get(r.nm_id) || r));
@@ -108,7 +161,7 @@ export default function BoxMultiplicityPage() {
                 updated: resp.updated.length,
                 notFound: resp.not_found,
             });
-            setPasteText('');
+            setPasteRows(Array.from({ length: 5 }, emptyPasteRow));
         } catch (e: any) {
             alert(e?.message || 'Ошибка применения');
         } finally {
@@ -553,161 +606,157 @@ export default function BoxMultiplicityPage() {
                 </>
             )}
 
-            {/* ─── Bulk paste modal ─────────────────────────────────────── */}
+            {/* ─── Bulk paste inline editor ───────────────────────────────── */}
             {pasteOpen && (
-                <div
-                    onClick={closePaste}
-                    style={{
-                        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        zIndex: 1000, padding: 24,
-                    }}
-                >
-                    <div
-                        onClick={e => e.stopPropagation()}
-                        className="glass-card"
-                        style={{ maxWidth: 720, width: '100%', maxHeight: '90vh', overflowY: 'auto', padding: 24 }}
-                    >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
-                            <div>
-                                <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>📋 Массовое редактирование</h2>
-                                <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--color-text-muted)' }}>
-                                    Вставь TAB-разделённые данные (как из Excel).
-                                </p>
-                            </div>
-                            <button className="btn btn-secondary btn-sm" onClick={closePaste}>✕</button>
+                <div className="glass-card" style={{ padding: 20, marginTop: 16 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+                        <div>
+                            <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>📋 Массовое редактирование</h3>
+                            <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                вставьте из Excel: <strong>Баркод, Кратность, Учитывать</strong>
+                                {' · '}кратность: число или <code>-</code>/<code>0</code> = очистить, пусто = не менять
+                                {' · '}учитывать: <code>да/нет</code>/<code>+/-</code>/<code>1/0</code>, пусто = не менять
+                            </p>
                         </div>
+                        <button className="btn btn-secondary btn-sm" onClick={closePaste} disabled={pasteApplying}>✕ Свернуть</button>
+                    </div>
 
+                    {pasteResult && (
                         <div style={{
-                            background: 'var(--color-bg)', border: '1px solid var(--color-border)',
-                            borderRadius: 8, padding: 12, marginBottom: 12, fontSize: 12,
-                            color: 'var(--color-text-muted)', lineHeight: 1.6,
+                            padding: '10px 14px', marginBottom: 12,
+                            borderRadius: 8, background: 'rgba(52, 199, 89, 0.08)',
+                            borderLeft: '3px solid var(--color-success)', fontSize: 13,
                         }}>
-                            <div><strong style={{ color: 'var(--color-text)' }}>Формат колонок:</strong> barcode &lt;TAB&gt; кратность &lt;TAB&gt; учитывать</div>
-                            <div>· Кратность: число <code>1–10000</code>, либо <code>-</code>/<code>null</code>/<code>0</code> = очистить, либо пусто = не менять</div>
-                            <div>· Учитывать: <code>да/нет</code>, <code>1/0</code>, <code>+/-</code>, <code>true/false</code>, либо пусто = не менять</div>
-                            <div>· SKU матчатся по barcode внутри проекта</div>
-                        </div>
-
-                        {pasteResult ? (
-                            <div className="glass-card" style={{ padding: 16, marginBottom: 12, borderLeft: '3px solid var(--color-success)' }}>
-                                <div style={{ fontSize: 14, marginBottom: 8 }}>
-                                    ✅ Готово — обновлено <strong>{pasteResult.updated}</strong> SKU,
-                                    {' '}найдено по barcode <strong>{pasteResult.matched}</strong>
-                                </div>
-                                {pasteResult.notFound.length > 0 && (
-                                    <details style={{ fontSize: 12 }}>
-                                        <summary style={{ cursor: 'pointer', color: 'var(--color-warning)' }}>
-                                            Не найдено barcode ({pasteResult.notFound.length})
-                                        </summary>
-                                        <div style={{ fontFamily: 'monospace', marginTop: 6, maxHeight: 120, overflowY: 'auto' }}>
-                                            {pasteResult.notFound.join(', ')}
-                                        </div>
-                                    </details>
-                                )}
-                                <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
-                                    <button className="btn btn-secondary btn-sm" onClick={() => setPasteResult(null)}>
-                                        Ещё одна вставка
-                                    </button>
-                                    <button className="btn btn-primary btn-sm" onClick={closePaste}>Закрыть</button>
-                                </div>
-                            </div>
-                        ) : (
-                            <>
-                                <textarea
-                                    value={pasteText}
-                                    onChange={e => setPasteText(e.target.value)}
-                                    placeholder={'2043740032052\t12\tда\n2043788808268\t6\tнет\n2044778634607\t-\t'}
-                                    rows={10}
-                                    style={{
-                                        width: '100%', padding: 10, fontFamily: 'monospace', fontSize: 13,
-                                        border: '1px solid var(--color-border)', borderRadius: 8,
-                                        resize: 'vertical', boxSizing: 'border-box',
-                                    }}
-                                    autoFocus
-                                />
-
-                                {/* Preview */}
-                                {pasteText && (
-                                    <div style={{ marginTop: 12, fontSize: 13 }}>
-                                        <div style={{ marginBottom: 6 }}>
-                                            <span style={{ color: 'var(--color-success)', fontWeight: 600 }}>
-                                                ✓ Распознано: {parsedPaste.rows.length}
-                                            </span>
-                                            {parsedPaste.errors.length > 0 && (
-                                                <span style={{ color: 'var(--color-danger)', marginLeft: 12, fontWeight: 600 }}>
-                                                    ✗ Ошибки: {parsedPaste.errors.length}
-                                                </span>
-                                            )}
-                                        </div>
-
-                                        {parsedPaste.errors.length > 0 && (
-                                            <details style={{ marginBottom: 8 }}>
-                                                <summary style={{ cursor: 'pointer', color: 'var(--color-danger)', fontSize: 12 }}>
-                                                    Подробности ошибок
-                                                </summary>
-                                                <div style={{ fontSize: 12, fontFamily: 'monospace', marginTop: 6, maxHeight: 120, overflowY: 'auto' }}>
-                                                    {parsedPaste.errors.map((err, i) => (
-                                                        <div key={i} style={{ color: 'var(--color-danger)', marginBottom: 2 }}>
-                                                            строка {err.line}: {err.reason}
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </details>
-                                        )}
-
-                                        {parsedPaste.rows.length > 0 && (
-                                            <details>
-                                                <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--color-text-muted)' }}>
-                                                    Превью ({Math.min(parsedPaste.rows.length, 20)})
-                                                </summary>
-                                                <table style={{ width: '100%', fontSize: 12, fontFamily: 'monospace', marginTop: 6 }}>
-                                                    <thead>
-                                                        <tr style={{ color: 'var(--color-text-muted)' }}>
-                                                            <th style={{ textAlign: 'left' }}>barcode</th>
-                                                            <th style={{ textAlign: 'right' }}>кратность</th>
-                                                            <th style={{ textAlign: 'center' }}>учитывать</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                        {parsedPaste.rows.slice(0, 20).map((r, i) => (
-                                                            <tr key={i}>
-                                                                <td>{r.barcode}</td>
-                                                                <td style={{ textAlign: 'right' }}>
-                                                                    {r.box_qty_override === null
-                                                                        ? <span style={{ color: 'var(--color-warning)' }}>очистить</span>
-                                                                        : r.box_qty_override !== undefined
-                                                                            ? r.box_qty_override
-                                                                            : <span style={{ color: 'var(--color-text-dim)' }}>—</span>}
-                                                                </td>
-                                                                <td style={{ textAlign: 'center' }}>
-                                                                    {r.use_box_multiplicity === undefined
-                                                                        ? <span style={{ color: 'var(--color-text-dim)' }}>—</span>
-                                                                        : r.use_box_multiplicity ? 'да' : 'нет'}
-                                                                </td>
-                                                            </tr>
-                                                        ))}
-                                                    </tbody>
-                                                </table>
-                                            </details>
-                                        )}
+                            ✅ Обновлено <strong>{pasteResult.updated}</strong> SKU
+                            {' · '}найдено по barcode <strong>{pasteResult.matched}</strong>
+                            {pasteResult.notFound.length > 0 && (
+                                <details style={{ marginTop: 6, fontSize: 12 }}>
+                                    <summary style={{ cursor: 'pointer', color: 'var(--color-warning)' }}>
+                                        Не найдено barcode ({pasteResult.notFound.length})
+                                    </summary>
+                                    <div style={{ fontFamily: 'monospace', marginTop: 4, maxHeight: 80, overflowY: 'auto' }}>
+                                        {pasteResult.notFound.join(', ')}
                                     </div>
-                                )}
+                                </details>
+                            )}
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                style={{ marginTop: 8 }}
+                                onClick={() => setPasteResult(null)}
+                            >Ещё одна вставка</button>
+                        </div>
+                    )}
 
-                                <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end' }}>
-                                    <button className="btn btn-secondary btn-sm" onClick={closePaste} disabled={pasteApplying}>
-                                        Отмена
-                                    </button>
-                                    <button
-                                        className="btn btn-primary btn-sm"
-                                        onClick={applyPaste}
-                                        disabled={pasteApplying || parsedPaste.rows.length === 0}
-                                    >
-                                        {pasteApplying ? 'Применяю…' : `Применить (${parsedPaste.rows.length})`}
-                                    </button>
-                                </div>
-                            </>
-                        )}
+                    <div style={{ overflowX: 'auto' }}>
+                        <table style={{ width: '100%', fontSize: 13 }}>
+                            <thead>
+                                <tr style={{ color: 'var(--color-text-muted)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.05 }}>
+                                    <th style={{ textAlign: 'left', padding: '6px 8px', width: 40 }}>#</th>
+                                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>Баркод</th>
+                                    <th style={{ textAlign: 'left', padding: '6px 8px', width: 140 }}>Кратность</th>
+                                    <th style={{ textAlign: 'left', padding: '6px 8px', width: 140 }}>Учитывать</th>
+                                    <th style={{ textAlign: 'center', padding: '6px 8px', width: 60 }}>—</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {pasteRows.map((row, i) => {
+                                    const filled = row.barcode.trim() || row.ppb.trim() || row.use.trim();
+                                    return (
+                                        <tr key={i} style={{ borderTop: '1px solid var(--color-border)' }}>
+                                            <td style={{ padding: '6px 8px', color: 'var(--color-text-muted)' }}>{i + 1}</td>
+                                            <td style={{ padding: '6px 8px' }}>
+                                                <input
+                                                    type="text"
+                                                    value={row.barcode}
+                                                    onChange={e => updatePasteRow(i, 'barcode', e.target.value)}
+                                                    onPaste={e => handleRowsPaste(e, i)}
+                                                    placeholder="Баркод"
+                                                    style={{
+                                                        width: '100%', padding: '6px 10px', fontSize: 13,
+                                                        border: '1px solid var(--color-border)', borderRadius: 8,
+                                                        fontFamily: 'monospace',
+                                                    }}
+                                                />
+                                            </td>
+                                            <td style={{ padding: '6px 8px' }}>
+                                                <input
+                                                    type="text"
+                                                    inputMode="numeric"
+                                                    value={row.ppb}
+                                                    onChange={e => updatePasteRow(i, 'ppb', e.target.value)}
+                                                    onPaste={e => handleRowsPaste(e, i)}
+                                                    placeholder="0"
+                                                    style={{
+                                                        width: '100%', padding: '6px 10px', fontSize: 13,
+                                                        border: '1px solid var(--color-border)', borderRadius: 8,
+                                                        textAlign: 'right',
+                                                    }}
+                                                />
+                                            </td>
+                                            <td style={{ padding: '6px 8px' }}>
+                                                <input
+                                                    type="text"
+                                                    value={row.use}
+                                                    onChange={e => updatePasteRow(i, 'use', e.target.value)}
+                                                    onPaste={e => handleRowsPaste(e, i)}
+                                                    placeholder="да / нет"
+                                                    style={{
+                                                        width: '100%', padding: '6px 10px', fontSize: 13,
+                                                        border: '1px solid var(--color-border)', borderRadius: 8,
+                                                    }}
+                                                />
+                                            </td>
+                                            <td style={{ padding: '6px 8px', textAlign: 'center' }}>
+                                                {filled && pasteRows.length > 1 && (
+                                                    <button
+                                                        className="btn btn-secondary btn-sm"
+                                                        onClick={() => setPasteRows(prev => prev.filter((_, j) => j !== i))}
+                                                        title="Удалить строку"
+                                                        style={{ padding: '2px 8px' }}
+                                                    >✕</button>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    {/* Errors summary */}
+                    {parsedPaste.errors.length > 0 && (
+                        <div style={{
+                            marginTop: 8, padding: '8px 12px', borderRadius: 8,
+                            background: 'rgba(255, 59, 48, 0.06)', borderLeft: '3px solid var(--color-danger)',
+                            fontSize: 12, color: 'var(--color-danger)',
+                        }}>
+                            <strong>Ошибки в строках:</strong>
+                            <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
+                                {parsedPaste.errors.slice(0, 5).map((err, i) => (
+                                    <li key={i}>строка {err.line}: {err.reason}</li>
+                                ))}
+                                {parsedPaste.errors.length > 5 && <li>…и ещё {parsedPaste.errors.length - 5}</li>}
+                            </ul>
+                        </div>
+                    )}
+
+                    <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end', alignItems: 'center' }}>
+                        <span style={{ marginRight: 'auto', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                            Распознано: <strong style={{ color: 'var(--color-success)' }}>{parsedPaste.rows.length}</strong>
+                            {parsedPaste.errors.length > 0 && (
+                                <> · ошибок: <strong style={{ color: 'var(--color-danger)' }}>{parsedPaste.errors.length}</strong></>
+                            )}
+                        </span>
+                        <button className="btn btn-secondary btn-sm" onClick={closePaste} disabled={pasteApplying}>
+                            Отмена
+                        </button>
+                        <button
+                            className="btn btn-primary btn-sm"
+                            onClick={applyPaste}
+                            disabled={pasteApplying || parsedPaste.rows.length === 0}
+                        >
+                            {pasteApplying ? 'Применяю…' : `Применить (${parsedPaste.rows.length})`}
+                        </button>
                     </div>
                 </div>
             )}
