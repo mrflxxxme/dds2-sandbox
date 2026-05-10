@@ -24,31 +24,41 @@ _WH_PARENS_RE = re.compile(r"\s*\([^)]*\)\s*$")
 
 
 def _normalize_wb_warehouse(name: str | None) -> str:
-    """Canonicalize warehouse name so all sources collapse into one column.
+    """Canonicalize warehouse name to the WAREHOUSE_COORDS form so backend's
+    `data.warehouses[].name` matches acceptance-redistribute output on the
+    frontend (both produce the same canonical key, columns collapse into one).
 
-    Step 1: apply ACCEPTANCE_TO_STOCK_NAME to map acceptance-API short forms
-    («Новосемейкино», «Склад Шушары», «Электросталь: Питание») to the canonical
-    name from WAREHOUSE_COORDS. Without this step the supplier/orders feed
-    («Новосемейкино») and the stocks feed («Самара (Новосемейкино)») produce
-    two separate columns for the same physical warehouse.
-
-    Step 2: strip any trailing «(...)» so FBO/orders short names («Самара»)
-    merge with stocks long names («Самара (Новосемейкино)»).
+    Algorithm mirrors `_normalize_acceptance_wh`:
+      1. Direct alias from ACCEPTANCE_TO_STOCK_NAME (acceptance/stocks variants
+         to canonical, e.g. 'Новосемейкино' -> 'Самара (Новосемейкино)',
+         'Склад Шушары' -> 'СПБ Шушары').
+      2. Else strip trailing «(...)» (orders feed short forms like 'Самара',
+         FBO short names) and look up alias on the stripped name.
+      3. Else return stripped — unknown warehouse passes through.
 
     Examples:
-      'Новосемейкино'             -> 'Самара (Новосемейкино)' -> 'Самара'
-      'Новосемейкино: Питание'    -> 'Самара (Новосемейкино)' -> 'Самара'
-      'Самара (Новосемейкино)'    -> 'Самара'
-      'Самара'                    -> 'Самара'
-      'Краснодар (Тихорецкая)'    -> 'Краснодар'
-      'Склад Шушары'              -> 'СПБ Шушары'
-      'Электросталь: Питание'     -> 'Электросталь'
-      'СЦ Симферополь (Молодежненское)' -> 'СЦ Симферополь'
+      'Новосемейкино'             -> 'Самара (Новосемейкино)' (alias step 1)
+      'Новосемейкино: Питание'    -> 'Самара (Новосемейкино)' (alias step 1)
+      'Самара (Новосемейкино)'    -> 'Самара (Новосемейкино)' (alias step 1, parens kept)
+      'Самара'                    -> 'Самара' (no alias, no parens — passthrough)
+      'Краснодар (Тихорецкая)'    -> 'Краснодар' (alias step 1 strips suffix)
+      'Склад Шушары'              -> 'СПБ Шушары' (alias step 1)
+      'Электросталь: Питание'     -> 'Электросталь' (alias step 1)
+      'СЦ Симферополь (Молодежненское)' -> 'СЦ Симферополь' (paren-strip step 2)
+
+    NB: the «Самара (Новосемейкино)» key in ACCEPTANCE_TO_STOCK_NAME is
+    self-aliased so the canonical form survives this function unchanged
+    (otherwise step 2 would strip it down to «Самара» and re-create the split
+    we are trying to fix).
     """
     if not name:
         return ""
-    canonical = ACCEPTANCE_TO_STOCK_NAME.get(name, name)
-    return _WH_PARENS_RE.sub("", canonical).strip()
+    if name in ACCEPTANCE_TO_STOCK_NAME:
+        return ACCEPTANCE_TO_STOCK_NAME[name]
+    stripped = _WH_PARENS_RE.sub("", name).strip()
+    if stripped in ACCEPTANCE_TO_STOCK_NAME:
+        return ACCEPTANCE_TO_STOCK_NAME[stripped]
+    return stripped
 
 
 @cached(prefix="reports:warehouse_need", ttl=300)

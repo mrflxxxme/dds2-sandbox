@@ -39,17 +39,18 @@ class TestFlagsForWarehouse:
         assert out == {}
 
     def test_or_merge_normalized_names(self):
-        # "Самара (Новосемейкино)" normalizes to "Самара" — same as "Самара".
-        # OR-merge: if any sub-warehouse can_box, the merged "Самара" can_box.
+        # «Самара» и «Самара (Новосемейкино)» — один физ. склад. Канон в
+        # WAREHOUSE_COORDS — со скобками. Через ACCEPTANCE_TO_STOCK_NAME оба
+        # варианта мапятся на «Самара (Новосемейкино)»; OR-merge даёт оба флага.
         wh_id_to_name = {1: "Самара", 2: "Самара (Новосемейкино)"}
         raw = [
             {"warehouseID": 1, "canBox": False, "canMonopallet": True},
             {"warehouseID": 2, "canBox": True, "canMonopallet": False},
         ]
         out = _flags_for_warehouse(raw, wh_id_to_name)
-        assert "Самара" in out
-        assert out["Самара"]["can_box"] is True
-        assert out["Самара"]["can_monopallet"] is True
+        assert "Самара (Новосемейкино)" in out
+        assert out["Самара (Новосемейкино)"]["can_box"] is True
+        assert out["Самара (Новосемейкино)"]["can_monopallet"] is True
 
 
 class TestPickPackageType:
@@ -298,35 +299,37 @@ class TestNormalizeAcceptanceWh:
 
 class TestNormalizeWbWarehouse:
     """warehouse_need_service._normalize_wb_warehouse — единый канонизатор для
-    orders/stocks/assembly. Должен сливать acceptance-форму («Новосемейкино»),
-    canonical-форму («Самара (Новосемейкино)») и short-форму («Самара») в одну
-    колонку, иначе в матрице потребности появляются дубли по одному физ. складу.
+    orders/stocks/assembly. Возвращает каноническое имя из WAREHOUSE_COORDS
+    (через ACCEPTANCE_TO_STOCK_NAME), чтобы backend `data.warehouses[].name`
+    совпадал с distribution-ключами из acceptance-redistribute (frontend
+    мерджит обе ветки по точному совпадению строки).
     """
 
-    def test_acceptance_short_name_collapses_with_canonical_long(self):
-        # Bug repro: «Новосемейкино» (acceptance API) и «Самара (Новосемейкино)»
-        # (stocks API) ранее давали 2 разные колонки. После фикса обе → «Самара».
+    def test_samara_collapses_to_canonical(self):
+        # Bug repro: «Самара» (orders/FBO short) и «Самара (Новосемейкино)»
+        # (stocks API) давали 2 разные колонки. Фикс: оба → канон с скобками.
         from backend.services.warehouse_need_service import _normalize_wb_warehouse
 
-        assert _normalize_wb_warehouse("Новосемейкино") == "Самара"
-        assert _normalize_wb_warehouse("Самара (Новосемейкино)") == "Самара"
-        assert _normalize_wb_warehouse("Самара") == "Самара"
-        assert _normalize_wb_warehouse("Новосемейкино: Питание") == "Самара"
+        assert _normalize_wb_warehouse("Новосемейкино") == "Самара (Новосемейкино)"
+        assert _normalize_wb_warehouse("Самара (Новосемейкино)") == "Самара (Новосемейкино)"
+        assert _normalize_wb_warehouse("Самара") == "Самара (Новосемейкино)"
+        assert _normalize_wb_warehouse("Новосемейкино: Питание") == "Самара (Новосемейкино)"
 
-    def test_acceptance_alias_then_paren_strip(self):
+    def test_acceptance_alias_to_canonical(self):
         from backend.services.warehouse_need_service import _normalize_wb_warehouse
 
-        # Acceptance-форма с «Склад »-префиксом мапится на каноническое имя,
-        # потом скобки (если есть) режутся.
+        # Acceptance-форма мапится напрямую на каноническое имя WAREHOUSE_COORDS.
         assert _normalize_wb_warehouse("Склад Шушары") == "СПБ Шушары"
         assert _normalize_wb_warehouse("Склад Владивосток") == "Владивосток"
         assert _normalize_wb_warehouse("Владивосток СГТ") == "Владивосток"
 
-    def test_paren_strip_for_existing_canonical(self):
+    def test_paren_strip_when_alias_strips_suffix(self):
         from backend.services.warehouse_need_service import _normalize_wb_warehouse
 
-        # Регрессия: фикс не должен ломать ранее работавшие случаи.
+        # «Краснодар (Тихорецкая)» в ACCEPTANCE_TO_STOCK_NAME → «Краснодар» —
+        # и в WAREHOUSE_COORDS канон БЕЗ скобок. Возвращаем как в карте.
         assert _normalize_wb_warehouse("Краснодар (Тихорецкая)") == "Краснодар"
+        # Неизвестный склад со скобками — fallback на paren-strip (шаг 2).
         assert _normalize_wb_warehouse("СЦ Симферополь (Молодежненское)") == "СЦ Симферополь"
 
     def test_food_suffix_collapses(self):
@@ -342,7 +345,7 @@ class TestNormalizeWbWarehouse:
         assert _normalize_wb_warehouse(None) == ""
         assert _normalize_wb_warehouse("") == ""
 
-    def test_unknown_name_passes_through_with_paren_strip(self):
+    def test_unknown_name_passthrough(self):
         from backend.services.warehouse_need_service import _normalize_wb_warehouse
 
         # Неизвестный склад → нет в алиасах → только parens-strip.
