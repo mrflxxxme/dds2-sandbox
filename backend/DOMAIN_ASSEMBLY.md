@@ -51,6 +51,11 @@ async def ship_shipment(db, project_id, shipment_id) -> OutboundShipment:
 - `MovementType.OUTBOUND` — для списания stock при ship
 - `OutboundStatus.SHIPPED` — статус создаваемого OutboundShipment
 - `WarehouseType.FULFILLMENT` — тип склада (проверка при создании заявки)
+- `PackageType` — `BOX | MONOPALLET | SUPERSAFE` (см. `models/assembly.py`). Один
+  AssemblyRequest = одна транспортная единица WB = один `package_type`. Тип
+  определяется через `POST /warehouse/acceptance-check` (см. `DOMAIN_WAREHOUSE.md`).
+  При `commit_draft` строки группируются по `(source_ff, target_wb, package_type)` —
+  если для одного склада нужны и короб, и моно — это две заявки.
 
 ## Статусная модель
 

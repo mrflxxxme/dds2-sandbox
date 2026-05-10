@@ -1449,6 +1449,8 @@ export interface FboAuditRevertResponse {
 
 export type AssemblyStatus = 'PENDING' | 'IN_PROGRESS' | 'READY' | 'VEHICLE_ASSIGNED' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED';
 
+export type PackageType = 'BOX' | 'MONOPALLET' | 'SUPERSAFE';
+
 export interface AssemblyRequestItem {
   id: number;
   nomenclature_id: number;
@@ -1494,6 +1496,7 @@ export interface AssemblyRequest {
   counterparty_id?: number | null;
   carrier_inn?: string | null;
   carrier_name?: string | null;
+  package_type?: PackageType;
   items: AssemblyRequestItem[];
   created_at: string;
   updated_at: string;
@@ -1521,6 +1524,7 @@ export interface AssemblyRequestCreate {
   pallets_count: number;
   pallet_weight_kg: number;
   comment?: string;
+  package_type?: PackageType;
   items: { barcode: string; quantity: number }[];
 }
 
@@ -1531,6 +1535,7 @@ export interface AssemblyRequestUpdate {
   comment?: string | null;
   wb_fbo_supply_id?: number | null;
   wb_warehouse_name_manual?: string | null;
+  package_type?: PackageType;
   items?: { barcode: string; quantity: number }[];
   pickup_cost?: number;
   vehicle_info?: string;
@@ -2751,6 +2756,9 @@ export interface AssemblyDraftRow {
   src: Record<string, number>;
   /** wb_warehouse_name -> qty (цель, WB-склад) */
   tgt: Record<string, number>;
+  /** WB acceptance package type — определяется через POST /warehouse/acceptance-check.
+   *  Группирует строки в AssemblyRequest при commit_draft (одна заявка = один тип). */
+  package_type?: PackageType;
 }
 
 export interface AssemblyDraftDistribution {
@@ -2805,6 +2813,7 @@ export interface ColdStartTableRow {
   article_seller: string | null;
   subject: string | null;
   brand: string | null;
+  barcode: string | null;
   rf_qty: number;
   wb_qty: number;
   in_assembly_total: number;
@@ -2820,4 +2829,56 @@ export interface ColdStartTableResponse {
   bench_source: string;
   bench_total_orders: number;
   meta: { min_pack: number; window_days: number; excluded_warehouses: string[] };
+}
+
+// WB Acceptance check (POST /warehouse/acceptance-check)
+export interface AcceptanceCoefMeta {
+  free_days_14: number;
+  paid_days_14: number;
+  min_coefficient: number | null;
+}
+export interface AcceptanceFlags {
+  warehouse_id: number;
+  can_box: boolean;
+  can_monopallet: boolean;
+  can_supersafe: boolean;
+  box_meta?: AcceptanceCoefMeta | null;
+  mono_meta?: AcceptanceCoefMeta | null;
+  super_meta?: AcceptanceCoefMeta | null;
+}
+export interface AcceptanceCheckItemRequest {
+  nm_id: number;
+  barcode: string;
+  distribution: Record<string, number>;
+}
+export interface AcceptanceCheckRequest {
+  items: AcceptanceCheckItemRequest[];
+}
+export interface RedistributionMove {
+  nm_id: number;
+  barcode: string;
+  from_warehouse: string;
+  to_warehouse: string | null;
+  quantity: number;
+  reason: string;
+}
+export interface AcceptanceCheckSplit {
+  package_type: PackageType;
+  distribution: Record<string, number>;
+  warnings: string[];
+}
+export interface AcceptanceCheckPerItem {
+  nm_id: number;
+  barcode: string;
+  availability: Record<string, AcceptanceFlags>;
+  package_type: PackageType;
+  distribution: Record<string, number>;
+  splits: AcceptanceCheckSplit[];
+  warnings: string[];
+}
+export interface AcceptanceCheckResponse {
+  items: AcceptanceCheckPerItem[];
+  moves: RedistributionMove[];
+  checked_at: string;
+  cache_hit: boolean;
 }

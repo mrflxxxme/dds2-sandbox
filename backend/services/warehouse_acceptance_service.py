@@ -1,0 +1,840 @@
+# ruff: noqa: RUF001, RUF002, RUF003
+"""WB FBO acceptance check + redistribute service.
+
+Calls WB Supplies API `POST /api/v1/acceptance/options` for a batch of
+(barcode, qty) and:
+
+1. Maps WB warehouseID → name via `/api/v1/warehouses` (cached separately).
+2. For each SKU, checks whether each warehouse in the planned distribution
+   accepts that barcode (canBox / canMonopallet / canSupersafe).
+3. Picks a single `package_type` per SKU:
+     * BOX        — if every involved warehouse has canBox=True
+     * MONOPALLET — else if every involved warehouse has canMonopallet=True
+     * SUPERSAFE  — else if every involved warehouse has canSupersafe=True
+     * SKU is unsplittable here → fallback BOX with warnings
+   (One AssemblyRequest = one transport unit, см. DOMAIN_ASSEMBLY.md)
+4. For warehouses fully closed for the chosen package_type, qty is moved to
+   the nearest open warehouse in the same федеральный округ; if no open WH
+   in district — to any open WH (warned).
+
+Rate limit on WB API: 6 req/min. We cache the (project_id, items_hash) result
+for 5 минут — повторное нажатие кнопки в UI не дёргает API.
+"""
+
+import hashlib
+import json
+import logging
+from collections import defaultdict
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.cache import _redis_client, get_redis
+from backend.integrations.wb_api import WBApiClient
+from backend.services.funnel.wb_api_client import get_wb_key
+from backend.services.warehouse_district import warehouse_to_district
+from backend.services.warehouse_geo_data import ACCEPTANCE_TO_STOCK_NAME
+from backend.services.warehouse_need_service import _normalize_wb_warehouse
+from backend.utils.time import utcnow
+
+
+def _normalize_acceptance_wh(name: str | None) -> str:
+    """Map WB acceptance-API warehouse name to canonical WAREHOUSE_COORDS name.
+
+    WB API возвращает имена вроде «Склад Владивосток», «Новосемейкино»,
+    «Краснодар (Тихорецкая)». В нашем cold-start / distribution используются
+    canonical-имена из WAREHOUSE_COORDS («Владивосток», «Самара (Новосемейкино)»,
+    «Краснодар»). Без явного алиаса qty не сматчится → склад выглядит закрытым.
+
+    Алгоритм:
+      1. Если есть прямой алиас (full name) — применить.
+      2. Иначе убрать суффикс в скобках («Краснодар (Тихорецкая)» → «Краснодар»).
+      3. Если у срезанной формы есть алиас — применить.
+      4. Иначе оставить как есть.
+    """
+    if not name:
+        return ""
+    if name in ACCEPTANCE_TO_STOCK_NAME:
+        return ACCEPTANCE_TO_STOCK_NAME[name]
+    stripped = _normalize_wb_warehouse(name)
+    if stripped in ACCEPTANCE_TO_STOCK_NAME:
+        return ACCEPTANCE_TO_STOCK_NAME[stripped]
+    return stripped
+
+
+logger = logging.getLogger("dds.warehouse_acceptance")
+
+CACHE_TTL_SECONDS = 300  # 5 min — WB rate limit 6 req/min
+WAREHOUSE_NAMES_CACHE_TTL = 3600  # 1 hour — IDs are stable
+COEFFICIENTS_CACHE_TTL = 3600  # 1 hour — WB обновляет ~раз в день в 03:00 МСК
+
+# WB box type ID → ours canonical key.
+# ВАЖНО (2026-05-10, реверс из реальных данных tariffs/v1/acceptance/coefficients):
+#   • 5 = МОНО      (подтверждено: Екатеринбург - Перспективная 14, boxTypeID=5
+#                    отдаёт Логистика 175% / Хранение 215% — точное совпадение
+#                    с экраном WB-кабинета «Монопаллетой» для одеяла 193х203 9кг)
+#   • 6 = КОРОБ
+#   • 2 = иной тип (вероятно «Суперсейф»; заводим как "super" для разделимости)
+# Прежний маппинг {2:mono, 5:super, 6:box} был НЕВЕРНЫМ — он делал моно-склады
+# (Великий Камень, Владивосток, Хабаровск) «по индивидуальной квоте» в нашем UI,
+# хотя WB-кабинет показывал их как «Есть бесплатные даты».
+_BOX_TYPE_ID_TO_KEY = {
+    2: "super",
+    5: "mono",
+    6: "box",
+}
+
+
+# ─── pure helpers (no I/O — fully unit-tested) ──────────────────────────────
+
+
+def _aggregate_coefficients(
+    raw_coefficients: list[dict],
+    wh_id_to_name: dict[int, str],
+    *,
+    paid_threshold: int = 1,
+) -> dict[tuple[str, str], dict]:
+    """Group coefficients by (canonical_warehouse_name, package_type_key).
+
+    Returns {(canon_wh, "box"|"mono"|"super"): {
+        "free_days_14": int,   # дней с coefficient ∈ {0..paid_threshold} И allowUnload=true
+        "paid_days_14": int,   # дней с coefficient > paid_threshold И allowUnload=true
+        "closed_days_14": int, # дней с coefficient=-1 ИЛИ allowUnload=false
+        "min_coefficient": int | None,  # лучший (минимальный) коэф среди allowUnload=true
+        "total_days": int,
+    }}.
+
+    paid_threshold=1 — стандарт WB: «бесплатно» = coefficient ∈ {0, 1}, «платно» = ≥2.
+    """
+    grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for e in raw_coefficients:
+        wid = e.get("warehouseID")
+        if wid is None:
+            continue
+        name = wh_id_to_name.get(wid) or e.get("warehouseName")
+        if not name:
+            continue
+        canon = _normalize_acceptance_wh(name)
+        if not canon:
+            continue
+        type_key = _BOX_TYPE_ID_TO_KEY.get(e.get("boxTypeID"))
+        if type_key is None:
+            continue
+        grouped[(canon, type_key)].append(e)
+
+    out: dict[tuple[str, str], dict] = {}
+    for key, entries in grouped.items():
+        free = paid = closed = 0
+        min_coef: int | None = None
+        for e in entries:
+            coef = e.get("coefficient")
+            allow = bool(e.get("allowUnload"))
+            if coef == -1 or not allow:
+                closed += 1
+                continue
+            if coef is None:
+                continue
+            if coef <= paid_threshold:
+                free += 1
+            else:
+                paid += 1
+            if min_coef is None or coef < min_coef:
+                min_coef = coef
+        out[key] = {
+            "free_days_14": free,
+            "paid_days_14": paid,
+            "closed_days_14": closed,
+            "min_coefficient": min_coef,
+            "total_days": len(entries),
+        }
+    return out
+
+
+def _flags_for_warehouse(
+    raw_warehouses: list[dict],
+    wh_id_to_name: dict[int, str],
+    coefficients_by_canon: dict[tuple[str, str], dict] | None = None,
+    *,
+    require_free_days: bool = False,
+) -> dict[str, dict]:
+    """Map raw WB warehouses[] → {canonical_name: {warehouse_id, can_box, ...}}.
+
+    `can_X` по дефолту = `options.canX` (как кабинет WB). Реальная per-barcode
+    доступность определяется именно `acceptance/options`, а coefficients — это
+    тарифы (платные коэффициенты ≥2) и публичные slot-окна, которые НЕ
+    являются source of truth для доступности (для одеяла_193х203_9кг кабинет
+    показывает Склад Владивосток МОНО как доступный, хотя в coefficients
+    `coefficient=-1, allowUnload=False` все 15 дней — расхождение зафиксировано
+    2026-05-10).
+
+    `require_free_days=True` (opt-in) — строгий режим: AND с
+    `coefficients.free_days_14 > 0`. Используй когда нужны ТОЛЬКО бесплатные
+    публичные слоты в ближайшие 14 дней.
+
+    Per-(canon, type) coefficients (free_days_14 / paid_days_14 /
+    min_coefficient) добавляются в `box_meta` / `mono_meta` / `super_meta` —
+    для tooltip («бесплатно N/14 дн») независимо от `require_free_days`.
+
+    Multiple sub-warehouses with the same canonical name are OR-merged.
+    """
+    coef = coefficients_by_canon or {}
+
+    def _check_can(canon: str, type_key: str, raw_can: bool) -> tuple[bool, dict | None]:
+        meta = coef.get((canon, type_key))
+        if not raw_can:
+            return False, meta
+        if not require_free_days:
+            return True, meta
+        if meta is None:
+            # Coefficients не получены (нет ключа / fail) — оставляем как сказал options.
+            return True, None
+        return meta["free_days_14"] > 0, meta
+
+    result: dict[str, dict] = {}
+    for w in raw_warehouses:
+        wid = w.get("warehouseID")
+        name = wh_id_to_name.get(wid)
+        if not name:
+            continue
+        norm = _normalize_acceptance_wh(name)
+        if not norm:
+            continue
+        raw_box = bool(w.get("canBox"))
+        raw_mono = bool(w.get("canMonopallet"))
+        raw_super = bool(w.get("canSupersafe"))
+        can_box, box_meta = _check_can(norm, "box", raw_box)
+        can_mono, mono_meta = _check_can(norm, "mono", raw_mono)
+        can_super, super_meta = _check_can(norm, "super", raw_super)
+
+        flags = {
+            "warehouse_id": wid,
+            "can_box": can_box,
+            "can_monopallet": can_mono,
+            "can_supersafe": can_super,
+            "box_meta": box_meta,
+            "mono_meta": mono_meta,
+            "super_meta": super_meta,
+        }
+        prev = result.get(norm)
+        if prev is None:
+            result[norm] = flags
+        else:
+            # OR-merge by flag; meta — берём более разрешительный (с большим free_days)
+            def _better_meta(a: dict | None, b: dict | None) -> dict | None:
+                if a is None:
+                    return b
+                if b is None:
+                    return a
+                return a if a.get("free_days_14", 0) >= b.get("free_days_14", 0) else b
+
+            result[norm] = {
+                "warehouse_id": prev["warehouse_id"],
+                "can_box": prev["can_box"] or flags["can_box"],
+                "can_monopallet": prev["can_monopallet"] or flags["can_monopallet"],
+                "can_supersafe": prev["can_supersafe"] or flags["can_supersafe"],
+                "box_meta": _better_meta(prev.get("box_meta"), flags["box_meta"]),
+                "mono_meta": _better_meta(prev.get("mono_meta"), flags["mono_meta"]),
+                "super_meta": _better_meta(prev.get("super_meta"), flags["super_meta"]),
+            }
+    return result
+
+
+def _pick_package_type(
+    distribution: dict[str, int],
+    availability: dict[str, dict],
+) -> tuple[str, list[str]]:
+    """Pick a single package_type that satisfies as many warehouses as possible.
+
+    Preference order: BOX > MONOPALLET > SUPERSAFE (cheapest acceptance first).
+    Returns (package_type, warnings).
+    """
+    if not distribution:
+        return "BOX", []
+
+    targets = [w for w, q in distribution.items() if q > 0]
+    if not targets:
+        return "BOX", []
+
+    def _all_support(flag_key: str) -> bool:
+        return all(availability.get(w, {}).get(flag_key, False) for w in targets)
+
+    if _all_support("can_box"):
+        return "BOX", []
+    if _all_support("can_monopallet"):
+        return "MONOPALLET", ["WB не принимает короб — упаковка моно-паллетой."]
+    if _all_support("can_supersafe"):
+        return "SUPERSAFE", ["WB принимает только в режиме super-safe."]
+
+    # Mixed — выбираем тип с наибольшим покрытием
+    box_cnt = sum(1 for w in targets if availability.get(w, {}).get("can_box"))
+    mono_cnt = sum(1 for w in targets if availability.get(w, {}).get("can_monopallet"))
+    if mono_cnt >= box_cnt:
+        return "MONOPALLET", ["Часть складов недоступна — выбран MONOPALLET, лишний qty будет перераспределён."]
+    return "BOX", ["Часть складов недоступна — выбран BOX, лишний qty будет перераспределён."]
+
+
+def _is_open_for(
+    package_type: str,
+    flags: dict | None,
+) -> bool:
+    if not flags:
+        return False
+    if package_type == "BOX":
+        return bool(flags.get("can_box"))
+    if package_type == "MONOPALLET":
+        return bool(flags.get("can_monopallet"))
+    if package_type == "SUPERSAFE":
+        return bool(flags.get("can_supersafe"))
+    return False
+
+
+def _best_package_type_for_wh(flags: dict | None) -> str | None:
+    """Cheapest package_type a single warehouse accepts (BOX > MONO > SUPER).
+
+    Returns None if the warehouse rejects all three types (treated as closed).
+    """
+    if not flags:
+        return None
+    if flags.get("can_box"):
+        return "BOX"
+    if flags.get("can_monopallet"):
+        return "MONOPALLET"
+    if flags.get("can_supersafe"):
+        return "SUPERSAFE"
+    return None
+
+
+def _split_distribution_by_package_type(
+    distribution: dict[str, int],
+    availability: dict[str, dict],
+    *,
+    min_pack: int = 5,
+) -> tuple[list[dict], list[dict]]:
+    """Split a single SKU distribution into per-package-type sub-assemblies.
+
+    Каждая сборка = одна транспортная единица одного типа упаковки. Если разные
+    склады принимают разные типы (Электросталь — только моно, Краснодар — только
+    короб), вместо отбраковки половины складов разносим qty по двум сборкам.
+
+    Алгоритм:
+      1. Для каждого склада в distribution выбираем самый дешёвый из доступных
+         (BOX > MONOPALLET > SUPERSAFE).
+      2. Группируем склады по выбранному типу → splits.
+      3. Закрытые склады (нет ни одного типа) → consolidate в крупнейший
+         открытый ЦФО-склад; их qty присоединяется к split того типа, который
+         этот ЦФО-склад поддерживает.
+      4. После consolidation запускаем `redistribute_blocked_qty` на каждом
+         split — на случай если склад в split'е тоже закрыт для своего типа
+         (не должно происходить, но safety net).
+
+    Returns: (splits, moves) где
+      splits = [{"package_type": "BOX", "distribution": {...}, "warnings": [...]}]
+      moves  = [{"from_warehouse", "to_warehouse", "quantity", "reason"}]
+    """
+    if not distribution:
+        return [], []
+
+    # Шаг 1: каждому складу — лучший доступный тип.
+    by_type: dict[str, dict[str, int]] = defaultdict(dict)
+    closed: list[tuple[str, int]] = []
+    for wh, qty in distribution.items():
+        if qty <= 0:
+            continue
+        pkg = _best_package_type_for_wh(availability.get(wh))
+        if pkg is None:
+            closed.append((wh, qty))
+            continue
+        by_type[pkg][wh] = qty
+
+    # Шаг 2: закрытые → consolidate-to-center (ЦФО), package_type выбирается
+    # по тому, что поддерживает склад-получатель.
+    open_central = [
+        (wh, _best_package_type_for_wh(availability.get(wh)))
+        for wh in availability
+        if warehouse_to_district(wh) == "central" and _best_package_type_for_wh(availability.get(wh)) is not None
+    ]
+    open_globally = [
+        (wh, _best_package_type_for_wh(availability.get(wh)))
+        for wh in availability
+        if _best_package_type_for_wh(availability.get(wh)) is not None
+    ]
+    moves: list[dict] = []
+    if closed:
+        # Получатель — крупнейший по уже накопленному qty в by_type ЦФО-склад
+        def _accumulated(wh: str, pkg: str | None) -> int:
+            if pkg is None:
+                return -1
+            return by_type.get(pkg, {}).get(wh, 0)
+
+        if open_central:
+            dest_wh, dest_pkg = max(
+                open_central,
+                key=lambda t: (_accumulated(t[0], t[1]), t[0]),
+            )
+            reason_default = "consolidated_to_center"
+        elif open_globally:
+            dest_wh, dest_pkg = max(
+                open_globally,
+                key=lambda t: (_accumulated(t[0], t[1]), t[0]),
+            )
+            reason_default = "closed_no_central_open"
+        else:
+            dest_wh, dest_pkg = None, None
+            reason_default = "closed_no_open_anywhere"
+
+        for src, qty in closed:
+            district = warehouse_to_district(src)
+            if dest_wh is not None and dest_pkg is not None:
+                by_type[dest_pkg][dest_wh] = by_type.get(dest_pkg, {}).get(dest_wh, 0) + qty
+                reason = "closed_in_district" if district == "central" else reason_default
+            else:
+                reason = reason_default
+            moves.append(
+                {
+                    "from_warehouse": src,
+                    "to_warehouse": dest_wh,
+                    "quantity": qty,
+                    "reason": reason,
+                }
+            )
+
+    # Шаг 3: формируем splits + post-pass min_pack для ЦФО на каждом
+    splits: list[dict] = []
+    for pkg in ("BOX", "MONOPALLET", "SUPERSAFE"):
+        dist = by_type.get(pkg)
+        if not dist:
+            continue
+        new_dist, sub_moves = redistribute_blocked_qty(
+            dist,
+            availability,
+            pkg,
+            min_pack=min_pack,
+        )
+        # Накапливаем move'ы из под-redistribute (обычно пусто — это safety-net)
+        moves.extend(sub_moves)
+        warnings: list[str] = []
+        if pkg == "MONOPALLET":
+            warnings.append("Часть складов принимает только моно-паллетой.")
+        elif pkg == "SUPERSAFE":
+            warnings.append("Часть складов принимает только super-safe.")
+        splits.append(
+            {
+                "package_type": pkg,
+                "distribution": new_dist,
+                "warnings": warnings,
+            }
+        )
+
+    return splits, moves
+
+
+def redistribute_blocked_qty(
+    distribution: dict[str, int],
+    availability: dict[str, dict],
+    package_type: str,
+    *,
+    mode: str = "consolidate_to_center",
+    min_pack: int = 5,
+) -> tuple[dict[str, int], list[dict]]:
+    """Move qty away from warehouses that don't accept this package_type.
+
+    Modes:
+      "consolidate_to_center" (default): qty закрытого склада идёт в крупнейший
+        открытый склад **Центрального ФО** (Электросталь). Идея — заказы
+        покупателей из недоступного региона WB всё равно повезёт из Москвы,
+        поэтому туда и кладём товар. Бонус: на Центре скапливается больше qty,
+        и внутри ЦФО разлёт по 3 складам становится возможным (min_pack pool).
+
+      "spread_in_district": qty уходит в крупнейший открытый склад **того же ФО**
+        (Невинномысск для Юга и т.д.). Географически локальнее, но если соседний
+        склад в реальности WB-логистики не покрывает регион закрытого — товар
+        останется лежать.
+
+    Fallback в обоих режимах: если в нужной зоне нет открытых складов — берём
+    крупнейший открытый globally. Совсем нет открытых → drop с to=None.
+
+    Returns (new_distribution, moves).
+    """
+    if not distribution:
+        return {}, []
+
+    # Все известные склады — из distribution + из availability (даже если в
+    # distribution=0). Это даёт полный набор кандидатов для перенаправления.
+    all_known = set(distribution.keys()) | set(availability.keys())
+    open_set = {w for w in all_known if _is_open_for(package_type, availability.get(w))}
+    closed = [(w, q) for w, q in distribution.items() if w not in open_set and q > 0]
+
+    new_dist = {w: q for w, q in distribution.items() if w in open_set}
+    moves: list[dict] = []
+
+    # Indexed by district for O(1) destination lookup
+    open_by_district: dict[str, list[str]] = defaultdict(list)
+    for w in open_set:
+        open_by_district[warehouse_to_district(w)].append(w)
+
+    open_globally = sorted(open_set, key=lambda w: -new_dist.get(w, 0))
+
+    # Для consolidate_to_center нам нужны открытые склады ЦФО (central).
+    # Если их нет — fallback на open_globally.
+    central_open = open_by_district.get("central", [])
+
+    for src, qty in closed:
+        district = warehouse_to_district(src)
+        if mode == "consolidate_to_center":
+            # Все закрытые → в крупнейший открытый склад ЦФО (Электросталь).
+            # Если ЦФО закрыт — fallback на open_globally.
+            if central_open:
+                dest = max(central_open, key=lambda w: (new_dist.get(w, 0), w))
+                reason = "consolidated_to_center" if district != "central" else "closed_in_district"
+            elif open_globally:
+                dest = open_globally[0]
+                reason = "closed_no_central_open"
+            else:
+                dest = None
+                reason = "closed_no_open_anywhere"
+            if dest is not None:
+                new_dist[dest] = new_dist.get(dest, 0) + qty
+            moves.append(
+                {
+                    "from_warehouse": src,
+                    "to_warehouse": dest,
+                    "quantity": qty,
+                    "reason": reason,
+                }
+            )
+            continue
+
+        # mode == "spread_in_district"
+        candidates = open_by_district.get(district, [])
+        if candidates:
+            # Сначала склад с уже большим qty (концентрация),
+            # при равенстве — стабильный порядок по имени.
+            dest = max(candidates, key=lambda w: (new_dist.get(w, 0), w))
+            reason = "closed_in_district"
+        elif open_globally:
+            dest = open_globally[0]
+            reason = "closed_no_open_in_district"
+        else:
+            dest = None
+            reason = "closed_no_open_anywhere"
+
+        if dest is not None:
+            new_dist[dest] = new_dist.get(dest, 0) + qty
+        moves.append(
+            {
+                "from_warehouse": src,
+                "to_warehouse": dest,
+                "quantity": qty,
+                "reason": reason,
+            }
+        )
+
+    # Post-pass для consolidate_to_center: если из закрытых складов qty уехал
+    # в один центральный склад и скопилось много (≥ min_pack × N_открытых_ЦФО) —
+    # разносим равномерно между ВСЕМИ открытыми складами ЦФО. Только если
+    # реально что-то консолидировали (есть moves в central) — иначе исходное
+    # распределение не трогаем.
+    consolidated_amount = sum(
+        m["quantity"] for m in moves if m["reason"] == "consolidated_to_center" and m["to_warehouse"] is not None
+    )
+    if mode == "consolidate_to_center" and consolidated_amount > 0 and len(central_open) >= 2:
+        # Главный получатель — тот в чей qty шли консолидации.
+        # Среди central_open — тот, у кого после redistribute больше всего.
+        center_main = max(central_open, key=lambda w: new_dist.get(w, 0))
+        center_qty = new_dist.get(center_main, 0)
+        n = len(central_open)
+        if center_qty >= min_pack * n:
+            per_wh = center_qty // n
+            leftover = center_qty - per_wh * n
+            new_dist[center_main] = per_wh + leftover
+            for w in central_open:
+                if w == center_main:
+                    continue
+                new_dist[w] = new_dist.get(w, 0) + per_wh
+
+    return new_dist, moves
+
+
+# ─── async public API ───────────────────────────────────────────────────────
+
+
+def _items_cache_key(project_id: int, items: list[dict]) -> str:
+    """Stable cache key for a batch (independent of dict order)."""
+    canonical = sorted(
+        ((it.get("nm_id"), it.get("barcode"), int(it.get("quantity", 0))) for it in items),
+        key=lambda t: (t[1] or "", t[0] or 0),
+    )
+    h = hashlib.sha1(json.dumps(canonical).encode(), usedforsecurity=False).hexdigest()[:16]
+    return f"wb:acceptance:{project_id}:{h}"
+
+
+async def _load_warehouse_id_map(client: WBApiClient, project_id: int) -> dict[int, str]:
+    """Cached WB warehouseID → name map (TTL 1 hour)."""
+    cache_key = f"wb:acceptance_warehouses:{project_id}"
+    redis = await get_redis() if _redis_client is None else _redis_client
+    if redis is not None:
+        try:
+            cached = await redis.get(cache_key)
+            if cached:
+                return {int(k): v for k, v in json.loads(cached).items()}
+        except Exception as e:  # pragma: no cover — graceful degradation
+            logger.warning("acceptance.cache_get_failed", error=str(e))
+
+    raw = await client.get_fbw_warehouses()
+    mapping = {int(w["ID"]): w["name"] for w in raw if w.get("ID") and w.get("name")}
+
+    if redis is not None:
+        try:
+            await redis.setex(
+                cache_key,
+                WAREHOUSE_NAMES_CACHE_TTL,
+                json.dumps({str(k): v for k, v in mapping.items()}),
+            )
+        except Exception as e:  # pragma: no cover
+            logger.warning("acceptance.cache_set_failed", error=str(e))
+
+    return mapping
+
+
+async def _load_coefficients(
+    client: WBApiClient,
+    project_id: int,
+    *,
+    force: bool = False,
+) -> list[dict]:
+    """Cached acceptance coefficients (TTL 1h, WB обновляется ~раз в день).
+
+    Returns raw list. Если ключ без scope «Поставки» / 401 / network fail —
+    возвращает [] (graceful degradation: в таком случае фильтр по free_days
+    не применяется — система ведёт себя как до coefficients-фичи).
+    """
+    cache_key = f"wb:acceptance_coefficients:{project_id}"
+    redis = await get_redis() if _redis_client is None else _redis_client
+    if redis is not None and not force:
+        try:
+            cached = await redis.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception as e:  # pragma: no cover
+            logger.warning("acceptance.coef_cache_get_failed", error=str(e))
+
+    try:
+        raw = await client.get_acceptance_coefficients()
+    except Exception as e:
+        logger.warning("acceptance.coef_fetch_failed", error=str(e))
+        return []
+
+    if redis is not None and raw:
+        try:
+            await redis.setex(cache_key, COEFFICIENTS_CACHE_TTL, json.dumps(raw))
+        except Exception as e:  # pragma: no cover
+            logger.warning("acceptance.coef_cache_set_failed", error=str(e))
+    return raw
+
+
+async def check_acceptance_and_redistribute(
+    db: AsyncSession,
+    project_id: int,
+    items: list[dict],
+    force: bool = False,
+) -> dict:
+    """Main entrypoint — used by the `/warehouse/acceptance-check` endpoint.
+
+    items: [{"nm_id": int, "barcode": str, "distribution": {wh_name: qty}}, ...]
+
+    Returns: {
+      "items": [{nm_id, barcode, availability: {wh: flags},
+                  package_type, distribution (post-redistribute), warnings}],
+      "moves": [{nm_id, barcode, from_warehouse, to_warehouse, quantity, reason}],
+      "checked_at": ISO datetime,
+      "cache_hit": bool,
+    }
+    """
+    if not items:
+        return {"items": [], "moves": [], "checked_at": utcnow(), "cache_hit": False}
+
+    # Build payload to WB: only barcodes with non-empty distribution.
+    payload = [
+        {"barcode": it["barcode"], "quantity": max(1, sum(it.get("distribution", {}).values()) or 1)}
+        for it in items
+        if it.get("barcode")
+    ]
+    if not payload:
+        return {"items": [], "moves": [], "checked_at": utcnow(), "cache_hit": False}
+
+    # Cache lookup
+    cache_key = _items_cache_key(
+        project_id,
+        [
+            {
+                "nm_id": it.get("nm_id"),
+                "barcode": it["barcode"],
+                "quantity": sum(it.get("distribution", {}).values()),
+            }
+            for it in items
+        ],
+    )
+    redis = await get_redis() if _redis_client is None else _redis_client
+    cached_raw = None
+    if redis is not None and not force:
+        try:
+            cached_raw = await redis.get(cache_key)
+        except Exception:  # pragma: no cover
+            cached_raw = None
+
+    if cached_raw:
+        cached = json.loads(cached_raw)
+        # Re-apply distribution + redistribute since user might have changed it
+        return _apply_distribution(items, cached["availability_per_barcode"], cache_hit=True)
+
+    # Live WB API call
+    api_key = await get_wb_key(db, project_id, "wb")
+    if not api_key:
+        raise ValueError("WB API key not configured for this project")
+
+    client = WBApiClient(api_key=api_key, project_id=project_id)
+    wh_id_to_name = await _load_warehouse_id_map(client, project_id)
+    raw_coefficients = await _load_coefficients(client, project_id)
+    coefficients_by_canon = _aggregate_coefficients(raw_coefficients, wh_id_to_name)
+    raw = await client.get_acceptance_options(payload)
+
+    availability_per_barcode: dict[str, dict[str, dict]] = {}
+    for entry in raw.get("result", []):
+        bc = entry.get("barcode")
+        if not bc:
+            continue
+        if entry.get("error"):
+            availability_per_barcode[bc] = {}
+            continue
+        availability_per_barcode[bc] = _flags_for_warehouse(
+            entry.get("warehouses") or [],
+            wh_id_to_name,
+            coefficients_by_canon,
+        )
+
+    if redis is not None:
+        try:
+            await redis.setex(
+                cache_key,
+                CACHE_TTL_SECONDS,
+                json.dumps({"availability_per_barcode": availability_per_barcode}),
+            )
+        except Exception as e:  # pragma: no cover
+            logger.warning("acceptance.cache_set_failed", error=str(e))
+
+    return _apply_distribution(items, availability_per_barcode, cache_hit=False)
+
+
+def _apply_distribution(
+    items: list[dict],
+    availability_per_barcode: dict[str, dict[str, dict]],
+    *,
+    cache_hit: bool,
+) -> dict:
+    """Run pure split + redistribute over per-item distributions.
+
+    Каждый SKU может иметь несколько `splits` — отдельные сборки под разные
+    package_type. Например, Электросталь принимает только моно, а Краснодар
+    только короб → split = [BOX→Краснодар, MONOPALLET→Электросталь].
+
+    Для backwards-compat в response есть и единые `package_type`/`distribution`
+    (берутся из крупнейшего по qty split'а).
+    """
+    out_items = []
+    out_moves = []
+    for it in items:
+        nm_id = it.get("nm_id")
+        barcode = it.get("barcode") or ""
+        distribution = dict(it.get("distribution") or {})
+        availability = availability_per_barcode.get(barcode, {})
+
+        if not availability:
+            out_items.append(
+                {
+                    "nm_id": nm_id,
+                    "barcode": barcode,
+                    "availability": {},
+                    "package_type": "BOX",
+                    "distribution": distribution,
+                    "splits": [{"package_type": "BOX", "distribution": distribution, "warnings": []}],
+                    "warnings": ["WB не вернул данные о приёмке для этого баркода (новинка / без карточки)."],
+                }
+            )
+            continue
+
+        splits, moves = _split_distribution_by_package_type(distribution, availability)
+
+        for m in moves:
+            out_moves.append(
+                {
+                    "nm_id": nm_id,
+                    "barcode": barcode,
+                    **m,
+                }
+            )
+
+        item_warnings: list[str] = []
+        if any(m["to_warehouse"] is None for m in moves):
+            item_warnings.append("Не нашли открытый WB-склад — qty закрытых складов вычеркнут.")
+        for s in splits:
+            for w in s.get("warnings") or []:
+                if w not in item_warnings:
+                    item_warnings.append(w)
+
+        # Backward-compat: package_type / distribution берём от крупнейшего split'а
+        if splits:
+            primary = max(splits, key=lambda s: sum(s["distribution"].values()))
+            primary_pkg = primary["package_type"]
+            primary_dist = primary["distribution"]
+        else:
+            primary_pkg = "BOX"
+            primary_dist = {}
+
+        # Strip flags to schema shape (включая meta из coefficients)
+        def _meta_to_schema(m: dict | None) -> dict | None:
+            if not m:
+                return None
+            return {
+                "free_days_14": m.get("free_days_14", 0),
+                "paid_days_14": m.get("paid_days_14", 0),
+                "min_coefficient": m.get("min_coefficient"),
+            }
+
+        avail_schema = {
+            wh: {
+                "warehouse_id": flags["warehouse_id"],
+                "can_box": flags["can_box"],
+                "can_monopallet": flags["can_monopallet"],
+                "can_supersafe": flags["can_supersafe"],
+                "box_meta": _meta_to_schema(flags.get("box_meta")),
+                "mono_meta": _meta_to_schema(flags.get("mono_meta")),
+                "super_meta": _meta_to_schema(flags.get("super_meta")),
+            }
+            for wh, flags in availability.items()
+        }
+
+        out_items.append(
+            {
+                "nm_id": nm_id,
+                "barcode": barcode,
+                "availability": avail_schema,
+                "package_type": primary_pkg,
+                "distribution": primary_dist,
+                "splits": splits,
+                "warnings": item_warnings,
+            }
+        )
+
+    return {
+        "items": out_items,
+        "moves": out_moves,
+        "checked_at": utcnow(),
+        "cache_hit": cache_hit,
+    }
+
+
+__all__ = [
+    "check_acceptance_and_redistribute",
+    "redistribute_blocked_qty",
+    "_pick_package_type",
+    "_flags_for_warehouse",
+]

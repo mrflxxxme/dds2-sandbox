@@ -310,10 +310,13 @@ def distribute_multi(
 
     Шаги:
     1. Сырое распределение по ФО (округление вниз), остаток крупнейшему ФО.
-    2. Pool: ФО с qty < min_pack отдают свои штуки крупнейшему ФО.
+    2. Bump-up: ФО с 0 < qty < min_pack поднимаются до min_pack за счёт
+       крупнейшего ФО (но biggest не должен упасть ниже min_pack). Это даёт
+       равномерное географическое покрытие — мелкие ФО тоже получают партию.
     3. Внутри округа qty делится между складами пропорционально их трафику;
-       остаток от округлений — крупнейшему складу округа;
-       склады с qty < min_pack пуляются в крупнейший склад того же округа.
+       остаток от округлений — крупнейшему складу округа.
+       Если в округе qty достаточно (>= min_pack × N_складов) — малые склады
+       тоже bump-ятся до min_pack за счёт biggest_wh; иначе всё в biggest_wh.
     4. Если в округе нет складов в bench — pool в крупнейший склад крупнейшего ФО.
     """
     skip = skip_districts if skip_districts is not None else set(_SKIP_DISTRICTS_DEFAULT)
@@ -332,22 +335,28 @@ def distribute_multi(
         biggest = max(raw, key=lambda k: district_share.get(k, 0))
         raw[biggest] += leftover
 
-    pooled: dict[str, int] = {}
-    pool_sum = 0
-    biggest = max(raw, key=lambda k: district_share.get(k, 0))
-    for district, qty in raw.items():
-        if qty < min_pack and district != biggest:
-            pool_sum += qty
-        else:
-            pooled[district] = qty
-    if pool_sum > 0:
-        pooled[biggest] = pooled.get(biggest, 0) + pool_sum
+    # Bump-up: округа с qty < min_pack поднимаем до min_pack за счёт biggest.
+    # Идём в порядке убывания доли — крупные ФО bump-аются первыми (приоритет
+    # географического покрытия). Стоп когда biggest не может отдать (упадёт
+    # ниже min_pack). Округа с qty=0 (доля × total < 1) — пропускаем (нет
+    # «адреса» откуда брать товар; они и так пустые).
+    biggest_d = max(raw, key=lambda k: district_share.get(k, 0))
+    for d in sorted(raw.keys(), key=lambda k: -district_share.get(k, 0)):
+        if d == biggest_d:
+            continue
+        if 0 < raw[d] < min_pack:
+            need = min_pack - raw[d]
+            if raw[biggest_d] - need >= min_pack:
+                raw[biggest_d] -= need
+                raw[d] = min_pack
 
     by_warehouse: dict[str, int] = {}
-    for district, qty in pooled.items():
+    for district, qty in raw.items():
+        if qty <= 0:
+            continue
         warehouses = wh_per_district.get(district)
         if not warehouses:
-            for fallback_d in sorted(pooled, key=lambda k: -district_share.get(k, 0)):
+            for fallback_d in sorted(raw, key=lambda k: -district_share.get(k, 0)):
                 fb_whs = wh_per_district.get(fallback_d)
                 if fb_whs:
                     fb_wh = fb_whs[0][0]
@@ -362,13 +371,28 @@ def distribute_multi(
         wh_leftover = qty - sum(wh_raw.values())
         if wh_leftover > 0:
             wh_raw[biggest_wh] = wh_raw.get(biggest_wh, 0) + wh_leftover
-        wh_pool = 0
-        for wh, q in list(wh_raw.items()):
-            if q < min_pack and wh != biggest_wh:
-                wh_pool += q
-                wh_raw[wh] = 0
-        if wh_pool > 0:
-            wh_raw[biggest_wh] = wh_raw.get(biggest_wh, 0) + wh_pool
+
+        # Складов внутри округа bump-аем до min_pack по той же схеме,
+        # но только если суммарного qty достаточно: иначе всё в biggest_wh.
+        if qty >= min_pack * len(warehouses):
+            for wh in sorted(wh_raw.keys(), key=lambda w: -dict(warehouses).get(w, 0)):
+                if wh == biggest_wh:
+                    continue
+                if 0 < wh_raw[wh] < min_pack:
+                    need = min_pack - wh_raw[wh]
+                    if wh_raw[biggest_wh] - need >= min_pack:
+                        wh_raw[biggest_wh] -= need
+                        wh_raw[wh] = min_pack
+        else:
+            # Не хватает на bump — все мелкие → biggest_wh
+            wh_pool = 0
+            for wh, q in list(wh_raw.items()):
+                if q < min_pack and wh != biggest_wh:
+                    wh_pool += q
+                    wh_raw[wh] = 0
+            if wh_pool > 0:
+                wh_raw[biggest_wh] = wh_raw.get(biggest_wh, 0) + wh_pool
+
         for wh, q in wh_raw.items():
             if q > 0:
                 by_warehouse[wh] = by_warehouse.get(wh, 0) + q
@@ -517,6 +541,7 @@ async def fetch_cold_start_segment(db: AsyncSession, project_id: int) -> list[di
                n.article_seller,
                n.subject,
                n.brand,
+               n.barcode,
                n.first_sale_date,
                COALESCE(
                  (SELECT SUM(ws.quantity) FROM warehouse_stock ws
@@ -583,6 +608,7 @@ async def fetch_cold_start_segment(db: AsyncSession, project_id: int) -> list[di
                 "article_seller": r["article_seller"],
                 "subject": r["subject"],
                 "brand": r["brand"],
+                "barcode": r["barcode"] or "",
                 "rf_qty": rf,
                 "wb_qty": wb,
                 "asm_qty": asm,
@@ -674,6 +700,7 @@ async def compute_cold_start_table(
                     article_seller=sku["article_seller"],
                     subject=sku["subject"],
                     brand=sku["brand"],
+                    barcode=sku.get("barcode") or None,
                     rf_qty=sku["rf_qty"],
                     wb_qty=sku["wb_qty"],
                     in_assembly_total=sku["asm_qty"],
@@ -699,6 +726,7 @@ async def compute_cold_start_table(
                 article_seller=sku["article_seller"],
                 subject=sku["subject"],
                 brand=sku["brand"],
+                barcode=sku.get("barcode") or None,
                 rf_qty=sku["rf_qty"],
                 wb_qty=sku["wb_qty"],
                 in_assembly_total=sku["asm_qty"],

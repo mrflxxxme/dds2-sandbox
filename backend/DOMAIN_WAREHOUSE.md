@@ -178,6 +178,38 @@ DEFECT_TRANSFER:  через StockTransfer.is_defect=True, DRAFT → IN_TRANSIT 
 - Base URL: `https://marketplace-api.wildberries.ru`
 - Авторизация: IntegrationKey service="wb"
 
+## WB Acceptance Check (Проверка приёмки складами)
+
+`POST /warehouse/acceptance-check` (см. `routers/warehouse.py`,
+`services/warehouse_acceptance_service.py`).
+
+**Что делает:** для каждого SKU + его планируемого распределения по WB-складам
+дёргает `POST https://supplies-api.wildberries.ru/api/v1/acceptance/options`
+и возвращает per-(barcode, warehouse) флаги `can_box / can_monopallet /
+can_supersafe`. Затем для каждого SKU выбирает один `package_type` (BOX
+предпочтительнее MONOPALLET, далее SUPERSAFE) и **автоматически
+перераспределяет** qty с закрытых для этого типа складов на ближайший
+открытый в том же федеральном округе (через `warehouse_to_district`).
+
+**Запрос/ответ:** см. `schemas/warehouse.py::AcceptanceCheckRequest /
+AcceptanceCheckResponse`.
+
+**Кэш:**
+- `wb:acceptance:{project_id}:{items_hash}` — 5 мин (WB rate-limit 6 req/min).
+- `wb:acceptance_warehouses:{project_id}` — 1 час (warehouseID→name стабильны).
+
+**Ограничения:**
+- WB не возвращает `error` для нового баркода / без карточки → SKU помечается
+  warning'ом «WB не вернул данные» и в матрице остаётся как есть (без бейджей).
+- Тип упаковки выбирается per-SKU, не per-warehouse: если из 5 складов 3 берут
+  коробом и 2 — только моно, выбирается `MONOPALLET` для всего SKU + warning
+  «часть складов недоступна» (моно-аккейпт обычно шире).
+
+**UI:** кнопка «📦 Проверить приёмку WB» на странице `/warehouse/analytics`.
+После клика клетки матрицы получают бейджи 📦/📐/🔒/⛔ и зачёркнутый qty в
+закрытых клетках. При создании сборки `package_type` пишется в
+`AssemblyRequest.package_type` — одна заявка = одна транспортная единица.
+
 ### Синхронизация
 - **Автоматическая:** каждый 1 час (scheduler job)
 - **Ручная полная:** POST /sync — все поставки + async enrichment

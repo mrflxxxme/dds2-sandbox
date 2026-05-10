@@ -97,6 +97,7 @@ class ColdStartTableRow(BaseModel):
     article_seller: str | None = None
     subject: str | None = None
     brand: str | None = None
+    barcode: str | None = None  # representative barcode для WB acceptance/options
     rf_qty: int
     wb_qty: int
     in_assembly_total: int

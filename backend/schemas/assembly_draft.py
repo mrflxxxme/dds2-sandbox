@@ -6,8 +6,11 @@ WB target warehouses) before committing it as N AssemblyRequests.
 """
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+PackageTypeStr = Literal["BOX", "MONOPALLET", "SUPERSAFE"]
 
 
 class AssemblyDraftRow(BaseModel):
@@ -18,6 +21,10 @@ class AssemblyDraftRow(BaseModel):
     vendor_code: str = ""
     src: dict[str, int] = Field(default_factory=dict)  # warehouse_id (str) -> qty
     tgt: dict[str, int] = Field(default_factory=dict)  # wb_warehouse_name -> qty
+    # Per-SKU acceptance package type (set by /warehouse/acceptance-check).
+    # Drives grouping into AssemblyRequests on commit_draft —
+    # one request per (source_ff, target_wb, package_type).
+    package_type: PackageTypeStr = "BOX"
 
 
 class AssemblyDraftDistribution(BaseModel):

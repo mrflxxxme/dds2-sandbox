@@ -237,6 +237,33 @@ async def get_warehouse_need(
     for _wh, nm in wh_orders_map:
         all_nm_ids.add(nm)
 
+    # SKU с RF-стоком, но без WbWarehouseStock и orders — это новинки. Они
+    # должны попасть в общий ответ, чтобы пользователь видел их в основной
+    # таблице с разбивкой по ФФ-складам, а не только в отдельной cold-start
+    # карточке. Distribution по WB-складам для них считается на стороне
+    # frontend через cold-start allocations (есть в /reports/cold_start_table).
+    rf_only_result = await db.execute(
+        select(Nomenclature.article_wb, Nomenclature.article_seller, Nomenclature.brand, Nomenclature.subject)
+        .join(WarehouseStock, WarehouseStock.nomenclature_id == Nomenclature.id)
+        .where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.article_wb.isnot(None),
+            WarehouseStock.project_id == project_id,
+            WarehouseStock.quantity > 0,
+        )
+        .group_by(Nomenclature.article_wb, Nomenclature.article_seller, Nomenclature.brand, Nomenclature.subject)
+    )
+    for r in rf_only_result:  # type: ignore[assignment]
+        if r.article_wb is None:
+            continue
+        all_nm_ids.add(r.article_wb)
+        if r.article_wb not in vendor_map and r.article_seller:
+            vendor_map[r.article_wb] = r.article_seller
+        if r.article_wb not in brand_map and r.brand:
+            brand_map[r.article_wb] = r.brand
+        if r.article_wb not in subject_map and r.subject:
+            subject_map[r.article_wb] = r.subject
+
     # WB stock totals per nm_id — нужно ДО district-pooling и only_available
     # блоков, которые суммируют общий WB-сток для total_need_global.
     wb_stock_total: dict[int, int] = {}

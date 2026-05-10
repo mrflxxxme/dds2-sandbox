@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF002, RUF003
 """
 Warehouse schemas: request/response models for warehouse module.
 """
@@ -350,3 +351,102 @@ class DeliveryTimesResponse(BaseModel):
     assembly_days: int
     wb_acceptance_days: int
     wb_warehouses: list[DeliveryTimeRow]
+
+
+# ─── WB Acceptance Check (POST /warehouse/acceptance-check) ─────────────────
+
+
+class AcceptanceCheckItemRequest(BaseModel):
+    """Single SKU + its current planned distribution per WB warehouse."""
+
+    nm_id: int
+    barcode: str
+    distribution: dict[str, int]  # {wb_warehouse_name: qty}
+
+
+class AcceptanceCheckRequest(BaseModel):
+    """Body for POST /warehouse/acceptance-check.
+
+    Caller passes the article's barcode, total qty, and the planned per-WB
+    distribution. We call WB API once for all barcodes, then redistribute
+    qty away from closed warehouses (gео-aware via warehouse_district).
+    """
+
+    items: list[AcceptanceCheckItemRequest]
+
+
+class AcceptanceCoefMeta(BaseModel):
+    """Coefficients aggregate for one (warehouse, package_type) на ближайшие 14 дней.
+
+    free_days_14   — coefficient ∈ {0, 1} И allowUnload=true (бесплатно)
+    paid_days_14   — coefficient ≥ 2 И allowUnload=true (платно × min_coefficient)
+    min_coefficient — лучший коэф среди allowUnload=true дней (None если все закрыты)
+    """
+
+    free_days_14: int = 0
+    paid_days_14: int = 0
+    min_coefficient: int | None = None
+
+
+class AcceptanceFlags(BaseModel):
+    """Per-(barcode, wb_warehouse) acceptance flags from WB API.
+
+    can_box / can_monopallet / can_supersafe — итоговый «можно сдать»:
+    options.canX = True И (нет coefficients-данных ИЛИ есть хотя бы 1 free_day).
+    *_meta — детализация per-type для UI tooltip («свободно N из 14 дней»).
+    """
+
+    warehouse_id: int
+    can_box: bool
+    can_monopallet: bool
+    can_supersafe: bool
+    box_meta: AcceptanceCoefMeta | None = None
+    mono_meta: AcceptanceCoefMeta | None = None
+    super_meta: AcceptanceCoefMeta | None = None
+
+
+class RedistributionMove(BaseModel):
+    """One redistribution step: qty moved from a closed wh to an open one."""
+
+    nm_id: int
+    barcode: str
+    from_warehouse: str
+    to_warehouse: str | None  # None = no destination found, qty dropped
+    quantity: int
+    reason: str  # e.g. "closed", "box-only-required" etc.
+
+
+class AcceptanceCheckSplit(BaseModel):
+    """One sub-assembly: warehouses that share a single package_type.
+
+    Каждый split = одна транспортная единица (одна `AssemblyRequest`).
+    Если разные склады принимают разные типы упаковки (Электросталь — только
+    моно, Краснодар — только короб), вместо отбраковки половины складов
+    создаются 2 split'а с разным `package_type`.
+    """
+
+    package_type: str  # BOX | MONOPALLET | SUPERSAFE
+    distribution: dict[str, int]
+    warnings: list[str] = []
+
+
+class AcceptanceCheckPerItem(BaseModel):
+    """Per-SKU result with availability flags + chosen package_type."""
+
+    nm_id: int
+    barcode: str
+    # {wb_warehouse_name: {warehouse_id, can_box, can_monopallet, can_supersafe}}
+    availability: dict[str, AcceptanceFlags]
+    package_type: str  # BOX | MONOPALLET | SUPERSAFE — primary (largest by qty) split
+    distribution: dict[str, int]  # primary split distribution (backward-compat)
+    splits: list[AcceptanceCheckSplit] = []  # all sub-assemblies (one per package_type)
+    warnings: list[str] = []
+
+
+class AcceptanceCheckResponse(BaseModel):
+    """Response for POST /warehouse/acceptance-check."""
+
+    items: list[AcceptanceCheckPerItem]
+    moves: list[RedistributionMove]
+    checked_at: datetime
+    cache_hit: bool = False

@@ -493,6 +493,14 @@ const ru: TranslationDict = {
     vehicle_items_confirm_bulk_delete: 'Удалить {count} позиций из машины?',
     vehicle_items_confirm_bulk_delete_post_shipment: 'Удалить {count} позиций из машины (статус {status})? qty вернётся в фабричный заказ, стоимость пересчитается. Продолжить?',
     vehicle_items_bulk_delete_partial: 'Часть позиций не удалось удалить:',
+    // ── Barcode grouping (несколько FOI на один баркод) ──
+    vdetail_group_expand: 'Раскрыть источники',
+    vdetail_group_collapse: 'Свернуть',
+    vdetail_group_sources: 'источника',
+    vdetail_group_sources_tooltip: 'Несколько строк фабричного заказа с этим баркодом. Раскройте чтобы увидеть разбивку.',
+    vdetail_group_mixed: 'разные',
+    vdetail_group_from_fo: 'из ФЗ',
+    vehicle_items_confirm_delete_group: 'Удалить ВСЕ {count} позиции с этим баркодом из машины?',
 };
 
 const zh: TranslationDict = {
@@ -978,6 +986,14 @@ const zh: TranslationDict = {
     vehicle_items_confirm_bulk_delete: '从车辆中删除 {count} 个货物?',
     vehicle_items_confirm_bulk_delete_post_shipment: '从车辆中删除 {count} 个货物 (状态 {status})? 数量将返回工厂订单，成本将重新计算。继续？',
     vehicle_items_bulk_delete_partial: '部分货物删除失败:',
+    // ── Barcode grouping ──
+    vdetail_group_expand: '展开来源',
+    vdetail_group_collapse: '折叠',
+    vdetail_group_sources: '来源',
+    vdetail_group_sources_tooltip: '同一条码对应多个工厂订单行。展开查看明细。',
+    vdetail_group_mixed: '不同',
+    vdetail_group_from_fo: '来自',
+    vehicle_items_confirm_delete_group: '确定删除该条码的全部 {count} 行？',
 };
 
 const translations: Record<Lang, TranslationDict> = { ru, zh };

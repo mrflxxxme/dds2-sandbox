@@ -9,6 +9,8 @@ from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.warehouse import (
+    AcceptanceCheckRequest,
+    AcceptanceCheckResponse,
     CostPriceUpdate,
     DefectBulkOperation,
     DefectBulkResponse,
@@ -32,7 +34,7 @@ from backend.schemas.warehouse import (
     WarehouseStockSchema,
     WarehouseUpdate,
 )
-from backend.services import warehouse_defect, warehouse_service
+from backend.services import warehouse_acceptance_service, warehouse_defect, warehouse_service
 from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/warehouse", tags=["Warehouse"])
@@ -127,6 +129,40 @@ async def delete_warehouse(
     if not deleted:
         raise HTTPException(404, "Warehouse not found")
     return {"ok": True}
+
+
+# ─── WB Acceptance Check (Проверка приёмки) ────────────────────────────────
+
+
+@router.post(
+    "/acceptance-check",
+    response_model=AcceptanceCheckResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def check_wb_acceptance(
+    body: AcceptanceCheckRequest,
+    force: bool = Query(False, description="Skip Redis cache and call WB API live"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Live WB acceptance/options check + per-SKU redistribute.
+
+    For each {nm_id, barcode, distribution} we ask WB which warehouses accept
+    the SKU (canBox/canMonopallet/canSupersafe), pick a single package_type
+    per SKU, and move qty away from closed warehouses to the largest open
+    warehouse in the same федеральный округ. Cached 5 минут (WB rate limit
+    6 req/min). Pass `force=true` to bypass cache (UI «🔄 Обновить»).
+    """
+    items = [it.model_dump() for it in body.items]
+    try:
+        return await warehouse_acceptance_service.check_acceptance_and_redistribute(
+            db,
+            project.id,
+            items,
+            force=force,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 # ─── Delivery Times (Время доставки до WB) ────────────────────────────────

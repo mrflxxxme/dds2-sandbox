@@ -46,6 +46,23 @@ class AssemblyStatus(enum.StrEnum):
     CANCELLED = "CANCELLED"
 
 
+class PackageType(enum.StrEnum):
+    """Package type for WB FBO acceptance.
+
+    Mapped 1:1 to WB acceptance/options flags:
+      BOX        ← canBox=true
+      MONOPALLET ← canMonopallet=true
+      SUPERSAFE  ← canSupersafe=true (rare; high-value categories)
+
+    One AssemblyRequest = one transport unit = one PackageType. Mixing types
+    in a single request is not allowed at the WB acceptance gate.
+    """
+
+    BOX = "BOX"
+    MONOPALLET = "MONOPALLET"
+    SUPERSAFE = "SUPERSAFE"
+
+
 # Allowed status transitions (from → set of valid next statuses)
 ASSEMBLY_TRANSITIONS: dict[AssemblyStatus, set[AssemblyStatus]] = {
     AssemblyStatus.PENDING: {AssemblyStatus.IN_PROGRESS, AssemblyStatus.CANCELLED},
@@ -110,6 +127,16 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
 
     # Manual WB warehouse name (used when no FBO supply is linked)
     wb_warehouse_name_manual: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    # WB acceptance package type — defines the transport unit for this request.
+    # Set when the request is built (default BOX; switched to MONOPALLET when
+    # WB acceptance/options says canBox=false but canMonopallet=true).
+    package_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=PackageType.BOX.value,
+        server_default=PackageType.BOX.value,
+    )
 
     # ─── Relationships ──────────────────────────────────────────────────
 

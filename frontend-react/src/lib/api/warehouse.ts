@@ -1,6 +1,8 @@
 /** Warehouse API methods */
 import { ApiClient } from './client';
 import type {
+    AcceptanceCheckRequest,
+    AcceptanceCheckResponse,
     AssemblyDraft,
     AssemblyDraftCommitResponse,
     AssemblyDraftCreate,
@@ -56,6 +58,15 @@ export function addWarehouseMethods(api: ApiClient) {
         deleteWarehouse(id: number) { return api.request<MessageResponse>('DELETE', `/api/v1/warehouse/${id}`); },
         reorderWarehouses(items: { id: number; sort_order: number }[]) {
             return api.request<MessageResponse>('PUT', '/api/v1/warehouse/reorder', { items });
+        },
+
+        // ─── WB Acceptance check ─────────────────────────────────────
+        /** POST /warehouse/acceptance-check — live WB API check + redistribute closed warehouses. */
+        checkWbAcceptance(body: AcceptanceCheckRequest, force = false) {
+            const url = force
+                ? '/api/v1/warehouse/acceptance-check?force=true'
+                : '/api/v1/warehouse/acceptance-check';
+            return api.request<AcceptanceCheckResponse>('POST', url, body);
         },
 
         // ─── Stock ───────────────────────────────────────────────────
