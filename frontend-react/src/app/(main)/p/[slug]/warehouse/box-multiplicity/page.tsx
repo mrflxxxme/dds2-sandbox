@@ -892,20 +892,25 @@ export default function BoxMultiplicityPage() {
                 const sku = rows.find(r => r.nm_id === perRfPopover.nmId);
                 if (!sku) return null;
 
-                // Расчёт позиции: показываем под кнопкой; если выходит за низ
-                // экрана — над кнопкой. Поповер ширины 540px, центрируем по
-                // anchor если влезает, иначе прижимаем к правому краю viewport.
-                const POPOVER_W = 540;
-                const POPOVER_MAX_H = 480;
+                // Dropdown: открываем строго под trigger-кнопкой, выровнено
+                // по её левому краю. Ширина 420px (или ширина кнопки если шире).
+                // Если справа не влезает — выравниваем по правому краю кнопки.
+                // Если снизу не влезает — flip вверх.
                 const a = perRfPopover.anchor;
+                const POPOVER_W = Math.max(420, a.width);
+                const POPOVER_MAX_H = 360;
                 const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
                 const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
                 let left = a.left;
-                if (left + POPOVER_W + 16 > vw) left = Math.max(8, vw - POPOVER_W - 16);
-                let top = a.top + a.height + 6;
-                if (top + POPOVER_MAX_H > vh - 16) {
-                    // открыть вверх
-                    top = Math.max(8, a.top - POPOVER_MAX_H - 6);
+                if (left + POPOVER_W + 8 > vw) {
+                    // выровнять по правому краю кнопки
+                    left = Math.max(8, a.left + a.width - POPOVER_W);
+                }
+                let top = a.top + a.height + 4;
+                let openUp = false;
+                if (top + POPOVER_MAX_H > vh - 8) {
+                    top = Math.max(8, a.top - POPOVER_MAX_H - 4);
+                    openUp = true;
                 }
 
                 return (
@@ -921,9 +926,12 @@ export default function BoxMultiplicityPage() {
                                 position: 'fixed',
                                 top, left,
                                 width: POPOVER_W, maxHeight: POPOVER_MAX_H,
-                                zIndex: 1000, padding: 14,
+                                zIndex: 1000, padding: 12,
                                 overflowY: 'auto',
-                                boxShadow: '0 8px 32px rgba(0,0,0,0.16)',
+                                boxShadow: openUp
+                                    ? '0 -8px 32px rgba(0,0,0,0.16)'
+                                    : '0 8px 32px rgba(0,0,0,0.16)',
+                                border: '1px solid var(--color-border)',
                             }}
                         >
                             <div style={{ marginBottom: 10 }}>
