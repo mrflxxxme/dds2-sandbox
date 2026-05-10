@@ -19,8 +19,8 @@ export default function BoxMultiplicityPage() {
     const [editValue, setEditValue] = useState('');
     const [saving, setSaving] = useState(false);
 
-    // Per-RF expansion state: nm_id → expanded?
-    const [expandedNm, setExpandedNm] = useState<Set<number>>(new Set());
+    // Per-RF dialog: показывает один SKU с полной таблицей по ФФ.
+    const [perRfDialogNm, setPerRfDialogNm] = useState<number | null>(null);
     // Per-RF inline edit: "{nm_id}:{warehouse_id}" → string value
     const [perRfEdit, setPerRfEdit] = useState<Record<string, string>>({});
 
@@ -175,13 +175,14 @@ export default function BoxMultiplicityPage() {
     };
 
     // ─── Per-RF handlers ───────────────────────────────────────────────────
-    const toggleExpand = (nmId: number) => {
-        setExpandedNm(prev => {
-            const next = new Set(prev);
-            if (next.has(nmId)) next.delete(nmId);
-            else next.add(nmId);
-            return next;
-        });
+    const openPerRfDialog = (nmId: number) => {
+        setPerRfDialogNm(nmId);
+        setPerRfEdit({});  // clear pending edits when opening fresh
+    };
+
+    const closePerRfDialog = () => {
+        setPerRfDialogNm(null);
+        setPerRfEdit({});
     };
 
     const savePerRfPpb = async (row: BoxMultiplicityRow, wh: BoxMultiplicityPerWarehouseRow) => {
@@ -505,126 +506,32 @@ export default function BoxMultiplicityPage() {
         {
             key: 'per_warehouse',
             label: 'По ФФ-складам',
-            width: '320px',
+            width: '180px',
+            align: 'center',
             getValue: (r: BoxMultiplicityRow) =>
                 r.per_warehouse.filter(p => p.box_qty !== null).length,
             render: (_v: unknown, r: BoxMultiplicityRow) => {
-                const expanded = expandedNm.has(r.nm_id);
                 const overridesCount = r.per_warehouse.filter(p => p.box_qty !== null).length;
                 const usedOff = r.per_warehouse.filter(p => !p.use_box_multiplicity).length;
-
-                if (!expanded) {
-                    return (
-                        <button
-                            className="btn btn-secondary btn-sm"
-                            onClick={() => toggleExpand(r.nm_id)}
-                            style={{ width: '100%', textAlign: 'left', fontSize: 12 }}
-                        >
-                            ▸ {r.per_warehouse.length} ФФ
-                            {overridesCount > 0 && (
-                                <span style={{ color: 'var(--color-accent)', marginLeft: 6 }}>
-                                    · override: {overridesCount}
-                                </span>
-                            )}
-                            {usedOff > 0 && (
-                                <span style={{ color: 'var(--color-warning)', marginLeft: 6 }}>
-                                    · откл: {usedOff}
-                                </span>
-                            )}
-                        </button>
-                    );
-                }
                 return (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        <button
-                            className="btn btn-secondary btn-sm"
-                            onClick={() => toggleExpand(r.nm_id)}
-                            style={{ fontSize: 12, marginBottom: 4 }}
-                        >▾ Свернуть</button>
-                        {r.per_warehouse.map(wh => {
-                            const editKey = `${r.nm_id}:${wh.warehouse_id}`;
-                            const editVal = perRfEdit[editKey];
-                            const showEdit = editVal !== undefined;
-                            return (
-                                <div
-                                    key={wh.warehouse_id}
-                                    style={{
-                                        display: 'grid', gridTemplateColumns: '1fr auto auto auto',
-                                        alignItems: 'center', gap: 6, fontSize: 12,
-                                        padding: '4px 6px', borderRadius: 6,
-                                        background: 'var(--color-bg)',
-                                    }}
-                                >
-                                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                        {wh.warehouse_name}
-                                        {wh.rf_stock > 0 && (
-                                            <span style={{ color: 'var(--color-success)', marginLeft: 4 }}>
-                                                ({formatNumber(wh.rf_stock)})
-                                            </span>
-                                        )}
-                                    </span>
-                                    {showEdit ? (
-                                        <input
-                                            type="text"
-                                            inputMode="numeric"
-                                            value={editVal}
-                                            onChange={e => setPerRfEdit(p => ({ ...p, [editKey]: e.target.value }))}
-                                            onKeyDown={e => {
-                                                if (e.key === 'Enter') savePerRfPpb(r, wh);
-                                                else if (e.key === 'Escape') {
-                                                    setPerRfEdit(p => {
-                                                        const next = { ...p };
-                                                        delete next[editKey];
-                                                        return next;
-                                                    });
-                                                }
-                                            }}
-                                            placeholder="—"
-                                            autoFocus
-                                            style={{
-                                                width: 60, padding: '2px 6px', fontSize: 12,
-                                                border: '1px solid var(--color-border)', borderRadius: 4,
-                                                textAlign: 'right',
-                                            }}
-                                        />
-                                    ) : (
-                                        <span
-                                            onClick={() => setPerRfEdit(p => ({
-                                                ...p, [editKey]: wh.box_qty !== null ? String(wh.box_qty) : '',
-                                            }))}
-                                            style={{
-                                                cursor: 'pointer', textAlign: 'right',
-                                                color: wh.box_qty !== null ? 'var(--color-accent)' : 'var(--color-text-dim)',
-                                                fontWeight: wh.box_qty !== null ? 600 : 400,
-                                                minWidth: 50, padding: '2px 4px',
-                                            }}
-                                            title={wh.box_qty !== null ? 'Изменить' : 'Задать'}
-                                        >
-                                            {wh.box_qty !== null ? `${wh.box_qty} шт` : '—'}
-                                        </span>
-                                    )}
-                                    {showEdit ? (
-                                        <button
-                                            className="btn btn-success btn-sm"
-                                            onClick={() => savePerRfPpb(r, wh)}
-                                            style={{ padding: '2px 6px' }}
-                                        >✓</button>
-                                    ) : (
-                                        <span style={{ width: 24 }} />
-                                    )}
-                                    <input
-                                        type="checkbox"
-                                        checked={wh.use_box_multiplicity}
-                                        onChange={e => togglePerRfUse(r, wh, e.target.checked)}
-                                        title={wh.use_box_multiplicity
-                                            ? 'Учитывается при сборке с этого ФФ'
-                                            : 'Игнорируется — раздаём без округления'}
-                                        style={{ width: 14, height: 14, cursor: 'pointer' }}
-                                    />
-                                </div>
-                            );
-                        })}
-                    </div>
+                    <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => openPerRfDialog(r.nm_id)}
+                        style={{ fontSize: 12, padding: '4px 10px', minWidth: 140, textAlign: 'left' }}
+                        title="Настроить кратность по каждому ФФ-складу"
+                    >
+                        🛠 {r.per_warehouse.length} ФФ
+                        {overridesCount > 0 && (
+                            <span style={{ color: 'var(--color-accent)', marginLeft: 6 }}>
+                                · {overridesCount} override
+                            </span>
+                        )}
+                        {usedOff > 0 && (
+                            <span style={{ color: 'var(--color-warning)', marginLeft: 6 }}>
+                                · {usedOff} откл
+                            </span>
+                        )}
+                    </button>
                 );
             },
             exportValue: (r: BoxMultiplicityRow) => r.per_warehouse
@@ -960,6 +867,175 @@ export default function BoxMultiplicityPage() {
                     </div>
                 </div>
             )}
+
+            {/* ─── Per-RF dialog ──────────────────────────────────────────── */}
+            {perRfDialogNm !== null && (() => {
+                const sku = rows.find(r => r.nm_id === perRfDialogNm);
+                if (!sku) return null;
+                return (
+                    <div
+                        onClick={closePerRfDialog}
+                        style={{
+                            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            zIndex: 1000, padding: 24,
+                        }}
+                    >
+                        <div
+                            onClick={e => e.stopPropagation()}
+                            className="glass-card"
+                            style={{ maxWidth: 760, width: '100%', maxHeight: '90vh', overflowY: 'auto', padding: 24 }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16, gap: 16 }}>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, wordBreak: 'break-word' }}>
+                                        🛠 Кратность по ФФ — {sku.vendor_code || '—'}
+                                    </h3>
+                                    <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                        nm_id <code>{sku.nm_id}</code> · barcode <code>{sku.barcode}</code> · {sku.brand || '—'} · {sku.subject || '—'}
+                                    </p>
+                                    <p style={{ margin: '8px 0 0', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                        Если задана per-RF кратность — она побеждает SKU-level override при сборке с выбранного ФФ.
+                                        Чекбокс «учитывать» отключает округление для этого конкретного ФФ.
+                                    </p>
+                                </div>
+                                <button className="btn btn-secondary btn-sm" onClick={closePerRfDialog}>✕</button>
+                            </div>
+
+                            <div style={{ overflowX: 'auto' }}>
+                                <table style={{ width: '100%', fontSize: 13 }}>
+                                    <thead>
+                                        <tr style={{ color: 'var(--color-text-muted)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.05 }}>
+                                            <th style={{ textAlign: 'left', padding: '8px 10px' }}>ФФ-склад</th>
+                                            <th style={{ textAlign: 'right', padding: '8px 10px', width: 110 }}>Сток</th>
+                                            <th style={{ textAlign: 'left', padding: '8px 10px', width: 180 }}>Кратность override</th>
+                                            <th style={{ textAlign: 'center', padding: '8px 10px', width: 110 }}>Учитывать</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {sku.per_warehouse.map(wh => {
+                                            const editKey = `${sku.nm_id}:${wh.warehouse_id}`;
+                                            const editVal = perRfEdit[editKey];
+                                            const showEdit = editVal !== undefined;
+                                            return (
+                                                <tr key={wh.warehouse_id} style={{ borderTop: '1px solid var(--color-border)' }}>
+                                                    <td style={{ padding: '10px', fontWeight: 500 }}>{wh.warehouse_name}</td>
+                                                    <td style={{ padding: '10px', textAlign: 'right', color: wh.rf_stock > 0 ? 'var(--color-success)' : 'var(--color-text-dim)' }}>
+                                                        {wh.rf_stock > 0 ? `${formatNumber(wh.rf_stock)} шт` : '—'}
+                                                    </td>
+                                                    <td style={{ padding: '10px' }}>
+                                                        {showEdit ? (
+                                                            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                                                                <input
+                                                                    type="text"
+                                                                    inputMode="numeric"
+                                                                    value={editVal}
+                                                                    onChange={e => setPerRfEdit(p => ({ ...p, [editKey]: e.target.value }))}
+                                                                    onKeyDown={e => {
+                                                                        if (e.key === 'Enter') savePerRfPpb(sku, wh);
+                                                                        else if (e.key === 'Escape') {
+                                                                            setPerRfEdit(p => {
+                                                                                const next = { ...p };
+                                                                                delete next[editKey];
+                                                                                return next;
+                                                                            });
+                                                                        }
+                                                                    }}
+                                                                    placeholder="пусто = очистить"
+                                                                    autoFocus
+                                                                    style={{
+                                                                        flex: 1, padding: '6px 10px', fontSize: 13,
+                                                                        border: '1px solid var(--color-border)', borderRadius: 6,
+                                                                    }}
+                                                                />
+                                                                <button
+                                                                    className="btn btn-success btn-sm"
+                                                                    onClick={() => savePerRfPpb(sku, wh)}
+                                                                    title="Сохранить (Enter)"
+                                                                >✓</button>
+                                                                <button
+                                                                    className="btn btn-secondary btn-sm"
+                                                                    onClick={() => setPerRfEdit(p => {
+                                                                        const next = { ...p };
+                                                                        delete next[editKey];
+                                                                        return next;
+                                                                    })}
+                                                                    title="Отмена (Esc)"
+                                                                >✕</button>
+                                                            </div>
+                                                        ) : (
+                                                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                                                <span
+                                                                    style={{
+                                                                        flex: 1,
+                                                                        color: wh.box_qty !== null ? 'var(--color-accent)' : 'var(--color-text-dim)',
+                                                                        fontWeight: wh.box_qty !== null ? 600 : 400,
+                                                                    }}
+                                                                >
+                                                                    {wh.box_qty !== null ? `${wh.box_qty} шт` : 'не задана'}
+                                                                </span>
+                                                                <button
+                                                                    className="btn btn-secondary btn-sm"
+                                                                    onClick={() => setPerRfEdit(p => ({
+                                                                        ...p, [editKey]: wh.box_qty !== null ? String(wh.box_qty) : '',
+                                                                    }))}
+                                                                    title={wh.box_qty !== null ? 'Изменить' : 'Задать'}
+                                                                >
+                                                                    {wh.box_qty !== null ? '✏️' : '➕'}
+                                                                </button>
+                                                            </div>
+                                                        )}
+                                                    </td>
+                                                    <td style={{ padding: '10px', textAlign: 'center' }}>
+                                                        <label
+                                                            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+                                                            title={wh.use_box_multiplicity
+                                                                ? 'Кратность учитывается при сборке с этого ФФ'
+                                                                : 'Кратность игнорируется — без округления'}
+                                                        >
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={wh.use_box_multiplicity}
+                                                                onChange={e => togglePerRfUse(sku, wh, e.target.checked)}
+                                                                style={{ width: 16, height: 16, cursor: 'pointer' }}
+                                                            />
+                                                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                                                {wh.use_box_multiplicity ? 'да' : 'нет'}
+                                                            </span>
+                                                        </label>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <div style={{
+                                marginTop: 16, padding: '10px 14px', borderRadius: 8,
+                                background: 'var(--color-bg)', fontSize: 12, color: 'var(--color-text-muted)',
+                            }}>
+                                <strong style={{ color: 'var(--color-text)' }}>SKU-level fallback:</strong>{' '}
+                                {sku.box_qty_override !== null
+                                    ? <>ручной override <strong>{sku.box_qty_override} шт</strong></>
+                                    : sku.box_qty_from_vehicle
+                                        ? <>из машины {sku.box_qty_from_vehicle} шт</>
+                                        : sku.box_qty_from_factory
+                                            ? <>из заказа {sku.box_qty_from_factory} шт</>
+                                            : <span style={{ color: 'var(--color-warning)' }}>не задана</span>}
+                                {' · '}
+                                <strong>применяется при сборке</strong>: {sku.effective_box_qty !== null
+                                    ? `${sku.effective_box_qty} шт`
+                                    : '—'}
+                            </div>
+
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
+                                <button className="btn btn-primary btn-sm" onClick={closePerRfDialog}>Готово</button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            })()}
         </div>
     );
 }
