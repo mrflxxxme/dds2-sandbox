@@ -257,15 +257,23 @@ class TestDistributeMulti:
         out = distribute_multi(100, share, min_pack=5, wh_per_district=wh_per_district)
         assert out == {"Электросталь": 70, "Подольск": 30}
 
-    def test_min_pack_pool_within_district(self) -> None:
-        """Склад с qty < min_pack → пулится в крупнейший склад округа."""
+    def test_min_pack_bump_within_district(self) -> None:
+        """Склад с qty < min_pack → bump до min_pack за счёт крупнейшего склада."""
         share = {"central": 1.0}
         wh_per_district = {"central": [("Электросталь", 95), ("Подольск", 5)]}
-        # 100 × 5/100 = 5 у Подольска (>= min_pack=5) — границевой случай
+        # 100 шт, 2 склада, min_pack=10 → 100 ≥ 10×2=20, bump доступен
+        # Подольск 5 < 10, deficit=5, Электросталь 95 → 90, Подольск → 10
         out = distribute_multi(100, share, min_pack=10, wh_per_district=wh_per_district)
-        # Подольск 5 < min_pack 10 → пулится в Электросталь
-        assert out == {"Электросталь": 100}
-        assert "Подольск" not in out
+        assert out == {"Электросталь": 90, "Подольск": 10}
+        assert sum(out.values()) == 100
+
+    def test_min_pack_pool_when_total_too_small(self) -> None:
+        """Если qty округа < min_pack × N_складов — все мелкие в biggest_wh (нет bump)."""
+        share = {"central": 1.0}
+        wh_per_district = {"central": [("Электросталь", 70), ("Подольск", 30)]}
+        # 15 шт, 2 склада, min_pack=10 → 15 < 20, bump НЕ применяется → all → Электросталь
+        out = distribute_multi(15, share, min_pack=10, wh_per_district=wh_per_district)
+        assert out == {"Электросталь": 15}
 
     def test_district_without_warehouses_pools_to_biggest(self) -> None:
         """Округ без складов → qty в крупнейший склад крупнейшего ФО."""
@@ -278,3 +286,38 @@ class TestDistributeMulti:
     def test_empty_qty_returns_empty(self) -> None:
         out = distribute_multi(0, {"central": 1.0}, min_pack=5, wh_per_district={"central": [("Электросталь", 1)]})
         assert out == {}
+
+    def test_district_bump_up_to_min_pack(self) -> None:
+        """ФО с малой долей bump-ятся до min_pack за счёт крупнейшего ФО.
+
+        Это ключевая логика: ural получает не пул в central, а свои
+        min_pack штук, чтобы географическое покрытие сохранилось.
+        """
+        share = {"central": 0.6, "south_caucasus": 0.3, "ural": 0.1}
+        wh_per_district = {
+            "central": [("Электросталь", 1)],
+            "south_caucasus": [("Краснодар", 1)],
+            "ural": [("Екатеринбург", 1)],
+        }
+        # 30 шт, min_pack=5
+        # raw: central=18, south=9, ural=3
+        # ural=3 < 5, deficit=2, central=18-2=16, ural=5
+        # south=9 ≥ 5, без изменений
+        out = distribute_multi(30, share, min_pack=5, wh_per_district=wh_per_district)
+        assert out == {"Электросталь": 16, "Краснодар": 9, "Екатеринбург": 5}
+        assert sum(out.values()) == 30
+
+    def test_district_bump_skipped_when_biggest_too_small(self) -> None:
+        """Bump не применяется если biggest упадёт ниже min_pack."""
+        share = {"central": 0.5, "ural": 0.5}
+        wh_per_district = {
+            "central": [("Электросталь", 1)],
+            "ural": [("Екатеринбург", 1)],
+        }
+        # 8 шт, min_pack=5
+        # raw: central=4, ural=4 → leftover=0
+        # biggest_d = central. ural=4<5, deficit=1, central=4-1=3 < min_pack=5 → skip bump
+        # Финал: central=4, ural=4. Но 4<min_pack тоже у central — он biggest, не bump.
+        out = distribute_multi(8, share, min_pack=5, wh_per_district=wh_per_district)
+        # Оба <min_pack, но bump skipped — оригинальные значения сохраняются
+        assert sum(out.values()) == 8

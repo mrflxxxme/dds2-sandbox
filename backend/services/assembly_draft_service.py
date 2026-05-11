@@ -215,9 +215,10 @@ async def commit_draft(
                 detail=f"Row {row.nm_id}: src sum != tgt sum ({src_sum} != {tgt_sum})",
             )
 
-    # 2. Group items per (source_ff_id, target_wb_name) pair
-    # pair_items[pair] -> {barcode: total_qty}
-    pair_items: dict[tuple[int, str], dict[str, int]] = {}
+    # 2. Group items per (source_ff_id, target_wb_name, package_type) triple.
+    # One AssemblyRequest = one transport unit = one package_type.
+    # pair_items[(src_id, wb_name, pkg)] -> {barcode: total_qty}
+    pair_items: dict[tuple[int, str, str], dict[str, int]] = {}
     for row in distribution.rows:
         if not row.barcode:
             raise HTTPException(
@@ -225,10 +226,11 @@ async def commit_draft(
                 detail=f"Row {row.nm_id}: barcode is required",
             )
         alloc = _allocate_pairs(row.src, row.tgt)
-        for pair, qty in alloc.items():
+        pkg = row.package_type or "BOX"
+        for (src_id, wb_name), qty in alloc.items():
             if qty <= 0:
                 continue
-            bucket = pair_items.setdefault(pair, {})
+            bucket = pair_items.setdefault((src_id, wb_name, pkg), {})
             bucket[row.barcode] = bucket.get(row.barcode, 0) + qty
 
     if not pair_items:
@@ -268,7 +270,7 @@ async def commit_draft(
     # 5. Create AssemblyRequest per pair (atomic — single transaction)
     created_ids: list[int] = []
     try:
-        for (source_ff_id, target_wb_name), barcodes in pair_items.items():
+        for (source_ff_id, target_wb_name, package_type), barcodes in pair_items.items():
             number = await _next_number(db, project_id, "ASM", AssemblyRequest)
 
             assembly_req = AssemblyRequest(
@@ -282,6 +284,7 @@ async def commit_draft(
                 pallets_count=pallets,
                 pallet_weight_kg=pallet_weight,
                 comment=draft.comment,
+                package_type=package_type,
             )
             db.add(assembly_req)
             await db.flush()

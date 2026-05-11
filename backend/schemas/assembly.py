@@ -5,8 +5,11 @@ See backend/DOMAIN_ASSEMBLY.md for full spec.
 
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
+
+PackageTypeStr = Literal["BOX", "MONOPALLET", "SUPERSAFE"]
 
 # ─── Request schemas ────────────────────────────────────────────────────────
 
@@ -24,6 +27,7 @@ class AssemblyRequestCreate(BaseModel):
     pallet_weight_kg: Decimal
     comment: str | None = None
     wb_warehouse_name_manual: str | None = None
+    package_type: PackageTypeStr = "BOX"
     items: list[AssemblyItemCreate]
 
 
@@ -34,6 +38,7 @@ class AssemblyRequestUpdate(BaseModel):
     pallet_weight_kg: Decimal | None = None
     comment: str | None = None
     wb_warehouse_name_manual: str | None = None
+    package_type: PackageTypeStr | None = None
     items: list[AssemblyItemCreate] | None = None  # only PENDING/IN_PROGRESS
     # Vehicle & cost — editable even after shipping
     pickup_cost: Decimal | None = None
@@ -127,6 +132,7 @@ class AssemblyRequestResponse(BaseModel):
     carrier_name: str | None = None
     comment: str | None = None
     wb_warehouse_name_manual: str | None = None
+    package_type: PackageTypeStr = "BOX"
     effective_wb_warehouse: str | None = None  # FBO warehouse_name or manual, whichever is set
     brands: str | None = None  # comma-separated unique brands from items
     items: list[AssemblyItemResponse] = []

@@ -769,12 +769,58 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
     const [categoryFilter, setCategoryFilter] = useState<string>('');
     const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
     const [bulkDeleting, setBulkDeleting] = useState(false);
+    // sc21: одинаковые баркоды без mix-группы (несколько FOI per barcode после paste-split)
+    // показываем как одну сводную строку с раскрытием.
+    const [expandedBarcodes, setExpandedBarcodes] = useState<Set<string>>(new Set());
     const hasCosts = items.some(i => i.total_rub);
 
     // Уникальные категории (subject) для фильтра.
     const categories = Array.from(new Set(items.map(i => i.subject).filter((s): s is string => Boolean(s)))).sort();
     const filteredItems = categoryFilter ? items.filter(i => i.subject === categoryFilter) : items;
     const visibleIds = filteredItems.map(i => i.id);
+
+    // sc21: группируем filteredItems по barcode (только non-mix). Группы из 2+ items
+    // рендерятся как одна сводная строка + опциональные дочерние строки.
+    type DisplayRow =
+        | { kind: 'single'; item: VehicleItemSchema }
+        | { kind: 'group_head'; barcode: string; items: VehicleItemSchema[] }
+        | { kind: 'group_child'; item: VehicleItemSchema };
+    const displayRows: DisplayRow[] = (() => {
+        const byBarcode = new Map<string, VehicleItemSchema[]>();
+        for (const it of filteredItems) {
+            if (it.mix_group_id) continue;
+            const list = byBarcode.get(it.barcode) || [];
+            list.push(it);
+            byBarcode.set(it.barcode, list);
+        }
+        const seen = new Set<string>();
+        const rows: DisplayRow[] = [];
+        for (const it of filteredItems) {
+            if (it.mix_group_id) {
+                rows.push({ kind: 'single', item: it });
+                continue;
+            }
+            const group = byBarcode.get(it.barcode) || [];
+            if (group.length === 1) {
+                rows.push({ kind: 'single', item: it });
+                continue;
+            }
+            if (seen.has(it.barcode)) continue;
+            seen.add(it.barcode);
+            rows.push({ kind: 'group_head', barcode: it.barcode, items: group });
+            if (expandedBarcodes.has(it.barcode)) {
+                for (const child of group) rows.push({ kind: 'group_child', item: child });
+            }
+        }
+        return rows;
+    })();
+    const toggleGroup = (barcode: string) => {
+        setExpandedBarcodes(prev => {
+            const next = new Set(prev);
+            if (next.has(barcode)) next.delete(barcode); else next.add(barcode);
+            return next;
+        });
+    };
     const allVisibleSelected = visibleIds.length > 0 && visibleIds.every(id => selectedIds.has(id));
     const toggleAll = () => {
         setSelectedIds(prev => {
@@ -810,6 +856,25 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
             alert(e instanceof Error ? e.message : t('msg_error'));
         }
         setRemovingId(null);
+    };
+
+    const handleRemoveGroup = async (groupItems: VehicleItemSchema[]) => {
+        const msg = isForming
+            ? t('vehicle_items_confirm_delete_group').replace('{count}', String(groupItems.length))
+            : t('vehicle_items_confirm_bulk_delete_post_shipment')
+                .replace('{count}', String(groupItems.length))
+                .replace('{status}', vehicleStatus);
+        if (!confirm(msg)) return;
+        const errors: string[] = [];
+        for (const it of groupItems) {
+            try {
+                await api.removeItemFromVehicle(vehicleOrderNo, it.id);
+            } catch (e: unknown) {
+                errors.push(`${it.id}: ${e instanceof Error ? e.message : 'error'}`);
+            }
+        }
+        if (errors.length > 0) alert(`${t('vehicle_items_bulk_delete_partial')}\n${errors.join('\n')}`);
+        onRemoved();
     };
 
     const handleBulkDelete = async () => {
@@ -1034,7 +1099,109 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
                 </tr>
             </thead>
             <tbody>
-                {filteredItems.map(item => {
+                {displayRows.map(row => {
+                    if (row.kind === 'group_head') {
+                        const groupItems = row.items;
+                        const totalQty = groupItems.reduce((s, it) => s + it.qty, 0);
+                        const allSameBox = groupItems.every(it => it.box_size === groupItems[0].box_size && it.pcs_per_box === groupItems[0].pcs_per_box);
+                        const groupPpb = allSameBox ? (groupItems[0].pcs_per_box || 0) : 0;
+                        const groupBoxes = allSameBox && groupPpb > 0 ? Math.ceil(totalQty / groupPpb) : groupItems.reduce((s, it) => {
+                            const p = it.pcs_per_box || 0;
+                            return s + (p > 0 ? Math.ceil(it.qty / p) : 0);
+                        }, 0);
+                        const totalWeight = groupItems.reduce((s, it) => s + (it.weight_kg || 0) * it.qty, 0);
+                        const totalVolume = groupItems.reduce((s, it) => {
+                            const d = parseBoxDims(it.box_size);
+                            const p = it.pcs_per_box || 0;
+                            return s + (d && p > 0 ? (d.l * d.w * d.h) / 1e6 * Math.ceil(it.qty / p) : 0);
+                        }, 0);
+                        const totalSumCny = groupItems.reduce((s, it) => s + Number(it.price_cny) * it.qty, 0);
+                        const avgPrice = totalQty > 0 ? totalSumCny / totalQty : 0;
+                        const totalDelivery = groupItems.reduce((s, it) => s + (it.delivery_rub || 0) * it.qty, 0);
+                        const totalDuty = groupItems.reduce((s, it) => s + (it.duty_rub || 0) * it.qty, 0);
+                        const totalVat = groupItems.reduce((s, it) => s + (it.vat_rub || 0) * it.qty, 0);
+                        const totalRubGroup = groupItems.reduce((s, it) => s + (it.total_rub || 0) * it.qty, 0);
+                        const expanded = expandedBarcodes.has(row.barcode);
+                        const groupAllSelected = groupItems.every(it => selectedIds.has(it.id));
+                        const groupSomeSelected = !groupAllSelected && groupItems.some(it => selectedIds.has(it.id));
+                        const weightPerPc = groupItems[0].weight_kg || null;
+                        const boxLabel = allSameBox && groupItems[0].box_size
+                            ? `${groupItems[0].box_size}${groupPpb ? ` (${groupPpb}${t('unit_pcs')})` : ''}`
+                            : t('vdetail_group_mixed');
+                        const groupHasDrift = groupItems.some(it => it.qty_drift != null && it.qty_drift > 0);
+                        return (
+                            <tr key={`group:${row.barcode}`} style={{ borderBottom: expanded ? 'none' : '1px solid var(--color-border)', background: groupSomeSelected || groupAllSelected ? 'rgba(0,113,227,0.04)' : 'rgba(0,113,227,0.015)' }}>
+                                {canDelete && (
+                                    <td style={{ ...td, textAlign: 'center', width: 28 }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={groupAllSelected}
+                                            ref={el => { if (el) el.indeterminate = groupSomeSelected; }}
+                                            onChange={() => {
+                                                setSelectedIds(prev => {
+                                                    const next = new Set(prev);
+                                                    if (groupAllSelected) groupItems.forEach(it => next.delete(it.id));
+                                                    else groupItems.forEach(it => next.add(it.id));
+                                                    return next;
+                                                });
+                                            }}
+                                        />
+                                    </td>
+                                )}
+                                <td style={{ ...td, fontFamily: 'monospace', fontSize: 12 }}>
+                                    <button
+                                        type="button"
+                                        onClick={() => toggleGroup(row.barcode)}
+                                        title={expanded ? t('vdetail_group_collapse') : t('vdetail_group_expand')}
+                                        style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 11, marginRight: 4, padding: 0, color: 'var(--color-text-muted)' }}
+                                    >
+                                        {expanded ? '▾' : '▸'}
+                                    </button>
+                                    {row.barcode}
+                                    <span
+                                        className="badge badge-info"
+                                        title={t('vdetail_group_sources_tooltip')}
+                                        style={{ marginLeft: 6, fontSize: 10, padding: '1px 6px' }}
+                                    >
+                                        {groupItems.length} {t('vdetail_group_sources')}
+                                    </span>
+                                    {groupHasDrift && (
+                                        <span
+                                            title={t('drift_existing_dot_tooltip')}
+                                            style={{ display: 'inline-block', marginLeft: 6, width: 8, height: 8, borderRadius: '50%', background: 'var(--color-warning)' }}
+                                        />
+                                    )}
+                                </td>
+                                <td style={{ ...td, fontSize: 12, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={groupItems[0].article_seller || ''}>{groupItems[0].article_seller || '—'}</td>
+                                <td style={{ ...td, fontSize: 12 }}>{groupItems[0].subject || '—'}</td>
+                                <td style={{ ...tdR, fontWeight: 600 }}>{formatNumber(totalQty, 0)}</td>
+                                <td style={tdR}>{groupBoxes > 0 ? groupBoxes : '—'}</td>
+                                <td style={{ ...tdR, color: 'var(--color-text-muted)' }}>{weightPerPc ? formatNumber(weightPerPc, 2) : '—'}</td>
+                                <td style={tdR}>{totalWeight > 0 ? formatNumber(totalWeight, 1) : '—'}</td>
+                                <td style={{ ...td, fontSize: 11, color: 'var(--color-text-muted)' }}>{boxLabel}</td>
+                                <td style={{ ...tdR, color: 'var(--color-text-muted)' }}>{totalVolume > 0 ? totalVolume.toFixed(2) : '—'}</td>
+                                <td style={tdR}>{formatNumber(avgPrice, 2)}</td>
+                                <td style={tdR}>{formatNumber(totalSumCny, 2)}</td>
+                                {hasCosts && <td style={tdF}>{formatNumber(perUnit ? (totalQty > 0 ? totalDelivery / totalQty : 0) : totalDelivery, perUnit ? 2 : 0)}</td>}
+                                {hasCosts && <td style={tdF}>{formatNumber(perUnit ? (totalQty > 0 ? totalDuty / totalQty : 0) : totalDuty, perUnit ? 2 : 0)}</td>}
+                                {hasCosts && <td style={tdF}>{formatNumber(perUnit ? (totalQty > 0 ? totalVat / totalQty : 0) : totalVat, perUnit ? 2 : 0)}</td>}
+                                {hasCosts && <td style={{ ...tdF, fontWeight: 700 }}>{formatNumber(perUnit ? (totalQty > 0 ? totalRubGroup / totalQty : 0) : totalRubGroup, perUnit ? 2 : 0)}</td>}
+                                {canDelete && (
+                                    <td style={{ ...td, textAlign: 'center' }}>
+                                        <button
+                                            onClick={() => handleRemoveGroup(groupItems)}
+                                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-danger)', fontSize: 14, opacity: 0.6, padding: 2 }}
+                                            title={t('btn_delete')}
+                                        >
+                                            ✕
+                                        </button>
+                                    </td>
+                                )}
+                            </tr>
+                        );
+                    }
+                    const item = row.item;
+                    const isChild = row.kind === 'group_child';
                     const ppb = item.pcs_per_box || 0;
                     const boxes = ppb > 0 ? Math.ceil(item.qty / ppb) : 0;
                     const notFull = ppb > 0 && item.qty % ppb !== 0;
@@ -1043,10 +1210,12 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
                     const itemTotalVol = boxVol * boxes;
                     const weight = item.weight_kg ? item.weight_kg * item.qty : 0;
                     const boxLabel = item.box_size ? `${item.box_size}${ppb ? ` (${ppb}${t('unit_pcs')})` : ''}` : '—';
+                    const childIndent = isChild ? { paddingLeft: 28 } : {};
+                    const childBg = isChild ? 'rgba(0,113,227,0.015)' : undefined;
 
                     return (
                     <React.Fragment key={item.id}>
-                        <tr style={{ borderBottom: expandedId === item.id ? 'none' : '1px solid var(--color-border)', background: selectedIds.has(item.id) ? 'rgba(0,113,227,0.04)' : undefined }}>
+                        <tr style={{ borderBottom: expandedId === item.id ? 'none' : '1px solid var(--color-border)', background: selectedIds.has(item.id) ? 'rgba(0,113,227,0.04)' : childBg }}>
                             {canDelete && (
                                 <td style={{ ...td, textAlign: 'center', width: 28 }}>
                                     <input
@@ -1056,8 +1225,16 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
                                     />
                                 </td>
                             )}
-                            <td style={{ ...td, fontFamily: 'monospace', fontSize: 12 }}>
-                                {item.barcode}
+                            <td style={{ ...td, fontFamily: 'monospace', fontSize: isChild ? 11 : 12, ...childIndent }}>
+                                {isChild && item.factory_order_number && (
+                                    <span style={{ fontSize: 10, color: 'var(--color-text-muted)', marginRight: 6 }}>
+                                        ↳ {t('vdetail_group_from_fo')} {item.factory_order_number}
+                                    </span>
+                                )}
+                                {!isChild && item.barcode}
+                                {isChild && (
+                                    <span style={{ color: 'var(--color-text-muted)', fontFamily: 'monospace', fontSize: 11 }}>{item.barcode}</span>
+                                )}
                                 {item.added_after_ship && (
                                     <span
                                         className="badge badge-warning"

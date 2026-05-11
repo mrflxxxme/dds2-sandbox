@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached
 from backend.models import WbFunnelDaily, WbWarehouseStock
+from backend.services.warehouse_geo_data import ACCEPTANCE_TO_STOCK_NAME
 from backend.services.warehouse_stock_service import compute_need
 
 logger = logging.getLogger("dds.stock_analytics")
@@ -23,15 +24,41 @@ _WH_PARENS_RE = re.compile(r"\s*\([^)]*\)\s*$")
 
 
 def _normalize_wb_warehouse(name: str | None) -> str:
-    """Strip trailing parenthesized suffix so FBO and order/stock names match.
+    """Canonicalize warehouse name to the WAREHOUSE_COORDS form so backend's
+    `data.warehouses[].name` matches acceptance-redistribute output on the
+    frontend (both produce the same canonical key, columns collapse into one).
 
-    'Краснодар (Тихорецкая)' -> 'Краснодар'
-    'Самара (Новосемейкино)' -> 'Самара'
-    'СЦ Симферополь (Молодежненское)' -> 'СЦ Симферополь'
+    Algorithm mirrors `_normalize_acceptance_wh`:
+      1. Direct alias from ACCEPTANCE_TO_STOCK_NAME (acceptance/stocks variants
+         to canonical, e.g. 'Новосемейкино' -> 'Самара (Новосемейкино)',
+         'Склад Шушары' -> 'СПБ Шушары').
+      2. Else strip trailing «(...)» (orders feed short forms like 'Самара',
+         FBO short names) and look up alias on the stripped name.
+      3. Else return stripped — unknown warehouse passes through.
+
+    Examples:
+      'Новосемейкино'             -> 'Самара (Новосемейкино)' (alias step 1)
+      'Новосемейкино: Питание'    -> 'Самара (Новосемейкино)' (alias step 1)
+      'Самара (Новосемейкино)'    -> 'Самара (Новосемейкино)' (alias step 1, parens kept)
+      'Самара'                    -> 'Самара' (no alias, no parens — passthrough)
+      'Краснодар (Тихорецкая)'    -> 'Краснодар' (alias step 1 strips suffix)
+      'Склад Шушары'              -> 'СПБ Шушары' (alias step 1)
+      'Электросталь: Питание'     -> 'Электросталь' (alias step 1)
+      'СЦ Симферополь (Молодежненское)' -> 'СЦ Симферополь' (paren-strip step 2)
+
+    NB: the «Самара (Новосемейкино)» key in ACCEPTANCE_TO_STOCK_NAME is
+    self-aliased so the canonical form survives this function unchanged
+    (otherwise step 2 would strip it down to «Самара» and re-create the split
+    we are trying to fix).
     """
     if not name:
         return ""
-    return _WH_PARENS_RE.sub("", name).strip()
+    if name in ACCEPTANCE_TO_STOCK_NAME:
+        return ACCEPTANCE_TO_STOCK_NAME[name]
+    stripped = _WH_PARENS_RE.sub("", name).strip()
+    if stripped in ACCEPTANCE_TO_STOCK_NAME:
+        return ACCEPTANCE_TO_STOCK_NAME[stripped]
+    return stripped
 
 
 @cached(prefix="reports:warehouse_need", ttl=300)
@@ -236,6 +263,33 @@ async def get_warehouse_need(
 
     for _wh, nm in wh_orders_map:
         all_nm_ids.add(nm)
+
+    # SKU с RF-стоком, но без WbWarehouseStock и orders — это новинки. Они
+    # должны попасть в общий ответ, чтобы пользователь видел их в основной
+    # таблице с разбивкой по ФФ-складам, а не только в отдельной cold-start
+    # карточке. Distribution по WB-складам для них считается на стороне
+    # frontend через cold-start allocations (есть в /reports/cold_start_table).
+    rf_only_result = await db.execute(
+        select(Nomenclature.article_wb, Nomenclature.article_seller, Nomenclature.brand, Nomenclature.subject)
+        .join(WarehouseStock, WarehouseStock.nomenclature_id == Nomenclature.id)
+        .where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.article_wb.isnot(None),
+            WarehouseStock.project_id == project_id,
+            WarehouseStock.quantity > 0,
+        )
+        .group_by(Nomenclature.article_wb, Nomenclature.article_seller, Nomenclature.brand, Nomenclature.subject)
+    )
+    for r in rf_only_result:  # type: ignore[assignment]
+        if r.article_wb is None:
+            continue
+        all_nm_ids.add(r.article_wb)
+        if r.article_wb not in vendor_map and r.article_seller:
+            vendor_map[r.article_wb] = r.article_seller
+        if r.article_wb not in brand_map and r.brand:
+            brand_map[r.article_wb] = r.brand
+        if r.article_wb not in subject_map and r.subject:
+            subject_map[r.article_wb] = r.subject
 
     # WB stock totals per nm_id — нужно ДО district-pooling и only_available
     # блоков, которые суммируют общий WB-сток для total_need_global.

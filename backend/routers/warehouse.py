@@ -8,7 +8,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
+from backend.schemas.box_multiplicity import (
+    BoxMultiplicityBulkRequest,
+    BoxMultiplicityBulkResponse,
+    BoxMultiplicityPerWarehouseUpdate,
+    BoxMultiplicityResponse,
+    BoxMultiplicityRow,
+    BoxMultiplicityUpdate,
+)
 from backend.schemas.warehouse import (
+    AcceptanceCheckRequest,
+    AcceptanceCheckResponse,
     CostPriceUpdate,
     DefectBulkOperation,
     DefectBulkResponse,
@@ -32,7 +42,12 @@ from backend.schemas.warehouse import (
     WarehouseStockSchema,
     WarehouseUpdate,
 )
-from backend.services import warehouse_defect, warehouse_service
+from backend.services import (
+    box_multiplicity_service,
+    warehouse_acceptance_service,
+    warehouse_defect,
+    warehouse_service,
+)
 from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/warehouse", tags=["Warehouse"])
@@ -127,6 +142,40 @@ async def delete_warehouse(
     if not deleted:
         raise HTTPException(404, "Warehouse not found")
     return {"ok": True}
+
+
+# ─── WB Acceptance Check (Проверка приёмки) ────────────────────────────────
+
+
+@router.post(
+    "/acceptance-check",
+    response_model=AcceptanceCheckResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def check_wb_acceptance(
+    body: AcceptanceCheckRequest,
+    force: bool = Query(False, description="Skip Redis cache and call WB API live"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Live WB acceptance/options check + per-SKU redistribute.
+
+    For each {nm_id, barcode, distribution} we ask WB which warehouses accept
+    the SKU (canBox/canMonopallet/canSupersafe), pick a single package_type
+    per SKU, and move qty away from closed warehouses to the largest open
+    warehouse in the same федеральный округ. Cached 5 минут (WB rate limit
+    6 req/min). Pass `force=true` to bypass cache (UI «🔄 Обновить»).
+    """
+    items = [it.model_dump() for it in body.items]
+    try:
+        return await warehouse_acceptance_service.check_acceptance_and_redistribute(
+            db,
+            project.id,
+            items,
+            force=force,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 # ─── Delivery Times (Время доставки до WB) ────────────────────────────────
@@ -775,3 +824,131 @@ async def update_cost_price(
     if not stock:
         raise HTTPException(404, "Stock record not found")
     return WarehouseStockSchema.model_validate(stock)
+
+
+# ─── Box-multiplicity (кратность коробки) ───────────────────────────────────
+
+
+@router.get("/box-multiplicity", response_model=BoxMultiplicityResponse)
+async def get_box_multiplicity(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-SKU box quantity table: manual override + last vehicle ppb + factory fallback."""
+    items = await box_multiplicity_service.get_box_multiplicity_table(db, project.id)
+    return {"items": items, "total": len(items)}
+
+
+@router.patch(
+    "/box-multiplicity/{nm_id}",
+    response_model=BoxMultiplicityRow,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def patch_box_multiplicity(
+    nm_id: int,
+    payload: BoxMultiplicityUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Partial update: any subset of {box_qty_override, use_box_multiplicity}.
+
+    Send only fields you want to change; omit others. `box_qty_override=null`
+    inside the body explicitly clears the manual ppb.
+    """
+    fields = payload.model_dump(exclude_unset=True)
+    kwargs: dict = {}
+    if "box_qty_override" in fields:
+        kwargs["box_qty_override"] = fields["box_qty_override"]
+    if "use_box_multiplicity" in fields:
+        kwargs["use_box_multiplicity"] = fields["use_box_multiplicity"]
+
+    ok = await box_multiplicity_service.update_box_multiplicity(
+        db,
+        project.id,
+        nm_id,
+        **kwargs,
+    )
+    if not ok:
+        raise HTTPException(404, "SKU not found")
+    items = await box_multiplicity_service.get_box_multiplicity_table(
+        db,
+        project.id,
+        nm_id_filter=nm_id,
+    )
+    if not items:
+        raise HTTPException(404, "SKU not found after update")
+    return items[0]
+
+
+@router.post(
+    "/box-multiplicity/bulk",
+    response_model=BoxMultiplicityBulkResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def bulk_box_multiplicity(
+    payload: BoxMultiplicityBulkRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk paste-update by barcode. Each item is partial: только переданные
+    поля применяются (Pydantic `exclude_unset`-семантика)."""
+    items_dicts = [it.model_dump(exclude_unset=True) for it in payload.items]
+
+    result = await box_multiplicity_service.bulk_update_by_barcode(
+        db,
+        project.id,
+        items_dicts,
+    )
+
+    updated_rows: list[dict] = []
+    if result["updated_nm_ids"]:
+        all_rows = await box_multiplicity_service.get_box_multiplicity_table(
+            db,
+            project.id,
+        )
+        upd_set = result["updated_nm_ids"]
+        updated_rows = [r for r in all_rows if r["nm_id"] in upd_set]
+
+    return {
+        "updated": updated_rows,
+        "not_found": result["not_found"],
+        "matched_count": len(result["matched_barcodes"]),
+    }
+
+
+@router.patch(
+    "/box-multiplicity/per-warehouse/{barcode}/{warehouse_id}",
+    response_model=BoxMultiplicityRow,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def patch_per_warehouse_box_multiplicity(
+    barcode: str,
+    warehouse_id: int,
+    payload: BoxMultiplicityPerWarehouseUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-RF override partial update. Создаёт строку если её нет."""
+    fields = payload.model_dump(exclude_unset=True)
+    kwargs: dict = {}
+    if "box_qty" in fields:
+        kwargs["box_qty"] = fields["box_qty"]
+    if "use_box_multiplicity" in fields:
+        kwargs["use_box_multiplicity"] = fields["use_box_multiplicity"]
+
+    ok = await box_multiplicity_service.update_per_warehouse(
+        db,
+        project.id,
+        barcode,
+        warehouse_id,
+        **kwargs,
+    )
+    if not ok:
+        raise HTTPException(404, "barcode or warehouse not found in project")
+
+    # Вернём целую строку SKU (по barcode → nm_id) с обновлённым per_warehouse.  # noqa: RUF003
+    items = await box_multiplicity_service.get_box_multiplicity_table(db, project.id)
+    row = next((r for r in items if r["barcode"] == barcode), None)
+    if not row:
+        raise HTTPException(404, "SKU not found after update")
+    return row

@@ -596,6 +596,7 @@ async def create_assembly_request(
         pallet_weight_kg=payload.pallet_weight_kg,
         comment=payload.comment,
         wb_warehouse_name_manual=wb_wh_manual,
+        package_type=getattr(payload, "package_type", None) or "BOX",
     )
     db.add(assembly_req)
     await db.flush()
@@ -712,6 +713,8 @@ async def update_assembly_request(
             req.estimated_ready_date = payload.estimated_ready_date
         if payload.wb_warehouse_name_manual is not None:
             req.wb_warehouse_name_manual = payload.wb_warehouse_name_manual
+        if payload.package_type is not None:
+            req.package_type = payload.package_type
 
     # Vehicle & cost fields — editable in any non-cancelled status (including SHIPPED/DELIVERED)
     if payload.pickup_cost is not None:

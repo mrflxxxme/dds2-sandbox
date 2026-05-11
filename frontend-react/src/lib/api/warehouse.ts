@@ -1,6 +1,8 @@
 /** Warehouse API methods */
 import { ApiClient } from './client';
 import type {
+    AcceptanceCheckRequest,
+    AcceptanceCheckResponse,
     AssemblyDraft,
     AssemblyDraftCommitResponse,
     AssemblyDraftCreate,
@@ -10,6 +12,12 @@ import type {
     AssemblyRequest,
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
+    BoxMultiplicityBulkRequest,
+    BoxMultiplicityBulkResponse,
+    BoxMultiplicityPatch,
+    BoxMultiplicityPerWarehousePatch,
+    BoxMultiplicityResponse,
+    BoxMultiplicityRow,
     DefectBulkOperation,
     DefectBulkResponse,
     DefectMarkCancelResponse,
@@ -56,6 +64,15 @@ export function addWarehouseMethods(api: ApiClient) {
         deleteWarehouse(id: number) { return api.request<MessageResponse>('DELETE', `/api/v1/warehouse/${id}`); },
         reorderWarehouses(items: { id: number; sort_order: number }[]) {
             return api.request<MessageResponse>('PUT', '/api/v1/warehouse/reorder', { items });
+        },
+
+        // ─── WB Acceptance check ─────────────────────────────────────
+        /** POST /warehouse/acceptance-check — live WB API check + redistribute closed warehouses. */
+        checkWbAcceptance(body: AcceptanceCheckRequest, force = false) {
+            const url = force
+                ? '/api/v1/warehouse/acceptance-check?force=true'
+                : '/api/v1/warehouse/acceptance-check';
+            return api.request<AcceptanceCheckResponse>('POST', url, body);
         },
 
         // ─── Stock ───────────────────────────────────────────────────
@@ -397,6 +414,45 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         commitAssemblyDraft(id: number) {
             return api.request<AssemblyDraftCommitResponse>('POST', `/api/v1/assembly/drafts/${id}/commit`);
+        },
+
+        // ─── Box-multiplicity (кратность коробки) ────────────────────────
+        getBoxMultiplicity() {
+            return api.request<BoxMultiplicityResponse>('GET', '/api/v1/warehouse/box-multiplicity');
+        },
+        /** Partial update — pass only fields you want to change. */
+        patchBoxMultiplicity(nmId: number, patch: BoxMultiplicityPatch) {
+            return api.request<BoxMultiplicityRow>(
+                'PATCH',
+                `/api/v1/warehouse/box-multiplicity/${nmId}`,
+                patch,
+            );
+        },
+        /** Convenience: set/clear manual ppb, leaves use-flag untouched. */
+        setBoxMultiplicity(nmId: number, boxQtyOverride: number | null) {
+            return api.request<BoxMultiplicityRow>(
+                'PATCH',
+                `/api/v1/warehouse/box-multiplicity/${nmId}`,
+                { box_qty_override: boxQtyOverride } satisfies BoxMultiplicityPatch,
+            );
+        },
+        /** Bulk paste-update by barcode (partial — только переданные поля). */
+        bulkBoxMultiplicity(items: BoxMultiplicityBulkRequest['items']) {
+            return api.request<BoxMultiplicityBulkResponse>(
+                'POST',
+                '/api/v1/warehouse/box-multiplicity/bulk',
+                { items } satisfies BoxMultiplicityBulkRequest,
+            );
+        },
+        /** Per-RF override: создаёт строку если её нет. URL-encode barcode на случай чужих символов. */
+        patchPerWarehouseBoxMultiplicity(
+            barcode: string, warehouseId: number, patch: BoxMultiplicityPerWarehousePatch,
+        ) {
+            return api.request<BoxMultiplicityRow>(
+                'PATCH',
+                `/api/v1/warehouse/box-multiplicity/per-warehouse/${encodeURIComponent(barcode)}/${warehouseId}`,
+                patch,
+            );
         },
     };
 }

@@ -12,6 +12,7 @@ Supported endpoints:
 - /api/v1/supplies/{id} — детали FBW поставки
 - /api/v1/supplies/{id}/goods — товары FBW поставки
 - /api/v1/warehouses — склады WB (Suppliers API)
+- /api/v1/acceptance/options — доступность приёмки по баркодам (Suppliers API)
 
 Resilience:
 - Per-project circuit breaker: stops calling WB API after 5 consecutive failures (120s cooldown)
@@ -382,6 +383,105 @@ class WBApiClient:
                     raise ValueError(f"WB Suppliers API server error: HTTP {response.status_code}")
                 if response.status_code != 200:
                     raise ValueError(f"WB Suppliers API error: HTTP {response.status_code} — {response.text[:200]}")
+
+                data = response.json()
+                return data if isinstance(data, list) else []
+
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def get_acceptance_options(self, items: list[dict]) -> dict:
+        """
+        Check WB FBO acceptance availability for a batch of (barcode, quantity).
+        Suppliers API: POST /api/v1/acceptance/options
+
+        Body: list of <=5000 entries [{"quantity": int, "barcode": str}, ...]
+        Returns: {"result": [{"barcode", "warehouses": [{warehouseID, canBox,
+                  canMonopallet, canSupersafe, isBoxOnPallet}], "error"?}]}
+
+        Rate limit: 6 req/min — caller MUST batch + cache. We slice by 5000
+        entries per call for very large catalogs.
+        """
+        all_results: list[dict] = []
+        chunk_size = 5000
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                for i in range(0, len(items), chunk_size):
+                    chunk = items[i : i + chunk_size]
+                    url = f"{WB_SUPPLIERS_API_BASE}/api/v1/acceptance/options"
+                    logger.info(
+                        "wb_api.request",
+                        method="POST",
+                        path="/api/v1/acceptance/options",
+                        items_count=len(chunk),
+                    )
+                    response = await client.post(url, headers=self.headers, json=chunk)
+
+                    if response.status_code == 401:
+                        raise ValueError("WB API: неверный API-ключ (401)")
+                    if response.status_code == 429:
+                        retry_after = int(response.headers.get("Retry-After", "60"))
+                        raise RateLimitError(
+                            "WB Suppliers API rate limited (429)",
+                            retry_after=retry_after,
+                        )
+                    if response.status_code >= 500:
+                        raise ValueError(f"WB Suppliers API server error: HTTP {response.status_code}")
+                    if response.status_code != 200:
+                        raise ValueError(f"WB Suppliers API error: HTTP {response.status_code} — {response.text[:200]}")
+
+                    data = response.json()
+                    all_results.extend(data.get("result", []))
+        return {"result": all_results}
+
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def get_acceptance_coefficients(self, warehouse_ids: list[int] | None = None) -> list[dict]:
+        """
+        Fetch acceptance coefficients for next 14 days per (warehouse, package_type).
+        Common API: GET /api/tariffs/v1/acceptance/coefficients
+
+        Returns: [{
+          "date": "2026-05-09T00:00:00Z",
+          "coefficient": -1 | 0 | 1 | 2 | 3 | 5 | ...,
+          "warehouseID": int,
+          "warehouseName": str,
+          "allowUnload": bool,
+          "boxTypeID": 5 (МОНО) | 6 (КОРОБ) | 2 (иной/«Суперсейф»),
+          "isSortingCenter": bool,
+          ...
+        }, ...]
+
+        Доступность: coefficient ∈ {0, 1} И allowUnload=true → бесплатно.
+                     coefficient >= 2 И allowUnload=true → платно (×N к базе).
+                     coefficient == -1 ИЛИ allowUnload=false → закрыто.
+
+        Rate limit: 6 req/min — caller MUST cache (мы делаем 1 час по умолчанию).
+        Migrated 2025-01-30 from supplies-api.wildberries.ru/api/v1/acceptance/coefficients.
+        """
+        url = f"{WB_API_BASE_V2}/api/tariffs/v1/acceptance/coefficients"
+        params = {}
+        if warehouse_ids:
+            params["warehouseIDs"] = ",".join(str(wid) for wid in warehouse_ids)
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                logger.info("wb_api.request", method="GET", path="/api/tariffs/v1/acceptance/coefficients")
+                response = await client.get(url, headers=self.headers, params=params or None)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Поставки»")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError(
+                        "WB Common API rate limited (429)",
+                        retry_after=retry_after,
+                    )
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Common API server error: HTTP {response.status_code}")
+                if response.status_code != 200:
+                    logger.warning(
+                        "wb_api.acceptance_coefficients_error",
+                        status=response.status_code,
+                        body=response.text[:200],
+                    )
+                    return []
 
                 data = response.json()
                 return data if isinstance(data, list) else []
