@@ -110,13 +110,16 @@ def _aggregate_coefficients(
         wid = e.get("warehouseID")
         if wid is None:
             continue
-        name = wh_id_to_name.get(wid) or e.get("warehouseName")
+        name = wh_id_to_name.get(int(wid)) or e.get("warehouseName")
         if not name:
             continue
         canon = _normalize_acceptance_wh(name)
         if not canon:
             continue
-        type_key = _BOX_TYPE_ID_TO_KEY.get(e.get("boxTypeID"))
+        box_type_id = e.get("boxTypeID")
+        if box_type_id is None:
+            continue
+        type_key = _BOX_TYPE_ID_TO_KEY.get(int(box_type_id))
         if type_key is None:
             continue
         grouped[(canon, type_key)].append(e)
@@ -192,7 +195,9 @@ def _flags_for_warehouse(
     result: dict[str, dict] = {}
     for w in raw_warehouses:
         wid = w.get("warehouseID")
-        name = wh_id_to_name.get(wid)
+        if wid is None:
+            continue
+        name = wh_id_to_name.get(int(wid))
         if not name:
             continue
         norm = _normalize_acceptance_wh(name)
@@ -231,9 +236,9 @@ def _flags_for_warehouse(
                 "can_box": prev["can_box"] or flags["can_box"],
                 "can_monopallet": prev["can_monopallet"] or flags["can_monopallet"],
                 "can_supersafe": prev["can_supersafe"] or flags["can_supersafe"],
-                "box_meta": _better_meta(prev.get("box_meta"), flags["box_meta"]),
-                "mono_meta": _better_meta(prev.get("mono_meta"), flags["mono_meta"]),
-                "super_meta": _better_meta(prev.get("super_meta"), flags["super_meta"]),
+                "box_meta": _better_meta(prev.get("box_meta"), box_meta),
+                "mono_meta": _better_meta(prev.get("mono_meta"), mono_meta),
+                "super_meta": _better_meta(prev.get("super_meta"), super_meta),
             }
     return result
 
@@ -577,7 +582,7 @@ async def _load_warehouse_id_map(client: WBApiClient, project_id: int) -> dict[i
             if cached:
                 return {int(k): v for k, v in json.loads(cached).items()}
         except Exception as e:  # pragma: no cover — graceful degradation
-            logger.warning("acceptance.cache_get_failed", error=str(e))
+            logger.warning(f"acceptance.cache_get_failed: {e}")
 
     raw = await client.get_fbw_warehouses()
     mapping = {int(w["ID"]): w["name"] for w in raw if w.get("ID") and w.get("name")}
@@ -590,7 +595,7 @@ async def _load_warehouse_id_map(client: WBApiClient, project_id: int) -> dict[i
                 json.dumps({str(k): v for k, v in mapping.items()}),
             )
         except Exception as e:  # pragma: no cover
-            logger.warning("acceptance.cache_set_failed", error=str(e))
+            logger.warning(f"acceptance.cache_set_failed: {e}")
 
     return mapping
 
@@ -613,21 +618,22 @@ async def _load_coefficients(
         try:
             cached = await redis.get(cache_key)
             if cached:
-                return json.loads(cached)
+                result: list[dict] = json.loads(cached)
+                return result
         except Exception as e:  # pragma: no cover
-            logger.warning("acceptance.coef_cache_get_failed", error=str(e))
+            logger.warning(f"acceptance.coef_cache_get_failed: {e}")
 
     try:
-        raw = await client.get_acceptance_coefficients()
+        raw: list[dict] = await client.get_acceptance_coefficients()
     except Exception as e:
-        logger.warning("acceptance.coef_fetch_failed", error=str(e))
+        logger.warning(f"acceptance.coef_fetch_failed: {e}")
         return []
 
     if redis is not None and raw:
         try:
             await redis.setex(cache_key, COEFFICIENTS_CACHE_TTL, json.dumps(raw))
         except Exception as e:  # pragma: no cover
-            logger.warning("acceptance.coef_cache_set_failed", error=str(e))
+            logger.warning(f"acceptance.coef_cache_set_failed: {e}")
     return raw
 
 
@@ -719,7 +725,7 @@ async def check_acceptance_and_redistribute(
                 json.dumps({"availability_per_barcode": availability_per_barcode}),
             )
         except Exception as e:  # pragma: no cover
-            logger.warning("acceptance.cache_set_failed", error=str(e))
+            logger.warning(f"acceptance.cache_set_failed: {e}")
 
     return _apply_distribution(items, availability_per_barcode, cache_hit=False)
 

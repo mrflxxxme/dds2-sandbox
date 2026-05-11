@@ -176,7 +176,7 @@ async def get_box_multiplicity_table(
                 BoxQtyPerWarehouse.barcode.in_(barcodes),
             )
         )
-        for row in per_rf_result.scalars().all():
+        for row in per_rf_result.scalars().all():  # type: ignore[assignment]
             per_rf_map[(row.barcode, row.warehouse_id)] = {
                 "box_qty": row.box_qty,
                 "use_box_multiplicity": row.use_box_multiplicity,
@@ -197,7 +197,7 @@ async def get_box_multiplicity_table(
                 WarehouseStock.project_id == project_id,
                 WarehouseStock.warehouse_id.in_(rf_wh_ids),
                 Nomenclature.article_wb.isnot(None),
-                Nomenclature.barcode.in_(barcodes) if barcodes else True,
+                Nomenclature.barcode.in_(barcodes),
             )
             .group_by(Nomenclature.article_wb, WarehouseStock.warehouse_id)
         )
@@ -301,13 +301,13 @@ async def get_box_multiplicity_table(
         # Per-RF block: одна строка на каждый активный RF-склад
         per_warehouse: list[dict] = []
         for wh_id, wh_name in rf_warehouses:
-            override = per_rf_map.get((n.barcode, wh_id))
+            rf_override = per_rf_map.get((n.barcode, wh_id))
             per_warehouse.append(
                 {
                     "warehouse_id": wh_id,
                     "warehouse_name": wh_name,
-                    "box_qty": override["box_qty"] if override else None,
-                    "use_box_multiplicity": override["use_box_multiplicity"] if override else True,
+                    "box_qty": rf_override["box_qty"] if rf_override else None,
+                    "use_box_multiplicity": rf_override["use_box_multiplicity"] if rf_override else True,
                     "rf_stock": per_rf_stock_map.get((n.article_wb, wh_id), 0) if n.article_wb else 0,
                 }
             )
