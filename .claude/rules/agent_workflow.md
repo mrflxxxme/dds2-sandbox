@@ -11,6 +11,8 @@ paths:
 
 **Opus 4.7 консервативен** — параллелизм включается только по **явной** формулировке («spawn subagents in the same turn», «launch teammates concurrently», «run reviewers in parallel»). Без такой формулировки lead делает сам.
 
+**ИСКЛЮЧЕНИЕ — auto-injection через hook.** `scripts/hooks/prompt-team-detect.sh` при детекте backend+frontend задачи (текст промпта **И** реальный `git diff` затрагивает обе зоны) автоматически инжектит в системный prompt директиву MANDATORY PARALLELISM. **Эта инжекция считается явной формулировкой** — lead исполняет без обсуждения. Канон в `lead_agent_v2.md` §4 «Параллелизм»: «Backend + Frontend = ОБЯЗАТЕЛЬНО parallel. Hook инжектит директиву — исполняешь без обсуждения».
+
 **Подробно:** `docs/AGENT_DEVELOPMENT.md`
 
 ## Когда параллелить

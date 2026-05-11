@@ -56,7 +56,7 @@ cd frontend-react && npx playwright test tests/e2e/smoke.spec.ts  # smoke E2E
 | Отчёты | кэш 300s; синк ОПИУ+БДР | `reports/`, `opiu_service`, `wb_bdr_service` |
 | AI Chat | SSE streaming, file upload | `routers/ai_chat`, `models/ai_chat` |
 | Себестоимость | FIFO; duty per container | `cost/`, `cost_parsers` |
-| Склад | FBO vs FBS; daily WB sync | `warehouse_*`, `fbo_supply_service` |
+| Склад | FBO vs FBS; daily WB sync; acceptance-check + box-multiplicity | `warehouse_*`, `fbo_supply_service`, `warehouse_acceptance_service`, `box_multiplicity_service` |
 | WB API | Semaphore, Retry-After, partial save | `integrations/`, `funnel/` |
 | Сборка | crud+status+analytics | `assembly/` |
 | AI Агенты | orchestrator→agents→synthesizer | `services/ai/` |

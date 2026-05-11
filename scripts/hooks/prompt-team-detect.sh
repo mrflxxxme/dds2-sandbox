@@ -37,8 +37,31 @@ trivial_match=0
 echo "$lower" | grep -qE '^(как устроен|что делает|где находит|покажи код|объясни|почему|why|where is|show me|explain)' && trivial_match=1
 [ "$prompt_len" -lt 60 ] && trivial_match=1
 
+# --- Real git-diff signal (additive: if diff is non-empty, refine prompt-based detection) ---
+ROOT_DIR_DETECT="$(cd "$(dirname "$0")/../.." && pwd)"
+diff_backend=0
+diff_frontend=0
+diff_total=$(git -C "$ROOT_DIR_DETECT" diff --name-only HEAD 2>/dev/null | wc -l | tr -d ' ')
+: "${diff_total:=0}"
+if [ "$diff_total" -gt 0 ]; then
+    git -C "$ROOT_DIR_DETECT" diff --name-only HEAD 2>/dev/null | grep -qE '^(backend/|migrations/|tests/)' && diff_backend=1
+    git -C "$ROOT_DIR_DETECT" diff --name-only HEAD 2>/dev/null | grep -qE '^frontend-react/' && diff_frontend=1
+fi
+
 # === DIRECTIVE 1: Backend + Frontend → MUST parallel ===
+# Logic:
+#   - Empty diff (fresh task) → use prompt-text signals only (backend_match AND frontend_match)
+#   - Non-empty diff → require BOTH zones touched in actual diff (eliminates false positive when prompt mentions "component" but task is backend-only)
+parallel_ok=0
 if [ "$backend_match" -eq 1 ] && [ "$frontend_match" -eq 1 ] && [ "$migration_match" -eq 0 ]; then
+    if [ "$diff_total" -eq 0 ]; then
+        parallel_ok=1
+    elif [ "$diff_backend" -eq 1 ] && [ "$diff_frontend" -eq 1 ]; then
+        parallel_ok=1
+    fi
+fi
+
+if [ "$parallel_ok" -eq 1 ]; then
     directives="${directives}**MANDATORY PARALLELISM:** This task touches BOTH backend AND frontend. You MUST:
 1. Lead does Phase 1 sequentially (Model → Migration → Schema if needed).
 2. Then spawn 2 teammates concurrently IN ONE MESSAGE with isolation:worktree, run_in_background:true:

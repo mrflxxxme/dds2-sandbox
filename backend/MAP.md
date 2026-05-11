@@ -76,6 +76,8 @@
 - Брак (дефекты): `services/warehouse_defect.py` — receive/writeoff создают InboundReceipt/OutboundShipment с is_defect=true; mark/recover — только stock_movements
 - Cleanup legacy defect (одноразово): `scripts/cleanup_legacy_defect.py --dry-run | --commit`
 - Расчёт потребности: `services/warehouse_need_service.py`
+- Проверка приёмки WB + redistribute: `services/warehouse_acceptance_service.py` (840 строк) — `POST /warehouse/acceptance-check` дёргает WB `/api/v1/acceptance/options` + `/api/tariffs/v1/acceptance/coefficients` (boxTypeID 5=моно, 6=короб, 2=супер), выбирает per-SKU package_type, перераспределяет qty с закрытых складов на ближайший открытый в том же ФО
+- Кратность коробок (box multiplicity): `services/box_multiplicity_service.py` — `GET/PATCH /warehouse/box-multiplicity`, per-SKU `Nomenclature.box_qty_override` + per-RF `BoxQtyPerWarehouse`, `use_box_multiplicity` toggle, bulk paste из Excel, `resolve_effective_ppb_for_assembly` (qty-weighted по vehicle)
 - Прогноз остатков: `services/stock_forecast_service.py` — прогноз выбытия по трендам продаж (wb / wb_rf / wb_rf_transit), светофор
 - Cold-start распределение для новинок: `services/cold_start_distribution_service.py` — bootstrap-распределение SKU-новинок (нет статистики продаж) по WB-складам пропорционально долям ФО проекта; `pick_warehouses_per_district` (top-3 на округ) + `distribute_multi` (qty внутри округа делится по трафику + min_pack pool); endpoints `routers/reports_stock.py`: `POST /distribute_cold_start` (per-SKU), `GET /cold_start_table` (сегмент целиком). Бенчмарк: свои данные → соседний проект (`bench_from_project_id`) → общероссийский WB-фолбэк
 - FBO поставки WB: `services/fbo_supply_service.py`

@@ -82,5 +82,9 @@
         "description": "Reset /compact counter при compact/clear"
       }
     ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "bash /Users/a1/Desktop/dds_app/scripts/statusline.sh"
   }
 }

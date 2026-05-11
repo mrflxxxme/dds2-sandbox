@@ -191,12 +191,32 @@ can_supersafe`. Затем для каждого SKU выбирает один `
 перераспределяет** qty с закрытых для этого типа складов на ближайший
 открытый в том же федеральном округе (через `warehouse_to_district`).
 
+**Маппинг WB boxTypeID** (фикс коммит 4b5835e, 2026-05-10):
+- `5` = МОНО (была ошибка: ранее считали `2=mono`, `5=super`)
+- `6` = КОРОБ (было ошибочно `6=box` — частично совпало)
+- `2` = иной / «Суперсейф»
+
+Доказательство: для «Екатеринбург - Перспективная 14», `boxTypeID=5` →
+`deliveryCoef=175, storageCoef=215` — точное совпадение со скриншотом
+WB-кабинета. До фикса все мono-склады (Владивосток, Хабаровск, Екатеринбург,
+Великий Камень) выглядели как «коробочные».
+
 **Запрос/ответ:** см. `schemas/warehouse.py::AcceptanceCheckRequest /
 AcceptanceCheckResponse`.
 
 **Кэш:**
 - `wb:acceptance:{project_id}:{items_hash}` — 5 мин (WB rate-limit 6 req/min).
 - `wb:acceptance_warehouses:{project_id}` — 1 час (warehouseID→name стабильны).
+
+**Нормализация имён складов** (фиксы 7777775, 6221684):
+- WB отдаёт имена с суффиксами «: Питание», «СГТ», скобками, варианты
+  «Шушары», «Самара» — приводим к канону через `ACCEPTANCE_TO_STOCK_NAME`
+  (см. `services/warehouse_geo_data.py`). Без нормализации qty в
+  distribution на «Владивосток» / «Самара (Новосемейкино)» не сматчится
+  с реальной доступностью склада, и склад выглядит закрытым.
+- Нормализация идёт в **canonical**-форму (не «stripped»), чтобы `Самара`
+  и `Самара (Новосемейкино)` не разваливались в две колонки в Unified
+  Stock после `_normalize_wb_warehouse` paren-strip.
 
 **Ограничения:**
 - WB не возвращает `error` для нового баркода / без карточки → SKU помечается
@@ -207,8 +227,70 @@ AcceptanceCheckResponse`.
 
 **UI:** кнопка «📦 Проверить приёмку WB» на странице `/warehouse/analytics`.
 После клика клетки матрицы получают бейджи 📦/📐/🔒/⛔ и зачёркнутый qty в
-закрытых клетках. При создании сборки `package_type` пишется в
-`AssemblyRequest.package_type` — одна заявка = одна транспортная единица.
+закрытых клетках. Tooltip показывает paid-квоты + фильтр спец-складов.
+При создании сборки `package_type` пишется в `AssemblyRequest.package_type`
+— одна заявка = одна транспортная единица.
+
+**Cold-start replace** (фикс 06c0439): когда WarehouseNeed пересчитывается
+после изменения cold-start tooltip / paid-квот, старый snapshot полностью
+замещается, не мерджится — иначе при отключённой галке «учитывать
+спец-склад» старая qty оседала в матрице тенью.
+
+## Box Multiplicity (сборка по кратности коробок)
+
+`GET/PATCH /warehouse/box-multiplicity` (см. `routers/warehouse.py`,
+`services/box_multiplicity_service.py`, `schemas/box_multiplicity.py`).
+
+**Зачем:** WB не принимает коробку, в которой кол-во штук одного SKU не
+кратно «кол-ву в коробке» (`pcs_per_box`). Раньше при `commit_draft` сборки
+qty шли «как посчитал need» — потом ассистент вручную округлял. Теперь
+система знает кратность per-SKU (и опционально per-RF) и распределение в
+WarehouseNeedView само округляет до кратного, переливая остаток на «соседа
+по федеральному округу».
+
+**Модели** (`backend/models/cost.py`):
+- `Nomenclature.box_qty_override: int | None` — глобальный SKU-override
+  (миграция `b1cb7b220c30_add_box_qty_override_to_nomenclature.py`).
+- `Nomenclature.use_box_multiplicity: bool` — per-SKU toggle учитывать ли
+  кратность при распределении (миграция
+  `b1a514c279d_add_use_box_multiplicity_flag_to_...py`).
+- `BoxQtyPerWarehouse(project_id, barcode, warehouse_id, box_qty, use_box_multiplicity)`
+  — per-RF override (миграция `9e4a5b921752_add_box_qty_per_warehouse_table.py`,
+  UniqueConstraint `uq_box_qty_pw_project_bc_wh`). Priority:
+  `BoxQtyPerWarehouse.box_qty` > `Nomenclature.box_qty_override` >
+  `CostOrderItem.pcs_per_box` (source-of-truth от поставщика).
+
+**Resolve effective ppb для сборки** (`resolve_effective_ppb_for_assembly`):
+qty-weighted по vehicle: если в одну машину распределены строки из 3
+CostOrderItem с разными `pcs_per_box`, берётся qty-weighted average. Per-RF
+override (если задан) bypass-ит это и используется напрямую. Если для
+RF выключен `use_box_multiplicity` — распределение идёт без округления.
+
+**Endpoints:**
+- `GET /warehouse/box-multiplicity` — таблица с фильтрами (brand /
+  subject / stock_days / barcode-search), scoped KPI «по выборке».
+- `PATCH /warehouse/box-multiplicity/{nm_id}` — partial update:
+  `box_qty_override` (null = сбросить) и/или `use_box_multiplicity`.
+- `PATCH /warehouse/box-multiplicity/per-warehouse/{barcode}/{warehouse_id}`
+  — per-RF override (точечно).
+- `POST /warehouse/box-multiplicity/bulk` — массовое редактирование
+  через paste из буфера обмена (Excel) с auto-detect колонок (см. ниже).
+
+**Bulk paste** (коммиты 7f33c23, 2c24306): пользователь копирует из Excel
+прямоугольный диапазон → frontend парсит через `boxMultiplicityPaste.ts`,
+auto-detect колонок (баркод / box_qty / use_flag по типу значений), отправляет
+батчем `POST /bulk`. Backend `bulk_update_by_barcode` upsert-ит по
+`(project_id, barcode)`. Inline-таблица paste без модалки (UX).
+
+**Per-RF UI** (коммиты 366bba1 → 45f342c → ad2b907 → 5e2760b):
+- Финальный UX — popover-dropdown «под кнопкой» на странице
+  `/warehouse/box-multiplicity` (не модалка, не узкая колонка).
+- Эволюция: узкая колонка → модалка → popover.
+
+**Acceptance redistribute интегрирован с box multiplicity:** после
+`POST /acceptance-check` redistribute учитывает эффективный `pcs_per_box`
+для каждого SKU+RF — это гарантирует, что после перелива qty остаётся
+кратным коробке.
 
 ### Синхронизация
 - **Автоматическая:** каждый 1 час (scheduler job)
@@ -366,7 +448,11 @@ WB API (раз в 30 мин, rate limit 1/min, max 31 день окно)
 | services/fbo_supply_service.py | FBO синхронизация + авто-доставка (882 строки — нужен рефакторинг) |
 | services/warehouse_stock_service.py | WB остатки sync + compute_need (852 строки — нужен рефакторинг) |
 | services/warehouse_need_service.py | Расчёт потребности в товарах (get_warehouse_need, compute_need) |
-| routers/warehouse.py | 21 endpoint: склады, stock, receipt, shipment, transfer, FBO |
+| services/warehouse_acceptance_service.py | WB Acceptance Check + redistribute закрытых складов (840 строк) |
+| services/box_multiplicity_service.py | Box multiplicity (global+per-RF override, bulk paste, resolve_effective_ppb_for_assembly) |
+| services/warehouse_geo_data.py | WB warehouse maps: координаты, federal districts, ACCEPTANCE_TO_STOCK_NAME, WB_API_ID_TO_STOCK_NAME |
+| schemas/box_multiplicity.py | Pydantic: BoxMultiplicityResponse / Patch / Bulk / PerWarehouse |
+| routers/warehouse.py | endpoints: склады, stock, receipt, shipment, transfer, FBO, acceptance-check, box-multiplicity |
 | routers/assembly.py | 14 endpoints: заявки на сборку (см. DOMAIN_ASSEMBLY.md) |
 
 ## Связанные домены
