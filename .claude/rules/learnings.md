@@ -1,9 +1,17 @@
 ---
 paths:
-  - "**/*"
+  - "backend/**/*.py"
+  - "frontend-react/**/*.{ts,tsx}"
+  - "migrations/versions/*.py"
+  - "scripts/**/*.{py,sh}"
+  - ".github/workflows/*.yml"
+  - "tests/**/*.py"
+  - "docker-compose*.yml"
 ---
 
 # DDS Learnings (накопленные решения)
+
+> Грузится только при работе с кодом / миграциями / тестами / CI. Для docs/markdown сессий не загружается — экономия context.
 
 ## Ошибки и решения
 - Alembic "multiple heads": `alembic merge heads -m "merge"` затем `alembic upgrade head`

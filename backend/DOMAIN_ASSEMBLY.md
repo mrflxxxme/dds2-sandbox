@@ -1,10 +1,12 @@
 # DOMAIN_ASSEMBLY — Заявки на сборку + Лист логиста
 
-## Назначение
+## Ownership
+Lead-agent. Все изменения в `services/assembly/*`, `routers/assembly*.py`, `models/assembly.py` идут через DOMAIN_ASSEMBLY.md.
+
 Модуль управляет процессом сборки товаров на складах фулфилмента
 для FBO-поставок WB. Это промежуточный слой между складом и отгрузкой.
 
-## Связи с другими доменами
+### Связи с другими доменами
 
 ```
 WbFboSupply ←(1:1)→ AssemblyRequest →(creates on SHIPPED)→ OutboundShipment
@@ -14,32 +16,10 @@ WbFboSupply ←(1:1)→ AssemblyRequest →(creates on SHIPPED)→ OutboundShipm
                    _update_stock() при SHIPPED
 ```
 
-## Ключевые зависимости
-
-### Из warehouse_service.py (backend/services/warehouse_service.py):
-
-```python
-# L146 — Резолвит баркод → Nomenclature. Raises ValueError если не найден.
-async def _resolve_barcode(db: AsyncSession, project_id: int, barcode: str) -> Nomenclature:
-
-# L163 — Обновляет остатки + создаёт StockMovement (аудит).
-# delta > 0 = приход, delta < 0 = расход. Raises ValueError при qty < 0.
-async def _update_stock(
-    db, project_id, warehouse_id, nomenclature_id, barcode,
-    delta, movement_type, reference_type, reference_id=None, comment=None
-) -> None:
-
-# L122 — Генерирует автономер: ASM-1, ASM-2...
-async def _next_number(db, project_id, prefix, model_class) -> str:
-
-# L520 — Пример создания OutboundShipment (use as template).
-async def create_shipment(db, project_id, warehouse_id, payload) -> OutboundShipment:
-
-# L556 — Пример ship: проверка status, stock -= qty для каждого item.
-async def ship_shipment(db, project_id, shipment_id) -> OutboundShipment:
-```
+## Tables
 
 ### Модели:
+- `AssemblyRequest`, `AssemblyRequestItem`, `AssemblyStatusHistory`, `AssemblyDraft` → `models/assembly.py`
 - `OutboundShipment` → models/warehouse.py:142 (status, wb_supply_id, shipped_date)
 - `OutboundShipmentItem` → models/warehouse.py:168 (shipment_id, nomenclature_id, barcode, qty)
 - `WbFboSupply` → models/wb_fbo.py:40 (outbound_shipment_id, warehouse_name, wb_supply_id)
@@ -57,7 +37,26 @@ async def ship_shipment(db, project_id, shipment_id) -> OutboundShipment:
   При `commit_draft` строки группируются по `(source_ff, target_wb, package_type)` —
   если для одного склада нужны и короб, и моно — это две заявки.
 
-## Статусная модель
+## Endpoints
+
+| Файл | Назначение |
+|------|-----------|
+| routers/assembly.py | 14 HTTP endpoints (CRUD + workflow + analytics) |
+| routers/assembly_drafts.py | 6 endpoints под /api/v1/assembly/drafts (list/get/create/update/delete/commit) |
+
+### Аналитика логистики
+
+Endpoint: `GET /warehouse/assembly/shipments/analytics`
+- Сервис: `get_logistics_analytics(db, project_id, date_from, date_to, warehouse_ids, brands)`
+- Кэш: `@cached(prefix="reports:logistics_analytics", ttl=300)`
+- Возвращает: summary (total_cost, avg_cost_per_pallet, total_pallets, total_shipments), by_destination, by_route
+- avg_cost = средняя стоимость за палету: `avg(pickup_cost / pallets_count)`
+- Фильтры: период (shipped_at), склады, бренды
+- date_to: `shipped_at < date_to + 1 day` (включает весь день)
+
+## Business Rules
+
+### Статусная модель
 
 ```
 IN_PROGRESS → READY → VEHICLE_ASSIGNED → SHIPPED
@@ -76,7 +75,7 @@ CANCELLED ← (любой статус)
 В коде PENDING остаётся в enum для совместимости со `status_history`, но активных заявок в этом
 статусе быть не должно. `start_assembly` идемпотентен (повторный клик «Начать сборку» в IN_PROGRESS = no-op).
 
-## Валидация остатков при создании / изменении
+### Валидация остатков при создании / изменении
 
 При `create_assembly_request`, `update_assembly_request` (для PENDING/IN_PROGRESS) и `start_assembly`
 (legacy PENDING) проверяется **доступный** остаток:
@@ -92,7 +91,7 @@ need / available / stock / reserved.
 
 Реализация: `_validate_available_for_assembly()` в `backend/services/assembly/crud.py`.
 
-## При Ship (VEHICLE_ASSIGNED → SHIPPED)
+### При Ship (VEHICLE_ASSIGNED → SHIPPED)
 
 1. Валидация: warehouse_stock.quantity >= need для каждого item
 2. _update_stock(delta=-qty, movement_type=OUTBOUND, reference_type="ASSEMBLY", reference_id=request.id)
@@ -102,7 +101,7 @@ need / available / stock / reserved.
 6. assembly_request.outbound_shipment_id = shipment.id
 7. assembly_request.shipped_at = utcnow()
 
-## При Cancel SHIPPED (rollback)
+### При Cancel SHIPPED (rollback)
 
 1. _update_stock(delta=+qty, movement_type=OUTBOUND, reference_type="ASSEMBLY_CANCEL")
 2. WbFboSupply.outbound_shipment_id = NULL
@@ -110,43 +109,21 @@ need / available / stock / reserved.
 4. assembly_request.outbound_shipment_id = NULL, shipped_at = NULL
 5. Status → READY
 
-## Аналитика логистики
+### Редактирование полей
 
-Endpoint: `GET /warehouse/assembly/shipments/analytics`
-- Сервис: `get_logistics_analytics(db, project_id, date_from, date_to, warehouse_ids, brands)`
-- Кэш: `@cached(prefix="reports:logistics_analytics", ttl=300)`
-- Возвращает: summary (total_cost, avg_cost_per_pallet, total_pallets, total_shipments), by_destination, by_route
-- avg_cost = средняя стоимость за палету: `avg(pickup_cost / pallets_count)`
-- Фильтры: период (shipped_at), склады, бренды
-- date_to: `shipped_at < date_to + 1 day` (включает весь день)
-
-## Редактирование полей
-
-### До READY (PENDING, IN_PROGRESS):
+#### До READY (PENDING, IN_PROGRESS):
 - Items (позиции), FBO поставка, все scalar поля
 
-### В любом статусе (кроме CANCELLED):
+#### В любом статусе (кроме CANCELLED):
 - pickup_cost, vehicle_info, vehicle_brand, driver_phone, pallets_count, pallet_weight_kg
 - Inline edit на detail page через EditableInfoField
 
-### Страница редактирования: `/assembly/[id]/edit`
+#### Страница редактирования: `/assembly/[id]/edit`
 - Полная форма: FBO, дата, палеты, комментарий, items
 - Ctrl+V paste в таблицу items (как в приёмке)
 - Кнопка обновления FBO из WB (sync + reload items)
 
-## Файлы модуля
-
-| Файл | Назначение |
-|------|-----------|
-| models/assembly.py | ORM: AssemblyRequest + Item + StatusHistory + AssemblyDraft |
-| schemas/assembly.py | Pydantic: CRUD + LogisticsAnalytics DTOs |
-| schemas/assembly_draft.py | Pydantic для AssemblyDraft (Distribution / Row / Create / Update / Read / CommitResponse) |
-| services/assembly_service.py | Бизнес-логика + аналитика |
-| services/assembly_draft_service.py | CRUD черновика + commit_draft (валидация, pro-rata, NxAssemblyRequest, atomic rollback) |
-| routers/assembly.py | 14 HTTP endpoints (CRUD + workflow + analytics) |
-| routers/assembly_drafts.py | 6 endpoints под /api/v1/assembly/drafts (list/get/create/update/delete/commit) |
-
-## AssemblyDraft (распределение N×M)
+### AssemblyDraft (распределение N×M)
 
 Черновик распределения с экрана «Потребность по складам» → «Создать сборку». Юзер выбирает чекбоксами артикулы, попадает на матрицу `ФФ-источники × WB-целевые`, редактирует кол-ва, балансирует Σ src ↔ Σ tgt per row, потом «Создать сборки» создаёт N `AssemblyRequest` (по одной на каждую уникальную пару `(source_ff, target_wb)` с qty>0).
 
@@ -173,7 +150,44 @@ Endpoint: `GET /warehouse/assembly/shipments/analytics`
 - atomic: исключение → rollback всех созданных, draft остаётся
 - успех → soft-delete draft
 
-## Frontend
+## Dependencies
+
+### Из warehouse_service.py (backend/services/warehouse_service.py):
+
+```python
+# L146 — Резолвит баркод → Nomenclature. Raises ValueError если не найден.
+async def _resolve_barcode(db: AsyncSession, project_id: int, barcode: str) -> Nomenclature:
+
+# L163 — Обновляет остатки + создаёт StockMovement (аудит).
+# delta > 0 = приход, delta < 0 = расход. Raises ValueError при qty < 0.
+async def _update_stock(
+    db, project_id, warehouse_id, nomenclature_id, barcode,
+    delta, movement_type, reference_type, reference_id=None, comment=None
+) -> None:
+
+# L122 — Генерирует автономер: ASM-1, ASM-2...
+async def _next_number(db, project_id, prefix, model_class) -> str:
+
+# L520 — Пример создания OutboundShipment (use as template).
+async def create_shipment(db, project_id, warehouse_id, payload) -> OutboundShipment:
+
+# L556 — Пример ship: проверка status, stock -= qty для каждого item.
+async def ship_shipment(db, project_id, shipment_id) -> OutboundShipment:
+```
+
+## Файлы модуля
+
+| Файл | Назначение |
+|------|-----------|
+| models/assembly.py | ORM: AssemblyRequest + Item + StatusHistory + AssemblyDraft |
+| schemas/assembly.py | Pydantic: CRUD + LogisticsAnalytics DTOs |
+| schemas/assembly_draft.py | Pydantic для AssemblyDraft (Distribution / Row / Create / Update / Read / CommitResponse) |
+| services/assembly_service.py | Бизнес-логика + аналитика |
+| services/assembly_draft_service.py | CRUD черновика + commit_draft (валидация, pro-rata, NxAssemblyRequest, atomic rollback) |
+| routers/assembly.py | 14 HTTP endpoints (CRUD + workflow + analytics) |
+| routers/assembly_drafts.py | 6 endpoints под /api/v1/assembly/drafts (list/get/create/update/delete/commit) |
+
+### Frontend
 
 | Файл | Назначение |
 |------|-----------|
@@ -184,7 +198,7 @@ Endpoint: `GET /warehouse/assembly/shipments/analytics`
 | warehouse/assembly/distribute/page.tsx | Двух-сторонняя матрица ФФ × WB; live-валидация балансов; «↺ Авто-баланс» (greedy src + pro-rata tgt); autosave 5s; commit → редирект на сборку или список с `just_created` |
 | warehouse/logistics/page.tsx | Лист логиста + аналитика (KPI, график, матрица) |
 
-## Полное ТЗ и UX
+### Полное ТЗ и UX
 
 - ТЗ: `docs/tz_assembly_logistics.md` (или в artifacts)
 - UX: `docs/ux_plan_assembly_logistics.md` (или в artifacts)
