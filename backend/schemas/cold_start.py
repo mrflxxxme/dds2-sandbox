@@ -1,4 +1,4 @@
-# ruff: noqa: RUF002, RUF003
+# ruff: noqa: RUF002
 """Cold-start distribution schemas — распределение SKU по WB-складам.
 
 Используется для MVP «холодного старта» — расчёт куда лучше отправить новинку
@@ -90,6 +90,13 @@ class DistributeResponse(BaseModel):
     meta: DistributeMeta
 
 
+class ColdStartRfWarehouse(BaseModel):
+    """ФФ-склад проекта (для разбивки rf_qty по локациям на UI)."""
+
+    id: int
+    name: str
+
+
 class ColdStartTableRow(BaseModel):
     """Одна строка таблицы cold-start: SKU + per-warehouse allocation."""
 
@@ -99,8 +106,10 @@ class ColdStartTableRow(BaseModel):
     brand: str | None = None
     barcode: str | None = None  # representative barcode для WB acceptance/options
     rf_qty: int
+    rf_by_warehouse: dict[int, int] = {}  # warehouse_id → qty на ФФ-локации
     wb_qty: int
     in_assembly_total: int
+    asm_by_warehouse: dict[str, int] = {}  # canonical wb_warehouse → qty в сборке на этот склад
     sales_14d: int
     revenue_30d: float
     is_newcomer: bool  # first_sale_date IS NULL OR < 14 days
@@ -115,6 +124,7 @@ class ColdStartTableResponse(BaseModel):
 
     rows: list[ColdStartTableRow]
     main_warehouses: list[dict]  # [{district_key, district_label, warehouse, share_pct}]
+    rf_warehouses: list[ColdStartRfWarehouse] = []  # ФФ-склады проекта (для колонок)
     bench_source: str
     bench_total_orders: int
     meta: DistributeMeta

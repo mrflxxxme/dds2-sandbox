@@ -41,10 +41,7 @@ async def _auto_sync_wb_stocks_if_stale(project_id: int, db: AsyncSession) -> bo
     )
     last_sync = result.scalar()
 
-    if last_sync and (utcnow() - last_sync).total_seconds() < _AUTO_SYNC_STALE_SECONDS:
-        return False
-
-    return True
+    return not (last_sync and (utcnow() - last_sync).total_seconds() < _AUTO_SYNC_STALE_SECONDS)
 
 
 async def _bg_sync_wb_stocks(project_id: int):
@@ -199,6 +196,18 @@ async def get_stock_need(
             "артикула: «реально могу отправить» вместо «идеальная потребность»."
         ),
     ),
+    min_stock_per_main_warehouse: int = Query(
+        0,
+        ge=0,
+        le=100,
+        description=(
+            "Минимальный остаток per main склад ФО (top-1 по traffic). Если на "
+            "главном складе округа WB-stock+asm+transit+cell_alloc < min — bump "
+            "до этого уровня. Cap по оставшемуся ФФ-остатку. Разрывает vicious-cycle "
+            "«склад пуст → заказы не идут → нет в bench» для дальних регионов. "
+            "Работает только при only_available=true. 0 = off."
+        ),
+    ),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -216,6 +225,7 @@ async def get_stock_need(
         mode,
         localization_optimized=localization_optimized,
         only_available=only_available,
+        min_stock_per_main_warehouse=min_stock_per_main_warehouse,
     )
 
 

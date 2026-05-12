@@ -6,6 +6,45 @@ _Нет активных. Последняя проверка: 2026-05-07._
 
 ## Исправленные
 
+### Warehouse Need: точность расчёта потребности (DIVANDEK_кофе, 120х160_пепельный, проект default)
+- **Исправлено:** 2026-05-12
+- **Описание:** Алгоритм `compute_stock_need` (вкладка «Все»/«С дефицитом») имел 4 точки неточности:
+  1. **Lead time не учитывался** в формуле need. `required = avg × supply_days` без учёта дней доставки FF→WB. Реально пока товар едет (3-21 день для дальних регионов) продолжаются продажи → существующий WB-stock истощается → буфер недостаточный.
+  2. **District-pool работал только для сборок/транзита**, не для WB-stock. При профиците на одном складе ЦФО (Владимир 75) алгоритм не «делил» этот излишек с соседями ЦФО → over-recommend в Тулу/Воронеж.
+  3. **Two режима (`По дефициту` / `Идеальная локализация`)** путали пользователя: Mode 2 предлагал N>0 даже когда global_need=0, числа > rf_avail.
+  4. **Mode 1 leftover greedy**: после floor-распределения 87 шт по 15 cells, leftover (9 шт) шёл целиком в один склад с наибольшим need (Екатеринбург 25 вместо справедливых 17).
+- **Фикс:**
+  - `compute_stock_need`: `effective_days = supply_days + lead_time_per_wb[wh]`. Lead = `assembly_days[ff] + delivery_days[ff→wb] + wb_acceptance_days`. Fallback per district через `FALLBACK_TRANSPORT_DAYS_PER_DISTRICT` (ЦФО 2д ... ДВФО 14д) если `warehouse_delivery_times` пуста.
+  - District-pool: добавлен `local_surplus = stock - demand_local` per cell, агрегируется в `district_pool[(d, nm)]` вместе с asm+transit, распределяется по deficit cells округа.
+  - `min_stock_per_main_warehouse: int = 0` параметр (default off): для главного склада каждого ФО bump до min_stock если `WB-stock + asm + transit + cell_alloc < min`. Cap по оставшемуся rf_avail. Цель — разрыв vicious-cycle «склад пуст → нет заказов в bench → не предлагается» для дальних регионов.
+  - Hamilton method для leftover: вместо «всё лидеру по need», размазываем по cells с наибольшей дробной частью initial share (largest-fractional-remainders). Екатеринбург 25→17 для пепельного, ПФО точно совпало с WB-рекомендацией (16=16).
+  - Frontend: удалён segmented control «📦 По дефициту / 🎯 Идеальная локализация», оставлен только Mode 1 (operational). `onlyAvailable = true` constant.
+- **Результат (vs WB Excel-рекомендации для 120х160_пепельный, на 14д):**
+  - ПФО: 16 = 16 (наш = WB) ✓
+  - СЗФО: 8 vs WB 9 ✓ (близко)
+  - ДВФО: 8 vs WB 5 (умеренный over из-за lead_time)
+  - УрФО: 17 vs WB 9 (over, lead 15д на slow-mover)
+  - ЦФО: 23 vs WB 10 (over)
+- **Известные оставшиеся неточности:**
+  - Не используем AI-прогноз WB (мы линейная экстраполяция, WB видит сезонные спады/пики) → over-shoot для SKU на спад
+  - Lead_time × small_avg раздувает буфер для дальних регионов с малым спросом
+  - Возможные fix'ы: дефолт `analysis_days=30-60` для сглаживания, импорт WB-xlsx как baseline forecast
+- **Файлы:** `backend/services/warehouse_need_service.py`, `backend/routers/reports_stock.py`, `frontend-react/src/app/(main)/p/[slug]/warehouse/analytics/components/WarehouseNeedView.tsx`.
+
+### Cold-start «фантомное распределение»: предлагает грузить шт, которых на ФФ уже нет (project default, BLACKOUT_200х260_кофейный + BZ-YY1106/30х60-30ШТ)
+- **Исправлено:** 2026-05-12
+- **Описание:** На вкладке «Новинки» (`/warehouse/analytics`) для SKU с `rf_qty=144` + `asm_qty=144` (все 144 уже едут в 9 разных WB-складов) UI предлагал «Распределить: 84» — будто на ФФ ещё 84 шт. Причина двойная:
+  1. `compute_cold_start_table` использовал `total_qty = sku["rf_qty"]` без вычета `asm_qty` → `distribute_multi` размазывал «фантом» по bench-складам.
+  2. Per-warehouse safety net `max(0, alloc - asm[wh])` промахивался из-за рассогласования имён: `assembly_requests.wb_warehouse_name_manual` хранит «Краснодар (Тихорецкая)», «Новосемейкино», «Склад Шушары», а bench-traffic из `wb_orders.warehouse_name` каноничные: «Краснодар», «Самара (Новосемейкино)», «СПБ Шушары».
+  - Прецедент BZ-YY1106: rf=550, asm=230 (10 разных целевых складов), система предлагала 205 → должно быть 165.
+- **Фикс:**
+  - `cold_start_distribution_service.compute_cold_start_table`: `total_qty = max(0, sku["rf_qty"] - sku["asm_qty"])`.
+  - `compute_distribution`: `active_asm` поднят выше расчёта `total_qty`; дефолт = `rf_qty - sum(active_asm)`.
+  - `_canonicalize_asm_warehouse()` через `ACCEPTANCE_TO_STOCK_NAME` в `fetch_active_assemblies_for_sku` — per-warehouse subtraction срабатывает для всех вариантов имён.
+  - UI: разбивка ФФ по складам (новые колонки Ханди/натали/wms/...), `asm_by_warehouse` в response — зелёная подстрока «🚚 N» в WB-ячейке («куда уже едет»), tooltip «Уже в сборке: N шт». Приоритет приёмки короб → моно → super (короб дешевле). Сортировка + ИТОГО.
+- **Тесты:** 4 regression в `test_cold_start_distribution.py` (BLACKOUT-сценарий с 9 целевыми складами + BZ-YY1106 partial assembly).
+- **Файлы:** `backend/services/cold_start_distribution_service.py`, `backend/schemas/cold_start.py`, `frontend-react/src/types/api.ts`, `frontend-react/src/app/(main)/p/[slug]/warehouse/analytics/components/WarehouseNeedView.tsx`, `tests/test_cold_start_distribution.py`.
+
 ### Vehicle target_warehouse_id ↔ inbound_receipt warehouse_id рассинхрон (project default, V-0001)
 - **Исправлено:** 2026-05-07
 - **Описание:** Поле `target_warehouse_id` есть в `always_editable` для CostOrder (vehicle) — можно править даже после DISPATCHED. При DISPATCHED-переходе `_create_inbound_from_vehicle` создаёт `InboundReceipt(warehouse_id=vehicle.target_warehouse_id)`. После — если юзер меняет `target_warehouse_id` на машине, привязанная приёмка остаётся на старом складе. Vehicle висит в «Ожидаемых поставках» нового склада (фильтр по `cost_orders.target_warehouse_id`), но приёмка не показывается в табе «Приёмки» (фильтр по `inbound_receipts.warehouse_id`), кнопка «Принять» недоступна.

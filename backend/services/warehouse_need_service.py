@@ -22,6 +22,20 @@ logger = logging.getLogger("dds.stock_analytics")
 
 _WH_PARENS_RE = re.compile(r"\s*\([^)]*\)\s*$")
 
+# Fallback transport time (дни) per district когда WarehouseDeliveryTime пуст
+# для пары FF→WB. Реалистичный среднеотраслевой transit time от Москвы.
+# Используется только если у пользователя нет per-pair настроек.
+FALLBACK_TRANSPORT_DAYS_PER_DISTRICT: dict[str, int] = {
+    "central": 2,
+    "northwest": 4,
+    "volga": 5,
+    "south_caucasus": 6,
+    "ural": 8,
+    "far_east_siberia": 14,
+    "abroad": 14,
+    "unknown": 7,
+}
+
 
 def _normalize_wb_warehouse(name: str | None) -> str:
     """Canonicalize warehouse name to the WAREHOUSE_COORDS form so backend's
@@ -70,6 +84,7 @@ async def get_warehouse_need(
     mode: str = "actual",
     localization_optimized: bool = False,
     only_available: bool = False,
+    min_stock_per_main_warehouse: int = 0,
 ) -> dict:
     """Compute restocking need per warehouse per article.
 
@@ -328,6 +343,45 @@ async def get_warehouse_need(
     rf_warehouses = rf_warehouses_result.scalars().all()
     rf_wh_ids = [w.id for w in rf_warehouses]
 
+    # -- Lead time (assembly + transport + WB acceptance) per WB-warehouse --
+    # Используется в формуле `required = avg_d × (supply_days + lead_time)`:
+    # пока товар едет, продолжаются продажи и съедают существующий WB-сток.
+    # Если у пользователя в WarehouseDeliveryTime настроено per-pair → берём min
+    # по всем FF (greedy быстрейший FF доступен для отгрузки). Иначе fallback
+    # по district через FALLBACK_TRANSPORT_DAYS_PER_DISTRICT + assembly_days FF
+    # + wb_acceptance_days FF.
+    lead_time_per_wb: dict[str, int] = {}
+    if rf_warehouses:
+        dt_pairs_result = await db.execute(
+            select(
+                WarehouseDeliveryTime.warehouse_id,
+                WarehouseDeliveryTime.wb_warehouse_name,
+                WarehouseDeliveryTime.delivery_days,
+            ).where(WarehouseDeliveryTime.project_id == project_id)
+        )
+        # ff_id -> {wb_name -> delivery_days}
+        per_pair: dict[int, dict[str, int]] = {}
+        for row in dt_pairs_result:  # type: ignore[assignment]
+            wb_canon = _normalize_wb_warehouse(row.wb_warehouse_name)
+            per_pair.setdefault(row.warehouse_id, {})[wb_canon] = int(row.delivery_days or 3)
+
+        from backend.services.warehouse_district import warehouse_to_district
+
+        for wh_name in wh_names_to_show:
+            district = warehouse_to_district(wh_name)
+            fallback_transport = FALLBACK_TRANSPORT_DAYS_PER_DISTRICT.get(district, 7)
+            candidates: list[int] = []
+            for ff in rf_warehouses:  # type: ignore[assignment]
+                ff_id = ff.id  # type: ignore[attr-defined]
+                assembly = int(ff.assembly_days or 3)  # type: ignore[attr-defined]
+                acceptance = int(ff.wb_acceptance_days or 2)  # type: ignore[attr-defined]
+                transport = per_pair.get(ff_id, {}).get(wh_name, fallback_transport)
+                candidates.append(assembly + transport + acceptance)
+            if candidates:
+                lead_time_per_wb[wh_name] = min(candidates)
+            else:
+                lead_time_per_wb[wh_name] = 3 + fallback_transport + 2
+
     # -- One representative barcode per nm_id (for prefilled assembly form) --
     # Primary: nomenclature. Fallback: WbFboSupplyItem — covers nm_ids that
     # appear in WB stocks/orders but were not yet imported into local catalog.
@@ -495,7 +549,11 @@ async def get_warehouse_need(
                 continue
 
             avg_d = round(total_orders_at_wh / max(actual_days, 1), 2)
-            raw_need = compute_need(stock, avg_d, supply_days)
+            # supply_days + lead_time: пока товар едет, продолжаются продажи и
+            # съедают существующий WB-сток. Без lead_time планируется только
+            # «после прибытия», и к этому моменту запас на WB уже исчерпан.
+            effective_days = supply_days + lead_time_per_wb.get(wh_name, 0)
+            raw_need = compute_need(stock, avg_d, effective_days)
 
             # Full (pre-allocation) demand goes into the per-article total
             raw_need_per_article[nm_id] = raw_need_per_article.get(nm_id, 0) + raw_need
@@ -538,6 +596,21 @@ async def get_warehouse_need(
             for wh, q in wh_qty.items():
                 d = warehouse_to_district(wh)
                 district_pool[(d, nm)] = district_pool.get((d, nm), 0) + q
+
+        # Pool WB-stock surplus per district: если на каком-то складе ЦФО товара
+        # больше чем local demand × (supply+lead) — этот surplus покрывает дефицит
+        # других складов того же ФО через WB internal-rebalance (склады в ЦФО
+        # рядом, доставка между ними быстрая).
+        for wh_name in list(wh_data.keys()):
+            d = warehouse_to_district(wh_name)
+            for nm_id, art in wh_data[wh_name]["articles"].items():
+                stock = stock_lookup.get((wh_name, nm_id), 0)
+                avg_d_local = art.get("avg_daily", 0)
+                eff_days = supply_days + lead_time_per_wb.get(wh_name, 0)
+                demand_local = avg_d_local * eff_days
+                local_surplus = stock - demand_local
+                if local_surplus > 0:
+                    district_pool[(d, nm_id)] = district_pool.get((d, nm_id), 0) + int(local_surplus)
 
         # Группируем raw_need по (district, nm) — для пропорционального дележа
         raw_need_district: dict[tuple[str, int], int] = {}
@@ -585,20 +658,119 @@ async def get_warehouse_need(
             )
             can_send_per_nm[nm_id] = min(rf_avail_local, global_need)
 
-        # Greedy: больше всего «нуждающемуся» WB-складу — первому.
+        # Пропорционально доле per-WB need (= локализованный спрос склада в
+        # общем дефиците артикула). Лучше greedy: размазывает cap_total по ВСЕМ
+        # deficit-складам пропорционально их доле, не отдаёт всё одному самому
+        # нуждающемуся. Улучшает географический индекс локализации.
+        # Leftover от int-округления → самым нуждающимся (sorted by need desc),
+        # но не больше per-WB need (нельзя предложить больше чем реально нужно).
         for nm_id, cap_total in can_send_per_nm.items():
             wbs = []
             for wh_name in list(wh_data.keys()):
                 arts = wh_data[wh_name]["articles"]
                 if nm_id in arts and arts[nm_id]["need"] > 0:
                     wbs.append((wh_name, arts[nm_id]["need"]))
-            wbs.sort(key=lambda x: -x[1])
-            remaining = cap_total
+            if not wbs or cap_total <= 0:
+                for wh_name in list(wh_data.keys()):
+                    arts = wh_data[wh_name]["articles"]
+                    if nm_id in arts:
+                        arts[nm_id]["need"] = 0
+                continue
+            total_need_local = sum(n for _, n in wbs)
+            allocated: dict[str, int] = {}
+            fractionals: list[tuple[str, float, int]] = []
             for wh_name, n in wbs:
-                cap = min(n, remaining)
-                wh_data[wh_name]["articles"][nm_id]["need"] = cap
-                remaining = max(0, remaining - cap)
+                raw_share = (cap_total * n) / total_need_local
+                floored = int(raw_share)
+                allocated[wh_name] = min(n, floored)
+                fractionals.append((wh_name, raw_share - floored, n))
+            leftover = cap_total - sum(allocated.values())
+            # Hamilton method (largest-fractional-remainders): размазываем leftover
+            # по складам с наибольшей дробной частью раздела. Лучше greedy "всё
+            # лидеру" — справедливее распределение, не over-shoot одного дальнего
+            # склада (Екатеринбург 25 → 17 при cap=87 для пепельный).
+            for wh_name, _frac, n in sorted(fractionals, key=lambda x: -x[1]):
+                if leftover <= 0:
+                    break
+                if allocated[wh_name] < n:
+                    allocated[wh_name] += 1
+                    leftover -= 1
+            for wh_name, _ in wbs:
+                wh_data[wh_name]["articles"][nm_id]["need"] = allocated[wh_name]
 
+        for wh_name in list(wh_data.keys()):
+            wh_data[wh_name]["total_need"] = sum(a["need"] for a in wh_data[wh_name]["articles"].values())
+
+    # 4.7. Min-stock per main warehouse: ensure top-1 склад каждого ФО имеет
+    # минимум N шт (WB-stock + asm + transit + cell_alloc). Цель — разорвать
+    # vicious-cycle «склад пуст → заказы туда не идут → bench не видит спрос
+    # → алгоритм не предлагает» для дальних регионов (ДВФО, СФО), где WB
+    # никогда не получит истории без bootstrap-загрузки.
+    # Bump capped по ОСТАВШЕМУСЯ rf_avail (после Mode 1 cap).
+    if min_stock_per_main_warehouse > 0 and only_available:
+        from collections import defaultdict
+
+        from backend.services.warehouse_district import warehouse_to_district
+
+        # Identify main warehouse per district (top-1 by total orders, not excluded)
+        wh_total_orders: dict[str, int] = defaultdict(int)
+        for (wh, _nm), qty in wh_orders_map.items():
+            wh_total_orders[wh] += qty
+        district_to_wh: dict[str, list[tuple[str, int]]] = defaultdict(list)
+        for wh, total in wh_total_orders.items():
+            d = warehouse_to_district(wh)
+            if d in ("abroad", "unknown"):
+                continue
+            district_to_wh[d].append((wh, total))
+        main_per_district: dict[str, str] = {}
+        for d, whs in district_to_wh.items():
+            for wh, _ in sorted(whs, key=lambda x: -x[1]):
+                main_per_district[d] = wh
+                break
+        main_wh_set = set(main_per_district.values())
+
+        # Apply bump per SKU per main warehouse
+        for nm_id in all_nm_ids:
+            total_rf_stock_local = sum(
+                rf_stock_map.get(nm_id, {}).get(wh.id, 0)
+                for wh in rf_warehouses  # type: ignore[attr-defined]
+            )
+            in_asm_total_local = in_assembly_map.get(nm_id, 0)
+            rf_avail_local = max(0, total_rf_stock_local - in_asm_total_local)
+            already_allocated = can_send_per_nm.get(nm_id, 0)
+            remaining_budget = max(0, rf_avail_local - already_allocated)
+            if remaining_budget <= 0:
+                continue
+
+            for wh_name in main_wh_set:
+                if wh_name not in wh_data:
+                    continue
+                arts = wh_data[wh_name]["articles"]
+                if nm_id not in arts:
+                    # Создаём cell если SKU не имеет current entry на этом складе
+                    arts[nm_id] = {
+                        "nm_id": nm_id,
+                        "vendor_code": vendor_map.get(nm_id, f"#{nm_id}"),
+                        "stock": stock_lookup.get((wh_name, nm_id), 0),
+                        "avg_daily": 0,
+                        "need": 0,
+                    }
+                art = arts[nm_id]
+                current_at_wh = (
+                    stock_lookup.get((wh_name, nm_id), 0)
+                    + assembly_target_map.get(nm_id, {}).get(wh_name, 0)
+                    + transit_target_map.get(nm_id, {}).get(wh_name, 0)
+                    + art["need"]
+                )
+                if current_at_wh < min_stock_per_main_warehouse:
+                    bump = min(min_stock_per_main_warehouse - current_at_wh, remaining_budget)
+                    if bump > 0:
+                        art["need"] += bump
+                        remaining_budget -= bump
+                if remaining_budget <= 0:
+                    break
+
+        # Re-sum per warehouse totals
         for wh_name in list(wh_data.keys()):
             wh_data[wh_name]["total_need"] = sum(a["need"] for a in wh_data[wh_name]["articles"].values())
 
@@ -714,6 +886,11 @@ async def get_warehouse_need(
                 "can_send": can_send,
                 "deficit": deficit,
                 "stocks_wb": stocks_wb,
+                # Per-(nm, wh) asm/transit нужны фронту для client-side bump
+                # («Дораспределить»): чтобы не дополнять склад на 5шт если туда
+                # уже едет 5шт транзитом — иначе двойной bump.
+                "asm_by_warehouse": dict(assembly_target_map.get(nm_id, {})),
+                "transit_by_warehouse": dict(transit_target_map.get(nm_id, {})),
             }
         )
 

@@ -11,6 +11,7 @@ bash scripts/check_conventions.sh                 # конвенции
 make test-fast | test-changed | test-unit         # backend варианты
 cd frontend-react && npx vitest run               # frontend тесты
 cd frontend-react && npx playwright test tests/e2e/smoke.spec.ts  # smoke E2E
+make sync-prod                                    # локалка = копия прода (скачать снимок + залить + маска)
 ```
 
 ## Iron rules (нарушение = баг, проверяет post_edit_check.py)
@@ -48,6 +49,7 @@ cd frontend-react && npx playwright test tests/e2e/smoke.spec.ts  # smoke E2E
 - **Кэш:** `invalidate_cache(prefix)` сам добавляет `:*`
 - **Crypto:** `backend/utils/crypto.py`, legacy_fallback — НЕ менять без data-migration
 - **WB API:** sync_log в `finally`, deductions → `DOMAIN_WB.md`
+- **Прод-снимок локально:** `make sync-prod` (= `pull-prod` + `load-prod`). Скрипты в `scripts/pull-prod-snapshot.sh` / `scripts/load-prod-snapshot.sh`. SSH через `dds-data` (`~/.ssh/config`). Маскирует `integration_keys.encrypted_key` (→`is_active=false`), `users.password_hash` (→`bcrypt('localdev')`), `project_invites.invite_token`. Локалка после load **не дёргает WB/Telegram** — все ключи нерабочие.
 
 ## Домены
 Полная таблица + ссылки на `backend/DOMAIN_*.md` → [backend/DOMAIN_INDEX.md](backend/DOMAIN_INDEX.md).

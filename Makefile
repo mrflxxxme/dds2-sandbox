@@ -62,6 +62,17 @@ backup: ## Ручной бэкап БД
 restore: ## Восстановить БД из бэкапа (usage: make restore FILE=backup.sql.gz)
 	docker compose exec -T db-backup /scripts/restore.sh $(FILE)
 
+pull-prod: ## Скачать свежий прод-снимок в backups/prod/ (без записи в БД)
+	bash scripts/pull-prod-snapshot.sh
+
+pull-prod-fresh: ## Создать НОВЫЙ дамп на проде, потом скачать
+	bash scripts/pull-prod-snapshot.sh --fresh
+
+load-prod: ## Залить прод-снимок в локальную БД + маскировка (требует confirm)
+	bash scripts/load-prod-snapshot.sh
+
+sync-prod: pull-prod load-prod ## pull-prod + load-prod одной командой
+
 # ─── Сборка ──────────────────────────────────────────────────────────────────
 
 build-backend: ## Пересобрать backend (после изменения requirements)
