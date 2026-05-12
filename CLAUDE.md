@@ -81,11 +81,12 @@ cd frontend-react && npx playwright test tests/e2e/smoke.spec.ts  # smoke E2E
 
 ## CI и безопасность
 - Pre-commit: Ruff + Bandit + Gitleaks
-- Pre-push: pytest-testmon + vitest + conventions + slopsquatting
-- CI: Tests + Security (pip-audit, Trivy, Snyk) + Conventions + Claude Code review
+- Pre-push: pytest-testmon (exit 5 = OK) + vitest + npm audit (HIGH+) + conventions + slopsquatting
+- CI: Tests + Security (pip-audit, Trivy, Snyk, npm audit, gitleaks) + Conventions + Claude Code review
 - Auto-flow: push dev → auto-PR → green CI → auto-merge → cd-production
 - Branch protection main: require Tests + Security
-- `make setup` — установка хуков, экстренный пропуск `git push --no-verify`
+- Dependabot: daily 06:00 MSK + grouping minor/patch → `dependabot-auto-merge.yml` авто-мерджит patch/minor/dev-deps после green CI
+- `make setup` или `bash scripts/setup-hooks.sh` — установка хуков. `git push --no-verify` блокирован `pre_tool_check.sh` намеренно — fix root cause, не bypass
 
 ## Деплой (3-серверная)
 | Что | Workflow | Куда |
