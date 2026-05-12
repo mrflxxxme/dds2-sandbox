@@ -1,12 +1,13 @@
-# Domain: Counterparties + Loans (Phase 2)
+# DOMAIN_COUNTERPARTY — Контрагенты + Займы (Phase 2)
 
-## Overview
+## Ownership
+Lead-agent + ETL-команда. Все изменения в `services/counterparty_service.py`, `services/loan_service.py`, `etl/master_logic.py` (regex enrichment) идут через DOMAIN_COUNTERPARTY.md.
 
 Справочник контрагентов и займы, связанные с банковскими транзакциями. Заменяет
 старый `CounterpartyCategory.cp_key` на полноценную сущность с типом, мультиролью,
 документами и статистикой по периодам (мультивалюта RUB/CNY раздельно).
 
-## Models
+## Tables
 
 | Модель | Файл | Ключевые поля |
 |--------|------|---------------|
@@ -24,7 +25,31 @@
 `SUPPLIER, FULFILLMENT, CARRIER, CUSTOMS_BROKER, DESIGNER, LEGAL, LANDLORD,
 IT_SERVICE, MARKETPLACE, BANK, GOVERNMENT, AFFILIATED, OTHER`.
 
-## Services
+### Migration
+
+`migrations/versions/cp01_counterparties_loans.py` создаёт:
+- Таблицы `counterparty`, `counterparty_document`, `loan`, `loan_payment`
+- Новые колонки в `transactions`: `counterparty_id`, `contract_number`, `unk_number`, `loan_id`, `loan_payment_id`, `loan_payment_type`
+- Partial indexes (через CONCURRENTLY):
+  - `uq_counterparty_project_inn` UNIQUE (project_id, inn) WHERE inn IS NOT NULL AND is_deleted=false
+  - `uq_counterparty_project_contract` UNIQUE (project_id, contract_number) WHERE contract_number IS NOT NULL AND is_deleted=false
+  - `ix_counterparty_active` (project_id, primary_type) WHERE is_deleted=false
+  - `uq_loan_payment_transaction` UNIQUE (transaction_id) WHERE transaction_id IS NOT NULL
+
+## Endpoints
+
+| Router | Файл | Endpoints |
+|--------|------|-----------|
+| `/counterparties` | `backend/routers/counterparty.py` | GET list/detail, POST create, PATCH update, DELETE (soft), POST/GET/DELETE /documents |
+| `/loans` | `backend/routers/loans.py` | GET list/detail, POST create, PATCH update, POST /{id}/payments/match |
+| `/reports/counterparty-turnovers` | `backend/routers/reports.py` (extension) | GET pivot report |
+
+### Register
+Роутеры подключены в `backend/main.py` под `prefix="/api/v1"` + `Depends(get_current_user)`.
+
+## Business Rules
+
+### Services
 
 | Сервис | Файл | Главные методы |
 |--------|------|----------------|
@@ -39,18 +64,7 @@ IT_SERVICE, MARKETPLACE, BANK, GOVERNMENT, AFFILIATED, OTHER`.
 - `LoanPaymentAlreadyExistsError` — транзакция уже связана с LoanPayment
 - `ProjectMismatchError` — tx.project_id ≠ loan.project_id
 
-## Routers
-
-| Router | Файл | Endpoints |
-|--------|------|-----------|
-| `/counterparties` | `backend/routers/counterparty.py` | GET list/detail, POST create, PATCH update, DELETE (soft), POST/GET/DELETE /documents |
-| `/loans` | `backend/routers/loans.py` | GET list/detail, POST create, PATCH update, POST /{id}/payments/match |
-| `/reports/counterparty-turnovers` | `backend/routers/reports.py` (extension) | GET pivot report |
-
-### Register
-Роутеры подключены в `backend/main.py` под `prefix="/api/v1"` + `Depends(get_current_user)`.
-
-## ETL integration (master_logic.py)
+### ETL integration (master_logic.py)
 
 `enrich_purpose(purpose: str) -> dict` применяет regex к `Transaction.purpose`:
 
@@ -66,19 +80,19 @@ IT_SERVICE, MARKETPLACE, BANK, GOVERNMENT, AFFILIATED, OTHER`.
 | `RE_LOAN_REPAY` | `loan_payment_type=PRINCIPAL_REPAY` |
 | `RE_LOAN_INTEREST` | `loan_payment_type=INTEREST_PAY` |
 
-### Автосоздание Counterparty при импорте
+#### Автосоздание Counterparty при импорте
 - Upsert по (project_id, inn) — всегда: обновляем имя если новое длиннее.
 - Китайские поставщики без ИНН — upsert по (project_id, contract_number).
 - `primary_type=OTHER`, `created_by_import=True` по умолчанию.
 - Не перезаписываем `primary_type` если был выставлен вручную.
 
-### Автопривязка LoanPayment
+#### Автопривязка LoanPayment
 При ETL срабатывает `LoanService.auto_link_from_etl(transaction, purpose_match, project_id)`:
 - Ищет ACTIVE Loan с тем же `contract_number` в проекте.
 - Создаёт LoanPayment + проставляет `Transaction.loan_id`, `Transaction.loan_payment_id`.
 - Если займ не найден — `loan_payment_type` всё равно проставляется (видимость в UI).
 
-## Parser
+### Parser
 
 `FAKTURA_WB_BANK` — XML Spreadsheet 2003 parser для банковских выписок WB Банка (Faktura.ru):
 - `backend/etl/parsers/faktura.py` (`FakturaParser`, `parse_faktura_wb_bank`)
@@ -86,7 +100,7 @@ IT_SERVICE, MARKETPLACE, BANK, GOVERNMENT, AFFILIATED, OTHER`.
 - Колонки: Плат.пор № | Дата | Корреспондент | ИНН | КПП | Счёт | БИК | Вх.остаток | Дт | Кт | Назначение
 - Зарегистрирован в `SOURCE_PARSERS` (`backend/etl/parsers/__init__.py`).
 
-## Backfill
+### Backfill
 
 `scripts/backfill_counterparties.py --project-id=X [--dry-run]`:
 1. Находит уникальные ИНН во всех `Transaction` проекта.
@@ -96,7 +110,7 @@ IT_SERVICE, MARKETPLACE, BANK, GOVERNMENT, AFFILIATED, OTHER`.
 
 Тесты: `tests/test_backfill_script.py`.
 
-## Cache
+### Cache
 
 Prefixes (инвалидируются в `invalidate_project_reports(project_id)`):
 - `counterparty_list`, `counterparty_detail`
@@ -104,6 +118,18 @@ Prefixes (инвалидируются в `invalidate_project_reports(project_id
 - `loan_list`
 
 Все мутации (create/update/delete/match) вызывают `invalidate_project_reports(project_id)`.
+
+## Dependencies
+- `DOMAIN_TRANSACTIONS` — банковские транзакции с FK `counterparty_id`, `loan_id`, `loan_payment_id`
+- `DOMAIN_COUNTERPARTY_TURNOVERS` — pivot отчёт мультивалюта
+- ETL parsers (`backend/etl/parsers/faktura.py`) — Faktura WB Bank XML
+- MinIO — хранилище документов контрагентов
+
+## Known Issues / Pitfalls
+- При импорте Faktura: китайские поставщики без ИНН — upsert идёт по `contract_number`, не по INN
+- Не перезаписывать `primary_type` если был выставлен вручную (created_by_import=False)
+- Backfill идемпотентный — безопасно гнать повторно
+- Partial indexes созданы через CONCURRENTLY — миграция должна использовать raw SQL / `op.execute` с `AUTOCOMMIT`
 
 ## Tests
 
@@ -118,18 +144,7 @@ Prefixes (инвалидируются в `invalidate_project_reports(project_id
 | `tests/test_counterparty_turnovers_report.py` | Pivot отчёт, мультивалюта |
 | `tests/test_backfill_script.py` | Идемпотентность, dry-run, known INN type |
 
-## Migration
-
-`migrations/versions/cp01_counterparties_loans.py` создаёт:
-- Таблицы `counterparty`, `counterparty_document`, `loan`, `loan_payment`
-- Новые колонки в `transactions`: `counterparty_id`, `contract_number`, `unk_number`, `loan_id`, `loan_payment_id`, `loan_payment_type`
-- Partial indexes (через CONCURRENTLY):
-  - `uq_counterparty_project_inn` UNIQUE (project_id, inn) WHERE inn IS NOT NULL AND is_deleted=false
-  - `uq_counterparty_project_contract` UNIQUE (project_id, contract_number) WHERE contract_number IS NOT NULL AND is_deleted=false
-  - `ix_counterparty_active` (project_id, primary_type) WHERE is_deleted=false
-  - `uq_loan_payment_transaction` UNIQUE (transaction_id) WHERE transaction_id IS NOT NULL
-
-## File list (быстрая навигация)
+## Файлы модуля
 
 ```
 backend/models/counterparty.py      # Counterparty, CounterpartyDocument

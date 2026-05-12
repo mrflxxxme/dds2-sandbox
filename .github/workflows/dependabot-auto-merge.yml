@@ -1,0 +1,60 @@
+# Dependabot Auto-Merge
+# Автоматически мержит dependabot PRs со security/patch/minor бампами после зелёного CI.
+# Major-обновления требуют ручного ревью (политика из dependabot.yml).
+#
+# Logic:
+# - Триггер: PR от dependabot[bot]
+# - Fetch metadata: тип обновления (patch/minor/major), категория (security/version-update)
+# - Если security ИЛИ patch ИЛИ minor → `gh pr merge --auto` (мерджится после прохождения required checks)
+# - Major → пропускаем (висит open до ручного approve)
+#
+# Прецедент 2026-05-12: 7 HIGH CVE в next@15.5.15 задержали PR #264 на ~5 минут пока я бампал вручную.
+# С этим workflow next 15.5.15 → 15.5.18 был бы auto-merged dependabot'ом за ночь, до моего push.
+
+name: Dependabot Auto-Merge
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    name: Auto-merge dependabot PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Auto-merge security / patch / minor updates
+        if: |
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          steps.meta.outputs.update-type == 'version-update:semver-minor' ||
+          steps.meta.outputs.dependency-type == 'direct:development'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          echo "Update type: ${{ steps.meta.outputs.update-type }}"
+          echo "Dependency type: ${{ steps.meta.outputs.dependency-type }}"
+          echo "Enabling auto-merge for ${{ steps.meta.outputs.dependency-names }}"
+          gh pr merge --auto --merge "$PR_URL"
+
+      - name: Comment on major updates (manual review required)
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          gh pr comment "$PR_URL" --body "⚠️ Major version bump — auto-merge skipped. Manual review required (breaking changes possible).
+
+          Type: \`${{ steps.meta.outputs.update-type }}\`
+          Dependency: \`${{ steps.meta.outputs.dependency-names }}\`"

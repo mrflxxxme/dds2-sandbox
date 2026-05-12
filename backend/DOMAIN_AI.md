@@ -1,11 +1,13 @@
-# Domain: AI Multi-Agent System
+# DOMAIN_AI — AI Multi-Agent System (7 агентов, orchestrator, memory, 19 tools)
 
-## Назначение
+## Ownership
+Lead-agent + AI-команда. Все изменения в `services/ai/*` идут через DOMAIN_AI.md.
+
 Система AI-аналитики для Wildberries-продавцов. Пользователь задаёт вопрос →
 Orchestrator классифицирует интент → маршрутизирует к 1-2 специализированным агентам →
 каждый агент вызывает инструменты (запросы к БД) → Synthesizer объединяет ответы.
 
-## Архитектура
+### Архитектура
 ```
 Вопрос пользователя
     ↓
@@ -20,8 +22,116 @@ synthesizer.py — объединение ответов (если >1 агент
 Ответ → Telegram (HTML) или TMA (JSON)
 ```
 
-## Ownership
-Файлы этого домена:
+### 7 агентов
+
+| Агент | Роль | Типичные вопросы |
+|-------|------|------------------|
+| Analyst | Аналитик | "Как продажи?", "Покажи воронку", "Тренды за неделю" |
+| Financier | Финансист | "Какая прибыль?", "Маржинальность?", "P&L за март" |
+| Marketer | Маркетолог | "DRR по товарам", "Эффективность рекламы", "ROI кампаний" |
+| Advertiser | Рекламщик | "Бюджеты кампаний", "Ставки", "Аномалии в рекламе" |
+| SupplyManager | Снабженец | "Что заказать?", "Остатки на складах", "Прогноз дефицита" |
+| Logistics | Логист | "Стоимость логистики", "История отгрузок", "Куда едет товар" |
+| Logistician | Legacy | Перенаправляется на SupplyManager/Logistics |
+
+## Tables
+Домен не имеет собственных ORM-таблиц аналитического слоя (использует таблицы других доменов через tools). Собственные таблицы веб-чата:
+
+| Модель | Назначение | Unique / Key |
+|--------|------------|--------------|
+| `AiConversation` | Диалог веб-чата (SoftDeleteMixin, TimestampMixin) | `(project_id, user_id)` |
+| `AiMessage` | Одно сообщение в диалоге (БЕЗ SoftDelete — каскадно с conversation) | `conversation_id` (FK CASCADE) |
+
+`AiConversation` поля: `project_id`, `user_id`, `brand` (опционально), `title` (default `"Новый чат"`), `created_at`.
+
+`AiMessage` поля: `conversation_id` (FK с `ondelete="CASCADE"`), `role` (`user`/`assistant`), `content` (Text), `files` JSONB (`[{name, type, size, url}]`), `tools_used` JSONB, `tokens_used`, `created_at`.
+
+## Endpoints
+
+### Web-интерфейс (ai_chat)
+Отдельный слой над orchestrator для веб-чата на странице `(main)/p/[slug]/ai-chat`.
+Сама бизнес-логика AI здесь НЕ реализуется — модуль только хранит историю и проксирует в `orchestrator.ask()`.
+
+- `routers/ai_chat.py` (prefix `/ai`):
+  - CRUD conversations (с `Depends(get_current_user)` и `get_current_project`).
+  - `POST /ai/conversations/{id}/messages` — стримит ответ агента через `StreamingResponse` (SSE).
+  - `POST /ai/upload` — file upload (картинки/документы для контекста), возвращает URL.
+  - Все write endpoints под `Depends(rate_limit_write)`.
+  - Внутри вызывает `from backend.services.ai.orchestrator import ask as orchestrator_ask`.
+- Подключён в `backend/main.py` (`app.include_router(ai_chat.router)`).
+- Frontend: `frontend-react/src/app/(main)/p/[slug]/ai-chat/page.tsx` + `lib/api/ai-chat.ts`.
+
+### 19 инструментов (tools)
+Каждый tool = JSON schema → executor вызывает backend service → возвращает JSON.
+Все tools фильтруют по `project_id` + опционально `brand`.
+
+#### Finance (6)
+- `get_bdr_data` — **самый точный P&L** (из финансовых строк WB)
+- `get_opiu_report` — ОПИУ (выручка, расходы, EBITDA)
+- `get_dds_report` — ДДС по месяцам
+- `get_margins_analysis` — маржинальность по артикулам
+- `get_cost_data` — себестоимость, пропуски
+- `get_cost_analysis` — анализ структуры затрат
+
+#### Marketing (5)
+- `get_funnel_data` — воронка (заказы, выручка, DRR, CTR)
+- `get_top_products` — топ/антитоп товаров с трендами
+- `get_anomalies` — аномалии в метриках (>30% изменение)
+- `compare_periods` — сравнение периодов (WoW, MoM)
+- `get_product_rankings` — рейтинг товаров
+
+#### Logistics (8)
+- `get_stock_info` — остатки, дней до дефицита, светофор
+- `get_warehouse_need` — рекомендации по дозаказу
+- `get_warehouse_stocks` — распределение по складам WB
+- `get_order_geography` — география заказов (топ-20 городов)
+- `get_day_analysis` — дневной KPI дашборд с аномалиями
+- `get_product_info` — детали по одному товару
+- `get_logistics_history` — история отгрузок, стоимость логистики
+- `get_supply_plan` — план снабжения
+
+## Business Rules
+1. **Rate Limit:** 20 req/hour per chat, 100 req/day per project (Redis)
+2. **History:** последние 10 сообщений в Redis (TTL 1 час)
+3. **Brand filtering:** все tools фильтруют по бренду если указан в binding
+4. **Tool loop:** максимум 5 раундов tool_use за один запрос
+5. **Truncation:** ответы tools обрезаются до 15KB для экономии токенов
+6. **Memory:** инсайты автоматически сохраняются в BrandNote после ответа
+7. **Models:** Haiku для классификации интента, Sonnet для ответов агентов
+8. **Digest:** утренний дайджест в 7:00 MSK (Haiku) через scheduler
+
+### Error Handling
+- `llm_client.py`: retry 3 раза с exponential backoff (2s→4s→8s) для 429, 5xx, connection errors
+- `base.py`: chat() обёрнут в try/except — агент возвращает "Ошибка при обращении к AI" вместо crash
+- `orchestrator.py`: single-agent и multi-agent пути оба защищены от необработанных исключений
+- `executor.py`: все tools обёрнуты в try/except, возвращают `{"error": "..."}` при ошибке
+
+### Security
+- Все tools проверяют project_id ownership
+- Multi-tenant изоляция через project_id на каждом запросе
+- API key: `ANTHROPIC_API_KEY` в .env
+- Rate limiting через Redis (graceful degradation при недоступности)
+
+## Dependencies
+- `services/funnel/` — данные воронки, реклама
+- `services/reports/` — ДДС, БДР, ОПИУ
+- `services/warehouse_*` — склады, остатки
+- `services/stock_forecast_service.py` — прогноз дефицита
+- `services/cost/` — себестоимость
+- `services/health_check_service.py` — health check для TMA dashboard
+- Anthropic API (Claude Sonnet + Haiku)
+
+## Known Issues / Pitfalls
+
+### XSS защита (коммит 8c1d167)
+- Ответы агента рендерятся через `dangerouslySetInnerHTML` — обязательна санитизация
+- `frontend-react/src/lib/sanitize.ts::sanitizeAIHtml()` — DOMPurify + hook `afterSanitizeAttributes` (force `target=_blank rel="noopener noreferrer"` на ссылках)
+- Используется в ai-chat + `(tma)/tma/chat`
+- НЕ использовать ручной regex/allowlist — он пропускает `<img onerror>`, `javascript:` в href, `<svg onload>`
+- Тесты: `frontend-react/src/__tests__/lib/sanitize.test.ts` (7 XSS-кейсов + 9 позитивных)
+
+## Файлы модуля
+
 - `services/ai/orchestrator.py` — классификация интента, маршрутизация, rate limit, history
 - `services/ai/agents/base.py` — BaseAgent: tool execution loop, history, brand notes
 - `services/ai/agents/analyst.py` — аналитик (воронка, KPI, тренды)
@@ -45,100 +155,7 @@ synthesizer.py — объединение ответов (если >1 агент
 - `services/ai/agent.py` — legacy монолитный агент (используется для digest)
 - `services/ai/tools_legacy.py` — legacy tools (13 шт, для обратной совместимости)
 - `services/health_check_service.py` — health check данные (отправки, просрочки, кат.А, неликвид)
-
-### Web-интерфейс (ai_chat)
-Отдельный слой над orchestrator для веб-чата на странице `(main)/p/[slug]/ai-chat`.
-Сама бизнес-логика AI здесь НЕ реализуется — модуль только хранит историю и проксирует в `orchestrator.ask()`.
-
-- `models/ai_chat.py`:
-  - `AiConversation` (SoftDeleteMixin, TimestampMixin) — диалог. Поля: `project_id`, `user_id`, `brand` (опционально), `title` (default `"Новый чат"`), `created_at`.
-  - `AiMessage` — одно сообщение. Поля: `conversation_id` (FK с `ondelete="CASCADE"`), `role` (`user`/`assistant`), `content` (Text), `files` JSONB (`[{name, type, size, url}]`), `tools_used` JSONB, `tokens_used`, `created_at`. Без SoftDeleteMixin — каскадно удаляется с conversation.
-- `schemas/ai_chat.py` — `AiConversationCreate/Update/Schema/List`, `AiMessageCreate/Schema`, `AiFileUploadResponse`.
-- `services/ai_chat_service.py` — `list_conversations`, CRUD conversations и messages. Все запросы фильтруют по `project_id` + `user_id` + `is_deleted == False`.
-- `routers/ai_chat.py` (prefix `/ai`):
-  - CRUD conversations (с `Depends(get_current_user)` и `get_current_project`).
-  - `POST /ai/conversations/{id}/messages` — стримит ответ агента через `StreamingResponse` (SSE).
-  - `POST /ai/upload` — file upload (картинки/документы для контекста), возвращает URL.
-  - Все write endpoints под `Depends(rate_limit_write)`.
-  - Внутри вызывает `from backend.services.ai.orchestrator import ask as orchestrator_ask`.
-- Подключён в `backend/main.py` (`app.include_router(ai_chat.router)`).
-- Frontend: `frontend-react/src/app/(main)/p/[slug]/ai-chat/page.tsx` + `lib/api/ai-chat.ts`.
-
-#### XSS защита (коммит 8c1d167)
-- Ответы агента рендерятся через `dangerouslySetInnerHTML` — обязательна санитизация
-- `frontend-react/src/lib/sanitize.ts::sanitizeAIHtml()` — DOMPurify + hook `afterSanitizeAttributes` (force `target=_blank rel="noopener noreferrer"` на ссылках)
-- Используется в ai-chat + `(tma)/tma/chat`
-- НЕ использовать ручной regex/allowlist — он пропускает `<img onerror>`, `javascript:` в href, `<svg onload>`
-- Тесты: `frontend-react/src/__tests__/lib/sanitize.test.ts` (7 XSS-кейсов + 9 позитивных)
-
-## 7 агентов
-
-| Агент | Роль | Типичные вопросы |
-|-------|------|------------------|
-| Analyst | Аналитик | "Как продажи?", "Покажи воронку", "Тренды за неделю" |
-| Financier | Финансист | "Какая прибыль?", "Маржинальность?", "P&L за март" |
-| Marketer | Маркетолог | "DRR по товарам", "Эффективность рекламы", "ROI кампаний" |
-| Advertiser | Рекламщик | "Бюджеты кампаний", "Ставки", "Аномалии в рекламе" |
-| SupplyManager | Снабженец | "Что заказать?", "Остатки на складах", "Прогноз дефицита" |
-| Logistics | Логист | "Стоимость логистики", "История отгрузок", "Куда едет товар" |
-| Logistician | Legacy | Перенаправляется на SupplyManager/Logistics |
-
-## 19 инструментов (tools)
-Каждый tool = JSON schema → executor вызывает backend service → возвращает JSON.
-Все tools фильтруют по `project_id` + опционально `brand`.
-
-### Finance (6)
-- `get_bdr_data` — **самый точный P&L** (из финансовых строк WB)
-- `get_opiu_report` — ОПИУ (выручка, расходы, EBITDA)
-- `get_dds_report` — ДДС по месяцам
-- `get_margins_analysis` — маржинальность по артикулам
-- `get_cost_data` — себестоимость, пропуски
-- `get_cost_analysis` — анализ структуры затрат
-
-### Marketing (5)
-- `get_funnel_data` — воронка (заказы, выручка, DRR, CTR)
-- `get_top_products` — топ/антитоп товаров с трендами
-- `get_anomalies` — аномалии в метриках (>30% изменение)
-- `compare_periods` — сравнение периодов (WoW, MoM)
-- `get_product_rankings` — рейтинг товаров
-
-### Logistics (8)
-- `get_stock_info` — остатки, дней до дефицита, светофор
-- `get_warehouse_need` — рекомендации по дозаказу
-- `get_warehouse_stocks` — распределение по складам WB
-- `get_order_geography` — география заказов (топ-20 городов)
-- `get_day_analysis` — дневной KPI дашборд с аномалиями
-- `get_product_info` — детали по одному товару
-- `get_logistics_history` — история отгрузок, стоимость логистики
-- `get_supply_plan` — план снабжения
-
-## Business Rules
-1. **Rate Limit:** 20 req/hour per chat, 100 req/day per project (Redis)
-2. **History:** последние 10 сообщений в Redis (TTL 1 час)
-3. **Brand filtering:** все tools фильтруют по бренду если указан в binding
-4. **Tool loop:** максимум 5 раундов tool_use за один запрос
-5. **Truncation:** ответы tools обрезаются до 15KB для экономии токенов
-6. **Memory:** инсайты автоматически сохраняются в BrandNote после ответа
-7. **Models:** Haiku для классификации интента, Sonnet для ответов агентов
-8. **Digest:** утренний дайджест в 7:00 MSK (Haiku) через scheduler
-
-## Error Handling
-- `llm_client.py`: retry 3 раза с exponential backoff (2s→4s→8s) для 429, 5xx, connection errors
-- `base.py`: chat() обёрнут в try/except — агент возвращает "Ошибка при обращении к AI" вместо crash
-- `orchestrator.py`: single-agent и multi-agent пути оба защищены от необработанных исключений
-- `executor.py`: все tools обёрнуты в try/except, возвращают `{"error": "..."}` при ошибке
-
-## Security
-- Все tools проверяют project_id ownership
-- Multi-tenant изоляция через project_id на каждом запросе
-- API key: `ANTHROPIC_API_KEY` в .env
-- Rate limiting через Redis (graceful degradation при недоступности)
-
-## Dependencies
-- `services/funnel/` — данные воронки, реклама
-- `services/reports/` — ДДС, БДР, ОПИУ
-- `services/warehouse_*` — склады, остатки
-- `services/stock_forecast_service.py` — прогноз дефицита
-- `services/cost/` — себестоимость
-- `services/health_check_service.py` — health check для TMA dashboard
-- Anthropic API (Claude Sonnet + Haiku)
+- `models/ai_chat.py` — `AiConversation`, `AiMessage`
+- `schemas/ai_chat.py` — `AiConversationCreate/Update/Schema/List`, `AiMessageCreate/Schema`, `AiFileUploadResponse`
+- `services/ai_chat_service.py` — `list_conversations`, CRUD conversations и messages. Все запросы фильтруют по `project_id` + `user_id` + `is_deleted == False`
+- `routers/ai_chat.py` — HTTP endpoints веб-чата

@@ -49,26 +49,14 @@ cd frontend-react && npx playwright test tests/e2e/smoke.spec.ts  # smoke E2E
 - **Crypto:** `backend/utils/crypto.py`, legacy_fallback — НЕ менять без data-migration
 - **WB API:** sync_log в `finally`, deductions → `DOMAIN_WB.md`
 
-## Домены (детали в `backend/DOMAIN_*.md`)
-| Домен | Ключевое | Файлы |
-|-------|----------|-------|
-| Транзакции | dedupe by txn_id | `etl/`, `transactions_service` |
-| Отчёты | кэш 300s; синк ОПИУ+БДР | `reports/`, `opiu_service`, `wb_bdr_service` |
-| AI Chat | SSE streaming, file upload | `routers/ai_chat`, `models/ai_chat` |
-| Себестоимость | FIFO; duty per container | `cost/`, `cost_parsers` |
-| Склад | FBO vs FBS; daily WB sync | `warehouse_*`, `fbo_supply_service` |
-| WB API | Semaphore, Retry-After, partial save | `integrations/`, `funnel/` |
-| Сборка | crud+status+analytics | `assembly/` |
-| AI Агенты | orchestrator→agents→synthesizer | `services/ai/` |
-| Поставки | FactoryOrder→CostOrder→Warehouse | `supply_chain/` |
-| Контрагенты+Займы | upsert by INN; мультивалюта | `counterparty_service`, `loan_service`, `DOMAIN_COUNTERPARTY.md` |
+## Домены
+Полная таблица + ссылки на `backend/DOMAIN_*.md` → [backend/DOMAIN_INDEX.md](backend/DOMAIN_INDEX.md).
 
 ## Навигация
 - `.claude/rules/lead_agent_v2.md` — lead-agent canon (роутинг, параллелизм, iron rules)
 - `backend/MAP.md` — карта backend
 - `backend/DOMAIN_*.md` — домены
-- `.claude/rules/learnings.md` — накопленные решения
-- `docs/KNOWN_PITFALLS.md` — повторяющиеся грабли
+- `.claude/rules/learnings.md` — накопленные решения + повторяющиеся грабли
 - `memory/MEMORY.md` — feedback + project state
 - `mcp-servers/dds-mcp/` — read-only MCP для PG/Redis инспекции (tools: `mcp__dds__*`)
 - `/status` — диагностика (git, docker, миграции)
@@ -93,11 +81,12 @@ cd frontend-react && npx playwright test tests/e2e/smoke.spec.ts  # smoke E2E
 
 ## CI и безопасность
 - Pre-commit: Ruff + Bandit + Gitleaks
-- Pre-push: pytest-testmon + vitest + conventions + slopsquatting
-- CI: Tests + Security (pip-audit, Trivy, Snyk) + Conventions + Claude Code review
+- Pre-push: pytest-testmon (exit 5 = OK) + vitest + npm audit (HIGH+) + conventions + slopsquatting
+- CI: Tests + Security (pip-audit, Trivy, Snyk, npm audit, gitleaks) + Conventions + Claude Code review
 - Auto-flow: push dev → auto-PR → green CI → auto-merge → cd-production
 - Branch protection main: require Tests + Security
-- `make setup` — установка хуков, экстренный пропуск `git push --no-verify`
+- Dependabot: daily 06:00 MSK + grouping minor/patch → `dependabot-auto-merge.yml` авто-мерджит patch/minor/dev-deps после green CI
+- `make setup` или `bash scripts/setup-hooks.sh` — установка хуков. `git push --no-verify` блокирован `pre_tool_check.sh` намеренно — fix root cause, не bypass
 
 ## Деплой (3-серверная)
 | Что | Workflow | Куда |
@@ -115,7 +104,7 @@ cd frontend-react && npx playwright test tests/e2e/smoke.spec.ts  # smoke E2E
 ## При баге или новом модуле
 1. Новая SoftDelete-модель → добавь в `SOFT_MODELS` в `scripts/check_conventions.sh`
 2. Новый отчёт с кэшем → prefix в `invalidate_project_reports()` в `backend/cache.py`
-3. Новый домен → создай `backend/DOMAIN_*.md` + строку в таблице доменов
+3. Новый домен → копируй `.claude/templates/DOMAIN_template.md` → `backend/DOMAIN_<NAME>.md` + строка в `backend/DOMAIN_INDEX.md`
 4. Новый антипаттерн → check в `scripts/check_conventions.sh`
 5. Урок из бага → `memory/project_known_bugs.md`
 

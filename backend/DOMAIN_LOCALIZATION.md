@@ -1,11 +1,16 @@
 # DOMAIN_LOCALIZATION — Индекс Локализации (ИЛ + ИРП)
 
+## Ownership
+Lead-agent + WB-команда. Все изменения в `services/localization_index_service.py`, `services/warehouse_district.py`, `scheduler/jobs/wb_orders_sync.py` идут через DOMAIN_LOCALIZATION.md.
+
 > С 23.03.2026 WB ввёл новые правила тарификации логистики, привязанные к
 > доле локально-доставленных заказов (`localizationPercent`). Этот домен
 > закрывает: сводный отчёт ИЛ/ИРП, региональную разбивку по федеральным
 > округам и manual-refresh.
 
-## Источники данных
+## Tables
+
+### Источники данных
 
 | Что | Endpoint WB | Куда складываем |
 |-----|-------------|-----------------|
@@ -15,28 +20,42 @@
 `wb_orders` синхронится 3×/день (cron 03:30 / 09:30 / 15:30 MSK), `days_back=30`,
 UPSERT по `(project_id, srid)`. Manual refresh: `POST /api/v1/localization/sync`.
 
-## Расчёты (`backend/services/localization_index_service.py`)
+## Endpoints
 
-### ИЛ — Индекс локализации
+| Метод | Path | Возвращает |
+|-------|------|------------|
+| GET | `/localization/summary?date_from&date_to` | `LocalizationSummary` (ИЛ, ИРП, district_totals) |
+| GET | `/localization/skus?date_from&date_to` | `list[LocalizationSkuRow]` (per nm + districts) |
+| GET | `/localization?date_from&date_to` | оба сразу |
+| POST | `/localization/sync` | trigger `sync_wb_orders(days_back=30)` |
+
+Все фильтруют по `project_id` через `Depends(get_current_project)`.
+`/sync` под `Depends(rate_limit_write)`.
+
+## Business Rules
+
+### Расчёты (`backend/services/localization_index_service.py`)
+
+#### ИЛ — Индекс локализации
 Средневзвешенный КТР по всем заказам периода:
 ```
 ИЛ = Σ(orders × ktr) / Σ orders
 ```
 КТР берётся per-SKU из `loc_pct → KTR_TABLE` ([localization_tariff.py](services/localization_tariff.py)).
 
-### ИРП — Индекс распределения продаж
+#### ИРП — Индекс распределения продаж
 Средневзвешенный КРП (% удержания к цене):
 ```
 ИРП = Σ(orders × krp) / Σ orders
 ```
 
-### Per-SKU loc_pct
+#### Per-SKU loc_pct
 Средневзвешенно по `orders_count` за период (из `wb_funnel_daily`):
 ```
 loc_pct(nm) = Σ(orders × localizationPercent) / Σ orders
 ```
 
-### Per-SKU × округ доставки (из wb_orders)
+#### Per-SKU × округ доставки (из wb_orders)
 ```
 local(nm, district)     = orders где
     is_cancel = false
@@ -55,7 +74,7 @@ non_local(nm, district) = orders где условия выше выполнен
 «Северо-Кавказский ФО» объединён с «Южный ФО», «Сибирский ФО» с
 «Дальневосточный ФО» — как в эталонном калькуляторе WB.
 
-## Маппинг складов
+### Маппинг складов
 [`warehouse_district.py`](services/warehouse_district.py) — справочник
 89 складов из WB-кабинета («Логистика → Склады → Коэффициенты по коробам»,
 2026-04). Включает виртуальные склады (`Виртуальный Москва Радумля` и т.д.) и
@@ -64,19 +83,7 @@ non_local(nm, district) = orders где условия выше выполнен
 `WAREHOUSE_LOGISTICS_COEF` хранит коэффициенты для будущих рублёвых
 расчётов логистики (пока используется только для документации).
 
-## API endpoints
-
-| Метод | Path | Возвращает |
-|-------|------|------------|
-| GET | `/localization/summary?date_from&date_to` | `LocalizationSummary` (ИЛ, ИРП, district_totals) |
-| GET | `/localization/skus?date_from&date_to` | `list[LocalizationSkuRow]` (per nm + districts) |
-| GET | `/localization?date_from&date_to` | оба сразу |
-| POST | `/localization/sync` | trigger `sync_wb_orders(days_back=30)` |
-
-Все фильтруют по `project_id` через `Depends(get_current_project)`.
-`/sync` под `Depends(rate_limit_write)`.
-
-## Кэш
+### Кэш
 
 | Префикс | TTL | Когда инвалидируется |
 |---------|-----|----------------------|
@@ -86,7 +93,7 @@ non_local(nm, district) = orders где условия выше выполнен
 
 `sync_wb_orders` сам делает invalidate всех трёх префиксов после UPSERT.
 
-## Scheduler
+### Scheduler
 
 [`scheduler/jobs/wb_orders_sync.py`](scheduler/jobs/wb_orders_sync.py) —
 `sync_all_projects_wb_orders()`:
@@ -98,19 +105,12 @@ non_local(nm, district) = orders где условия выше выполнен
 - `cutoff_dt = вчера 23:59 MSK` — сегодняшние заказы пропускаются
   (счётчик `skipped_future`).
 
-## Frontend
+## Dependencies
+- `DOMAIN_WB` — WB Statistics API, wb_funnel_daily агрегаты
+- `services/warehouse_district.py` — справочник 89 WB складов → ФО
+- `services/localization_tariff.py` — KTR_TABLE, KRP-боксы
 
-`/p/[slug]/localization` ([page.tsx](../frontend-react/src/app/(main)/p/[slug]/localization/page.tsx)):
-- Top-блок: ИЛ, ИРП, заказы, Легенда КТР, КРП-боксы.
-- Таблица per-SKU + sticky ИТОГО + group-headers по 6 ФО × 4 sub-cols.
-- Conditional row coloring по КРП.
-- Кнопка «Обновить данные» → `POST /localization/sync`.
-
-API client: [`lib/api/localization.ts`](../frontend-react/src/lib/api/localization.ts).
-Constants: [`lib/constants/localization.ts`](../frontend-react/src/lib/constants/localization.ts)
-(DISTRICT_ORDER, DISTRICT_LABELS, DISTRICT_COLORS).
-
-## Важные нюансы
+## Known Issues / Pitfalls
 
 - **Виртуальные склады**: WB иногда отгружает заказ через «Виртуальный Краснодар»
   и т.п. — это FBS-сеть в нужном городе. Маппятся на свой ФО.
@@ -127,6 +127,18 @@ Constants: [`lib/constants/localization.ts`](../frontend-react/src/lib/constants
   ответе → `dict[srid] -> row` ДО UPSERT-batch (защита от
   CardinalityViolation).
 
+## Frontend
+
+`/p/[slug]/localization` ([page.tsx](../frontend-react/src/app/(main)/p/[slug]/localization/page.tsx)):
+- Top-блок: ИЛ, ИРП, заказы, Легенда КТР, КРП-боксы.
+- Таблица per-SKU + sticky ИТОГО + group-headers по 6 ФО × 4 sub-cols.
+- Conditional row coloring по КРП.
+- Кнопка «Обновить данные» → `POST /localization/sync`.
+
+API client: [`lib/api/localization.ts`](../frontend-react/src/lib/api/localization.ts).
+Constants: [`lib/constants/localization.ts`](../frontend-react/src/lib/constants/localization.ts)
+(DISTRICT_ORDER, DISTRICT_LABELS, DISTRICT_COLORS).
+
 ## Тесты
 
 | Файл | Что покрыто |
@@ -136,3 +148,13 @@ Constants: [`lib/constants/localization.ts`](../frontend-react/src/lib/constants
 | [test_localization_districts.py](../tests/test_localization_districts.py) | _load_district_breakdown, exclusions, summary/skus integration (12) |
 | [test_localization_index_service.py](../tests/test_localization_index_service.py) | ИЛ/ИРП расчёт, эталон 37%/62% → ИРП 1.05% (12) |
 | [test_localization_tariff.py](../tests/test_localization_tariff.py) | КТР/КРП таблицы (25) |
+
+## Файлы модуля
+- `backend/services/localization_index_service.py` — расчёт ИЛ/ИРП, per-SKU loc_pct, district breakdown
+- `backend/services/warehouse_district.py` — справочник 89 WB складов → ФО
+- `backend/services/localization_tariff.py` — KTR_TABLE, KRP-боксы
+- `backend/scheduler/jobs/wb_orders_sync.py` — sync wb_orders 3×/день
+- `backend/routers/localization.py` — endpoints
+- `frontend-react/src/app/(main)/p/[slug]/localization/page.tsx` — UI
+- `frontend-react/src/lib/api/localization.ts` — API client
+- `frontend-react/src/lib/constants/localization.ts` — DISTRICT_ORDER/LABELS/COLORS

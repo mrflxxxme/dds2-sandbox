@@ -3,17 +3,23 @@
 # Запуск: bash scripts/setup-hooks.sh
 # Или:    make setup
 
-set -e
+# Note: НЕ используем `set -e` — pre-commit framework может вернуть non-zero
+# из-за core.hooksPath (валидная конфигурация), но это не должно блокировать
+# установку остальных хуков (pre-push, post-commit) которые важнее.
 
 HOOKS_DIR=".git/hooks"
 SCRIPTS_DIR="scripts/hooks"
 
 echo "🔧 Установка git hooks..."
 
-# pre-commit (через pre-commit framework)
+# pre-commit (через pre-commit framework, опционально)
 if command -v pre-commit &> /dev/null; then
-    pre-commit install
-    echo "  ✓ pre-commit установлен (pre-commit framework)"
+    if pre-commit install 2>&1 | tee /tmp/pre-commit-install.log | grep -qiE "error|cowardly"; then
+        echo "  ⚠ pre-commit install пропущен (core.hooksPath set или иной conflict)"
+        echo "    Это не критично — pre-commit hooks работают и в CI."
+    else
+        echo "  ✓ pre-commit установлен (pre-commit framework)"
+    fi
 else
     echo "  ⚠ pre-commit не найден — установи: pip install pre-commit && pre-commit install"
 fi

@@ -2,6 +2,10 @@
 # Install: pip install pre-commit && pre-commit install
 # Run manually: pre-commit run --all-files
 
+# Глобальный exclude: внешние артефакты (Anthropic skills) и стейл-worktrees
+# не валидируются проектными правилами — это код третьей стороны.
+exclude: '^(\.claude/skills/|\.claude/worktrees/)'
+
 repos:
   # ─── Ruff (linter + formatter) ─────────────────────────────────────
   - repo: https://github.com/astral-sh/ruff-pre-commit
