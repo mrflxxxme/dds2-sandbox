@@ -179,6 +179,7 @@ export function addReportMethods(api: ApiClient) {
             mode: string = 'actual',
             localizationOptimized: boolean = false,
             onlyAvailable: boolean = false,
+            minStockPerMainWarehouse: number = 0,
         ) {
             const q = new URLSearchParams();
             q.set('supply_days', String(supplyDays));
@@ -186,6 +187,7 @@ export function addReportMethods(api: ApiClient) {
             q.set('mode', mode);
             if (localizationOptimized) q.set('localization_optimized', 'true');
             if (onlyAvailable) q.set('only_available', 'true');
+            if (minStockPerMainWarehouse > 0) q.set('min_stock_per_main_warehouse', String(minStockPerMainWarehouse));
             return api.request<any>('GET', `/api/v1/reports/stock_need?${q.toString()}`);
         },
         getOrderCitiesStatus() {

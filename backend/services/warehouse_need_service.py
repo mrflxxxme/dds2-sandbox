@@ -886,6 +886,11 @@ async def get_warehouse_need(
                 "can_send": can_send,
                 "deficit": deficit,
                 "stocks_wb": stocks_wb,
+                # Per-(nm, wh) asm/transit нужны фронту для client-side bump
+                # («Дораспределить»): чтобы не дополнять склад на 5шт если туда
+                # уже едет 5шт транзитом — иначе двойной bump.
+                "asm_by_warehouse": dict(assembly_target_map.get(nm_id, {})),
+                "transit_by_warehouse": dict(transit_target_map.get(nm_id, {})),
             }
         )
 

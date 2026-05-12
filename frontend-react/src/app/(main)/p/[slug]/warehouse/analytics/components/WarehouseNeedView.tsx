@@ -43,6 +43,10 @@ interface NeedArticle {
     can_send: number;
     deficit: number;
     stocks_wb: number;
+    /** Per-WB-склад: сколько уже в сборке на этот склад (не учтено в need). */
+    asm_by_warehouse?: Record<string, number>;
+    /** Per-WB-склад: сколько уже едет на этот склад транзитом. */
+    transit_by_warehouse?: Record<string, number>;
 }
 
 interface WbWarehouseNeed {
@@ -92,7 +96,11 @@ function formatTransitDate(dateStr: string | null): string {
     return `${dd}.${mm}`;
 }
 
-type QuickFilter = 'all' | 'deficit' | 'can_send' | 'no_wb' | 'box' | 'mono';
+// Фильтры разделены на 2 независимые группы — статус (по реальной возможности
+// отправки) и тип упаковки (по acceptance check). Можно нажать «Могу отправить»
+// + «Моно» одновременно: остаются SKU где can_send>0 И есть моно-split.
+type StatusFilter = 'all' | 'deficit' | 'can_send' | 'no_wb';
+type PackageFilter = 'none' | 'box' | 'mono';
 
 /** Persist WB acceptance check result so F5 не теряет состояние.
  *  TTL соответствует backend Redis-кэшу (5 мин). */
@@ -173,6 +181,12 @@ export function WarehouseNeedView() {
     const [creatingAssembly, setCreatingAssembly] = useState(false);
     const [supplyDays, setSupplyDays] = useState(14);
     const [analysisDays, setAnalysisDays] = useState(14);
+    /** «Дораспределить»: bump top-1 главного склада каждого ФО до N шт.
+     *  0 = выключено (используется только operational план).
+     *  N > 0 = добавляем bump после жадного cap, если у SKU остались свободные
+     *  FF-остатки и главный склад ФО имеет < N шт (WB-stock + asm + transit + cell). */
+    const [minStockPerMain, setMinStockPerMain] = useState(0);
+    const [showMinStockInput, setShowMinStockInput] = useState(false);
     const [mode, setMode] = useState<'actual' | 'hypothetical'>('actual');
     /** Идеальная локализация: распределяем потребность по ближайшим доступным
      *  WB-складам (по координатам региона покупателя). Исключённые склады
@@ -191,7 +205,8 @@ export function WarehouseNeedView() {
     const [uploading, setUploading] = useState(false);
     const [brandFilter, setBrandFilter] = useState('');
     const [subjectFilter, setSubjectFilter] = useState('');
-    const [quickFilter, setQuickFilter] = useState<QuickFilter>('all');
+    const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+    const [packageFilter, setPackageFilter] = useState<PackageFilter>('none');
     const [searchQuery, setSearchQuery] = useState('');
     const [sortCol, setSortCol] = useState<string>('revenue_30d');
     const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -298,11 +313,14 @@ export function WarehouseNeedView() {
         setColdStartQtyOverrides({});
     }, [coldStartData?.bench_source, coldStartData?.bench_total_orders]);
 
+    // Грузим coldStartData ВСЕГДА (не только при открытии вкладки «Новинки»):
+    // newcomerSet нужен на основной таблице, чтобы исключить новинок из
+    // общего списка (у них total_need=0, и они создают шум — 121 строка
+    // с прочерками в WB-колонках).
     useEffect(() => {
-        if (!coldStartMode) return;
         let cancelled = false;
         (async () => {
-            setColdStartLoading(true);
+            if (coldStartMode) setColdStartLoading(true);
             try {
                 const resp = await api.getColdStartTable(analysisDays, coldStartMinPack);
                 if (!cancelled) setColdStartData(resp);
@@ -374,12 +392,16 @@ export function WarehouseNeedView() {
         setError(null);
         try {
             const actualMode = mode === 'hypothetical' ? 'hypothetical' : 'actual';
+            // min_stock_per_main_warehouse=0 — bump делается на клиенте (с учётом
+            // acceptance: только склады где WB реально принимает), а не на backend
+            // (он знает только top-1 ФО, но не знает acceptance-флагов).
             const resp = await api.getStockNeed(
                 supplyDays,
                 analysisDays,
                 actualMode,
                 localizationOptimized,
                 onlyAvailable,
+                0,
             ) as StockNeedResponse;
             setData(resp);
             if (resp.rf_warehouses?.length && !assemblyWarehouseId) {
@@ -443,7 +465,17 @@ export function WarehouseNeedView() {
         return main;
     }, [data, filteredMainWarehouses, acceptanceMap, isSpecWarehouse]);
 
-    const getArticleWbNeed = useCallback((article: NeedArticle, whName: string): number => {
+    /** Set nm_id'ов которые являются новинками (cold-start). Объявлен здесь,
+     *  до bumpedCells и filteredArticles — нужен для исключения новинок. */
+    const newcomerSet = useMemo(() => {
+        const s = new Set<number>();
+        for (const r of coldStartData?.rows ?? []) s.add(r.nm_id);
+        return s;
+    }, [coldStartData]);
+
+    /** Базовый per-cell need из backend / acceptance splits / cold-start allocations.
+     *  НЕ включает client-side bump (см. bumpedCells ниже). */
+    const getBaseArticleWbNeed = useCallback((article: NeedArticle, whName: string): number => {
         // Если acceptance-check был запущен — суммируем qty по ВСЕМ splits.
         // primary distribution содержит только самый большой split (обычно BOX),
         // а Владивосток / Великий Камень / Хабаровск (canMonopallet=true, canBox=false)
@@ -471,6 +503,88 @@ export function WarehouseNeedView() {
         const wh = data.warehouses.find(w => w.name === whName);
         return wh?.articles?.[article.nm_id]?.need || 0;
     }, [data, acceptanceMap, coldStartData, filteredMainWarehouses, coldStartQtyOverrides, coldStartMinPack]);
+
+    /** Client-side bump: для каждого SKU после операционного cap (Hamilton)
+     *  у нас остался свободный FF-сток = `total_rf_available - sum(cell_needs)`.
+     *  «Дораспределить» использует этот остаток: добавляет qty на WB-склады, где:
+     *    1. **acceptance проверен ОБЯЗАТЕЛЬНО** — без проверки не знаем, принимает ли WB,
+     *       и можно случайно bump'нуть на склад куда WB не везёт этот SKU вообще
+     *    2. WB реально принимает хоть какой-то пакет (can_box || can_monopallet || can_supersafe)
+     *    3. WB-сток + asm + transit + base_need < minStockPerMain
+     *  Порядок обхода — как в wbWarehouses (по убыванию total_need backend).
+     *  Возвращает Map<nm_id, Map<wh, additional_qty>>. */
+    const bumpedCells = useMemo(() => {
+        const result = new Map<number, Map<string, number>>();
+        // Без acceptance check — bump полностью отключён. Без него мы не отличаем
+        // склад «принимает но пустой» от «WB вообще не везёт этот SKU сюда».
+        if (minStockPerMain <= 0 || !data?.articles || acceptanceMap.size === 0) return result;
+        for (const a of data.articles) {
+            if (newcomerSet.has(a.nm_id)) continue; // новинки идут через cold-start
+            // Если для этого SKU acceptance не проверяли — skip
+            // (можно проверить только часть SKU, остальные не bump'ать).
+            const acceptanceItem = acceptanceMap.get(a.nm_id);
+            if (!acceptanceItem) continue;
+            // Определяем какие package_type РЕАЛЬНО использует этот SKU
+            // (из splits, которые backend построил). Если у SKU есть BOX split —
+            // bump только на склады с can_box. Без этого bump'ит ковёр через
+            // super-safe на Пензу, куда коробом не принимают.
+            const skuPackages = new Set<string>(
+                (acceptanceItem.splits ?? []).map(s => s.package_type),
+            );
+            const totalRfAvail = Object.values(a.rf_stocks).reduce((s, v) => s + (v?.available || 0), 0);
+            let usedFf = 0;
+            for (const wh of wbWarehouses) {
+                usedFf += getBaseArticleWbNeed(a, wh.name);
+            }
+            let remaining = Math.max(0, totalRfAvail - usedFf);
+            if (remaining <= 0) continue;
+            const perSku = new Map<string, number>();
+            for (const wh of wbWarehouses) {
+                if (remaining <= 0) break;
+                // Строгое: acceptance.availability[wh] обязан существовать
+                // и склад должен принимать ТОТ ЖЕ пакет что SKU реально использует.
+                const acceptance = acceptanceItem.availability?.[wh.name];
+                if (!acceptance) continue;
+                const canSendThisSku = (
+                    (skuPackages.has('BOX') && acceptance.can_box)
+                    || (skuPackages.has('MONOPALLET') && acceptance.can_monopallet)
+                    || (skuPackages.has('SUPERSAFE') && acceptance.can_supersafe)
+                );
+                if (!canSendThisSku) continue;
+                const whData = data.warehouses.find(w => w.name === wh.name);
+                const stock = whData?.articles?.[a.nm_id]?.stock || 0;
+                const asm = a.asm_by_warehouse?.[wh.name] || 0;
+                const transit = a.transit_by_warehouse?.[wh.name] || 0;
+                const baseNeed = getBaseArticleWbNeed(a, wh.name);
+                const currentAtWh = stock + asm + transit + baseNeed;
+                if (currentAtWh >= minStockPerMain) continue;
+                const bump = Math.min(minStockPerMain - currentAtWh, remaining);
+                if (bump > 0) {
+                    perSku.set(wh.name, bump);
+                    remaining -= bump;
+                }
+            }
+            if (perSku.size > 0) result.set(a.nm_id, perSku);
+        }
+        return result;
+    }, [minStockPerMain, data, newcomerSet, wbWarehouses, acceptanceMap, getBaseArticleWbNeed]);
+
+    /** Итоговый per-cell need: base + client-side bump (если активен «Дораспределить»). */
+    const getArticleWbNeed = useCallback((article: NeedArticle, whName: string): number => {
+        const base = getBaseArticleWbNeed(article, whName);
+        const bump = bumpedCells.get(article.nm_id)?.get(whName) || 0;
+        return base + bump;
+    }, [getBaseArticleWbNeed, bumpedCells]);
+
+    /** Сколько шт добавлено через «Дораспределить» суммарно. Показывается в кнопке
+     *  чтобы пользователь видел реальное действие фичи. */
+    const bumpTotal = useMemo(() => {
+        let sum = 0;
+        for (const skuMap of bumpedCells.values()) {
+            for (const q of skuMap.values()) sum += q;
+        }
+        return sum;
+    }, [bumpedCells]);
 
     /** Returns 'box' | 'mono' | 'super' | 'closed' | null (null = не проверяли). */
     const getCellAcceptanceMarks = useCallback(
@@ -507,29 +621,75 @@ export function WarehouseNeedView() {
         [acceptanceMap],
     );
 
+    /** Счётчики кнопок-фильтров — без учёта новинок (они идут отдельно). */
+    const nonNewcomerCounts = useMemo(() => {
+        const result = { all: 0, deficit: 0, can_send: 0, no_wb: 0 };
+        if (!data?.articles) return result;
+        for (const a of data.articles) {
+            if (newcomerSet.has(a.nm_id)) continue;
+            result.all++;
+            if (a.deficit > 0) result.deficit++;
+            if (a.can_send > 0) result.can_send++;
+            // «Нет на WB» = stocks_wb=0 И есть RF-сток (= можно отправить, но WB пустой).
+            // Совпадает с backend.summary.no_wb_count.
+            if (a.stocks_wb === 0) {
+                const totalRf = Object.values(a.rf_stocks).reduce((s, v) => s + (v?.stock || 0), 0);
+                if (totalRf > 0) result.no_wb++;
+            }
+        }
+        return result;
+    }, [data, newcomerSet]);
+
     const filteredArticles = useMemo(() => {
         if (!data?.articles) return [];
         return data.articles.filter(a => {
+            // Новинки (cold-start) рендерятся отдельно на вкладке «🆕 Новинки» —
+            // на основной таблице их скрываем. У них total_need=0 (нет orders),
+            // в WB-колонках прочерки, создают визуальный шум.
+            if (newcomerSet.has(a.nm_id)) return false;
             if (brandFilter && a.brand !== brandFilter) return false;
             if (subjectFilter && a.subject !== subjectFilter) return false;
             if (searchQuery) {
                 const q = searchQuery.toLowerCase();
                 if (!a.vendor_code.toLowerCase().includes(q)) return false;
             }
-            if (quickFilter === 'deficit' && a.deficit <= 0) return false;
-            if (quickFilter === 'can_send' && a.can_send <= 0) return false;
-            if (quickFilter === 'no_wb' && a.stocks_wb > 0) return false;
-            if (quickFilter === 'box' || quickFilter === 'mono') {
+            if (statusFilter === 'deficit' && a.deficit <= 0) return false;
+            if (statusFilter === 'can_send' && a.can_send <= 0) return false;
+            if (statusFilter === 'no_wb' && a.stocks_wb > 0) return false;
+            if (packageFilter !== 'none') {
                 const it = acceptanceMap.get(a.nm_id);
                 if (!it) return false; // не проверяли — вне фильтра
-                const expected = quickFilter === 'box' ? 'BOX' : 'MONOPALLET';
+                const expected = packageFilter === 'box' ? 'BOX' : 'MONOPALLET';
                 // SKU попадает в фильтр если ХОТЯ БЫ ОДИН split имеет такой package_type
                 const hasType = (it.splits ?? []).some(s => s.package_type === expected);
                 if (!hasType) return false;
             }
             return true;
         });
-    }, [data, brandFilter, subjectFilter, searchQuery, quickFilter, acceptanceMap]);
+    }, [data, brandFilter, subjectFilter, searchQuery, statusFilter, packageFilter, acceptanceMap, newcomerSet]);
+
+    /** WB-колонки в матрице, отфильтрованные по packageFilter.
+     *  При packageFilter='mono' — оставляем только склады где для хотя бы одного
+     *  отфильтрованного SKU acceptanceMap.availability[wh].can_monopallet=true.
+     *  При packageFilter='box' — аналогично can_box. Если acceptance не запускали
+     *  (acceptanceMap пустой) — фильтр не работает, возвращаем все склады. */
+    const visibleWbWarehouses = useMemo(() => {
+        if (packageFilter === 'none' || acceptanceMap.size === 0) return wbWarehouses;
+        // «Моно» = склад принимает ТОЛЬКО моно (короб запрещён): can_monopallet && !can_box.
+        // Это даёт «чистый моно» (Владивосток, Хабаровск). Bi-modal склады
+        // (Краснодар, Электросталь — принимают и короб и моно) скрываются,
+        // потому что пользователь видя 📦 рядом с цифрой думал «это короб».
+        // «Короб» = склад принимает коробом: can_box (моно может тоже быть, не критично).
+        return wbWarehouses.filter(wh => {
+            for (const a of filteredArticles) {
+                const flags = acceptanceMap.get(a.nm_id)?.availability?.[wh.name];
+                if (!flags) continue;
+                if (packageFilter === 'box' && flags.can_box) return true;
+                if (packageFilter === 'mono' && flags.can_monopallet && !flags.can_box) return true;
+            }
+            return false;
+        });
+    }, [wbWarehouses, packageFilter, filteredArticles, acceptanceMap]);
 
     /* Counters для бэйджей фильтров: SKU имеющий ХОТЯ БЫ ОДИН split такого типа */
     const acceptanceCounts = useMemo(() => {
@@ -674,12 +834,23 @@ export function WarehouseNeedView() {
                     t.rf[wh.id] = (t.rf[wh.id] || 0) + (a.rf_stocks[wh.id]?.available || 0);
                 }
             }
-            for (const wh of wbWarehouses) {
-                t.wb[wh.name] = (t.wb[wh.name] || 0) + (getArticleWbNeed(a, wh.name));
+            for (const wh of visibleWbWarehouses) {
+                let n = getArticleWbNeed(a, wh.name);
+                // При packageFilter обнуляем ячейки где для этой пары (SKU, склад)
+                // нет нужного пакета. «Моно» = строго only-mono (короб не принимают):
+                // bi-modal склады (короб+моно) тоже скрываются.
+                if (packageFilter !== 'none') {
+                    const flags = acceptanceMap.get(a.nm_id)?.availability?.[wh.name];
+                    const allowed = packageFilter === 'mono'
+                        ? !!(flags?.can_monopallet && !flags?.can_box)
+                        : !!flags?.can_box;
+                    if (!allowed) n = 0;
+                }
+                t.wb[wh.name] = (t.wb[wh.name] || 0) + n;
             }
         }
         return t;
-    }, [filteredArticles, data, wbWarehouses, getArticleWbNeed]);
+    }, [filteredArticles, data, visibleWbWarehouses, getArticleWbNeed, packageFilter, acceptanceMap]);
 
     /* ── Checkbox logic ── */
 
@@ -703,13 +874,6 @@ export function WarehouseNeedView() {
     };
 
     const checkedCount = checkedIds.size;
-
-    /** Set nm_id'ов которые являются новинками (cold-start). */
-    const newcomerSet = useMemo(() => {
-        const s = new Set<number>();
-        for (const r of coldStartData?.rows ?? []) s.add(r.nm_id);
-        return s;
-    }, [coldStartData]);
 
     const assemblyTotal = useMemo(() => {
         if (!assemblyWarehouseId || !data) return 0;
@@ -1043,8 +1207,8 @@ export function WarehouseNeedView() {
         if (typeof window !== 'undefined' && slug) {
             window.localStorage.removeItem(acceptanceLsKey(slug));
         }
-        if (quickFilter === 'box' || quickFilter === 'mono') setQuickFilter('all');
-    }, [slug, quickFilter]);
+        if (packageFilter !== 'none') setPackageFilter('none');
+    }, [slug, packageFilter]);
 
     /* ── Sort ── */
 
@@ -1148,7 +1312,7 @@ export function WarehouseNeedView() {
                 <h2 className="page-title">Потребность по складам</h2>
                 <p className="page-subtitle">
                     {data
-                        ? `${data.total_warehouses} складов \u00B7 ${data.total_articles} артикулов \u00B7 запас ${supplyDays} дн`
+                        ? `${data.total_warehouses} складов \u00B7 ${nonNewcomerCounts.all} артикулов${newcomerSet.size > 0 ? ` + ${newcomerSet.size} новинок` : ''} \u00B7 запас ${supplyDays} дн`
                         : 'Нет данных'}
                 </p>
                 </div>
@@ -1220,6 +1384,67 @@ export function WarehouseNeedView() {
                     ))}
                 </div>
 
+                {/* Дораспределить: bump главных складов ФО до N шт, если у SKU
+                    остались свободные FF-остатки после жадного cap. Лекарство против
+                    «пустой склад → 0 заказов → 0 спроса → ничего не предлагаем»
+                    для дальних регионов (ДВ, Сибирь). */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <button
+                        className={`btn btn-sm ${minStockPerMain > 0 ? 'btn-primary' : 'btn-secondary'}`}
+                        disabled={acceptanceMap.size === 0}
+                        style={{
+                            ...(minStockPerMain === 0 && acceptanceMap.size > 0 ? { borderColor: '#8b5cf6', color: '#7c3aed' } : {}),
+                            ...(acceptanceMap.size === 0 ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+                        }}
+                        onClick={() => {
+                            if (acceptanceMap.size === 0) return;
+                            if (minStockPerMain > 0) {
+                                setMinStockPerMain(0);
+                                setShowMinStockInput(false);
+                            } else {
+                                setShowMinStockInput(v => !v);
+                            }
+                        }}
+                        title={acceptanceMap.size === 0
+                            ? 'Сначала нажми «Проверить приёмку WB» — без acceptance check не знаем, какие склады принимают этот SKU. Иначе дораспределим на склады куда WB не везёт.'
+                            : 'Дораспределить остатки на WB-склады (где WB-сток < N И WB реально принимает). Использует свободные FF-остатки после операционного cap.'}
+                    >
+                        📤 Дораспределить{minStockPerMain > 0 ? ` ≥${minStockPerMain}` : ''}
+                        {minStockPerMain > 0 && bumpTotal > 0 && (
+                            <span style={{ marginLeft: 4, fontSize: 10, opacity: 0.85 }}>
+                                +{formatNumber(bumpTotal, 0)}шт
+                            </span>
+                        )}
+                    </button>
+                    {showMinStockInput && (
+                        <input
+                            type="number" min={1} max={1000}
+                            placeholder="N шт"
+                            defaultValue={minStockPerMain || 5}
+                            autoFocus
+                            onKeyDown={e => {
+                                if (e.key === 'Enter') {
+                                    const v = Math.max(0, Number((e.target as HTMLInputElement).value) || 0);
+                                    setMinStockPerMain(v);
+                                    setShowMinStockInput(false);
+                                } else if (e.key === 'Escape') {
+                                    setShowMinStockInput(false);
+                                }
+                            }}
+                            onBlur={e => {
+                                const v = Math.max(0, Number(e.target.value) || 0);
+                                setMinStockPerMain(v);
+                                setShowMinStockInput(false);
+                            }}
+                            style={{
+                                width: 60, padding: '4px 8px', fontSize: 12,
+                                borderRadius: 8, border: '1px solid var(--color-border)',
+                                background: 'var(--color-bg)',
+                            }}
+                        />
+                    )}
+                </div>
+
                 <button
                     className="btn btn-sm btn-primary"
                     disabled={checkedCount === 0 || creatingAssembly}
@@ -1262,47 +1487,47 @@ export function WarehouseNeedView() {
             {/* Filter Panel - Row 2: quick filters + search */}
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
                 <button
-                    className={`btn btn-sm ${quickFilter === 'all' ? 'btn-primary' : 'btn-secondary'}`}
-                    onClick={() => setQuickFilter('all')}
+                    className={`btn btn-sm ${statusFilter === 'all' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setStatusFilter('all')}
                 >
-                    Все ({data?.total_articles || 0})
+                    Все ({nonNewcomerCounts.all})
                 </button>
                 <button
-                    className={`btn btn-sm ${quickFilter === 'deficit' ? 'btn-primary' : 'btn-secondary'}`}
-                    style={quickFilter !== 'deficit' ? { borderColor: '#ef4444', color: '#ef4444' } : {}}
-                    onClick={() => setQuickFilter('deficit')}
+                    className={`btn btn-sm ${statusFilter === 'deficit' ? 'btn-primary' : 'btn-secondary'}`}
+                    style={statusFilter !== 'deficit' ? { borderColor: '#ef4444', color: '#ef4444' } : {}}
+                    onClick={() => setStatusFilter('deficit')}
                 >
-                    С дефицитом ({summary?.deficit_count || 0})
+                    С дефицитом ({nonNewcomerCounts.deficit})
                 </button>
                 <button
-                    className={`btn btn-sm ${quickFilter === 'can_send' ? 'btn-primary' : 'btn-secondary'}`}
-                    style={quickFilter !== 'can_send' ? { borderColor: '#22c55e', color: '#22c55e' } : {}}
-                    onClick={() => setQuickFilter('can_send')}
+                    className={`btn btn-sm ${statusFilter === 'can_send' ? 'btn-primary' : 'btn-secondary'}`}
+                    style={statusFilter !== 'can_send' ? { borderColor: '#22c55e', color: '#22c55e' } : {}}
+                    onClick={() => setStatusFilter('can_send')}
                 >
-                    Могу отправить ({summary?.can_send_count || 0})
+                    Могу отправить ({nonNewcomerCounts.can_send})
                 </button>
                 <button
-                    className={`btn btn-sm ${quickFilter === 'no_wb' ? 'btn-primary' : 'btn-secondary'}`}
-                    style={quickFilter !== 'no_wb' ? { borderColor: '#eab308', color: '#eab308' } : {}}
-                    onClick={() => setQuickFilter('no_wb')}
+                    className={`btn btn-sm ${statusFilter === 'no_wb' ? 'btn-primary' : 'btn-secondary'}`}
+                    style={statusFilter !== 'no_wb' ? { borderColor: '#eab308', color: '#eab308' } : {}}
+                    onClick={() => setStatusFilter('no_wb')}
                 >
-                    Нет на WB ({summary?.no_wb_count || 0})
+                    Нет на WB ({nonNewcomerCounts.no_wb})
                 </button>
                 {acceptanceMap.size > 0 && (
                     <>
                         <button
-                            className={`btn btn-sm ${quickFilter === 'box' ? 'btn-primary' : 'btn-secondary'}`}
-                            style={quickFilter !== 'box' ? { borderColor: '#16a34a', color: '#16a34a' } : {}}
-                            onClick={() => setQuickFilter(quickFilter === 'box' ? 'all' : 'box')}
-                            title="Только SKU, которые WB примет коробом на ВСЕ выбранные склады"
+                            className={`btn btn-sm ${packageFilter === 'box' ? 'btn-primary' : 'btn-secondary'}`}
+                            style={packageFilter !== 'box' ? { borderColor: '#16a34a', color: '#16a34a' } : {}}
+                            onClick={() => setPackageFilter(packageFilter === 'box' ? 'none' : 'box')}
+                            title="Только SKU, которые WB примет коробом. Комбинируется со статусом."
                         >
                             📦 Короб ({acceptanceCounts.box})
                         </button>
                         <button
-                            className={`btn btn-sm ${quickFilter === 'mono' ? 'btn-primary' : 'btn-secondary'}`}
-                            style={quickFilter !== 'mono' ? { borderColor: '#a16207', color: '#a16207' } : {}}
-                            onClick={() => setQuickFilter(quickFilter === 'mono' ? 'all' : 'mono')}
-                            title="SKU, которые WB принимает только моно-паллетой"
+                            className={`btn btn-sm ${packageFilter === 'mono' ? 'btn-primary' : 'btn-secondary'}`}
+                            style={packageFilter !== 'mono' ? { borderColor: '#a16207', color: '#a16207' } : {}}
+                            onClick={() => setPackageFilter(packageFilter === 'mono' ? 'none' : 'mono')}
+                            title="SKU с моно-split. Скрывает WB-склады, которые не принимают моно. Комбинируется со статусом."
                         >
                             📐 Моно ({acceptanceCounts.mono})
                         </button>
@@ -1806,8 +2031,8 @@ export function WarehouseNeedView() {
                                 }}>МОИ СКЛАДЫ</th>
 
                                 {/* СКЛАДЫ WB group */}
-                                {wbWarehouses.length > 0 && (
-                                    <th colSpan={wbWarehouses.length} style={{
+                                {visibleWbWarehouses.length > 0 && (
+                                    <th colSpan={visibleWbWarehouses.length} style={{
                                         ...thBase, cursor: 'default', textAlign: 'center',
                                         background: 'rgba(245,158,11,0.08)', fontSize: 10, fontWeight: 700,
                                         letterSpacing: 1, borderBottom: '1px solid var(--color-border)',
@@ -1870,7 +2095,7 @@ export function WarehouseNeedView() {
                                 </th>
 
                                 {/* WB Warehouses */}
-                                {wbWarehouses.map(wh => (
+                                {visibleWbWarehouses.map(wh => (
                                     <th key={`wb_${wh.name}`} style={{ ...thBase, background: 'rgba(245,158,11,0.04)' }}
                                         onClick={() => handleSort(`wb_${wh.name}`)}>
                                         {wh.name.length > 12 ? wh.name.slice(0, 12) + '\u2026' : wh.name}
@@ -1908,7 +2133,7 @@ export function WarehouseNeedView() {
                                     {totals.deficit > 0 ? formatNumber(totals.deficit, 0) : '\u2014'}
                                 </td>
 
-                                {wbWarehouses.map(wh => (
+                                {visibleWbWarehouses.map(wh => (
                                     <td key={`tot_wb_${wh.name}`} style={{
                                         ...tdBase, fontWeight: 700, borderBottom: '2px solid var(--color-border)',
                                         color: (totals.wb[wh.name] || 0) > 0 ? '#ef4444' : 'var(--color-text-muted)',
@@ -2012,18 +2237,31 @@ export function WarehouseNeedView() {
                                         </td>
 
                                         {/* WB Warehouse needs */}
-                                        {wbWarehouses.map(wh => {
-                                            const need = getArticleWbNeed(a, wh.name);
+                                        {visibleWbWarehouses.map(wh => {
+                                            const rawNeed = getArticleWbNeed(a, wh.name);
+                                            const bumpQty = bumpedCells.get(a.nm_id)?.get(wh.name) || 0;
                                             const m = getCellAcceptanceMarks(a.nm_id, wh.name);
+                                            // При packageFilter — обнуляем ячейку если для пары (SKU, склад)
+                                            // нет нужного пакета. «Моно» = строго only-mono (m.mono && !m.box):
+                                            // bi-modal склады (Краснодар, Электросталь) скрываются, чтобы
+                                            // не путать пользователя бейджем 📦 в режиме «Моно».
+                                            const need = packageFilter === 'mono' && !(m.mono && !m.box) ? 0
+                                                : packageFilter === 'box' && !m.box ? 0
+                                                : rawNeed;
+                                            // Подсветка bumped ячейки фиолетовым — пользователь видит куда
+                                            // ушёл свободный FF-сток через «Дораспределить».
+                                            const isBumped = bumpQty > 0 && need > 0;
                                             const onlyMono = m.checked && !m.box && m.mono;
                                             const onlySuper = m.checked && !m.box && !m.mono && m.super;
                                             const cellBg = m.closed
                                                 ? 'rgba(148,163,184,0.18)'
-                                                : onlyMono
-                                                    ? 'rgba(234,179,8,0.10)'
-                                                    : onlySuper
-                                                        ? 'rgba(168,85,247,0.10)'
-                                                        : need > 0 ? 'rgba(239,68,68,0.08)' : undefined;
+                                                : isBumped
+                                                    ? 'rgba(139,92,246,0.12)'
+                                                    : onlyMono
+                                                        ? 'rgba(234,179,8,0.10)'
+                                                        : onlySuper
+                                                            ? 'rgba(168,85,247,0.10)'
+                                                            : need > 0 ? 'rgba(239,68,68,0.08)' : undefined;
                                             const cellColor = m.closed
                                                 ? '#64748b'
                                                 : onlyMono
@@ -2043,9 +2281,12 @@ export function WarehouseNeedView() {
                                             else if (m.box) tipParts.push(`\u043a\u043e\u0440\u043e\u0431\u043e\u043c${m.box_free !== undefined ? ` (\u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e ${m.box_free}/14 \u0434\u043d)` : ''}`);
                                             else if (m.mono) tipParts.push(`\u043c\u043e\u043d\u043e-\u043f\u0430\u043b\u043b\u0435\u0442\u043e\u0439${m.mono_free !== undefined ? ` (\u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e ${m.mono_free}/14 \u0434\u043d)` : ''}`);
                                             else if (m.super) tipParts.push(`super-safe${m.super_free !== undefined ? ` (\u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e ${m.super_free}/14 \u0434\u043d)` : ''}`);
-                                            const tooltip = tipParts.length
+                                            const tooltipBase = tipParts.length
                                                 ? (m.closed ? tipParts[0] : `\u041f\u0440\u0438\u043d\u0438\u043c\u0430\u0435\u0442: ${tipParts.join(', ')}`)
                                                 : '';
+                                            const tooltip = isBumped
+                                                ? [tooltipBase, `\ud83d\udce4 \u0414\u043e\u0440\u0430\u0441\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d\u043e +${formatNumber(bumpQty, 0)} \u0448\u0442 (\u0438\u0437 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e\u0433\u043e FF-\u0441\u0442\u043e\u043a\u0430)`].filter(Boolean).join('\n')
+                                                : tooltipBase;
                                             return (
                                                 <td key={`wb_${wh.name}`} title={tooltip} style={{
                                                     ...tdBase,
@@ -2055,9 +2296,13 @@ export function WarehouseNeedView() {
                                                     textDecoration: m.closed && need > 0 ? 'line-through' : undefined,
                                                 }}>
                                                     {need > 0 ? formatNumber(need, 0) : '\u2014'}
-                                                    {/* \u0411\u0435\u0439\u0434\u0436 \u043f\u0440\u0438\u0451\u043c\u043a\u0438: \u043f\u0440\u0438 need>0 \u2014 \u0441\u043f\u0440\u0430\u0432\u0430 \u043e\u0442 qty; \u043f\u0440\u0438 need=0 + acceptance \u043f\u0440\u043e\u0432\u0435\u0440\u0435\u043d \u0438
-                                                        \u0441\u043a\u043b\u0430\u0434 \u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d \u2014 \u0440\u044f\u0434\u043e\u043c \u0441 \u043f\u0440\u043e\u0447\u0435\u0440\u043a\u043e\u043c (\u0432\u0438\u0434\u043d\u043e \u043a\u0443\u0434\u0430 \u0435\u0449\u0451 \u041c\u041e\u0416\u041d\u041e). */}
-                                                    {badge && (need > 0 || (m.checked && !m.closed)) && (
+                                                    {/* \u0411\u0435\u0439\u0434\u0436 \u043f\u0440\u0438\u0451\u043c\u043a\u0438. \u0415\u0441\u043b\u0438 packageFilter \u043d\u0435 \u0441\u043e\u0432\u043f\u0430\u0434\u0430\u0435\u0442 \u0441 \u0440\u0435\u0430\u043b\u044c\u043d\u044b\u043c
+                                                        \u043f\u0430\u043a\u0435\u0442\u043e\u043c \u0434\u043b\u044f \u044d\u0442\u043e\u0439 \u043f\u0430\u0440\u044b (SKU, \u0441\u043a\u043b\u0430\u0434) \u2014 \u0431\u0435\u0439\u0434\u0436 \u0441\u043a\u0440\u044b\u0432\u0430\u0435\u043c, \u0447\u0442\u043e\u0431\u044b
+                                                        \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c \u0432\u0438\u0434\u0435\u043b \u0442\u043e\u043b\u044c\u043a\u043e \u0440\u0435\u043b\u0435\u0432\u0430\u043d\u0442\u043d\u0443\u044e \u0438\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u044e (\u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440,
+                                                        \u043f\u0440\u0438 \u00ab\u041c\u043e\u043d\u043e\u00bb \u043d\u0435 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u043c \ud83d\udce6). */}
+                                                    {badge && (need > 0 || (m.checked && !m.closed))
+                                                        && !(packageFilter === 'mono' && !(m.mono && !m.box))
+                                                        && !(packageFilter === 'box' && !m.box) && (
                                                         <span style={{ marginLeft: 4, fontSize: 10, opacity: need > 0 ? 1 : 0.55 }}>{badge}</span>
                                                     )}
                                                 </td>
