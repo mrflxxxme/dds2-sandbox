@@ -6,6 +6,20 @@ _Нет активных. Последняя проверка: 2026-05-07._
 
 ## Исправленные
 
+### Cold-start «фантомное распределение»: предлагает грузить шт, которых на ФФ уже нет (project default, BLACKOUT_200х260_кофейный + BZ-YY1106/30х60-30ШТ)
+- **Исправлено:** 2026-05-12
+- **Описание:** На вкладке «Новинки» (`/warehouse/analytics`) для SKU с `rf_qty=144` + `asm_qty=144` (все 144 уже едут в 9 разных WB-складов) UI предлагал «Распределить: 84» — будто на ФФ ещё 84 шт. Причина двойная:
+  1. `compute_cold_start_table` использовал `total_qty = sku["rf_qty"]` без вычета `asm_qty` → `distribute_multi` размазывал «фантом» по bench-складам.
+  2. Per-warehouse safety net `max(0, alloc - asm[wh])` промахивался из-за рассогласования имён: `assembly_requests.wb_warehouse_name_manual` хранит «Краснодар (Тихорецкая)», «Новосемейкино», «Склад Шушары», а bench-traffic из `wb_orders.warehouse_name` каноничные: «Краснодар», «Самара (Новосемейкино)», «СПБ Шушары».
+  - Прецедент BZ-YY1106: rf=550, asm=230 (10 разных целевых складов), система предлагала 205 → должно быть 165.
+- **Фикс:**
+  - `cold_start_distribution_service.compute_cold_start_table`: `total_qty = max(0, sku["rf_qty"] - sku["asm_qty"])`.
+  - `compute_distribution`: `active_asm` поднят выше расчёта `total_qty`; дефолт = `rf_qty - sum(active_asm)`.
+  - `_canonicalize_asm_warehouse()` через `ACCEPTANCE_TO_STOCK_NAME` в `fetch_active_assemblies_for_sku` — per-warehouse subtraction срабатывает для всех вариантов имён.
+  - UI: разбивка ФФ по складам (новые колонки Ханди/натали/wms/...), `asm_by_warehouse` в response — зелёная подстрока «🚚 N» в WB-ячейке («куда уже едет»), tooltip «Уже в сборке: N шт». Приоритет приёмки короб → моно → super (короб дешевле). Сортировка + ИТОГО.
+- **Тесты:** 4 regression в `test_cold_start_distribution.py` (BLACKOUT-сценарий с 9 целевыми складами + BZ-YY1106 partial assembly).
+- **Файлы:** `backend/services/cold_start_distribution_service.py`, `backend/schemas/cold_start.py`, `frontend-react/src/types/api.ts`, `frontend-react/src/app/(main)/p/[slug]/warehouse/analytics/components/WarehouseNeedView.tsx`, `tests/test_cold_start_distribution.py`.
+
 ### Vehicle target_warehouse_id ↔ inbound_receipt warehouse_id рассинхрон (project default, V-0001)
 - **Исправлено:** 2026-05-07
 - **Описание:** Поле `target_warehouse_id` есть в `always_editable` для CostOrder (vehicle) — можно править даже после DISPATCHED. При DISPATCHED-переходе `_create_inbound_from_vehicle` создаёт `InboundReceipt(warehouse_id=vehicle.target_warehouse_id)`. После — если юзер меняет `target_warehouse_id` на машине, привязанная приёмка остаётся на старом складе. Vehicle висит в «Ожидаемых поставках» нового склада (фильтр по `cost_orders.target_warehouse_id`), но приёмка не показывается в табе «Приёмки» (фильтр по `inbound_receipts.warehouse_id`), кнопка «Принять» недоступна.

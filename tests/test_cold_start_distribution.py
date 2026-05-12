@@ -1,12 +1,15 @@
-# ruff: noqa: RUF001, RUF002, RUF003
 """Cold-start distribution — pure-logic tests (no DB).
 
 Тесты на чистые функции `distribute()` и `pick_main_warehouse_per_district()`
 из cold_start_distribution_service. Без БД, быстрые.
 """
 
+from typing import Any
+
 import pytest
 
+from backend.schemas.cold_start import DistributeRequest
+from backend.services import cold_start_distribution_service as cs
 from backend.services.cold_start_distribution_service import (
     FALLBACK_DISTRICT_SHARE,
     distribute,
@@ -244,6 +247,212 @@ class TestPickWarehousesPerDistrict:
         traffic = {"Электросталь": 100, "Подольск": 50, "Тула": 25}
         out = pick_warehouses_per_district(traffic, excluded=set(), top_n=None)
         assert len(out["central"]) == 3
+
+
+@pytest.mark.unit
+class TestColdStartSubtractAssembly:
+    """Regression: prod incident 2026-05-12 — BLACKOUT_200х260_кофейный (project 4).
+
+    SKU был с rf_qty=144 (ФФ) и asm_qty=144 (9 сборок IN_PROGRESS по 16 шт
+    на разные WB-склады). UI вкладки «Новинки» предлагал распределить ещё 84 шт
+    из ниоткуда: total_qty=rf_qty без вычета сборок размазывал «фантом» по складам,
+    где сборка существует под несовпадающим именем
+    (wb_warehouse_name_manual="Новосемейкино" vs bench-key "Самара" и т.п.).
+    """
+
+    @pytest.mark.asyncio
+    async def test_table_returns_zero_when_all_ff_already_in_assembly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """rf_qty=144, asm_qty=144 → total_allocated=0 (нечего распределять)."""
+
+        async def fake_excluded(*_a: Any, **_kw: Any) -> list[str]:
+            return []
+
+        async def fake_district_share(*_a: Any, **_kw: Any) -> tuple[dict[str, float], int]:
+            return ({"central": 0.5, "south_caucasus": 0.5}, 1000)
+
+        async def fake_traffic(*_a: Any, **_kw: Any) -> dict[str, int]:
+            return {"Электросталь": 1000, "Краснодар": 500}
+
+        async def fake_segment(*_a: Any, **_kw: Any) -> list[dict]:
+            return [
+                {
+                    "internal_id": 1,
+                    "nm_id": 889654250,
+                    "article_seller": "BLACKOUT_200х260_кофейный",
+                    "subject": "Шторы интерьерные",
+                    "brand": "Уютопия",
+                    "barcode": "",
+                    "rf_qty": 144,
+                    "wb_qty": 0,
+                    "asm_qty": 144,
+                    "sales_14d": 0,
+                    "revenue_30d": 0.0,
+                    "is_newcomer": True,
+                }
+            ]
+
+        async def fake_active_asm(*_a: Any, **_kw: Any) -> dict[str, int]:
+            return {"Электросталь": 16, "Краснодар (Тихорецкая)": 16, "Новосемейкино": 16}
+
+        async def fake_rf_wh(*_a: Any, **_kw: Any) -> list:
+            return []
+
+        monkeypatch.setattr(cs, "get_excluded_warehouses", fake_excluded)
+        monkeypatch.setattr(cs, "fetch_district_share", fake_district_share)
+        monkeypatch.setattr(cs, "fetch_warehouse_traffic", fake_traffic)
+        monkeypatch.setattr(cs, "fetch_cold_start_segment", fake_segment)
+        monkeypatch.setattr(cs, "fetch_active_assemblies_for_sku", fake_active_asm)
+        monkeypatch.setattr(cs, "fetch_rf_warehouses", fake_rf_wh)
+
+        resp = await cs.compute_cold_start_table(
+            db=None,  # type: ignore[arg-type]
+            project_id=4,
+            window_days=14,
+            min_pack=5,
+            bench_from_project_id=None,
+        )
+        assert len(resp.rows) == 1
+        row = resp.rows[0]
+        assert row.nm_id == 889654250
+        assert row.rf_qty == 144
+        assert row.in_assembly_total == 144
+        assert row.total_allocated == 0, f"asm_qty=rf_qty → ничего не должно распределяться, получено {row.allocations}"
+        assert row.allocations == {}
+
+    @pytest.mark.asyncio
+    async def test_table_partial_assembly_distributes_remainder(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """rf_qty=100, asm_qty=40 → распределяется 60 (остаток)."""
+
+        async def fake_excluded(*_a: Any, **_kw: Any) -> list[str]:
+            return []
+
+        async def fake_district_share(*_a: Any, **_kw: Any) -> tuple[dict[str, float], int]:
+            return ({"central": 1.0}, 1000)
+
+        async def fake_traffic(*_a: Any, **_kw: Any) -> dict[str, int]:
+            return {"Электросталь": 1000}
+
+        async def fake_segment(*_a: Any, **_kw: Any) -> list[dict]:
+            return [
+                {
+                    "internal_id": 2,
+                    "nm_id": 999,
+                    "article_seller": "TEST",
+                    "subject": "X",
+                    "brand": "Y",
+                    "barcode": "",
+                    "rf_qty": 100,
+                    "wb_qty": 0,
+                    "asm_qty": 40,
+                    "sales_14d": 0,
+                    "revenue_30d": 0.0,
+                    "is_newcomer": True,
+                }
+            ]
+
+        async def fake_active_asm(*_a: Any, **_kw: Any) -> dict[str, int]:
+            # asm на не-canonical имя — глобальный вычет всё равно работает
+            return {"Новосемейкино": 40}
+
+        async def fake_rf_wh(*_a: Any, **_kw: Any) -> list:
+            return []
+
+        monkeypatch.setattr(cs, "get_excluded_warehouses", fake_excluded)
+        monkeypatch.setattr(cs, "fetch_district_share", fake_district_share)
+        monkeypatch.setattr(cs, "fetch_warehouse_traffic", fake_traffic)
+        monkeypatch.setattr(cs, "fetch_cold_start_segment", fake_segment)
+        monkeypatch.setattr(cs, "fetch_active_assemblies_for_sku", fake_active_asm)
+        monkeypatch.setattr(cs, "fetch_rf_warehouses", fake_rf_wh)
+
+        resp = await cs.compute_cold_start_table(
+            db=None,  # type: ignore[arg-type]
+            project_id=1,
+            window_days=14,
+            min_pack=5,
+            bench_from_project_id=None,
+        )
+        row = resp.rows[0]
+        # 100 - 40 = 60, central=1.0 → весь остаток в Электросталь
+        assert row.total_allocated == 60
+        assert row.allocations.get("Электросталь") == 60
+
+    @pytest.mark.asyncio
+    async def test_distribute_endpoint_default_qty_subtracts_assembly(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`/distribute_cold_start` без явного total_qty → ФФ минус сборки."""
+
+        async def fake_sku(*_a: Any, **_kw: Any) -> dict:
+            return {
+                "internal_id": 1,
+                "nm_id": 889654250,
+                "article_seller": "BLACKOUT",
+                "subject": "Шторы",
+                "brand": "Уютопия",
+                "rf_qty": 144,
+                "wb_qty": 0,
+            }
+
+        async def fake_excluded(*_a: Any, **_kw: Any) -> list[str]:
+            return []
+
+        async def fake_district_share(*_a: Any, **_kw: Any) -> tuple[dict[str, float], int]:
+            return ({"central": 1.0}, 1000)
+
+        async def fake_traffic(*_a: Any, **_kw: Any) -> dict[str, int]:
+            return {"Электросталь": 1000}
+
+        async def fake_active_asm(*_a: Any, **_kw: Any) -> dict[str, int]:
+            return {"Электросталь": 144}
+
+        monkeypatch.setattr(cs, "fetch_sku", fake_sku)
+        monkeypatch.setattr(cs, "get_excluded_warehouses", fake_excluded)
+        monkeypatch.setattr(cs, "fetch_district_share", fake_district_share)
+        monkeypatch.setattr(cs, "fetch_warehouse_traffic", fake_traffic)
+        monkeypatch.setattr(cs, "fetch_active_assemblies_for_sku", fake_active_asm)
+
+        req = DistributeRequest(nm_id=889654250, total_qty=None, window_days=14, min_pack=5)
+        resp = await cs.compute_distribution(db=None, project_id=4, req=req)  # type: ignore[arg-type]
+        assert resp.total_qty == 0, "По умолчанию должен быть rf_qty(144) - asm(144) = 0"
+        assert all(a.to_send == 0 for a in resp.allocations)
+
+    @pytest.mark.asyncio
+    async def test_distribute_endpoint_explicit_qty_respected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Если total_qty явно передан — используется как есть (пользователь знает что делает)."""
+
+        async def fake_sku(*_a: Any, **_kw: Any) -> dict:
+            return {
+                "internal_id": 1,
+                "nm_id": 100,
+                "article_seller": "X",
+                "subject": "X",
+                "brand": "X",
+                "rf_qty": 144,
+                "wb_qty": 0,
+            }
+
+        async def fake_excluded(*_a: Any, **_kw: Any) -> list[str]:
+            return []
+
+        async def fake_district_share(*_a: Any, **_kw: Any) -> tuple[dict[str, float], int]:
+            return ({"central": 1.0}, 1000)
+
+        async def fake_traffic(*_a: Any, **_kw: Any) -> dict[str, int]:
+            return {"Электросталь": 1000}
+
+        async def fake_active_asm(*_a: Any, **_kw: Any) -> dict[str, int]:
+            return {"Электросталь": 144}
+
+        monkeypatch.setattr(cs, "fetch_sku", fake_sku)
+        monkeypatch.setattr(cs, "get_excluded_warehouses", fake_excluded)
+        monkeypatch.setattr(cs, "fetch_district_share", fake_district_share)
+        monkeypatch.setattr(cs, "fetch_warehouse_traffic", fake_traffic)
+        monkeypatch.setattr(cs, "fetch_active_assemblies_for_sku", fake_active_asm)
+
+        req = DistributeRequest(nm_id=100, total_qty=50, window_days=14, min_pack=5)
+        resp = await cs.compute_distribution(db=None, project_id=1, req=req)  # type: ignore[arg-type]
+        assert resp.total_qty == 50, "Явно переданный total_qty не должен меняться"
 
 
 @pytest.mark.unit

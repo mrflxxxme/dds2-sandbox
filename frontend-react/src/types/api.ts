@@ -2808,6 +2808,10 @@ export interface ColdStartMainWarehouse {
   warehouse: string;
   share_pct: number;
 }
+export interface ColdStartRfWarehouse {
+  id: number;
+  name: string;
+}
 export interface ColdStartTableRow {
   nm_id: number;
   article_seller: string | null;
@@ -2815,8 +2819,10 @@ export interface ColdStartTableRow {
   brand: string | null;
   barcode: string | null;
   rf_qty: number;
+  rf_by_warehouse: Record<number, number>;
   wb_qty: number;
   in_assembly_total: number;
+  asm_by_warehouse: Record<string, number>;
   sales_14d: number;
   revenue_30d: number;
   is_newcomer: boolean;
@@ -2826,6 +2832,7 @@ export interface ColdStartTableRow {
 export interface ColdStartTableResponse {
   rows: ColdStartTableRow[];
   main_warehouses: ColdStartMainWarehouse[];
+  rf_warehouses: ColdStartRfWarehouse[];
   bench_source: string;
   bench_total_orders: number;
   meta: { min_pack: number; window_days: number; excluded_warehouses: string[] };

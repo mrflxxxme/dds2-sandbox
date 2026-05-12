@@ -23,11 +23,13 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.models.warehouse import Warehouse, WarehouseType
 from backend.schemas.cold_start import (
     AllocationItem,
+    ColdStartRfWarehouse,
     ColdStartTableResponse,
     ColdStartTableRow,
     DistributeMeta,
@@ -42,6 +44,7 @@ from backend.services.warehouse_district import (
     WAREHOUSE_TO_DISTRICT,
     okrug_to_district,
 )
+from backend.services.warehouse_geo_data import ACCEPTANCE_TO_STOCK_NAME
 
 if TYPE_CHECKING:
     pass
@@ -161,11 +164,38 @@ async def fetch_sku(db: AsyncSession, project_id: int, nm_id: int) -> dict | Non
     return dict(row) if row else None
 
 
+async def fetch_rf_warehouses(db: AsyncSession, project_id: int) -> list[ColdStartRfWarehouse]:
+    """Активные ФФ-склады проекта (id+name), отсортированные по sort_order."""
+    result = await db.execute(
+        select(Warehouse.id, Warehouse.name)
+        .where(
+            Warehouse.project_id == project_id,
+            Warehouse.warehouse_type == WarehouseType.FULFILLMENT,
+            Warehouse.is_deleted.is_(False),
+            Warehouse.is_active.is_(True),
+        )
+        .order_by(Warehouse.sort_order)
+    )
+    return [ColdStartRfWarehouse(id=int(r.id), name=str(r.name)) for r in result]
+
+
+def _canonicalize_asm_warehouse(name: str) -> str:
+    """Нормализация имени target-склада сборки к каноничной форме bench-traffic.
+
+    `assembly_requests.wb_warehouse_name_manual` хранит то что выбрал юзер
+    («Краснодар (Тихорецкая)», «Новосемейкино», «Склад Шушары»). `wb_orders.warehouse_name`
+    приходит уже каноничным от WB API («Краснодар», «Самара (Новосемейкино)», «СПБ Шушары»).
+    Без маппинга per-warehouse subtraction (`max(0, alloc - asm[wh])`) промахивается.
+    """
+    return ACCEPTANCE_TO_STOCK_NAME.get(name, name)
+
+
 async def fetch_active_assemblies_for_sku(db: AsyncSession, project_id: int, nm_id: int) -> dict[str, int]:
     """Сколько уже едет/собрано в каждый WB-склад для этого SKU.
 
     Учитываются только активные сборки (PENDING/READY/SHIPPED/VEHICLE_ASSIGNED/IN_PROGRESS).
     Iron rule: assembly_requests — SoftDeleteMixin → фильтр is_deleted = false.
+    Ключи result — каноничные имена (см. `_canonicalize_asm_warehouse`).
     """
     sql = text(
         """
@@ -181,7 +211,14 @@ async def fetch_active_assemblies_for_sku(db: AsyncSession, project_id: int, nm_
         """
     )
     result = await db.execute(sql, {"project_id": project_id, "nm_id": nm_id})
-    return {row["wb_target"]: int(row["qty"]) for row in result.mappings() if row["wb_target"] != "?"}
+    out: dict[str, int] = {}
+    for row in result.mappings():
+        raw = row["wb_target"]
+        if raw == "?":
+            continue
+        canon = _canonicalize_asm_warehouse(raw)
+        out[canon] = out.get(canon, 0) + int(row["qty"])
+    return out
 
 
 # ─── Pure logic (sync, безопасно тестировать без БД) ───────────────────────
@@ -424,7 +461,10 @@ async def compute_distribution(db: AsyncSession, project_id: int, req: Distribut
         raise HTTPException(status_code=404, detail=f"SKU nm_id={req.nm_id} not found in project")
 
     rf_qty = int(sku["rf_qty"])
-    total_qty = int(req.total_qty) if req.total_qty is not None else rf_qty
+    # active_asm нужен до total_qty: уже идущие штуки зарезервированы, повторно не распределяем.
+    active_asm = await fetch_active_assemblies_for_sku(db, project_id, int(sku["internal_id"]))
+    total_asm = sum(active_asm.values())
+    total_qty = int(req.total_qty) if req.total_qty is not None else max(0, rf_qty - total_asm)
 
     # 2. Excluded warehouses (set для быстрой проверки)
     excluded_list = await get_excluded_warehouses(db, project_id)
@@ -467,10 +507,7 @@ async def compute_distribution(db: AsyncSession, project_id: int, req: Distribut
         # Без данных по складам — дефолтные центры ФО, исключив excluded.
         main_wh = {d: wh for d, wh in _DEFAULT_MAIN_WAREHOUSES.items() if wh not in excluded}
 
-    # 5. Активные сборки по SKU (по nomenclature.id, не article_wb)
-    active_asm = await fetch_active_assemblies_for_sku(db, project_id, int(sku["internal_id"]))
-
-    # 6. Распределение и вычитание уже идущих сборок
+    # 6. Распределение и вычитание уже идущих сборок (active_asm уже загружены выше)
     allocation = distribute(total_qty, bench_share, req.min_pack, main_wh)
 
     # 7. Сборка ответа в каноничном порядке ФО
@@ -549,6 +586,13 @@ async def fetch_cold_start_segment(db: AsyncSession, project_id: int) -> list[di
                  0
                ) AS rf_qty,
                COALESCE(
+                 (SELECT jsonb_object_agg(ws.warehouse_id::text, ws.quantity)
+                  FROM warehouse_stock ws
+                  WHERE ws.nomenclature_id = n.id AND ws.project_id = :project_id
+                    AND ws.quantity > 0),
+                 '{}'::jsonb
+               ) AS rf_by_wh,
+               COALESCE(
                  (SELECT SUM(wws.quantity) FROM wb_warehouse_stocks wws
                   WHERE wws.nm_id = n.article_wb AND wws.project_id = :project_id
                     AND wws.quantity > 0),
@@ -601,6 +645,9 @@ async def fetch_cold_start_segment(db: AsyncSession, project_id: int) -> list[di
                 is_newcomer = True
         if not is_newcomer:
             continue  # есть история продаж — для bootstrap не нужен
+        rf_by_wh_raw = r["rf_by_wh"] or {}
+        # jsonb приходит как dict[str,int]; на всякий случай приводим типы.
+        rf_by_warehouse: dict[int, int] = {int(k): int(v) for k, v in rf_by_wh_raw.items()}
         out.append(
             {
                 "internal_id": int(r["internal_id"]),
@@ -610,6 +657,7 @@ async def fetch_cold_start_segment(db: AsyncSession, project_id: int) -> list[di
                 "brand": r["brand"],
                 "barcode": r["barcode"] or "",
                 "rf_qty": rf,
+                "rf_by_warehouse": rf_by_warehouse,
                 "wb_qty": wb,
                 "asm_qty": asm,
                 "sales_14d": sales,
@@ -687,12 +735,20 @@ async def compute_cold_start_table(
                 }
             )
 
+    # ФФ-склады проекта (id+name) — для разбивки rf_qty по локациям на UI.
+    rf_warehouses = await fetch_rf_warehouses(db, project_id)
+
     # сегмент SKU
     segment = await fetch_cold_start_segment(db, project_id)
 
     rows: list[ColdStartTableRow] = []
     for sku in segment:
-        total_qty = sku["rf_qty"]  # дефолт = весь ФФ-остаток
+        # asm_by_warehouse нужен в обеих ветках: и для прозрачности «куда едет»,
+        # и для per-warehouse subtraction в активной ветке распределения.
+        active_asm = await fetch_active_assemblies_for_sku(db, project_id, sku["internal_id"])
+
+        # ФФ-остаток минус уже идущие сборки — иначе размазываем «фантом» по складам где asm под другим именем (Новосемейкино vs Самара).
+        total_qty = max(0, sku["rf_qty"] - sku["asm_qty"])
         if total_qty <= 0:
             rows.append(
                 ColdStartTableRow(
@@ -702,8 +758,10 @@ async def compute_cold_start_table(
                     brand=sku["brand"],
                     barcode=sku.get("barcode") or None,
                     rf_qty=sku["rf_qty"],
+                    rf_by_warehouse=sku.get("rf_by_warehouse", {}),
                     wb_qty=sku["wb_qty"],
                     in_assembly_total=sku["asm_qty"],
+                    asm_by_warehouse=active_asm,
                     sales_14d=sku["sales_14d"],
                     revenue_30d=sku["revenue_30d"],
                     is_newcomer=sku["is_newcomer"],
@@ -714,7 +772,6 @@ async def compute_cold_start_table(
             continue
 
         allocation = distribute_multi(total_qty, bench_share, min_pack, wh_per_district)
-        active_asm = await fetch_active_assemblies_for_sku(db, project_id, sku["internal_id"])
         final_alloc: dict[str, int] = {}
         for wh, qty in allocation.items():
             asm = active_asm.get(wh, 0)
@@ -728,8 +785,10 @@ async def compute_cold_start_table(
                 brand=sku["brand"],
                 barcode=sku.get("barcode") or None,
                 rf_qty=sku["rf_qty"],
+                rf_by_warehouse=sku.get("rf_by_warehouse", {}),
                 wb_qty=sku["wb_qty"],
                 in_assembly_total=sku["asm_qty"],
+                asm_by_warehouse=active_asm,
                 sales_14d=sku["sales_14d"],
                 revenue_30d=sku["revenue_30d"],
                 is_newcomer=sku["is_newcomer"],
@@ -741,6 +800,7 @@ async def compute_cold_start_table(
     return ColdStartTableResponse(
         rows=rows,
         main_warehouses=main_wh_meta,
+        rf_warehouses=rf_warehouses,
         bench_source=bench_source,
         bench_total_orders=bench_total,
         meta=DistributeMeta(

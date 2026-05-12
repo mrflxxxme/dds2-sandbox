@@ -288,6 +288,8 @@ export function WarehouseNeedView() {
     const [coldStartMinPack, setColdStartMinPack] = useState(5);
     const [coldStartLoading, setColdStartLoading] = useState(false);
     const [coldStartQtyOverrides, setColdStartQtyOverrides] = useState<Record<number, number>>({});
+    const [coldStartSortCol, setColdStartSortCol] = useState<string>('revenue_30d');
+    const [coldStartSortDir, setColdStartSortDir] = useState<'asc' | 'desc'>('desc');
 
     useEffect(() => {
         // Сброс overrides при перезагрузке cold-start данных
@@ -580,6 +582,72 @@ export function WarehouseNeedView() {
     }, [filteredArticles, sortCol, sortDir, getArticleWbNeed]);
 
     /* ── Totals ── */
+
+    /* Cold-start: сортировка + ИТОГО (под колонками) */
+    const sortedColdStartRows = useMemo(() => {
+        if (!coldStartData) return [];
+        const rows = [...coldStartData.rows];
+        const dir = coldStartSortDir === 'asc' ? 1 : -1;
+        const col = coldStartSortCol;
+        rows.sort((a, b) => {
+            if (col === 'vendor_code') {
+                return dir * (a.article_seller || '').localeCompare(b.article_seller || '');
+            }
+            let va = 0, vb = 0;
+            if (col === 'revenue_30d') { va = a.revenue_30d; vb = b.revenue_30d; }
+            else if (col === 'rf_qty') { va = a.rf_qty; vb = b.rf_qty; }
+            else if (col === 'wb_qty') { va = a.wb_qty; vb = b.wb_qty; }
+            else if (col === 'in_assembly_total') { va = a.in_assembly_total; vb = b.in_assembly_total; }
+            else if (col === 'total_allocated') { va = a.total_allocated; vb = b.total_allocated; }
+            else if (col.startsWith('cs_rf_')) {
+                const id = parseInt(col.replace('cs_rf_', ''), 10);
+                va = a.rf_by_warehouse?.[id] || 0;
+                vb = b.rf_by_warehouse?.[id] || 0;
+            }
+            else if (col.startsWith('cs_wb_')) {
+                const wh = col.replace('cs_wb_', '');
+                va = a.allocations?.[wh] || 0;
+                vb = b.allocations?.[wh] || 0;
+            }
+            return dir * (va - vb);
+        });
+        return rows;
+    }, [coldStartData, coldStartSortCol, coldStartSortDir]);
+
+    const coldStartTotals = useMemo(() => {
+        const t = {
+            revenue_30d: 0,
+            rf_qty: 0,
+            wb_qty: 0,
+            in_assembly_total: 0,
+            total_allocated: 0,
+            rf: {} as Record<number, number>,
+            wb: {} as Record<string, number>,
+        };
+        if (!coldStartData) return t;
+        for (const row of coldStartData.rows) {
+            t.revenue_30d += row.revenue_30d || 0;
+            t.rf_qty += row.rf_qty || 0;
+            t.wb_qty += row.wb_qty || 0;
+            t.in_assembly_total += row.in_assembly_total || 0;
+            const overrideQty = coldStartQtyOverrides[row.nm_id];
+            t.total_allocated += overrideQty !== undefined ? overrideQty : (row.total_allocated || 0);
+            for (const [whId, qty] of Object.entries(row.rf_by_warehouse || {})) {
+                const id = Number(whId);
+                t.rf[id] = (t.rf[id] || 0) + (qty || 0);
+            }
+            for (const [wh, qty] of Object.entries(row.allocations || {})) {
+                t.wb[wh] = (t.wb[wh] || 0) + (qty || 0);
+            }
+        }
+        return t;
+    }, [coldStartData, coldStartQtyOverrides]);
+
+    const handleColdStartSort = (col: string) => {
+        if (coldStartSortCol === col) setColdStartSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
+        else { setColdStartSortCol(col); setColdStartSortDir('desc'); }
+    };
+    const csSortArrow = (col: string) => coldStartSortCol === col ? (coldStartSortDir === 'asc' ? ' ↑' : ' ↓') : '';
 
     const totals = useMemo(() => {
         const t = {
@@ -1467,20 +1535,35 @@ export function WarehouseNeedView() {
                                 <thead>
                                     <tr style={{ borderBottom: '2px solid var(--color-border)', background: '#f5f5f7' }}>
                                         <th style={{ padding: '8px 6px', width: 30 }}></th>
-                                        <th style={{ padding: '8px 10px', textAlign: 'left' }}>Артикул</th>
-                                        <th style={{ padding: '8px 10px', textAlign: 'right' }}>Реализ. 30д</th>
-                                        <th style={{ padding: '8px 10px', textAlign: 'right' }}>ФФ</th>
-                                        <th style={{ padding: '8px 10px', textAlign: 'right' }}>WB</th>
-                                        <th style={{ padding: '8px 10px', textAlign: 'right' }}>В сборке</th>
-                                        <th style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                            Распределить
+                                        <th style={{ padding: '8px 10px', textAlign: 'left', cursor: 'pointer' }} onClick={() => handleColdStartSort('vendor_code')}>
+                                            Артикул{csSortArrow('vendor_code')}
+                                        </th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right', cursor: 'pointer' }} onClick={() => handleColdStartSort('revenue_30d')}>
+                                            Реализ. 30д{csSortArrow('revenue_30d')}
+                                        </th>
+                                        {(coldStartData.rf_warehouses ?? []).map(wh => (
+                                            <th key={`cs_rf_${wh.id}`} style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap', background: 'rgba(59,130,246,0.04)', cursor: 'pointer' }}
+                                                onClick={() => handleColdStartSort(`cs_rf_${wh.id}`)}>
+                                                {wh.name.length > 12 ? wh.name.slice(0, 12) + '…' : wh.name}
+                                                {csSortArrow(`cs_rf_${wh.id}`)}
+                                            </th>
+                                        ))}
+                                        <th style={{ padding: '8px 10px', textAlign: 'right', cursor: 'pointer' }} onClick={() => handleColdStartSort('wb_qty')}>
+                                            WB{csSortArrow('wb_qty')}
+                                        </th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right', cursor: 'pointer' }} onClick={() => handleColdStartSort('in_assembly_total')}>
+                                            В сборке{csSortArrow('in_assembly_total')}
+                                        </th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap', cursor: 'pointer' }} onClick={() => handleColdStartSort('total_allocated')}>
+                                            Распределить{csSortArrow('total_allocated')}
                                             <div style={{ fontSize: 10, color: 'var(--color-text-muted)', fontWeight: 400 }}>
                                                 ✏️ редактируй
                                             </div>
                                         </th>
                                         {filteredMainWarehouses.map(w => (
-                                            <th key={w.warehouse} style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                                <div style={{ fontSize: 11 }}>{w.warehouse}</div>
+                                            <th key={w.warehouse} style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap', cursor: 'pointer' }}
+                                                onClick={() => handleColdStartSort(`cs_wb_${w.warehouse}`)}>
+                                                <div style={{ fontSize: 11 }}>{w.warehouse}{csSortArrow(`cs_wb_${w.warehouse}`)}</div>
                                                 <div style={{ fontSize: 10, color: 'var(--color-text-muted)', fontWeight: 400 }}>
                                                     {w.share_pct.toFixed(1)}%
                                                 </div>
@@ -1488,9 +1571,39 @@ export function WarehouseNeedView() {
                                         ))}
                                         <th style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700 }}>Итого</th>
                                     </tr>
+                                    {/* ИТОГО — сумма по всем новинкам, под колонками */}
+                                    <tr style={{ background: 'rgba(59,130,246,0.06)', fontWeight: 700, borderBottom: '2px solid var(--color-border)' }}>
+                                        <td style={{ padding: '8px 6px' }}>&nbsp;</td>
+                                        <td style={{ padding: '8px 10px' }}>ИТОГО</td>
+                                        <td style={{ padding: '8px 10px', textAlign: 'right' }}>
+                                            {coldStartTotals.revenue_30d > 0 ? `₽${formatNumber(coldStartTotals.revenue_30d, 0)}` : '—'}
+                                        </td>
+                                        {(coldStartData.rf_warehouses ?? []).map(wh => (
+                                            <td key={`tot_cs_rf_${wh.id}`} style={{ padding: '8px 10px', textAlign: 'right', background: 'rgba(59,130,246,0.04)' }}>
+                                                {(coldStartTotals.rf[wh.id] || 0) > 0 ? formatNumber(coldStartTotals.rf[wh.id], 0) : '—'}
+                                            </td>
+                                        ))}
+                                        <td style={{ padding: '8px 10px', textAlign: 'right' }}>
+                                            {coldStartTotals.wb_qty > 0 ? formatNumber(coldStartTotals.wb_qty, 0) : '—'}
+                                        </td>
+                                        <td style={{ padding: '8px 10px', textAlign: 'right' }}>
+                                            {coldStartTotals.in_assembly_total > 0 ? formatNumber(coldStartTotals.in_assembly_total, 0) : '—'}
+                                        </td>
+                                        <td style={{ padding: '8px 10px', textAlign: 'right' }}>
+                                            {coldStartTotals.total_allocated > 0 ? formatNumber(coldStartTotals.total_allocated, 0) : '—'}
+                                        </td>
+                                        {filteredMainWarehouses.map(w => (
+                                            <td key={`tot_cs_wb_${w.warehouse}`} style={{ padding: '8px 10px', textAlign: 'right' }}>
+                                                {(coldStartTotals.wb[w.warehouse] || 0) > 0 ? formatNumber(coldStartTotals.wb[w.warehouse], 0) : '—'}
+                                            </td>
+                                        ))}
+                                        <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700 }}>
+                                            {coldStartTotals.total_allocated > 0 ? formatNumber(coldStartTotals.total_allocated, 0) : '—'}
+                                        </td>
+                                    </tr>
                                 </thead>
                                 <tbody>
-                                    {coldStartData.rows.map(row => {
+                                    {sortedColdStartRows.map(row => {
                                         const overrideQty = coldStartQtyOverrides[row.nm_id];
                                         const useOverride = overrideQty !== undefined && overrideQty !== row.total_allocated;
                                         const effective = useOverride
@@ -1523,9 +1636,35 @@ export function WarehouseNeedView() {
                                             <td style={{ padding: '8px 10px', textAlign: 'right', color: row.revenue_30d > 0 ? 'var(--color-text)' : 'var(--color-text-muted)' }}>
                                                 {row.revenue_30d > 0 ? `₽${formatNumber(row.revenue_30d, 0)}` : '—'}
                                             </td>
-                                            <td style={{ padding: '8px 10px', textAlign: 'right' }}>{formatNumber(row.rf_qty, 0)}</td>
+                                            {(coldStartData.rf_warehouses ?? []).map(wh => {
+                                                const v = row.rf_by_warehouse?.[wh.id] ?? 0;
+                                                return (
+                                                    <td key={`cs_rf_cell_${wh.id}`} style={{
+                                                        padding: '8px 10px', textAlign: 'right',
+                                                        background: 'rgba(59,130,246,0.04)',
+                                                        color: v > 0 ? 'var(--color-text)' : 'var(--color-text-muted)',
+                                                        fontWeight: v > 0 ? 500 : 400,
+                                                    }}>
+                                                        {v > 0 ? formatNumber(v, 0) : '—'}
+                                                    </td>
+                                                );
+                                            })}
                                             <td style={{ padding: '8px 10px', textAlign: 'right' }}>{formatNumber(row.wb_qty, 0)}</td>
-                                            <td style={{ padding: '8px 10px', textAlign: 'right' }}>
+                                            <td
+                                                style={{
+                                                    padding: '8px 10px', textAlign: 'right',
+                                                    cursor: row.in_assembly_total > 0 ? 'help' : 'default',
+                                                    textDecoration: row.in_assembly_total > 0 ? 'underline dotted var(--color-text-muted)' : undefined,
+                                                }}
+                                                title={
+                                                    row.in_assembly_total > 0 && row.asm_by_warehouse
+                                                        ? 'В сборке по складам:\n' + Object.entries(row.asm_by_warehouse)
+                                                            .sort((a, b) => b[1] - a[1])
+                                                            .map(([wh, q]) => `• ${wh}: ${formatNumber(q, 0)}`)
+                                                            .join('\n')
+                                                        : undefined
+                                                }
+                                            >
                                                 {row.in_assembly_total > 0 ? formatNumber(row.in_assembly_total, 0) : '—'}
                                             </td>
                                             <td style={{ padding: '6px 8px', textAlign: 'right' }}>
@@ -1548,6 +1687,7 @@ export function WarehouseNeedView() {
                                             </td>
                                             {filteredMainWarehouses.map(w => {
                                                 const v = effective.alloc[w.warehouse] || 0;
+                                                const asmQty = row.asm_by_warehouse?.[w.warehouse] ?? 0;
                                                 const m = getCellAcceptanceMarks(row.nm_id, w.warehouse);
                                                 const onlyMono = m.checked && !m.box && m.mono;
                                                 const onlySuper = m.checked && !m.box && !m.mono && m.super;
@@ -1565,13 +1705,13 @@ export function WarehouseNeedView() {
                                                         : onlySuper
                                                             ? '#7e22ce'
                                                             : v > 0 ? '#16a34a' : 'var(--color-text-muted)';
+                                                // Приоритет: короб → моно → super. Показываем только высший доступный
+                                                // тип (короб не нужно дублировать с моно — он дешевле и в приоритете).
                                                 const badgeParts: string[] = [];
                                                 if (m.closed) badgeParts.push('⛔');
-                                                else {
-                                                    if (m.box) badgeParts.push('📦');
-                                                    if (m.mono) badgeParts.push('📐');
-                                                    if (m.super) badgeParts.push('🔒');
-                                                }
+                                                else if (m.box) badgeParts.push('📦');
+                                                else if (m.mono) badgeParts.push('📐');
+                                                else if (m.super) badgeParts.push('🔒');
                                                 const badge = badgeParts.length ? ' ' + badgeParts.join('') : '';
                                                 const tipParts: string[] = [];
                                                 if (m.closed) tipParts.push(`WB не принимает на «${w.warehouse}» в ближайшие 14 дней`);
@@ -1587,11 +1727,14 @@ export function WarehouseNeedView() {
                                                         if (free === undefined && paid === undefined) return '';
                                                         return ' (по индивидуальной квоте)';
                                                     };
+                                                    // Приоритет: короб дешевле, поэтому если есть — другие варианты не показываем.
                                                     if (m.box) tipParts.push(`коробом${slotsLabel(m.box_free, m.box_paid, m.box_min)}`);
-                                                    if (m.mono) tipParts.push(`моно-паллетой${slotsLabel(m.mono_free, m.mono_paid, m.mono_min)}`);
-                                                    if (m.super) tipParts.push(`super-safe${slotsLabel(m.super_free, m.super_paid, m.super_min)}`);
+                                                    else if (m.mono) tipParts.push(`моно-паллетой${slotsLabel(m.mono_free, m.mono_paid, m.mono_min)}`);
+                                                    else if (m.super) tipParts.push(`super-safe${slotsLabel(m.super_free, m.super_paid, m.super_min)}`);
                                                 }
-                                                const tip = tipParts.length ? (m.closed ? tipParts[0] : `Принимает: ${tipParts.join(', ')}`) : '';
+                                                const baseTip = tipParts.length ? (m.closed ? tipParts[0] : `Принимает: ${tipParts.join(', ')}`) : '';
+                                                const asmTip = asmQty > 0 ? `Уже в сборке: ${formatNumber(asmQty, 0)} шт` : '';
+                                                const tip = [baseTip, asmTip].filter(Boolean).join('\n');
                                                 return (
                                                     <td key={w.warehouse} title={tip} style={{
                                                         padding: '8px 10px', textAlign: 'right',
@@ -1600,11 +1743,18 @@ export function WarehouseNeedView() {
                                                         fontWeight: v > 0 ? 500 : 400,
                                                         textDecoration: m.closed && v > 0 ? 'line-through' : undefined,
                                                     }}>
-                                                        {v > 0 ? formatNumber(v, 0) : '—'}
-                                                        {/* Бейдж приёмки: при v>0 — справа от qty; при v=0 + acceptance проверен и
-                                                            склад доступен — рядом с прочерком (видно куда ещё МОЖНО, даже без потребности). */}
-                                                        {badge && (v > 0 || (m.checked && !m.closed)) && (
-                                                            <span style={{ marginLeft: 4, fontSize: 10, opacity: v > 0 ? 1 : 0.55 }}>{badge}</span>
+                                                        <div>
+                                                            {v > 0 ? formatNumber(v, 0) : '—'}
+                                                            {/* Бейдж приёмки: при v>0 — справа от qty; при v=0 + acceptance проверен и
+                                                                склад доступен — рядом с прочерком (видно куда ещё МОЖНО, даже без потребности). */}
+                                                            {badge && (v > 0 || (m.checked && !m.closed)) && (
+                                                                <span style={{ marginLeft: 4, fontSize: 10, opacity: v > 0 ? 1 : 0.55 }}>{badge}</span>
+                                                            )}
+                                                        </div>
+                                                        {asmQty > 0 && (
+                                                            <div style={{ fontSize: 10, color: '#16a34a', fontWeight: 600, lineHeight: 1.1, marginTop: 2 }}>
+                                                                🚚 {formatNumber(asmQty, 0)}
+                                                            </div>
                                                         )}
                                                     </td>
                                                 );
@@ -1888,21 +2038,18 @@ export function WarehouseNeedView() {
                                                     : onlySuper
                                                         ? '#7e22ce'
                                                         : need > 0 ? '#ef4444' : 'var(--color-text-muted)';
+                                            // \u041f\u0440\u0438\u043e\u0440\u0438\u0442\u0435\u0442: \u043a\u043e\u0440\u043e\u0431 \u2192 \u043c\u043e\u043d\u043e \u2192 super. \u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u043c \u0442\u043e\u043b\u044c\u043a\u043e \u0432\u044b\u0441\u0448\u0438\u0439 \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b\u0439 \u0442\u0438\u043f.
                                             const badgeParts: string[] = [];
                                             if (m.closed) badgeParts.push('\u26d4');
-                                            else {
-                                                if (m.box) badgeParts.push('\ud83d\udce6');
-                                                if (m.mono) badgeParts.push('\ud83d\udcd0');
-                                                if (m.super) badgeParts.push('\ud83d\udd12');
-                                            }
+                                            else if (m.box) badgeParts.push('\ud83d\udce6');
+                                            else if (m.mono) badgeParts.push('\ud83d\udcd0');
+                                            else if (m.super) badgeParts.push('\ud83d\udd12');
                                             const badge = badgeParts.length ? ' ' + badgeParts.join('') : '';
                                             const tipParts: string[] = [];
                                             if (m.closed) tipParts.push(`WB \u043d\u0435 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0435\u0442 \u043d\u0430 \u00ab${wh.name}\u00bb \u0432 \u0431\u043b\u0438\u0436\u0430\u0439\u0448\u0438\u0435 14 \u0434\u043d\u0435\u0439`);
-                                            else {
-                                                if (m.box) tipParts.push(`\u043a\u043e\u0440\u043e\u0431\u043e\u043c${m.box_free !== undefined ? ` (\u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e ${m.box_free}/14 \u0434\u043d)` : ''}`);
-                                                if (m.mono) tipParts.push(`\u043c\u043e\u043d\u043e-\u043f\u0430\u043b\u043b\u0435\u0442\u043e\u0439${m.mono_free !== undefined ? ` (\u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e ${m.mono_free}/14 \u0434\u043d)` : ''}`);
-                                                if (m.super) tipParts.push(`super-safe${m.super_free !== undefined ? ` (\u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e ${m.super_free}/14 \u0434\u043d)` : ''}`);
-                                            }
+                                            else if (m.box) tipParts.push(`\u043a\u043e\u0440\u043e\u0431\u043e\u043c${m.box_free !== undefined ? ` (\u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e ${m.box_free}/14 \u0434\u043d)` : ''}`);
+                                            else if (m.mono) tipParts.push(`\u043c\u043e\u043d\u043e-\u043f\u0430\u043b\u043b\u0435\u0442\u043e\u0439${m.mono_free !== undefined ? ` (\u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e ${m.mono_free}/14 \u0434\u043d)` : ''}`);
+                                            else if (m.super) tipParts.push(`super-safe${m.super_free !== undefined ? ` (\u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e ${m.super_free}/14 \u0434\u043d)` : ''}`);
                                             const tooltip = tipParts.length
                                                 ? (m.closed ? tipParts[0] : `\u041f\u0440\u0438\u043d\u0438\u043c\u0430\u0435\u0442: ${tipParts.join(', ')}`)
                                                 : '';
