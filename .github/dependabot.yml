@@ -8,8 +8,9 @@ updates:
   - package-ecosystem: pip
     directory: "/"
     schedule:
-      interval: weekly
-      day: monday
+      interval: daily
+      time: "06:00"
+      timezone: "Europe/Moscow"
     reviewers:
       - vladbydaev37
     labels:
@@ -19,13 +20,20 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+    # Группировать non-major апдейты в один PR — меньше шума, легче auto-merge
+    groups:
+      python-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   # Node.js frontend dependencies
   - package-ecosystem: npm
     directory: "/frontend-react"
     schedule:
-      interval: weekly
-      day: monday
+      interval: daily
+      time: "06:00"
+      timezone: "Europe/Moscow"
     reviewers:
       - vladbydaev37
     labels:
@@ -35,6 +43,11 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+    groups:
+      npm-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   # GitHub Actions
   - package-ecosystem: github-actions

@@ -26,10 +26,15 @@ fi
 echo ""
 echo "━━━ Backend tests (testmon + xdist -n 2) ━━━"
 if [ "$DOCKER_OK" -eq 1 ]; then
-    if docker compose exec -T backend pytest --testmon -n 2 --tb=short -q 2>/dev/null; then
+    docker compose exec -T backend pytest --testmon -n 2 --tb=short -q 2>/dev/null
+    PYTEST_EXIT=$?
+    # exit 5 = "no tests collected" (testmon: ничего не изменилось) — это OK, не fail
+    if [ $PYTEST_EXIT -eq 0 ]; then
         echo -e "${GREEN}✓ Backend tests passed${NC}"
+    elif [ $PYTEST_EXIT -eq 5 ]; then
+        echo -e "${GREEN}✓ Backend tests skipped (testmon: no Python changes)${NC}"
     else
-        echo -e "${RED}✗ Backend tests FAILED${NC}"
+        echo -e "${RED}✗ Backend tests FAILED (exit $PYTEST_EXIT)${NC}"
         FAILED=1
     fi
 else
@@ -67,7 +72,28 @@ else
     FAILED=1
 fi
 
-# ─── 4. Slopsquatting защита (~3-10 сек) ────────────────────────────
+# ─── 4. Frontend npm audit (security CVE, ~5-10 сек) ─────────────────
+# Прецедент 2026-05-12: 7 HIGH CVE в next@15.5.15 ловятся ТОЛЬКО в CI,
+# не локально. Pre-push catch + 5 секунд = меньше CI runs впустую.
+echo ""
+echo "━━━ Frontend security (npm audit --audit-level=high) ━━━"
+if [ -d "frontend-react/node_modules" ] && command -v npm &>/dev/null; then
+    AUDIT_OUTPUT=$(cd frontend-react && npm audit --audit-level=high 2>&1)
+    AUDIT_EXIT=$?
+    if [ $AUDIT_EXIT -eq 0 ]; then
+        echo -e "${GREEN}✓ npm audit clean (no HIGH/CRITICAL)${NC}"
+    else
+        echo -e "${RED}✗ npm audit found HIGH/CRITICAL CVEs${NC}"
+        echo "$AUDIT_OUTPUT" | grep -E "Severity:|^[a-z-]+\s+[<>=]" | head -10
+        echo -e "${YELLOW}Fix: cd frontend-react && npm audit fix (or bump manually)${NC}"
+        FAILED=1
+    fi
+else
+    echo -e "${YELLOW}⚠ SKIPPED — npm/node_modules не готовы${NC}"
+    SKIPPED=1
+fi
+
+# ─── 5. Slopsquatting защита (~3-10 сек) ────────────────────────────
 echo ""
 echo "━━━ Slopsquatting check (new imports) ━━━"
 if bash "$ROOT_DIR/scripts/hooks/check_slopsquatting.sh" 2>&1; then
