@@ -182,7 +182,9 @@ export function WarehouseNeedView() {
     const [localizationOptimized] = useState(true);
     /** Только реально могу отправить: каждая клетка урезана greedy по
      *  ФФ-остатку артикула — сумма needs во всех WB-колонках ≤ available. */
-    const [onlyAvailable, setOnlyAvailable] = useState(false);
+    // Алгоритм работает только в режиме «По дефициту» — operational план.
+    // Идеальная локализация удалена как режим (was confusing: cells > rf_avail).
+    const onlyAvailable = true;
     const [hypoMode, setHypoMode] = useState<HypoMode>('region');
     const [showHypoMenu, setShowHypoMenu] = useState(false);
     const [citiesStatus, setCitiesStatus] = useState<OrderCitiesStatus | null>(null);
@@ -1201,15 +1203,6 @@ export function WarehouseNeedView() {
                         {data.subjects.map(s => <option key={s} value={s}>{s}</option>)}
                     </select>
                 )}
-
-                <button
-                    className={`btn btn-sm ${onlyAvailable ? 'btn-primary' : 'btn-secondary'}`}
-                    style={{ borderRadius: 8, fontSize: 11, whiteSpace: 'nowrap' }}
-                    onClick={() => setOnlyAvailable(v => !v)}
-                    title="Каждая клетка матрицы урезана по ФФ-остатку артикула. Сумма needs во всех WB-колонках ≤ available на ФФ. Показывает «реально могу отправить» вместо «идеальная потребность»."
-                >
-                    📦 Только могу отправить {onlyAvailable ? 'ON' : 'OFF'}
-                </button>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                     <span style={{ fontSize: 11, opacity: 0.6, whiteSpace: 'nowrap' }}>Запас:</span>
