@@ -36,6 +36,20 @@ FALLBACK_TRANSPORT_DAYS_PER_DISTRICT: dict[str, int] = {
     "unknown": 7,
 }
 
+# Override локального WB-склада для дальних ФО когда WB всё равно направляет
+# большинство заказов с центральных складов, а не с нашего периферийного FF.
+# Прецедент: project_id=4, ДВ+СФО за 14д = 3646 orders. Из них реально WB
+# обслужил: Электросталь 568 (16%) + Перспективная 1703 (47%) + ЦФО-доноры
+# 30%, а Владивосток только 79 (2%). При nearest_by_coords алгоритм считал
+# что 100% ДВ+СФО уйдёт на наш Владивосток → переоценка локализации в 10-50×
+# и overstock дальних регионов. Override: для `far_east_siberia` принудительно
+# использовать Перспективную (главный WB-склад УФО, отлично доставляет в ДВ/СФО).
+# Применяется только в localization_optimized режиме, только если Перспективная
+# не в excluded. Иначе fallback на старую nearest_by_coords логику.
+DISTRICT_PREFERRED_WH_OVERRIDE: dict[str, str] = {
+    "far_east_siberia": "Екатеринбург - Перспективная 14",
+}
+
 
 def _normalize_wb_warehouse(name: str | None) -> str:
     """Canonicalize warehouse name to the WAREHOUSE_COORDS form so backend's
@@ -122,6 +136,7 @@ async def get_warehouse_need(
         fetch_supplier_orders,
         get_wb_key,
     )
+    from backend.services.warehouse_district import okrug_to_district
     from backend.services.warehouse_geo import (
         WAREHOUSE_COORDS,
         find_nearest_warehouse,
@@ -181,16 +196,25 @@ async def get_warehouse_need(
                 # Игнорируем фактический warehouseName — берём ближайший
                 # доступный склад по координатам покупателя. open_warehouses
                 # уже отфильтрован от excluded (см. выше). Цепочка fallback:
-                # city → region → пропускаем заказ (нет доступного склада).
+                # district-override → city → region → пропускаем заказ.
                 srid = str(order.get("srid", ""))
                 wh_name = None
                 okrug = okrug_map.get(srid)
-                country_wh = get_country_filtered_warehouses(okrug, open_warehouses)
-                city = city_map.get(srid)
-                if city:
-                    wh_name = find_nearest_warehouse_by_city(city, country_wh)
+                # Override для дальних ФО: WB всё равно направит большинство
+                # на свои главные склады (Перспективная для ДВ+СФО), а не на
+                # наш периферийный FF. См. DISTRICT_PREFERRED_WH_OVERRIDE.
+                district = okrug_to_district(okrug)
+                preferred = DISTRICT_PREFERRED_WH_OVERRIDE.get(district)
+                if preferred and preferred in open_warehouses:
+                    wh_name = preferred
+                if not wh_name:
+                    country_wh = get_country_filtered_warehouses(okrug, open_warehouses)
+                    city = city_map.get(srid)
+                    if city:
+                        wh_name = find_nearest_warehouse_by_city(city, country_wh)
                 if not wh_name:
                     region = order.get("regionName", "")
+                    country_wh = get_country_filtered_warehouses(okrug, open_warehouses)
                     wh_name = find_nearest_warehouse(region, country_wh)
                 # Если ни city, ни region не дали nearest (например, region
                 # отсутствует в REGION_COORDS) — заказ некуда привязать,
