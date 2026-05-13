@@ -81,6 +81,19 @@
         ],
         "description": "Reset /compact counter при compact/clear"
       }
+    ],
+    "TeammateIdle": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/hooks/teammate_idle_check.sh",
+            "timeout": 15
+          }
+        ],
+        "description": "Quality gate перед idle worktree-teammate: iron rules (Float/utcnow/db.delete/f-string SQL), types-first FE, абсолютные пути, check_conventions.sh. Exit 2 → teammate получит feedback и продолжит фиксить, не возвращая управление lead-агенту"
+      }
     ]
   },
   "statusLine": {

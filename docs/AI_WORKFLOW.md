@@ -80,6 +80,7 @@
 - **Pre-commit**: Ruff + Bandit + Gitleaks
 - **Pre-push**: backend tests + vitest + conventions + slopsquatting
 - **Iron rules enforcement**: `post_edit_check.py` после каждого Edit/Write
+- **TeammateIdle gate** ([`scripts/hooks/teammate_idle_check.sh`](../scripts/hooks/teammate_idle_check.sh), 2026-05-13) — quality gate перед idle worktree-teammate: iron rules + types-first FE + absolute-path leak + `check_conventions.sh`. Exit 2 → teammate получает stderr как feedback и продолжает фиксить, lead не получает преждевременный «готово». Срабатывает ТОЛЬКО в worktree (gitfile check), main репо пропускается
 
 ## Память (самообучение)
 
@@ -125,7 +126,8 @@ post-merge.yml → healthcheck → GH issue при fail
 - [`CLAUDE.md`](../CLAUDE.md) — главная точка входа, iron rules, архитектура
 - [`.claude/rules/lead_agent_v2.md`](../.claude/rules/lead_agent_v2.md) — **канон lead-agent v2** (роутинг, параллелизм, cloud-команды)
 - [`docs/AGENT_DEVELOPMENT.md`](AGENT_DEVELOPMENT.md) — детали TDD + Teams workflow
-- [`.claude/rules/agent_workflow.md`](../.claude/rules/agent_workflow.md) — file ownership, параллелизм
+- [`.claude/rules/agent_workflow.md`](../.claude/rules/agent_workflow.md) — file ownership + 5 constraints для worktree-teammate (канон роутинга/параллелизма — в `lead_agent_v2.md`)
 - [`.claude/rules/learnings.md`](../.claude/rules/learnings.md) — накопленные паттерны и антипаттерны
-- [`memory/MEMORY.md`](/Users/a1/.claude/projects/-Users-a1-Desktop-dds-app/memory/MEMORY.md) — user feedback, project state, references
+- [`memory/MEMORY.md`](../memory/MEMORY.md) — **manual** feedback + known_bugs (под git)
+- `~/.claude/projects/-Users-a1-Desktop-dds-app/memory/` — **auto-memory** (Claude пишет сам между сессиями, под git НЕ попадает)
 - [`REVIEW.md`](../REVIEW.md) — чеклист code review

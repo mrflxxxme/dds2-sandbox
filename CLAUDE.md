@@ -59,14 +59,15 @@ make sync-prod                                    # локалка = копия 
 - `backend/MAP.md` — карта backend
 - `backend/DOMAIN_*.md` — домены
 - `.claude/rules/learnings.md` — накопленные решения + повторяющиеся грабли
-- `memory/MEMORY.md` — feedback + project state
+- `memory/MEMORY.md` — **manual** feedback + known_bugs (правим руками, под git)
+- `~/.claude/projects/-Users-a1-Desktop-dds-app/memory/` — **auto-memory** (Claude пишет сам между сессиями: user/feedback/project/reference, под git НЕ попадает)
 - `mcp-servers/dds-mcp/` — read-only MCP для PG/Redis инспекции (tools: `mcp__dds__*`)
 - `/status` — диагностика (git, docker, миграции)
 
 ## Subagents (по триггеру, всё на opus 4.7)
 `code-reviewer`, `security-reviewer`, `performance-optimizer`, `api-designer`, `database-reviewer`, `tdd-guide`, `build-error-resolver`, `planner`.
 
-## Skills (детали `.claude/commands/`)
+## Skills (детали `.claude/commands/` для legacy, `.claude/skills/` для новых)
 - Разработка: `/new-endpoint`, `/new-page`, `/migration`, `/tdd`, `/plan`
 - Крупные фичи: `/spec` (локально), `/ultraplan` ☁️ (cross-domain)
 - Рефакторинг: `/codemod`
@@ -74,6 +75,8 @@ make sync-prod                                    # локалка = копия 
 - Проверки: `/smoke`, `/verify`, `/review`, `/status`, `/build-fix`
 - Большие PR: `/ultrareview` ☁️ (миграции, security, money)
 - Рефлексия: `/learn` (после коммита), `/docs`, `/pause`, `/resume`
+
+> **Формат для новых skills** (Anthropic 2026): создавать как `.claude/skills/<name>/SKILL.md` + папка с helpers — даёт dynamic context injection (`` !`git diff --stat` `` в начале skill), supporting files рядом, per-skill `model`/`effort` override. Текущие 18 в `.claude/commands/*.md` — legacy, работают; мигрировать при следующем редактировании. Пример нового формата: [.claude/skills/webapp-testing/](.claude/skills/webapp-testing/).
 
 ## Git
 - Коммиты: `feat:` / `fix:` / `infra:` / `refactor:` / `test:`
