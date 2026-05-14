@@ -59,6 +59,7 @@ export default function AssemblyDistributePage() {
     const [targetWarehouseNames, setTargetWarehouseNames] = useState<string[]>([]);
     const [rows, setRows] = useState<AssemblyDraftRow[]>([]);
     const [coldStartShares, setColdStartShares] = useState<Record<string, number> | null>(null);
+    const [newcomerNmIds, setNewcomerNmIds] = useState<Set<number>>(new Set());
 
     // Reference data
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
@@ -97,6 +98,7 @@ export default function AssemblyDistributePage() {
                 setTargetWarehouseNames(draftResp.distribution.target_warehouse_names || []);
                 setRows(draftResp.distribution.rows || []);
                 setColdStartShares(draftResp.distribution.cold_start_shares || null);
+                setNewcomerNmIds(new Set(draftResp.newcomer_nm_ids || []));
                 setWarehouses(whs);
                 setStockNeed(stockNeedResp);
                 lastSavedJsonRef.current = JSON.stringify(draftResp.distribution);
@@ -325,19 +327,23 @@ export default function AssemblyDistributePage() {
     }, [rows, sourceWarehouseIds, targetWarehouseNames, availableAtFf, wbNeedByNmIdAndWh, coldStartShares]);
 
     // ─── Commit ──────────────────────────────────────────────────────────
+    // Должно совпадать с backend `commit_draft` группировкой:
+    // (source_ff_id, target_wb_name, package_type, is_newcomer) → 1 AssemblyRequest.
     const uniqueAssemblyCount = useMemo(() => {
         const pairs = new Set<string>();
         for (const r of rows) {
+            const pkg = r.package_type || 'BOX';
+            const isNew = newcomerNmIds.has(r.nm_id) ? '1' : '0';
             for (const [ffId, srcQty] of Object.entries(r.src)) {
                 if ((srcQty || 0) <= 0) continue;
                 for (const [wbName, tgtQty] of Object.entries(r.tgt)) {
                     if ((tgtQty || 0) <= 0) continue;
-                    pairs.add(`${ffId}::${wbName}`);
+                    pairs.add(`${ffId}::${wbName}::${pkg}::${isNew}`);
                 }
             }
         }
         return pairs.size;
-    }, [rows]);
+    }, [rows, newcomerNmIds]);
 
     const handleCommit = useCallback(async () => {
         if (!draftId) return;
@@ -548,6 +554,7 @@ export default function AssemblyDistributePage() {
                         tgtSumPerWb={tgtSumPerWb}
                         availableAtFf={availableAtFf}
                         initialNeedByNmId={initialNeedByNmId}
+                        newcomerNmIds={newcomerNmIds}
                         onSrcChange={setRowSrc}
                         onTgtChange={setRowTgt}
                         onMergeWb={handleMergeWb}
@@ -569,6 +576,7 @@ interface DistributeMatrixProps {
     tgtSumPerWb: Record<string, number>;
     availableAtFf: (nmId: number, ffId: number) => number;
     initialNeedByNmId: Record<number, number>;
+    newcomerNmIds: Set<number>;
     onSrcChange: (nmId: number, ffId: number, qty: number) => void;
     onTgtChange: (nmId: number, whName: string, qty: number) => void;
     onMergeWb: (sourceWb: string, targetWb: string) => void;
@@ -583,6 +591,7 @@ function DistributeMatrix({
     tgtSumPerWb,
     availableAtFf,
     initialNeedByNmId,
+    newcomerNmIds,
     onSrcChange,
     onTgtChange,
     onMergeWb,
@@ -624,19 +633,31 @@ function DistributeMatrix({
                         ЦЕЛИ (WB) <span style={{ fontWeight: 400, fontSize: 10, opacity: 0.6, letterSpacing: 0 }}>· перетащи столбец чтобы объединить</span>
                     </th>
                 </tr>
-                {/* Column headers */}
+                {/* Column headers — название + сумма «к отгрузке» прямо под названием */}
                 <tr>
                     <th style={{ ...thStyle, textAlign: 'left', position: 'sticky', left: 0, zIndex: 3 }} />
                     <th style={thStyle} />
-                    {sourceWarehouseIds.map(ffId => (
-                        <th key={`hdr-src-${ffId}`} style={{ ...thStyle, background: 'rgba(59,130,246,0.04)' }}>
-                            {warehouseNameById(ffId)}
-                        </th>
-                    ))}
-                    <th style={{ ...thStyle, background: 'rgba(59,130,246,0.04)' }}>Σ ист</th>
+                    {sourceWarehouseIds.map(ffId => {
+                        const total = srcSumPerFf[ffId] || 0;
+                        return (
+                            <th key={`hdr-src-${ffId}`} style={{ ...thStyle, background: 'rgba(59,130,246,0.04)' }}>
+                                <div>{warehouseNameById(ffId)}</div>
+                                <div style={{ fontSize: 13, fontWeight: 700, color: total > 0 ? 'var(--color-accent)' : 'var(--color-text-muted)', marginTop: 2 }}>
+                                    {total > 0 ? formatNumber(total, 0) : '—'}
+                                </div>
+                            </th>
+                        );
+                    })}
+                    <th style={{ ...thStyle, background: 'rgba(59,130,246,0.08)' }}>
+                        <div>Σ ист</div>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-accent)', marginTop: 2 }}>
+                            {formatNumber(Object.values(srcSumPerFf).reduce((s, v) => s + v, 0), 0)}
+                        </div>
+                    </th>
                     {targetWarehouseNames.map(whName => {
                         const isDragging = dragSourceWb === whName;
                         const isOver = dragOverWb === whName && dragSourceWb !== null && dragSourceWb !== whName;
+                        const total = tgtSumPerWb[whName] || 0;
                         return (
                             <th
                                 key={`hdr-tgt-${whName}`}
@@ -671,7 +692,7 @@ function DistributeMatrix({
                                     setDragSourceWb(null);
                                     setDragOverWb(null);
                                 }}
-                                title={`Перетащи на другой WB-склад чтобы объединить колонки\n${whName}`}
+                                title={`Перетащи на другой WB-склад чтобы объединить колонки\n${whName}\nК отгрузке: ${formatNumber(total, 0)}`}
                                 style={{
                                     ...thStyle,
                                     background: isOver ? 'rgba(34,197,94,0.18)' : 'rgba(245,158,11,0.04)',
@@ -681,11 +702,19 @@ function DistributeMatrix({
                                     border: isOver ? '2px dashed var(--color-success, #22c55e)' : undefined,
                                 }}
                             >
-                                {whName.length > 14 ? whName.slice(0, 14) + '…' : whName}
+                                <div>{whName.length > 14 ? whName.slice(0, 14) + '…' : whName}</div>
+                                <div style={{ fontSize: 13, fontWeight: 700, color: total > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)', marginTop: 2 }}>
+                                    {total > 0 ? formatNumber(total, 0) : '—'}
+                                </div>
                             </th>
                         );
                     })}
-                    <th style={{ ...thStyle, background: 'rgba(245,158,11,0.04)' }}>Σ цель</th>
+                    <th style={{ ...thStyle, background: 'rgba(245,158,11,0.08)' }}>
+                        <div>Σ цель</div>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-warning)', marginTop: 2 }}>
+                            {formatNumber(Object.values(tgtSumPerWb).reduce((s, v) => s + v, 0), 0)}
+                        </div>
+                    </th>
                 </tr>
             </thead>
             <tbody>
@@ -709,7 +738,45 @@ function DistributeMatrix({
                                     fontWeight: 500,
                                 }}
                             >
-                                <div>{row.vendor_code || `nm:${row.nm_id}`}</div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                    {newcomerNmIds.has(row.nm_id) && (
+                                        <span
+                                            title="Новинка (≤14 дней с первой продажи или без продаж) — уйдёт отдельной заявкой"
+                                            style={{
+                                                padding: '1px 6px', borderRadius: 6,
+                                                background: '#a855f7', color: '#fff',
+                                                fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
+                                            }}
+                                        >
+                                            🆕
+                                        </span>
+                                    )}
+                                    {row.package_type === 'MONOPALLET' && (
+                                        <span title="Монопаллета — отдельная заявка от короба"
+                                            style={{
+                                                padding: '1px 6px', borderRadius: 6,
+                                                background: 'rgba(34,197,94,0.16)', color: '#15803d',
+                                                fontSize: 9, fontWeight: 700,
+                                            }}>📐 моно</span>
+                                    )}
+                                    {row.package_type === 'SUPERSAFE' && (
+                                        <span title="Суперсейф — отдельная заявка"
+                                            style={{
+                                                padding: '1px 6px', borderRadius: 6,
+                                                background: 'rgba(168,85,247,0.16)', color: '#7e22ce',
+                                                fontSize: 9, fontWeight: 700,
+                                            }}>🛡 суп</span>
+                                    )}
+                                    {(!row.package_type || row.package_type === 'BOX') && (
+                                        <span title="Короб (по умолчанию)"
+                                            style={{
+                                                padding: '1px 6px', borderRadius: 6,
+                                                background: 'rgba(59,130,246,0.14)', color: '#1d4ed8',
+                                                fontSize: 9, fontWeight: 700,
+                                            }}>📦 кор</span>
+                                    )}
+                                    <span>{row.vendor_code || `nm:${row.nm_id}`}</span>
+                                </div>
                                 <div style={{ fontSize: 10, color: 'var(--color-text-muted)' }}>
                                     {row.barcode}
                                 </div>
@@ -800,45 +867,6 @@ function DistributeMatrix({
                     );
                 })}
 
-                {/* Totals row */}
-                <tr style={{ background: 'rgba(59,130,246,0.06)', fontWeight: 700 }}>
-                    <td
-                        style={{
-                            ...tdStyle,
-                            textAlign: 'left',
-                            position: 'sticky',
-                            left: 0,
-                            background: 'rgba(59,130,246,0.06)',
-                            zIndex: 2,
-                            fontWeight: 700,
-                        }}
-                    >
-                        ИТОГО
-                    </td>
-                    <td style={tdStyle} />
-                    {sourceWarehouseIds.map(ffId => (
-                        <td key={`tot-src-${ffId}`} style={{ ...tdStyle, fontWeight: 700 }}>
-                            {formatNumber(srcSumPerFf[ffId] || 0, 0)}
-                        </td>
-                    ))}
-                    <td style={{ ...tdStyle, fontWeight: 700 }}>
-                        {formatNumber(
-                            Object.values(srcSumPerFf).reduce((s, v) => s + v, 0),
-                            0,
-                        )}
-                    </td>
-                    {targetWarehouseNames.map(whName => (
-                        <td key={`tot-tgt-${whName}`} style={{ ...tdStyle, fontWeight: 700 }}>
-                            {formatNumber(tgtSumPerWb[whName] || 0, 0)}
-                        </td>
-                    ))}
-                    <td style={{ ...tdStyle, fontWeight: 700 }}>
-                        {formatNumber(
-                            Object.values(tgtSumPerWb).reduce((s, v) => s + v, 0),
-                            0,
-                        )}
-                    </td>
-                </tr>
             </tbody>
         </table>
     );

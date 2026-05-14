@@ -33,7 +33,7 @@ async def list_drafts(
 ) -> list[AssemblyDraftRead]:
     """List non-deleted drafts of current project, newest-updated first."""
     drafts = await assembly_draft_service.list_drafts(db, project.id)
-    return [AssemblyDraftRead.model_validate(d) for d in drafts]
+    return [await assembly_draft_service.to_read_model(db, project.id, d) for d in drafts]
 
 
 @router.post("", response_model=AssemblyDraftRead, dependencies=[Depends(rate_limit_write)])
@@ -44,7 +44,7 @@ async def create_draft(
 ) -> AssemblyDraftRead:
     """Create a new draft."""
     draft = await assembly_draft_service.create_draft(db, project.id, payload)
-    return AssemblyDraftRead.model_validate(draft)
+    return await assembly_draft_service.to_read_model(db, project.id, draft)
 
 
 @router.get("/{draft_id}", response_model=AssemblyDraftRead)
@@ -57,7 +57,7 @@ async def get_draft(
     draft = await assembly_draft_service.get_draft(db, project.id, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
-    return AssemblyDraftRead.model_validate(draft)
+    return await assembly_draft_service.to_read_model(db, project.id, draft)
 
 
 @router.put("/{draft_id}", response_model=AssemblyDraftRead, dependencies=[Depends(rate_limit_write)])
@@ -69,7 +69,7 @@ async def update_draft(
 ) -> AssemblyDraftRead:
     """Update mutable fields of a draft."""
     draft = await assembly_draft_service.update_draft(db, project.id, draft_id, payload)
-    return AssemblyDraftRead.model_validate(draft)
+    return await assembly_draft_service.to_read_model(db, project.id, draft)
 
 
 @router.delete("/{draft_id}", status_code=204, dependencies=[Depends(rate_limit_write)])

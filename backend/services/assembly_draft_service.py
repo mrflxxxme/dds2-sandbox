@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF002, RUF003
 """
 Assembly Draft service — CRUD + commit (turn draft into N AssemblyRequests).
 
@@ -10,7 +11,7 @@ See backend/DOMAIN_ASSEMBLY.md for context (assembly module).
 """
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -27,11 +28,64 @@ from backend.schemas.assembly_draft import (
     AssemblyDraftCommitResponse,
     AssemblyDraftCreate,
     AssemblyDraftDistribution,
+    AssemblyDraftRead,
     AssemblyDraftUpdate,
 )
 from backend.services.warehouse_stock_engine import _next_number
 
 logger = logging.getLogger(__name__)
+
+# Окно "новинка" — синхронно с cold_start_distribution_service.fetch_cold_start_segment:
+# nm_id считается новинкой если first_sale_date IS NULL ИЛИ ≥ today-14d.
+NEWCOMER_DAYS = 14
+NEWCOMER_COMMENT_PREFIX = "🆕 Новинки"
+
+
+async def fetch_newcomer_nm_ids(
+    db: AsyncSession,
+    project_id: int,
+    nm_ids: set[int],
+) -> set[int]:
+    """Из переданного множества nm_id выбрать те, что считаются «новинками».
+
+    Новинка = `Nomenclature.first_sale_date` IS NULL ИЛИ first_sale_date ≥ today-14d.
+    Этот же критерий использует backend cold-start (fetch_cold_start_segment),
+    поэтому при commit_draft новинки группируются в отдельные AssemblyRequests.
+    """
+    if not nm_ids:
+        return set()
+    cutoff = date.today() - timedelta(days=NEWCOMER_DAYS)
+    result = await db.execute(
+        select(Nomenclature.article_wb).where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.article_wb.in_(nm_ids),
+            (Nomenclature.first_sale_date.is_(None)) | (Nomenclature.first_sale_date >= cutoff),
+        )
+    )
+    return {nm for (nm,) in result.fetchall() if nm is not None}
+
+
+def _draft_nm_ids(draft: AssemblyDraft) -> set[int]:
+    """Извлечь все nm_id из draft.distribution.rows (toJSON-friendly чтение)."""
+    rows = (draft.distribution or {}).get("rows", []) if isinstance(draft.distribution, dict) else []
+    out: set[int] = set()
+    for r in rows:
+        nm = r.get("nm_id")
+        if isinstance(nm, int):
+            out.add(nm)
+    return out
+
+
+async def to_read_model(
+    db: AsyncSession,
+    project_id: int,
+    draft: AssemblyDraft,
+) -> AssemblyDraftRead:
+    """Преобразовать ORM-модель в схему ответа с обогащённым newcomer_nm_ids."""
+    newcomer = await fetch_newcomer_nm_ids(db, project_id, _draft_nm_ids(draft))
+    read = AssemblyDraftRead.model_validate(draft)
+    read.newcomer_nm_ids = sorted(newcomer)
+    return read
 
 
 # ─── List / Get / CRUD ──────────────────────────────────────────────────────
@@ -215,10 +269,15 @@ async def commit_draft(
                 detail=f"Row {row.nm_id}: src sum != tgt sum ({src_sum} != {tgt_sum})",
             )
 
-    # 2. Group items per (source_ff_id, target_wb_name, package_type) triple.
-    # One AssemblyRequest = one transport unit = one package_type.
-    # pair_items[(src_id, wb_name, pkg)] -> {barcode: total_qty}
-    pair_items: dict[tuple[int, str, str], dict[str, int]] = {}
+    # 2. Detect newcomer SKUs — они группируются в отдельные AssemblyRequests,
+    # чтобы заявку «новинки» можно было обрабатывать отдельно от обычных.
+    all_nm_ids = {row.nm_id for row in distribution.rows}
+    newcomer_nm_ids = await fetch_newcomer_nm_ids(db, project_id, all_nm_ids)
+
+    # 3. Group items per (source_ff_id, target_wb_name, package_type, is_newcomer) tuple.
+    # One AssemblyRequest = one transport unit = one package_type, новинки отдельно.
+    # pair_items[(src_id, wb_name, pkg, is_new)] -> {barcode: total_qty}
+    pair_items: dict[tuple[int, str, str, bool], dict[str, int]] = {}
     for row in distribution.rows:
         if not row.barcode:
             raise HTTPException(
@@ -227,16 +286,17 @@ async def commit_draft(
             )
         alloc = _allocate_pairs(row.src, row.tgt)
         pkg = row.package_type or "BOX"
+        is_new = row.nm_id in newcomer_nm_ids
         for (src_id, wb_name), qty in alloc.items():
             if qty <= 0:
                 continue
-            bucket = pair_items.setdefault((src_id, wb_name, pkg), {})
+            bucket = pair_items.setdefault((src_id, wb_name, pkg, is_new), {})
             bucket[row.barcode] = bucket.get(row.barcode, 0) + qty
 
     if not pair_items:
         raise HTTPException(status_code=400, detail="No (source, target) pairs with non-zero quantity")
 
-    # 3. Resolve barcodes -> nomenclature in one batch
+    # 4. Resolve barcodes -> nomenclature in one batch
     all_barcodes = {bc for items in pair_items.values() for bc in items}
     nom_result = await db.execute(
         select(Nomenclature).where(
@@ -253,7 +313,7 @@ async def commit_draft(
             detail=f"Barcode not found: {missing[0]}",
         )
 
-    # 4. Parse estimated_ready_date once
+    # 5. Parse estimated_ready_date once
     eta: date | None = None
     if distribution.estimated_ready_date:
         try:
@@ -266,12 +326,20 @@ async def commit_draft(
 
     pallets = max(1, int(distribution.pallets_count or 1))
     pallet_weight = distribution.pallet_weight_kg or 0.0
+    base_comment = draft.comment
 
-    # 5. Create AssemblyRequest per pair (atomic — single transaction)
+    # 6. Create AssemblyRequest per pair (atomic — single transaction)
     created_ids: list[int] = []
     try:
-        for (source_ff_id, target_wb_name, package_type), barcodes in pair_items.items():
+        for (source_ff_id, target_wb_name, package_type, is_newcomer), barcodes in pair_items.items():
             number = await _next_number(db, project_id, "ASM", AssemblyRequest)
+            if is_newcomer:
+                pieces = [NEWCOMER_COMMENT_PREFIX]
+                if base_comment:
+                    pieces.append(base_comment)
+                req_comment: str | None = " | ".join(pieces)
+            else:
+                req_comment = base_comment
 
             assembly_req = AssemblyRequest(
                 project_id=project_id,
@@ -283,7 +351,7 @@ async def commit_draft(
                 estimated_ready_date=eta,
                 pallets_count=pallets,
                 pallet_weight_kg=pallet_weight,
-                comment=draft.comment,
+                comment=req_comment,
                 package_type=package_type,
             )
             db.add(assembly_req)
@@ -305,7 +373,7 @@ async def commit_draft(
             await db.flush()
             created_ids.append(assembly_req.id)
 
-        # 6. Soft-delete draft on success
+        # 7. Soft-delete draft on success
         draft.soft_delete()
         await db.commit()
     except HTTPException:

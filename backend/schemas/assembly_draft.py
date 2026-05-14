@@ -64,6 +64,11 @@ class AssemblyDraftRead(BaseModel):
     comment: str | None
     created_at: datetime
     updated_at: datetime
+    # SKU-новинки в этом draft (Nomenclature.first_sale_date IS NULL OR ≥ today-14d).
+    # Заполняется роутером при возврате; в БД не хранится — derived из nomenclature.
+    # UI использует чтобы (a) показать бейдж 🆕 в матрице, (b) посчитать сколько
+    # отдельных заявок будет создано (новинки идут отдельно от обычных).
+    newcomer_nm_ids: list[int] = Field(default_factory=list)
 
 
 class AssemblyDraftCommitResponse(BaseModel):

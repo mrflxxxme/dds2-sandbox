@@ -2782,6 +2782,9 @@ export interface AssemblyDraft {
   comment: string | null;
   created_at: string;
   updated_at: string;
+  /** SKU-новинки в draft (Nomenclature.first_sale_date IS NULL OR ≥ today-14d).
+   *  Backend заполняет на чтении draft; commit_draft создаёт по ним отдельные заявки. */
+  newcomer_nm_ids?: number[];
 }
 
 export interface AssemblyDraftCreate {

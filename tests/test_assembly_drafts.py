@@ -590,3 +590,164 @@ async def test_commit_404_when_draft_missing(db_session):
     with pytest.raises(HTTPException) as ei:
         await assembly_draft_service.commit_draft(db_session, PROJECT_ID, 999_999_999)
     assert ei.value.status_code == 404
+
+
+# ─── Tests: newcomer split (короб/моно/новинки идут отдельными заявками) ────
+
+
+NEWCOMER_BARCODE = "TEST_DRAFT_BC_NEW_001"
+REGULAR_BARCODE = "TEST_DRAFT_BC_OLD_001"
+NEWCOMER_NM_ID = 9_001_001
+REGULAR_NM_ID = 9_001_002
+
+
+@pytest_asyncio.fixture
+async def setup_newcomer_nomenclature(db_session):
+    """UPSERT two SKU: one «новинка» (first_sale_date NULL), one «обычный» (-100d).
+
+    Без teardown — autouse `setup_test_data` следующего теста чистит зависимые
+    assembly_request_items/requests перед удалением nomenclature невозможно
+    (FK violation), поэтому UPSERT идемпотентен и safe для re-use между тестами.
+    """
+    from datetime import date, timedelta
+
+    await db_session.execute(
+        text(
+            "INSERT INTO nomenclature (project_id, barcode, article_wb, first_sale_date, updated_at) "
+            "VALUES (:pid, :bc, :nm, NULL, NOW()) "
+            "ON CONFLICT (project_id, barcode) DO UPDATE "
+            "SET article_wb = EXCLUDED.article_wb, first_sale_date = NULL, updated_at = NOW()"
+        ),
+        {"pid": PROJECT_ID, "bc": NEWCOMER_BARCODE, "nm": NEWCOMER_NM_ID},
+    )
+    await db_session.execute(
+        text(
+            "INSERT INTO nomenclature (project_id, barcode, article_wb, first_sale_date, updated_at) "
+            "VALUES (:pid, :bc, :nm, :fsd, NOW()) "
+            "ON CONFLICT (project_id, barcode) DO UPDATE "
+            "SET article_wb = EXCLUDED.article_wb, first_sale_date = EXCLUDED.first_sale_date, updated_at = NOW()"
+        ),
+        {
+            "pid": PROJECT_ID,
+            "bc": REGULAR_BARCODE,
+            "nm": REGULAR_NM_ID,
+            "fsd": date.today() - timedelta(days=100),
+        },
+    )
+    await db_session.commit()
+    yield
+
+
+@pytest.mark.asyncio
+async def test_commit_splits_newcomer_from_regular(db_session, setup_newcomer_nomenclature):
+    """Same (src, wb, pkg) but mixed newcomer/regular → 2 separate AssemblyRequests."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(
+            nm_id=NEWCOMER_NM_ID,
+            barcode=NEWCOMER_BARCODE,
+            src={str(wh_a): 5},
+            tgt={"Электросталь": 5},
+            package_type="BOX",
+        ),
+        AssemblyDraftRow(
+            nm_id=REGULAR_NM_ID,
+            barcode=REGULAR_BARCODE,
+            src={str(wh_a): 7},
+            tgt={"Электросталь": 7},
+            package_type="BOX",
+        ),
+    ]
+    payload = _build_payload([wh_a], ["Электросталь"], rows)
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    # Несмотря на одинаковые (src, wb, pkg) — две заявки: новинки отдельно.
+    assert len(resp.created_request_ids) == 2
+
+    res = await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id.in_(resp.created_request_ids)))
+    requests = list(res.scalars().all())
+    comments = {r.comment for r in requests}
+    # Одна заявка — новинки (comment начинается с маркера), вторая — обычная (auto-test).
+    assert any(c and c.startswith("🆕 Новинки") for c in comments)
+    assert "auto-test" in comments
+
+
+@pytest.mark.asyncio
+async def test_commit_splits_box_mono_newcomer_4_requests(db_session, setup_newcomer_nomenclature):
+    """Same (src, wb) — оба SKU имеют BOX+MONOPALLET split → 4 заявки (newcomer × {BOX, MONO} + regular × {BOX, MONO})."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(
+            nm_id=NEWCOMER_NM_ID,
+            barcode=NEWCOMER_BARCODE,
+            src={str(wh_a): 3},
+            tgt={"Электросталь": 3},
+            package_type="BOX",
+        ),
+        AssemblyDraftRow(
+            nm_id=NEWCOMER_NM_ID,
+            barcode=NEWCOMER_BARCODE,
+            src={str(wh_a): 4},
+            tgt={"Электросталь": 4},
+            package_type="MONOPALLET",
+        ),
+        AssemblyDraftRow(
+            nm_id=REGULAR_NM_ID,
+            barcode=REGULAR_BARCODE,
+            src={str(wh_a): 5},
+            tgt={"Электросталь": 5},
+            package_type="BOX",
+        ),
+        AssemblyDraftRow(
+            nm_id=REGULAR_NM_ID,
+            barcode=REGULAR_BARCODE,
+            src={str(wh_a): 6},
+            tgt={"Электросталь": 6},
+            package_type="MONOPALLET",
+        ),
+    ]
+    payload = _build_payload([wh_a], ["Электросталь"], rows)
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    assert len(resp.created_request_ids) == 4
+
+    res = await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id.in_(resp.created_request_ids)))
+    requests = list(res.scalars().all())
+    pkg_types = {r.package_type for r in requests}
+    assert pkg_types == {"BOX", "MONOPALLET"}
+    newcomer_reqs = [r for r in requests if r.comment and r.comment.startswith("🆕")]
+    regular_reqs = [r for r in requests if not r.comment or not r.comment.startswith("🆕")]
+    assert len(newcomer_reqs) == 2  # BOX + MONOPALLET для новинки
+    assert len(regular_reqs) == 2  # BOX + MONOPALLET для обычного
+    # Каждый тип package_type есть и у новинки, и у обычного
+    assert {r.package_type for r in newcomer_reqs} == {"BOX", "MONOPALLET"}
+    assert {r.package_type for r in regular_reqs} == {"BOX", "MONOPALLET"}
+
+
+@pytest.mark.asyncio
+async def test_to_read_model_returns_newcomer_nm_ids(db_session, setup_newcomer_nomenclature):
+    """to_read_model добавляет newcomer_nm_ids — UI использует для бейджа 🆕 и счётчика заявок."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(
+            nm_id=NEWCOMER_NM_ID,
+            barcode=NEWCOMER_BARCODE,
+            src={str(wh_a): 1},
+            tgt={"Электросталь": 1},
+        ),
+        AssemblyDraftRow(
+            nm_id=REGULAR_NM_ID,
+            barcode=REGULAR_BARCODE,
+            src={str(wh_a): 1},
+            tgt={"Электросталь": 1},
+        ),
+    ]
+    payload = _build_payload([wh_a], ["Электросталь"], rows)
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    read = await assembly_draft_service.to_read_model(db_session, PROJECT_ID, draft)
+    assert NEWCOMER_NM_ID in read.newcomer_nm_ids
+    assert REGULAR_NM_ID not in read.newcomer_nm_ids
+    assert read.id == draft.id
