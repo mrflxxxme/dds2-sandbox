@@ -79,7 +79,8 @@ def _load_speed_table() -> dict:
     if not _SPEED_TABLE_PATH.exists():
         return {"version": "missing", "cities": []}
     with _SPEED_TABLE_PATH.open(encoding="utf-8") as f:
-        return json.load(f)
+        data: dict = json.load(f)
+        return data
 
 
 @lru_cache(maxsize=1)

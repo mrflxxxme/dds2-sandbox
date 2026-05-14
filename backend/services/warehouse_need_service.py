@@ -886,7 +886,7 @@ async def get_warehouse_need(
         for wh_name in list(wh_data.keys()):
             wh_data[wh_name]["total_need"] = sum(a["need"] for a in wh_data[wh_name]["articles"].values())
 
-    warehouses = sorted(wh_data.values(), key=lambda w: w["total_need"], reverse=True)
+    warehouses: list[dict] = sorted(wh_data.values(), key=lambda w: w["total_need"], reverse=True)
     # Аннотируем округом для UI — фронт показывает label под названием склада
     # (как в индексе локализации). 'unknown' для складов вне справочника.
     for _wh in warehouses:

@@ -21,6 +21,7 @@ Read-only: никаких записей в БД.
 
 import logging
 from collections import defaultdict
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select, text
@@ -224,7 +225,7 @@ async def fetch_active_assemblies_for_sku(db: AsyncSession, project_id: int, nm_
 # ─── Pure logic (sync, безопасно тестировать без БД) ───────────────────────
 
 
-def _sort_key_traffic_then_priority(district: str):
+def _sort_key_traffic_then_priority(district: str) -> Callable[[tuple[str, int]], tuple[int, float, str]]:
     """Composite-ключ сортировки складов внутри ФО.
 
     Primary: трафик в проекте (desc) — куда WB реально вёз.
