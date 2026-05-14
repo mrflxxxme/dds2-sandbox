@@ -12,6 +12,7 @@ import type {
     ColdStartMainWarehouse,
     ColdStartTableResponse,
     ColdStartTableRow,
+    OkrugInfo,
     PackageType,
     RedistributionMove,
 } from '@/types/api';
@@ -347,6 +348,24 @@ export function WarehouseNeedView() {
         return () => { cancelled = true; };
     }, [coldStartMode, analysisDays, coldStartMinPack]);
 
+    // Speed-карта /okrug-info — anchors_top per ФО. Нужно для bump-логики:
+    // выбор main_wh для «Дораспределить» использует priority-rank склада в
+    // speed-карте (POSTAVLENO) как primary ключ сортировки, share_pct из
+    // cold-start — secondary. Anchors_top — статичный справочник, грузим один раз.
+    const [okrugInfo, setOkrugInfo] = useState<OkrugInfo[]>([]);
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const resp = await api.warehouseSpeed.getOkrugInfo();
+                if (!cancelled) setOkrugInfo(resp);
+            } catch (e) {
+                if (!cancelled) console.warn('okrug-info load failed (bump fallback на share_pct):', e);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, []);
+
     /* ── Close hypo menu on outside click ── */
     useEffect(() => {
         if (!showHypoMenu) return;
@@ -624,19 +643,48 @@ export function WarehouseNeedView() {
      *       И acceptance на main_wh этого ФО разрешает наш package_type.
      *    4. FF-излишек > 0 (rf_avail - usedFf > 0).
      *
-     *  Bump идёт ТОЛЬКО в main_wh underserved ФО (top-1 по orders / share_pct).
+     *  Bump идёт в main_wh underserved ФО. Выбор склада per district:
+     *    primary key — позиция в anchors_top из speed-карты (priority-rank),
+     *    secondary — share_pct из cold-start (исторический leader заказов).
+     *  Если okrugInfo не загрузился — fallback на чистый share_pct (старая логика).
      *  Возвращает Map<nm_id, Map<wh, additional_qty>>. */
     const bumpedCells = useMemo(() => {
         const result = new Map<number, Map<string, number>>();
         if (minStockPerMain <= 0 || !data?.articles || acceptanceMap.size === 0) return result;
 
         const OVERSTOCK_DAYS = 21; // ФО считается перетарен если >= 3 нед запаса
-        // Reverse map: district → main_wh (top-1 по share_pct из cold-start).
-        const mainWhPerDistrict = new Map<string, string>();
+
+        // anchorRank: wh_name → district_key → rank (1-based; меньше = выше).
+        // Источник: /warehouse/speed/okrug-info `anchors_top` (топ-5 anchor каждого ФО).
+        // Не в anchors_top → rank=999 (fallback на share_pct).
+        const anchorRank = new Map<string, Map<string, number>>();
+        for (const ok of okrugInfo) {
+            ok.anchors_top.forEach((a, idx) => {
+                if (!anchorRank.has(a.warehouse_name)) {
+                    anchorRank.set(a.warehouse_name, new Map());
+                }
+                anchorRank.get(a.warehouse_name)!.set(ok.okrug_key, idx + 1);
+            });
+        }
+
+        // Группируем main_warehouses per district, сортируем по
+        // (anchor_rank ASC, share_pct DESC) — anchor speed-карты побеждает,
+        // tiebreak — исторический share_pct.
+        const candidatesByDistrict = new Map<string, ColdStartMainWarehouse[]>();
         for (const w of coldStartData?.main_warehouses ?? []) {
-            if (!mainWhPerDistrict.has(w.district_key)) {
-                mainWhPerDistrict.set(w.district_key, w.warehouse);
-            }
+            const list = candidatesByDistrict.get(w.district_key) ?? [];
+            list.push(w);
+            candidatesByDistrict.set(w.district_key, list);
+        }
+        const mainWhPerDistrict = new Map<string, string>();
+        for (const [d, cands] of candidatesByDistrict.entries()) {
+            cands.sort((x, y) => {
+                const xRank = anchorRank.get(x.warehouse)?.get(d) ?? 999;
+                const yRank = anchorRank.get(y.warehouse)?.get(d) ?? 999;
+                if (xRank !== yRank) return xRank - yRank;
+                return (y.share_pct ?? 0) - (x.share_pct ?? 0);
+            });
+            if (cands.length > 0) mainWhPerDistrict.set(d, cands[0].warehouse);
         }
 
         for (const a of data.articles) {
@@ -742,7 +790,7 @@ export function WarehouseNeedView() {
             if (perSku.size > 0) result.set(a.nm_id, perSku);
         }
         return result;
-    }, [minStockPerMain, supplyDays, data, newcomerSet, wbWarehouses, acceptanceMap, getBaseArticleWbNeed, coldStartData, warehouseToDistrict]);
+    }, [minStockPerMain, supplyDays, data, newcomerSet, wbWarehouses, acceptanceMap, getBaseArticleWbNeed, coldStartData, warehouseToDistrict, okrugInfo]);
 
     /** Итоговый per-cell need: base + client-side bump (если активен «Дораспределить»). */
     const getArticleWbNeed = useCallback((article: NeedArticle, whName: string): number => {

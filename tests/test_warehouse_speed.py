@@ -173,3 +173,63 @@ async def test_meta_requires_auth(client):
     """Без auth_headers — 401/403."""
     resp = await client.get("/api/v1/warehouse/speed/meta")
     assert resp.status_code in (401, 403)
+
+
+# ─── find_priority_warehouse ────────────────────────────────────────────────
+
+
+def test_find_priority_warehouse_by_city_top1_open():
+    """Если top-1 priority открыт — возвращаем его."""
+    from backend.services.warehouse_speed import find_priority_warehouse
+
+    # Казань: top-1 = Казань, top-2 = Самара (Новосемейкино)
+    open_set = {"Казань", "Самара (Новосемейкино)", "Пенза"}
+    assert find_priority_warehouse("Казань", open_set) == "Казань"
+
+
+def test_find_priority_warehouse_by_city_top1_excluded_fallback_top2():
+    """Если top-1 закрыт — возвращаем top-2 ТОГО ЖЕ ГОРОДА (не haversine)."""
+    from backend.services.warehouse_speed import find_priority_warehouse
+
+    # Город Казань: priority chain [Казань, Новосемейкино, Владимир, Сарапул, ...]
+    # Закроем Казань → ожидаем Самара (Новосемейкино) — priority-2.
+    open_set = {"Самара (Новосемейкино)", "Сарапул", "Пенза", "Владимир"}
+    assert find_priority_warehouse("Казань", open_set) == "Самара (Новосемейкино)"
+
+
+def test_find_priority_warehouse_okrug_fallback_when_city_missing():
+    """Если city не в speed-карте, но okrug известен — берём anchor ФО по score."""
+    from backend.services.warehouse_speed import find_priority_warehouse
+
+    # Несуществующий город ПФО: Казань — top anchor ПФО, score максимальный.
+    open_set = {"Казань", "Самара (Новосемейкино)", "Сарапул"}
+    assert find_priority_warehouse("несуществующий-город", open_set, okrug="volga") == "Казань"
+
+
+def test_find_priority_warehouse_okrug_skips_excluded_anchor():
+    """okrug-fallback: если top anchor ФО закрыт — берём следующий по score."""
+    from backend.services.warehouse_speed import find_priority_warehouse
+
+    # ПФО: Казань (top) закрыта → ожидаем Сарапул/Самара (следующие anchor ПФО).
+    open_set = {"Самара (Новосемейкино)", "Сарапул", "Пенза"}
+    res = find_priority_warehouse(None, open_set, okrug="volga")
+    assert res in {"Самара (Новосемейкино)", "Сарапул", "Пенза"}
+    # Самара выше в priority-листах ПФО городов, чем Пенза/Сарапул.
+    assert res == "Самара (Новосемейкино)"
+
+
+def test_find_priority_warehouse_returns_none_when_no_open():
+    """Если ни city, ни okrug не дают match — None (caller fallback на haversine)."""
+    from backend.services.warehouse_speed import find_priority_warehouse
+
+    assert find_priority_warehouse(None, set(), okrug=None) is None
+    assert find_priority_warehouse(None, {"non-existent"}, okrug="volga") is None
+
+
+def test_find_priority_warehouse_unknown_okrug_returns_none():
+    """okrug='unknown' или 'abroad' → не должно возвращать рандомный склад."""
+    from backend.services.warehouse_speed import find_priority_warehouse
+
+    open_set = {"Казань", "Краснодар"}
+    # 'unknown' не в speed cities_by_okrug → пустой scored → None
+    assert find_priority_warehouse(None, open_set, okrug="unknown") is None

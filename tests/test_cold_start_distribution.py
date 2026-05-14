@@ -530,3 +530,63 @@ class TestDistributeMulti:
         out = distribute_multi(8, share, min_pack=5, wh_per_district=wh_per_district)
         # Оба <min_pack, но bump skipped — оригинальные значения сохраняются
         assert sum(out.values()) == 8
+
+
+class TestPickWithPriorityTiebreak:
+    """priority-rank tiebreak в `pick_main_warehouse_per_district` /
+    `pick_warehouses_per_district`: при равном трафике anchor speed-карты
+    POSTAVLENO побеждает stealer-склад.
+    """
+
+    def test_main_warehouse_tiebreak_anchor_over_stealer(self) -> None:
+        # ПФО: Казань (anchor #1 speed-карты) vs Электросталь (stealer ЦФО→ПФО).
+        # Трафик ОДИНАКОВЫЙ → должна победить Казань (priority_score > 0).
+        traffic = {
+            "Казань": 100,
+            "Электросталь": 100,  # ЦФО, но крадёт ПФО
+        }
+        result = pick_main_warehouse_per_district(traffic, excluded=set())
+        assert result.get("volga") == "Казань"
+        assert result.get("central") == "Электросталь"
+
+    def test_main_warehouse_traffic_still_dominant(self) -> None:
+        # При большом разрыве traffic — anchor speed-карты НЕ переигрывает.
+        # Это «tiebreak», а не «override».
+        traffic = {
+            "Самара (Новосемейкино)": 50,  # anchor ПФО (priority_score>0)
+            "Казань": 200,  # top anchor ПФО, ещё выше score
+        }
+        result = pick_main_warehouse_per_district(traffic, excluded=set())
+        assert result.get("volga") == "Казань"  # выиграл по traffic
+        # Но если поменять traffic — выиграет тот у кого больше:
+        traffic2 = {"Самара (Новосемейкино)": 200, "Казань": 50}
+        result2 = pick_main_warehouse_per_district(traffic2, excluded=set())
+        assert result2.get("volga") == "Самара (Новосемейкино)"  # traffic dominant
+
+    def test_warehouses_per_district_orders_by_composite(self) -> None:
+        # При равном трафике в одном ФО — anchor speed-карты выше в списке.
+        traffic = {
+            "Казань": 50,
+            "Самара (Новосемейкино)": 50,
+            "Пенза": 50,
+            "Сарапул": 50,
+        }
+        result = pick_warehouses_per_district(traffic, excluded=set(), top_n=4)
+        volga_order = [wh for wh, _ in result.get("volga", [])]
+        # Все 4 ПФО, traffic одинаковый — порядок по priority_score speed-карты.
+        # Из demo: Казань 0.62 > Самара 0.39 > Сарапул 0.33 > Пенза 0.30
+        assert volga_order[0] == "Казань"
+        assert "Электросталь" not in volga_order  # она ЦФО, не ПФО
+
+    def test_warehouses_per_district_excluded_skipped(self) -> None:
+        # Закрываем Казань → лидером ПФО должна стать следующая по composite.
+        traffic = {
+            "Казань": 100,
+            "Самара (Новосемейкино)": 100,
+            "Сарапул": 100,
+        }
+        result = pick_warehouses_per_district(traffic, excluded={"Казань"})
+        volga_order = [wh for wh, _ in result.get("volga", [])]
+        assert "Казань" not in volga_order
+        # Самара выше Сарапула по priority_score → лидер
+        assert volga_order[0] == "Самара (Новосемейкино)"

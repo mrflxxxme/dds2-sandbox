@@ -572,6 +572,56 @@ def _items_cache_key(project_id: int, items: list[dict]) -> str:
     return f"wb:acceptance:{project_id}:{h}"
 
 
+async def get_acceptance_closed_warehouses(project_id: int) -> set[str]:
+    """Set canonical имён WB-складов, ПОЛНОСТЬЮ закрытых для приёмки.
+
+    «Закрыт» = во всех package_types (box/mono/super) free_days_14 = 0 И
+    paid_days_14 = 0 (нет ни одного дня в ближайших 14, когда склад
+    готов принять поставку). Это случается при индивидуальной квоте
+    WB или явной остановке приёмки на складе.
+
+    Источник — Redis-кэш `wb:acceptance_coefficients:{pid}` +
+    `wb:acceptance_warehouses:{pid}`, которые наполняются при первом
+    вызове `/warehouse/acceptance-check` (TTL 1ч). НЕ дёргает WB API
+    самостоятельно — distribution-расчёт должен быть быстрым; если
+    кэш пуст (нет scope, network fail, проект не запрашивал
+    приёмку) — fail-open: возвращаем empty set, склады не блокируем.
+
+    Используется в `warehouse_need_service.py` для отсева складов из
+    `open_warehouses` ДО priority-chain и Hamilton-распределения.
+    """
+    redis = await get_redis() if _redis_client is None else _redis_client
+    if redis is None:
+        return set()
+    try:
+        coef_raw = await redis.get(f"wb:acceptance_coefficients:{project_id}")
+        wh_raw = await redis.get(f"wb:acceptance_warehouses:{project_id}")
+    except Exception as e:  # pragma: no cover — graceful degradation
+        logger.warning(f"acceptance.closed_warehouses_cache_failed: {e}")
+        return set()
+    if not coef_raw:
+        return set()
+    try:
+        coefficients: list[dict] = json.loads(coef_raw)
+        wh_map: dict[int, str] = {int(k): v for k, v in json.loads(wh_raw).items()} if wh_raw else {}
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"acceptance.closed_warehouses_parse_failed: {e}")
+        return set()
+
+    aggregated = _aggregate_coefficients(coefficients, wh_map)
+    # Группируем per warehouse: считаем закрытым только если ВСЕ package_types
+    # имеют 0 free + 0 paid.
+    by_wh: dict[str, list[dict]] = defaultdict(list)
+    for (canon, _type_key), meta in aggregated.items():
+        by_wh[canon].append(meta)
+
+    closed: set[str] = set()
+    for wh, metas in by_wh.items():
+        if all(m["free_days_14"] == 0 and m["paid_days_14"] == 0 for m in metas):
+            closed.add(wh)
+    return closed
+
+
 async def _load_warehouse_id_map(client: WBApiClient, project_id: int) -> dict[int, str]:
     """Cached WB warehouseID → name map (TTL 1 hour)."""
     cache_key = f"wb:acceptance_warehouses:{project_id}"

@@ -1,4 +1,4 @@
-# ruff: noqa: RUF002
+# ruff: noqa: RUF001, RUF002, RUF003
 """Сервис приоритетов скорости доставки складов WB.
 
 Источник истины: `backend/data/wb_warehouse_speed.json` (выгрузка из
@@ -157,6 +157,54 @@ def get_priority_score(warehouse: str, okrug: str) -> float:
             idx = c.warehouses.index(canon)
             score += 1.0 / (idx + 1)
     return score / len(cities)
+
+
+def find_priority_warehouse(
+    city: str | None,
+    open_warehouses: set[str] | list[str],
+    okrug: str | None = None,
+) -> str | None:
+    """Найти первый open склад в priority-chain города из speed-карты.
+
+    Используется в warehouse_need_service.localization_optimized как
+    fallback ДО haversine: WB маршрутизирует заказы по часам доставки
+    (priority-chain города), а не по евклидову расстоянию. Если top-1
+    склад города закрыт (excluded в настройках проекта), заказ должен
+    попасть на priority-2 ТОГО ЖЕ ГОРОДА, а не на ближайший по карте.
+
+    Стратегия:
+      1. Если `city` известен и есть в speed-карте — идём по priority-chain
+         города, возвращаем первый open склад.
+      2. Иначе если `okrug` известен — берём агрегатный priority-score
+         каждого склада по городам ФО (`get_priority_score`), сортируем
+         desc, возвращаем первый open с score > 0.
+      3. Иначе None — пусть caller fallback'нется на haversine.
+    """
+    open_set = set(open_warehouses)
+
+    if city:
+        for c in _all_cities():
+            if c.city == city:
+                for wh in c.warehouses:
+                    if wh in open_set:
+                        return wh
+                # Город найден, но все приоритеты excluded — пробуем okrug
+                # ниже как fallback (а не сразу haversine — он точно хуже).
+                if not okrug:
+                    okrug = c.okrug
+                break
+
+    if okrug:
+        scored: list[tuple[str, float]] = []
+        for wh in open_set:
+            score = get_priority_score(wh, okrug)
+            if score > 0:
+                scored.append((wh, score))
+        if scored:
+            scored.sort(key=lambda kv: (-kv[1], kv[0]))
+            return scored[0][0]
+
+    return None
 
 
 def sort_warehouses_by_priority(warehouses: list[str], okrug: str) -> list[str]:
