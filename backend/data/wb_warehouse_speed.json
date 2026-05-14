@@ -1,0 +1,2924 @@
+{
+  "version": "2026-05-14",
+  "source": "tg:@POSTAVLENOru_BOT (лист bot_data)",
+  "okrug_keys": [
+    "central",
+    "far_east_siberia",
+    "northwest",
+    "south_caucasus",
+    "ural",
+    "volga"
+  ],
+  "cities": [
+    {
+      "city": "Коломна",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Подольск",
+          "hours": 25
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 25
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 26
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 26
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 29
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 30
+        }
+      ]
+    },
+    {
+      "city": "Сергиев-Посад",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Электросталь",
+          "hours": 23
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 25
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 26
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 26
+        },
+        {
+          "warehouse": "Белая Дача",
+          "hours": 29
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 31
+        }
+      ]
+    },
+    {
+      "city": "Наро-Фоминск",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Подольск",
+          "hours": 24
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 25
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 26
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 26
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 27
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 29
+        }
+      ]
+    },
+    {
+      "city": "Орехово-Зуево",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Электросталь",
+          "hours": 22
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 23
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 23
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 23
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 24
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 25
+        }
+      ]
+    },
+    {
+      "city": "Волоколамск",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Подольск",
+          "hours": 23
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 24
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 25
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 28
+        },
+        {
+          "warehouse": "Истра",
+          "hours": 29
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 30
+        }
+      ]
+    },
+    {
+      "city": "Серпухов",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Подольск",
+          "hours": 20
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 21
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 23
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 25
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 26
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 28
+        }
+      ]
+    },
+    {
+      "city": "Смоленск",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 25
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 26
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 27
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 30
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 31
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 34
+        }
+      ]
+    },
+    {
+      "city": "Тверь",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Электросталь",
+          "hours": 24
+        },
+        {
+          "warehouse": "СК Тверь Эммаусское",
+          "hours": 24
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 36
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 37
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 37
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 37
+        }
+      ]
+    },
+    {
+      "city": "Кострома",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Электросталь",
+          "hours": 28
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 33
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 34
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 34
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 35
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 36
+        }
+      ]
+    },
+    {
+      "city": "Иваново",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Электросталь",
+          "hours": 29
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 34
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 35
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 35
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 36
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 37
+        }
+      ]
+    },
+    {
+      "city": "Владимир",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Владимир",
+          "hours": 19
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 23
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 28
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 29
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 31
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 33
+        }
+      ]
+    },
+    {
+      "city": "Рязань",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 24
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 29
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 30
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 30
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 31
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 31
+        }
+      ]
+    },
+    {
+      "city": "Тамбов",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Котовск",
+          "hours": 27
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 29
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 33
+        },
+        {
+          "warehouse": "Волгоград",
+          "hours": 34
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 35
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 36
+        }
+      ]
+    },
+    {
+      "city": "Воронеж",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Воронеж",
+          "hours": 28
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 36
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 38
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 38
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 39
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 41
+        }
+      ]
+    },
+    {
+      "city": "Белгород",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Воронеж",
+          "hours": 32
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 35
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 35
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 41
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 42
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 42
+        }
+      ]
+    },
+    {
+      "city": "Курск",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 26
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 28
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 29
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 29
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 30
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 32
+        }
+      ]
+    },
+    {
+      "city": "Липецк",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Котовск",
+          "hours": 24
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 25
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 29
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 30
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 30
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 31
+        }
+      ]
+    },
+    {
+      "city": "Орел",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 25
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 29
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 29
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 30
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 31
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 33
+        }
+      ]
+    },
+    {
+      "city": "Брянск",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 24
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 27
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 28
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 30
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 30
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 31
+        }
+      ]
+    },
+    {
+      "city": "Тула",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 19
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 26
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 27
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 27
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 28
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 30
+        }
+      ]
+    },
+    {
+      "city": "Калуга",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 22
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 26
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 26
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 27
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 28
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 30
+        }
+      ]
+    },
+    {
+      "city": "Ярославль",
+      "okrug": "central",
+      "priorities": [
+        {
+          "warehouse": "Электросталь",
+          "hours": 24
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 29
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 30
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 30
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 31
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 32
+        }
+      ]
+    },
+    {
+      "city": "Псков",
+      "okrug": "northwest",
+      "priorities": [
+        {
+          "warehouse": "Электросталь",
+          "hours": 33
+        },
+        {
+          "warehouse": "СК Тверь Эммаусское",
+          "hours": 35
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 47
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 47
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 48
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 52
+        }
+      ]
+    },
+    {
+      "city": "Великий Новгород",
+      "okrug": "northwest",
+      "priorities": [
+        {
+          "warehouse": "Склад СПБ Шушары Московское",
+          "hours": 22
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 33
+        },
+        {
+          "warehouse": "СК Тверь Эммаусское",
+          "hours": 33
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 42
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 43
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 46
+        }
+      ]
+    },
+    {
+      "city": "Вологда",
+      "okrug": "northwest",
+      "priorities": [
+        {
+          "warehouse": "Электросталь",
+          "hours": 28
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 31
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 32
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 34
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 35
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 37
+        }
+      ]
+    },
+    {
+      "city": "Сыктывкар",
+      "okrug": "northwest",
+      "priorities": [
+        {
+          "warehouse": "Казань",
+          "hours": 35
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 37
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 43
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 50
+        },
+        {
+          "warehouse": "Перспективный",
+          "hours": 52
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 52
+        }
+      ]
+    },
+    {
+      "city": "Санкт-Петербург",
+      "okrug": "northwest",
+      "priorities": [
+        {
+          "warehouse": "Склад СПБ Шушары Московское",
+          "hours": 17
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 32
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 34
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 35
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 35
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 35
+        }
+      ]
+    },
+    {
+      "city": "Петрозаводск",
+      "okrug": "northwest",
+      "priorities": [
+        {
+          "warehouse": "Склад СПБ Шушары Московское",
+          "hours": 26
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 40
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 47
+        },
+        {
+          "warehouse": "СК Тверь Эммаусское",
+          "hours": 48
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 50
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 51
+        }
+      ]
+    },
+    {
+      "city": "Мурманск",
+      "okrug": "northwest",
+      "priorities": [
+        {
+          "warehouse": "Электросталь",
+          "hours": 47
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 50
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 51
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 51
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 54
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 56
+        }
+      ]
+    },
+    {
+      "city": "Архангельск",
+      "okrug": "northwest",
+      "priorities": [
+        {
+          "warehouse": "Электросталь",
+          "hours": 35
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 41
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 42
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 45
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 47
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 48
+        }
+      ]
+    },
+    {
+      "city": "Нарьян-Мар",
+      "okrug": "northwest",
+      "priorities": [
+        {
+          "warehouse": "Подольск",
+          "hours": 280
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 281
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 281
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 283
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 283
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 283
+        }
+      ]
+    },
+    {
+      "city": "Калининград",
+      "okrug": "northwest",
+      "priorities": [
+        {
+          "warehouse": "Калининград",
+          "hours": 19
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 138
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 139
+        },
+        {
+          "warehouse": "Белая Дача",
+          "hours": 147
+        },
+        {
+          "warehouse": "Склад Чашниково",
+          "hours": 149
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 152
+        }
+      ]
+    },
+    {
+      "city": "Саратов",
+      "okrug": "volga",
+      "priorities": [
+        {
+          "warehouse": "Пенза",
+          "hours": 26
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 29
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 33
+        },
+        {
+          "warehouse": "Волгоград",
+          "hours": 33
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 38
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 42
+        }
+      ]
+    },
+    {
+      "city": "Оренбург",
+      "okrug": "volga",
+      "priorities": [
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 28
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 33
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 36
+        },
+        {
+          "warehouse": "Перспективный",
+          "hours": 40
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 49
+        },
+        {
+          "warehouse": "Пенза",
+          "hours": 49
+        }
+      ]
+    },
+    {
+      "city": "Самара",
+      "okrug": "volga",
+      "priorities": [
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 24
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 32
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 41
+        },
+        {
+          "warehouse": "Волгоград",
+          "hours": 44
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 47
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 49
+        }
+      ]
+    },
+    {
+      "city": "Уфа",
+      "okrug": "volga",
+      "priorities": [
+        {
+          "warehouse": "Сарапул",
+          "hours": 28
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 30
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 31
+        },
+        {
+          "warehouse": "Перспективный",
+          "hours": 34
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 39
+        },
+        {
+          "warehouse": "Пенза",
+          "hours": 40
+        }
+      ]
+    },
+    {
+      "city": "Казань",
+      "okrug": "volga",
+      "priorities": [
+        {
+          "warehouse": "Казань",
+          "hours": 19
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 29
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 31
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 33
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 36
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 38
+        }
+      ]
+    },
+    {
+      "city": "Чебоксары",
+      "okrug": "volga",
+      "priorities": [
+        {
+          "warehouse": "Казань",
+          "hours": 24
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 35
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 35
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 36
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 37
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 42
+        }
+      ]
+    },
+    {
+      "city": "Нижний Новгород",
+      "okrug": "volga",
+      "priorities": [
+        {
+          "warehouse": "Владимир",
+          "hours": 25
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 27
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 31
+        },
+        {
+          "warehouse": "Пенза",
+          "hours": 31
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 31
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 32
+        }
+      ]
+    },
+    {
+      "city": "Саранск",
+      "okrug": "volga",
+      "priorities": [
+        {
+          "warehouse": "Пенза",
+          "hours": 29
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 35
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 36
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 42
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 43
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 44
+        }
+      ]
+    },
+    {
+      "city": "Ульяновск",
+      "okrug": "volga",
+      "priorities": [
+        {
+          "warehouse": "Казань",
+          "hours": 24
+        },
+        {
+          "warehouse": "Пенза",
+          "hours": 28
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 29
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 36
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 36
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 39
+        }
+      ]
+    },
+    {
+      "city": "Пенза",
+      "okrug": "volga",
+      "priorities": [
+        {
+          "warehouse": "Пенза",
+          "hours": 18
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 28
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 31
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 31
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 33
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 34
+        }
+      ]
+    },
+    {
+      "city": "Йошкар-Ола",
+      "okrug": "volga",
+      "priorities": [
+        {
+          "warehouse": "Казань",
+          "hours": 23
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 34
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 34
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 35
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 36
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 41
+        }
+      ]
+    },
+    {
+      "city": "Ижевск",
+      "okrug": "volga",
+      "priorities": [
+        {
+          "warehouse": "Сарапул",
+          "hours": 23
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 28
+        },
+        {
+          "warehouse": "Перспективный",
+          "hours": 37
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 42
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 44
+        },
+        {
+          "warehouse": "Пенза",
+          "hours": 50
+        }
+      ]
+    },
+    {
+      "city": "Пермь",
+      "okrug": "volga",
+      "priorities": [
+        {
+          "warehouse": "Перспективный",
+          "hours": 25
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 29
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 34
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 44
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 46
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 49
+        }
+      ]
+    },
+    {
+      "city": "Киров",
+      "okrug": "volga",
+      "priorities": [
+        {
+          "warehouse": "Казань",
+          "hours": 26
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 29
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 32
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 37
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 39
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 42
+        }
+      ]
+    },
+    {
+      "city": "Волгоград",
+      "okrug": "south_caucasus",
+      "priorities": [
+        {
+          "warehouse": "Волгоград",
+          "hours": 21
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 30
+        },
+        {
+          "warehouse": "Краснодар",
+          "hours": 37
+        },
+        {
+          "warehouse": "Невинномысск",
+          "hours": 37
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 38
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 38
+        }
+      ]
+    },
+    {
+      "city": "Ростов-на-Дону",
+      "okrug": "south_caucasus",
+      "priorities": [
+        {
+          "warehouse": "Краснодар",
+          "hours": 25
+        },
+        {
+          "warehouse": "Невинномысск",
+          "hours": 31
+        },
+        {
+          "warehouse": "Волгоград",
+          "hours": 32
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 33
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 39
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 46
+        }
+      ]
+    },
+    {
+      "city": "Астрахань",
+      "okrug": "south_caucasus",
+      "priorities": [
+        {
+          "warehouse": "Волгоград",
+          "hours": 27
+        },
+        {
+          "warehouse": "Невинномысск",
+          "hours": 28
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 36
+        },
+        {
+          "warehouse": "Краснодар",
+          "hours": 37
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 45
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 47
+        }
+      ]
+    },
+    {
+      "city": "Элиста",
+      "okrug": "south_caucasus",
+      "priorities": [
+        {
+          "warehouse": "Волгоград",
+          "hours": 33
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 42
+        },
+        {
+          "warehouse": "Невинномысск",
+          "hours": 49
+        },
+        {
+          "warehouse": "Краснодар",
+          "hours": 49
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 50
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 50
+        }
+      ]
+    },
+    {
+      "city": "Краснодар",
+      "okrug": "south_caucasus",
+      "priorities": [
+        {
+          "warehouse": "Краснодар",
+          "hours": 25
+        },
+        {
+          "warehouse": "Невинномысск",
+          "hours": 36
+        },
+        {
+          "warehouse": "Волгоград",
+          "hours": 47
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 49
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 61
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 63
+        }
+      ]
+    },
+    {
+      "city": "Симферополь",
+      "okrug": "south_caucasus",
+      "priorities": [
+        {
+          "warehouse": "Невинномысск",
+          "hours": 44
+        },
+        {
+          "warehouse": "Волгоград",
+          "hours": 47
+        },
+        {
+          "warehouse": "Краснодар",
+          "hours": 47
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 49
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 57
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 57
+        }
+      ]
+    },
+    {
+      "city": "Майкоп",
+      "okrug": "south_caucasus",
+      "priorities": [
+        {
+          "warehouse": "Краснодар",
+          "hours": 25
+        },
+        {
+          "warehouse": "Невинномысск",
+          "hours": 28
+        },
+        {
+          "warehouse": "Волгоград",
+          "hours": 40
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 41
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 48
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 49
+        }
+      ]
+    },
+    {
+      "city": "Севастополь",
+      "okrug": "south_caucasus",
+      "priorities": [
+        {
+          "warehouse": "Невинномысск",
+          "hours": 49
+        },
+        {
+          "warehouse": "Краснодар",
+          "hours": 52
+        },
+        {
+          "warehouse": "Волгоград",
+          "hours": 52
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 54
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 62
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 62
+        }
+      ]
+    },
+    {
+      "city": "Ставрополь",
+      "okrug": "south_caucasus",
+      "priorities": [
+        {
+          "warehouse": "Невинномысск",
+          "hours": 24
+        },
+        {
+          "warehouse": "Краснодар",
+          "hours": 28
+        },
+        {
+          "warehouse": "Волгоград",
+          "hours": 36
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 48
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 49
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 49
+        }
+      ]
+    },
+    {
+      "city": "Черкесск",
+      "okrug": "south_caucasus",
+      "priorities": [
+        {
+          "warehouse": "Невинномысск",
+          "hours": 25
+        },
+        {
+          "warehouse": "Краснодар",
+          "hours": 29
+        },
+        {
+          "warehouse": "Волгоград",
+          "hours": 37
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 49
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 50
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 50
+        }
+      ]
+    },
+    {
+      "city": "Нальчик",
+      "okrug": "south_caucasus",
+      "priorities": [
+        {
+          "warehouse": "Невинномысск",
+          "hours": 23
+        },
+        {
+          "warehouse": "Краснодар",
+          "hours": 28
+        },
+        {
+          "warehouse": "Волгоград",
+          "hours": 44
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 48
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 49
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 49
+        }
+      ]
+    },
+    {
+      "city": "Владикавказ",
+      "okrug": "south_caucasus",
+      "priorities": [
+        {
+          "warehouse": "Невинномысск",
+          "hours": 23
+        },
+        {
+          "warehouse": "Краснодар",
+          "hours": 27
+        },
+        {
+          "warehouse": "Волгоград",
+          "hours": 44
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 48
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 49
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 49
+        }
+      ]
+    },
+    {
+      "city": "Грозный",
+      "okrug": "south_caucasus",
+      "priorities": [
+        {
+          "warehouse": "Невинномысск",
+          "hours": 26
+        },
+        {
+          "warehouse": "Краснодар",
+          "hours": 30
+        },
+        {
+          "warehouse": "Волгоград",
+          "hours": 47
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 51
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 52
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 52
+        }
+      ]
+    },
+    {
+      "city": "Махачкала",
+      "okrug": "south_caucasus",
+      "priorities": [
+        {
+          "warehouse": "Невинномысск",
+          "hours": 26
+        },
+        {
+          "warehouse": "Краснодар",
+          "hours": 33
+        },
+        {
+          "warehouse": "Волгоград",
+          "hours": 50
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 52
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 52
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 53
+        }
+      ]
+    },
+    {
+      "city": "Тюмень",
+      "okrug": "ural",
+      "priorities": [
+        {
+          "warehouse": "Перспективный",
+          "hours": 26
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 40
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 47
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 51
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 51
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 53
+        }
+      ]
+    },
+    {
+      "city": "Челябинск",
+      "okrug": "ural",
+      "priorities": [
+        {
+          "warehouse": "Перспективный",
+          "hours": 26
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 39
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 40
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 40
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 42
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 51
+        }
+      ]
+    },
+    {
+      "city": "Курган",
+      "okrug": "ural",
+      "priorities": [
+        {
+          "warehouse": "Перспективный",
+          "hours": 32
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 45
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 46
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 46
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 48
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 57
+        }
+      ]
+    },
+    {
+      "city": "Екатеринбург",
+      "okrug": "ural",
+      "priorities": [
+        {
+          "warehouse": "Перспективный",
+          "hours": 25
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 37
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 40
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 45
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 45
+        },
+        {
+          "warehouse": "СЦ Оренбург",
+          "hours": 53
+        }
+      ]
+    },
+    {
+      "city": "Ханты-Мансийск",
+      "okrug": "ural",
+      "priorities": [
+        {
+          "warehouse": "Перспективный",
+          "hours": 46
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 61
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 65
+        },
+        {
+          "warehouse": "СЦ Оренбург",
+          "hours": 69
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 70
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 71
+        }
+      ]
+    },
+    {
+      "city": "Сургут",
+      "okrug": "ural",
+      "priorities": [
+        {
+          "warehouse": "Перспективный",
+          "hours": 38
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 53
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 57
+        },
+        {
+          "warehouse": "СЦ Оренбург",
+          "hours": 61
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 62
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 63
+        }
+      ]
+    },
+    {
+      "city": "Новый Уренгой",
+      "okrug": "ural",
+      "priorities": [
+        {
+          "warehouse": "Перспективный",
+          "hours": 96
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 107
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 115
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 115
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 121
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 135
+        }
+      ]
+    },
+    {
+      "city": "Омск",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Перспективный",
+          "hours": 38
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 55
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 56
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 59
+        },
+        {
+          "warehouse": "СЦ Оренбург",
+          "hours": 62
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 64
+        }
+      ]
+    },
+    {
+      "city": "Новосибирск",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Барнаул СЦ 2",
+          "hours": 36
+        },
+        {
+          "warehouse": "Перспективный",
+          "hours": 52
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 67
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 70
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 71
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 73
+        }
+      ]
+    },
+    {
+      "city": "Барнаул",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Барнаул СЦ 2",
+          "hours": 35
+        },
+        {
+          "warehouse": "Перспективный",
+          "hours": 53
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 72
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 77
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 82
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 83
+        }
+      ]
+    },
+    {
+      "city": "Кемерово",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Барнаул СЦ 2",
+          "hours": 45
+        },
+        {
+          "warehouse": "Перспективный",
+          "hours": 49
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 65
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 74
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 75
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 80
+        }
+      ]
+    },
+    {
+      "city": "Горно-Алтайск",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Барнаул СЦ 2",
+          "hours": 38
+        },
+        {
+          "warehouse": "Перспективный",
+          "hours": 69
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 100
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 105
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 110
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 111
+        }
+      ]
+    },
+    {
+      "city": "Кызыл",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Барнаул СЦ 2",
+          "hours": 72
+        },
+        {
+          "warehouse": "Перспективный",
+          "hours": 88
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 110
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 111
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 112
+        },
+        {
+          "warehouse": "Чехов",
+          "hours": 113
+        }
+      ]
+    },
+    {
+      "city": "Абакан",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Барнаул СЦ 2",
+          "hours": 70
+        },
+        {
+          "warehouse": "Перспективный",
+          "hours": 86
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 108
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 109
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 110
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 114
+        }
+      ]
+    },
+    {
+      "city": "Красноярск",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Барнаул СЦ 2",
+          "hours": 56
+        },
+        {
+          "warehouse": "Перспективный",
+          "hours": 71
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 77
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 84
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 85
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 87
+        }
+      ]
+    },
+    {
+      "city": "Томск",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Барнаул СЦ 2",
+          "hours": 54
+        },
+        {
+          "warehouse": "Перспективный",
+          "hours": 56
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 74
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 77
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 77
+        },
+        {
+          "warehouse": "СЦ Оренбург",
+          "hours": 77
+        }
+      ]
+    },
+    {
+      "city": "Норильск",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "СК Тверь Эммаусское",
+          "hours": 88
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 109
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 110
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 112
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 117
+        },
+        {
+          "warehouse": "СК Великий Камень (Белоруссия)",
+          "hours": 117
+        }
+      ]
+    },
+    {
+      "city": "Иркутск",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Владивосток",
+          "hours": 85
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 100
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 101
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 104
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 106
+        },
+        {
+          "warehouse": "Перспективный",
+          "hours": 107
+        }
+      ]
+    },
+    {
+      "city": "Улан-Удэ",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Владивосток",
+          "hours": 93
+        },
+        {
+          "warehouse": "Перспективный",
+          "hours": 108
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 121
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 131
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 136
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 137
+        }
+      ]
+    },
+    {
+      "city": "Чита",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Перспективный",
+          "hours": 92
+        },
+        {
+          "warehouse": "Владивосток",
+          "hours": 112
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 125
+        },
+        {
+          "warehouse": "Склад СПБ Шушары Московское",
+          "hours": 146
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 146
+        },
+        {
+          "warehouse": "Волгоград",
+          "hours": 151
+        }
+      ]
+    },
+    {
+      "city": "Якутск",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Владивосток",
+          "hours": 179
+        },
+        {
+          "warehouse": "Казань",
+          "hours": 181
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 184
+        },
+        {
+          "warehouse": "СК Великий Камень (Белоруссия)",
+          "hours": 184
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 186
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 195
+        }
+      ]
+    },
+    {
+      "city": "Хабаровск",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Владивосток",
+          "hours": 77
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 148
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 149
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 153
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 157
+        },
+        {
+          "warehouse": "Воронеж",
+          "hours": 159
+        }
+      ]
+    },
+    {
+      "city": "Благовещенск",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Сарапул",
+          "hours": 136
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 150
+        },
+        {
+          "warehouse": "Владивосток",
+          "hours": 151
+        },
+        {
+          "warehouse": "Чехов",
+          "hours": 157
+        },
+        {
+          "warehouse": "Волгоград",
+          "hours": 159
+        },
+        {
+          "warehouse": "Пенза",
+          "hours": 159
+        }
+      ]
+    },
+    {
+      "city": "Владивосток",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Владивосток",
+          "hours": 42
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 173
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 174
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 180
+        },
+        {
+          "warehouse": "Склад Чашниково",
+          "hours": 180
+        },
+        {
+          "warehouse": "Чехов",
+          "hours": 190
+        }
+      ]
+    },
+    {
+      "city": "Магадан",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Котовск",
+          "hours": 131
+        },
+        {
+          "warehouse": "Пенза",
+          "hours": 133
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 140
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 141
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 141
+        },
+        {
+          "warehouse": "Краснодар",
+          "hours": 145
+        }
+      ]
+    },
+    {
+      "city": "Петропавловск-Камчатский",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Белая Дача",
+          "hours": 198
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 200
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 201
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 201
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 202
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 202
+        }
+      ]
+    },
+    {
+      "city": "Анадырь",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 231
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 236
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 245
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 246
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 247
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 249
+        }
+      ]
+    },
+    {
+      "city": "Южно-Сахалинск",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Владивосток",
+          "hours": 214
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 311
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 312
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 324
+        },
+        {
+          "warehouse": "СК Великий Камень (Белоруссия)",
+          "hours": 324
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 325
+        }
+      ]
+    },
+    {
+      "city": "Минск",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 31
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 34
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 35
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 36
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 37
+        },
+        {
+          "warehouse": "Владимир",
+          "hours": 40
+        }
+      ]
+    },
+    {
+      "city": "Гомель",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 28
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 30
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 31
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 34
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 38
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 39
+        }
+      ]
+    },
+    {
+      "city": "Могилев",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 33
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 39
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 40
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 42
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 45
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 47
+        }
+      ]
+    },
+    {
+      "city": "Витебск",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 33
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 39
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 40
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 42
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 45
+        },
+        {
+          "warehouse": "Котовск",
+          "hours": 47
+        }
+      ]
+    },
+    {
+      "city": "Гродно",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 43
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 43
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 44
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 46
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 51
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 51
+        }
+      ]
+    },
+    {
+      "city": "Брест",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Подольск",
+          "hours": 41
+        },
+        {
+          "warehouse": "Коледино",
+          "hours": 42
+        },
+        {
+          "warehouse": "Алексин (Тула)",
+          "hours": 44
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 47
+        },
+        {
+          "warehouse": "Белые Столбы",
+          "hours": 47
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 51
+        }
+      ]
+    },
+    {
+      "city": "Алматы",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Алматы Атакент",
+          "hours": 20
+        },
+        {
+          "warehouse": "Склад Астана Карагандинское шоссе",
+          "hours": 50
+        },
+        {
+          "warehouse": "Перспективный",
+          "hours": 110
+        },
+        {
+          "warehouse": "Актобе",
+          "hours": 118
+        },
+        {
+          "warehouse": "Новосемейкино",
+          "hours": 145
+        },
+        {
+          "warehouse": "Склад СПБ Шушары Московское",
+          "hours": 147
+        }
+      ]
+    },
+    {
+      "city": "Астана",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Склад Астана Карагандинское шоссе",
+          "hours": 26
+        },
+        {
+          "warehouse": "Перспективный",
+          "hours": 61
+        },
+        {
+          "warehouse": "Алматы Атакент",
+          "hours": 62
+        },
+        {
+          "warehouse": "Актобе",
+          "hours": 83
+        },
+        {
+          "warehouse": "Сарапул",
+          "hours": 83
+        },
+        {
+          "warehouse": "Пенза",
+          "hours": 87
+        }
+      ]
+    },
+    {
+      "city": "Шымкент",
+      "okrug": "far_east_siberia",
+      "priorities": [
+        {
+          "warehouse": "Алматы Атакент",
+          "hours": 79
+        },
+        {
+          "warehouse": "Склад Астана Карагандинское шоссе",
+          "hours": 117
+        },
+        {
+          "warehouse": "Нижний Тагил Восточное",
+          "hours": 149
+        },
+        {
+          "warehouse": "Подольск",
+          "hours": 153
+        },
+        {
+          "warehouse": "Рязань (Тюшевское)",
+          "hours": 153
+        },
+        {
+          "warehouse": "Электросталь",
+          "hours": 153
+        }
+      ]
+    }
+  ]
+}
