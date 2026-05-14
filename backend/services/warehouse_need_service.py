@@ -889,8 +889,8 @@ async def get_warehouse_need(
     warehouses: list[dict] = sorted(wh_data.values(), key=lambda w: w["total_need"], reverse=True)
     # Аннотируем округом для UI — фронт показывает label под названием склада
     # (как в индексе локализации). 'unknown' для складов вне справочника.
-    for _wh in warehouses:
-        _wh["district_key"] = warehouse_to_district(_wh["name"])
+    for wh_entry in warehouses:
+        wh_entry["district_key"] = warehouse_to_district(wh_entry["name"])
 
     # -- Revenue for analysis_days from wb_finance_rows (sales - returns) --
     from backend.models.wb_finance import WbFinanceRow
