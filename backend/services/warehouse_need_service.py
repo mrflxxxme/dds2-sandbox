@@ -22,6 +22,21 @@ logger = logging.getLogger("dds.stock_analytics")
 
 _WH_PARENS_RE = re.compile(r"\s*\([^)]*\)\s*$")
 
+# WB API /supplier/orders отдаёт srid с префиксом 'eXX.r' или 'eXX.i'
+# (e.g. 'eBw.r62e0deb30efa49d3b0f2c9e6cc87266c.0.0'), а Excel-выгрузка
+# «Лента заказов» в `order_city_map` хранит только core 'hex32.X.X'
+# ('62e0deb30efa49d3b0f2c9e6cc87266c.0.0'). Для match'инга нормализуем
+# к единой форме — обрезаем префикс если он есть.
+_SRID_PREFIX_RE = re.compile(r"^e[A-Za-z0-9]+\.[ri]")
+
+
+def _normalize_srid(srid: str | None) -> str:
+    """Привести srid к канонической форме без префикса 'eXX.r/i'."""
+    if not srid:
+        return ""
+    return _SRID_PREFIX_RE.sub("", str(srid))
+
+
 # Fallback transport time (дни) per district когда WarehouseDeliveryTime пуст
 # для пары FF→WB. Реалистичный среднеотраслевой transit time от Москвы.
 # Используется только если у пользователя нет per-pair настроек.
@@ -169,6 +184,29 @@ async def get_warehouse_need(
         open_warehouses = [w for w in open_warehouses if w not in excluded_set]
         logger.info("Excluded warehouses for project %s: %s", project_id, sorted(excluded_set))
 
+    # Дополнительно отсекаем склады закрытые ПО ПРИЁМКЕ WB — индивидуальная
+    # квота / 0 free+paid дней в 14 для всех package_types. Из cached snapshot
+    # `wb:acceptance_coefficients:{pid}` (TTL 1ч). Fail-open: если кэша нет —
+    # склады не блокируем (поведение как до фичи).
+    from backend.services.warehouse_acceptance_service import (
+        get_acceptance_closed_warehouses,
+    )
+
+    acceptance_closed = await get_acceptance_closed_warehouses(project_id)
+    # Объединяем с excluded_set: на все последующие фильтры (haversine,
+    # priority-chain, stock_lookup, Hamilton) распространяется единый запрет.
+    if acceptance_closed:
+        before = len(open_warehouses)
+        open_warehouses = [w for w in open_warehouses if w not in acceptance_closed]
+        excluded_set = excluded_set | acceptance_closed
+        logger.info(
+            "Acceptance-closed warehouses for project %s: %s (open: %d → %d)",
+            project_id,
+            sorted(acceptance_closed),
+            before,
+            len(open_warehouses),
+        )
+
     # city_map нужен для hypothetical (точнее по городу) И для
     # localization_optimized (если region не дал nearest — пробуем по городу).
     if mode == "hypothetical" or localization_optimized:
@@ -197,7 +235,7 @@ async def get_warehouse_need(
                 # доступный склад по координатам покупателя. open_warehouses
                 # уже отфильтрован от excluded (см. выше). Цепочка fallback:
                 # district-override → city → region → пропускаем заказ.
-                srid = str(order.get("srid", ""))
+                srid = _normalize_srid(order.get("srid"))
                 wh_name = None
                 okrug = okrug_map.get(srid)
                 # Override для дальних ФО: WB всё равно направит большинство
@@ -207,6 +245,15 @@ async def get_warehouse_need(
                 preferred = DISTRICT_PREFERRED_WH_OVERRIDE.get(district)
                 if preferred and preferred in open_warehouses:
                     wh_name = preferred
+                if not wh_name:
+                    # Priority-chain города из speed-карты — точнее haversine:
+                    # WB маршрутизирует по часам доставки, а не по евклиду.
+                    # Если top-1 склад города excluded — берём priority-2
+                    # ТОГО ЖЕ города (не ближайший по координатам).
+                    from backend.services.warehouse_speed import find_priority_warehouse
+
+                    city = city_map.get(srid)
+                    wh_name = find_priority_warehouse(city, open_warehouses, okrug=district)
                 if not wh_name:
                     country_wh = get_country_filtered_warehouses(okrug, open_warehouses)
                     city = city_map.get(srid)
@@ -222,7 +269,7 @@ async def get_warehouse_need(
                 if not wh_name:
                     continue
             elif mode == "hypothetical":
-                srid = str(order.get("srid", ""))
+                srid = _normalize_srid(order.get("srid"))
                 wh_name = None
                 okrug = okrug_map.get(srid)
                 country_wh = get_country_filtered_warehouses(okrug, open_warehouses)
@@ -682,12 +729,44 @@ async def get_warehouse_need(
             )
             can_send_per_nm[nm_id] = min(rf_avail_local, global_need)
 
-        # Пропорционально доле per-WB need (= локализованный спрос склада в
-        # общем дефиците артикула). Лучше greedy: размазывает cap_total по ВСЕМ
-        # deficit-складам пропорционально их доле, не отдаёт всё одному самому
-        # нуждающемуся. Улучшает географический индекс локализации.
-        # Leftover от int-округления → самым нуждающимся (sorted by need desc),
-        # но не больше per-WB need (нельзя предложить больше чем реально нужно).
+        # Priority-weighted Hamilton: каждый склад получает долю cap_total
+        # пропорционально `need × (1 + priority_score) × penalty`, где
+        #   priority_score = `get_priority_score(склад, ФО_склада)` —
+        #      средневзвешенный приоритет склада в priority-цепочках городов
+        #      своего ФО (0..1), из speed-карты POSTAVLENO bot.
+        #   penalty = 0.6 если склад «крадёт» города у соседних ФО (его
+        #      имя встречается в priority-chains городов чужого ФО — `🐭`
+        #      на странице /warehouse/speed). Иначе 1.0.
+        # Эффект: anchor дальних/чистых ФО (Екатеринбург УФО pri=1.00,
+        # Невинномысск ЮФО pri=0.76) получают больше cap'а, stealer-склады
+        # (Краснодар, Самара Новосемейкино, Коледино) — меньше. Локально
+        # cap уходит туда, где он реально замкнёт первый priority города,
+        # а не туда, где WB и так дотянется через соседний ФО.
+        # Leftover распределяется по самой большой дробной части (Hamilton
+        # largest-fractional-remainders), но не больше per-WB need.
+        from backend.services.warehouse_district import warehouse_to_district as _wh_to_d
+        from backend.services.warehouse_speed import get_priority_score, is_stealer_for_okrug
+
+        _ALL_OKRUGS = (
+            "central",
+            "northwest",
+            "south_caucasus",
+            "volga",
+            "ural",
+            "far_east_siberia",
+        )
+
+        def _priority_weight(wh: str) -> float:
+            own = _wh_to_d(wh)
+            if own in ("abroad", "unknown"):
+                # У зарубежных и неизвестных складов нет «своего ФО» в
+                # speed-карте — оставляем нейтральный вес (без штрафа).
+                return 1.0
+            score = get_priority_score(wh, own)
+            is_thief = any(is_stealer_for_okrug(wh, ok) for ok in _ALL_OKRUGS if ok != own)
+            penalty = 0.6 if is_thief else 1.0
+            return (1.0 + score) * penalty
+
         for nm_id, cap_total in can_send_per_nm.items():
             wbs = []
             for wh_name in list(wh_data.keys()):
@@ -700,19 +779,28 @@ async def get_warehouse_need(
                     if nm_id in arts:
                         arts[nm_id]["need"] = 0
                 continue
-            total_need_local = sum(n for _, n in wbs)
+
+            # Effective weight per warehouse = need × priority_weight
+            weighted: list[tuple[str, float, int]] = []
+            for wh_name, n in wbs:
+                weighted.append((wh_name, n * _priority_weight(wh_name), n))
+            total_w = sum(w for _, w, _ in weighted)
+            if total_w <= 0:
+                # Fallback на старый proportional Hamilton если все веса
+                # обнулились (теоретически невозможно, но защищаемся).
+                total_w = sum(n for _, _, n in weighted)
+                weighted = [(wh, float(n), n) for wh, _, n in weighted]
+
             allocated: dict[str, int] = {}
             fractionals: list[tuple[str, float, int]] = []
-            for wh_name, n in wbs:
-                raw_share = (cap_total * n) / total_need_local
+            for wh_name, w, n in weighted:
+                raw_share = (cap_total * w) / total_w
                 floored = int(raw_share)
                 allocated[wh_name] = min(n, floored)
                 fractionals.append((wh_name, raw_share - floored, n))
             leftover = cap_total - sum(allocated.values())
-            # Hamilton method (largest-fractional-remainders): размазываем leftover
-            # по складам с наибольшей дробной частью раздела. Лучше greedy "всё
-            # лидеру" — справедливее распределение, не over-shoot одного дальнего
-            # склада (Екатеринбург 25 → 17 при cap=87 для пепельный).
+            # Leftover по убыванию дробной части (как раньше, для
+            # справедливого распределения остатка).
             for wh_name, _frac, n in sorted(fractionals, key=lambda x: -x[1]):
                 if leftover <= 0:
                     break
@@ -798,7 +886,11 @@ async def get_warehouse_need(
         for wh_name in list(wh_data.keys()):
             wh_data[wh_name]["total_need"] = sum(a["need"] for a in wh_data[wh_name]["articles"].values())
 
-    warehouses = sorted(wh_data.values(), key=lambda w: w["total_need"], reverse=True)
+    warehouses: list[dict] = sorted(wh_data.values(), key=lambda w: w["total_need"], reverse=True)
+    # Аннотируем округом для UI — фронт показывает label под названием склада
+    # (как в индексе локализации). 'unknown' для складов вне справочника.
+    for wh_entry in warehouses:
+        wh_entry["district_key"] = warehouse_to_district(wh_entry["name"])
 
     # -- Revenue for analysis_days from wb_finance_rows (sales - returns) --
     from backend.models.wb_finance import WbFinanceRow

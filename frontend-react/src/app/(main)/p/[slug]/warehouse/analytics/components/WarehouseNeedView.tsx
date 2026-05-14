@@ -5,12 +5,14 @@ import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, exportToExcel } from '@/lib/utils';
 import { distributeByBoxMultiple } from '@/lib/utils/boxDistribution';
+import { DISTRICT_LABELS, DISTRICT_COLORS, DISTRICT_ORDER } from '@/lib/constants/localization';
 import type {
     AcceptanceCheckPerItem,
     AssemblyDraftRow,
     ColdStartMainWarehouse,
     ColdStartTableResponse,
     ColdStartTableRow,
+    OkrugInfo,
     PackageType,
     RedistributionMove,
 } from '@/types/api';
@@ -53,6 +55,9 @@ interface WbWarehouseNeed {
     name: string;
     total_need: number;
     articles: Record<number, { need: number; stock: number; avg_daily: number }>;
+    /** Ключ ФО (central|south_caucasus|volga|ural|far_east_siberia|northwest|abroad|unknown).
+     *  Backend заполняет через `warehouse_to_district`. UI рендерит label под названием. */
+    district_key?: string;
 }
 
 interface NeedSummary {
@@ -99,7 +104,7 @@ function formatTransitDate(dateStr: string | null): string {
 // Фильтры разделены на 2 независимые группы — статус (по реальной возможности
 // отправки) и тип упаковки (по acceptance check). Можно нажать «Могу отправить»
 // + «Моно» одновременно: остаются SKU где can_send>0 И есть моно-split.
-type StatusFilter = 'all' | 'deficit' | 'can_send' | 'no_wb';
+type StatusFilter = 'all' | 'deficit' | 'can_send' | 'no_wb' | 'no_stock';
 type PackageFilter = 'none' | 'box' | 'mono';
 
 /** Persist WB acceptance check result so F5 не теряет состояние.
@@ -178,6 +183,16 @@ export function WarehouseNeedView() {
     const [data, setData] = useState<StockNeedResponse | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    /** Map nm_id → {margin_pct, stocks_wb, days_left} из getStockAnalytics(14).
+     *  Используется для столбцов «Маржа / WB / Хватит дн» в обеих таблицах. */
+    const [analyticsMap, setAnalyticsMap] = useState<Map<number, {
+        margin_pct: number | null;
+        stocks_wb: number;
+        days_left: number;
+    }>>(new Map());
+    /** Map nm_id → loc_pct (% локализации) из getLocalizationSkus(14d).
+     *  Используется для столбца «% лок» в обеих таблицах. */
+    const [locMap, setLocMap] = useState<Map<number, number>>(new Map());
     const [creatingAssembly, setCreatingAssembly] = useState(false);
     const [supplyDays, setSupplyDays] = useState(14);
     const [analysisDays, setAnalysisDays] = useState(14);
@@ -333,6 +348,24 @@ export function WarehouseNeedView() {
         return () => { cancelled = true; };
     }, [coldStartMode, analysisDays, coldStartMinPack]);
 
+    // Speed-карта /okrug-info — anchors_top per ФО. Нужно для bump-логики:
+    // выбор main_wh для «Дораспределить» использует priority-rank склада в
+    // speed-карте (POSTAVLENO) как primary ключ сортировки, share_pct из
+    // cold-start — secondary. Anchors_top — статичный справочник, грузим один раз.
+    const [okrugInfo, setOkrugInfo] = useState<OkrugInfo[]>([]);
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const resp = await api.warehouseSpeed.getOkrugInfo();
+                if (!cancelled) setOkrugInfo(resp);
+            } catch (e) {
+                if (!cancelled) console.warn('okrug-info load failed (bump fallback на share_pct):', e);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, []);
+
     /* ── Close hypo menu on outside click ── */
     useEffect(() => {
         if (!showHypoMenu) return;
@@ -395,15 +428,54 @@ export function WarehouseNeedView() {
             // min_stock_per_main_warehouse=0 — bump делается на клиенте (с учётом
             // acceptance: только склады где WB реально принимает), а не на backend
             // (он знает только top-1 ФО, но не знает acceptance-флагов).
-            const resp = await api.getStockNeed(
-                supplyDays,
-                analysisDays,
-                actualMode,
-                localizationOptimized,
-                onlyAvailable,
-                0,
-            ) as StockNeedResponse;
+            // Окно для аналитики/локализации — 14 дней назад → сегодня.
+            // ВАЖНО: использовать локальную дату (Y-M-D местного timezone), не UTC.
+            // `toISOString()` сдвинул бы окно на день для UTC+3 если сейчас вечер.
+            const _today = new Date();
+            const _from = new Date(_today.getTime() - 14 * 86_400_000);
+            const fmtLocal = (d: Date) => {
+                const y = d.getFullYear();
+                const m = String(d.getMonth() + 1).padStart(2, '0');
+                const day = String(d.getDate()).padStart(2, '0');
+                return `${y}-${m}-${day}`;
+            };
+            const dateFrom = fmtLocal(_from);
+            const dateTo = fmtLocal(_today);
+
+            const [resp, analyticsResp, locResp] = await Promise.all([
+                api.getStockNeed(
+                    supplyDays,
+                    analysisDays,
+                    actualMode,
+                    localizationOptimized,
+                    onlyAvailable,
+                    0,
+                ) as Promise<StockNeedResponse>,
+                // Параллельный fetch для столбцов «Маржа / WB / Хватит дн».
+                // trend_days=14 чтобы avg_daily и days_left были по тому же
+                // окну что analysis_days в основном fetch'е. Тип ответа — any
+                // (см. api.reports.getStockAnalytics).
+                (api.getStockAnalytics(14) as Promise<{
+                    articles?: Array<{ nm_id: number; margin_pct?: number | null; stocks_wb?: number; days_left?: number }>;
+                }>).catch(() => ({ articles: [] })),
+                // % локализации из индекса локализации (то же окно 14д).
+                api.getLocalizationSkus(dateFrom, dateTo).catch(() => [] as Array<{ nm_id: number; loc_pct: number }>),
+            ]);
             setData(resp);
+            const aMap = new Map<number, { margin_pct: number | null; stocks_wb: number; days_left: number }>();
+            for (const a of analyticsResp.articles ?? []) {
+                aMap.set(a.nm_id, {
+                    margin_pct: a.margin_pct ?? null,
+                    stocks_wb: a.stocks_wb ?? 0,
+                    days_left: a.days_left ?? 0,
+                });
+            }
+            setAnalyticsMap(aMap);
+            const lMap = new Map<number, number>();
+            for (const r of locResp ?? []) {
+                if (typeof r.nm_id === 'number') lMap.set(r.nm_id, Number(r.loc_pct) || 0);
+            }
+            setLocMap(lMap);
             if (resp.rf_warehouses?.length && !assemblyWarehouseId) {
                 setAssemblyWarehouseId(resp.rf_warehouses[0].id);
             }
@@ -436,18 +508,41 @@ export function WarehouseNeedView() {
     // вкладке «Новинки», и во всех вызовах recomputeColdStartAlloc.
     const filteredMainWarehouses = useMemo(() => {
         if (!coldStartData?.main_warehouses?.length) return [];
-        return coldStartData.main_warehouses.filter(
+        const base = coldStartData.main_warehouses.filter(
             w => w.share_pct > 0 && !isSpecWarehouse(w.warehouse),
         );
+        // Сортировка по округу (DISTRICT_ORDER) — чтобы group-header'ы во вкладке
+        // «Новинки» были непрерывными, как в основной таблице.
+        const districtIdx = (k?: string): number => {
+            const i = DISTRICT_ORDER.indexOf((k || 'unknown') as typeof DISTRICT_ORDER[number]);
+            return i < 0 ? DISTRICT_ORDER.length : i;
+        };
+        return base
+            .map((w, idx) => ({ w, idx, di: districtIdx(w.district_key) }))
+            .sort((a, b) => a.di - b.di || a.idx - b.idx)
+            .map(x => x.w);
     }, [coldStartData, isSpecWarehouse]);
 
     const wbWarehouses = useMemo(() => {
         const main = (data?.warehouses ?? []).filter(w => w.total_need > 0 && !isSpecWarehouse(w.name));
         const have = new Set(main.map(w => w.name));
+        // Lookup district_key для дополняемых складов: сначала из data.warehouses
+        // (backend заполняет через warehouse_to_district), затем из cold-start
+        // (там district_key всегда есть для main_warehouses).
+        const districtLookup = new Map<string, string>();
+        for (const w of data?.warehouses ?? []) {
+            if (w.district_key) districtLookup.set(w.name, w.district_key);
+        }
+        for (const cs of filteredMainWarehouses) {
+            if (cs.district_key) districtLookup.set(cs.warehouse, cs.district_key);
+        }
         // (1) Cold-start главные склады округов (новинки без истории).
         for (const cs of filteredMainWarehouses) {
             if (!have.has(cs.warehouse)) {
-                main.push({ name: cs.warehouse, total_need: 0, articles: {} });
+                main.push({
+                    name: cs.warehouse, total_need: 0, articles: {},
+                    district_key: cs.district_key || districtLookup.get(cs.warehouse),
+                });
                 have.add(cs.warehouse);
             }
         }
@@ -457,7 +552,10 @@ export function WarehouseNeedView() {
         for (const it of acceptanceMap.values()) {
             for (const [wh, q] of Object.entries(it.distribution || {})) {
                 if (q > 0 && !have.has(wh) && !isSpecWarehouse(wh)) {
-                    main.push({ name: wh, total_need: 0, articles: {} });
+                    main.push({
+                        name: wh, total_need: 0, articles: {},
+                        district_key: districtLookup.get(wh),
+                    });
                     have.add(wh);
                 }
             }
@@ -545,19 +643,48 @@ export function WarehouseNeedView() {
      *       И acceptance на main_wh этого ФО разрешает наш package_type.
      *    4. FF-излишек > 0 (rf_avail - usedFf > 0).
      *
-     *  Bump идёт ТОЛЬКО в main_wh underserved ФО (top-1 по orders / share_pct).
+     *  Bump идёт в main_wh underserved ФО. Выбор склада per district:
+     *    primary key — позиция в anchors_top из speed-карты (priority-rank),
+     *    secondary — share_pct из cold-start (исторический leader заказов).
+     *  Если okrugInfo не загрузился — fallback на чистый share_pct (старая логика).
      *  Возвращает Map<nm_id, Map<wh, additional_qty>>. */
     const bumpedCells = useMemo(() => {
         const result = new Map<number, Map<string, number>>();
         if (minStockPerMain <= 0 || !data?.articles || acceptanceMap.size === 0) return result;
 
         const OVERSTOCK_DAYS = 21; // ФО считается перетарен если >= 3 нед запаса
-        // Reverse map: district → main_wh (top-1 по share_pct из cold-start).
-        const mainWhPerDistrict = new Map<string, string>();
+
+        // anchorRank: wh_name → district_key → rank (1-based; меньше = выше).
+        // Источник: /warehouse/speed/okrug-info `anchors_top` (топ-5 anchor каждого ФО).
+        // Не в anchors_top → rank=999 (fallback на share_pct).
+        const anchorRank = new Map<string, Map<string, number>>();
+        for (const ok of okrugInfo) {
+            ok.anchors_top.forEach((a, idx) => {
+                if (!anchorRank.has(a.warehouse_name)) {
+                    anchorRank.set(a.warehouse_name, new Map());
+                }
+                anchorRank.get(a.warehouse_name)!.set(ok.okrug_key, idx + 1);
+            });
+        }
+
+        // Группируем main_warehouses per district, сортируем по
+        // (anchor_rank ASC, share_pct DESC) — anchor speed-карты побеждает,
+        // tiebreak — исторический share_pct.
+        const candidatesByDistrict = new Map<string, ColdStartMainWarehouse[]>();
         for (const w of coldStartData?.main_warehouses ?? []) {
-            if (!mainWhPerDistrict.has(w.district_key)) {
-                mainWhPerDistrict.set(w.district_key, w.warehouse);
-            }
+            const list = candidatesByDistrict.get(w.district_key) ?? [];
+            list.push(w);
+            candidatesByDistrict.set(w.district_key, list);
+        }
+        const mainWhPerDistrict = new Map<string, string>();
+        for (const [d, cands] of candidatesByDistrict.entries()) {
+            cands.sort((x, y) => {
+                const xRank = anchorRank.get(x.warehouse)?.get(d) ?? 999;
+                const yRank = anchorRank.get(y.warehouse)?.get(d) ?? 999;
+                if (xRank !== yRank) return xRank - yRank;
+                return (y.share_pct ?? 0) - (x.share_pct ?? 0);
+            });
+            if (cands.length > 0) mainWhPerDistrict.set(d, cands[0].warehouse);
         }
 
         for (const a of data.articles) {
@@ -663,7 +790,7 @@ export function WarehouseNeedView() {
             if (perSku.size > 0) result.set(a.nm_id, perSku);
         }
         return result;
-    }, [minStockPerMain, supplyDays, data, newcomerSet, wbWarehouses, acceptanceMap, getBaseArticleWbNeed, coldStartData, warehouseToDistrict]);
+    }, [minStockPerMain, supplyDays, data, newcomerSet, wbWarehouses, acceptanceMap, getBaseArticleWbNeed, coldStartData, warehouseToDistrict, okrugInfo]);
 
     /** Итоговый per-cell need: base + client-side bump (если активен «Дораспределить»). */
     const getArticleWbNeed = useCallback((article: NeedArticle, whName: string): number => {
@@ -729,18 +856,22 @@ export function WarehouseNeedView() {
 
     /** Счётчики кнопок-фильтров — без учёта новинок (они идут отдельно). */
     const nonNewcomerCounts = useMemo(() => {
-        const result = { all: 0, deficit: 0, can_send: 0, no_wb: 0 };
+        const result = { all: 0, deficit: 0, can_send: 0, no_wb: 0, no_stock: 0 };
         if (!data?.articles) return result;
         for (const a of data.articles) {
             if (newcomerSet.has(a.nm_id)) continue;
             result.all++;
             if (a.deficit > 0) result.deficit++;
             if (a.can_send > 0) result.can_send++;
-            // «Нет на WB» = stocks_wb=0 И есть RF-сток (= можно отправить, но WB пустой).
-            // Совпадает с backend.summary.no_wb_count.
+            // «Нет на WB» = stocks_wb=0 И есть у нас (RF / в сборке / в пути).
+            // Имеет смысл смотреть на эти SKU: WB-сток пуст, но есть чем дослать.
+            // «Нет остатков» = stocks_wb=0 И RF=0 И в сборке=0 И в пути=0 —
+            // реально нет нигде, нужно производство/закупка, отправлять нечего.
             if (a.stocks_wb === 0) {
                 const totalRf = Object.values(a.rf_stocks).reduce((s, v) => s + (v?.stock || 0), 0);
-                if (totalRf > 0) result.no_wb++;
+                const haveOurs = totalRf > 0 || (a.in_assembly || 0) > 0 || (a.in_transit || 0) > 0;
+                if (haveOurs) result.no_wb++;
+                else result.no_stock++;
             }
         }
         return result;
@@ -761,7 +892,18 @@ export function WarehouseNeedView() {
             }
             if (statusFilter === 'deficit' && a.deficit <= 0) return false;
             if (statusFilter === 'can_send' && a.can_send <= 0) return false;
-            if (statusFilter === 'no_wb' && a.stocks_wb > 0) return false;
+            if (statusFilter === 'no_wb') {
+                if (a.stocks_wb > 0) return false;
+                // Должно быть хоть что-то наше (RF / в сборке / в пути).
+                const totalRf = Object.values(a.rf_stocks).reduce((s, v) => s + (v?.stock || 0), 0);
+                const haveOurs = totalRf > 0 || (a.in_assembly || 0) > 0 || (a.in_transit || 0) > 0;
+                if (!haveOurs) return false;
+            }
+            if (statusFilter === 'no_stock') {
+                if (a.stocks_wb > 0) return false;
+                const totalRf = Object.values(a.rf_stocks).reduce((s, v) => s + (v?.stock || 0), 0);
+                if (totalRf > 0 || (a.in_assembly || 0) > 0 || (a.in_transit || 0) > 0) return false;
+            }
             if (packageFilter !== 'none') {
                 const it = acceptanceMap.get(a.nm_id);
                 if (!it) return false; // не проверяли — вне фильтра
@@ -780,21 +922,33 @@ export function WarehouseNeedView() {
      *  При packageFilter='box' — аналогично can_box. Если acceptance не запускали
      *  (acceptanceMap пустой) — фильтр не работает, возвращаем все склады. */
     const visibleWbWarehouses = useMemo(() => {
-        if (packageFilter === 'none' || acceptanceMap.size === 0) return wbWarehouses;
-        // «Моно» = склад принимает ТОЛЬКО моно (короб запрещён): can_monopallet && !can_box.
-        // Это даёт «чистый моно» (Владивосток, Хабаровск). Bi-modal склады
-        // (Краснодар, Электросталь — принимают и короб и моно) скрываются,
-        // потому что пользователь видя 📦 рядом с цифрой думал «это короб».
-        // «Короб» = склад принимает коробом: can_box (моно может тоже быть, не критично).
-        return wbWarehouses.filter(wh => {
-            for (const a of filteredArticles) {
-                const flags = acceptanceMap.get(a.nm_id)?.availability?.[wh.name];
-                if (!flags) continue;
-                if (packageFilter === 'box' && flags.can_box) return true;
-                if (packageFilter === 'mono' && flags.can_monopallet && !flags.can_box) return true;
-            }
-            return false;
-        });
+        const base = (packageFilter === 'none' || acceptanceMap.size === 0)
+            ? wbWarehouses
+            : wbWarehouses.filter(wh => {
+                // «Моно» = склад принимает ТОЛЬКО моно (короб запрещён): can_monopallet && !can_box.
+                // Это даёт «чистый моно» (Владивосток, Хабаровск). Bi-modal склады
+                // (Краснодар, Электросталь — принимают и короб и моно) скрываются,
+                // потому что пользователь видя 📦 рядом с цифрой думал «это короб».
+                // «Короб» = склад принимает коробом: can_box (моно может тоже быть, не критично).
+                for (const a of filteredArticles) {
+                    const flags = acceptanceMap.get(a.nm_id)?.availability?.[wh.name];
+                    if (!flags) continue;
+                    if (packageFilter === 'box' && flags.can_box) return true;
+                    if (packageFilter === 'mono' && flags.can_monopallet && !flags.can_box) return true;
+                }
+                return false;
+            });
+        // Сортируем по федеральному округу (DISTRICT_ORDER), сохраняя внутренний порядок
+        // (stable sort через index). Нужно для group-header'а — склады одного ФО рядом,
+        // одна цветная полоса на округ как в индексе локализации.
+        const districtIdx = (k?: string): number => {
+            const i = DISTRICT_ORDER.indexOf((k || 'unknown') as typeof DISTRICT_ORDER[number]);
+            return i < 0 ? DISTRICT_ORDER.length : i;  // unknown — в конец
+        };
+        return base
+            .map((wh, idx) => ({ wh, idx, di: districtIdx(wh.district_key) }))
+            .sort((a, b) => a.di - b.di || a.idx - b.idx)
+            .map(x => x.wh);
     }, [wbWarehouses, packageFilter, filteredArticles, acceptanceMap]);
 
     /* Counters для бэйджей фильтров: SKU имеющий ХОТЯ БЫ ОДИН split такого типа */
@@ -987,7 +1141,9 @@ export function WarehouseNeedView() {
     const checkedCount = checkedIds.size;
 
     const assemblyTotal = useMemo(() => {
-        if (!assemblyWarehouseId || !data) return 0;
+        if (!data) return 0;
+        // Multi-source: суммируем по ВСЕМ ФФ-складам (как делает handleCreateAssembly).
+        // Берём min(total_avail_по_всем_RF, plan = can_send + bump).
         let sum = 0;
         for (const nmId of checkedIds) {
             const newcomer = coldStartData?.rows.find(r => r.nm_id === nmId);
@@ -1002,12 +1158,14 @@ export function WarehouseNeedView() {
             }
             const article = data.articles.find(a => a.nm_id === nmId);
             if (!article) continue;
-            const available = article.rf_stocks[assemblyWarehouseId]?.available || 0;
-            const need = article.total_need;
-            sum += Math.floor(Math.min(available, need) / 10) * 10;
+            const totalAvail = (data.rf_warehouses ?? []).reduce(
+                (s, w) => s + (article.rf_stocks[w.id]?.available || 0), 0,
+            );
+            const plan = getSendWithBump(nmId, article.can_send);
+            sum += Math.min(totalAvail, plan);
         }
         return sum;
-    }, [checkedIds, assemblyWarehouseId, data, coldStartData, filteredMainWarehouses, coldStartQtyOverrides, coldStartMinPack]);
+    }, [checkedIds, data, coldStartData, filteredMainWarehouses, coldStartQtyOverrides, coldStartMinPack, getSendWithBump]);
 
     const checkedNewcomersCount = useMemo(() => {
         let n = 0;
@@ -1141,15 +1299,44 @@ export function WarehouseNeedView() {
                 // Иначе — fallback на исходный tgt с package_type=BOX.
                 // src на каждый split распределяем пропорционально доле splitQty/qty.
                 const acceptanceItem = acceptanceMap.get(nmId);
-                const splits = acceptanceItem?.splits ?? [];
+                const allSplits = acceptanceItem?.splits ?? [];
+                // Уважаем фильтр Короб/Моно из шапки: если выбран короб — не пихаем
+                // моно-части в draft (и наоборот). Без этого SKU с двумя splits
+                // (BOX+MONOPALLET) попадали в draft обеими частями, даже когда
+                // пользователь явно выбрал только один тип.
+                const splits = packageFilter === 'box'
+                    ? allSplits.filter(s => s.package_type === 'BOX')
+                    : packageFilter === 'mono'
+                    ? allSplits.filter(s => s.package_type === 'MONOPALLET')
+                    : allSplits;
                 if (acceptanceItem && splits.length > 0) {
                     for (const split of splits) {
                         const splitQty = Object.values(split.distribution).reduce((a, b) => a + b, 0);
                         if (splitQty <= 0) continue;
-                        // Пропорционально распределяем srcAlloc на split.
+                        // Пропорционально распределяем srcAlloc на split через largest-remainder:
+                        // floor по каждому ФФ + раздаём остаток по самым большим дробным частям.
+                        // Без этого `Math.round` для .5-долей округлял обе стороны вверх и
+                        // Σ ист становился > Σ цель (та самая разница 12543 vs 12541).
                         const splitSrc: Record<string, number> = {};
+                        const fractions: Array<{ rfId: string; frac: number }> = [];
+                        let allocated = 0;
                         for (const [rfId, take] of Object.entries(srcAlloc)) {
-                            splitSrc[rfId] = Math.round((take * splitQty) / qty);
+                            const exact = (take * splitQty) / qty;
+                            const floor = Math.floor(exact);
+                            splitSrc[rfId] = floor;
+                            allocated += floor;
+                            fractions.push({ rfId, frac: exact - floor });
+                        }
+                        fractions.sort((a, b) => b.frac - a.frac || a.rfId.localeCompare(b.rfId));
+                        let remainder = splitQty - allocated;
+                        for (let i = 0; i < fractions.length && remainder > 0; i++) {
+                            splitSrc[fractions[i].rfId] += 1;
+                            remainder -= 1;
+                        }
+                        // Cleanup: убираем нулевые записи, чтобы backend не отвергал
+                        // (commit_draft требует Σ src > 0 и Σ src == Σ tgt).
+                        for (const k of Object.keys(splitSrc)) {
+                            if (splitSrc[k] <= 0) delete splitSrc[k];
                         }
                         draftRows.push({
                             nm_id: nmId,
@@ -1160,16 +1347,23 @@ export function WarehouseNeedView() {
                             package_type: split.package_type,
                         });
                     }
-                } else {
+                } else if (!acceptanceItem || allSplits.length === 0) {
+                    // Acceptance не проверялся (или вернул пустой splits) — fallback.
+                    // packageFilter уважаем: если выбран Моно, default MONOPALLET, иначе BOX.
+                    const fallbackPkg: PackageType = packageFilter === 'mono'
+                        ? 'MONOPALLET'
+                        : (acceptanceItem?.package_type ?? 'BOX') as PackageType;
                     draftRows.push({
                         nm_id: nmId,
                         barcode,
                         vendor_code: vendor,
                         src: srcAlloc,
                         tgt,
-                        package_type: (acceptanceItem?.package_type ?? 'BOX') as PackageType,
+                        package_type: fallbackPkg,
                     });
                 }
+                // Если acceptance был, splits были, но после фильтрации все отсеялись —
+                // пропускаем SKU (не подходит под текущий packageFilter).
             }
 
             if (draftRows.length === 0) {
@@ -1227,7 +1421,7 @@ export function WarehouseNeedView() {
         } finally {
             setCreatingAssembly(false);
         }
-    }, [data, assemblyWarehouseId, checkedIds, router, slug, acceptanceMap,
+    }, [data, assemblyWarehouseId, checkedIds, router, slug, acceptanceMap, packageFilter,
         coldStartData, filteredMainWarehouses, coldStartQtyOverrides, coldStartMinPack,
         getSendWithBump, getArticleWbNeed]);
 
@@ -1697,8 +1891,17 @@ export function WarehouseNeedView() {
                     className={`btn btn-sm ${statusFilter === 'no_wb' ? 'btn-primary' : 'btn-secondary'}`}
                     style={statusFilter !== 'no_wb' ? { borderColor: '#eab308', color: '#eab308' } : {}}
                     onClick={() => setStatusFilter('no_wb')}
+                    title="WB пуст, но у нас есть остатки (ФФ / в сборке / в пути) — можно дослать"
                 >
                     Нет на WB ({nonNewcomerCounts.no_wb})
+                </button>
+                <button
+                    className={`btn btn-sm ${statusFilter === 'no_stock' ? 'btn-primary' : 'btn-secondary'}`}
+                    style={statusFilter !== 'no_stock' ? { borderColor: '#94a3b8', color: '#64748b' } : {}}
+                    onClick={() => setStatusFilter('no_stock')}
+                    title="WB=0, ФФ=0, в сборке=0, в пути=0 — нигде нет, нужно производство"
+                >
+                    Нет остатков ({nonNewcomerCounts.no_stock})
                 </button>
                 {acceptanceMap.size > 0 && (
                     <>
@@ -1938,6 +2141,37 @@ export function WarehouseNeedView() {
                         <div style={{ overflowX: 'auto' }}>
                             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                                 <thead>
+                                    {/* Group-header: цветные плашки округов над WB-колонками (как в основной таблице).
+                                        colSpan = 9 + N: checkbox + Артикул + Реализ + Маржа + Хватит + % лок + N×RF + WB + В сборке + Распределить */}
+                                    <tr>
+                                        <th colSpan={9 + (coldStartData.rf_warehouses?.length ?? 0)} style={{ background: '#f5f5f7' }}>&nbsp;</th>
+                                        {(() => {
+                                            const groups: Array<{ key: string; count: number }> = [];
+                                            for (const w of filteredMainWarehouses) {
+                                                const k = w.district_key || 'unknown';
+                                                const last = groups[groups.length - 1];
+                                                if (last && last.key === k) last.count += 1;
+                                                else groups.push({ key: k, count: 1 });
+                                            }
+                                            return groups.map((g, i) => (
+                                                <th
+                                                    key={`cs-grp-${i}-${g.key}`}
+                                                    colSpan={g.count}
+                                                    style={{
+                                                        background: DISTRICT_COLORS[g.key] ?? '#475569',
+                                                        color: '#fff',
+                                                        fontSize: 10, fontWeight: 700,
+                                                        letterSpacing: 0.5, textTransform: 'uppercase',
+                                                        textAlign: 'center', padding: '6px 8px',
+                                                        borderBottom: '1px solid var(--color-border)',
+                                                    }}
+                                                >
+                                                    {DISTRICT_LABELS[g.key] ?? g.key}
+                                                </th>
+                                            ));
+                                        })()}
+                                        <th style={{ background: '#f5f5f7' }}>&nbsp;</th>
+                                    </tr>
                                     <tr style={{ borderBottom: '2px solid var(--color-border)', background: '#f5f5f7' }}>
                                         <th style={{ padding: '8px 6px', width: 30 }}></th>
                                         <th style={{ padding: '8px 10px', textAlign: 'left', cursor: 'pointer' }} onClick={() => handleColdStartSort('vendor_code')}>
@@ -1945,6 +2179,15 @@ export function WarehouseNeedView() {
                                         </th>
                                         <th style={{ padding: '8px 10px', textAlign: 'right', cursor: 'pointer' }} onClick={() => handleColdStartSort('revenue_30d')}>
                                             Реализ. 30д{csSortArrow('revenue_30d')}
+                                        </th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right' }} title="Маржа % — из аналитики остатков">
+                                            Маржа %
+                                        </th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right' }} title="На сколько дней хватит при текущей скорости продаж">
+                                            Хватит дн
+                                        </th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right' }} title="Процент локализации — из индекса локализации (период 14д)">
+                                            % лок
                                         </th>
                                         {(coldStartData.rf_warehouses ?? []).map(wh => (
                                             <th key={`cs_rf_${wh.id}`} style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap', background: 'rgba(59,130,246,0.04)', cursor: 'pointer' }}
@@ -1983,6 +2226,9 @@ export function WarehouseNeedView() {
                                         <td style={{ padding: '8px 10px', textAlign: 'right' }}>
                                             {coldStartTotals.revenue_30d > 0 ? `₽${formatNumber(coldStartTotals.revenue_30d, 0)}` : '—'}
                                         </td>
+                                        <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--color-text-muted)' }}>—</td>
+                                        <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--color-text-muted)' }}>—</td>
+                                        <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--color-text-muted)' }}>—</td>
                                         {(coldStartData.rf_warehouses ?? []).map(wh => (
                                             <td key={`tot_cs_rf_${wh.id}`} style={{ padding: '8px 10px', textAlign: 'right', background: 'rgba(59,130,246,0.04)' }}>
                                                 {(coldStartTotals.rf[wh.id] || 0) > 0 ? formatNumber(coldStartTotals.rf[wh.id], 0) : '—'}
@@ -2041,6 +2287,42 @@ export function WarehouseNeedView() {
                                             <td style={{ padding: '8px 10px', textAlign: 'right', color: row.revenue_30d > 0 ? 'var(--color-text)' : 'var(--color-text-muted)' }}>
                                                 {row.revenue_30d > 0 ? `₽${formatNumber(row.revenue_30d, 0)}` : '—'}
                                             </td>
+                                            {/* Margin % / Хватит дн — для новинок из analyticsMap */}
+                                            {(() => {
+                                                const m = analyticsMap.get(row.nm_id)?.margin_pct;
+                                                const color = m == null ? 'var(--color-text-muted)'
+                                                    : m < 0 ? '#ef4444' : m < 20 ? '#a16207' : '#16a34a';
+                                                return (
+                                                    <td style={{ padding: '8px 10px', textAlign: 'right', color, fontWeight: 600 }}>
+                                                        {m == null ? '—' : `${formatNumber(m, 1)}%`}
+                                                    </td>
+                                                );
+                                            })()}
+                                            {(() => {
+                                                const dl = analyticsMap.get(row.nm_id)?.days_left;
+                                                if (dl == null || dl <= 0) {
+                                                    return <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--color-text-muted)' }}>—</td>;
+                                                }
+                                                const bg = dl < 7 ? '#ff4444' : dl <= 14 ? '#ff9800' : dl <= 29 ? '#ffd600' : '#4caf50';
+                                                const color = dl <= 29 && dl > 14 ? '#333' : '#fff';
+                                                return (
+                                                    <td style={{ padding: '8px 10px', textAlign: 'right' }}>
+                                                        <span style={{ background: bg, color, padding: '2px 8px', borderRadius: 10, fontWeight: 600, fontSize: 11 }}>
+                                                            {dl >= 999 ? '∞' : dl}
+                                                        </span>
+                                                    </td>
+                                                );
+                                            })()}
+                                            {(() => {
+                                                const p = locMap.get(row.nm_id);
+                                                if (p == null) return <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--color-text-muted)' }}>—</td>;
+                                                const color = p >= 80 ? '#16a34a' : p >= 50 ? '#a16207' : '#ef4444';
+                                                return (
+                                                    <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600, color }}>
+                                                        {formatNumber(p, 1)}%
+                                                    </td>
+                                                );
+                                            })()}
                                             {(coldStartData.rf_warehouses ?? []).map(wh => {
                                                 const v = row.rf_by_warehouse?.[wh.id] ?? 0;
                                                 return (
@@ -2203,28 +2485,56 @@ export function WarehouseNeedView() {
                                     borderBottom: '1px solid var(--color-border)',
                                     minWidth: 180,
                                 }}>&nbsp;</th>
-                                {/* Revenue + Need (not sticky) */}
-                                <th colSpan={2} style={{
+                                {/* Revenue + Маржа% + WB + Хватит дн + % лок + Need (not sticky) */}
+                                <th colSpan={6} style={{
                                     ...thBase, cursor: 'default',
                                     background: '#f5f5f7',
                                     borderBottom: '1px solid var(--color-border)',
                                 }}>&nbsp;</th>
 
-                                {/* МОИ СКЛАДЫ group */}
+                                {/* МОИ СКЛАДЫ group: RF + В сборке + В пути + Могу + ОТПРАВИТЬ = +4 */}
                                 <th colSpan={rfWarehouses.length + 4} style={{
                                     ...thBase, cursor: 'default', textAlign: 'center',
                                     background: 'rgba(59,130,246,0.08)', fontSize: 10, fontWeight: 700,
                                     letterSpacing: 1, borderBottom: '1px solid var(--color-border)',
                                 }}>МОИ СКЛАДЫ</th>
+                                {/* Дефицит — отдельная колонка между «МОИ СКЛАДЫ» и WB-группами,
+                                    пустая ячейка в group-header чтобы WB-группы не съезжали влево. */}
+                                <th style={{
+                                    ...thBase, cursor: 'default',
+                                    background: '#f5f5f7',
+                                    borderBottom: '1px solid var(--color-border)',
+                                }}>&nbsp;</th>
 
-                                {/* СКЛАДЫ WB group */}
-                                {visibleWbWarehouses.length > 0 && (
-                                    <th colSpan={visibleWbWarehouses.length} style={{
-                                        ...thBase, cursor: 'default', textAlign: 'center',
-                                        background: 'rgba(245,158,11,0.08)', fontSize: 10, fontWeight: 700,
-                                        letterSpacing: 1, borderBottom: '1px solid var(--color-border)',
-                                    }}>СКЛАДЫ WB</th>
-                                )}
+                                {/* СКЛАДЫ WB group — разбито по федеральным округам как в индексе локализации.
+                                    Run-length encoding по visibleWbWarehouses (порядок сохраняется): соседние склады
+                                    одного district_key объединяются в один цветной group-cell. */}
+                                {visibleWbWarehouses.length > 0 && (() => {
+                                    const groups: Array<{ key: string; count: number }> = [];
+                                    for (const wh of visibleWbWarehouses) {
+                                        const k = wh.district_key || 'unknown';
+                                        const last = groups[groups.length - 1];
+                                        if (last && last.key === k) last.count += 1;
+                                        else groups.push({ key: k, count: 1 });
+                                    }
+                                    return groups.map((g, i) => (
+                                        <th
+                                            key={`wb-grp-${i}-${g.key}`}
+                                            colSpan={g.count}
+                                            style={{
+                                                ...thBase, cursor: 'default', textAlign: 'center',
+                                                background: DISTRICT_COLORS[g.key] ?? '#475569',
+                                                color: '#fff',
+                                                fontSize: 10, fontWeight: 700,
+                                                letterSpacing: 0.5, textTransform: 'uppercase',
+                                                borderBottom: '1px solid var(--color-border)',
+                                                padding: '6px 8px',
+                                            }}
+                                        >
+                                            {DISTRICT_LABELS[g.key] ?? g.key}
+                                        </th>
+                                    ));
+                                })()}
                             </tr>
 
                             {/* Level 2: Column Headers */}
@@ -2246,6 +2556,19 @@ export function WarehouseNeedView() {
                                 {/* Revenue */}
                                 <th style={{ ...thBase }} onClick={() => handleSort('revenue_30d')}>
                                     РЕАЛИЗ. {analysisDays}д{sortArrow('revenue_30d')}
+                                </th>
+                                {/* Margin / WB stock / Days left — данные из getStockAnalytics(14) */}
+                                <th style={{ ...thBase }} title="Маржа % — из аналитики остатков">
+                                    МАРЖА %
+                                </th>
+                                <th style={{ ...thBase }} title="Текущие остатки на всех WB-складах">
+                                    WB
+                                </th>
+                                <th style={{ ...thBase }} title="На сколько дней хватит при текущей скорости продаж">
+                                    ХВАТИТ ДН
+                                </th>
+                                <th style={{ ...thBase }} title="Процент локализации — из индекса локализации (период 14д)">
+                                    % ЛОК
                                 </th>
                                 {/* Total Need */}
                                 <th style={{ ...thBase }} onClick={() => handleSort('total_need')}>
@@ -2287,14 +2610,19 @@ export function WarehouseNeedView() {
                                     ДЕФИЦИТ{sortArrow('deficit')}
                                 </th>
 
-                                {/* WB Warehouses */}
-                                {visibleWbWarehouses.map(wh => (
-                                    <th key={`wb_${wh.name}`} style={{ ...thBase, background: 'rgba(245,158,11,0.04)' }}
-                                        onClick={() => handleSort(`wb_${wh.name}`)}>
-                                        {wh.name.length > 12 ? wh.name.slice(0, 12) + '\u2026' : wh.name}
-                                        {sortArrow(`wb_${wh.name}`)}
-                                    </th>
-                                ))}
+                                {/* WB Warehouses \u2014 \u043e\u043a\u0440\u0443\u0433 \u043f\u043e\u043a\u0430\u0437\u0430\u043d \u0432 group-header \u0441\u0432\u0435\u0440\u0445\u0443, \u0442\u0443\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 */}
+                                {visibleWbWarehouses.map(wh => {
+                                    const dKey = wh.district_key || 'unknown';
+                                    const dLabel = DISTRICT_LABELS[dKey] ?? dKey;
+                                    return (
+                                        <th key={`wb_${wh.name}`} style={{ ...thBase, background: 'rgba(245,158,11,0.04)' }}
+                                            onClick={() => handleSort(`wb_${wh.name}`)}
+                                            title={`${wh.name} \u00b7 ${dLabel}`}>
+                                            {wh.name.length > 12 ? wh.name.slice(0, 12) + '\u2026' : wh.name}
+                                            {sortArrow(`wb_${wh.name}`)}
+                                        </th>
+                                    );
+                                })}
                             </tr>
 
                             {/* ИТОГО row */}
@@ -2303,6 +2631,31 @@ export function WarehouseNeedView() {
                                 <td style={{ ...stickyArticle, background: 'rgba(59,130,246,0.06)', borderBottom: '2px solid var(--color-border)' }}>ИТОГО</td>
                                 <td style={{ ...tdBase, fontWeight: 700, borderBottom: '2px solid var(--color-border)' }}>
                                     {formatRevenue(totals.revenue_30d)}
+                                </td>
+                                {/* \u041c\u0430\u0440\u0436\u0430% / WB / \u0425\u0432\u0430\u0442\u0438\u0442 \u0434\u043d \u2014 totals \u043d\u0435 \u0438\u043c\u0435\u0435\u0442 \u0441\u043c\u044b\u0441\u043b\u0430, \u043f\u0443\u0441\u0442\u043e. */}
+                                <td style={{ ...tdBase, fontWeight: 700, borderBottom: '2px solid var(--color-border)', color: 'var(--color-text-muted)' }}>&mdash;</td>
+                                <td style={{ ...tdBase, fontWeight: 700, borderBottom: '2px solid var(--color-border)' }}>
+                                    {(() => {
+                                        let sum = 0;
+                                        for (const a of filteredArticles) sum += analyticsMap.get(a.nm_id)?.stocks_wb || 0;
+                                        return sum > 0 ? formatNumber(sum, 0) : '\u2014';
+                                    })()}
+                                </td>
+                                <td style={{ ...tdBase, fontWeight: 700, borderBottom: '2px solid var(--color-border)', color: 'var(--color-text-muted)' }}>&mdash;</td>
+                                {/* % \u043b\u043e\u043a \u2014 weighted avg \u043f\u043e total (\u043a\u0430\u043a \u0432 \u0438\u043d\u0434\u0435\u043a\u0441\u0435 \u043b\u043e\u043a\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u0438) */}
+                                <td style={{ ...tdBase, fontWeight: 700, borderBottom: '2px solid var(--color-border)' }}>
+                                    {(() => {
+                                        let wSum = 0, denom = 0;
+                                        for (const a of filteredArticles) {
+                                            const p = locMap.get(a.nm_id);
+                                            const w = a.revenue_30d || 0;
+                                            if (p != null && w > 0) { wSum += p * w; denom += w; }
+                                        }
+                                        if (denom <= 0) return <span style={{ color: 'var(--color-text-muted)' }}>{'\u2014'}</span>;
+                                        const v = wSum / denom;
+                                        const color = v >= 80 ? '#16a34a' : v >= 50 ? '#a16207' : '#ef4444';
+                                        return <span style={{ color }}>{formatNumber(v, 1)}%</span>;
+                                    })()}
                                 </td>
                                 <td style={{ ...tdBase, fontWeight: 700, borderBottom: '2px solid var(--color-border)' }}>
                                     {totals.total_need > 0 ? formatNumber(totals.total_need, 0) : '\u2014'}
@@ -2379,6 +2732,57 @@ export function WarehouseNeedView() {
                                         <td style={{ ...tdBase, fontWeight: 500 }}>
                                             {formatRevenue(a.revenue_30d)}
                                         </td>
+                                        {/* Margin % \u2014 \u0446\u0432\u0435\u0442 \u043f\u043e \u0437\u043d\u0430\u043a\u0443 */}
+                                        {(() => {
+                                            const am = analyticsMap.get(a.nm_id);
+                                            const m = am?.margin_pct;
+                                            const color = m == null ? 'var(--color-text-muted)'
+                                                : m < 0 ? '#ef4444'
+                                                : m < 20 ? '#a16207'
+                                                : '#16a34a';
+                                            return (
+                                                <td style={{ ...tdBase, fontWeight: 600, color }}>
+                                                    {m == null ? '\u2014' : `${formatNumber(m, 1)}%`}
+                                                </td>
+                                            );
+                                        })()}
+                                        {/* WB stock (\u043e\u0431\u0449\u0438\u0439) */}
+                                        <td style={{ ...tdBase, fontWeight: 500 }}>
+                                            {(() => {
+                                                const v = analyticsMap.get(a.nm_id)?.stocks_wb ?? 0;
+                                                return v > 0 ? formatNumber(v, 0) : '\u2014';
+                                            })()}
+                                        </td>
+                                        {/* \u0425\u0432\u0430\u0442\u0438\u0442 \u0434\u043d\u0435\u0439 \u2014 \u0446\u0432\u0435\u0442\u043d\u043e\u0439 \u0431\u0435\u0439\u0434\u0436 \u043a\u0430\u043a \u0432 StockAnalytics */}
+                                        {(() => {
+                                            const dl = analyticsMap.get(a.nm_id)?.days_left;
+                                            if (dl == null || dl <= 0) {
+                                                return <td style={{ ...tdBase, color: 'var(--color-text-muted)' }}>{'\u2014'}</td>;
+                                            }
+                                            const bg = dl < 7 ? '#ff4444' : dl <= 14 ? '#ff9800' : dl <= 29 ? '#ffd600' : '#4caf50';
+                                            const color = dl <= 29 && dl > 14 ? '#333' : '#fff';
+                                            return (
+                                                <td style={{ ...tdBase }}>
+                                                    <span style={{
+                                                        background: bg, color, padding: '2px 8px', borderRadius: 10,
+                                                        fontWeight: 600, fontSize: 11,
+                                                    }}>
+                                                        {dl >= 999 ? '\u221e' : dl}
+                                                    </span>
+                                                </td>
+                                            );
+                                        })()}
+                                        {/* % \u043b\u043e\u043a \u2014 \u0438\u0437 \u0438\u043d\u0434\u0435\u043a\u0441\u0430 \u043b\u043e\u043a\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u0438 */}
+                                        {(() => {
+                                            const p = locMap.get(a.nm_id);
+                                            if (p == null) return <td style={{ ...tdBase, color: 'var(--color-text-muted)' }}>{'\u2014'}</td>;
+                                            const color = p >= 80 ? '#16a34a' : p >= 50 ? '#a16207' : '#ef4444';
+                                            return (
+                                                <td style={{ ...tdBase, fontWeight: 600, color }}>
+                                                    {formatNumber(p, 1)}%
+                                                </td>
+                                            );
+                                        })()}
                                         {/* Total Need */}
                                         <td style={{ ...tdBase, fontWeight: 700 }}>
                                             {a.total_need > 0 ? formatNumber(a.total_need, 0) : '\u2014'}
@@ -2591,18 +2995,7 @@ export function WarehouseNeedView() {
                         )}
                     </span>
                     <span style={{ opacity: 0.4 }}>|</span>
-                    <span style={{ fontSize: 13 }}>С какого склада:</span>
-                    <select
-                        value={assemblyWarehouseId ?? ''}
-                        onChange={e => setAssemblyWarehouseId(Number(e.target.value))}
-                        style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid var(--color-border)', background: 'var(--color-bg)', fontSize: 12 }}
-                    >
-                        {rfWarehouses.map(wh => (
-                            <option key={wh.id} value={wh.id}>{wh.name}</option>
-                        ))}
-                    </select>
-                    <span style={{ opacity: 0.4 }}>|</span>
-                    <span style={{ fontSize: 13 }}>
+                    <span style={{ fontSize: 13 }} title="Multi-source: товар берётся со всех ФФ-складов, greedy по доступности">
                         Итого: <strong>{formatNumber(assemblyTotal, 0)} шт</strong>
                     </span>
                     <button

@@ -624,3 +624,50 @@ class TestFlagsForWarehouseWithCoefficients:
         assert "Самара (Новосемейкино)" in out
         assert out["Самара (Новосемейкино)"]["can_monopallet"] is True
         assert out["Самара (Новосемейкино)"]["mono_meta"]["free_days_14"] == 15
+
+
+# ─── get_acceptance_closed_warehouses ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_acceptance_closed_when_no_cache(monkeypatch):
+    """Если Redis-кэш пуст → empty set (fail-open, склады не блокируем)."""
+    import backend.services.warehouse_acceptance_service as svc
+
+    class _StubRedis:
+        async def get(self, key):
+            return None
+
+    monkeypatch.setattr(svc, "_redis_client", _StubRedis())
+    closed = await svc.get_acceptance_closed_warehouses(project_id=999)
+    assert closed == set()
+
+
+@pytest.mark.asyncio
+async def test_get_acceptance_closed_finds_zero_free_zero_paid(monkeypatch):
+    """Склад где во всех package_types free=0 И paid=0 → попадает в closed."""
+    import json
+
+    import backend.services.warehouse_acceptance_service as svc
+
+    # Симулируем: Test-склад имеет 0/0 во всех 14 днях, Коледино имеет free_days>0
+    raw_coef = [
+        # Коледино, box, coef=0 allowUnload=true × 14 = free=14
+        *[{"warehouseID": 507, "boxTypeID": 6, "coefficient": 0, "allowUnload": True} for _ in range(14)],
+        # Test-склад, box, coef=-1 allowUnload=false × 14 = closed=14
+        *[{"warehouseID": 999, "boxTypeID": 6, "coefficient": -1, "allowUnload": False} for _ in range(14)],
+    ]
+    wh_map = {507: "Коледино", 999: "Test"}
+
+    class _StubRedis:
+        async def get(self, key):
+            if "coefficients" in key:
+                return json.dumps(raw_coef)
+            if "warehouses" in key:
+                return json.dumps({str(k): v for k, v in wh_map.items()})
+            return None
+
+    monkeypatch.setattr(svc, "_redis_client", _StubRedis())
+    closed = await svc.get_acceptance_closed_warehouses(project_id=42)
+    assert "Test" in closed
+    assert "Коледино" not in closed

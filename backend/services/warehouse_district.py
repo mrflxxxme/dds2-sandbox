@@ -1,4 +1,4 @@
-# ruff: noqa: RUF001, RUF002, RUF003
+# ruff: noqa: RUF001, RUF003
 """Маппинг WB-склада → федеральный округ (для отчёта «Индекс локализации»).
 
 Эталонный справочник от 23.03.2026 (раздел WB «Локализация»). Группы:
@@ -118,11 +118,14 @@ WAREHOUSE_TO_DISTRICT: dict[str, str] = {
     "Ярославль СГТ": DISTRICT_CENTRAL,
     "Подольск 3 СГТ": DISTRICT_CENTRAL,
     "Цифровой склад": DISTRICT_CENTRAL,
+    "Рязань": DISTRICT_CENTRAL,
     "Рязань (Тюшевское)": DISTRICT_CENTRAL,
     "Рязань (Тюшевское): Питание": DISTRICT_CENTRAL,
     "Сабурово": DISTRICT_CENTRAL,
     "Владимир": DISTRICT_CENTRAL,
+    "Владимир (Воршинское): Питание": DISTRICT_CENTRAL,
     "Тула": DISTRICT_CENTRAL,
+    "Алексин (Тула)": DISTRICT_CENTRAL,
     "Воронеж": DISTRICT_CENTRAL,
     "Котовск": DISTRICT_CENTRAL,
     "Котовск: Питание": DISTRICT_CENTRAL,
@@ -147,6 +150,7 @@ WAREHOUSE_TO_DISTRICT: dict[str, str] = {
     "Шушары: Питание": DISTRICT_NORTHWEST,
     "СПБ Шушары": DISTRICT_NORTHWEST,
     "Санкт-Петербург Уткина Заводь": DISTRICT_NORTHWEST,
+    "Калининград": DISTRICT_NORTHWEST,
     # ── Южный и Северо-Кавказский ────────────────────────────────────────────
     "Крыловская": DISTRICT_SOUTH_CAUCASUS,
     "Краснодар СГТ": DISTRICT_SOUTH_CAUCASUS,
@@ -211,6 +215,7 @@ WAREHOUSE_TO_DISTRICT: dict[str, str] = {
     "Астана Карагандинское шоссе": DISTRICT_ABROAD,
     "Ташкент": DISTRICT_ABROAD,
     "Ташкент 2": DISTRICT_ABROAD,
+    "СЦ Душанбе": DISTRICT_ABROAD,
 }
 
 # Лог-коэффициент склада (% к базовой логистике короба, 2026-03-23).
@@ -343,3 +348,36 @@ def warehouse_to_district(warehouse_name: str | None) -> str:
     if not warehouse_name:
         return DISTRICT_UNKNOWN
     return WAREHOUSE_TO_DISTRICT.get(warehouse_name.strip(), DISTRICT_UNKNOWN)
+
+
+# ─── Aliases: 3rd-party короткие имена → канон WB API ────────────────────────
+# Источник: таблица скоростей доставки складов от tg:@POSTAVLENOru_BOT
+# (файл backend/data/wb_warehouse_speed.json). Бот использует сокращённые
+# имена; для lookup в WAREHOUSE_TO_DISTRICT и сопоставления с warehouseName
+# из /api/v1/supplier/orders нужна нормализация.
+WAREHOUSE_NAME_ALIASES: dict[str, str] = {
+    "Новосемейкино": "Самара (Новосемейкино)",
+    "Перспективный": "Екатеринбург - Перспективная 14",
+    "Барнаул СЦ 2": "СЦ Барнаул",
+    "СК Тверь Эммаусское": "Тверь Эммаусское",
+    "Склад СПБ Шушары Московское": "СПБ Шушары",
+    "СЦ Оренбург": "СЦ Оренбург Центральная",
+    "Чехов": "Чехов 1",
+    "СК Великий Камень (Белоруссия)": "СК Великий Камень",
+    "Алматы Атакент": "Атакент",
+    "Склад Астана Карагандинское шоссе": "Астана Карагандинское шоссе",
+    "Склад Чашниково": "Чашниково",
+}
+
+
+def canonical_warehouse_name(name: str | None) -> str | None:
+    """Привести имя склада к каноническому виду WB API.
+
+    Двусторонняя канонизация: 3rd-party источники (POSTAVLENO bot)
+    используют сокращения, наш WAREHOUSE_TO_DISTRICT и WB API — длинные
+    имена. Без нормализации matrix-lookup промахивается.
+    """
+    if not name:
+        return None
+    n = name.strip()
+    return WAREHOUSE_NAME_ALIASES.get(n, n)

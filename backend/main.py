@@ -42,6 +42,7 @@ from backend.routers import (
     telegram_miniapp,
     telegram_webhook,
     warehouse,
+    warehouse_speed,
     wb_returns,
     ws,
 )
@@ -497,6 +498,12 @@ app.include_router(
     warehouse.router,
     prefix="/api/v1",
     tags=["Warehouse"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    warehouse_speed.router,
+    prefix="/api/v1",
+    tags=["Warehouse Speed"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

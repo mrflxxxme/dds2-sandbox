@@ -21,6 +21,7 @@ Read-only: никаких записей в БД.
 
 import logging
 from collections import defaultdict
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select, text
@@ -224,10 +225,31 @@ async def fetch_active_assemblies_for_sku(db: AsyncSession, project_id: int, nm_
 # ─── Pure logic (sync, безопасно тестировать без БД) ───────────────────────
 
 
+def _sort_key_traffic_then_priority(district: str) -> Callable[[tuple[str, int]], tuple[int, float, str]]:
+    """Composite-ключ сортировки складов внутри ФО.
+
+    Primary: трафик в проекте (desc) — куда WB реально вёз.
+    Secondary: priority_score в speed-карте POSTAVLENO (desc) — при близком
+        трафике anchor speed-карты побеждает stealer.
+
+    Tiebreak на этом уровне = небольшое preference anchor'ам когда история
+    проекта неоднозначна (например, у двух складов ПФО по 100 заказов —
+    лидер в speed-карте получает приоритет).
+    """
+    from backend.services.warehouse_speed import get_priority_score
+
+    def key(item: tuple[str, int]) -> tuple[int, float, str]:
+        wh, traffic = item
+        score = get_priority_score(wh, district)
+        return (-traffic, -score, wh)  # asc по всем → traffic desc, score desc, name asc
+
+    return key
+
+
 def pick_main_warehouse_per_district(warehouse_traffic: dict[str, int], excluded: set[str]) -> dict[str, str]:
     """{district → главный склад этого ФО, не из excluded}.
 
-    Главный = top-1 по трафику (orders) в bench-источнике.
+    Главный = top-1 по composite ключу (traffic desc, priority_score desc).
     Если все склады ФО исключены — ФО не попадает в результат.
     """
     by_district: dict[str, list[tuple[str, int]]] = defaultdict(list)
@@ -238,7 +260,7 @@ def pick_main_warehouse_per_district(warehouse_traffic: dict[str, int], excluded
         by_district[district].append((wh, cnt))
     result: dict[str, str] = {}
     for district, items in by_district.items():
-        items.sort(key=lambda x: x[1], reverse=True)
+        items.sort(key=_sort_key_traffic_then_priority(district))
         for wh, _ in items:
             if wh not in excluded:
                 result[district] = wh
@@ -253,7 +275,7 @@ def pick_warehouses_per_district(
 ) -> dict[str, list[tuple[str, int]]]:
     """{district → [(warehouse, traffic), ...]} top-N складов округа, не из excluded.
 
-    Каждый список отсортирован по трафику по убыванию.
+    Сортировка composite: traffic desc, priority_score speed-карты desc, name asc.
     top_n=None — все склады округа.
     """
     by_district: dict[str, list[tuple[str, int]]] = defaultdict(list)
@@ -266,7 +288,7 @@ def pick_warehouses_per_district(
         by_district[district].append((wh, cnt))
     result: dict[str, list[tuple[str, int]]] = {}
     for district, items in by_district.items():
-        items.sort(key=lambda x: x[1], reverse=True)
+        items.sort(key=_sort_key_traffic_then_priority(district))
         result[district] = items[:top_n] if top_n else items
     return result
 

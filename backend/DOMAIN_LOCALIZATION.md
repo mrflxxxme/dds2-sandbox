@@ -149,12 +149,73 @@ Constants: [`lib/constants/localization.ts`](../frontend-react/src/lib/constants
 | [test_localization_index_service.py](../tests/test_localization_index_service.py) | ИЛ/ИРП расчёт, эталон 37%/62% → ИРП 1.05% (12) |
 | [test_localization_tariff.py](../tests/test_localization_tariff.py) | КТР/КРП таблицы (25) |
 
+## Priority-weighted распределение (новое, 2026-05-14)
+
+Распределение потребности между WB-складами учитывает «скорость доставки»
+из speed-карты POSTAVLENO bot (`backend/data/wb_warehouse_speed.json`, 97
+городов с priority chains).
+
+### Phase 0 — фильтр open_warehouses ([warehouse_need_service.py:164-205](services/warehouse_need_service.py))
+1. `excluded_warehouses` из настроек проекта (UI checkbox).
+2. **WB acceptance closure**: склад где `free_days_14=0 AND paid_days_14=0`
+   во всех package_types → автоматически выпадает из распределения.
+   Источник — Redis snapshot `wb:acceptance_coefficients:{pid}`. Fail-open
+   если кэша нет.
+3. `_normalize_srid`: WB `/supplier/orders` отдаёт srid с префиксом
+   `eXX.r/i`, `order_city_map.srid` — без префикса. Нормализуем при чтении
+   для матчинга city-key.
+
+### Phase 1 — маршрутизация заказа в open_warehouse
+1. `DISTRICT_PREFERRED_WH_OVERRIDE` (ДВ+Сибирь → Перспективная).
+2. **priority-chain города** ([find_priority_warehouse](services/warehouse_speed.py)) —
+   обходим priority-chain города из speed-карты, возвращаем первый open
+   склад. Если top-1 анкор закрыт → priority-2 ТОГО ЖЕ ГОРОДА.
+3. **okrug-fallback** — если city не в speed-карте, агрегатный priority_score
+   per ФО, возвращаем top open.
+4. haversine по city → по region (старые fallback'и).
+
+### Phase 3 — Priority-weighted Hamilton ([:732-810](services/warehouse_need_service.py))
+Активируется при `only_available=True`. Каждый склад получает долю cap_total
+пропорционально:
+```
+effective_share = need × (1 + priority_score(wh, ФО_склада)) × penalty
+penalty = 0.6 если склад crawl-stealer (есть в priority-chains соседних ФО)
+penalty = 1.0 если чистый anchor своего ФО
+```
+- `get_priority_score(wh, okrug)` — `Σ 1/(idx+1) по городам ФО / число_городов_ФО`,
+  диапазон [0..1]. 1.00 = priority-1 во всех городах ФО (Екатеринбург в УФО).
+- `is_stealer_for_okrug(wh, ok)` — склад другого ФО, но в priority-chain ФО ok.
+  Helper `get_anchors_for_okrug` / `get_stealers_for_okrug` — для bump-логики.
+
+Leftover (от int-округления) распределяется по убыванию дробной части
+(Hamilton largest-fractional-remainders), но не больше `need[wh]`.
+
+### Phase 4 — Min-stock bump для дальних регионов
+Frontend bump «Дораспределить» ([WarehouseNeedView.tsx:606+](../frontend-react/src/app/(main)/p/[slug]/warehouse/analytics/components/WarehouseNeedView.tsx))
+выбирает `main_wh` для underserved ФО по composite ключу:
+```
+sort by (anchor_rank_in_okrug_info ASC, share_pct DESC)
+```
+Anchor speed-карты (`anchors_top` из `/warehouse/speed/okrug-info`) побеждает
+исторический leader (`cold_start.main_warehouses[].share_pct`) при равном
+условии.
+
+### Cold-start (новинки) tiebreak ([cold_start_distribution_service.py:227+](services/cold_start_distribution_service.py))
+`pick_main_warehouse_per_district` и `pick_warehouses_per_district` используют
+composite sort `(traffic DESC, priority_score DESC, name ASC)`. Traffic из
+истории проекта по-прежнему primary, priority-rank speed-карты — tiebreak.
+
 ## Файлы модуля
 - `backend/services/localization_index_service.py` — расчёт ИЛ/ИРП, per-SKU loc_pct, district breakdown
 - `backend/services/warehouse_district.py` — справочник 89 WB складов → ФО
+- `backend/services/warehouse_speed.py` — speed-карта POSTAVLENO (priority_score, find_priority_warehouse, anchors/stealers)
+- `backend/services/warehouse_need_service.py` — priority-weighted Hamilton + priority-chain fallback + srid normalize
+- `backend/services/warehouse_acceptance_service.py` — `get_acceptance_closed_warehouses` для phase-0 фильтра
+- `backend/services/cold_start_distribution_service.py` — distribute_multi + priority-rank tiebreak в pick_*
 - `backend/services/localization_tariff.py` — KTR_TABLE, KRP-боксы
 - `backend/scheduler/jobs/wb_orders_sync.py` — sync wb_orders 3×/день
 - `backend/routers/localization.py` — endpoints
 - `frontend-react/src/app/(main)/p/[slug]/localization/page.tsx` — UI
+- `frontend-react/src/app/(main)/p/[slug]/warehouse/analytics/components/WarehouseNeedView.tsx` — bump с priority-rank main_wh
 - `frontend-react/src/lib/api/localization.ts` — API client
 - `frontend-react/src/lib/constants/localization.ts` — DISTRICT_ORDER/LABELS/COLORS
