@@ -41,6 +41,7 @@ const navGroups = [
             { href: '/warehouse/wb-returns', label: 'Возвраты на ПВЗ', icon: '↩️', pageKey: 'warehouse' },
             { href: '/warehouse/wb-stocks', label: 'Остатки WB', icon: '🏭', pageKey: 'stocks' },
             { href: '/warehouse/analytics', label: 'Аналитика остатков', icon: '📊', pageKey: 'stock-analytics' },
+            { href: '/warehouse/speed', label: 'Приоритет складов', icon: '🚀', pageKey: 'stock-analytics' },
         ],
     },
     {
