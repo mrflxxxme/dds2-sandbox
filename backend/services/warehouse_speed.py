@@ -125,6 +125,15 @@ def speed_table_meta() -> dict:
     }
 
 
+def iter_all_cities() -> list[CityPriority]:
+    """Публичный read-only getter для списка городов с priority-цепочками.
+
+    Возвращает кэшированный список (lru_cache на _all_cities) — мутировать нельзя.
+    Используется роутером `/warehouse/speed/cities` для отдачи всей таблицы.
+    """
+    return _all_cities()
+
+
 @lru_cache(maxsize=1024)
 def get_priority_score(warehouse: str, okrug: str) -> float:
     """Скор склада как быстрого для городов этого ФО.
