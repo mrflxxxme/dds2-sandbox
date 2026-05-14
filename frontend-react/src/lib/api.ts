@@ -21,6 +21,7 @@ import { addFunnelMethods } from './api/funnel';
 import { addImportMethods } from './api/imports';
 import { addTelegramMethods } from './api/telegram';
 import { addWarehouseMethods } from './api/warehouse';
+import { addWarehouseSpeedMethods } from './api/warehouse-speed';
 import { addMonitoringMethods } from './api/monitoring';
 import { addSupplyChainMethods } from './api/supply-chain';
 import { addAiChatMethods } from './api/ai-chat';
@@ -44,6 +45,7 @@ export const api = Object.assign(client, {
     ...addImportMethods(client),
     ...addTelegramMethods(client),
     ...addWarehouseMethods(client),
+    ...addWarehouseSpeedMethods(client),
     ...addMonitoringMethods(client),
     ...addSupplyChainMethods(client),
     ...addAiChatMethods(client),

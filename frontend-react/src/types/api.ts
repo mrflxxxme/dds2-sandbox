@@ -2951,3 +2951,71 @@ export interface BoxMultiplicityBulkResponse {
   not_found: string[];        // barcodes that don't exist in the project
   matched_count: number;      // how many barcodes matched (some may have had no diff)
 }
+
+// ─── Warehouse Speed Priority (WB delivery speed map) ────────────────────────
+// Endpoints: /api/v1/warehouse/speed/*
+// UI: (main)/p/[slug]/warehouse/speed/page.tsx
+
+export interface SpeedMeta {
+  version: string;
+  source: string;
+  cities_count: number;
+  okrug_keys: string[];
+}
+
+export interface OkrugCount {
+  warehouse_name: string;
+  cities_count: number;
+}
+
+export interface OkrugInfo {
+  okrug_key: string;
+  okrug_label: string;
+  anchors_top: OkrugCount[];
+  stealers_top: OkrugCount[];
+}
+
+export type BasketWarningSeverity = 'info' | 'warning' | 'error';
+
+export interface BasketWarning {
+  kind: string;
+  severity: BasketWarningSeverity;
+  okrug: string;
+  okrug_label: string;
+  message: string;
+  stealer: string | null;
+  suggested_anchors: string[];
+}
+
+export interface OkrugBasketStats {
+  okrug_key: string;
+  okrug_label: string;
+  anchors_in_basket: string[];
+  stealers_in_basket: string[];
+  cities_covered_locally: number;
+  cities_total: number;
+}
+
+export interface CityPriorityRow {
+  warehouse_name: string;
+  hours: number;
+}
+
+export interface CitySpeedDTO {
+  city: string;
+  okrug_key: string;
+  okrug_label: string;
+  priorities: CityPriorityRow[];
+}
+
+export interface BasketEvaluation {
+  loaded_warehouses: string[];
+  realistic_ceiling_pct: number;
+  cities_local: number;
+  cities_stealer: number;
+  cities_uncovered: number;
+  cities_total: number;
+  warnings: BasketWarning[];
+  per_okrug: OkrugBasketStats[];
+  cities: CitySpeedDTO[] | null;
+}
