@@ -46,86 +46,27 @@ from backend.services.assembly_service import (
     update_assembly_request,
 )
 
-PROJECT_ID = 77701  # unique — avoids conflicts with other tests using project_id=1
-OTHER_PROJECT_ID = 99999
+# PROJECT_ID / OTHER_PROJECT_ID are assigned per-test by the `setup_test_data`
+# fixture from conftest's sequence-allocated `project` / `other_project`. Never
+# hardcode a project id: a fixed value is a landmine — projects_id_seq on the
+# local dev DB eventually climbs to it and auto-id INSERTs collide on projects_pkey.
+PROJECT_ID = 0
+OTHER_PROJECT_ID = 0
 TEST_BARCODE_1 = "TEST_BC_ASM_001"
 TEST_BARCODE_2 = "TEST_BC_ASM_002"
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def setup_test_data(db_session):
-    """Clean assembly data and ensure test fixtures exist."""
-    # Clean in dependency order (scoped to project_id to avoid cross-test contamination)
-    await db_session.execute(
-        text(
-            "DELETE FROM assembly_request_items WHERE assembly_request_id IN "
-            "(SELECT id FROM assembly_requests WHERE project_id = :pid)"
-        ),
-        {"pid": PROJECT_ID},
-    )
-    await db_session.execute(text("DELETE FROM assembly_requests WHERE project_id = :pid"), {"pid": PROJECT_ID})
-    # Unlink FBO supplies from outbound shipments before deleting them
-    await db_session.execute(
-        text(
-            "UPDATE wb_fbo_supplies SET outbound_shipment_id = NULL "
-            "WHERE project_id = :pid AND outbound_shipment_id IN "
-            "(SELECT id FROM outbound_shipments WHERE number LIKE 'OUT-%' AND project_id = :pid)"
-        ),
-        {"pid": PROJECT_ID},
-    )
-    # Clean outbound shipments created by tests
-    await db_session.execute(
-        text(
-            "DELETE FROM outbound_shipment_items WHERE shipment_id IN (SELECT id FROM outbound_shipments WHERE number LIKE 'OUT-%' AND project_id = :pid)"
-        ),
-        {"pid": PROJECT_ID},
-    )
-    await db_session.execute(
-        text("DELETE FROM outbound_shipments WHERE number LIKE 'OUT-%' AND project_id = :pid"), {"pid": PROJECT_ID}
-    )
-    # Clean stock
-    await db_session.execute(
-        text(
-            "DELETE FROM stock_movements WHERE reference_type IN ('ASSEMBLY', 'ASSEMBLY_CANCEL') AND project_id = :pid"
-        ),
-        {"pid": PROJECT_ID},
-    )
-    await db_session.execute(text("DELETE FROM warehouse_stock WHERE project_id = :pid"), {"pid": PROJECT_ID})
-    # Clean FBO test data
-    await db_session.execute(
-        text(
-            "DELETE FROM wb_fbo_supply_items WHERE supply_id IN (SELECT id FROM wb_fbo_supplies WHERE project_id = :pid AND name LIKE 'ASM_TEST%')"
-        ),
-        {"pid": PROJECT_ID},
-    )
-    await db_session.execute(
-        text("DELETE FROM wb_fbo_supplies WHERE project_id = :pid AND name LIKE 'ASM_TEST%'"), {"pid": PROJECT_ID}
-    )
-    await db_session.commit()
+async def setup_test_data(db_session, project, other_project):
+    """Allocate fresh projects and seed assembly test fixtures.
 
-    # Ensure project exists
-    result = await db_session.execute(text("SELECT id FROM projects WHERE id = :pid"), {"pid": PROJECT_ID})
-    if result.scalar() is None:
-        result_u = await db_session.execute(text("SELECT id FROM users WHERE username = 'asm_test_user'"))
-        user_id = result_u.scalar()
-        if user_id is None:
-            await db_session.execute(
-                text(
-                    "INSERT INTO users (username, email, password_hash, is_active, created_at) "
-                    "VALUES (:u, :e, :p, true, NOW()) RETURNING id"
-                ),
-                {"u": "asm_test_user", "e": "asm_test@test.com", "p": "nohash"},
-            )
-            result_u = await db_session.execute(text("SELECT id FROM users WHERE username = 'asm_test_user'"))
-            user_id = result_u.scalar()
-        await db_session.execute(
-            text(
-                "INSERT INTO projects (id, name, slug, owner_id, created_at) "
-                "VALUES (:pid, :n, :s, :o, NOW()) ON CONFLICT (id) DO NOTHING"
-            ),
-            {"pid": PROJECT_ID, "n": "ASM Test Project", "s": "asm-test", "o": user_id},
-        )
-        await db_session.commit()
+    `project` / `other_project` (conftest) have sequence-allocated ids — no
+    hardcoded project id to collide with projects_id_seq as it climbs on the
+    local dev DB. Each test gets a clean project, so no cross-test cleanup needed.
+    """
+    global PROJECT_ID, OTHER_PROJECT_ID
+    PROJECT_ID = project.id
+    OTHER_PROJECT_ID = other_project.id
 
     # Ensure FULFILLMENT warehouse
     wh_result = await db_session.execute(

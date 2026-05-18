@@ -72,7 +72,10 @@ async def ensure_test_project(db_session):
     await db_session.execute(text("DELETE FROM wb_fbo_supplies WHERE project_id = 1"))
     await db_session.commit()
 
-    # Ensure project exists
+    # Ensure project exists.
+    # allow-fixed-project-id: id=1 is the foundational seed project and sits far
+    # below projects_id_seq — the collision window has passed. See check 21 in
+    # scripts/check_conventions.sh.
     result = await db_session.execute(text("SELECT id FROM projects WHERE id = 1"))
     if result.scalar() is None:
         result_u = await db_session.execute(text("SELECT id FROM users WHERE username = 'fbo_test_user'"))
@@ -873,13 +876,13 @@ class TestEnrichPartialAcceptance:
         assert result["enriched"] == 1
         assert mock_client.get_fbw_supply_goods.called
 
-    async def test_goods_api_error_preserves_stale_synced_at(self, db_session):
+    async def test_goods_api_error_preserves_stale_synced_at(self, db_session, project):
         """ACCEPTED supply must NOT update synced_at when goods API fails —
         otherwise 24h cooldown blocks retry indefinitely even after WB recovers.
         Regression: 2026-04-22, 44 supplies stuck with accepted_qty=0 for 13 days.
 
-        Uses unique project_id=7777 to isolate from autouse fixture (project_id=1)
-        under xdist parallel runs.
+        Uses the `project` fixture (unique auto-id) to isolate from the autouse
+        fixture (project_id=1) under xdist parallel runs.
         """
         from datetime import timedelta
 
@@ -887,30 +890,9 @@ class TestEnrichPartialAcceptance:
 
         from backend.services.fbo_supply_service import enrich_fbo_supplies
 
-        # Create isolated project (avoid xdist race with autouse ensure_test_project).
-        await db_session.execute(
-            text(
-                "INSERT INTO users (username, email, password_hash, is_active, created_at) "
-                "VALUES ('fbo_goods_err_user', 'fbo_goods_err@test.com', 'nohash', true, NOW()) "
-                "ON CONFLICT (username) DO NOTHING"
-            )
-        )
-        user_row = await db_session.execute(text("SELECT id FROM users WHERE username = 'fbo_goods_err_user'"))
-        user_id = user_row.scalar()
-        await db_session.execute(
-            text(
-                "INSERT INTO projects (id, name, slug, owner_id, created_at) "
-                "VALUES (7777, 'FBO Goods Err Test', 'fbo-goods-err-test', :o, NOW()) "
-                "ON CONFLICT (id) DO NOTHING"
-            ),
-            {"o": user_id},
-        )
-        await db_session.execute(text("DELETE FROM wb_fbo_supplies WHERE project_id = 7777"))
-        await db_session.commit()
-
         stale_synced = datetime.utcnow() - timedelta(hours=36)
         supply = WbFboSupply(
-            project_id=7777,
+            project_id=project.id,
             wb_supply_id="38413056",
             wb_status=WbSupplyStatus.ACCEPTED,
             name="FBW-38413056",
@@ -931,7 +913,7 @@ class TestEnrichPartialAcceptance:
         }
         mock_client.get_fbw_supply_goods.side_effect = Exception("WB API rate limited (429)")
 
-        await enrich_fbo_supplies(db_session, 7777, mock_client, max_calls=5)
+        await enrich_fbo_supplies(db_session, project.id, mock_client, max_calls=5)
 
         assert mock_client.get_fbw_supply_goods.called
 

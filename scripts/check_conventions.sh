@@ -367,6 +367,28 @@ if [ -d frontend-react/src/lib/api ]; then
 fi
 echo ""
 
+# ─── 21. Hardcoded project id in test INSERT (projects_id_seq collision) ─
+# Incident 2026-05-18: tests doing `INSERT INTO projects (id, ...) VALUES (<fixed>)`
+# plant a landmine — projects_id_seq on the long-lived local dev DB eventually
+# climbs to that id and every auto-id INSERT then collides with projects_pkey.
+# Use the sequence-allocated `project` / `other_project` fixtures from conftest.
+# Whitelist a file with a `# allow-fixed-project-id: <reason>` comment.
+echo "── Check 21: hardcoded project id in test INSERT (use project fixture) ──"
+FOUND=""
+while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    grep -q "# allow-fixed-project-id" "$file" 2>/dev/null && continue
+    HITS=$(grep -n -E "INSERT INTO projects ?\(id" "$file" 2>/dev/null || true)
+    [ -n "$HITS" ] && FOUND="$FOUND$file:"$'\n'"$HITS"$'\n'
+done < <(grep -rlE "INSERT INTO projects ?\(id" tests/ --include="*.py" 2>/dev/null || true)
+if [ -n "$FOUND" ]; then
+    error "INSERT INTO projects (id, ...) in tests — hardcoded id collides with projects_id_seq on the dev DB. Use conftest 'project'/'other_project' fixtures."
+    echo "$FOUND"
+else
+    ok "No hardcoded project ids in test INSERTs"
+fi
+echo ""
+
 # ─── Summary ─────────────────────────────────────────────────────────
 echo "═══════════════════════════════════════════════════════"
 if [ "$ERRORS" -gt 0 ]; then

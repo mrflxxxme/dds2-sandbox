@@ -27,8 +27,12 @@ from backend.schemas.assembly_draft import (
 )
 from backend.services import assembly_draft_service
 
-PROJECT_ID = 77711
-OTHER_PROJECT_ID = 77712
+# PROJECT_ID / OTHER_PROJECT_ID are assigned per-test by the `setup_test_data`
+# fixture from conftest's sequence-allocated `project` / `other_project`. Never
+# hardcode a project id: a fixed value is a landmine — projects_id_seq on the
+# local dev DB eventually climbs to it and auto-id INSERTs collide on projects_pkey.
+PROJECT_ID = 0
+OTHER_PROJECT_ID = 0
 TEST_BARCODE_1 = "TEST_DRAFT_BC_001"
 TEST_BARCODE_2 = "TEST_DRAFT_BC_002"
 
@@ -37,49 +41,16 @@ TEST_BARCODE_2 = "TEST_DRAFT_BC_002"
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def setup_test_data(db_session):
-    """Clean assembly_drafts and ensure test fixtures exist."""
-    # Clean test projects (in dependency order)
-    for pid in (PROJECT_ID, OTHER_PROJECT_ID):
-        await db_session.execute(
-            text(
-                "DELETE FROM assembly_request_items WHERE assembly_request_id IN "
-                "(SELECT id FROM assembly_requests WHERE project_id = :pid)"
-            ),
-            {"pid": pid},
-        )
-        await db_session.execute(text("DELETE FROM assembly_status_history WHERE project_id = :pid"), {"pid": pid})
-        await db_session.execute(text("DELETE FROM assembly_requests WHERE project_id = :pid"), {"pid": pid})
-        await db_session.execute(text("DELETE FROM assembly_drafts WHERE project_id = :pid"), {"pid": pid})
-    await db_session.commit()
+async def setup_test_data(db_session, project, other_project):
+    """Allocate fresh projects and seed assembly-draft test fixtures.
 
-    # Ensure projects exist
-    for pid, name, slug in (
-        (PROJECT_ID, "Draft Test Project", "draft-test"),
-        (OTHER_PROJECT_ID, "Draft Other Project", "draft-other"),
-    ):
-        result = await db_session.execute(text("SELECT id FROM projects WHERE id = :pid"), {"pid": pid})
-        if result.scalar() is None:
-            user_q = await db_session.execute(text("SELECT id FROM users WHERE username = 'draft_test_user'"))
-            user_id = user_q.scalar()
-            if user_id is None:
-                await db_session.execute(
-                    text(
-                        "INSERT INTO users (username, email, password_hash, is_active, created_at) "
-                        "VALUES (:u, :e, :p, true, NOW())"
-                    ),
-                    {"u": "draft_test_user", "e": "draft_test@test.com", "p": "nohash"},
-                )
-                user_q = await db_session.execute(text("SELECT id FROM users WHERE username = 'draft_test_user'"))
-                user_id = user_q.scalar()
-            await db_session.execute(
-                text(
-                    "INSERT INTO projects (id, name, slug, owner_id, created_at) "
-                    "VALUES (:pid, :n, :s, :o, NOW()) ON CONFLICT (id) DO NOTHING"
-                ),
-                {"pid": pid, "n": name, "s": slug, "o": user_id},
-            )
-    await db_session.commit()
+    `project` / `other_project` (conftest) have sequence-allocated ids — no
+    hardcoded project id to collide with projects_id_seq as it climbs on the
+    local dev DB. Each test gets clean projects, so no cross-test cleanup needed.
+    """
+    global PROJECT_ID, OTHER_PROJECT_ID
+    PROJECT_ID = project.id
+    OTHER_PROJECT_ID = other_project.id
 
     # Ensure FULFILLMENT warehouses for PROJECT_ID (we need at least 2 sources for matrix tests)
     for slot in ("Source FF A", "Source FF B"):
