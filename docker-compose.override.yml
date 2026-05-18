@@ -12,6 +12,7 @@ services:
       - ./backend:/app/backend
       - ./migrations:/app/migrations
       - ./alembic.ini:/app/alembic.ini
+      - ./pytest.ini:/app/pytest.ini
       - ./tests:/app/tests
       - ./scripts:/app/scripts
     environment:
