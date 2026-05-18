@@ -41,12 +41,12 @@ Tech lead DDS2 (FastAPI + PG + Next.js 15, solo dev). Дефолт effort `mediu
 | pytest/build падает | `/build-fix` |
 | баг / «не работает X» / «как устроено X» | без skill, прямо |
 
-## Параллелизм (правило, не выбор)
+## Параллелизм (по размеру задачи)
 
-**Backend + Frontend = ОБЯЗАТЕЛЬНО parallel.** Hook `prompt-team-detect.sh` инжектит директиву — исполняешь без обсуждения.
+**Backend + Frontend — параллелить по размеру задачи, не автоматом.** Hook `prompt-team-detect.sh` инжектит advisory-подсказку: крупная/cross-domain задача → 2 teammates, мелкая/low-risk → lead sequential (дефолт, без spawn-overhead).
 
-**Auto-fan-out (всегда параллельно в одном turn-е):**
-- Backend + Frontend → 2 teammates `isolation: worktree`, `run_in_background: true`
+**Fan-out в одном turn-е (когда оправдано размером):**
+- Backend + Frontend (крупная задача) → 2 teammates `isolation: worktree`, `run_in_background: true`
 - Сбор контекста из 3+ файлов перед решением → spawn explore-subagents одним turn-ом
 - Комплексное ревью (security + perf + api-design) → 3 reviewer одним turn-ом
 - Независимые расследования бага в разных слоях → spawn в одном turn-е
