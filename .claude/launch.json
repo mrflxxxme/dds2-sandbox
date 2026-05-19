@@ -3,30 +3,9 @@
   "configurations": [
     {
       "name": "frontend",
-      "runtimeExecutable": "docker",
-      "runtimeArgs": ["compose", "up", "frontend-react"],
-      "port": 3000,
-      "autoPort": false
-    },
-    {
-      "name": "frontend-dev",
       "runtimeExecutable": "sh",
-      "runtimeArgs": ["-c", "cd frontend-react && BACKEND_URL=http://localhost:8000 npm run dev"],
-      "port": 3000,
-      "autoPort": false
-    },
-    {
-      "name": "frontend-dev-preview",
-      "runtimeExecutable": "sh",
-      "runtimeArgs": ["-c", "cd frontend-react && BACKEND_URL=http://localhost:8000 npm run dev -- -p 3001"],
-      "port": 3001,
-      "autoPort": false
-    },
-    {
-      "name": "backend",
-      "runtimeExecutable": "docker",
-      "runtimeArgs": ["compose", "up", "backend"],
-      "port": 8000
+      "runtimeArgs": ["-c", "while true; do sleep 60; done"],
+      "port": 3000
     }
   ]
 }

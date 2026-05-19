@@ -2955,6 +2955,29 @@ export interface BoxMultiplicityBulkResponse {
   matched_count: number;      // how many barcodes matched (some may have had no diff)
 }
 
+// Drill-down: история снабжения одного SKU (второй уровень под артикулом).
+export interface BoxMultiplicitySourceRow {
+  source_type: 'vehicle' | 'factory';     // машина либо заказ на фабрику
+  order_no: string;                        // № машины / № заказа
+  factory_order_item_id: number | null;    // id строки заказа (для PATCH override)
+  warehouse_name: string | null;           // ФФ-склад назначения (только vehicle)
+  qty: number;
+  box_qty: number | null;                  // эффективная кратность (override ?? из заказа)
+  box_size: string | null;                 // размер коробки
+  date: string | null;                     // ISO-date — прибытие машины / дата заказа
+  status: string | null;                   // статус машины (DELIVERED и т.д.)
+  editable: boolean;                        // true только для factory-строк
+  is_overridden: boolean;                   // box_qty взят из box_qty_per_order
+}
+
+export interface BoxMultiplicitySourcesResponse {
+  items: BoxMultiplicitySourceRow[];
+}
+
+export interface BoxMultiplicityOrderPatch {
+  box_qty: number | null;                   // null = сбросить override
+}
+
 // ─── Warehouse Speed Priority (WB delivery speed map) ────────────────────────
 // Endpoints: /api/v1/warehouse/speed/*
 // UI: (main)/p/[slug]/warehouse/speed/page.tsx

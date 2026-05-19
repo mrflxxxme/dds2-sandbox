@@ -52,9 +52,9 @@ check_list() {
     local actual_list="$3" # newline separated
 
     local doc_sorted
-    doc_sorted=$(echo "$doc_list" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -v '^$' | sort)
+    doc_sorted=$(echo "$doc_list" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -v '^$' | sort || true)
     local actual_sorted
-    actual_sorted=$(echo "$actual_list" | grep -v '^$' | sort)
+    actual_sorted=$(echo "$actual_list" | grep -v '^$' | sort || true)
 
     local only_in_docs
     only_in_docs=$(comm -23 <(echo "$doc_sorted") <(echo "$actual_sorted") || true)
@@ -115,7 +115,7 @@ echo ""
 echo "── Check 3: Frontend main pages ──"
 PAGES_DIR='frontend-react/src/app/(main)/p/[slug]'
 ACTUAL_PAGES=$(ls -1 "$PAGES_DIR" 2>/dev/null | grep -v '\.tsx$' | sort)
-ACTUAL_PAGES_COUNT=$(echo "$ACTUAL_PAGES" | grep -c . || echo 0)
+ACTUAL_PAGES_COUNT=$(echo "$ACTUAL_PAGES" | grep -c . || true)
 
 DOC_PAGES_COUNT=$(grep -oE '[0-9]+ страниц' "$CLAUDE_MD" | head -1 | grep -oE '[0-9]+' || echo "")
 check_count "Frontend pages" "$DOC_PAGES_COUNT" "$ACTUAL_PAGES_COUNT"
@@ -137,7 +137,7 @@ ACTUAL_TMA_COUNT=$(echo "$ACTUAL_TMA" | grep -c . || echo 0)
 DOC_TMA_LINE=$(grep "tma.*slug" "$CLAUDE_MD" | head -1 || echo "")
 if [ -n "$DOC_TMA_LINE" ]; then
     DOC_TMA=$(echo "$DOC_TMA_LINE" | sed 's/.*(\(.*\)).*/\1/' | tr ',' '\n' | sed 's/^ *//;s/ *$//' | sort)
-    DOC_TMA_COUNT=$(echo "$DOC_TMA" | grep -c . || echo 0)
+    DOC_TMA_COUNT=$(echo "$DOC_TMA" | grep -c . || true)
     check_count "TMA pages" "$DOC_TMA_COUNT" "$ACTUAL_TMA_COUNT"
     check_list "TMA pages list" "$(echo "$DOC_TMA" | tr '\n' ',')" "$ACTUAL_TMA"
 fi

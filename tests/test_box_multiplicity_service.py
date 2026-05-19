@@ -1,4 +1,3 @@
-# ruff: noqa: RUF001, RUF002, RUF003
 """Tests for box_multiplicity_service — per-SKU effective ppb resolution."""
 
 import uuid
@@ -17,9 +16,11 @@ from backend.models.warehouse import Warehouse, WarehouseType
 from backend.services.box_multiplicity_service import (
     bulk_update_by_barcode,
     get_box_multiplicity_table,
+    get_sku_box_sources,
     resolve_effective_ppb_for_assembly,
     set_box_qty_override,
     update_box_multiplicity,
+    update_order_box_qty,
     update_per_warehouse,
 )
 
@@ -59,12 +60,16 @@ async def _create_foi(
     pcs_per_box: int | None = None,
     mix_pcs_per_box: int | None = None,
     mix_group_id: str | None = None,
+    order_date: date | None = None,
+    box_size: str | None = None,
+    mix_box_size: str | None = None,
 ) -> FactoryOrderItem:
     fo = FactoryOrder(
         project_id=project_id,
         order_number=f"FO-{_uid()}",
         factory_name="TestFactory",
         status="FORMING",
+        order_date=order_date,
     )
     db.add(fo)
     await db.flush()
@@ -77,6 +82,8 @@ async def _create_foi(
         pcs_per_box=pcs_per_box,
         mix_pcs_per_box=mix_pcs_per_box,
         mix_group_id=mix_group_id,
+        box_size=box_size,
+        mix_box_size=mix_box_size,
     )
     db.add(foi)
     await db.commit()
@@ -92,6 +99,7 @@ async def _create_vehicle_with_item(
     arrival_date: date | None = None,
     pcs_per_box_override: int | None = None,
     factory_order_item_id: int | None = None,
+    target_warehouse_id: int | None = None,
 ) -> CostOrderItem:
     order_no = f"V-{_uid()}"
     co = CostOrder(
@@ -99,6 +107,7 @@ async def _create_vehicle_with_item(
         order_no=order_no,
         status=status,
         actual_arrival_date=arrival_date,
+        target_warehouse_id=target_warehouse_id,
         delivery_cost_cny=Decimal("0"),
         delivery_cost_usd=Decimal("0"),
         delivery_cost_rub=Decimal("0"),
@@ -838,3 +847,139 @@ class TestVehicleQtyWeightedMode:
         rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=60001)
         assert rows[0]["box_qty_from_vehicle"] == 10  # mode (qty-weighted)
         assert rows[0]["box_qty_from_vehicle_alts"] == [12]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# get_sku_box_sources (drill-down: история снабжения SKU)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGetSkuBoxSources:
+    @pytest.mark.asyncio
+    async def test_empty_no_sources(self, db_session: AsyncSession, project):
+        rows = await get_sku_box_sources(db_session, project.id, f"BC-NONE-{_uid()}")
+        assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_factory_row(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        foi = await _create_foi(
+            db_session,
+            project.id,
+            barcode=bc,
+            pcs_per_box=10,
+            box_size="40x30x20",
+            order_date=date(2026, 3, 1),
+        )
+
+        rows = await get_sku_box_sources(db_session, project.id, bc)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["source_type"] == "factory"
+        assert row["factory_order_item_id"] == foi.id
+        assert row["box_qty"] == 10
+        assert row["box_size"] == "40x30x20"
+        assert row["date"] == "2026-03-01"
+        assert row["editable"] is True
+        assert row["is_overridden"] is False
+
+    @pytest.mark.asyncio
+    async def test_vehicle_row_with_warehouse(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await _create_vehicle_with_item(
+            db_session,
+            project.id,
+            barcode=bc,
+            arrival_date=date(2026, 4, 1),
+            pcs_per_box_override=12,
+            target_warehouse_id=wh.id,
+        )
+
+        rows = await get_sku_box_sources(db_session, project.id, bc)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["source_type"] == "vehicle"
+        assert row["factory_order_item_id"] is None
+        assert row["warehouse_name"] == wh.name
+        assert row["box_qty"] == 12
+        assert row["editable"] is False
+
+    @pytest.mark.asyncio
+    async def test_override_marks_factory_row(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        foi = await _create_foi(db_session, project.id, barcode=bc, pcs_per_box=10)
+        await update_order_box_qty(db_session, project.id, foi.id, 24)
+
+        rows = await get_sku_box_sources(db_session, project.id, bc)
+        factory = next(r for r in rows if r["source_type"] == "factory")
+        assert factory["box_qty"] == 24
+        assert factory["is_overridden"] is True
+
+    @pytest.mark.asyncio
+    async def test_other_project_isolation(
+        self,
+        db_session: AsyncSession,
+        project,
+        other_project,
+    ):
+        """История снабжения SKU из чужого проекта не должна попадать в выборку."""
+        bc = f"BC-SHARED-{_uid()}"
+        await _create_foi(db_session, other_project.id, barcode=bc, pcs_per_box=10)
+
+        rows = await get_sku_box_sources(db_session, project.id, bc)
+        assert rows == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# update_order_box_qty (per-order override кратности)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestUpdateOrderBoxQty:
+    @pytest.mark.asyncio
+    async def test_set_override_returns_barcode(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        foi = await _create_foi(db_session, project.id, barcode=bc, pcs_per_box=10)
+
+        result = await update_order_box_qty(db_session, project.id, foi.id, 24)
+        assert result == bc
+
+        rows = await get_sku_box_sources(db_session, project.id, bc)
+        assert rows[0]["box_qty"] == 24
+        assert rows[0]["is_overridden"] is True
+
+    @pytest.mark.asyncio
+    async def test_clear_override_falls_back_to_foi(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        foi = await _create_foi(db_session, project.id, barcode=bc, pcs_per_box=10)
+        await update_order_box_qty(db_session, project.id, foi.id, 24)
+
+        result = await update_order_box_qty(db_session, project.id, foi.id, None)
+        assert result == bc
+
+        rows = await get_sku_box_sources(db_session, project.id, bc)
+        assert rows[0]["box_qty"] == 10  # fallback to FactoryOrderItem.pcs_per_box
+        assert rows[0]["is_overridden"] is False
+
+    @pytest.mark.asyncio
+    async def test_unknown_foi_returns_none(self, db_session: AsyncSession, project):
+        result = await update_order_box_qty(db_session, project.id, 99999999, 10)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_other_project_isolation(
+        self,
+        db_session: AsyncSession,
+        project,
+        other_project,
+    ):
+        """FOI чужого проекта недоступен для override через наш project_id."""
+        bc = f"BC-{_uid()}"
+        foi = await _create_foi(db_session, other_project.id, barcode=bc, pcs_per_box=10)
+
+        result = await update_order_box_qty(db_session, project.id, foi.id, 50)
+        assert result is None
+
+        rows = await get_sku_box_sources(db_session, other_project.id, bc)
+        assert rows[0]["is_overridden"] is False
