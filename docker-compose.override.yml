@@ -20,6 +20,14 @@ services:
       DDS_ROLE: api
     ports:
       - "8000:8000"
+    # Тесты гоняются внутри backend-контейнера (pytest -n 2 в pre-push) рядом
+    # с живым uvicorn. 1024M из docker-compose.yml не хватает на 3 процесса →
+    # контейнер OOM-кил/exit 137. 2G даёт запас. Только локально — прод на
+    # docker-compose.prod.yml этот файл не подхватывает.
+    deploy:
+      resources:
+        limits:
+          memory: 2G
 
   worker:
     volumes:
