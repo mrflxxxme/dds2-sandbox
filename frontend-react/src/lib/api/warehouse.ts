@@ -14,7 +14,7 @@ import type {
     AssemblyRequestUpdate,
     BoxMultiplicityBulkRequest,
     BoxMultiplicityBulkResponse,
-    BoxMultiplicityOrderPatch,
+    BoxMultiplicityChangesResponse,
     BoxMultiplicityPatch,
     BoxMultiplicityPerWarehousePatch,
     BoxMultiplicityResponse,
@@ -446,7 +446,7 @@ export function addWarehouseMethods(api: ApiClient) {
                 { items } satisfies BoxMultiplicityBulkRequest,
             );
         },
-        /** Per-RF override: создаёт строку если её нет. URL-encode barcode на случай чужих символов. */
+        /** Per-ФФ override кратности/флага. Может вернуть 409 если ФФ машинно-заблокирован. */
         patchPerWarehouseBoxMultiplicity(
             barcode: string, warehouseId: number, patch: BoxMultiplicityPerWarehousePatch,
         ) {
@@ -456,19 +456,26 @@ export function addWarehouseMethods(api: ApiClient) {
                 patch,
             );
         },
-        /** Drill-down: вся история снабжения SKU — машины + заказы на фабрику. */
+        /** Drill-down: вся история снабжения SKU — машины + заказы на фабрику (read-only). */
         getBoxMultiplicitySources(barcode: string) {
             return api.request<BoxMultiplicitySourcesResponse>(
                 'GET',
                 `/api/v1/warehouse/box-multiplicity/sources/${encodeURIComponent(barcode)}`,
             );
         },
-        /** Override кратности у строки заказа на фабрику. boxQty=null — сброс. */
-        patchOrderBoxMultiplicity(factoryOrderItemId: number, boxQty: number | null) {
+        /** Drill-down: история изменений кратности/размера SKU (SKU- и per-ФФ-уровень). */
+        getBoxMultiplicityChanges(barcode: string) {
+            return api.request<BoxMultiplicityChangesResponse>(
+                'GET',
+                `/api/v1/warehouse/box-multiplicity/changes/${encodeURIComponent(barcode)}`,
+            );
+        },
+        /** Откат одного изменения. Возвращает обновлённую строку SKU; 409 если откат заблокирован машиной. */
+        revertBoxMultiplicityChange(changeId: number) {
             return api.request<BoxMultiplicityRow>(
-                'PATCH',
-                `/api/v1/warehouse/box-multiplicity/order/${factoryOrderItemId}`,
-                { box_qty: boxQty } satisfies BoxMultiplicityOrderPatch,
+                'POST',
+                `/api/v1/warehouse/box-multiplicity/changes/${changeId}/revert`,
+                {},
             );
         },
     };

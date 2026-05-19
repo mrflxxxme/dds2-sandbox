@@ -1,4 +1,8 @@
-"""Tests for box_multiplicity_service — per-SKU effective ppb resolution."""
+"""Tests for box_multiplicity_service — per-(SKU, ФФ-склад) кратность коробки.
+
+Кратность резолвится из ACCEPTED-приёмок машин-поставок. Цепочка:
+  machine → manual per-ФФ → SKU-дефолт → none.
+"""
 
 import uuid
 from datetime import date
@@ -9,24 +13,40 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import CostOrderItem
-from backend.models.cost import CostOrder, Nomenclature
+from backend.models.cost import (
+    BoxMultiplicityChangeLog,
+    BoxQtyPerWarehouse,
+    CostOrder,
+    Nomenclature,
+)
 from backend.models.enums import VehicleStatus
 from backend.models.supply_chain import FactoryOrder, FactoryOrderItem
-from backend.models.warehouse import Warehouse, WarehouseType
+from backend.models.warehouse import (
+    InboundReceipt,
+    InboundReceiptItem,
+    InboundStatus,
+    Warehouse,
+    WarehouseType,
+)
 from backend.services.box_multiplicity_service import (
     bulk_update_by_barcode,
     get_box_multiplicity_table,
+    get_change_log,
     get_sku_box_sources,
+    has_machine_box_qty,
     resolve_effective_ppb_for_assembly,
+    revert_change,
     set_box_qty_override,
     update_box_multiplicity,
-    update_order_box_qty,
     update_per_warehouse,
 )
 
 
 def _uid() -> str:
     return uuid.uuid4().hex[:8]
+
+
+# ─── builders ────────────────────────────────────────────────────────────────
 
 
 async def _create_nomenclature(
@@ -50,6 +70,18 @@ async def _create_nomenclature(
     db.add(nom)
     await db.commit()
     return nom
+
+
+async def _create_rf_warehouse(db: AsyncSession, project_id: int, name: str) -> Warehouse:
+    wh = Warehouse(
+        project_id=project_id,
+        name=name,
+        warehouse_type=WarehouseType.FULFILLMENT,
+        is_active=True,
+    )
+    db.add(wh)
+    await db.commit()
+    return wh
 
 
 async def _create_foi(
@@ -90,21 +122,17 @@ async def _create_foi(
     return foi
 
 
-async def _create_vehicle_with_item(
+async def _create_vehicle(
     db: AsyncSession,
     project_id: int,
     *,
-    barcode: str,
     status: VehicleStatus = VehicleStatus.DELIVERED,
     arrival_date: date | None = None,
-    pcs_per_box_override: int | None = None,
-    factory_order_item_id: int | None = None,
     target_warehouse_id: int | None = None,
-) -> CostOrderItem:
-    order_no = f"V-{_uid()}"
+) -> CostOrder:
     co = CostOrder(
         project_id=project_id,
-        order_no=order_no,
+        order_no=f"V-{_uid()}",
         status=status,
         actual_arrival_date=arrival_date,
         target_warehouse_id=target_warehouse_id,
@@ -117,22 +145,115 @@ async def _create_vehicle_with_item(
     )
     db.add(co)
     await db.flush()
+    return co
+
+
+async def _add_vehicle_item(
+    db: AsyncSession,
+    project_id: int,
+    order_no: str,
+    *,
+    barcode: str,
+    qty: int = 10,
+    pcs_per_box_override: int | None = None,
+    box_size_override: str | None = None,
+    factory_order_item_id: int | None = None,
+) -> CostOrderItem:
     coi = CostOrderItem(
         project_id=project_id,
         order_no=order_no,
         barcode=barcode,
-        qty=10,
+        qty=qty,
         price_cny=Decimal("10"),
         pcs_per_box_override=pcs_per_box_override,
+        box_size_override=box_size_override,
         factory_order_item_id=factory_order_item_id,
     )
     db.add(coi)
-    await db.commit()
     return coi
 
 
+async def _create_receipt(
+    db: AsyncSession,
+    project_id: int,
+    *,
+    warehouse_id: int,
+    cost_order_id: int | None,
+    status: InboundStatus = InboundStatus.ACCEPTED,
+    actual_date: date | None = None,
+    items: list[tuple[int, str, int]] | None = None,  # (nom_id, barcode, actual_qty)
+) -> InboundReceipt:
+    receipt = InboundReceipt(
+        project_id=project_id,
+        warehouse_id=warehouse_id,
+        number=f"IN-{_uid()}",
+        status=status.value,
+        actual_date=actual_date,
+        cost_order_id=cost_order_id,
+    )
+    db.add(receipt)
+    await db.flush()
+    for nom_id, barcode, actual_qty in items or []:
+        db.add(
+            InboundReceiptItem(
+                project_id=project_id,
+                receipt_id=receipt.id,
+                nomenclature_id=nom_id,
+                barcode=barcode,
+                expected_qty=actual_qty,
+                actual_qty=actual_qty,
+            )
+        )
+    await db.commit()
+    return receipt
+
+
+async def _machine_into_ff(
+    db: AsyncSession,
+    project_id: int,
+    *,
+    nom: Nomenclature,
+    warehouse_id: int,
+    ppb_lines: list[tuple[int, int]],  # list of (qty, pcs_per_box_override)
+    status: InboundStatus = InboundStatus.ACCEPTED,
+    arrival_date: date | None = None,
+    box_size_override: str | None = None,
+) -> CostOrder:
+    """Создаёт машину с позициями + приёмку на ФФ-склад.
+
+    Возвращает CostOrder.
+    """
+    co = await _create_vehicle(db, project_id, arrival_date=arrival_date)
+    for qty, ppb in ppb_lines:
+        await _add_vehicle_item(
+            db,
+            project_id,
+            co.order_no,
+            barcode=nom.barcode,
+            qty=qty,
+            pcs_per_box_override=ppb,
+            box_size_override=box_size_override,
+        )
+    await db.flush()
+    await _create_receipt(
+        db,
+        project_id,
+        warehouse_id=warehouse_id,
+        cost_order_id=co.id,
+        status=status,
+        actual_date=arrival_date,
+        items=[(nom.id, nom.barcode, sum(q for q, _ in ppb_lines))],
+    )
+    return co
+
+
+def _pw(row: dict) -> dict[int, dict]:
+    """per_warehouse list → {warehouse_id: row}."""
+    return {p["warehouse_id"]: p for p in row["per_warehouse"]}
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
-# get_box_multiplicity_table
+# get_box_multiplicity_table — резолв кратности
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -143,172 +264,221 @@ class TestGetBoxMultiplicityTable:
         assert rows == []
 
     @pytest.mark.asyncio
-    async def test_sku_no_box_data(self, db_session: AsyncSession, project):
+    async def test_sku_no_box_data_source_none(self, db_session: AsyncSession, project):
         await _create_nomenclature(
-            db_session,
-            project.id,
-            barcode=f"BC-{_uid()}",
-            article_seller="ART-1",
-            article_wb=10001,
+            db_session, project.id, barcode=f"BC-{_uid()}", article_seller="ART-1", article_wb=10001
         )
-        rows = await get_box_multiplicity_table(db_session, project.id)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10001)
         assert len(rows) == 1
-        assert rows[0]["nm_id"] == 10001
         assert rows[0]["box_qty_override"] is None
-        assert rows[0]["box_qty_from_vehicle"] is None
-        assert rows[0]["box_qty_from_factory"] is None
-        assert rows[0]["effective_box_qty"] is None
+        assert rows[0]["has_machine_data"] is False
+        pw = _pw(rows[0])
+        assert pw[wh.id]["box_qty"] is None
+        assert pw[wh.id]["source"] == "none"
+        assert pw[wh.id]["editable"] is True
 
     @pytest.mark.asyncio
-    async def test_factory_only_fallback(self, db_session: AsyncSession, project):
+    async def test_sku_default_from_override(self, db_session: AsyncSession, project):
+        """SKU-уровневый box_qty_override → source='default', editable=True."""
         bc = f"BC-{_uid()}"
         await _create_nomenclature(
-            db_session,
-            project.id,
-            barcode=bc,
-            article_seller="ART-2",
-            article_wb=10002,
+            db_session, project.id, barcode=bc, article_seller="ART-2", article_wb=10002, box_qty_override=8
         )
-        await _create_foi(db_session, project.id, barcode=bc, pcs_per_box=10)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
 
         rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10002)
-        assert rows[0]["box_qty_from_factory"] == 10
-        assert rows[0]["box_qty_from_vehicle"] is None
-        assert rows[0]["effective_box_qty"] == 10
+        pw = _pw(rows[0])
+        assert pw[wh.id]["box_qty"] == 8
+        assert pw[wh.id]["source"] == "default"
+        assert pw[wh.id]["editable"] is True
 
     @pytest.mark.asyncio
-    async def test_vehicle_inherits_foi_when_no_override(self, db_session: AsyncSession, project):
-        """DELIVERED vehicle с factory_order_item_id, но без pcs_per_box_override
-        → from_vehicle берёт ppb из FOI."""
+    async def test_manual_per_ff_beats_default(self, db_session: AsyncSession, project):
+        """Ручная per-ФФ кратность побеждает SKU-дефолт."""
         bc = f"BC-{_uid()}"
-        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="ART-3", article_wb=10003)
-        foi = await _create_foi(db_session, project.id, barcode=bc, pcs_per_box=15)
-        await _create_vehicle_with_item(
-            db_session,
-            project.id,
-            barcode=bc,
-            arrival_date=date(2026, 1, 10),
-            pcs_per_box_override=None,
-            factory_order_item_id=foi.id,
+        await _create_nomenclature(
+            db_session, project.id, barcode=bc, article_seller="ART-3", article_wb=10003, box_qty_override=8
         )
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await update_per_warehouse(db_session, project.id, bc, wh.id, box_qty=20)
 
         rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10003)
-        assert rows[0]["box_qty_from_vehicle"] == 15
-        assert rows[0]["box_qty_from_factory"] == 15
-        assert rows[0]["effective_box_qty"] == 15
+        pw = _pw(rows[0])
+        assert pw[wh.id]["box_qty"] == 20
+        assert pw[wh.id]["source"] == "manual"
+        assert pw[wh.id]["editable"] is True
 
     @pytest.mark.asyncio
-    async def test_vehicle_override_beats_foi(self, db_session: AsyncSession, project):
+    async def test_machine_resolves_box_qty(self, db_session: AsyncSession, project):
+        """ACCEPTED-приёмка машины на ФФ → source='machine', editable=False."""
         bc = f"BC-{_uid()}"
-        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="ART-4", article_wb=10004)
-        foi = await _create_foi(db_session, project.id, barcode=bc, pcs_per_box=10)
-        await _create_vehicle_with_item(
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="ART-4", article_wb=10004)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        co = await _machine_into_ff(
             db_session,
             project.id,
-            barcode=bc,
-            arrival_date=date(2026, 1, 10),
-            pcs_per_box_override=20,
-            factory_order_item_id=foi.id,
+            nom=nom,
+            warehouse_id=wh.id,
+            ppb_lines=[(50, 12)],
+            arrival_date=date(2026, 5, 1),
         )
 
         rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10004)
-        assert rows[0]["box_qty_from_vehicle"] == 20
-        assert rows[0]["effective_box_qty"] == 20
+        assert rows[0]["has_machine_data"] is True
+        pw = _pw(rows[0])
+        assert pw[wh.id]["box_qty"] == 12
+        assert pw[wh.id]["source"] == "machine"
+        assert pw[wh.id]["editable"] is False
+        assert pw[wh.id]["machine_order_no"] == co.order_no
+        assert pw[wh.id]["machine_received_at"] == "2026-05-01"
 
     @pytest.mark.asyncio
-    async def test_manual_override_top_priority(self, db_session: AsyncSession, project):
+    async def test_machine_beats_manual_and_default(self, db_session: AsyncSession, project):
+        """Машина побеждает и ручную per-ФФ, и SKU-дефолт."""
         bc = f"BC-{_uid()}"
-        await _create_nomenclature(
-            db_session,
-            project.id,
-            barcode=bc,
-            article_seller="ART-5",
-            article_wb=10005,
-            box_qty_override=99,
+        nom = await _create_nomenclature(
+            db_session, project.id, barcode=bc, article_seller="ART-5", article_wb=10005, box_qty_override=99
         )
-        foi = await _create_foi(db_session, project.id, barcode=bc, pcs_per_box=10)
-        await _create_vehicle_with_item(
-            db_session,
-            project.id,
-            barcode=bc,
-            arrival_date=date(2026, 1, 10),
-            pcs_per_box_override=20,
-            factory_order_item_id=foi.id,
-        )
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await update_per_warehouse(db_session, project.id, bc, wh.id, box_qty=77)
+        await _machine_into_ff(db_session, project.id, nom=nom, warehouse_id=wh.id, ppb_lines=[(30, 15)])
 
         rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10005)
-        assert rows[0]["box_qty_override"] == 99
-        assert rows[0]["box_qty_from_vehicle"] == 20
-        assert rows[0]["box_qty_from_factory"] == 10
-        assert rows[0]["effective_box_qty"] == 99
+        pw = _pw(rows[0])
+        assert pw[wh.id]["box_qty"] == 15
+        assert pw[wh.id]["source"] == "machine"
 
     @pytest.mark.asyncio
-    async def test_latest_delivered_vehicle_wins(self, db_session: AsyncSession, project):
+    async def test_per_ff_resolution_differs_by_warehouse(self, db_session: AsyncSession, project):
+        """Разные машины приняты на разные ФФ → per-ФФ кратность различается."""
         bc = f"BC-{_uid()}"
-        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="ART-6", article_wb=10006)
-        foi = await _create_foi(db_session, project.id, barcode=bc, pcs_per_box=10)
-        # Old vehicle ppb=20, newer ppb=30. Newer must win.
-        await _create_vehicle_with_item(
-            db_session,
-            project.id,
-            barcode=bc,
-            arrival_date=date(2026, 1, 1),
-            pcs_per_box_override=20,
-            factory_order_item_id=foi.id,
+        nom = await _create_nomenclature(
+            db_session, project.id, barcode=bc, article_seller="ART-6", article_wb=10006, box_qty_override=5
         )
-        await _create_vehicle_with_item(
-            db_session,
-            project.id,
-            barcode=bc,
-            arrival_date=date(2026, 2, 1),
-            pcs_per_box_override=30,
-            factory_order_item_id=foi.id,
-        )
+        wh1 = await _create_rf_warehouse(db_session, project.id, f"RF1-{_uid()}")
+        wh2 = await _create_rf_warehouse(db_session, project.id, f"RF2-{_uid()}")
+        # Машина с ppb=10 принята на wh1; машина с ppb=20 — на wh2.
+        await _machine_into_ff(db_session, project.id, nom=nom, warehouse_id=wh1.id, ppb_lines=[(40, 10)])
+        await _machine_into_ff(db_session, project.id, nom=nom, warehouse_id=wh2.id, ppb_lines=[(40, 20)])
 
         rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10006)
-        assert rows[0]["box_qty_from_vehicle"] == 30
+        pw = _pw(rows[0])
+        assert pw[wh1.id]["box_qty"] == 10 and pw[wh1.id]["source"] == "machine"
+        assert pw[wh2.id]["box_qty"] == 20 and pw[wh2.id]["source"] == "machine"
 
     @pytest.mark.asyncio
-    async def test_non_delivered_vehicle_ignored(self, db_session: AsyncSession, project):
-        """Машина в IN_TRANSIT не должна давать ppb — только DELIVERED."""
+    async def test_latest_accepted_receipt_wins(self, db_session: AsyncSession, project):
+        """Для пары (barcode, ФФ) берётся приёмка с max (actual_date, id)."""
         bc = f"BC-{_uid()}"
-        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="ART-7", article_wb=10007)
-        foi = await _create_foi(db_session, project.id, barcode=bc, pcs_per_box=10)
-        await _create_vehicle_with_item(
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="ART-7", article_wb=10007)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await _machine_into_ff(
             db_session,
             project.id,
-            barcode=bc,
-            status=VehicleStatus.SHIPPED,
-            arrival_date=None,
-            pcs_per_box_override=99,
-            factory_order_item_id=foi.id,
+            nom=nom,
+            warehouse_id=wh.id,
+            ppb_lines=[(40, 10)],
+            arrival_date=date(2026, 1, 1),
+        )
+        await _machine_into_ff(
+            db_session,
+            project.id,
+            nom=nom,
+            warehouse_id=wh.id,
+            ppb_lines=[(40, 30)],
+            arrival_date=date(2026, 3, 1),
         )
 
         rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10007)
-        assert rows[0]["box_qty_from_vehicle"] is None
-        assert rows[0]["box_qty_from_factory"] == 10
-        assert rows[0]["effective_box_qty"] == 10
+        assert _pw(rows[0])[wh.id]["box_qty"] == 30
 
     @pytest.mark.asyncio
-    async def test_mix_ppb_used_when_mix_group_set(self, db_session: AsyncSession, project):
-        """FactoryOrderItem с mix_group_id и mix_pcs_per_box — берём mix-вариант."""
+    async def test_non_accepted_receipt_ignored(self, db_session: AsyncSession, project):
+        """Машина с приёмкой не в статусе ACCEPTED — не учитывается."""
         bc = f"BC-{_uid()}"
-        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="ART-8", article_wb=10008)
-        await _create_foi(
+        nom = await _create_nomenclature(
+            db_session, project.id, barcode=bc, article_seller="ART-8", article_wb=10008, box_qty_override=4
+        )
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await _machine_into_ff(
             db_session,
             project.id,
-            barcode=bc,
-            pcs_per_box=10,
-            mix_pcs_per_box=7,
-            mix_group_id="grp-1",
+            nom=nom,
+            warehouse_id=wh.id,
+            ppb_lines=[(40, 99)],
+            status=InboundStatus.EXPECTED,
         )
 
         rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10008)
-        assert rows[0]["box_qty_from_factory"] == 7
+        pw = _pw(rows[0])
+        assert pw[wh.id]["box_qty"] == 4  # fallback to SKU default
+        assert pw[wh.id]["source"] == "default"
+        assert rows[0]["has_machine_data"] is False
+
+    @pytest.mark.asyncio
+    async def test_receipt_without_cost_order_ignored(self, db_session: AsyncSession, project):
+        """ACCEPTED-приёмка без cost_order_id — не даёт машинной кратности."""
+        bc = f"BC-{_uid()}"
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="ART-9", article_wb=10009)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await _create_receipt(
+            db_session,
+            project.id,
+            warehouse_id=wh.id,
+            cost_order_id=None,
+            status=InboundStatus.ACCEPTED,
+            items=[(nom.id, bc, 30)],
+        )
+
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10009)
+        assert _pw(rows[0])[wh.id]["source"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_qty_weighted_mode_inside_machine(self, db_session: AsyncSession, project):
+        """Несколько строк товара в машине с разной ppb → qty-weighted mode."""
+        bc = f"BC-{_uid()}"
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="ART-10", article_wb=10010)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        # qty=100 при ppb=10, qty=20 при ppb=12 → mode=10.
+        await _machine_into_ff(db_session, project.id, nom=nom, warehouse_id=wh.id, ppb_lines=[(100, 10), (20, 12)])
+
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10010)
+        assert _pw(rows[0])[wh.id]["box_qty"] == 10
+
+    @pytest.mark.asyncio
+    async def test_machine_inherits_foi_ppb(self, db_session: AsyncSession, project):
+        """CostOrderItem без pcs_per_box_override → берёт ppb из FactoryOrderItem."""
+        bc = f"BC-{_uid()}"
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="ART-11", article_wb=10011)
+        foi = await _create_foi(db_session, project.id, barcode=bc, pcs_per_box=18)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        co = await _create_vehicle(db_session, project.id, arrival_date=date(2026, 2, 1))
+        await _add_vehicle_item(
+            db_session,
+            project.id,
+            co.order_no,
+            barcode=bc,
+            qty=40,
+            pcs_per_box_override=None,
+            factory_order_item_id=foi.id,
+        )
+        await db_session.flush()
+        await _create_receipt(
+            db_session,
+            project.id,
+            warehouse_id=wh.id,
+            cost_order_id=co.id,
+            status=InboundStatus.ACCEPTED,
+            items=[(nom.id, bc, 40)],
+        )
+
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10011)
+        assert _pw(rows[0])[wh.id]["box_qty"] == 18
 
     @pytest.mark.asyncio
     async def test_only_skus_with_article_wb_returned(self, db_session: AsyncSession, project):
-        """Nomenclature без article_wb (нет nm_id) не попадает в таблицу."""
         nom = Nomenclature(
             project_id=project.id,
             barcode=f"BC-NOWB-{_uid()}",
@@ -320,24 +490,38 @@ class TestGetBoxMultiplicityTable:
         await db_session.commit()
 
         rows = await get_box_multiplicity_table(db_session, project.id)
-        nm_ids = [r["nm_id"] for r in rows]
-        assert None not in nm_ids
+        assert None not in [r["nm_id"] for r in rows]
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# set_box_qty_override
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestSetBoxQtyOverride:
     @pytest.mark.asyncio
-    async def test_set_value(self, db_session: AsyncSession, project):
+    async def test_project_isolation(self, db_session: AsyncSession, project, other_project):
+        """Машинная приёмка в другом проекте не влияет на наш SKU."""
+        bc = f"BC-SHARED-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=10020)
+        nom_other = await _create_nomenclature(
+            db_session, other_project.id, barcode=bc, article_seller="A", article_wb=10021
+        )
+        wh_other = await _create_rf_warehouse(db_session, other_project.id, f"RF-{_uid()}")
+        await _machine_into_ff(
+            db_session, other_project.id, nom=nom_other, warehouse_id=wh_other.id, ppb_lines=[(40, 50)]
+        )
+
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10020)
+        assert rows[0]["has_machine_data"] is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# update_box_multiplicity / set_box_qty_override (SKU-уровень — всегда разрешён)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestUpdateBoxMultiplicity:
+    @pytest.mark.asyncio
+    async def test_set_box_qty_override(self, db_session: AsyncSession, project):
         bc = f"BC-{_uid()}"
         await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=20001)
 
         ok = await set_box_qty_override(db_session, project.id, 20001, 42)
         assert ok is True
-
         nom = (await db_session.execute(select(Nomenclature).where(Nomenclature.article_wb == 20001))).scalar_one()
         assert nom.box_qty_override == 42
 
@@ -345,51 +529,50 @@ class TestSetBoxQtyOverride:
     async def test_clear_with_none(self, db_session: AsyncSession, project):
         bc = f"BC-{_uid()}"
         await _create_nomenclature(
-            db_session,
-            project.id,
-            barcode=bc,
-            article_seller="A",
-            article_wb=20002,
-            box_qty_override=10,
+            db_session, project.id, barcode=bc, article_seller="A", article_wb=20002, box_qty_override=10
         )
-
         ok = await set_box_qty_override(db_session, project.id, 20002, None)
         assert ok is True
-
         nom = (await db_session.execute(select(Nomenclature).where(Nomenclature.article_wb == 20002))).scalar_one()
         assert nom.box_qty_override is None
 
     @pytest.mark.asyncio
     async def test_unknown_nm_returns_false(self, db_session: AsyncSession, project):
-        ok = await set_box_qty_override(db_session, project.id, 99999999, 10)
-        assert ok is False
+        assert await set_box_qty_override(db_session, project.id, 99999999, 10) is False
 
     @pytest.mark.asyncio
-    async def test_other_project_isolation(
-        self,
-        db_session: AsyncSession,
-        project,
-        other_project,
-    ):
-        """Override в другом проекте не должен затронуть наш SKU."""
-        bc1 = f"BC-{_uid()}"
-        await _create_nomenclature(db_session, project.id, barcode=bc1, article_seller="A", article_wb=20003)
-        bc2 = f"BC-{_uid()}"
+    async def test_toggle_use_flag(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=20003)
+        await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+
+        await update_box_multiplicity(db_session, project.id, 20003, use_box_multiplicity=False)
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=20003)
+        assert rows[0]["use_box_multiplicity"] is False
+
+    @pytest.mark.asyncio
+    async def test_partial_does_not_touch_omitted_field(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
         await _create_nomenclature(
-            db_session,
-            other_project.id,
-            barcode=bc2,
-            article_seller="A",
-            article_wb=20003,
+            db_session, project.id, barcode=bc, article_seller="A", article_wb=20004, box_qty_override=50
         )
+        await update_box_multiplicity(db_session, project.id, 20004, use_box_multiplicity=False)
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=20004)
+        assert rows[0]["box_qty_override"] == 50
+        assert rows[0]["use_box_multiplicity"] is False
 
-        await set_box_qty_override(db_session, project.id, 20003, 100)
-
+    @pytest.mark.asyncio
+    async def test_other_project_isolation(self, db_session: AsyncSession, project, other_project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=20010)
+        await _create_nomenclature(
+            db_session, other_project.id, barcode=f"BC-{_uid()}", article_seller="A", article_wb=20010
+        )
+        await set_box_qty_override(db_session, project.id, 20010, 100)
         other = (
             await db_session.execute(
                 select(Nomenclature).where(
-                    Nomenclature.project_id == other_project.id,
-                    Nomenclature.article_wb == 20003,
+                    Nomenclature.project_id == other_project.id, Nomenclature.article_wb == 20010
                 )
             )
         ).scalar_one()
@@ -397,138 +580,172 @@ class TestSetBoxQtyOverride:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# update_box_multiplicity (partial: ppb + use flag)
+# update_per_warehouse — ручная per-ФФ кратность
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-class TestUpdateBoxMultiplicity:
+class TestPerWarehouse:
     @pytest.mark.asyncio
-    async def test_default_use_flag_is_true(self, db_session: AsyncSession, project):
+    async def test_create_per_ff_row(self, db_session: AsyncSession, project):
         bc = f"BC-{_uid()}"
-        nom = await _create_nomenclature(
-            db_session,
-            project.id,
-            barcode=bc,
-            article_seller="A",
-            article_wb=30001,
-        )
-        assert nom.use_box_multiplicity is True
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=30001)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+
+        assert await update_per_warehouse(db_session, project.id, bc, wh.id, box_qty=15) is True
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=30001)
+        pw = _pw(rows[0])
+        assert pw[wh.id]["box_qty"] == 15
+        assert pw[wh.id]["source"] == "manual"
 
     @pytest.mark.asyncio
-    async def test_toggle_use_flag_off(self, db_session: AsyncSession, project):
+    async def test_update_existing_per_ff_row(self, db_session: AsyncSession, project):
         bc = f"BC-{_uid()}"
-        await _create_nomenclature(
-            db_session,
-            project.id,
-            barcode=bc,
-            article_seller="A",
-            article_wb=30002,
-        )
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=30002)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
 
-        ok = await update_box_multiplicity(
-            db_session,
-            project.id,
-            30002,
-            use_box_multiplicity=False,
-        )
-        assert ok is True
-
+        await update_per_warehouse(db_session, project.id, bc, wh.id, box_qty=10)
+        await update_per_warehouse(db_session, project.id, bc, wh.id, use_box_multiplicity=False)
         rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=30002)
-        assert rows[0]["use_box_multiplicity"] is False
+        pw = _pw(rows[0])
+        assert pw[wh.id]["box_qty"] == 10
+        assert pw[wh.id]["use_box_multiplicity"] is False
 
     @pytest.mark.asyncio
-    async def test_partial_update_does_not_touch_omitted_field(
-        self,
-        db_session: AsyncSession,
-        project,
-    ):
-        """Toggle use=False — box_qty_override должен остаться 50."""
+    async def test_unknown_warehouse_returns_false(self, db_session: AsyncSession, project):
         bc = f"BC-{_uid()}"
-        await _create_nomenclature(
-            db_session,
-            project.id,
-            barcode=bc,
-            article_seller="A",
-            article_wb=30003,
-            box_qty_override=50,
-        )
-
-        await update_box_multiplicity(
-            db_session,
-            project.id,
-            30003,
-            use_box_multiplicity=False,
-        )
-
-        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=30003)
-        assert rows[0]["box_qty_override"] == 50  # not cleared
-        assert rows[0]["use_box_multiplicity"] is False
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=30003)
+        assert await update_per_warehouse(db_session, project.id, bc, 99999998, box_qty=10) is False
 
     @pytest.mark.asyncio
-    async def test_set_both_fields_at_once(self, db_session: AsyncSession, project):
-        bc = f"BC-{_uid()}"
-        await _create_nomenclature(
-            db_session,
-            project.id,
-            barcode=bc,
-            article_seller="A",
-            article_wb=30004,
-        )
+    async def test_unknown_barcode_returns_false(self, db_session: AsyncSession, project):
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        assert await update_per_warehouse(db_session, project.id, "NOPE-BC", wh.id, box_qty=10) is False
 
-        await update_box_multiplicity(
-            db_session,
-            project.id,
-            30004,
-            box_qty_override=12,
-            use_box_multiplicity=True,
-        )
+    @pytest.mark.asyncio
+    async def test_per_ff_use_flag_overrides_sku_flag(self, db_session: AsyncSession, project):
+        """use_box_multiplicity per-ФФ важнее SKU-уровневого флага."""
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=30004)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await update_per_warehouse(db_session, project.id, bc, wh.id, use_box_multiplicity=False)
 
         rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=30004)
-        assert rows[0]["box_qty_override"] == 12
-        assert rows[0]["use_box_multiplicity"] is True
+        # SKU-флаг по умолчанию True, но per-ФФ строка выключает.
+        assert _pw(rows[0])[wh.id]["use_box_multiplicity"] is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# has_machine_box_qty — 409-guard helper
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestHasMachineBoxQty:
+    @pytest.mark.asyncio
+    async def test_true_when_machine_resolved(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=35001)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await _machine_into_ff(db_session, project.id, nom=nom, warehouse_id=wh.id, ppb_lines=[(40, 12)])
+
+        assert await has_machine_box_qty(db_session, project.id, bc, wh.id) is True
 
     @pytest.mark.asyncio
-    async def test_no_op_when_nothing_passed(self, db_session: AsyncSession, project):
+    async def test_false_when_no_machine(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=35002)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        assert await has_machine_box_qty(db_session, project.id, bc, wh.id) is False
+
+    @pytest.mark.asyncio
+    async def test_false_for_other_ff(self, db_session: AsyncSession, project):
+        """Машина принята на wh1 → wh2 не заблокирован."""
+        bc = f"BC-{_uid()}"
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=35003)
+        wh1 = await _create_rf_warehouse(db_session, project.id, f"RF1-{_uid()}")
+        wh2 = await _create_rf_warehouse(db_session, project.id, f"RF2-{_uid()}")
+        await _machine_into_ff(db_session, project.id, nom=nom, warehouse_id=wh1.id, ppb_lines=[(40, 12)])
+
+        assert await has_machine_box_qty(db_session, project.id, bc, wh1.id) is True
+        assert await has_machine_box_qty(db_session, project.id, bc, wh2.id) is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# resolve_effective_ppb_for_assembly
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestResolveEffectivePpb:
+    @pytest.mark.asyncio
+    async def test_machine_resolved(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        nom = await _create_nomenclature(
+            db_session, project.id, barcode=bc, article_seller="A", article_wb=40001, box_qty_override=99
+        )
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await _machine_into_ff(db_session, project.id, nom=nom, warehouse_id=wh.id, ppb_lines=[(40, 16)])
+
+        ppb, use = await resolve_effective_ppb_for_assembly(db_session, project.id, bc, wh.id)
+        assert ppb == 16  # machine beats SKU override
+        assert use is True
+
+    @pytest.mark.asyncio
+    async def test_manual_per_ff(self, db_session: AsyncSession, project):
         bc = f"BC-{_uid()}"
         await _create_nomenclature(
-            db_session,
-            project.id,
-            barcode=bc,
-            article_seller="A",
-            article_wb=30005,
-            box_qty_override=10,
+            db_session, project.id, barcode=bc, article_seller="A", article_wb=40002, box_qty_override=20
         )
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await update_per_warehouse(db_session, project.id, bc, wh.id, box_qty=30)
 
-        ok = await update_box_multiplicity(db_session, project.id, 30005)
-        assert ok is True
-
-        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=30005)
-        assert rows[0]["box_qty_override"] == 10
-        assert rows[0]["use_box_multiplicity"] is True
+        ppb, use = await resolve_effective_ppb_for_assembly(db_session, project.id, bc, wh.id)
+        assert ppb == 30  # manual per-ФФ beats SKU default
+        assert use is True
 
     @pytest.mark.asyncio
-    async def test_unknown_nm_returns_false(self, db_session: AsyncSession, project):
-        ok = await update_box_multiplicity(
-            db_session,
-            project.id,
-            99999998,
-            use_box_multiplicity=False,
+    async def test_falls_to_sku_default(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(
+            db_session, project.id, barcode=bc, article_seller="A", article_wb=40003, box_qty_override=25
         )
-        assert ok is False
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+
+        ppb, use = await resolve_effective_ppb_for_assembly(db_session, project.id, bc, wh.id)
+        assert ppb == 25
+        assert use is True
+
+    @pytest.mark.asyncio
+    async def test_none_when_nothing(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=40004)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+
+        ppb, _use = await resolve_effective_ppb_for_assembly(db_session, project.id, bc, wh.id)
+        assert ppb is None
+
+    @pytest.mark.asyncio
+    async def test_per_ff_use_flag_false(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(
+            db_session, project.id, barcode=bc, article_seller="A", article_wb=40005, box_qty_override=10
+        )
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await update_per_warehouse(db_session, project.id, bc, wh.id, use_box_multiplicity=False)
+
+        _ppb, use = await resolve_effective_ppb_for_assembly(db_session, project.id, bc, wh.id)
+        assert use is False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# bulk_update_by_barcode (paste из буфера)
+# bulk_update_by_barcode
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-class TestBulkUpdateByBarcode:
+class TestBulkUpdate:
     @pytest.mark.asyncio
-    async def test_match_by_barcode_updates_ppb(self, db_session: AsyncSession, project):
-        bc1 = f"BC-{_uid()}"
-        bc2 = f"BC-{_uid()}"
-        await _create_nomenclature(db_session, project.id, barcode=bc1, article_seller="A1", article_wb=40001)
-        await _create_nomenclature(db_session, project.id, barcode=bc2, article_seller="A2", article_wb=40002)
+    async def test_match_updates_sku_ppb(self, db_session: AsyncSession, project):
+        bc1, bc2 = f"BC-{_uid()}", f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc1, article_seller="A1", article_wb=50001)
+        await _create_nomenclature(db_session, project.id, barcode=bc2, article_seller="A2", article_wb=50002)
 
         result = await bulk_update_by_barcode(
             db_session,
@@ -540,250 +757,23 @@ class TestBulkUpdateByBarcode:
         )
         assert result["matched_barcodes"] == {bc1, bc2}
         assert result["not_found"] == []
-        assert result["updated_nm_ids"] == {40001, 40002}
-
-        rows = await get_box_multiplicity_table(db_session, project.id)
-        by_nm = {r["nm_id"]: r for r in rows}
-        assert by_nm[40001]["box_qty_override"] == 10
-        assert by_nm[40001]["use_box_multiplicity"] is True  # not changed
-        assert by_nm[40002]["box_qty_override"] == 20
-        assert by_nm[40002]["use_box_multiplicity"] is False
+        assert result["updated_nm_ids"] == {50001, 50002}
+        assert result["locked"] == []
 
     @pytest.mark.asyncio
     async def test_unknown_barcode_in_not_found(self, db_session: AsyncSession, project):
         bc = f"BC-{_uid()}"
-        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=40010)
-
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=50010)
         result = await bulk_update_by_barcode(
             db_session,
             project.id,
-            [
-                {"barcode": bc, "box_qty_override": 5},
-                {"barcode": "NOT-EXIST-1", "box_qty_override": 5},
-                {"barcode": "NOT-EXIST-2"},
-            ],
+            [{"barcode": bc, "box_qty_override": 5}, {"barcode": "NOPE-1", "box_qty_override": 5}],
         )
         assert bc in result["matched_barcodes"]
-        assert sorted(result["not_found"]) == ["NOT-EXIST-1", "NOT-EXIST-2"]
+        assert result["not_found"] == ["NOPE-1"]
 
     @pytest.mark.asyncio
-    async def test_partial_only_use_flag(self, db_session: AsyncSession, project):
-        """Если в строке только use — ppb не трогается."""
-        bc = f"BC-{_uid()}"
-        await _create_nomenclature(
-            db_session,
-            project.id,
-            barcode=bc,
-            article_seller="A",
-            article_wb=40020,
-            box_qty_override=99,
-        )
-
-        await bulk_update_by_barcode(
-            db_session,
-            project.id,
-            [{"barcode": bc, "use_box_multiplicity": False}],
-        )
-        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=40020)
-        assert rows[0]["box_qty_override"] == 99  # not cleared
-        assert rows[0]["use_box_multiplicity"] is False
-
-    @pytest.mark.asyncio
-    async def test_no_change_no_commit(self, db_session: AsyncSession, project):
-        """Если значения не отличаются — updated_nm_ids пустой."""
-        bc = f"BC-{_uid()}"
-        await _create_nomenclature(
-            db_session,
-            project.id,
-            barcode=bc,
-            article_seller="A",
-            article_wb=40030,
-            box_qty_override=15,
-        )
-
-        result = await bulk_update_by_barcode(
-            db_session,
-            project.id,
-            [{"barcode": bc, "box_qty_override": 15, "use_box_multiplicity": True}],
-        )
-        # Barcode matched but nothing changed
-        assert bc in result["matched_barcodes"]
-        assert result["updated_nm_ids"] == set()
-
-    @pytest.mark.asyncio
-    async def test_other_project_isolation(
-        self,
-        db_session: AsyncSession,
-        project,
-        other_project,
-    ):
-        """SKU с тем же barcode в other_project не должен затрагиваться."""
-        bc = f"BC-SHARED-{_uid()}"
-        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=40040)
-        await _create_nomenclature(db_session, other_project.id, barcode=bc, article_seller="A", article_wb=40041)
-
-        await bulk_update_by_barcode(
-            db_session,
-            project.id,
-            [{"barcode": bc, "box_qty_override": 77}],
-        )
-
-        other = (
-            await db_session.execute(
-                select(Nomenclature).where(
-                    Nomenclature.project_id == other_project.id,
-                    Nomenclature.barcode == bc,
-                )
-            )
-        ).scalar_one()
-        assert other.box_qty_override is None
-
-    @pytest.mark.asyncio
-    async def test_empty_items_list(self, db_session: AsyncSession, project):
-        result = await bulk_update_by_barcode(db_session, project.id, [])
-        assert result["matched_barcodes"] == set()
-        assert result["not_found"] == []
-        assert result["updated_nm_ids"] == set()
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Per-RF override (BoxQtyPerWarehouse)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-async def _create_rf_warehouse(db: AsyncSession, project_id: int, name: str) -> Warehouse:
-    wh = Warehouse(
-        project_id=project_id,
-        name=name,
-        warehouse_type=WarehouseType.FULFILLMENT,
-        is_active=True,
-    )
-    db.add(wh)
-    await db.commit()
-    return wh
-
-
-class TestPerWarehouseOverride:
-    @pytest.mark.asyncio
-    async def test_create_per_rf_row(self, db_session: AsyncSession, project):
-        bc = f"BC-{_uid()}"
-        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=50001)
-        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
-
-        ok = await update_per_warehouse(
-            db_session,
-            project.id,
-            bc,
-            wh.id,
-            box_qty=15,
-        )
-        assert ok is True
-
-        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=50001)
-        per_wh = {p["warehouse_id"]: p for p in rows[0]["per_warehouse"]}
-        assert per_wh[wh.id]["box_qty"] == 15
-        assert per_wh[wh.id]["use_box_multiplicity"] is True
-
-    @pytest.mark.asyncio
-    async def test_update_existing_per_rf_row(self, db_session: AsyncSession, project):
-        bc = f"BC-{_uid()}"
-        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=50002)
-        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
-
-        await update_per_warehouse(db_session, project.id, bc, wh.id, box_qty=10)
-        await update_per_warehouse(db_session, project.id, bc, wh.id, use_box_multiplicity=False)
-
-        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=50002)
-        per_wh = {p["warehouse_id"]: p for p in rows[0]["per_warehouse"]}
-        assert per_wh[wh.id]["box_qty"] == 10  # not cleared
-        assert per_wh[wh.id]["use_box_multiplicity"] is False
-
-    @pytest.mark.asyncio
-    async def test_unknown_warehouse_returns_false(self, db_session: AsyncSession, project):
-        bc = f"BC-{_uid()}"
-        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=50003)
-
-        ok = await update_per_warehouse(db_session, project.id, bc, 99999998, box_qty=10)
-        assert ok is False
-
-    @pytest.mark.asyncio
-    async def test_unknown_barcode_returns_false(self, db_session: AsyncSession, project):
-        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
-        ok = await update_per_warehouse(db_session, project.id, "NOT-EXISTS-BC", wh.id, box_qty=10)
-        assert ok is False
-
-    @pytest.mark.asyncio
-    async def test_resolve_per_rf_priority(self, db_session: AsyncSession, project):
-        """Per-RF override должен побеждать SKU-level override."""
-        bc = f"BC-{_uid()}"
-        await _create_nomenclature(
-            db_session,
-            project.id,
-            barcode=bc,
-            article_seller="A",
-            article_wb=50010,
-            box_qty_override=20,  # SKU-level
-        )
-        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
-        await update_per_warehouse(db_session, project.id, bc, wh.id, box_qty=30)
-
-        ppb, use = await resolve_effective_ppb_for_assembly(
-            db_session,
-            project.id,
-            bc,
-            wh.id,
-        )
-        assert ppb == 30  # per-RF wins
-        assert use is True
-
-    @pytest.mark.asyncio
-    async def test_resolve_falls_through_to_sku_level(self, db_session: AsyncSession, project):
-        """Если per-RF не задан — берём SKU-level."""
-        bc = f"BC-{_uid()}"
-        await _create_nomenclature(
-            db_session,
-            project.id,
-            barcode=bc,
-            article_seller="A",
-            article_wb=50011,
-            box_qty_override=25,
-        )
-        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
-
-        ppb, use = await resolve_effective_ppb_for_assembly(
-            db_session,
-            project.id,
-            bc,
-            wh.id,
-        )
-        assert ppb == 25
-        assert use is True
-
-    @pytest.mark.asyncio
-    async def test_resolve_per_rf_use_flag_false(self, db_session: AsyncSession, project):
-        """Per-RF use=false — отключает округление, даже если ppb задан."""
-        bc = f"BC-{_uid()}"
-        await _create_nomenclature(
-            db_session,
-            project.id,
-            barcode=bc,
-            article_seller="A",
-            article_wb=50012,
-            box_qty_override=10,
-        )
-        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
-        await update_per_warehouse(db_session, project.id, bc, wh.id, use_box_multiplicity=False)
-
-        _, use = await resolve_effective_ppb_for_assembly(
-            db_session,
-            project.id,
-            bc,
-            wh.id,
-        )
-        assert use is False  # per-RF flag wins
-
-    @pytest.mark.asyncio
-    async def test_bulk_per_rf_creates_row(self, db_session: AsyncSession, project):
+    async def test_per_ff_bulk_creates_rows(self, db_session: AsyncSession, project):
         bc = f"BC-{_uid()}"
         await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=50020)
         wh1 = await _create_rf_warehouse(db_session, project.id, f"RF1-{_uid()}")
@@ -797,73 +787,94 @@ class TestPerWarehouseOverride:
                 {"barcode": bc, "warehouse_id": wh2.id, "box_qty_override": 12},
             ],
         )
-        assert bc in result["matched_barcodes"]
-        assert result["not_found"] == []
-
+        assert result["locked"] == []
         rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=50020)
-        per_wh = {p["warehouse_id"]: p["box_qty"] for p in rows[0]["per_warehouse"]}
-        assert per_wh[wh1.id] == 10
-        assert per_wh[wh2.id] == 12
+        pw = _pw(rows[0])
+        assert pw[wh1.id]["box_qty"] == 10
+        assert pw[wh2.id]["box_qty"] == 12
 
-
-class TestVehicleQtyWeightedMode:
     @pytest.mark.asyncio
-    async def test_mode_picks_majority_ppb(self, db_session: AsyncSession, project):
-        """Если в одной машине qty=100 при ppb=10 + qty=20 при ppb=12 → mode=10."""
+    async def test_machine_locked_pair_goes_to_locked(self, db_session: AsyncSession, project):
+        """box_qty для машинно-заблокированной пары (barcode, ФФ) → locked, не апдейтится."""
         bc = f"BC-{_uid()}"
-        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=60001)
-        foi = await _create_foi(db_session, project.id, barcode=bc, pcs_per_box=8)
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=50030)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await _machine_into_ff(db_session, project.id, nom=nom, warehouse_id=wh.id, ppb_lines=[(40, 14)])
+        wh_id = wh.id  # capture before bulk no-change rollback expires ORM state
 
-        # 2 строки в одной машине, разная ppb через override
-        order_no = f"V-{_uid()}"
-        co = CostOrder(
-            project_id=project.id,
-            order_no=order_no,
-            status=VehicleStatus.DELIVERED,
-            actual_arrival_date=date(2026, 5, 1),
-            delivery_cost_cny=Decimal("0"),
-            delivery_cost_usd=Decimal("0"),
-            delivery_cost_rub=Decimal("0"),
-            rate_cny=Decimal("1"),
-            rate_eur=Decimal("1"),
-            rate_usd=Decimal("1"),
+        result = await bulk_update_by_barcode(
+            db_session,
+            project.id,
+            [{"barcode": bc, "warehouse_id": wh_id, "box_qty_override": 99}],
         )
-        db_session.add(co)
-        await db_session.flush()
-        for qty, ppb in [(100, 10), (20, 12)]:
-            db_session.add(
-                CostOrderItem(
-                    project_id=project.id,
-                    order_no=order_no,
-                    barcode=bc,
-                    qty=qty,
-                    price_cny=Decimal("10"),
-                    pcs_per_box_override=ppb,
-                    factory_order_item_id=foi.id,
+        assert result["locked"] == [bc]
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=50030)
+        # box_qty остался машинным.
+        assert _pw(rows[0])[wh_id]["box_qty"] == 14
+        assert _pw(rows[0])[wh_id]["source"] == "machine"
+
+    @pytest.mark.asyncio
+    async def test_machine_locked_still_applies_use_flag(self, db_session: AsyncSession, project):
+        """На машинном ФФ use_box_multiplicity всё ещё применяется через bulk."""
+        bc = f"BC-{_uid()}"
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=50040)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await _machine_into_ff(db_session, project.id, nom=nom, warehouse_id=wh.id, ppb_lines=[(40, 14)])
+        wh_id = wh.id
+
+        result = await bulk_update_by_barcode(
+            db_session,
+            project.id,
+            [{"barcode": bc, "warehouse_id": wh_id, "box_qty_override": 99, "use_box_multiplicity": False}],
+        )
+        assert result["locked"] == [bc]
+        per_rf = (
+            await db_session.execute(
+                select(BoxQtyPerWarehouse).where(
+                    BoxQtyPerWarehouse.project_id == project.id,
+                    BoxQtyPerWarehouse.barcode == bc,
+                    BoxQtyPerWarehouse.warehouse_id == wh_id,
                 )
             )
-        await db_session.commit()
+        ).scalar_one()
+        assert per_rf.use_box_multiplicity is False
+        assert per_rf.box_qty is None  # box_qty не записан — машинная блокировка
 
-        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=60001)
-        assert rows[0]["box_qty_from_vehicle"] == 10  # mode (qty-weighted)
-        assert rows[0]["box_qty_from_vehicle_alts"] == [12]
+    @pytest.mark.asyncio
+    async def test_empty_items(self, db_session: AsyncSession, project):
+        result = await bulk_update_by_barcode(db_session, project.id, [])
+        assert result["matched_barcodes"] == set()
+        assert result["locked"] == []
+
+    @pytest.mark.asyncio
+    async def test_other_project_isolation(self, db_session: AsyncSession, project, other_project):
+        bc = f"BC-SHARED-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=50050)
+        await _create_nomenclature(db_session, other_project.id, barcode=bc, article_seller="A", article_wb=50051)
+
+        await bulk_update_by_barcode(db_session, project.id, [{"barcode": bc, "box_qty_override": 77}])
+        other = (
+            await db_session.execute(
+                select(Nomenclature).where(Nomenclature.project_id == other_project.id, Nomenclature.barcode == bc)
+            )
+        ).scalar_one()
+        assert other.box_qty_override is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# get_sku_box_sources (drill-down: история снабжения SKU)
+# get_sku_box_sources (drill-down, read-only)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestGetSkuBoxSources:
     @pytest.mark.asyncio
     async def test_empty_no_sources(self, db_session: AsyncSession, project):
-        rows = await get_sku_box_sources(db_session, project.id, f"BC-NONE-{_uid()}")
-        assert rows == []
+        assert await get_sku_box_sources(db_session, project.id, f"BC-NONE-{_uid()}") == []
 
     @pytest.mark.asyncio
     async def test_factory_row(self, db_session: AsyncSession, project):
         bc = f"BC-{_uid()}"
-        foi = await _create_foi(
+        await _create_foi(
             db_session,
             project.id,
             barcode=bc,
@@ -871,115 +882,423 @@ class TestGetSkuBoxSources:
             box_size="40x30x20",
             order_date=date(2026, 3, 1),
         )
-
         rows = await get_sku_box_sources(db_session, project.id, bc)
         assert len(rows) == 1
         row = rows[0]
         assert row["source_type"] == "factory"
-        assert row["factory_order_item_id"] == foi.id
         assert row["box_qty"] == 10
         assert row["box_size"] == "40x30x20"
-        assert row["date"] == "2026-03-01"
-        assert row["editable"] is True
-        assert row["is_overridden"] is False
+        assert row["accepted"] is False
 
     @pytest.mark.asyncio
-    async def test_vehicle_row_with_warehouse(self, db_session: AsyncSession, project):
+    async def test_vehicle_row_accepted_flag(self, db_session: AsyncSession, project):
         bc = f"BC-{_uid()}"
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=60001)
         wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
-        await _create_vehicle_with_item(
+        await _machine_into_ff(
             db_session,
             project.id,
-            barcode=bc,
+            nom=nom,
+            warehouse_id=wh.id,
+            ppb_lines=[(40, 12)],
             arrival_date=date(2026, 4, 1),
-            pcs_per_box_override=12,
-            target_warehouse_id=wh.id,
         )
 
         rows = await get_sku_box_sources(db_session, project.id, bc)
-        assert len(rows) == 1
-        row = rows[0]
-        assert row["source_type"] == "vehicle"
-        assert row["factory_order_item_id"] is None
-        assert row["warehouse_name"] == wh.name
-        assert row["box_qty"] == 12
-        assert row["editable"] is False
+        veh = next(r for r in rows if r["source_type"] == "vehicle")
+        assert veh["box_qty"] == 12
+        assert veh["accepted"] is True
+        assert veh["warehouse_name"] == wh.name
 
     @pytest.mark.asyncio
-    async def test_override_marks_factory_row(self, db_session: AsyncSession, project):
+    async def test_vehicle_not_accepted(self, db_session: AsyncSession, project):
+        """Машина без ACCEPTED-приёмки → accepted=False."""
         bc = f"BC-{_uid()}"
-        foi = await _create_foi(db_session, project.id, barcode=bc, pcs_per_box=10)
-        await update_order_box_qty(db_session, project.id, foi.id, 24)
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=60002)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        co = await _create_vehicle(db_session, project.id, target_warehouse_id=wh.id)
+        await _add_vehicle_item(db_session, project.id, co.order_no, barcode=bc, qty=40, pcs_per_box_override=8)
+        await db_session.commit()
 
         rows = await get_sku_box_sources(db_session, project.id, bc)
-        factory = next(r for r in rows if r["source_type"] == "factory")
-        assert factory["box_qty"] == 24
-        assert factory["is_overridden"] is True
+        veh = next(r for r in rows if r["source_type"] == "vehicle")
+        assert veh["accepted"] is False
+        assert veh["warehouse_name"] == wh.name  # target_warehouse fallback
 
     @pytest.mark.asyncio
-    async def test_other_project_isolation(
-        self,
-        db_session: AsyncSession,
-        project,
-        other_project,
-    ):
-        """История снабжения SKU из чужого проекта не должна попадать в выборку."""
+    async def test_other_project_isolation(self, db_session: AsyncSession, project, other_project):
         bc = f"BC-SHARED-{_uid()}"
         await _create_foi(db_session, other_project.id, barcode=bc, pcs_per_box=10)
-
-        rows = await get_sku_box_sources(db_session, project.id, bc)
-        assert rows == []
+        assert await get_sku_box_sources(db_session, project.id, bc) == []
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# update_order_box_qty (per-order override кратности)
+# Задача #1 — per-ФФ box_size
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-class TestUpdateOrderBoxQty:
+async def _change_rows(db: AsyncSession, project_id: int, barcode: str) -> list[BoxMultiplicityChangeLog]:
+    """Все строки журнала по barcode, отсортированы id asc."""
+    res = await db.execute(
+        select(BoxMultiplicityChangeLog)
+        .where(
+            BoxMultiplicityChangeLog.project_id == project_id,
+            BoxMultiplicityChangeLog.barcode == barcode,
+        )
+        .order_by(BoxMultiplicityChangeLog.id)
+    )
+    return list(res.scalars().all())
+
+
+class TestPerWarehouseBoxSize:
     @pytest.mark.asyncio
-    async def test_set_override_returns_barcode(self, db_session: AsyncSession, project):
+    async def test_update_per_ff_box_size(self, db_session: AsyncSession, project):
         bc = f"BC-{_uid()}"
-        foi = await _create_foi(db_session, project.id, barcode=bc, pcs_per_box=10)
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=70001)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
 
-        result = await update_order_box_qty(db_session, project.id, foi.id, 24)
-        assert result == bc
-
-        rows = await get_sku_box_sources(db_session, project.id, bc)
-        assert rows[0]["box_qty"] == 24
-        assert rows[0]["is_overridden"] is True
+        await update_per_warehouse(db_session, project.id, bc, wh.id, box_qty=12, box_size="40x30x20")
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=70001)
+        pw = _pw(rows[0])
+        assert pw[wh.id]["box_qty"] == 12
+        assert pw[wh.id]["box_size"] == "40x30x20"
+        assert pw[wh.id]["source"] == "manual"
 
     @pytest.mark.asyncio
-    async def test_clear_override_falls_back_to_foi(self, db_session: AsyncSession, project):
+    async def test_box_size_resolved_for_default_source(self, db_session: AsyncSession, project):
+        """box_size из per-ФФ строки отображается даже когда box_qty резолвится из SKU-дефолта."""
         bc = f"BC-{_uid()}"
-        foi = await _create_foi(db_session, project.id, barcode=bc, pcs_per_box=10)
-        await update_order_box_qty(db_session, project.id, foi.id, 24)
+        await _create_nomenclature(
+            db_session, project.id, barcode=bc, article_seller="A", article_wb=70002, box_qty_override=8
+        )
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        # Задаём только box_size — box_qty остаётся None → source='default'.
+        await update_per_warehouse(db_session, project.id, bc, wh.id, box_size="50x40x30")
 
-        result = await update_order_box_qty(db_session, project.id, foi.id, None)
-        assert result == bc
-
-        rows = await get_sku_box_sources(db_session, project.id, bc)
-        assert rows[0]["box_qty"] == 10  # fallback to FactoryOrderItem.pcs_per_box
-        assert rows[0]["is_overridden"] is False
-
-    @pytest.mark.asyncio
-    async def test_unknown_foi_returns_none(self, db_session: AsyncSession, project):
-        result = await update_order_box_qty(db_session, project.id, 99999999, 10)
-        assert result is None
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=70002)
+        pw = _pw(rows[0])
+        assert pw[wh.id]["source"] == "default"
+        assert pw[wh.id]["box_qty"] == 8
+        assert pw[wh.id]["box_size"] == "50x40x30"
 
     @pytest.mark.asyncio
-    async def test_other_project_isolation(
-        self,
-        db_session: AsyncSession,
-        project,
-        other_project,
-    ):
-        """FOI чужого проекта недоступен для override через наш project_id."""
+    async def test_machine_box_size_wins(self, db_session: AsyncSession, project):
+        """На машинном ФФ box_size берётся из машины, а не из ручной строки."""
         bc = f"BC-{_uid()}"
-        foi = await _create_foi(db_session, other_project.id, barcode=bc, pcs_per_box=10)
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=70003)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await _machine_into_ff(
+            db_session,
+            project.id,
+            nom=nom,
+            warehouse_id=wh.id,
+            ppb_lines=[(40, 12)],
+            box_size_override="MACHINE-SIZE",
+        )
 
-        result = await update_order_box_qty(db_session, project.id, foi.id, 50)
-        assert result is None
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=70003)
+        pw = _pw(rows[0])
+        assert pw[wh.id]["source"] == "machine"
+        assert pw[wh.id]["box_size"] == "MACHINE-SIZE"
 
-        rows = await get_sku_box_sources(db_session, other_project.id, bc)
-        assert rows[0]["is_overridden"] is False
+    @pytest.mark.asyncio
+    async def test_bulk_per_ff_box_size(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=70004)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+
+        result = await bulk_update_by_barcode(
+            db_session,
+            project.id,
+            [{"barcode": bc, "warehouse_id": wh.id, "box_qty_override": 10, "box_size": "BX-1"}],
+        )
+        assert result["locked"] == []
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=70004)
+        pw = _pw(rows[0])
+        assert pw[wh.id]["box_qty"] == 10
+        assert pw[wh.id]["box_size"] == "BX-1"
+
+    @pytest.mark.asyncio
+    async def test_bulk_box_size_locked_on_machine_ff(self, db_session: AsyncSession, project):
+        """bulk box_size для машинно-заблокированной пары → locked, не записан."""
+        bc = f"BC-{_uid()}"
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=70005)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await _machine_into_ff(db_session, project.id, nom=nom, warehouse_id=wh.id, ppb_lines=[(40, 12)])
+        wh_id = wh.id
+
+        result = await bulk_update_by_barcode(
+            db_session,
+            project.id,
+            [{"barcode": bc, "warehouse_id": wh_id, "box_size": "NEW-SIZE"}],
+        )
+        assert result["locked"] == [bc]
+        per_rf = (
+            await db_session.execute(
+                select(BoxQtyPerWarehouse).where(
+                    BoxQtyPerWarehouse.project_id == project.id,
+                    BoxQtyPerWarehouse.barcode == bc,
+                    BoxQtyPerWarehouse.warehouse_id == wh_id,
+                )
+            )
+        ).scalar_one_or_none()
+        assert per_rf is None  # строка не создана — нечего было применить
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Задача #2 — журнал изменений + откат
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestChangeLogging:
+    @pytest.mark.asyncio
+    async def test_sku_box_qty_override_logged(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=80001)
+
+        await update_box_multiplicity(db_session, project.id, 80001, box_qty_override=15)
+        logs = await _change_rows(db_session, project.id, bc)
+        assert len(logs) == 1
+        log = logs[0]
+        assert log.field == "box_qty_override"
+        assert log.warehouse_id is None
+        assert log.old_value is None
+        assert log.new_value == "15"
+        assert log.change_source == "manual"
+
+    @pytest.mark.asyncio
+    async def test_no_op_not_logged(self, db_session: AsyncSession, project):
+        """Запись в SKU без реального изменения значения — журнал не пишется."""
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(
+            db_session, project.id, barcode=bc, article_seller="A", article_wb=80002, box_qty_override=20
+        )
+        await update_box_multiplicity(db_session, project.id, 80002, box_qty_override=20)
+        assert await _change_rows(db_session, project.id, bc) == []
+
+    @pytest.mark.asyncio
+    async def test_use_flag_logged_as_bool(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=80003)
+        await update_box_multiplicity(db_session, project.id, 80003, use_box_multiplicity=False)
+        logs = await _change_rows(db_session, project.id, bc)
+        assert len(logs) == 1
+        assert logs[0].field == "use_box_multiplicity"
+        assert logs[0].old_value == "true"
+        assert logs[0].new_value == "false"
+
+    @pytest.mark.asyncio
+    async def test_per_ff_box_qty_and_size_logged(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=80004)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+
+        await update_per_warehouse(db_session, project.id, bc, wh.id, box_qty=10, box_size="S-1")
+        logs = await _change_rows(db_session, project.id, bc)
+        fields = {(log.field, log.new_value, log.warehouse_id) for log in logs}
+        assert ("box_qty", "10", wh.id) in fields
+        assert ("box_size", "S-1", wh.id) in fields
+
+    @pytest.mark.asyncio
+    async def test_per_ff_no_op_not_logged(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=80005)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+
+        await update_per_warehouse(db_session, project.id, bc, wh.id, box_qty=10)
+        await update_per_warehouse(db_session, project.id, bc, wh.id, box_qty=10)  # no-op
+        logs = [log for log in await _change_rows(db_session, project.id, bc) if log.field == "box_qty"]
+        assert len(logs) == 1
+
+    @pytest.mark.asyncio
+    async def test_bulk_change_source(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=80006)
+        await bulk_update_by_barcode(db_session, project.id, [{"barcode": bc, "box_qty_override": 7}])
+        logs = await _change_rows(db_session, project.id, bc)
+        assert len(logs) == 1
+        assert logs[0].change_source == "bulk"
+        assert logs[0].new_value == "7"
+
+
+class TestGetChangeLog:
+    @pytest.mark.asyncio
+    async def test_empty(self, db_session: AsyncSession, project):
+        assert await get_change_log(db_session, project.id, f"BC-NONE-{_uid()}") == []
+
+    @pytest.mark.asyncio
+    async def test_sorted_fresh_first(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=81001)
+        await update_box_multiplicity(db_session, project.id, 81001, box_qty_override=10)
+        await update_box_multiplicity(db_session, project.id, 81001, box_qty_override=20)
+
+        log = await get_change_log(db_session, project.id, bc)
+        assert len(log) == 2
+        # Свежее сверху: последнее изменение (10→20) первым.
+        assert log[0]["old_value"] == "10" and log[0]["new_value"] == "20"
+        assert log[1]["old_value"] is None and log[1]["new_value"] == "10"
+
+    @pytest.mark.asyncio
+    async def test_warehouse_name_resolved(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=81002)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await update_per_warehouse(db_session, project.id, bc, wh.id, box_qty=5)
+        await update_box_multiplicity(db_session, project.id, 81002, box_qty_override=9)
+
+        log = await get_change_log(db_session, project.id, bc)
+        per_ff = next(r for r in log if r["warehouse_id"] is not None)
+        sku = next(r for r in log if r["warehouse_id"] is None)
+        assert per_ff["warehouse_name"] == wh.name
+        assert sku["warehouse_name"] is None
+
+    @pytest.mark.asyncio
+    async def test_project_isolation(self, db_session: AsyncSession, project, other_project):
+        bc = f"BC-SHARED-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=81003)
+        await _create_nomenclature(db_session, other_project.id, barcode=bc, article_seller="A", article_wb=81004)
+        await update_box_multiplicity(db_session, project.id, 81003, box_qty_override=10)
+        await update_box_multiplicity(db_session, other_project.id, 81004, box_qty_override=99)
+
+        log = await get_change_log(db_session, project.id, bc)
+        assert len(log) == 1
+        assert log[0]["new_value"] == "10"
+
+
+class TestRevertChange:
+    @pytest.mark.asyncio
+    async def test_unknown_change_id(self, db_session: AsyncSession, project):
+        result = await revert_change(db_session, project.id, 99999999)
+        assert result["barcode"] is None
+
+    @pytest.mark.asyncio
+    async def test_revert_sku_box_qty_override(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(
+            db_session, project.id, barcode=bc, article_seller="A", article_wb=82001, box_qty_override=5
+        )
+        # 5 → 50, потом откат → должно вернуться 5.
+        await update_box_multiplicity(db_session, project.id, 82001, box_qty_override=50)
+        logs = await _change_rows(db_session, project.id, bc)
+        change_id = logs[0].id
+
+        result = await revert_change(db_session, project.id, change_id)
+        assert result["barcode"] == bc
+        assert result["machine_locked"] is False
+        nom = (await db_session.execute(select(Nomenclature).where(Nomenclature.article_wb == 82001))).scalar_one()
+        assert nom.box_qty_override == 5
+
+    @pytest.mark.asyncio
+    async def test_revert_clears_to_none(self, db_session: AsyncSession, project):
+        """old_value=None → откат ставит поле обратно в None."""
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=82002)
+        await update_box_multiplicity(db_session, project.id, 82002, box_qty_override=30)
+        logs = await _change_rows(db_session, project.id, bc)
+
+        await revert_change(db_session, project.id, logs[0].id)
+        nom = (await db_session.execute(select(Nomenclature).where(Nomenclature.article_wb == 82002))).scalar_one()
+        assert nom.box_qty_override is None
+
+    @pytest.mark.asyncio
+    async def test_revert_creates_new_revert_log(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=82003)
+        await update_box_multiplicity(db_session, project.id, 82003, box_qty_override=40)
+        logs_before = await _change_rows(db_session, project.id, bc)
+        assert len(logs_before) == 1
+
+        await revert_change(db_session, project.id, logs_before[0].id)
+        logs_after = await _change_rows(db_session, project.id, bc)
+        assert len(logs_after) == 2
+        revert_log = logs_after[-1]
+        assert revert_log.change_source == "revert"
+        assert revert_log.old_value == "40"
+        assert revert_log.new_value is None
+
+    @pytest.mark.asyncio
+    async def test_revert_use_flag(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=82004)
+        await update_box_multiplicity(db_session, project.id, 82004, use_box_multiplicity=False)
+        logs = await _change_rows(db_session, project.id, bc)
+
+        await revert_change(db_session, project.id, logs[0].id)
+        nom = (await db_session.execute(select(Nomenclature).where(Nomenclature.article_wb == 82004))).scalar_one()
+        assert nom.use_box_multiplicity is True  # откат к "true"
+
+    @pytest.mark.asyncio
+    async def test_revert_per_ff_box_qty(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=82005)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await update_per_warehouse(db_session, project.id, bc, wh.id, box_qty=10)
+        await update_per_warehouse(db_session, project.id, bc, wh.id, box_qty=25)
+        logs = [log for log in await _change_rows(db_session, project.id, bc) if log.field == "box_qty"]
+        # logs[1] — изменение 10→25; откат вернёт 10.
+        result = await revert_change(db_session, project.id, logs[1].id)
+        assert result["barcode"] == bc
+        per_rf = (
+            await db_session.execute(
+                select(BoxQtyPerWarehouse).where(
+                    BoxQtyPerWarehouse.project_id == project.id,
+                    BoxQtyPerWarehouse.barcode == bc,
+                    BoxQtyPerWarehouse.warehouse_id == wh.id,
+                )
+            )
+        ).scalar_one()
+        assert per_rf.box_qty == 10
+
+    @pytest.mark.asyncio
+    async def test_revert_per_ff_box_size(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=82006)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await update_per_warehouse(db_session, project.id, bc, wh.id, box_size="OLD-SIZE")
+        await update_per_warehouse(db_session, project.id, bc, wh.id, box_size="NEW-SIZE")
+        logs = [log for log in await _change_rows(db_session, project.id, bc) if log.field == "box_size"]
+
+        await revert_change(db_session, project.id, logs[1].id)
+        per_rf = (
+            await db_session.execute(
+                select(BoxQtyPerWarehouse).where(
+                    BoxQtyPerWarehouse.project_id == project.id,
+                    BoxQtyPerWarehouse.barcode == bc,
+                    BoxQtyPerWarehouse.warehouse_id == wh.id,
+                )
+            )
+        ).scalar_one()
+        assert per_rf.box_size == "OLD-SIZE"
+
+    @pytest.mark.asyncio
+    async def test_revert_blocked_on_machine_ff(self, db_session: AsyncSession, project):
+        """Откат box_qty для ФФ, ставшего машинно-заблокированным, → machine_locked, не применён."""
+        bc = f"BC-{_uid()}"
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=82007)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        # Сначала ручная per-ФФ кратность — создаёт лог.
+        await update_per_warehouse(db_session, project.id, bc, wh.id, box_qty=10)
+        logs = [log for log in await _change_rows(db_session, project.id, bc) if log.field == "box_qty"]
+        change_id = logs[0].id
+        wh_id = wh.id
+        # Потом приходит машина на этот же ФФ → блокировка.
+        await _machine_into_ff(db_session, project.id, nom=nom, warehouse_id=wh_id, ppb_lines=[(40, 14)])
+
+        result = await revert_change(db_session, project.id, change_id)
+        assert result["machine_locked"] is True
+        assert result["barcode"] == bc
+        # Никакой новой revert-записи не добавлено.
+        revert_logs = [log for log in await _change_rows(db_session, project.id, bc) if log.change_source == "revert"]
+        assert revert_logs == []
+
+    @pytest.mark.asyncio
+    async def test_revert_project_isolation(self, db_session: AsyncSession, project, other_project):
+        """Запись журнала чужого проекта не откатывается из нашего."""
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, other_project.id, barcode=bc, article_seller="A", article_wb=82008)
+        await update_box_multiplicity(db_session, other_project.id, 82008, box_qty_override=33)
+        logs = await _change_rows(db_session, other_project.id, bc)
+
+        result = await revert_change(db_session, project.id, logs[0].id)
+        assert result["barcode"] is None

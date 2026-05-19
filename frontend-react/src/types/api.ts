@@ -2894,12 +2894,22 @@ export interface AcceptanceCheckResponse {
 }
 
 // ─── Box multiplicity (кратность коробки) ────────────────────────────────────
+// Кратность резолвится ПЕР (товар, ФФ-склад) из принятых машин-поставок:
+//   machine → manual per-ФФ → default (box_qty_override) → none.
+
+export type BoxMultiplicitySource = 'machine' | 'manual' | 'default' | 'none';
+
 export interface BoxMultiplicityPerWarehouseRow {
   warehouse_id: number;
   warehouse_name: string;
-  box_qty: number | null;                 // per-RF override
-  use_box_multiplicity: boolean;          // per-RF флаг
-  rf_stock: number;                       // сток на этом RF
+  box_qty: number | null;                  // резолвнутая кратность для этого ФФ
+  box_size: string | null;                 // размер коробки (если из машины)
+  source: BoxMultiplicitySource;            // откуда взята кратность
+  editable: boolean;                        // false если ФФ машинно-заблокирован
+  use_box_multiplicity: boolean;            // per-ФФ флаг «учитывать»
+  rf_stock: number;                         // сток на этом ФФ
+  machine_order_no: string | null;          // № машины (только source=machine)
+  machine_received_at: string | null;       // ISO-date приёмки машины (только source=machine)
 }
 
 export interface BoxMultiplicityRow {
@@ -2908,19 +2918,14 @@ export interface BoxMultiplicityRow {
   barcode: string;
   brand: string | null;
   subject: string | null;
-  box_qty_override: number | null;        // ручной ввод (Nomenclature)
-  box_qty_from_vehicle: number | null;    // из последней DELIVERED машины (qty-weighted mode)
-  box_qty_from_vehicle_alts: number[];    // другие ppb из той же машины (если несколько)
-  vehicle_order_no: string | null;
-  vehicle_received_at: string | null;     // ISO-date или null
-  box_qty_from_factory: number | null;    // из активного FOI (fallback)
-  effective_box_qty: number | null;       // override → vehicle → factory
-  use_box_multiplicity: boolean;          // SKU-level флаг (default для RF без per-RF override)
-  rf_stock: number;                       // суммарный остаток на ФФ-складах
-  in_assembly: number;                    // в активной сборке (PENDING..VEHICLE_ASSIGNED)
-  in_transit: number;                     // в пути на WB (SHIPPED)
-  wb_stock: number;                       // суммарный остаток на WB-складах
-  per_warehouse: BoxMultiplicityPerWarehouseRow[];  // overrides по RF-складам
+  box_qty_override: number | null;          // ручной дефолт SKU (редактируется всегда)
+  use_box_multiplicity: boolean;            // SKU-level флаг «учитывать»
+  has_machine_data: boolean;                // есть хотя бы один ФФ с source=machine
+  rf_stock: number;                         // суммарный остаток на ФФ-складах
+  in_assembly: number;                      // в активной сборке (PENDING..VEHICLE_ASSIGNED)
+  in_transit: number;                       // в пути на WB (SHIPPED)
+  wb_stock: number;                         // суммарный остаток на WB-складах
+  per_warehouse: BoxMultiplicityPerWarehouseRow[];
 }
 
 export interface BoxMultiplicityResponse {
@@ -2933,15 +2938,17 @@ export interface BoxMultiplicityPatch {
   use_box_multiplicity?: boolean;
 }
 
-export interface BoxMultiplicityBulkItem {
-  barcode: string;
-  warehouse_id?: number | null;            // если задан — per-RF override; иначе SKU-level
-  box_qty_override?: number | null;
+export interface BoxMultiplicityPerWarehousePatch {
+  box_qty?: number | null;
+  box_size?: string | null;                 // размер коробки per-ФФ (ручной)
   use_box_multiplicity?: boolean;
 }
 
-export interface BoxMultiplicityPerWarehousePatch {
-  box_qty?: number | null;
+export interface BoxMultiplicityBulkItem {
+  barcode: string;
+  warehouse_id?: number | null;             // если задан — per-ФФ; иначе SKU-level
+  box_qty_override?: number | null;
+  box_size?: string | null;                 // размер коробки (per-ФФ)
   use_box_multiplicity?: boolean;
 }
 
@@ -2953,29 +2960,40 @@ export interface BoxMultiplicityBulkResponse {
   updated: BoxMultiplicityRow[];
   not_found: string[];        // barcodes that don't exist in the project
   matched_count: number;      // how many barcodes matched (some may have had no diff)
+  locked: string[];           // barcodes пропущены — ФФ машинно-заблокирован
 }
 
 // Drill-down: история снабжения одного SKU (второй уровень под артикулом).
 export interface BoxMultiplicitySourceRow {
-  source_type: 'vehicle' | 'factory';     // машина либо заказ на фабрику
-  order_no: string;                        // № машины / № заказа
-  factory_order_item_id: number | null;    // id строки заказа (для PATCH override)
-  warehouse_name: string | null;           // ФФ-склад назначения (только vehicle)
+  source_type: 'vehicle' | 'factory';      // машина либо заказ на фабрику
+  order_no: string;                         // № машины / № заказа
+  warehouse_name: string | null;            // ФФ-склад назначения (только vehicle)
   qty: number;
-  box_qty: number | null;                  // эффективная кратность (override ?? из заказа)
-  box_size: string | null;                 // размер коробки
-  date: string | null;                     // ISO-date — прибытие машины / дата заказа
-  status: string | null;                   // статус машины (DELIVERED и т.д.)
-  editable: boolean;                        // true только для factory-строк
-  is_overridden: boolean;                   // box_qty взят из box_qty_per_order
+  box_qty: number | null;                   // кратность из этой поставки
+  box_size: string | null;                  // размер коробки
+  date: string | null;                      // ISO-date — прибытие машины / дата заказа
+  status: string | null;                    // статус машины/заказа
+  accepted: boolean;                         // машина принята (не «в пути»)
 }
 
 export interface BoxMultiplicitySourcesResponse {
   items: BoxMultiplicitySourceRow[];
 }
 
-export interface BoxMultiplicityOrderPatch {
-  box_qty: number | null;                   // null = сбросить override
+// История изменений кратности/размера одного SKU (второй уровень под артикулом).
+export interface BoxMultiplicityChangeRow {
+  id: number;
+  warehouse_id: number | null;              // null = изменение SKU-уровня
+  warehouse_name: string | null;            // имя ФФ (для per-ФФ записи)
+  field: string;                            // box_qty_override | box_qty | box_size | use_box_multiplicity
+  old_value: string | null;                 // null = было «не задано»
+  new_value: string | null;                 // null = стало «не задано»
+  change_source: string;                    // manual | bulk | revert
+  created_at: string;                       // ISO datetime
+}
+
+export interface BoxMultiplicityChangesResponse {
+  items: BoxMultiplicityChangeRow[];
 }
 
 // ─── Warehouse Speed Priority (WB delivery speed map) ────────────────────────

@@ -2,229 +2,832 @@
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
-import { formatNumber, formatDate } from '@/lib/utils';
+import { formatNumber, formatDate, formatDateTime } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
 import type {
     BoxMultiplicityRow,
     BoxMultiplicityBulkItem,
+    BoxMultiplicityChangeRow,
     BoxMultiplicityPerWarehouseRow,
     BoxMultiplicitySourceRow,
 } from '@/types/api';
 import { parseBoxMultiplicityPaste } from '@/lib/utils/boxMultiplicityPaste';
 
-type StockFilter = 'all' | 'rf' | 'in_assembly' | 'in_transit' | 'no_wb' | 'no_stock';
+type StockFilter = 'all' | 'rf' | 'in_assembly' | 'in_transit' | 'no_wb' | 'no_stock' | 'no_box_qty';
 
 const SOURCE_TYPE_META: Record<string, { label: string; icon: string }> = {
     vehicle: { label: 'Машина', icon: '🚚' },
     factory: { label: 'Заказ', icon: '🏭' },
 };
 
-// Второй уровень под артикулом: история снабжения SKU (машины + заказы фабрики).
-// Кратность редактируется только у строк-заказов (editable=true), не у машин.
-function SkuSourcesPanel({
-    barcode,
-    onSkuUpdated,
-}: {
-    barcode: string;
-    onSkuUpdated: (row: BoxMultiplicityRow) => void;
-}) {
+// Бейдж источника кратности для ячейки ФФ-склада.
+function SourceBadge({ wh }: { wh: BoxMultiplicityPerWarehouseRow }) {
+    if (wh.source === 'machine') {
+        const date = wh.machine_received_at ? ` · ${formatDate(wh.machine_received_at)}` : '';
+        const label = wh.machine_order_no ? `машина ${wh.machine_order_no}${date}` : 'машина';
+        return (
+            <span className="badge badge-info" style={{ fontSize: 10 }} title="Кратность из принятой машины — заблокирована">
+                🔒 {label}
+            </span>
+        );
+    }
+    if (wh.source === 'manual') {
+        return (
+            <span className="badge badge-success" style={{ fontSize: 10 }} title="Кратность задана вручную для этого ФФ">
+                вручную
+            </span>
+        );
+    }
+    if (wh.source === 'default') {
+        return (
+            <span className="badge badge-secondary" style={{ fontSize: 10 }} title="Кратность взята из ручного дефолта SKU">
+                дефолт
+            </span>
+        );
+    }
+    return (
+        <span className="badge badge-secondary" style={{ fontSize: 10, opacity: 0.6 }} title="Кратность не определена">
+            —
+        </span>
+    );
+}
+
+// История снабжения SKU (read-only) — вложенная секция внутри sub-row.
+function SkuSourcesSection({ barcode }: { barcode: string }) {
     const [sources, setSources] = useState<BoxMultiplicitySourceRow[] | null>(null);
     const [error, setError] = useState<string | null>(null);
-    const [editingFoi, setEditingFoi] = useState<number | null>(null);
-    const [editValue, setEditValue] = useState('');
-    const [saving, setSaving] = useState(false);
+    const [loaded, setLoaded] = useState(false);
 
+    // Ленивая загрузка — только когда секция раскрыта пользователем.
     const loadSources = useCallback(async () => {
+        if (loaded) return;
         try {
             setError(null);
             const resp = await api.getBoxMultiplicitySources(barcode);
             setSources(resp.items);
-        } catch (e: any) {
-            setError(e?.message || 'Ошибка загрузки');
+            setLoaded(true);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         }
-    }, [barcode]);
-
-    useEffect(() => { loadSources(); }, [loadSources]);
-
-    const startEdit = (row: BoxMultiplicitySourceRow) => {
-        if (row.factory_order_item_id === null) return;
-        setEditingFoi(row.factory_order_item_id);
-        setEditValue(row.box_qty !== null ? String(row.box_qty) : '');
-    };
-    const cancelEdit = () => { setEditingFoi(null); setEditValue(''); };
-
-    const saveEdit = async () => {
-        if (editingFoi === null) return;
-        const trimmed = editValue.trim();
-        const value = trimmed === '' ? null : parseInt(trimmed, 10);
-        if (value !== null && (Number.isNaN(value) || value < 1)) {
-            alert('Кратность — положительное число или пусто (сброс)');
-            return;
-        }
-        try {
-            setSaving(true);
-            const updatedSku = await api.patchOrderBoxMultiplicity(editingFoi, value);
-            onSkuUpdated(updatedSku);
-            cancelEdit();
-            await loadSources();
-        } catch (e: any) {
-            alert(e?.message || 'Ошибка сохранения');
-        } finally {
-            setSaving(false);
-        }
-    };
-
-    const panelStyle: React.CSSProperties = {
-        background: 'var(--color-bg)',
-        padding: '12px 16px 14px 48px',
-        borderTop: '1px solid var(--color-border)',
-    };
-
-    if (error) {
-        return <div style={{ ...panelStyle, color: 'var(--color-danger)', fontSize: 13 }}>{error}</div>;
-    }
-    if (sources === null) {
-        return (
-            <div style={{ ...panelStyle, color: 'var(--color-text-muted)', fontSize: 13 }}>
-                Загрузка истории снабжения…
-            </div>
-        );
-    }
-    if (sources.length === 0) {
-        return (
-            <div style={{ ...panelStyle, color: 'var(--color-text-muted)', fontSize: 13 }}>
-                Нет истории снабжения — ни машин, ни заказов на фабрику для этого SKU.
-            </div>
-        );
-    }
+    }, [barcode, loaded]);
 
     return (
-        <div style={panelStyle}>
-            <div style={{
-                fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)',
-                textTransform: 'uppercase', letterSpacing: 0.05, marginBottom: 6,
+        <details
+            style={{ marginTop: 10 }}
+            onToggle={e => { if ((e.currentTarget as HTMLDetailsElement).open) loadSources(); }}
+        >
+            <summary style={{
+                cursor: 'pointer', fontSize: 11, fontWeight: 600,
+                color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: 0.05,
             }}>
-                История снабжения · {sources.length}
-            </div>
-            <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
-                <thead>
-                    <tr style={{
-                        color: 'var(--color-text-muted)', fontSize: 10,
-                        textTransform: 'uppercase', letterSpacing: 0.05,
-                    }}>
-                        <th style={{ textAlign: 'left', padding: '4px 8px' }}>Тип</th>
-                        <th style={{ textAlign: 'left', padding: '4px 8px' }}>№ заказа</th>
-                        <th style={{ textAlign: 'left', padding: '4px 8px' }}>ФФ-склад</th>
-                        <th style={{ textAlign: 'right', padding: '4px 8px', width: 80 }}>Кол-во</th>
-                        <th style={{ textAlign: 'left', padding: '4px 8px', width: 180 }}>Кратность</th>
-                        <th style={{ textAlign: 'left', padding: '4px 8px', width: 120 }}>Размер</th>
-                        <th style={{ textAlign: 'left', padding: '4px 8px', width: 110 }}>Дата</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {sources.map((row, i) => {
-                        const meta = SOURCE_TYPE_META[row.source_type] ?? { label: row.source_type, icon: '' };
-                        const isEditing = row.editable && editingFoi === row.factory_order_item_id;
-                        return (
-                            <tr
-                                key={`${row.source_type}-${row.factory_order_item_id ?? 'v'}-${i}`}
-                                style={{ borderTop: '1px solid var(--color-border)' }}
-                            >
-                                <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>
-                                    {meta.icon} {meta.label}
-                                </td>
-                                <td style={{ padding: '6px 8px' }}>
-                                    <span style={{ fontFamily: 'monospace' }}>{row.order_no}</span>
-                                    {row.status && (
-                                        <span className="badge badge-secondary" style={{ marginLeft: 6, fontSize: 10 }}>
-                                            {row.status}
-                                        </span>
-                                    )}
-                                </td>
-                                <td style={{
-                                    padding: '6px 8px',
-                                    color: row.warehouse_name ? undefined : 'var(--color-text-dim)',
-                                }}>
-                                    {row.warehouse_name || '—'}
-                                </td>
-                                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(row.qty)}</td>
-                                <td style={{ padding: '6px 8px' }}>
-                                    {isEditing ? (
-                                        <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
-                                            <input
-                                                type="text"
-                                                inputMode="numeric"
-                                                value={editValue}
-                                                onChange={e => setEditValue(e.target.value)}
-                                                onKeyDown={e => {
-                                                    if (e.key === 'Enter') saveEdit();
-                                                    else if (e.key === 'Escape') cancelEdit();
-                                                }}
-                                                placeholder="пусто = сброс"
-                                                autoFocus
-                                                style={{
-                                                    width: 90, padding: '3px 6px', fontSize: 12,
-                                                    border: '1px solid var(--color-border)', borderRadius: 4,
-                                                }}
-                                            />
-                                            <button
-                                                className="btn btn-success btn-sm"
-                                                disabled={saving}
-                                                onClick={saveEdit}
-                                                style={{ padding: '2px 6px', fontSize: 11 }}
-                                                title="Сохранить (Enter)"
-                                            >✓</button>
-                                            <button
-                                                className="btn btn-secondary btn-sm"
-                                                disabled={saving}
-                                                onClick={cancelEdit}
-                                                style={{ padding: '2px 6px', fontSize: 11 }}
-                                                title="Отмена (Esc)"
-                                            >✕</button>
-                                        </div>
-                                    ) : (
-                                        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                История снабжения
+            </summary>
+            <div style={{ marginTop: 8 }}>
+                {error && (
+                    <div style={{ color: 'var(--color-danger)', fontSize: 13 }}>{error}</div>
+                )}
+                {!error && sources === null && (
+                    <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+                        Загрузка истории снабжения…
+                    </div>
+                )}
+                {!error && sources !== null && sources.length === 0 && (
+                    <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+                        Нет истории снабжения — ни машин, ни заказов на фабрику для этого SKU.
+                    </div>
+                )}
+                {!error && sources !== null && sources.length > 0 && (
+                    <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                        <thead>
+                            <tr style={{
+                                color: 'var(--color-text-muted)', fontSize: 10,
+                                textTransform: 'uppercase', letterSpacing: 0.05,
+                            }}>
+                                <th style={{ textAlign: 'left', padding: '4px 8px' }}>Тип</th>
+                                <th style={{ textAlign: 'left', padding: '4px 8px' }}>№ заказа</th>
+                                <th style={{ textAlign: 'left', padding: '4px 8px' }}>ФФ-склад</th>
+                                <th style={{ textAlign: 'right', padding: '4px 8px', width: 80 }}>Кол-во</th>
+                                <th style={{ textAlign: 'right', padding: '4px 8px', width: 110 }}>Кратность</th>
+                                <th style={{ textAlign: 'left', padding: '4px 8px', width: 120 }}>Размер</th>
+                                <th style={{ textAlign: 'left', padding: '4px 8px', width: 110 }}>Дата</th>
+                                <th style={{ textAlign: 'center', padding: '4px 8px', width: 90 }}>Принято</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {sources.map((row, i) => {
+                                const meta = SOURCE_TYPE_META[row.source_type] ?? { label: row.source_type, icon: '' };
+                                return (
+                                    <tr
+                                        key={`${row.source_type}-${row.order_no}-${i}`}
+                                        style={{ borderTop: '1px solid var(--color-border)' }}
+                                    >
+                                        <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>
+                                            {meta.icon} {meta.label}
+                                        </td>
+                                        <td style={{ padding: '6px 8px' }}>
+                                            <span style={{ fontFamily: 'monospace' }}>{row.order_no}</span>
+                                            {row.status && (
+                                                <span className="badge badge-secondary" style={{ marginLeft: 6, fontSize: 10 }}>
+                                                    {row.status}
+                                                </span>
+                                            )}
+                                        </td>
+                                        <td style={{
+                                            padding: '6px 8px',
+                                            color: row.warehouse_name ? undefined : 'var(--color-text-dim)',
+                                        }}>
+                                            {row.warehouse_name || '—'}
+                                        </td>
+                                        <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(row.qty)}</td>
+                                        <td style={{ padding: '6px 8px', textAlign: 'right' }}>
                                             <span style={{
                                                 color: row.box_qty !== null ? undefined : 'var(--color-text-dim)',
                                                 fontWeight: row.box_qty !== null ? 500 : 400,
                                             }}>
                                                 {row.box_qty !== null ? `${formatNumber(row.box_qty)} шт` : 'не задана'}
                                             </span>
-                                            {row.is_overridden && (
-                                                <span
-                                                    className="badge badge-info"
-                                                    style={{ fontSize: 10 }}
-                                                    title="Кратность переопределена вручную"
-                                                >правка</span>
+                                        </td>
+                                        <td style={{
+                                            padding: '6px 8px',
+                                            color: row.box_size ? undefined : 'var(--color-text-dim)',
+                                        }}>
+                                            {row.box_size || '—'}
+                                        </td>
+                                        <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>{formatDate(row.date)}</td>
+                                        <td style={{ padding: '6px 8px', textAlign: 'center' }}>
+                                            {row.accepted ? (
+                                                <span className="badge badge-success" style={{ fontSize: 10 }}>принято</span>
+                                            ) : (
+                                                <span className="badge badge-secondary" style={{ fontSize: 10 }}>в пути</span>
                                             )}
-                                            {row.editable && (
+                                        </td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                )}
+            </div>
+        </details>
+    );
+}
+
+// Человекочитаемые лейблы полей/источников истории изменений.
+const CHANGE_FIELD_LABELS: Record<string, string> = {
+    box_qty_override: 'Ручной дефолт',
+    box_qty: 'Кратность ФФ',
+    box_size: 'Размер ФФ',
+    use_box_multiplicity: 'Учитывать',
+};
+const CHANGE_SOURCE_LABELS: Record<string, string> = {
+    manual: 'вручную',
+    bulk: 'массово',
+    revert: 'откат',
+};
+
+// Отображение значения изменения: null → «не задано».
+function changeValueText(field: string, value: string | null): string {
+    if (value === null) return 'не задано';
+    if (field === 'use_box_multiplicity') {
+        return value === 'true' ? 'да' : value === 'false' ? 'нет' : value;
+    }
+    return value;
+}
+
+// История изменений кратности/размера SKU (SKU- и per-ФФ-уровень) — collapsible.
+function SkuChangesSection({
+    barcode,
+    onRowUpdated,
+}: {
+    barcode: string;
+    onRowUpdated: (row: BoxMultiplicityRow) => void;
+}) {
+    const [changes, setChanges] = useState<BoxMultiplicityChangeRow[] | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const [loaded, setLoaded] = useState(false);
+    const [revertingId, setRevertingId] = useState<number | null>(null);
+    const [revertError, setRevertError] = useState<string | null>(null);
+
+    // Ленивая загрузка — только когда секция раскрыта пользователем.
+    const loadChanges = useCallback(async () => {
+        if (loaded) return;
+        try {
+            setError(null);
+            const resp = await api.getBoxMultiplicityChanges(barcode);
+            setChanges(resp.items);
+            setLoaded(true);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+        }
+    }, [barcode, loaded]);
+
+    const revert = useCallback(async (changeId: number) => {
+        setRevertingId(changeId);
+        setRevertError(null);
+        try {
+            const updated = await api.revertBoxMultiplicityChange(changeId);
+            onRowUpdated(updated);
+            // Перечитываем историю — откат добавляет новую запись.
+            const resp = await api.getBoxMultiplicityChanges(barcode);
+            setChanges(resp.items);
+        } catch (e: unknown) {
+            // 409 — откат заблокирован машиной.
+            setRevertError(e instanceof Error ? e.message : 'Не удалось откатить изменение');
+        } finally {
+            setRevertingId(null);
+        }
+    }, [barcode, onRowUpdated]);
+
+    return (
+        <details
+            style={{ marginTop: 10 }}
+            onToggle={e => { if ((e.currentTarget as HTMLDetailsElement).open) loadChanges(); }}
+        >
+            <summary style={{
+                cursor: 'pointer', fontSize: 11, fontWeight: 600,
+                color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: 0.05,
+            }}>
+                История изменений
+            </summary>
+            <div style={{ marginTop: 8 }}>
+                {error && (
+                    <div style={{ color: 'var(--color-danger)', fontSize: 13 }}>{error}</div>
+                )}
+                {revertError && (
+                    <div style={{
+                        marginBottom: 8, padding: '8px 12px', borderRadius: 8,
+                        background: 'rgba(255, 59, 48, 0.08)',
+                        borderLeft: '3px solid var(--color-danger)', fontSize: 12,
+                        color: 'var(--color-danger)',
+                    }}>
+                        ⚠️ {revertError}
+                    </div>
+                )}
+                {!error && changes === null && (
+                    <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+                        Загрузка истории изменений…
+                    </div>
+                )}
+                {!error && changes !== null && changes.length === 0 && (
+                    <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+                        Нет истории изменений кратности или размера для этого SKU.
+                    </div>
+                )}
+                {!error && changes !== null && changes.length > 0 && (
+                    <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                        <thead>
+                            <tr style={{
+                                color: 'var(--color-text-muted)', fontSize: 10,
+                                textTransform: 'uppercase', letterSpacing: 0.05,
+                            }}>
+                                <th style={{ textAlign: 'left', padding: '4px 8px' }}>Поле</th>
+                                <th style={{ textAlign: 'left', padding: '4px 8px' }}>Изменение</th>
+                                <th style={{ textAlign: 'left', padding: '4px 8px', width: 90 }}>Источник</th>
+                                <th style={{ textAlign: 'left', padding: '4px 8px', width: 150 }}>Дата</th>
+                                <th style={{ textAlign: 'center', padding: '4px 8px', width: 100 }}>Откат</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {changes.map(ch => {
+                                const fieldLabel = CHANGE_FIELD_LABELS[ch.field] ?? ch.field;
+                                const sourceLabel = CHANGE_SOURCE_LABELS[ch.change_source] ?? ch.change_source;
+                                return (
+                                    <tr key={ch.id} style={{ borderTop: '1px solid var(--color-border)' }}>
+                                        <td style={{ padding: '6px 8px' }}>
+                                            <span style={{ fontWeight: 500 }}>{fieldLabel}</span>
+                                            {ch.warehouse_id !== null && (
+                                                <span style={{ color: 'var(--color-text-muted)', display: 'block', fontSize: 11 }}>
+                                                    {ch.warehouse_name || `ФФ #${ch.warehouse_id}`}
+                                                </span>
+                                            )}
+                                        </td>
+                                        <td style={{ padding: '6px 8px' }}>
+                                            <span style={{
+                                                color: ch.old_value === null ? 'var(--color-text-dim)' : undefined,
+                                            }}>
+                                                {changeValueText(ch.field, ch.old_value)}
+                                            </span>
+                                            <span style={{ color: 'var(--color-text-muted)' }}> → </span>
+                                            <span style={{
+                                                fontWeight: 500,
+                                                color: ch.new_value === null ? 'var(--color-text-dim)' : 'var(--color-accent)',
+                                            }}>
+                                                {changeValueText(ch.field, ch.new_value)}
+                                            </span>
+                                        </td>
+                                        <td style={{ padding: '6px 8px' }}>
+                                            <span className="badge badge-secondary" style={{ fontSize: 10 }}>
+                                                {sourceLabel}
+                                            </span>
+                                        </td>
+                                        <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>
+                                            {formatDateTime(ch.created_at)}
+                                        </td>
+                                        <td style={{ padding: '6px 8px', textAlign: 'center' }}>
+                                            <button
+                                                className="btn btn-secondary btn-sm"
+                                                onClick={() => revert(ch.id)}
+                                                disabled={revertingId !== null}
+                                                style={{ padding: '2px 8px', fontSize: 11 }}
+                                                title="Откатить это изменение"
+                                            >
+                                                {revertingId === ch.id ? 'Откат…' : '↩ Откатить'}
+                                            </button>
+                                        </td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                )}
+            </div>
+        </details>
+    );
+}
+
+// Второй уровень под строкой артикула — инлайн-аккордеон.
+// Основное содержимое: кратность по каждому ФФ-складу. История снабжения —
+// вложенная collapsible-секция внизу.
+function SkuExpandPanel({
+    sku,
+    perRfEdit,
+    setPerRfEdit,
+    perRfSizeEdit,
+    setPerRfSizeEdit,
+    onSavePerRfPpb,
+    onSavePerRfSize,
+    onTogglePerRfUse,
+    onRowUpdated,
+}: {
+    sku: BoxMultiplicityRow;
+    perRfEdit: Record<string, string>;
+    setPerRfEdit: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+    perRfSizeEdit: Record<string, string>;
+    setPerRfSizeEdit: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+    onSavePerRfPpb: (row: BoxMultiplicityRow, wh: BoxMultiplicityPerWarehouseRow) => void;
+    onSavePerRfSize: (row: BoxMultiplicityRow, wh: BoxMultiplicityPerWarehouseRow) => void;
+    onTogglePerRfUse: (row: BoxMultiplicityRow, wh: BoxMultiplicityPerWarehouseRow, next: boolean) => void;
+    onRowUpdated: (row: BoxMultiplicityRow) => void;
+}) {
+    const panelStyle: React.CSSProperties = {
+        background: 'var(--color-bg)',
+        padding: '14px 16px 16px 48px',
+        borderTop: '1px solid var(--color-border)',
+    };
+
+    // Показываем только ФФ с остатком — склады без стока не засоряют список.
+    const warehouses = sku.per_warehouse.filter(wh => wh.rf_stock > 0);
+
+    // ─── Автозаполнение кратности других ФФ по данным машины ──────────────
+    // Источник — машинные кратности (source==='machine'); цели — пустые
+    // редактируемые ФФ (box_qty===null, editable). Считаем только по ФФ с
+    // остатком — как и видимый список.
+    const machineWarehouses = warehouses.filter(wh => wh.source === 'machine' && wh.box_qty !== null);
+    const emptyTargets = warehouses.filter(wh => wh.editable && wh.box_qty === null);
+    // Уникальные машинные наполнения (кратность + размер + пример № машины).
+    // Ключ — qty+size: одна кратность с разными коробками = разные варианты.
+    const machineOptions = useMemo(() => {
+        const map = new Map<string, { qty: number; size: string | null; orderNo: string | null }>();
+        for (const wh of machineWarehouses) {
+            const qty = wh.box_qty as number;
+            const key = `${qty}|${wh.box_size ?? ''}`;
+            if (!map.has(key)) map.set(key, { qty, size: wh.box_size, orderNo: wh.machine_order_no });
+        }
+        return Array.from(map.values()).sort((a, b) => a.qty - b.qty);
+    }, [machineWarehouses]);
+    const canAutofill = machineOptions.length > 0 && emptyTargets.length > 0;
+
+    // Ключ варианта наполнения для radio-выбора: qty + size.
+    const optionKey = (opt: { qty: number; size: string | null }) => `${opt.qty}|${opt.size ?? ''}`;
+
+    const [autofillOpen, setAutofillOpen] = useState(false);
+    const [autofillKey, setAutofillKey] = useState<string | null>(null);
+    const [autofillTargets, setAutofillTargets] = useState<Set<number>>(new Set());
+    const [autofillApplying, setAutofillApplying] = useState(false);
+    const [autofillResult, setAutofillResult] = useState<string | null>(null);
+
+    const openAutofill = () => {
+        // Дефолты: единственный вариант зафиксирован, все цели отмечены.
+        setAutofillKey(machineOptions.length === 1 ? optionKey(machineOptions[0]) : null);
+        setAutofillTargets(new Set(emptyTargets.map(wh => wh.warehouse_id)));
+        setAutofillResult(null);
+        setAutofillOpen(true);
+    };
+
+    const closeAutofill = () => {
+        setAutofillOpen(false);
+        setAutofillResult(null);
+    };
+
+    const toggleAutofillTarget = (warehouseId: number) => {
+        setAutofillTargets(prev => {
+            const next = new Set(prev);
+            if (next.has(warehouseId)) next.delete(warehouseId);
+            else next.add(warehouseId);
+            return next;
+        });
+    };
+
+    const applyAutofill = async () => {
+        const selected = machineOptions.find(opt => optionKey(opt) === autofillKey);
+        if (!selected || autofillTargets.size === 0) return;
+        setAutofillApplying(true);
+        try {
+            // Копируем и кратность, и размер выбранного машинного наполнения.
+            const items: BoxMultiplicityBulkItem[] = Array.from(autofillTargets).map(warehouseId => ({
+                barcode: sku.barcode,
+                warehouse_id: warehouseId,
+                box_qty_override: selected.qty,
+                box_size: selected.size,
+            }));
+            const resp = await api.bulkBoxMultiplicity(items);
+            const updated = resp.updated.find(r => r.nm_id === sku.nm_id);
+            if (updated) onRowUpdated(updated);
+            const sizePart = selected.size ? ` · ${selected.size}` : '';
+            setAutofillResult(
+                `Заполнено ${autofillTargets.size} ФФ — ${selected.qty} шт${sizePart}`,
+            );
+            // Свернуть форму, оставив краткий фидбек.
+            setAutofillOpen(false);
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка автозаполнения');
+        } finally {
+            setAutofillApplying(false);
+        }
+    };
+
+    return (
+        <div style={panelStyle}>
+            <div style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                gap: 12, marginBottom: 8, flexWrap: 'wrap',
+            }}>
+                <div style={{
+                    fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)',
+                    textTransform: 'uppercase', letterSpacing: 0.05,
+                }}>
+                    Кратность по ФФ-складам · {warehouses.length}
+                </div>
+                {canAutofill && !autofillOpen && (
+                    <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={openAutofill}
+                        style={{ fontSize: 11 }}
+                        title="Проставить кратность машины на пустые редактируемые ФФ-склады"
+                    >
+                        ✨ Заполнить по машине ({emptyTargets.length})
+                    </button>
+                )}
+            </div>
+
+            {autofillResult && (
+                <div style={{
+                    marginBottom: 8, padding: '8px 12px', borderRadius: 8,
+                    background: 'rgba(52, 199, 89, 0.08)',
+                    borderLeft: '3px solid var(--color-success)', fontSize: 12,
+                }}>
+                    ✅ {autofillResult}
+                </div>
+            )}
+
+            {autofillOpen && (
+                <div style={{
+                    marginBottom: 10, padding: 12, borderRadius: 8,
+                    background: 'var(--color-bg-card)', border: '1px solid var(--color-border)',
+                }}>
+                    <div style={{
+                        fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)',
+                        textTransform: 'uppercase', letterSpacing: 0.05, marginBottom: 8,
+                    }}>
+                        ✨ Заполнить кратность по машине
+                    </div>
+
+                    {/* Шаг 1: выбор машинного наполнения (кратность + размер) */}
+                    <div style={{ marginBottom: 10 }}>
+                        <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4 }}>Наполнение машины</div>
+                        {machineOptions.length === 1 ? (
+                            <div style={{ fontSize: 13 }}>
+                                <strong style={{ color: 'var(--color-accent)' }}>
+                                    {formatNumber(machineOptions[0].qty)} шт
+                                </strong>
+                                {machineOptions[0].size && (
+                                    <span style={{ color: 'var(--color-text)', marginLeft: 6 }}>
+                                        · {machineOptions[0].size}
+                                    </span>
+                                )}
+                                {machineOptions[0].orderNo && (
+                                    <span style={{ color: 'var(--color-text-muted)', marginLeft: 6 }}>
+                                        — машина {machineOptions[0].orderNo}
+                                    </span>
+                                )}
+                            </div>
+                        ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                {machineOptions.map(opt => {
+                                    const key = optionKey(opt);
+                                    return (
+                                        <label
+                                            key={key}
+                                            style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}
+                                        >
+                                            <input
+                                                type="radio"
+                                                name={`autofill-qty-${sku.nm_id}`}
+                                                checked={autofillKey === key}
+                                                onChange={() => setAutofillKey(key)}
+                                                style={{ cursor: 'pointer' }}
+                                            />
+                                            <strong style={{ color: 'var(--color-accent)' }}>{formatNumber(opt.qty)} шт</strong>
+                                            {opt.size && (
+                                                <span style={{ color: 'var(--color-text)' }}>· {opt.size}</span>
+                                            )}
+                                            {opt.orderNo && (
+                                                <span style={{ color: 'var(--color-text-muted)' }}>— машина {opt.orderNo}</span>
+                                            )}
+                                        </label>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Шаг 2: выбор целевых ФФ */}
+                    <div style={{ marginBottom: 10 }}>
+                        <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4 }}>
+                            Целевые ФФ-склады (пустые) · {autofillTargets.size} из {emptyTargets.length}
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                            {emptyTargets.map(wh => (
+                                <label
+                                    key={wh.warehouse_id}
+                                    style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}
+                                >
+                                    <input
+                                        type="checkbox"
+                                        checked={autofillTargets.has(wh.warehouse_id)}
+                                        onChange={() => toggleAutofillTarget(wh.warehouse_id)}
+                                        style={{ cursor: 'pointer' }}
+                                    />
+                                    <span style={{ fontWeight: 500 }}>{wh.warehouse_name}</span>
+                                    <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+                                        · сток {formatNumber(wh.rf_stock)}
+                                    </span>
+                                </label>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', alignItems: 'center' }}>
+                        <span style={{ marginRight: 'auto', fontSize: 11, color: 'var(--color-text-muted)' }}>
+                            Заполнятся только пустые ФФ — машинные и ручные не затрагиваются.
+                        </span>
+                        <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={closeAutofill}
+                            disabled={autofillApplying}
+                        >Отмена</button>
+                        <button
+                            className="btn btn-primary btn-sm"
+                            onClick={applyAutofill}
+                            disabled={autofillApplying || autofillKey === null || autofillTargets.size === 0}
+                        >
+                            {autofillApplying ? 'Применяю…' : `Применить (${autofillTargets.size})`}
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {warehouses.length === 0 ? (
+                <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+                    Нет остатков ни на одном ФФ-складе.
+                </div>
+            ) : (
+                <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                    <thead>
+                        <tr style={{ color: 'var(--color-text-muted)', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.05 }}>
+                            <th style={{ textAlign: 'left', padding: '4px 8px' }}>ФФ-склад</th>
+                            <th style={{ textAlign: 'right', padding: '4px 8px', width: 80 }}>Сток</th>
+                            <th style={{ textAlign: 'left', padding: '4px 8px' }}>Кратность</th>
+                            <th style={{ textAlign: 'left', padding: '4px 8px', width: 110 }}>Размер</th>
+                            <th style={{ textAlign: 'right', padding: '4px 8px', width: 110 }}>Коробов</th>
+                            <th style={{ textAlign: 'center', padding: '4px 8px', width: 90 }}>Учитывать</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {warehouses.map(wh => {
+                            const editKey = `${sku.nm_id}:${wh.warehouse_id}`;
+                            const editVal = perRfEdit[editKey];
+                            const showEdit = editVal !== undefined;
+                            const sizeEditVal = perRfSizeEdit[editKey];
+                            const showSizeEdit = sizeEditVal !== undefined;
+                            // Коробов на этом ФФ = сток / кратность (целых + остаток).
+                            const ppb = wh.box_qty;
+                            const fullBoxes = ppb && ppb > 0 ? Math.floor(wh.rf_stock / ppb) : null;
+                            const remPcs = ppb && ppb > 0 ? wh.rf_stock % ppb : 0;
+                            return (
+                                <tr key={wh.warehouse_id} style={{ borderTop: '1px solid var(--color-border)' }}>
+                                    <td style={{ padding: '6px 8px', fontWeight: 500 }}>{wh.warehouse_name}</td>
+                                    <td style={{
+                                        padding: '6px 8px', textAlign: 'right',
+                                        color: wh.rf_stock > 0 ? 'var(--color-success)' : 'var(--color-text-dim)',
+                                    }}>
+                                        {wh.rf_stock > 0 ? formatNumber(wh.rf_stock) : '—'}
+                                    </td>
+                                    <td style={{ padding: '6px 8px' }}>
+                                        {showEdit && wh.editable ? (
+                                            <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
+                                                <input
+                                                    type="text"
+                                                    inputMode="numeric"
+                                                    value={editVal}
+                                                    onChange={e => setPerRfEdit(p => ({ ...p, [editKey]: e.target.value }))}
+                                                    onKeyDown={e => {
+                                                        if (e.key === 'Enter') onSavePerRfPpb(sku, wh);
+                                                        else if (e.key === 'Escape') {
+                                                            setPerRfEdit(p => {
+                                                                const next = { ...p };
+                                                                delete next[editKey];
+                                                                return next;
+                                                            });
+                                                        }
+                                                    }}
+                                                    placeholder="—"
+                                                    autoFocus
+                                                    style={{
+                                                        width: 100, padding: '3px 6px', fontSize: 12,
+                                                        border: '1px solid var(--color-border)', borderRadius: 4,
+                                                    }}
+                                                />
+                                                <button
+                                                    className="btn btn-success btn-sm"
+                                                    onClick={() => onSavePerRfPpb(sku, wh)}
+                                                    style={{ padding: '2px 6px', fontSize: 11 }}
+                                                    title="Сохранить (Enter)"
+                                                >✓</button>
                                                 <button
                                                     className="btn btn-secondary btn-sm"
-                                                    onClick={() => startEdit(row)}
+                                                    onClick={() => setPerRfEdit(p => {
+                                                        const next = { ...p };
+                                                        delete next[editKey];
+                                                        return next;
+                                                    })}
                                                     style={{ padding: '2px 6px', fontSize: 11 }}
-                                                    title={row.box_qty !== null ? 'Изменить кратность заказа' : 'Задать кратность'}
-                                                >
-                                                    {row.is_overridden ? '✏️' : '➕'}
-                                                </button>
-                                            )}
-                                        </div>
-                                    )}
-                                </td>
-                                <td style={{
-                                    padding: '6px 8px',
-                                    color: row.box_size ? undefined : 'var(--color-text-dim)',
-                                }}>
-                                    {row.box_size || '—'}
-                                </td>
-                                <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>{formatDate(row.date)}</td>
-                            </tr>
-                        );
-                    })}
-                </tbody>
-            </table>
+                                                    title="Отмена (Esc)"
+                                                >✕</button>
+                                            </div>
+                                        ) : (
+                                            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                                                <span style={{
+                                                    color: wh.box_qty !== null ? 'var(--color-accent)' : 'var(--color-text-dim)',
+                                                    fontWeight: wh.box_qty !== null ? 600 : 400,
+                                                }}>
+                                                    {wh.box_qty !== null ? `${formatNumber(wh.box_qty)} шт` : 'не задана'}
+                                                </span>
+                                                <SourceBadge wh={wh} />
+                                                {wh.editable ? (
+                                                    <button
+                                                        className="btn btn-secondary btn-sm"
+                                                        onClick={() => setPerRfEdit(p => ({
+                                                            ...p, [editKey]: wh.box_qty !== null ? String(wh.box_qty) : '',
+                                                        }))}
+                                                        style={{ padding: '2px 6px', fontSize: 11 }}
+                                                        title={wh.box_qty !== null ? 'Изменить кратность ФФ' : 'Задать кратность ФФ'}
+                                                    >
+                                                        {wh.box_qty !== null ? '✏️' : '➕'}
+                                                    </button>
+                                                ) : (
+                                                    <span
+                                                        style={{ fontSize: 14 }}
+                                                        title="Заблокировано — кратность из принятой машины"
+                                                    >🔒</span>
+                                                )}
+                                            </div>
+                                        )}
+                                    </td>
+                                    <td style={{ padding: '6px 8px' }}>
+                                        {showSizeEdit && wh.editable ? (
+                                            <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
+                                                <input
+                                                    type="text"
+                                                    value={sizeEditVal}
+                                                    onChange={e => setPerRfSizeEdit(p => ({ ...p, [editKey]: e.target.value }))}
+                                                    onKeyDown={e => {
+                                                        if (e.key === 'Enter') onSavePerRfSize(sku, wh);
+                                                        else if (e.key === 'Escape') {
+                                                            setPerRfSizeEdit(p => {
+                                                                const next = { ...p };
+                                                                delete next[editKey];
+                                                                return next;
+                                                            });
+                                                        }
+                                                    }}
+                                                    placeholder="напр. 60×40×50"
+                                                    autoFocus
+                                                    style={{
+                                                        width: 110, padding: '3px 6px', fontSize: 12,
+                                                        border: '1px solid var(--color-border)', borderRadius: 4,
+                                                    }}
+                                                />
+                                                <button
+                                                    className="btn btn-success btn-sm"
+                                                    onClick={() => onSavePerRfSize(sku, wh)}
+                                                    style={{ padding: '2px 6px', fontSize: 11 }}
+                                                    title="Сохранить (Enter)"
+                                                >✓</button>
+                                                <button
+                                                    className="btn btn-secondary btn-sm"
+                                                    onClick={() => setPerRfSizeEdit(p => {
+                                                        const next = { ...p };
+                                                        delete next[editKey];
+                                                        return next;
+                                                    })}
+                                                    style={{ padding: '2px 6px', fontSize: 11 }}
+                                                    title="Отмена (Esc)"
+                                                >✕</button>
+                                            </div>
+                                        ) : (
+                                            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                                                <span style={{ color: wh.box_size ? undefined : 'var(--color-text-dim)' }}>
+                                                    {wh.box_size || '—'}
+                                                </span>
+                                                {wh.editable ? (
+                                                    <button
+                                                        className="btn btn-secondary btn-sm"
+                                                        onClick={() => setPerRfSizeEdit(p => ({
+                                                            ...p, [editKey]: wh.box_size ?? '',
+                                                        }))}
+                                                        style={{ padding: '2px 6px', fontSize: 11 }}
+                                                        title={wh.box_size ? 'Изменить размер коробки ФФ' : 'Задать размер коробки ФФ'}
+                                                    >
+                                                        {wh.box_size ? '✏️' : '➕'}
+                                                    </button>
+                                                ) : (
+                                                    <span
+                                                        style={{ fontSize: 14 }}
+                                                        title="Заблокировано — размер из принятой машины"
+                                                    >🔒</span>
+                                                )}
+                                            </div>
+                                        )}
+                                    </td>
+                                    <td style={{ padding: '6px 8px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                        {fullBoxes !== null ? (
+                                            <>
+                                                <strong style={{ color: fullBoxes === 0 ? 'var(--color-warning)' : undefined }}>
+                                                    {formatNumber(fullBoxes)}
+                                                </strong>
+                                                <span style={{ color: 'var(--color-text-muted)' }}> кор</span>
+                                                {remPcs > 0 && (
+                                                    <span
+                                                        style={{ color: 'var(--color-warning)' }}
+                                                        title="Неполная коробка — остаток не кратен"
+                                                    > +{formatNumber(remPcs)} шт</span>
+                                                )}
+                                            </>
+                                        ) : (
+                                            <span style={{ color: 'var(--color-text-dim)' }}>—</span>
+                                        )}
+                                    </td>
+                                    <td style={{ padding: '6px 8px', textAlign: 'center' }}>
+                                        {/* Per-ФФ тоггл разрешён даже на машинных ФФ */}
+                                        <input
+                                            type="checkbox"
+                                            checked={wh.use_box_multiplicity}
+                                            onChange={e => onTogglePerRfUse(sku, wh, e.target.checked)}
+                                            title={wh.use_box_multiplicity
+                                                ? 'Кратность учитывается при сборке с этого ФФ'
+                                                : 'Кратность игнорируется — без округления'}
+                                            style={{ width: 14, height: 14, cursor: 'pointer' }}
+                                        />
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            )}
+
+            <div style={{
+                marginTop: 10, padding: '6px 10px', borderRadius: 6,
+                background: 'var(--color-bg-card)', fontSize: 11, color: 'var(--color-text-muted)',
+            }}>
+                <strong style={{ color: 'var(--color-text)' }}>Ручной дефолт SKU:</strong>{' '}
+                {sku.box_qty_override !== null
+                    ? <>{formatNumber(sku.box_qty_override)} шт</>
+                    : <span style={{ color: 'var(--color-warning)' }}>не задан</span>}
+                {' — fallback для ФФ без своей кратности.'}
+            </div>
+
+            <SkuSourcesSection barcode={sku.barcode} />
+            <SkuChangesSection barcode={sku.barcode} onRowUpdated={onRowUpdated} />
         </div>
     );
+}
+
+// Резолв «применяемой» кратности SKU для сводки: ФФ с остатком и заданной кратностью.
+function skuHasBoxQty(row: BoxMultiplicityRow): boolean {
+    return row.per_warehouse.some(p => p.rf_stock > 0 && p.box_qty !== null);
 }
 
 export default function BoxMultiplicityPage() {
@@ -236,13 +839,10 @@ export default function BoxMultiplicityPage() {
     const [editValue, setEditValue] = useState('');
     const [saving, setSaving] = useState(false);
 
-    // Per-RF popover: один SKU с таблицей по ФФ + якорь к trigger-кнопке.
-    const [perRfPopover, setPerRfPopover] = useState<{
-        nmId: number;
-        anchor: { top: number; left: number; width: number; height: number };
-    } | null>(null);
-    // Per-RF inline edit: "{nm_id}:{warehouse_id}" → string value
+    // Per-ФФ inline edit кратности: "{nm_id}:{warehouse_id}" → string value
     const [perRfEdit, setPerRfEdit] = useState<Record<string, string>>({});
+    // Per-ФФ inline edit размера: "{nm_id}:{warehouse_id}" → string value
+    const [perRfSizeEdit, setPerRfSizeEdit] = useState<Record<string, string>>({});
 
     // Filters
     const [brandFilter, setBrandFilter] = useState('');
@@ -256,7 +856,9 @@ export default function BoxMultiplicityPage() {
     const [pasteOpen, setPasteOpen] = useState(false);
     const [pasteRows, setPasteRows] = useState<PasteRow[]>(() => Array.from({ length: 5 }, emptyPasteRow));
     const [pasteApplying, setPasteApplying] = useState(false);
-    const [pasteResult, setPasteResult] = useState<{ matched: number; updated: number; notFound: string[] } | null>(null);
+    const [pasteResult, setPasteResult] = useState<{
+        matched: number; updated: number; notFound: string[]; locked: string[];
+    } | null>(null);
 
     const load = useCallback(async () => {
         try {
@@ -264,8 +866,8 @@ export default function BoxMultiplicityPage() {
             setError(null);
             const resp = await api.getBoxMultiplicity();
             setRows(resp.items);
-        } catch (e: any) {
-            setError(e?.message || 'Ошибка загрузки');
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         } finally {
             setLoading(false);
         }
@@ -292,8 +894,8 @@ export default function BoxMultiplicityPage() {
             const updated = await api.setBoxMultiplicity(nmId, value);
             setRows(prev => prev.map(r => r.nm_id === nmId ? updated : r));
             cancelEdit();
-        } catch (e: any) {
-            alert(e?.message || 'Ошибка сохранения');
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка сохранения');
         } finally {
             setSaving(false);
         }
@@ -372,7 +974,7 @@ export default function BoxMultiplicityPage() {
         try {
             const items: BoxMultiplicityBulkItem[] = parsedPaste.rows.map(r => {
                 const item: BoxMultiplicityBulkItem = { barcode: r.barcode };
-                if (r.box_qty_override !== undefined) item.box_qty_override = r.box_qty_override;
+                if (r.box_qty_override !== undefined) item.box_qty_override = r.box_qty_override ?? null;
                 if (r.use_box_multiplicity !== undefined) item.use_box_multiplicity = r.use_box_multiplicity;
                 return item;
             });
@@ -385,44 +987,20 @@ export default function BoxMultiplicityPage() {
                 matched: resp.matched_count,
                 updated: resp.updated.length,
                 notFound: resp.not_found,
+                locked: resp.locked,
             });
             setPasteRows(Array.from({ length: 5 }, emptyPasteRow));
-        } catch (e: any) {
-            alert(e?.message || 'Ошибка применения');
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка применения');
         } finally {
             setPasteApplying(false);
         }
     };
 
-    // ─── Per-RF handlers ───────────────────────────────────────────────────
-    const openPerRfPopover = (nmId: number, btn: HTMLElement) => {
-        const rect = btn.getBoundingClientRect();
-        setPerRfPopover({
-            nmId,
-            anchor: { top: rect.top, left: rect.left, width: rect.width, height: rect.height },
-        });
-        setPerRfEdit({});
-    };
-
-    const closePerRfPopover = () => {
-        setPerRfPopover(null);
-        setPerRfEdit({});
-    };
-
-    // Close on Esc + click outside (handled in popover render via onClick on backdrop).
-    useEffect(() => {
-        if (!perRfPopover) return;
-        const handler = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') closePerRfPopover();
-        };
-        window.addEventListener('keydown', handler);
-        return () => window.removeEventListener('keydown', handler);
-    }, [perRfPopover]);
-
+    // ─── Per-ФФ handlers ───────────────────────────────────────────────────
     const savePerRfPpb = async (row: BoxMultiplicityRow, wh: BoxMultiplicityPerWarehouseRow) => {
         const key = `${row.nm_id}:${wh.warehouse_id}`;
-        const raw = perRfEdit[key] ?? '';
-        const trimmed = raw.trim();
+        const trimmed = (perRfEdit[key] ?? '').trim();
         const value = trimmed === '' ? null : parseInt(trimmed, 10);
         if (value !== null && (Number.isNaN(value) || value < 1)) {
             alert('Кратность должна быть положительным числом или пустой');
@@ -438,8 +1016,29 @@ export default function BoxMultiplicityPage() {
                 delete next[key];
                 return next;
             });
-        } catch (e: any) {
-            alert(e?.message || 'Ошибка сохранения');
+        } catch (e: unknown) {
+            // 409 — ФФ машинно-заблокирован
+            alert(e instanceof Error ? e.message : 'Ошибка сохранения');
+        }
+    };
+
+    const savePerRfSize = async (row: BoxMultiplicityRow, wh: BoxMultiplicityPerWarehouseRow) => {
+        const key = `${row.nm_id}:${wh.warehouse_id}`;
+        const trimmed = (perRfSizeEdit[key] ?? '').trim();
+        const value = trimmed === '' ? null : trimmed;
+        try {
+            const updated = await api.patchPerWarehouseBoxMultiplicity(
+                row.barcode, wh.warehouse_id, { box_size: value },
+            );
+            setRows(prev => prev.map(r => r.nm_id === row.nm_id ? updated : r));
+            setPerRfSizeEdit(prev => {
+                const next = { ...prev };
+                delete next[key];
+                return next;
+            });
+        } catch (e: unknown) {
+            // 409 — ФФ машинно-заблокирован
+            alert(e instanceof Error ? e.message : 'Ошибка сохранения');
         }
     };
 
@@ -459,7 +1058,7 @@ export default function BoxMultiplicityPage() {
                 row.barcode, wh.warehouse_id, { use_box_multiplicity: next },
             );
             setRows(prev => prev.map(r => r.nm_id === row.nm_id ? updated : r));
-        } catch (e: any) {
+        } catch (e: unknown) {
             // rollback
             setRows(prev => prev.map(r => {
                 if (r.nm_id !== row.nm_id) return r;
@@ -470,7 +1069,7 @@ export default function BoxMultiplicityPage() {
                     ),
                 };
             }));
-            alert(e?.message || 'Ошибка сохранения');
+            alert(e instanceof Error ? e.message : 'Ошибка сохранения');
         }
     };
 
@@ -480,9 +1079,9 @@ export default function BoxMultiplicityPage() {
         try {
             const updated = await api.patchBoxMultiplicity(nmId, { use_box_multiplicity: next });
             setRows(prev => prev.map(r => r.nm_id === nmId ? updated : r));
-        } catch (e: any) {
+        } catch (e: unknown) {
             setRows(prev => prev.map(r => r.nm_id === nmId ? { ...r, use_box_multiplicity: !next } : r));
-            alert(e?.message || 'Ошибка сохранения');
+            alert(e instanceof Error ? e.message : 'Ошибка сохранения');
         }
     };
 
@@ -522,6 +1121,7 @@ export default function BoxMultiplicityPage() {
                 case 'in_transit': return r.in_transit > 0;
                 case 'no_wb': return r.wb_stock === 0;
                 case 'no_stock': return r.rf_stock === 0 && r.wb_stock === 0 && r.in_assembly === 0 && r.in_transit === 0;
+                case 'no_box_qty': return !skuHasBoxQty(r);
                 default: return true;
             }
         });
@@ -537,19 +1137,22 @@ export default function BoxMultiplicityPage() {
 
     const stats = useMemo(() => {
         const total = scopeRows.length;
-        const withEffective = scopeRows.filter(r => r.effective_box_qty !== null).length;
+        // «С кратностью» — есть ФФ с остатком и заданной кратностью.
+        const withBoxQty = scopeRows.filter(skuHasBoxQty).length;
+        const noBoxQty = total - withBoxQty;
+        const withMachine = scopeRows.filter(r => r.has_machine_data).length;
         const withManual = scopeRows.filter(r => r.box_qty_override !== null).length;
-        const fromVehicle = scopeRows.filter(r => r.box_qty_override === null && r.box_qty_from_vehicle !== null).length;
-        const empty = total - withEffective;
-        const active = scopeRows.filter(r => r.use_box_multiplicity && r.effective_box_qty !== null).length;
+        // «Учитывается» — SKU-флаг включён и кратность фактически задана.
+        const active = scopeRows.filter(r => r.use_box_multiplicity && skuHasBoxQty(r)).length;
         const filterCounts = {
             rf: scopeRows.filter(r => r.rf_stock > 0).length,
             in_assembly: scopeRows.filter(r => r.in_assembly > 0).length,
             in_transit: scopeRows.filter(r => r.in_transit > 0).length,
             no_wb: scopeRows.filter(r => r.wb_stock === 0).length,
             no_stock: scopeRows.filter(r => r.rf_stock === 0 && r.wb_stock === 0 && r.in_assembly === 0 && r.in_transit === 0).length,
+            no_box_qty: scopeRows.filter(r => !skuHasBoxQty(r)).length,
         };
-        return { total, withEffective, withManual, fromVehicle, empty, active, filterCounts };
+        return { total, withBoxQty, noBoxQty, withMachine, withManual, active, filterCounts };
     }, [scopeRows]);
 
     const columns: Column[] = [
@@ -613,42 +1216,42 @@ export default function BoxMultiplicityPage() {
                 `ФФ:${r.rf_stock} | сборка:${r.in_assembly} | путь:${r.in_transit} | WB:${r.wb_stock}`,
         },
         {
-            key: 'box_qty_from_vehicle',
-            label: 'Из машины',
-            align: 'right',
-            getValue: (r: BoxMultiplicityRow) => r.box_qty_from_vehicle ?? -1,
+            key: 'per_warehouse',
+            label: 'Кратность по ФФ',
+            width: '240px',
+            // Сводка — раскрытие per-ФФ панели делает встроенный expander таблицы (стрелка слева).
+            getValue: (r: BoxMultiplicityRow) =>
+                r.per_warehouse.filter(p => p.rf_stock > 0 && p.box_qty !== null).length,
             render: (_v: unknown, r: BoxMultiplicityRow) => {
-                if (r.box_qty_from_vehicle === null) {
-                    return <span style={{ color: 'var(--color-text-dim)' }}>—</span>;
-                }
+                // Сводка — только по ФФ с остатком (как и развёрнутый список).
+                const whs = r.per_warehouse.filter(p => p.rf_stock > 0);
+                const withQty = whs.filter(p => p.box_qty !== null).length;
+                const machineCount = whs.filter(p => p.source === 'machine').length;
+                const manualCount = whs.filter(p => p.source === 'manual').length;
                 return (
-                    <div style={{ textAlign: 'right' }}>
-                        <div style={{ fontWeight: 500 }}>{formatNumber(r.box_qty_from_vehicle)} шт</div>
-                        {r.vehicle_order_no && (
-                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                                {r.vehicle_order_no}
-                                {r.vehicle_received_at && ` · ${formatDate(r.vehicle_received_at)}`}
-                            </div>
+                    <div
+                        style={{ fontSize: 12, color: 'var(--color-text-muted)' }}
+                        title="Разверните строку (стрелка слева) — настройка кратности по каждому ФФ-складу"
+                    >
+                        🛠 {whs.length} ФФ
+                        {withQty > 0 && <span style={{ marginLeft: 6 }}>· задано {withQty}</span>}
+                        {machineCount > 0 && (
+                            <span style={{ marginLeft: 6, color: 'var(--color-accent)' }}>· 🔒 {machineCount}</span>
+                        )}
+                        {manualCount > 0 && (
+                            <span style={{ marginLeft: 6, color: 'var(--color-success)' }}>· ✏️ {manualCount}</span>
                         )}
                     </div>
                 );
             },
-        },
-        {
-            key: 'box_qty_from_factory',
-            label: 'Из заказа',
-            align: 'right',
-            format: 'number',
-            getValue: (r: BoxMultiplicityRow) => r.box_qty_from_factory ?? -1,
-            render: (_v: unknown, r: BoxMultiplicityRow) => (
-                <span style={{ color: r.box_qty_from_factory === null ? 'var(--color-text-dim)' : undefined }}>
-                    {r.box_qty_from_factory === null ? '—' : `${formatNumber(r.box_qty_from_factory)} шт`}
-                </span>
-            ),
+            exportValue: (r: BoxMultiplicityRow) => r.per_warehouse
+                .filter(p => p.rf_stock > 0)
+                .map(p => `${p.warehouse_name}:${p.box_qty ?? '—'}[${p.source}]${p.use_box_multiplicity ? '' : '*'}`)
+                .join(' | '),
         },
         {
             key: 'box_qty_override',
-            label: 'Ручной override',
+            label: 'Ручной дефолт',
             align: 'right',
             width: '180px',
             getValue: (r: BoxMultiplicityRow) => r.box_qty_override ?? -1,
@@ -689,13 +1292,17 @@ export default function BoxMultiplicityPage() {
                 }
                 return (
                     <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'center' }}>
-                        {r.box_qty_override !== null && (
+                        {r.box_qty_override !== null ? (
                             <span style={{ fontWeight: 500 }}>{formatNumber(r.box_qty_override)} шт</span>
+                        ) : (
+                            <span style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>—</span>
                         )}
                         <button
                             className="btn btn-secondary btn-sm"
                             onClick={() => startEdit(r)}
-                            title={r.box_qty_override !== null ? 'Изменить' : 'Указать вручную'}
+                            title={r.box_qty_override !== null
+                                ? 'Изменить ручной дефолт SKU'
+                                : 'Задать ручной дефолт SKU (fallback для ФФ без своей кратности)'}
                         >
                             {r.box_qty_override !== null ? '✏️' : '➕'}
                         </button>
@@ -709,105 +1316,41 @@ export default function BoxMultiplicityPage() {
             align: 'center',
             width: '110px',
             getValue: (r: BoxMultiplicityRow) => (r.use_box_multiplicity ? 1 : 0),
-            render: (_v: unknown, r: BoxMultiplicityRow) => {
-                const disabled = r.effective_box_qty === null;
-                return (
-                    <label
-                        title={disabled
-                            ? 'Сначала задай кратность (вручную или примем машину)'
-                            : (r.use_box_multiplicity
-                                ? 'Кратность учитывается при создании сборки'
-                                : 'Кратность игнорируется — раздаём без округления')}
-                        style={{
-                            display: 'inline-flex', alignItems: 'center', gap: 6, cursor: disabled ? 'not-allowed' : 'pointer',
-                            opacity: disabled ? 0.4 : 1,
-                        }}
-                    >
-                        <input
-                            type="checkbox"
-                            checked={r.use_box_multiplicity}
-                            disabled={disabled}
-                            onChange={e => toggleUse(r.nm_id, e.target.checked)}
-                            style={{ width: 16, height: 16, cursor: disabled ? 'not-allowed' : 'pointer' }}
-                        />
-                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                            {r.use_box_multiplicity ? 'да' : 'нет'}
-                        </span>
-                    </label>
-                );
-            },
+            render: (_v: unknown, r: BoxMultiplicityRow) => (
+                <label
+                    title={r.use_box_multiplicity
+                        ? 'Кратность учитывается при создании сборки (дефолт для ФФ без своего флага)'
+                        : 'Кратность игнорируется — раздаём без округления'}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+                >
+                    <input
+                        type="checkbox"
+                        checked={r.use_box_multiplicity}
+                        onChange={e => toggleUse(r.nm_id, e.target.checked)}
+                        style={{ width: 16, height: 16, cursor: 'pointer' }}
+                    />
+                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                        {r.use_box_multiplicity ? 'да' : 'нет'}
+                    </span>
+                </label>
+            ),
         },
         {
-            key: 'per_warehouse',
-            label: 'По ФФ-складам',
-            width: '180px',
+            key: 'has_machine_data',
+            label: 'Машина',
             align: 'center',
-            getValue: (r: BoxMultiplicityRow) =>
-                r.per_warehouse.filter(p => p.box_qty !== null).length,
-            render: (_v: unknown, r: BoxMultiplicityRow) => {
-                const overridesCount = r.per_warehouse.filter(p => p.box_qty !== null).length;
-                const usedOff = r.per_warehouse.filter(p => !p.use_box_multiplicity).length;
-                const isOpen = perRfPopover?.nmId === r.nm_id;
-                return (
-                    <button
-                        className={`btn btn-sm ${isOpen ? 'btn-primary' : 'btn-secondary'}`}
-                        onClick={e => openPerRfPopover(r.nm_id, e.currentTarget)}
-                        style={{ fontSize: 12, padding: '4px 10px', minWidth: 140, textAlign: 'left' }}
-                        title="Настроить кратность по каждому ФФ-складу"
-                    >
-                        🛠 {r.per_warehouse.length} ФФ
-                        {overridesCount > 0 && (
-                            <span style={{ marginLeft: 6 }}>
-                                · {overridesCount} override
-                            </span>
-                        )}
-                        {usedOff > 0 && (
-                            <span style={{ marginLeft: 6 }}>
-                                · {usedOff} откл
-                            </span>
-                        )}
-                        <span style={{ marginLeft: 6, fontSize: 10 }}>{isOpen ? '▴' : '▾'}</span>
-                    </button>
-                );
-            },
-            exportValue: (r: BoxMultiplicityRow) => r.per_warehouse
-                .filter(p => p.box_qty !== null)
-                .map(p => `${p.warehouse_name}:${p.box_qty}${p.use_box_multiplicity ? '' : '*'}`)
-                .join(' | '),
-        },
-        {
-            key: 'effective_box_qty',
-            label: 'Применяется',
-            align: 'right',
-            getValue: (r: BoxMultiplicityRow) => r.effective_box_qty ?? -1,
-            render: (_v: unknown, r: BoxMultiplicityRow) => {
-                if (r.effective_box_qty === null) {
-                    return <span style={{ color: 'var(--color-warning)', fontSize: 12 }}>не задана</span>;
-                }
-                if (!r.use_box_multiplicity) {
-                    return (
-                        <div style={{ textAlign: 'right' }}>
-                            <div style={{ color: 'var(--color-text-dim)', textDecoration: 'line-through' }}>
-                                {formatNumber(r.effective_box_qty)} шт
-                            </div>
-                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>отключено</div>
-                        </div>
-                    );
-                }
-                const source = r.box_qty_override !== null
-                    ? 'ручной'
-                    : r.box_qty_from_vehicle !== null
-                        ? 'из машины'
-                        : 'из заказа';
-                return (
-                    <div style={{ textAlign: 'right' }}>
-                        <div style={{ fontWeight: 600, color: 'var(--color-accent)' }}>
-                            {formatNumber(r.effective_box_qty)} шт
-                        </div>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{source}</div>
-                    </div>
-                );
-            },
+            width: '110px',
+            getValue: (r: BoxMultiplicityRow) => (r.has_machine_data ? 1 : 0),
+            render: (_v: unknown, r: BoxMultiplicityRow) => (
+                r.has_machine_data ? (
+                    <span className="badge badge-info" style={{ fontSize: 11 }} title="Есть ФФ с кратностью из принятой машины">
+                        🔒 есть
+                    </span>
+                ) : (
+                    <span style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>—</span>
+                )
+            ),
+            exportValue: (r: BoxMultiplicityRow) => (r.has_machine_data ? 'да' : 'нет'),
         },
     ];
 
@@ -828,8 +1371,8 @@ export default function BoxMultiplicityPage() {
                 <div>
                     <h1 className="page-title">📦 Кратность коробок</h1>
                     <p className="page-subtitle">
-                        Кратность из последней принятой машины + ручной override.
-                        Используется в распределении при создании сборки.
+                        Кратность резолвится по каждому ФФ-складу: машина → вручную → дефолт.
+                        Разверните строку для настройки по ФФ. Используется в распределении при создании сборки.
                     </p>
                 </div>
                 <button className="btn btn-primary btn-sm" onClick={openPaste}>
@@ -844,7 +1387,7 @@ export default function BoxMultiplicityPage() {
                 </div>
                 <div className="glass-card" style={{ padding: '14px 18px', textAlign: 'center' }}>
                     <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--color-success)' }}>
-                        {formatNumber(stats.withEffective)}
+                        {formatNumber(stats.withBoxQty)}
                     </div>
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>С кратностью</div>
                 </div>
@@ -855,18 +1398,18 @@ export default function BoxMultiplicityPage() {
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Учитывается</div>
                 </div>
                 <div className="glass-card" style={{ padding: '14px 18px', textAlign: 'center' }}>
-                    <div style={{ fontSize: 26, fontWeight: 700 }}>{formatNumber(stats.fromVehicle)}</div>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Из машины</div>
+                    <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--color-accent)' }}>
+                        {formatNumber(stats.withMachine)}
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>С машинными данными</div>
                 </div>
                 <div className="glass-card" style={{ padding: '14px 18px', textAlign: 'center' }}>
-                    <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--color-accent)' }}>
-                        {formatNumber(stats.withManual)}
-                    </div>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Ручной ввод</div>
+                    <div style={{ fontSize: 26, fontWeight: 700 }}>{formatNumber(stats.withManual)}</div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Ручной дефолт</div>
                 </div>
                 <div className="glass-card" style={{ padding: '14px 18px', textAlign: 'center' }}>
                     <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--color-warning)' }}>
-                        {formatNumber(stats.empty)}
+                        {formatNumber(stats.noBoxQty)}
                     </div>
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Не задана</div>
                 </div>
@@ -921,6 +1464,7 @@ export default function BoxMultiplicityPage() {
                             { key: 'in_transit', label: 'В пути', count: stats.filterCounts.in_transit },
                             { key: 'no_wb', label: 'Нет на WB', count: stats.filterCounts.no_wb },
                             { key: 'no_stock', label: 'Нет нигде', count: stats.filterCounts.no_stock },
+                            { key: 'no_box_qty', label: 'Нет кратности', count: stats.filterCounts.no_box_qty },
                         ] as Array<{ key: StockFilter; label: string; count: number }>).map(c => (
                             <button
                                 key={c.key}
@@ -946,10 +1490,17 @@ export default function BoxMultiplicityPage() {
                             pageSize={100}
                             getRowId={(r: BoxMultiplicityRow) => r.barcode}
                             renderSubRow={(r: BoxMultiplicityRow) => (
-                                <SkuSourcesPanel
-                                    barcode={r.barcode}
-                                    onSkuUpdated={updated =>
-                                        setRows(prev => prev.map(x => x.barcode === updated.barcode ? updated : x))}
+                                <SkuExpandPanel
+                                    sku={r}
+                                    perRfEdit={perRfEdit}
+                                    setPerRfEdit={setPerRfEdit}
+                                    perRfSizeEdit={perRfSizeEdit}
+                                    setPerRfSizeEdit={setPerRfSizeEdit}
+                                    onSavePerRfPpb={savePerRfPpb}
+                                    onSavePerRfSize={savePerRfSize}
+                                    onTogglePerRfUse={togglePerRfUse}
+                                    onRowUpdated={updated =>
+                                        setRows(prev => prev.map(x => x.nm_id === updated.nm_id ? updated : x))}
                                 />
                             )}
                         />
@@ -967,6 +1518,7 @@ export default function BoxMultiplicityPage() {
                                 вставьте из Excel: <strong>Баркод, Кратность, Учитывать</strong>
                                 {' · '}кратность: число или <code>-</code>/<code>0</code> = очистить, пусто = не менять
                                 {' · '}учитывать: <code>да/нет</code>/<code>+/-</code>/<code>1/0</code>, пусто = не менять
+                                {' · '}обновляется ручной дефолт SKU; машинно-заблокированные ФФ пропускаются
                             </p>
                         </div>
                         <button className="btn btn-secondary btn-sm" onClick={closePaste} disabled={pasteApplying}>✕ Свернуть</button>
@@ -987,6 +1539,16 @@ export default function BoxMultiplicityPage() {
                                     </summary>
                                     <div style={{ fontFamily: 'monospace', marginTop: 4, maxHeight: 80, overflowY: 'auto' }}>
                                         {pasteResult.notFound.join(', ')}
+                                    </div>
+                                </details>
+                            )}
+                            {pasteResult.locked.length > 0 && (
+                                <details style={{ marginTop: 6, fontSize: 12 }}>
+                                    <summary style={{ cursor: 'pointer', color: 'var(--color-accent)' }}>
+                                        🔒 Заблокировано машиной — пропущено ({pasteResult.locked.length})
+                                    </summary>
+                                    <div style={{ fontFamily: 'monospace', marginTop: 4, maxHeight: 80, overflowY: 'auto' }}>
+                                        {pasteResult.locked.join(', ')}
                                     </div>
                                 </details>
                             )}
@@ -1111,186 +1673,6 @@ export default function BoxMultiplicityPage() {
                     </div>
                 </div>
             )}
-
-            {/* ─── Per-RF popover (anchored к trigger-кнопке) ─────────────── */}
-            {perRfPopover && (() => {
-                const sku = rows.find(r => r.nm_id === perRfPopover.nmId);
-                if (!sku) return null;
-
-                // Dropdown: открываем строго под trigger-кнопкой, выровнено
-                // по её левому краю. Ширина 420px (или ширина кнопки если шире).
-                // Если справа не влезает — выравниваем по правому краю кнопки.
-                // Если снизу не влезает — flip вверх.
-                const a = perRfPopover.anchor;
-                const POPOVER_W = Math.max(420, a.width);
-                const POPOVER_MAX_H = 360;
-                const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
-                const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
-                let left = a.left;
-                if (left + POPOVER_W + 8 > vw) {
-                    // выровнять по правому краю кнопки
-                    left = Math.max(8, a.left + a.width - POPOVER_W);
-                }
-                let top = a.top + a.height + 4;
-                let openUp = false;
-                if (top + POPOVER_MAX_H > vh - 8) {
-                    top = Math.max(8, a.top - POPOVER_MAX_H - 4);
-                    openUp = true;
-                }
-
-                return (
-                    <>
-                        {/* Прозрачный backdrop для click-outside */}
-                        <div
-                            onClick={closePerRfPopover}
-                            style={{ position: 'fixed', inset: 0, zIndex: 999 }}
-                        />
-                        <div
-                            className="glass-card"
-                            style={{
-                                position: 'fixed',
-                                top, left,
-                                width: POPOVER_W, maxHeight: POPOVER_MAX_H,
-                                zIndex: 1000, padding: 12,
-                                overflowY: 'auto',
-                                boxShadow: openUp
-                                    ? '0 -8px 32px rgba(0,0,0,0.16)'
-                                    : '0 8px 32px rgba(0,0,0,0.16)',
-                                border: '1px solid var(--color-border)',
-                            }}
-                        >
-                            <div style={{ marginBottom: 10 }}>
-                                <div style={{ fontSize: 13, fontWeight: 600, wordBreak: 'break-word' }}>
-                                    🛠 {sku.vendor_code || '—'}
-                                </div>
-                                <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>
-                                    nm_id {sku.nm_id} · {sku.subject || '—'}
-                                </div>
-                            </div>
-
-                            <table style={{ width: '100%', fontSize: 12 }}>
-                                <thead>
-                                    <tr style={{ color: 'var(--color-text-muted)', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.05 }}>
-                                        <th style={{ textAlign: 'left', padding: '4px 6px' }}>ФФ-склад</th>
-                                        <th style={{ textAlign: 'right', padding: '4px 6px', width: 70 }}>Сток</th>
-                                        <th style={{ textAlign: 'left', padding: '4px 6px', width: 150 }}>Кратность</th>
-                                        <th style={{ textAlign: 'center', padding: '4px 6px', width: 80 }}>Учитыв.</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {sku.per_warehouse.map(wh => {
-                                        const editKey = `${sku.nm_id}:${wh.warehouse_id}`;
-                                        const editVal = perRfEdit[editKey];
-                                        const showEdit = editVal !== undefined;
-                                        return (
-                                            <tr key={wh.warehouse_id} style={{ borderTop: '1px solid var(--color-border)' }}>
-                                                <td style={{ padding: '6px', fontWeight: 500 }}>{wh.warehouse_name}</td>
-                                                <td style={{ padding: '6px', textAlign: 'right', color: wh.rf_stock > 0 ? 'var(--color-success)' : 'var(--color-text-dim)' }}>
-                                                    {wh.rf_stock > 0 ? formatNumber(wh.rf_stock) : '—'}
-                                                </td>
-                                                <td style={{ padding: '6px' }}>
-                                                    {showEdit ? (
-                                                        <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
-                                                            <input
-                                                                type="text"
-                                                                inputMode="numeric"
-                                                                value={editVal}
-                                                                onChange={e => setPerRfEdit(p => ({ ...p, [editKey]: e.target.value }))}
-                                                                onKeyDown={e => {
-                                                                    if (e.key === 'Enter') savePerRfPpb(sku, wh);
-                                                                    else if (e.key === 'Escape') {
-                                                                        setPerRfEdit(p => {
-                                                                            const next = { ...p };
-                                                                            delete next[editKey];
-                                                                            return next;
-                                                                        });
-                                                                    }
-                                                                }}
-                                                                placeholder="—"
-                                                                autoFocus
-                                                                style={{
-                                                                    flex: 1, padding: '3px 6px', fontSize: 12,
-                                                                    border: '1px solid var(--color-border)', borderRadius: 4,
-                                                                    minWidth: 0,
-                                                                }}
-                                                            />
-                                                            <button
-                                                                className="btn btn-success btn-sm"
-                                                                onClick={() => savePerRfPpb(sku, wh)}
-                                                                style={{ padding: '2px 6px', fontSize: 11 }}
-                                                                title="Сохранить (Enter)"
-                                                            >✓</button>
-                                                            <button
-                                                                className="btn btn-secondary btn-sm"
-                                                                onClick={() => setPerRfEdit(p => {
-                                                                    const next = { ...p };
-                                                                    delete next[editKey];
-                                                                    return next;
-                                                                })}
-                                                                style={{ padding: '2px 6px', fontSize: 11 }}
-                                                                title="Отмена (Esc)"
-                                                            >✕</button>
-                                                        </div>
-                                                    ) : (
-                                                        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                                                            <span
-                                                                style={{
-                                                                    flex: 1,
-                                                                    color: wh.box_qty !== null ? 'var(--color-accent)' : 'var(--color-text-dim)',
-                                                                    fontWeight: wh.box_qty !== null ? 600 : 400,
-                                                                }}
-                                                            >
-                                                                {wh.box_qty !== null ? `${wh.box_qty} шт` : 'не задана'}
-                                                            </span>
-                                                            <button
-                                                                className="btn btn-secondary btn-sm"
-                                                                onClick={() => setPerRfEdit(p => ({
-                                                                    ...p, [editKey]: wh.box_qty !== null ? String(wh.box_qty) : '',
-                                                                }))}
-                                                                style={{ padding: '2px 6px', fontSize: 11 }}
-                                                                title={wh.box_qty !== null ? 'Изменить' : 'Задать'}
-                                                            >
-                                                                {wh.box_qty !== null ? '✏️' : '➕'}
-                                                            </button>
-                                                        </div>
-                                                    )}
-                                                </td>
-                                                <td style={{ padding: '6px', textAlign: 'center' }}>
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={wh.use_box_multiplicity}
-                                                        onChange={e => togglePerRfUse(sku, wh, e.target.checked)}
-                                                        title={wh.use_box_multiplicity
-                                                            ? 'Кратность учитывается при сборке с этого ФФ'
-                                                            : 'Кратность игнорируется — без округления'}
-                                                        style={{ width: 14, height: 14, cursor: 'pointer' }}
-                                                    />
-                                                </td>
-                                            </tr>
-                                        );
-                                    })}
-                                </tbody>
-                            </table>
-
-                            <div style={{
-                                marginTop: 10, padding: '6px 10px', borderRadius: 6,
-                                background: 'var(--color-bg)', fontSize: 11, color: 'var(--color-text-muted)',
-                            }}>
-                                <strong style={{ color: 'var(--color-text)' }}>Fallback:</strong>{' '}
-                                {sku.box_qty_override !== null
-                                    ? <>ручной {sku.box_qty_override}шт</>
-                                    : sku.box_qty_from_vehicle
-                                        ? <>машина {sku.box_qty_from_vehicle}шт</>
-                                        : sku.box_qty_from_factory
-                                            ? <>заказ {sku.box_qty_from_factory}шт</>
-                                            : <span style={{ color: 'var(--color-warning)' }}>нет</span>}
-                                {' · применяется: '}
-                                <strong>{sku.effective_box_qty !== null ? `${sku.effective_box_qty} шт` : '—'}</strong>
-                            </div>
-                        </div>
-                    </>
-                );
-            })()}
         </div>
     );
 }

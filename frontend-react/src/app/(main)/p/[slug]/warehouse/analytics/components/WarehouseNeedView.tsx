@@ -258,7 +258,9 @@ export function WarehouseNeedView() {
                         perRf.set(p.warehouse_id, { ppb: p.box_qty, use: p.use_box_multiplicity });
                     }
                     m.set(r.nm_id, {
-                        skuPpb: r.effective_box_qty,
+                        // SKU-level fallback — ручной дефолт; per-ФФ box_qty уже
+                        // резолвит machine/manual/default и побеждает в resolveBoxMult.
+                        skuPpb: r.box_qty_override,
                         skuUse: r.use_box_multiplicity,
                         perRf,
                     });

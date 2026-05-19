@@ -72,6 +72,7 @@ class BoxQtyPerWarehouse(Base):
     barcode: Mapped[str] = mapped_column(String(50), nullable=False)
     warehouse_id: Mapped[int] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=False)
     box_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    box_size: Mapped[str | None] = mapped_column(String(50), nullable=True)
     use_box_multiplicity: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -107,6 +108,31 @@ class BoxQtyPerOrder(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     __table_args__ = (UniqueConstraint("project_id", "factory_order_item_id", name="uq_box_qty_po_project_foi"),)
+
+
+class BoxMultiplicityChangeLog(Base):
+    """Журнал изменений кратности/размера коробки — для «Истории изменений» и отката.
+
+    Одна строка на одно изменение поля. `warehouse_id IS NULL` — изменение
+    SKU-уровня (`Nomenclature`), иначе per-ФФ (`BoxQtyPerWarehouse`).
+    `old_value`/`new_value` — строковое представление (`None` = очистка/«не задано»).
+    """
+
+    __tablename__ = "box_multiplicity_change_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    barcode: Mapped[str] = mapped_column(String(50), nullable=False)
+    warehouse_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=True)
+    # field: box_qty_override | box_qty | box_size | use_box_multiplicity
+    field: Mapped[str] = mapped_column(String(30), nullable=False)
+    old_value: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    new_value: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # change_source: manual | bulk | revert
+    change_source: Mapped[str] = mapped_column(String(20), nullable=False, default="manual", server_default="manual")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    __table_args__ = (Index("ix_box_mult_change_log_project_bc", "project_id", "barcode"),)
 
 
 class DutyRule(Base, SoftDeleteMixin):

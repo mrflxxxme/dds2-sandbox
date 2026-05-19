@@ -11,7 +11,7 @@ from backend.project_context import get_current_project
 from backend.schemas.box_multiplicity import (
     BoxMultiplicityBulkRequest,
     BoxMultiplicityBulkResponse,
-    BoxMultiplicityOrderUpdate,
+    BoxMultiplicityChangesResponse,
     BoxMultiplicityPerWarehouseUpdate,
     BoxMultiplicityResponse,
     BoxMultiplicityRow,
@@ -915,6 +915,7 @@ async def bulk_box_multiplicity(
         "updated": updated_rows,
         "not_found": result["not_found"],
         "matched_count": len(result["matched_barcodes"]),
+        "locked": result["locked"],
     }
 
 
@@ -930,13 +931,28 @@ async def patch_per_warehouse_box_multiplicity(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Per-RF override partial update. Создаёт строку если её нет."""
+    """Per-ФФ ручная кратность/размер, partial update. Создаёт строку если её нет.
+
+    Если на этом ФФ есть машинная приёмка И запрос меняет `box_qty`/`box_size`
+    → 409. Менять только `use_box_multiplicity` на машинном ФФ — разрешено.
+    """
     fields = payload.model_dump(exclude_unset=True)
     kwargs: dict = {}
     if "box_qty" in fields:
         kwargs["box_qty"] = fields["box_qty"]
+    if "box_size" in fields:
+        kwargs["box_size"] = fields["box_size"]
     if "use_box_multiplicity" in fields:
         kwargs["use_box_multiplicity"] = fields["use_box_multiplicity"]
+
+    # 409-guard: машинно-заблокированную ячейку нельзя менять по box_qty/box_size.
+    if ("box_qty" in kwargs or "box_size" in kwargs) and await box_multiplicity_service.has_machine_box_qty(
+        db, project.id, barcode, warehouse_id
+    ):
+        raise HTTPException(
+            409,
+            "Кратность на этом ФФ задаётся машиной-поставкой — box_qty/box_size не редактируется",
+        )
 
     ok = await box_multiplicity_service.update_per_warehouse(
         db,
@@ -965,37 +981,51 @@ async def get_box_multiplicity_sources(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Drill-down источников снабжения SKU: машины + заказы на фабрику (вся история)."""
+    """Drill-down источников снабжения SKU: машины + заказы на фабрику (read-only история)."""
     items = await box_multiplicity_service.get_sku_box_sources(db, project.id, barcode)
     return {"items": items}
 
 
-@router.patch(
-    "/box-multiplicity/order/{factory_order_item_id}",
-    response_model=BoxMultiplicityRow,
-    dependencies=[Depends(rate_limit_write)],
+@router.get(
+    "/box-multiplicity/changes/{barcode}",
+    response_model=BoxMultiplicityChangesResponse,
 )
-async def patch_order_box_multiplicity(
-    factory_order_item_id: int,
-    payload: BoxMultiplicityOrderUpdate,
+async def get_box_multiplicity_changes(
+    barcode: str,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Override кратности коробки для строки заказа на фабрику.
+    """История изменений кратности/размера коробки одного SKU — свежие сверху."""
+    items = await box_multiplicity_service.get_change_log(db, project.id, barcode)
+    return {"items": items}
 
-    `box_qty=null` сбрасывает override. Возвращает обновлённую строку SKU.
+
+@router.post(
+    "/box-multiplicity/changes/{change_id}/revert",
+    response_model=BoxMultiplicityRow,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def revert_box_multiplicity_change(
+    change_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Откатить одно изменение из журнала — применить `old_value` обратно.
+
+    404 если запись журнала не найдена; 409 если откат `box_qty`/`box_size`
+    заблокирован машиной-поставкой на этом ФФ.
     """
-    barcode = await box_multiplicity_service.update_order_box_qty(
-        db,
-        project.id,
-        factory_order_item_id,
-        payload.box_qty,
-    )
-    if barcode is None:
-        raise HTTPException(404, "factory order item not found in project")
+    result = await box_multiplicity_service.revert_change(db, project.id, change_id)
+    if result["barcode"] is None:
+        raise HTTPException(404, "Change log entry not found")
+    if result["machine_locked"]:
+        raise HTTPException(
+            409,
+            "Кратность на этом ФФ задаётся машиной-поставкой — откат не применён",
+        )
 
     items = await box_multiplicity_service.get_box_multiplicity_table(db, project.id)
-    row = next((r for r in items if r["barcode"] == barcode), None)
+    row = next((r for r in items if r["barcode"] == result["barcode"]), None)
     if not row:
-        raise HTTPException(404, "SKU not found after update")
+        raise HTTPException(404, "SKU not found after revert")
     return row
