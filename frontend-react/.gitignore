@@ -1,4 +1,7 @@
 node_modules/
+
+# Auto-generated from backend OpenAPI (regenerate via `make sync-types`)
+openapi.json
 .next/
 out/
 .env

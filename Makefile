@@ -136,6 +136,22 @@ clean: ## Удалить volumes (ОСТОРОЖНО!)
 setup: ## Установить git hooks (pre-commit + pre-push)
 	bash scripts/setup-hooks.sh
 
+# ─── Multi-Claude (parallel worktrees) ───────────────────────────────────────
+
+wt-start: ## Создать worktree'ы для параллельной работы (usage: make wt-start F=feature-name)
+	bash scripts/worktree-start.sh "$(F)"
+
+wt-finish: ## Слить worktree'ы обратно в dev (usage: make wt-finish F=feature-name)
+	bash scripts/worktree-finish.sh "$(F)"
+
+wt-list: ## Показать активные worktree'ы
+	@git worktree list
+
+# ─── Type sync (FastAPI → TypeScript) ────────────────────────────────────────
+
+sync-types: ## Сгенерировать TS типы из FastAPI OpenAPI schema
+	bash scripts/sync-api-types.sh
+
 # ─── Help ────────────────────────────────────────────────────────────────────
 
 help: ## Показать все команды
