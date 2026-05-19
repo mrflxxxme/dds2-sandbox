@@ -5,47 +5,31 @@ paths:
   - "tests/**/*.py"
 ---
 
-# Backend правила DDS2 (Python + PostgreSQL + Security)
+# Backend — детали реализации
 
-## Архитектура слоёв
-`routers/` (HTTP, валидация) → `services/` (логика) → `models/` (ORM). Порядок нового модуля: Model → Migration → Schema → Service → Router → Test.
+Iron rules, архитектура слоёв и анти-паттерны — в корневом `CLAUDE.md`. Здесь только то, чего там нет.
 
-## Типы данных PostgreSQL
-- `bigint` ID, `text` строки, `timestamptz` даты, `Numeric(18,2)` деньги, `boolean` флаги
+## Типы PostgreSQL
+`bigint` для ID, `text` для строк, `timestamptz` для дат, `Numeric(18,2)` для денег, `boolean` для флагов.
 
-## Multi-tenancy + Soft Delete
-- КАЖДЫЙ запрос фильтрует `project_id` + `.where(Model.is_deleted == False)` для SoftDeleteMixin
-- Удаление → `soft_delete()`, не `db.delete()`
-- Дочерние без project_id → проверять parent.project_id
+## Multi-tenancy
+Дочерняя таблица без своего `project_id` → фильтровать через `project_id` родителя (JOIN или подзапрос).
 
 ## Запросы
-- `:param` binding (НИКОГДА f-string в `text()`)
-- `.limit()` для `.scalars().all()`
-- Batch inserts, JOIN вместо N+1
-- `ilike()` с экранированием `%`/`_`
+- `.scalars().all()` — всегда с `.limit()`; на больших выборках — пагинация.
+- Batch inserts и JOIN вместо N+1.
+- `ilike()` — экранировать `%` и `_` в пользовательском вводе.
 
-## Кэш (Redis)
-- `@cached(prefix, ttl=300)` — ключ MUST содержать project_id
-- `invalidate_cache(prefix)` после мутаций — суффикс `:*` добавляется сам
-
-## PgBouncer
-- `prepared_statement_cache_size=0`, `DATABASE_URL_SYNC` для Alembic/ETL
+## Кэш
+`@cached(prefix, ttl=300)` для чтения — ключ обязан включать `project_id`.
 
 ## Безопасность
-- API-ключи шифруются `utils/crypto.py` (legacy_fallback — не менять)
-- Upload → проверять `MAX_UPLOAD_SIZE_MB` ПЕРЕД обработкой
-- scheduler jobs: `except asyncio.CancelledError: raise` ПЕРЕД `except Exception`
-- Мутации настроек → через `project_settings_service`
+- Upload-файлы → проверять `MAX_UPLOAD_SIZE_MB` до обработки.
+- Мутации настроек проекта — через `project_settings_service`, не напрямую.
+- В scheduler jobs: `except asyncio.CancelledError: raise` ПЕРЕД `except Exception`.
 
-## Тестирование (pytest, asyncio_mode=auto)
-```bash
-make test / test-fast / test-changed / test-unit
-docker compose exec backend pytest tests/ -x --tb=short
-```
-Обязательно: happy path, edge cases, multi-tenancy изоляция, soft delete фильтрация.
+## Тестирование
+pytest, `asyncio_mode=auto`. Покрывать: happy path, edge cases, изоляцию по `project_id`, фильтрацию soft-delete.
 
-## Анти-паттерны
-- `SELECT *`, `.scalars().all()` без `.limit()`, Float для денег
-- `datetime.utcnow()` → `from backend.utils.time import utcnow`
-- `except Exception` без CancelledError в scheduler
-- Логика в роутере, сервис >500 строк, функция >50 строк
+## Размер
+Сервис >500 строк или функция >50 строк — повод разбить.

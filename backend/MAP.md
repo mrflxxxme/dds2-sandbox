@@ -1,118 +1,21 @@
-# Backend Navigation Map (для AI-агентов)
+# Backend Navigation Map
 
-Читай этот файл ОДИН РАЗ при старте задачи — он покажет где что лежит.
+Где что лежит и как добавить типовое. Читать при старте задачи. Бизнес-логику доменов смотри в `DOMAIN_*.md` (каталог — `DOMAIN_INDEX.md`).
 
-## Типовые паттерны
+## Добавить API endpoint
+1. Schema: `schemas/{domain}.py` — Pydantic-модели.
+2. Service: `services/{domain}_service.py` — бизнес-логика.
+3. Router: `routers/{domain}.py` — HTTP-хендлеры; `Depends(rate_limit_write)` на write-методах.
+4. Test: `tests/test_{domain}_service.py` или `tests/test_api_{domain}.py`.
 
-### Добавить API endpoint
-1. Schema: `schemas/{domain}.py` — Pydantic модели
-2. Service: `services/{domain}_service.py` — бизнес-логика
-3. Router: `routers/{domain}.py` — HTTP handlers
-4. Test: `tests/test_{domain}_service.py` или `tests/test_api_{domain}.py`
-
-### Добавить модель
-1. Model: `models/{domain}.py` + добавить в `models/__init__.py` (`__all__`)
-2. Migration: `alembic revision --autogenerate -m "..."` (через `DATABASE_URL_SYNC`, файл появится в `migrations/versions/`)
-3. Schema: `schemas/{domain}.py` + добавить в `schemas/__init__.py`
-4. Service → Router → Test
-
-### Транзакции
-- Импорт/ETL: `etl/` (парсеры VTB, WB)
-- Поиск, категоризация, INBOX: `services/transactions_service.py`
-- Курсы валют: `services/fx_service.py` — извлечение CNY/RUB из назначений платежей VTB, backfill, lookup (FxRate)
-
-### Справочники
-- CRUD (Account, Override, CounterpartyCategory, OpeningBalance): `services/refs_service.py`
-
-### Изменить отчёт
-- ДДС: `services/reports/dds.py`
-- БДР: `services/wb_bdr_service.py` (+ `bdr_loaders.py`, `bdr_enrichment.py`, `wb_bdr_helpers.py`)
-- ОПИУ: `services/opiu_service.py` (+ `opiu_helpers.py`)
-- ДНК Себестоимости: `services/cost_dna_service.py` (+ `cost_dna_helpers.py`)
-- Dashboard: `services/reports/dashboard.py`
-- Balance: `services/reports/balance.py`
-- ВСЕГДА: `invalidate_cache()` после изменений
-
-### WB интеграция
-- HTTP клиент: `integrations/wb_api.py`
-- Resilience (per-project circuit breaker, retry): `integrations/resilience.py`
-- Воронка/реклама: `services/funnel/` (sync.py — `get_recent_sync_logs()`, unified_sync.py, wb_funnel_api.py, wb_advertising_api.py, ad_campaigns_service.py)
-- Локализация (ИЛ + ИРП, с 23.03.2026): `services/localization_tariff.py` (таблицы КТР/КРП), `services/localization_index_service.py` (расчёт индекса), `routers/localization.py` (`/localization`, `/localization/summary`, `/localization/skus`)
-- Финансы WB: `wb_finance_sync.py` (в корне `services/`, не в funnel/) + `wb_finance_helpers.py` (parse_review_target, enrich_review_rows — обогащение строк-удержаний за отзывы товарными полями)
-- WB акции/остатки: `scheduler/jobs/wb_stocks.py`
-- Scheduler jobs: `scheduler/jobs/`
-- Rate limiting: asyncio.Semaphore в wb_api.py
-- Интеграционные ключи: `services/integrations_service.py` — CRUD ключей (шифрование/маскирование), синхронизации, payouts
-
-### Себестоимость
-- Парсеры: `etl/cost_parsers.py` + `etl/cost_parser_helpers.py`
-- Вспомогательные парсеры: `etl/parsers/` (vtb.py, wb.py, order_city_parser.py)
-- Расчёт: `services/cost/` (duty.py, helpers.py, items.py, nomenclature.py, orders.py, plan_gen.py)
-- История себестоимости: `services/cost_history_service.py`
-- Тарифы WB: `services/tariff_service.py` — CRUD комиссий WB, загрузка из xlsx, карта среднего выкупа
-- Налоги: `services/tax_service.py` — CRUD помесячных налоговых ставок проекта (TaxRate)
-
-### AI агенты
-- Точка входа: `services/ai/orchestrator.py`
-- Агенты: `services/ai/agents/` (analyst, financier, marketer, advertiser, supply_manager, logistics, logistician)
-- Базовый класс: `services/ai/agents/base.py`
-- Tools: `services/ai/tools/` (finance.py, marketing.py, logistics.py, shipping.py, supply.py, funnel.py, warehouse.py, health.py, planning.py, products.py, reports.py, common.py)
-- Промпты: `services/ai/prompts/`
-- Память (BrandNote): `services/ai/memory.py`
-- LLM клиент: `services/ai/llm_client.py`
-- Синтезатор ответов: `services/ai/synthesizer.py`
-
-### AI Chat — web-интерфейс агентов
-- Router: `routers/ai_chat.py` — prefix `/ai`. CRUD conversations, SSE message streaming, file upload
-- Service: `services/ai_chat_service.py` — list/CRUD `AiConversation` и `AiMessage`
-- Schema: `schemas/ai_chat.py` — Pydantic для conversations, messages, file upload
-- Models: `models/ai_chat.py` — `AiConversation` с SoftDeleteMixin + `AiMessage` с JSONB полями `files`/`tools_used`
-- Передаёт запросы в `services/ai/orchestrator.ask` — собственной AI-логики не содержит
-
-### Склад
-- CRUD: `services/warehouse_crud.py`
-- Сервис: `services/warehouse_service.py`, `warehouse_stock_service.py`, `warehouse_stock_engine.py`
-- Входящие/исходящие: `services/warehouse_inbound.py`, `services/warehouse_outbound.py`
-- Брак (дефекты): `services/warehouse_defect.py` — receive/writeoff создают InboundReceipt/OutboundShipment с is_defect=true; mark/recover — только stock_movements
-- Cleanup legacy defect (одноразово): `scripts/cleanup_legacy_defect.py --dry-run | --commit`
-- Расчёт потребности: `services/warehouse_need_service.py`
-- Проверка приёмки WB + redistribute: `services/warehouse_acceptance_service.py` (840 строк) — `POST /warehouse/acceptance-check` дёргает WB `/api/v1/acceptance/options` + `/api/tariffs/v1/acceptance/coefficients` (boxTypeID 5=моно, 6=короб, 2=супер), выбирает per-SKU package_type, перераспределяет qty с закрытых складов на ближайший открытый в том же ФО
-- Кратность коробок (box multiplicity): `services/box_multiplicity_service.py` — `GET/PATCH /warehouse/box-multiplicity`, per-SKU `Nomenclature.box_qty_override` + per-RF `BoxQtyPerWarehouse`, `use_box_multiplicity` toggle, bulk paste из Excel, `resolve_effective_ppb_for_assembly` (qty-weighted по vehicle)
-- Прогноз остатков: `services/stock_forecast_service.py` — прогноз выбытия по трендам продаж (wb / wb_rf / wb_rf_transit), светофор
-- Cold-start распределение для новинок: `services/cold_start_distribution_service.py` — bootstrap-распределение SKU-новинок (нет статистики продаж) по WB-складам пропорционально долям ФО проекта; `pick_warehouses_per_district` (top-3 на округ) + `distribute_multi` (qty внутри округа делится по трафику + min_pack pool); endpoints `routers/reports_stock.py`: `POST /distribute_cold_start` (per-SKU), `GET /cold_start_table` (сегмент целиком). Бенчмарк: свои данные → соседний проект (`bench_from_project_id`) → общероссийский WB-фолбэк
-- FBO поставки WB: `services/fbo_supply_service.py`
-- Гео данные складов: `services/warehouse_geo.py`, `services/warehouse_geo_data.py`
-- WB возвраты на ПВЗ: `services/wb_returns_service.py` (~650 строк) — sync (WB Seller Analytics API) + list/summary + classify_ui_state + create_receipt_from_returns → InboundReceipt(EXPECTED, is_defect=true). Scheduler job: `scheduler/jobs/wb_goods_returns_sync.py`
-
-### Планирование
-- CRUD: `services/planning/crud.py`
-- Кэшфлоу: `services/planning/cashflow.py`
-- Таможня: `services/planning/customs.py`
-- WB выплаты: `services/planning/wb.py`
-- Связи платежей с фактом: `services/planning/fact_links.py`
-
-### Цепочка поставок (Supply Chain)
-- Пакет: `services/supply_chain/` (factory_orders.py, vehicle_delivery.py, supplier_service.py, supplier_catalog.py)
-- Заказы на производство: `services/supply_chain/factory_orders.py` — CRUD FactoryOrder, split_to_vehicles
-- Доставка (Vehicle/CostOrder): `services/supply_chain/vehicle_delivery.py` — CRUD транспортов, статусы (VehicleStatus), обзор цепочки
-- Поставщики: `services/supply_chain/supplier_service.py` — CRUD Supplier
-- Ассортимент поставщика: `services/supply_chain/supplier_catalog.py` — агрегация по subject + barcode с delivered_qty (кэш 300с, `get_supplier_catalog`)
-
-### Мониторинг и здоровье
-- Метрики синхронизаций: `services/monitoring_service.py` — sync health, статус scheduler, обзор за 24ч
-- Ежедневная проверка: `services/health_check_service.py` — дефицит на складах WB, просроченные сборки, здоровье Category-A, неликвид
-
-### География заказов
-- Агрегация по городам: `services/order_geography_service.py` — WB заказы по городам/регионам, график по дням, фильтры (бренд, категория, артикул), `get_order_cities_status()` — статус загруженных маппингов
-
-### Telegram
-- Бот-сервис: `services/telegram_service.py` — deep link auth, привязка чатов, BrandNote, TMA авторизация
-- Бот (polling): `integrations/telegram_bot.py`
+## Добавить модель
+1. Model: `models/{domain}.py` + регистрация в `models/__init__.py` (`__all__`).
+2. Migration: `alembic revision --autogenerate -m "..."` (через `DATABASE_URL_SYNC`).
+3. Schema → Service → Router → Test.
 
 ## Типовые импорты
 ```python
 from backend.models import User, Transaction, Project, WbApiKey
-from backend.models import IntegrationKey, SyncLog, WbFunnelDaily
 from backend.schemas import TransactionSchema, ProjectSchema
 from backend.utils.time import utcnow
 from backend.cache import cached, invalidate_cache
@@ -121,49 +24,38 @@ from backend.models.mixins import SoftDeleteMixin
 ```
 
 ## Где искать
-| Что ищу | Где |
-|---------|-----|
-| Модель таблицы | `models/{domain}.py` + `models/__init__.py` |
-| API endpoint | `routers/` (ai_chat, assembly, auth, cost, counterparty, fbo_supplies, funnel, import_txn, integrations, loans, monitoring, planning, planning_customs, planning_wb_payouts, projects, refs, reports, reports_stock, reports_wb, supply_chain, telegram, telegram_miniapp, telegram_webhook, warehouse, wb_returns, ws) |
-| Бизнес-логика | `services/` (domain services + `ai_chat_service.py` для web AI chat + `project_settings_service.py` для мутаций настроек проекта). NB: `assembly/`, `fbo_supply/`, `supply_chain/` — пакеты (разбиты из монолитов) |
-| Pydantic schemas | `schemas/` (ai_chat, anomaly, assembly, auth, capital, common, cost, counterparty, imports, integrations, loan, monitoring, planning, refs, reports, supply_chain, tariff, tax, telegram, transactions, warehouse, wb_fbo, wb_returns) |
-| Импорт файлов / ETL | `etl/` |
-| WB HTTP клиент | `integrations/wb_api.py` |
-| Telegram бот | `integrations/telegram_bot.py` |
-| Фоновые задачи | `scheduler/jobs/` (ai_digest, fbo_supplies, funnel, health_check, prewarm, wb_finance, wb_goods_returns_sync, wb_stocks) |
-| Кэш конфигурация | `cache.py` |
-| Утилиты | `utils/` (time.py, crypto.py, file_validation.py, queries.py, telegram.py, telegram_auth.py) |
-| Тесты | `tests/` (в корне проекта, рядом с `backend/`) |
-| Миграции | `migrations/versions/` (в корне проекта, рядом с `alembic.ini`) |
-| Алембик конфиг | `alembic.ini` + `migrations/env.py` (корень проекта) |
+| Что | Где |
+|-----|-----|
+| Модели таблиц | `models/{domain}.py` + `models/__init__.py` |
+| API endpoints | `routers/` |
+| Бизнес-логика | `services/` (`assembly/`, `fbo_supply/`, `supply_chain/`, `planning/`, `cost/`, `funnel/`, `ai/` — пакеты) |
+| Pydantic schemas | `schemas/` |
+| Импорт файлов / ETL | `etl/` (парсеры VTB, WB) |
+| WB HTTP-клиент | `integrations/wb_api.py` (+ `resilience.py`) |
+| Telegram-бот | `integrations/telegram_bot.py` |
+| Фоновые задачи | `scheduler/jobs/` |
+| Кэш | `cache.py` |
+| Утилиты | `utils/` (time, crypto, file_validation, queries) |
+| Тесты | `tests/` (корень проекта) |
+| Миграции | `migrations/versions/` + `alembic.ini` (корень) |
+| Справочники | `services/refs_service.py` (Account, Override, CounterpartyCategory) |
+| Курсы валют | `services/fx_service.py` (`FxRate`) |
+| Мониторинг и health | `services/monitoring_service.py`, `health_check_service.py` |
+| География заказов | `services/order_geography_service.py` |
 
 ## Ключевые модели
 | Модель | Файл | Назначение |
 |--------|------|-----------|
-| `User`, `Project`, `ProjectMember` | `models/auth.py` | Аутентификация, мультиарендность |
-| `Transaction`, `ImportLog` | `models/transactions.py` | ДДС транзакции |
-| `IntegrationKey` (= `WbApiKey`) | `models/integrations.py` | API-ключи WB |
-| `SyncLog` | `models/integrations.py` | Статус синхронизаций |
-| `WbFunnelDaily`, `WbAdCampaign` | `models/integrations.py` | WB воронка/реклама |
-| `WbFinanceRow`, `WbFinanceSyncLog` | `models/wb_finance.py` | WB финансовые отчёты |
-| `Order`, `PlannedPayment`, `BrandPlan` | `models/planning.py` | Планирование |
-| `Nomenclature`, `CostOrder` | `models/cost.py` | Себестоимость |
-| `Warehouse`, `WarehouseStock` | `models/warehouse.py` | Склад |
-| `WbFboSupply` | `models/wb_fbo.py` | FBO поставки |
-| `WbGoodsReturn` | `models/wb_returns.py` | Возвраты с WB на ПВЗ (линк на `InboundReceipt`) |
-| `BrandNote`, `TelegramBotUser` | `models/telegram.py` | Telegram / AI память |
-| `AiConversation`, `AiMessage` | `models/ai_chat.py` | Web AI chat (история диалогов с агентами) |
-| `Account`, `CategoryRef` | `models/refs.py` | Справочники |
-| `FxRate` | `models/fx_rates.py` | Курсы валют |
+| `User`, `Project`, `ProjectMember` | `models/auth.py` | аутентификация, мультиарендность |
+| `Transaction`, `ImportLog` | `models/transactions.py` | ДДС-транзакции |
+| `IntegrationKey` (= `WbApiKey`), `SyncLog` | `models/integrations.py` | ключи WB, статус синков |
+| `Order`, `PlannedPayment`, `BrandPlan` | `models/planning.py` | планирование |
+| `Nomenclature`, `CostOrder` | `models/cost.py` | себестоимость |
+| `Warehouse`, `WarehouseStock` | `models/warehouse.py` | склад |
+| `Account`, `CategoryRef` | `models/refs.py` | справочники |
 
-## Тесты (make-команды)
-```bash
-make test            # Все тесты
-make test-fast       # Быстрые тесты (без медленных)
-make test-changed    # Только тесты затронутых файлов
-make test-unit       # Только unit-тесты
-make lint            # Линтер
-```
+## Тесты
+`make test` · `test-fast` · `test-changed` · `test-unit` · `lint`. Прямо: `docker compose exec backend pytest tests/ -x --tb=short`.
 
 ## Алиасы
-- `WbApiKey` = `IntegrationKey` (обратная совместимость, определён в `models/__init__.py`)
+`WbApiKey` = `IntegrationKey` (обратная совместимость, в `models/__init__.py`).

@@ -1,7 +1,6 @@
 {
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
-    "DDS_PREWARM_ENABLED": "0",
     "ENABLE_PROMPT_CACHING_1H": "1",
     "CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-4-7",
     "CLAUDE_EFFORT": "medium"
@@ -56,7 +55,7 @@
             "timeout": 3
           }
         ],
-        "description": "Auto-detect: backend+frontend → TeamCreate, новая фича → /plan, миграция → последовательно, рефакторинг, опасные команды + /compact reminder"
+        "description": "Напоминание [DOCS] при pending docs-коммитах + счётчик /compact"
       }
     ],
     "SessionStart": [

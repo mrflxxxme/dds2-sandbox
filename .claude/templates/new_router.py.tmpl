@@ -14,6 +14,7 @@ from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.xxx import XxxCreate, XxxResponse, XxxUpdate  # TODO: replace with real schemas
 from backend.services import xxx_service  # TODO: replace with real service module
+from backend.utils.rate_limit import rate_limit_write  # RULE: write endpoints carry this dependency
 
 router = APIRouter(prefix="/xxx")  # TODO: replace with real prefix, e.g. "/orders"
 
@@ -49,7 +50,7 @@ async def get_xxx(
 # ─── Create ───────────────────────────────────────────────────────────────────
 
 
-@router.post("", response_model=XxxResponse)
+@router.post("", response_model=XxxResponse, dependencies=[Depends(rate_limit_write)])
 async def create_xxx(
     payload: XxxCreate,
     project: Project = Depends(get_current_project),
@@ -63,7 +64,7 @@ async def create_xxx(
 # ─── Update ───────────────────────────────────────────────────────────────────
 
 
-@router.patch("/{xxx_id}", response_model=XxxResponse)
+@router.patch("/{xxx_id}", response_model=XxxResponse, dependencies=[Depends(rate_limit_write)])
 async def update_xxx(
     xxx_id: int,
     payload: XxxUpdate,
@@ -80,7 +81,7 @@ async def update_xxx(
 # ─── Upsert (create-or-update) ────────────────────────────────────────────────
 
 
-@router.post("/upsert", response_model=XxxResponse)
+@router.post("/upsert", response_model=XxxResponse, dependencies=[Depends(rate_limit_write)])
 async def upsert_xxx(
     payload: XxxCreate,  # reuse Create schema; id optional inside
     project: Project = Depends(get_current_project),
@@ -93,7 +94,7 @@ async def upsert_xxx(
 # ─── Delete ───────────────────────────────────────────────────────────────────
 
 
-@router.delete("/{xxx_id}")
+@router.delete("/{xxx_id}", dependencies=[Depends(rate_limit_write)])
 async def delete_xxx(
     xxx_id: int,
     project: Project = Depends(get_current_project),
