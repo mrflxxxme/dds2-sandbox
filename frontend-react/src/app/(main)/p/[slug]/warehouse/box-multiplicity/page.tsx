@@ -14,7 +14,7 @@ import type {
 } from '@/types/api';
 import { parseBoxMultiplicityPaste } from '@/lib/utils/boxMultiplicityPaste';
 
-type StockFilter = 'all' | 'rf' | 'in_assembly' | 'in_transit' | 'no_wb' | 'no_stock' | 'no_box_qty';
+type StockFilter = 'all' | 'rf' | 'no_box_qty';
 
 const SOURCE_TYPE_META: Record<string, { label: string; icon: string }> = {
     vehicle: { label: 'Машина', icon: '🚚' },
@@ -376,8 +376,9 @@ function SkuExpandPanel({
         borderTop: '1px solid var(--color-border)',
     };
 
-    // Показываем только ФФ с остатком — склады без стока не засоряют список.
-    const warehouses = sku.per_warehouse.filter(wh => wh.rf_stock > 0);
+    // Видны ФФ с остатком ИЛИ с заданной кратностью (машинной/ручной) — чтобы
+    // машинная кратность на опустевшем складе оставалась видимой и доступной автозаполнению.
+    const warehouses = sku.per_warehouse.filter(wh => wh.rf_stock > 0 || wh.box_qty !== null);
 
     // ─── Автозаполнение кратности других ФФ по данным машины ──────────────
     // Источник — машинные кратности (source==='machine'); цели — пустые
@@ -600,7 +601,7 @@ function SkuExpandPanel({
 
             {warehouses.length === 0 ? (
                 <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
-                    Нет остатков ни на одном ФФ-складе.
+                    Нет ФФ-складов с остатком или кратностью.
                 </div>
             ) : (
                 <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
@@ -808,17 +809,6 @@ function SkuExpandPanel({
                 </table>
             )}
 
-            <div style={{
-                marginTop: 10, padding: '6px 10px', borderRadius: 6,
-                background: 'var(--color-bg-card)', fontSize: 11, color: 'var(--color-text-muted)',
-            }}>
-                <strong style={{ color: 'var(--color-text)' }}>Ручной дефолт SKU:</strong>{' '}
-                {sku.box_qty_override !== null
-                    ? <>{formatNumber(sku.box_qty_override)} шт</>
-                    : <span style={{ color: 'var(--color-warning)' }}>не задан</span>}
-                {' — fallback для ФФ без своей кратности.'}
-            </div>
-
             <SkuSourcesSection barcode={sku.barcode} />
             <SkuChangesSection barcode={sku.barcode} onRowUpdated={onRowUpdated} />
         </div>
@@ -835,9 +825,6 @@ export default function BoxMultiplicityPage() {
     const [rows, setRows] = useState<BoxMultiplicityRow[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [editingNm, setEditingNm] = useState<number | null>(null);
-    const [editValue, setEditValue] = useState('');
-    const [saving, setSaving] = useState(false);
 
     // Per-ФФ inline edit кратности: "{nm_id}:{warehouse_id}" → string value
     const [perRfEdit, setPerRfEdit] = useState<Record<string, string>>({});
@@ -874,32 +861,6 @@ export default function BoxMultiplicityPage() {
     }, []);
 
     useEffect(() => { load(); }, [load]);
-
-    const startEdit = (row: BoxMultiplicityRow) => {
-        setEditingNm(row.nm_id);
-        setEditValue(row.box_qty_override !== null ? String(row.box_qty_override) : '');
-    };
-
-    const cancelEdit = () => { setEditingNm(null); setEditValue(''); };
-
-    const saveEdit = async (nmId: number) => {
-        const trimmed = editValue.trim();
-        const value = trimmed === '' ? null : parseInt(trimmed, 10);
-        if (value !== null && (Number.isNaN(value) || value < 1)) {
-            alert('Кратность должна быть положительным числом или пустой');
-            return;
-        }
-        try {
-            setSaving(true);
-            const updated = await api.setBoxMultiplicity(nmId, value);
-            setRows(prev => prev.map(r => r.nm_id === nmId ? updated : r));
-            cancelEdit();
-        } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка сохранения');
-        } finally {
-            setSaving(false);
-        }
-    };
 
     // ─── Bulk paste (inline editor, не модалка) ───────────────────────────
     // Конвертируем текущие inline-строки в TSV → парсер → распознанные items.
@@ -1117,11 +1078,7 @@ export default function BoxMultiplicityPage() {
             }
             switch (stockFilter) {
                 case 'rf': return r.rf_stock > 0;
-                case 'in_assembly': return r.in_assembly > 0;
-                case 'in_transit': return r.in_transit > 0;
-                case 'no_wb': return r.wb_stock === 0;
-                case 'no_stock': return r.rf_stock === 0 && r.wb_stock === 0 && r.in_assembly === 0 && r.in_transit === 0;
-                case 'no_box_qty': return !skuHasBoxQty(r);
+                case 'no_box_qty': return r.rf_stock > 0 && !skuHasBoxQty(r);
                 default: return true;
             }
         });
@@ -1141,18 +1098,14 @@ export default function BoxMultiplicityPage() {
         const withBoxQty = scopeRows.filter(skuHasBoxQty).length;
         const noBoxQty = total - withBoxQty;
         const withMachine = scopeRows.filter(r => r.has_machine_data).length;
-        const withManual = scopeRows.filter(r => r.box_qty_override !== null).length;
         // «Учитывается» — SKU-флаг включён и кратность фактически задана.
         const active = scopeRows.filter(r => r.use_box_multiplicity && skuHasBoxQty(r)).length;
         const filterCounts = {
             rf: scopeRows.filter(r => r.rf_stock > 0).length,
-            in_assembly: scopeRows.filter(r => r.in_assembly > 0).length,
-            in_transit: scopeRows.filter(r => r.in_transit > 0).length,
-            no_wb: scopeRows.filter(r => r.wb_stock === 0).length,
-            no_stock: scopeRows.filter(r => r.rf_stock === 0 && r.wb_stock === 0 && r.in_assembly === 0 && r.in_transit === 0).length,
-            no_box_qty: scopeRows.filter(r => !skuHasBoxQty(r)).length,
+            // «Нет кратности» — есть остаток на ФФ И кратность не задана.
+            no_box_qty: scopeRows.filter(r => r.rf_stock > 0 && !skuHasBoxQty(r)).length,
         };
-        return { total, withBoxQty, noBoxQty, withMachine, withManual, active, filterCounts };
+        return { total, withBoxQty, noBoxQty, withMachine, active, filterCounts };
     }, [scopeRows]);
 
     const columns: Column[] = [
@@ -1221,10 +1174,10 @@ export default function BoxMultiplicityPage() {
             width: '240px',
             // Сводка — раскрытие per-ФФ панели делает встроенный expander таблицы (стрелка слева).
             getValue: (r: BoxMultiplicityRow) =>
-                r.per_warehouse.filter(p => p.rf_stock > 0 && p.box_qty !== null).length,
+                r.per_warehouse.filter(p => p.rf_stock > 0 || p.box_qty !== null).length,
             render: (_v: unknown, r: BoxMultiplicityRow) => {
                 // Сводка — только по ФФ с остатком (как и развёрнутый список).
-                const whs = r.per_warehouse.filter(p => p.rf_stock > 0);
+                const whs = r.per_warehouse.filter(p => p.rf_stock > 0 || p.box_qty !== null);
                 const withQty = whs.filter(p => p.box_qty !== null).length;
                 const machineCount = whs.filter(p => p.source === 'machine').length;
                 const manualCount = whs.filter(p => p.source === 'manual').length;
@@ -1245,70 +1198,9 @@ export default function BoxMultiplicityPage() {
                 );
             },
             exportValue: (r: BoxMultiplicityRow) => r.per_warehouse
-                .filter(p => p.rf_stock > 0)
+                .filter(p => p.rf_stock > 0 || p.box_qty !== null)
                 .map(p => `${p.warehouse_name}:${p.box_qty ?? '—'}[${p.source}]${p.use_box_multiplicity ? '' : '*'}`)
                 .join(' | '),
-        },
-        {
-            key: 'box_qty_override',
-            label: 'Ручной дефолт',
-            align: 'right',
-            width: '180px',
-            getValue: (r: BoxMultiplicityRow) => r.box_qty_override ?? -1,
-            render: (_v: unknown, r: BoxMultiplicityRow) => {
-                if (editingNm === r.nm_id) {
-                    return (
-                        <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end', alignItems: 'center' }}>
-                            <input
-                                type="text"
-                                inputMode="numeric"
-                                value={editValue}
-                                onChange={e => setEditValue(e.target.value)}
-                                placeholder="пусто = очистить"
-                                autoFocus
-                                style={{
-                                    width: 90, padding: '4px 8px', fontSize: 13,
-                                    border: '1px solid var(--color-border)', borderRadius: 6,
-                                }}
-                                onKeyDown={e => {
-                                    if (e.key === 'Enter') saveEdit(r.nm_id);
-                                    else if (e.key === 'Escape') cancelEdit();
-                                }}
-                            />
-                            <button
-                                className="btn btn-success btn-sm"
-                                disabled={saving}
-                                onClick={() => saveEdit(r.nm_id)}
-                                title="Сохранить (Enter)"
-                            >✓</button>
-                            <button
-                                className="btn btn-secondary btn-sm"
-                                disabled={saving}
-                                onClick={cancelEdit}
-                                title="Отмена (Esc)"
-                            >✕</button>
-                        </div>
-                    );
-                }
-                return (
-                    <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'center' }}>
-                        {r.box_qty_override !== null ? (
-                            <span style={{ fontWeight: 500 }}>{formatNumber(r.box_qty_override)} шт</span>
-                        ) : (
-                            <span style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>—</span>
-                        )}
-                        <button
-                            className="btn btn-secondary btn-sm"
-                            onClick={() => startEdit(r)}
-                            title={r.box_qty_override !== null
-                                ? 'Изменить ручной дефолт SKU'
-                                : 'Задать ручной дефолт SKU (fallback для ФФ без своей кратности)'}
-                        >
-                            {r.box_qty_override !== null ? '✏️' : '➕'}
-                        </button>
-                    </div>
-                );
-            },
         },
         {
             key: 'use_box_multiplicity',
@@ -1404,10 +1296,6 @@ export default function BoxMultiplicityPage() {
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>С машинными данными</div>
                 </div>
                 <div className="glass-card" style={{ padding: '14px 18px', textAlign: 'center' }}>
-                    <div style={{ fontSize: 26, fontWeight: 700 }}>{formatNumber(stats.withManual)}</div>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Ручной дефолт</div>
-                </div>
-                <div className="glass-card" style={{ padding: '14px 18px', textAlign: 'center' }}>
                     <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--color-warning)' }}>
                         {formatNumber(stats.noBoxQty)}
                     </div>
@@ -1460,10 +1348,6 @@ export default function BoxMultiplicityPage() {
                         {([
                             { key: 'all', label: 'Все', count: rows.length },
                             { key: 'rf', label: 'Есть на ФФ', count: stats.filterCounts.rf },
-                            { key: 'in_assembly', label: 'В сборке', count: stats.filterCounts.in_assembly },
-                            { key: 'in_transit', label: 'В пути', count: stats.filterCounts.in_transit },
-                            { key: 'no_wb', label: 'Нет на WB', count: stats.filterCounts.no_wb },
-                            { key: 'no_stock', label: 'Нет нигде', count: stats.filterCounts.no_stock },
                             { key: 'no_box_qty', label: 'Нет кратности', count: stats.filterCounts.no_box_qty },
                         ] as Array<{ key: StockFilter; label: string; count: number }>).map(c => (
                             <button
