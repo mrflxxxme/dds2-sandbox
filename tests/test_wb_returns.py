@@ -32,6 +32,9 @@ from backend.utils.time import utcnow
 
 # ─── Fixture: clean DB + project ────────────────────────────────────────────
 
+# allow-fixed-project-id: 991/992 sit below projects_id_seq on the long-lived dev
+# DB — the collision window has already passed, so the sequence never re-issues
+# these ids. See check 21 in scripts/check_conventions.sh.
 TEST_PROJECT_ID = 991  # isolated from other suites
 OTHER_PROJECT_ID = 992
 

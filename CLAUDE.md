@@ -37,7 +37,7 @@ make sync-prod                                    # локалка = копия 
 ## Workflow (детали в `.claude/rules/lead_agent_v2.md`)
 - Фича → уточни ТЗ при 3 условиях (>3 файлов, неясно WHAT/WHERE, hard-to-revert) → код. Иначе сразу.
 - Баг/мелочь / explain → сразу, без вопросов.
-- Backend+Frontend (обе части) → 2 параллельных teammate **в одном turn-е** (hook требует).
+- Backend+Frontend → крупная/cross-domain задача: 2 параллельных teammate в одном turn-е; мелкая/low-risk → lead sequential (дефолт).
 - Только backend ИЛИ frontend → lead сам, sequential.
 - Fan-out (3+ файла контекста / комплексное ревью) → spawn в одном turn-е.
 - Subagents (`code-reviewer`, `security-reviewer` etc.) → ПОСЛЕ работы, по триггеру.

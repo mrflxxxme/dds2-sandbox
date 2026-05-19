@@ -3,7 +3,7 @@
 # Возвращает JSON в stdout — текст инжектится как system-reminder и обязательно к исполнению.
 #
 # Триггеры:
-# - Backend + Frontend → MUST spawn 2 teammates concurrently
+# - Backend + Frontend → advisory: lead decides spawn-vs-sequential by task size
 # - Миграция → MUST sequential, lead only
 # - Мелкая задача / баг / "как устроено X" → MUST действуй сразу, без уточнений
 # - Counter / pending /docs / pending /learn → soft reminders в stderr (как раньше)
@@ -62,13 +62,9 @@ if [ "$backend_match" -eq 1 ] && [ "$frontend_match" -eq 1 ] && [ "$migration_ma
 fi
 
 if [ "$parallel_ok" -eq 1 ]; then
-    directives="${directives}**MANDATORY PARALLELISM:** This task touches BOTH backend AND frontend. You MUST:
-1. Lead does Phase 1 sequentially (Model → Migration → Schema if needed).
-2. Then spawn 2 teammates concurrently IN ONE MESSAGE with isolation:worktree, run_in_background:true:
-   - Backend teammate: backend/, migrations/, tests/
-   - Frontend teammate: frontend-react/src/, frontend-react/tests/
-3. Each teammate gets relative-path constraint, types-first rule, 40k token budget.
-4. NO sequential. NO «I'll do backend first then frontend». Spawn BOTH at the same turn.
+    directives="${directives}**PARALLELISM AVAILABLE (advisory):** This task may touch BOTH backend AND frontend. Lead decides by task size — do NOT spawn reflexively:
+- Large / multi-file / cross-domain → spawn 2 teammates concurrently IN ONE MESSAGE (isolation:worktree, run_in_background:true): Backend → backend/, migrations/, tests/; Frontend → frontend-react/. Each gets relative-path + types-first + 40k budget.
+- Small / low-risk change → lead does it directly, sequentially. This is the default — no spawn overhead.
 
 "
 fi
