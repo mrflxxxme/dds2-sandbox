@@ -47,6 +47,9 @@ lint: ## Линтер + convention checks
 	ruff check backend/ --select E,W,F --ignore E501
 	bash scripts/check_conventions.sh
 
+typecheck: ## Mypy проверка типов (backend/services + models, как в CI)
+	docker compose exec -T backend mypy backend/services/ backend/models/ --config-file pyproject.toml
+
 # ─── База данных ─────────────────────────────────────────────────────────────
 
 migrate: ## Применить миграции

@@ -42,7 +42,27 @@ else
     SKIPPED=1
 fi
 
-# ─── 2. Frontend тесты (~20-30 сек) ─────────────────────────────────
+# ─── 2. Mypy type check (backend types, ~3-30 сек) ──────────────────
+# Прецедент 2026-05-14: 5 красных CI-прогонов подряд из-за ошибок типов
+# в warehouse_need_service.py — раньше mypy ловился ТОЛЬКО в CI (~9 мин).
+echo ""
+echo "━━━ Mypy type check (backend) ━━━"
+if [ "$DOCKER_OK" -eq 1 ]; then
+    MYPY_OUTPUT=$(docker compose exec -T backend mypy backend/services/ backend/models/ --config-file pyproject.toml 2>&1)
+    MYPY_EXIT=$?
+    if [ $MYPY_EXIT -eq 0 ]; then
+        echo -e "${GREEN}✓ Mypy passed${NC}"
+    else
+        echo -e "${RED}✗ Mypy FAILED${NC}"
+        echo "$MYPY_OUTPUT" | grep -E 'error:|Found [0-9]+ error' | head -15
+        FAILED=1
+    fi
+else
+    echo -e "${YELLOW}⚠ SKIPPED — Docker/backend не запущен${NC}"
+    SKIPPED=1
+fi
+
+# ─── 3. Frontend тесты (~20-30 сек) ─────────────────────────────────
 echo ""
 echo "━━━ Frontend tests (vitest) ━━━"
 if [ -d "frontend-react/node_modules" ] && command -v npx &>/dev/null; then
@@ -57,7 +77,7 @@ else
     SKIPPED=1
 fi
 
-# ─── 3. Convention checks (~5 сек) ──────────────────────────────────
+# ─── 4. Convention checks (~5 сек) ──────────────────────────────────
 echo ""
 echo "━━━ Conventions ━━━"
 CONV_OUTPUT=$(bash "$ROOT_DIR/scripts/check_conventions.sh" 2>&1)
@@ -72,7 +92,7 @@ else
     FAILED=1
 fi
 
-# ─── 4. Frontend npm audit (security CVE, ~5-10 сек) ─────────────────
+# ─── 5. Frontend npm audit (security CVE, ~5-10 сек) ─────────────────
 # Прецедент 2026-05-12: 7 HIGH CVE в next@15.5.15 ловятся ТОЛЬКО в CI,
 # не локально. Pre-push catch + 5 секунд = меньше CI runs впустую.
 echo ""
@@ -93,7 +113,7 @@ else
     SKIPPED=1
 fi
 
-# ─── 5. Slopsquatting защита (~3-10 сек) ────────────────────────────
+# ─── 6. Slopsquatting защита (~3-10 сек) ────────────────────────────
 echo ""
 echo "━━━ Slopsquatting check (new imports) ━━━"
 if bash "$ROOT_DIR/scripts/hooks/check_slopsquatting.sh" 2>&1; then

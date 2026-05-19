@@ -93,7 +93,7 @@ async def backfill_first_sale_dates(
             .values(first_sale_date=dt)
         )
         res = await db.execute(upd_stmt)
-        updated += res.rowcount or 0
+        updated += res.rowcount or 0  # type: ignore[attr-defined]
 
     await db.commit()
 

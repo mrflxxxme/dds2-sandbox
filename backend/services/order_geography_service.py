@@ -179,7 +179,7 @@ async def upsert_order_city_mappings(db: AsyncSession, project_id: int, mappings
             set_={"city": stmt.excluded.city, "okrug": stmt.excluded.okrug, "order_date": stmt.excluded.order_date},
         )
         result = await db.execute(stmt)
-        affected = result.rowcount or 0
+        affected = result.rowcount or 0  # type: ignore[attr-defined]
         inserted += affected
 
     await db.commit()

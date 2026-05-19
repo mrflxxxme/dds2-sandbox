@@ -371,7 +371,7 @@ async def assign_category_bulk(
 
     await invalidate_project_reports(project_id)
 
-    return {"ok": True, "updated": result.rowcount}
+    return {"ok": True, "updated": result.rowcount}  # type: ignore[attr-defined]
 
 
 async def assign_category_by_ids(
@@ -396,7 +396,7 @@ async def assign_category_by_ids(
 
     await invalidate_project_reports(project_id)
 
-    return {"ok": True, "updated": result.rowcount}
+    return {"ok": True, "updated": result.rowcount}  # type: ignore[attr-defined]
 
 
 async def get_import_logs(db: AsyncSession, project_id: int, limit: int = 100) -> list:

@@ -175,7 +175,7 @@ async def apply_auto_categorize(db: AsyncSession, project_id: int) -> dict:
             .values(cat_lvl1_2=cat_lvl1, cat_lvl2_2=cat_lvl2)
         )
 
-        if result.rowcount > 0:
+        if result.rowcount > 0:  # type: ignore[attr-defined]
             updated_count += 1
             details.append(
                 {

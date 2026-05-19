@@ -85,7 +85,7 @@ async def chat(
     last_exc: Exception | None = None
     for attempt in range(_MAX_RETRIES):
         try:
-            return await client.messages.create(**kwargs)  # type: ignore[return-value]
+            return await client.messages.create(**kwargs)  # type: ignore[return-value,no-any-return]
         except anthropic.RateLimitError as exc:
             last_exc = exc
             delay = _BASE_DELAY * (2**attempt)
