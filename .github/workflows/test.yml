@@ -18,19 +18,10 @@ on:
       - '.github/workflows/**'
       - 'infra/**'
   pull_request:
+    # NO `paths` filter — Backend/Frontend Tests are REQUIRED checks on `main`.
+    # A paths filter can skip the whole workflow → the required check stays
+    # "Expected" forever → PR permanently BLOCKED. Always run on PRs to main.
     branches: [main]
-    paths:
-      - 'backend/**'
-      - 'tests/**'
-      - 'migrations/**'
-      - 'scripts/**'
-      - 'requirements-backend.txt'
-      - 'frontend-react/**'
-      - 'docker-compose.yml'
-      - 'docker-compose.app.yml'
-      - 'Dockerfile.backend'
-      - '.github/workflows/**'
-      - 'infra/**'
 
 jobs:
   conventions:
@@ -80,7 +71,11 @@ jobs:
   test:
     name: Backend Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 20, not 10: the job legitimately runs ~9 min, but runner setup
+    # (free-disk + docker build + compose up) can eat ~10 min on a slow
+    # runner — a 10-min cap killed the job before pytest started.
+    # Incident 2026-05-18 (PR #283).
+    timeout-minutes: 20
     env:
       POSTGRES_USER: dds
       POSTGRES_PASSWORD: dds_ci_secret

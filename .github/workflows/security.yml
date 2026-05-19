@@ -15,11 +15,11 @@ on:
       - 'frontend-react/**'
       - '.github/workflows/security.yml'
   pull_request:
+    # NO `paths` filter — pip-audit/Trivy/gitleaks/npm-audit are REQUIRED
+    # checks on `main`. A paths filter can skip the whole workflow → the
+    # required check stays "Expected" forever → PR permanently BLOCKED.
+    # Always run on PRs to main. Incident 2026-05-18 (PR #283).
     branches: [main]
-    paths:
-      - 'requirements*.txt'
-      - 'backend/**'
-      - 'frontend-react/**'
 
 permissions:
   contents: read
