@@ -26,13 +26,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  test:
-    name: Run Tests
-    uses: ./.github/workflows/test.yml
-
+  # Тесты здесь НЕ пере-прогоняются: PR dev→main уже прошёл Tests + Security
+  # (required checks), а auto-merge гейтит merge на их зелёности. Сетка
+  # безопасности — health-check с авто-откатом (ниже) + post-merge.yml.
+  # Раньше повторный прогон test.yml добавлял ~8-9 мин к каждому деплою.
   deploy-prod:
     name: Deploy to Production
-    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production

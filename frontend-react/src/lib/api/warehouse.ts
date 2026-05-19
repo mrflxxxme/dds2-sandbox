@@ -14,10 +14,12 @@ import type {
     AssemblyRequestUpdate,
     BoxMultiplicityBulkRequest,
     BoxMultiplicityBulkResponse,
+    BoxMultiplicityOrderPatch,
     BoxMultiplicityPatch,
     BoxMultiplicityPerWarehousePatch,
     BoxMultiplicityResponse,
     BoxMultiplicityRow,
+    BoxMultiplicitySourcesResponse,
     DefectBulkOperation,
     DefectBulkResponse,
     DefectMarkCancelResponse,
@@ -452,6 +454,21 @@ export function addWarehouseMethods(api: ApiClient) {
                 'PATCH',
                 `/api/v1/warehouse/box-multiplicity/per-warehouse/${encodeURIComponent(barcode)}/${warehouseId}`,
                 patch,
+            );
+        },
+        /** Drill-down: вся история снабжения SKU — машины + заказы на фабрику. */
+        getBoxMultiplicitySources(barcode: string) {
+            return api.request<BoxMultiplicitySourcesResponse>(
+                'GET',
+                `/api/v1/warehouse/box-multiplicity/sources/${encodeURIComponent(barcode)}`,
+            );
+        },
+        /** Override кратности у строки заказа на фабрику. boxQty=null — сброс. */
+        patchOrderBoxMultiplicity(factoryOrderItemId: number, boxQty: number | null) {
+            return api.request<BoxMultiplicityRow>(
+                'PATCH',
+                `/api/v1/warehouse/box-multiplicity/order/${factoryOrderItemId}`,
+                { box_qty: boxQty } satisfies BoxMultiplicityOrderPatch,
             );
         },
     };

@@ -4,7 +4,9 @@ name: Tests
 on:
   workflow_call:
   push:
-    branches: [main, dev, develop]
+    # Только dev. Push в main деплоит через cd-production.yml (отдельный
+    # прогон тут — лишний). develop — мёртвая ветка.
+    branches: [dev]
     paths:
       - 'backend/**'
       - 'tests/**'
@@ -43,30 +45,6 @@ jobs:
 
       - name: Run documentation checks
         run: bash scripts/check_docs.sh
-
-  mypy:
-    name: Mypy Type Check
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          pip install mypy sqlalchemy[mypy]==2.0.28 pydantic==2.6.3 \
-            types-redis types-pytz \
-            fastapi==0.124.0 pydantic-settings==2.2.1 \
-            python-jose[cryptography]==3.4.0 httpx==0.27.0 \
-            asyncpg==0.29.0 redis==5.0.1
-
-      - name: Run mypy on services/ and models/
-        run: mypy backend/services/ backend/models/ --config-file pyproject.toml
 
   test:
     name: Backend Tests
@@ -178,6 +156,13 @@ jobs:
             echo "  Waiting for DB... ($i/30)"
             sleep 2
           done
+
+      # mypy в backend-контейнере — видит ВСЕ зависимости из requirements-backend.txt.
+      # Раньше отдельная job ставила минимальный pinned-набор пакетов → mypy был слеп
+      # к коду с импортами не из набора (anthropic и др.) → false-green. Type-check
+      # ДО pytest — fail-fast (8 мин pytest не ждём, если типы красные).
+      - name: Run mypy (type check, in container)
+        run: docker compose exec -T backend mypy backend/services/ backend/models/ --config-file pyproject.toml
 
       - name: Run Alembic migrations
         run: docker compose exec -T backend alembic upgrade head

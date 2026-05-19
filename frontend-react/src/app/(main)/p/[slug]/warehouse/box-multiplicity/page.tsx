@@ -5,10 +5,227 @@ import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { BoxMultiplicityRow, BoxMultiplicityBulkItem, BoxMultiplicityPerWarehouseRow } from '@/types/api';
+import type {
+    BoxMultiplicityRow,
+    BoxMultiplicityBulkItem,
+    BoxMultiplicityPerWarehouseRow,
+    BoxMultiplicitySourceRow,
+} from '@/types/api';
 import { parseBoxMultiplicityPaste } from '@/lib/utils/boxMultiplicityPaste';
 
 type StockFilter = 'all' | 'rf' | 'in_assembly' | 'in_transit' | 'no_wb' | 'no_stock';
+
+const SOURCE_TYPE_META: Record<string, { label: string; icon: string }> = {
+    vehicle: { label: 'Машина', icon: '🚚' },
+    factory: { label: 'Заказ', icon: '🏭' },
+};
+
+// Второй уровень под артикулом: история снабжения SKU (машины + заказы фабрики).
+// Кратность редактируется только у строк-заказов (editable=true), не у машин.
+function SkuSourcesPanel({
+    barcode,
+    onSkuUpdated,
+}: {
+    barcode: string;
+    onSkuUpdated: (row: BoxMultiplicityRow) => void;
+}) {
+    const [sources, setSources] = useState<BoxMultiplicitySourceRow[] | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const [editingFoi, setEditingFoi] = useState<number | null>(null);
+    const [editValue, setEditValue] = useState('');
+    const [saving, setSaving] = useState(false);
+
+    const loadSources = useCallback(async () => {
+        try {
+            setError(null);
+            const resp = await api.getBoxMultiplicitySources(barcode);
+            setSources(resp.items);
+        } catch (e: any) {
+            setError(e?.message || 'Ошибка загрузки');
+        }
+    }, [barcode]);
+
+    useEffect(() => { loadSources(); }, [loadSources]);
+
+    const startEdit = (row: BoxMultiplicitySourceRow) => {
+        if (row.factory_order_item_id === null) return;
+        setEditingFoi(row.factory_order_item_id);
+        setEditValue(row.box_qty !== null ? String(row.box_qty) : '');
+    };
+    const cancelEdit = () => { setEditingFoi(null); setEditValue(''); };
+
+    const saveEdit = async () => {
+        if (editingFoi === null) return;
+        const trimmed = editValue.trim();
+        const value = trimmed === '' ? null : parseInt(trimmed, 10);
+        if (value !== null && (Number.isNaN(value) || value < 1)) {
+            alert('Кратность — положительное число или пусто (сброс)');
+            return;
+        }
+        try {
+            setSaving(true);
+            const updatedSku = await api.patchOrderBoxMultiplicity(editingFoi, value);
+            onSkuUpdated(updatedSku);
+            cancelEdit();
+            await loadSources();
+        } catch (e: any) {
+            alert(e?.message || 'Ошибка сохранения');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const panelStyle: React.CSSProperties = {
+        background: 'var(--color-bg)',
+        padding: '12px 16px 14px 48px',
+        borderTop: '1px solid var(--color-border)',
+    };
+
+    if (error) {
+        return <div style={{ ...panelStyle, color: 'var(--color-danger)', fontSize: 13 }}>{error}</div>;
+    }
+    if (sources === null) {
+        return (
+            <div style={{ ...panelStyle, color: 'var(--color-text-muted)', fontSize: 13 }}>
+                Загрузка истории снабжения…
+            </div>
+        );
+    }
+    if (sources.length === 0) {
+        return (
+            <div style={{ ...panelStyle, color: 'var(--color-text-muted)', fontSize: 13 }}>
+                Нет истории снабжения — ни машин, ни заказов на фабрику для этого SKU.
+            </div>
+        );
+    }
+
+    return (
+        <div style={panelStyle}>
+            <div style={{
+                fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)',
+                textTransform: 'uppercase', letterSpacing: 0.05, marginBottom: 6,
+            }}>
+                История снабжения · {sources.length}
+            </div>
+            <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                <thead>
+                    <tr style={{
+                        color: 'var(--color-text-muted)', fontSize: 10,
+                        textTransform: 'uppercase', letterSpacing: 0.05,
+                    }}>
+                        <th style={{ textAlign: 'left', padding: '4px 8px' }}>Тип</th>
+                        <th style={{ textAlign: 'left', padding: '4px 8px' }}>№ заказа</th>
+                        <th style={{ textAlign: 'left', padding: '4px 8px' }}>ФФ-склад</th>
+                        <th style={{ textAlign: 'right', padding: '4px 8px', width: 80 }}>Кол-во</th>
+                        <th style={{ textAlign: 'left', padding: '4px 8px', width: 180 }}>Кратность</th>
+                        <th style={{ textAlign: 'left', padding: '4px 8px', width: 120 }}>Размер</th>
+                        <th style={{ textAlign: 'left', padding: '4px 8px', width: 110 }}>Дата</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {sources.map((row, i) => {
+                        const meta = SOURCE_TYPE_META[row.source_type] ?? { label: row.source_type, icon: '' };
+                        const isEditing = row.editable && editingFoi === row.factory_order_item_id;
+                        return (
+                            <tr
+                                key={`${row.source_type}-${row.factory_order_item_id ?? 'v'}-${i}`}
+                                style={{ borderTop: '1px solid var(--color-border)' }}
+                            >
+                                <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>
+                                    {meta.icon} {meta.label}
+                                </td>
+                                <td style={{ padding: '6px 8px' }}>
+                                    <span style={{ fontFamily: 'monospace' }}>{row.order_no}</span>
+                                    {row.status && (
+                                        <span className="badge badge-secondary" style={{ marginLeft: 6, fontSize: 10 }}>
+                                            {row.status}
+                                        </span>
+                                    )}
+                                </td>
+                                <td style={{
+                                    padding: '6px 8px',
+                                    color: row.warehouse_name ? undefined : 'var(--color-text-dim)',
+                                }}>
+                                    {row.warehouse_name || '—'}
+                                </td>
+                                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(row.qty)}</td>
+                                <td style={{ padding: '6px 8px' }}>
+                                    {isEditing ? (
+                                        <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
+                                            <input
+                                                type="text"
+                                                inputMode="numeric"
+                                                value={editValue}
+                                                onChange={e => setEditValue(e.target.value)}
+                                                onKeyDown={e => {
+                                                    if (e.key === 'Enter') saveEdit();
+                                                    else if (e.key === 'Escape') cancelEdit();
+                                                }}
+                                                placeholder="пусто = сброс"
+                                                autoFocus
+                                                style={{
+                                                    width: 90, padding: '3px 6px', fontSize: 12,
+                                                    border: '1px solid var(--color-border)', borderRadius: 4,
+                                                }}
+                                            />
+                                            <button
+                                                className="btn btn-success btn-sm"
+                                                disabled={saving}
+                                                onClick={saveEdit}
+                                                style={{ padding: '2px 6px', fontSize: 11 }}
+                                                title="Сохранить (Enter)"
+                                            >✓</button>
+                                            <button
+                                                className="btn btn-secondary btn-sm"
+                                                disabled={saving}
+                                                onClick={cancelEdit}
+                                                style={{ padding: '2px 6px', fontSize: 11 }}
+                                                title="Отмена (Esc)"
+                                            >✕</button>
+                                        </div>
+                                    ) : (
+                                        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                            <span style={{
+                                                color: row.box_qty !== null ? undefined : 'var(--color-text-dim)',
+                                                fontWeight: row.box_qty !== null ? 500 : 400,
+                                            }}>
+                                                {row.box_qty !== null ? `${formatNumber(row.box_qty)} шт` : 'не задана'}
+                                            </span>
+                                            {row.is_overridden && (
+                                                <span
+                                                    className="badge badge-info"
+                                                    style={{ fontSize: 10 }}
+                                                    title="Кратность переопределена вручную"
+                                                >правка</span>
+                                            )}
+                                            {row.editable && (
+                                                <button
+                                                    className="btn btn-secondary btn-sm"
+                                                    onClick={() => startEdit(row)}
+                                                    style={{ padding: '2px 6px', fontSize: 11 }}
+                                                    title={row.box_qty !== null ? 'Изменить кратность заказа' : 'Задать кратность'}
+                                                >
+                                                    {row.is_overridden ? '✏️' : '➕'}
+                                                </button>
+                                            )}
+                                        </div>
+                                    )}
+                                </td>
+                                <td style={{
+                                    padding: '6px 8px',
+                                    color: row.box_size ? undefined : 'var(--color-text-dim)',
+                                }}>
+                                    {row.box_size || '—'}
+                                </td>
+                                <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>{formatDate(row.date)}</td>
+                            </tr>
+                        );
+                    })}
+                </tbody>
+            </table>
+        </div>
+    );
+}
 
 export default function BoxMultiplicityPage() {
     useParams() as { slug: string };  // route guard — slug used by API client
@@ -727,6 +944,14 @@ export default function BoxMultiplicityPage() {
                             exportName="box_multiplicity"
                             emptyText="Нет данных"
                             pageSize={100}
+                            getRowId={(r: BoxMultiplicityRow) => r.barcode}
+                            renderSubRow={(r: BoxMultiplicityRow) => (
+                                <SkuSourcesPanel
+                                    barcode={r.barcode}
+                                    onSkuUpdated={updated =>
+                                        setRows(prev => prev.map(x => x.barcode === updated.barcode ? updated : x))}
+                                />
+                            )}
                         />
                     )}
                 </>

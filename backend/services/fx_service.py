@@ -78,7 +78,7 @@ async def backfill_rates_from_transactions(db: AsyncSession, project_id: int) ->
             .on_conflict_do_nothing(constraint="uq_fx_rate_txn")
         )
         res = await db.execute(stmt)
-        if res.rowcount > 0:
+        if res.rowcount > 0:  # type: ignore[attr-defined]
             inserted += 1
         else:
             skipped += 1

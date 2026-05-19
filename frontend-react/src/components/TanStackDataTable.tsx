@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, Fragment } from 'react';
 import {
     useReactTable,
     getCoreRowModel,
@@ -42,6 +42,11 @@ interface TanStackDataTableProps {
     pageSize?: number;
     /** Optional summary row rendered at the top of tbody (sticky) */
     summaryRow?: React.ReactNode;
+    /** When set, each row gets a leading expander toggle; returns the content
+     *  rendered in a full-width sub-row below the row when it is expanded. */
+    renderSubRow?: (row: any) => React.ReactNode;
+    /** Stable row id for expand state (default: row index). */
+    getRowId?: (row: any) => string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -124,9 +129,12 @@ export default function TanStackDataTable({
     enablePagination = true,
     pageSize = 50,
     summaryRow,
+    renderSubRow,
+    getRowId,
 }: TanStackDataTableProps) {
     const [sorting, setSorting] = useState<SortingState>([]);
     const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
+    const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
 
     const tanstackColumns = useMemo(() => adaptColumns(columns), [columns]);
 
@@ -140,10 +148,20 @@ export default function TanStackDataTable({
         ...(enableSorting ? { getSortedRowModel: getSortedRowModel() } : {}),
         ...(enableFiltering ? { getFilteredRowModel: getFilteredRowModel() } : {}),
         ...(enablePagination ? { getPaginationRowModel: getPaginationRowModel() } : {}),
+        ...(getRowId ? { getRowId } : {}),
         initialState: {
             pagination: { pageSize },
         },
     });
+
+    const toggleExpanded = (rowId: string) => {
+        setExpandedRows((prev) => {
+            const next = new Set(prev);
+            if (next.has(rowId)) next.delete(rowId);
+            else next.add(rowId);
+            return next;
+        });
+    };
 
     const totalRows = enableFiltering ? table.getFilteredRowModel().rows.length : data.length;
 
@@ -186,6 +204,7 @@ export default function TanStackDataTable({
                             <thead>
                                 {table.getHeaderGroups().map((hg) => (
                                     <tr key={hg.id}>
+                                        {renderSubRow && <th aria-hidden="true" style={{ width: 36 }} />}
                                         {hg.headers.map((header) => {
                                             const meta = header.column.columnDef.meta as any;
                                             const canSort = header.column.getCanSort();
@@ -216,6 +235,7 @@ export default function TanStackDataTable({
                                 {/* Column filters row */}
                                 {enableFiltering && (
                                     <tr>
+                                        {renderSubRow && <th style={{ width: 36 }} />}
                                         {table.getHeaderGroups()[0].headers.map((header) => (
                                             <th key={`filter-${header.id}`} style={{ padding: '4px 8px' }}>
                                                 {header.column.getCanFilter() && (
@@ -237,25 +257,51 @@ export default function TanStackDataTable({
                                 {table.getRowModel().rows.map((row) => {
                                     const idx = row.index;
                                     const original = row.original;
+                                    const isExpanded = !!renderSubRow && expandedRows.has(row.id);
                                     return (
-                                        <tr
-                                            key={row.id}
-                                            onClick={onRowClick ? () => onRowClick(original, idx) : undefined}
-                                            className={rowClassName ? rowClassName(original, idx) : undefined}
-                                            style={{
-                                                cursor: onRowClick ? 'pointer' : undefined,
-                                                background: selectedIndex === idx ? 'rgba(139,92,246,0.1)' : undefined,
-                                            }}
-                                        >
-                                            {row.getVisibleCells().map((cell) => {
-                                                const meta = cell.column.columnDef.meta as any;
-                                                return (
-                                                    <td key={cell.id} style={{ textAlign: meta?.align || 'left' }}>
-                                                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                                        <Fragment key={row.id}>
+                                            <tr
+                                                onClick={onRowClick ? () => onRowClick(original, idx) : undefined}
+                                                className={rowClassName ? rowClassName(original, idx) : undefined}
+                                                style={{
+                                                    cursor: onRowClick ? 'pointer' : undefined,
+                                                    background: selectedIndex === idx ? 'rgba(139,92,246,0.1)' : undefined,
+                                                }}
+                                            >
+                                                {renderSubRow && (
+                                                    <td style={{ textAlign: 'center', width: 36 }}>
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) => { e.stopPropagation(); toggleExpanded(row.id); }}
+                                                            aria-label={isExpanded ? 'Свернуть' : 'Развернуть'}
+                                                            aria-expanded={isExpanded}
+                                                            style={{
+                                                                background: 'none', border: 'none', cursor: 'pointer',
+                                                                fontSize: 11, lineHeight: 1, padding: 4,
+                                                                color: 'var(--color-text-muted)',
+                                                            }}
+                                                        >
+                                                            {isExpanded ? '▾' : '▸'}
+                                                        </button>
                                                     </td>
-                                                );
-                                            })}
-                                        </tr>
+                                                )}
+                                                {row.getVisibleCells().map((cell) => {
+                                                    const meta = cell.column.columnDef.meta as any;
+                                                    return (
+                                                        <td key={cell.id} style={{ textAlign: meta?.align || 'left' }}>
+                                                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                                                        </td>
+                                                    );
+                                                })}
+                                            </tr>
+                                            {isExpanded && (
+                                                <tr>
+                                                    <td colSpan={row.getVisibleCells().length + 1} style={{ padding: 0 }}>
+                                                        {renderSubRow!(original)}
+                                                    </td>
+                                                </tr>
+                                            )}
+                                        </Fragment>
                                     );
                                 })}
                             </tbody>

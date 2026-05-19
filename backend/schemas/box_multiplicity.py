@@ -1,4 +1,4 @@
-# ruff: noqa: RUF002, RUF003
+# ruff: noqa: RUF002
 """Pydantic schemas for box-multiplicity (кратность коробки) feature."""
 
 from pydantic import BaseModel, Field
@@ -82,3 +82,34 @@ class BoxMultiplicityBulkResponse(BaseModel):
     updated: list[BoxMultiplicityRow]  # rows actually changed
     not_found: list[str]  # barcodes that don't exist in this project
     matched_count: int  # how many barcodes matched (some may have had no diff)
+
+
+class BoxMultiplicitySourceRow(BaseModel):
+    """Один источник снабжения SKU для drill-down (второй уровень под артикулом):
+    строка машины (cost order) либо строка заказа на фабрику (factory order).
+    """
+
+    source_type: str  # "vehicle" | "factory"
+    order_no: str  # машина order_no либо factory order_number
+    factory_order_item_id: int | None = None  # для factory-строки — id для PATCH override
+    warehouse_name: str | None = None  # ФФ-склад назначения (только vehicle)
+    qty: int = 0
+    box_qty: int | None = None  # эффективная кратность: override ?? исходная из заказа
+    box_size: str | None = None  # размер коробки (mix-вариант если позиция в миксе)
+    date: str | None = None  # ISO date — прибытие машины / дата заказа
+    status: str | None = None  # статус машины (DELIVERED и т.д.); None для factory
+    editable: bool = False  # true только для factory-строк (кратность правится)
+    is_overridden: bool = False  # box_qty взят из box_qty_per_order, не из заказа
+
+
+class BoxMultiplicitySourcesResponse(BaseModel):
+    items: list[BoxMultiplicitySourceRow]
+
+
+class BoxMultiplicityOrderUpdate(BaseModel):
+    """PATCH per-order override кратности (`box_qty_per_order`).
+
+    `box_qty` — положительное число задаёт override; `null` очищает его.
+    """
+
+    box_qty: int | None = Field(default=None, ge=1, le=10000)

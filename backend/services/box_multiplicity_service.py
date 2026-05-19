@@ -13,6 +13,7 @@ that SKU.
 """
 
 import logging
+from datetime import date
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,9 +21,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.cache import invalidate_cache
 from backend.models import WbWarehouseStock
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
-from backend.models.cost import BoxQtyPerWarehouse, CostOrder, CostOrderItem, Nomenclature
+from backend.models.cost import (
+    BoxQtyPerOrder,
+    BoxQtyPerWarehouse,
+    CostOrder,
+    CostOrderItem,
+    Nomenclature,
+)
 from backend.models.enums import VehicleStatus
-from backend.models.supply_chain import FactoryOrderItem
+from backend.models.supply_chain import FactoryOrder, FactoryOrderItem
 from backend.models.warehouse import Warehouse, WarehouseStock, WarehouseType
 
 logger = logging.getLogger("dds.box_multiplicity")
@@ -35,6 +42,13 @@ def _foi_effective_ppb(
     if mix_group_id and mix_pcs_per_box:
         return mix_pcs_per_box
     return foi_pcs_per_box
+
+
+def _foi_effective_box_size(foi_box_size: str | None, mix_box_size: str | None, mix_group_id: str | None) -> str | None:
+    """Resolve FOI's effective box_size (mix variant if mixed, else regular)."""
+    if mix_group_id and mix_box_size:
+        return mix_box_size
+    return foi_box_size
 
 
 async def get_box_multiplicity_table(
@@ -132,6 +146,8 @@ async def get_box_multiplicity_table(
         }
 
     # ─── Latest active FOI per barcode (fallback) ──────────────────────────
+    # box_qty_per_order override (если задан для строки заказа) побеждает
+    # исходную factory_order_items.pcs_per_box.
     foi_by_bc: dict[str, int] = {}
     foi_result = await db.execute(
         select(
@@ -139,6 +155,11 @@ async def get_box_multiplicity_table(
             FactoryOrderItem.pcs_per_box,
             FactoryOrderItem.mix_pcs_per_box,
             FactoryOrderItem.mix_group_id,
+            BoxQtyPerOrder.box_qty.label("override_box_qty"),
+        )
+        .outerjoin(
+            BoxQtyPerOrder,
+            (BoxQtyPerOrder.factory_order_item_id == FactoryOrderItem.id) & (BoxQtyPerOrder.project_id == project_id),
         )
         .where(
             FactoryOrderItem.project_id == project_id,
@@ -150,7 +171,7 @@ async def get_box_multiplicity_table(
     for row in foi_result:  # type: ignore[assignment]
         if row.barcode in foi_by_bc:
             continue
-        ppb = _foi_effective_ppb(row.pcs_per_box, row.mix_pcs_per_box, row.mix_group_id)
+        ppb = row.override_box_qty or _foi_effective_ppb(row.pcs_per_box, row.mix_pcs_per_box, row.mix_group_id)
         if ppb and ppb > 0:
             foi_by_bc[row.barcode] = int(ppb)
 
@@ -660,3 +681,184 @@ async def bulk_update_by_barcode(
         "not_found": not_found,
         "updated_nm_ids": updated_nm_ids,
     }
+
+
+async def get_sku_box_sources(
+    db: AsyncSession,
+    project_id: int,
+    barcode: str,
+) -> list[dict]:
+    """Drill-down: вся история снабжения одного SKU (по barcode).
+
+    Возвращает строки двух типов, отсортированные по дате (свежие сверху):
+      - source_type="vehicle" — позиция машины (cost_order_items), read-only;
+        ФФ-склад = cost_orders.target_warehouse_id.
+      - source_type="factory" — позиция заказа на фабрику (factory_order_items),
+        editable=True; box_qty учитывает box_qty_per_order override.
+    """
+    rows: list[tuple[date | None, dict]] = []
+
+    # ─── Vehicle lines (cost_order_items) ─────────────────────────────────
+    veh_result = await db.execute(
+        select(
+            CostOrderItem.qty,
+            CostOrderItem.pcs_per_box_override,
+            CostOrderItem.box_size_override,
+            CostOrder.order_no,
+            CostOrder.status.label("co_status"),
+            CostOrder.actual_arrival_date,
+            CostOrder.ship_date,
+            CostOrder.created_at.label("co_created_at"),
+            Warehouse.name.label("warehouse_name"),
+            FactoryOrderItem.pcs_per_box.label("foi_pcs_per_box"),
+            FactoryOrderItem.mix_pcs_per_box.label("foi_mix_pcs_per_box"),
+            FactoryOrderItem.box_size.label("foi_box_size"),
+            FactoryOrderItem.mix_box_size.label("foi_mix_box_size"),
+            FactoryOrderItem.mix_group_id.label("foi_mix_group_id"),
+        )
+        .join(CostOrder, CostOrder.order_no == CostOrderItem.order_no)
+        .outerjoin(FactoryOrderItem, FactoryOrderItem.id == CostOrderItem.factory_order_item_id)
+        .outerjoin(Warehouse, Warehouse.id == CostOrder.target_warehouse_id)
+        .where(
+            CostOrderItem.project_id == project_id,
+            CostOrderItem.is_deleted == False,  # noqa: E712
+            CostOrder.is_deleted == False,  # noqa: E712
+            CostOrderItem.barcode == barcode,
+        )
+    )
+    for r in veh_result:  # type: ignore[assignment]
+        sort_date = r.actual_arrival_date or r.ship_date or (r.co_created_at.date() if r.co_created_at else None)
+        ppb = r.pcs_per_box_override or _foi_effective_ppb(r.foi_pcs_per_box, r.foi_mix_pcs_per_box, r.foi_mix_group_id)
+        box_size = r.box_size_override or _foi_effective_box_size(
+            r.foi_box_size, r.foi_mix_box_size, r.foi_mix_group_id
+        )
+        rows.append(
+            (
+                sort_date,
+                {
+                    "source_type": "vehicle",
+                    "order_no": r.order_no,
+                    "factory_order_item_id": None,
+                    "warehouse_name": r.warehouse_name,
+                    "qty": int(r.qty or 0),
+                    "box_qty": int(ppb) if ppb and ppb > 0 else None,
+                    "box_size": box_size,
+                    "date": sort_date.isoformat() if sort_date else None,
+                    "status": getattr(r.co_status, "value", r.co_status),
+                    "editable": False,
+                    "is_overridden": False,
+                },
+            )
+        )
+
+    # ─── Factory order lines (factory_order_items) ────────────────────────
+    foi_result = await db.execute(
+        select(
+            FactoryOrderItem.id,
+            FactoryOrderItem.qty,
+            FactoryOrderItem.pcs_per_box,
+            FactoryOrderItem.mix_pcs_per_box,
+            FactoryOrderItem.box_size,
+            FactoryOrderItem.mix_box_size,
+            FactoryOrderItem.mix_group_id,
+            FactoryOrder.order_number,
+            FactoryOrder.order_date,
+            BoxQtyPerOrder.box_qty.label("override_box_qty"),
+        )
+        .join(FactoryOrder, FactoryOrder.id == FactoryOrderItem.factory_order_id)
+        .outerjoin(
+            BoxQtyPerOrder,
+            (BoxQtyPerOrder.factory_order_item_id == FactoryOrderItem.id) & (BoxQtyPerOrder.project_id == project_id),
+        )
+        .where(
+            FactoryOrderItem.project_id == project_id,
+            FactoryOrderItem.is_deleted == False,  # noqa: E712
+            FactoryOrder.is_deleted == False,  # noqa: E712
+            FactoryOrderItem.barcode == barcode,
+        )
+    )
+    for r in foi_result:  # type: ignore[assignment]
+        is_overridden = r.override_box_qty is not None
+        ppb = (
+            r.override_box_qty
+            if is_overridden
+            else _foi_effective_ppb(r.pcs_per_box, r.mix_pcs_per_box, r.mix_group_id)
+        )
+        box_size = _foi_effective_box_size(r.box_size, r.mix_box_size, r.mix_group_id)
+        rows.append(
+            (
+                r.order_date,
+                {
+                    "source_type": "factory",
+                    "order_no": r.order_number,
+                    "factory_order_item_id": r.id,
+                    "warehouse_name": None,
+                    "qty": int(r.qty or 0),
+                    "box_qty": int(ppb) if ppb and ppb > 0 else None,
+                    "box_size": box_size,
+                    "date": r.order_date.isoformat() if r.order_date else None,
+                    "status": None,
+                    "editable": True,
+                    "is_overridden": is_overridden,
+                },
+            )
+        )
+
+    # Свежие сверху; строки без даты — в конец.
+    rows.sort(key=lambda x: x[0] or date.min, reverse=True)
+    return [row for _, row in rows]
+
+
+async def update_order_box_qty(
+    db: AsyncSession,
+    project_id: int,
+    factory_order_item_id: int,
+    box_qty: int | None,
+) -> str | None:
+    """Set/clear box_qty_per_order override для строки заказа на фабрику.
+
+    `box_qty=None` сбрасывает override (возврат к factory_order_items.pcs_per_box).
+    Возвращает barcode строки заказа, либо None если factory_order_item не
+    найден в проекте.
+    """
+    foi_row = await db.execute(
+        select(FactoryOrderItem.barcode).where(
+            FactoryOrderItem.id == factory_order_item_id,
+            FactoryOrderItem.project_id == project_id,
+            FactoryOrderItem.is_deleted == False,  # noqa: E712
+        )
+    )
+    barcode = foi_row.scalar_one_or_none()
+    if barcode is None:
+        return None
+
+    existing = await db.execute(
+        select(BoxQtyPerOrder).where(
+            BoxQtyPerOrder.project_id == project_id,
+            BoxQtyPerOrder.factory_order_item_id == factory_order_item_id,
+        )
+    )
+    row = existing.scalar_one_or_none()
+
+    if row is None:
+        if box_qty is None:
+            return barcode  # override и так нет — сбрасывать нечего
+        db.add(
+            BoxQtyPerOrder(
+                project_id=project_id,
+                factory_order_item_id=factory_order_item_id,
+                box_qty=box_qty,
+            )
+        )
+    else:
+        row.box_qty = box_qty  # type: ignore[assignment]
+
+    await db.commit()
+    await invalidate_cache("reports:warehouse_need")
+    logger.info(
+        "box_qty_per_order updated: project=%s foi=%s box_qty=%s",
+        project_id,
+        factory_order_item_id,
+        box_qty,
+    )
+    return barcode

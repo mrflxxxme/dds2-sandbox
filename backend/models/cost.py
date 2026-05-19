@@ -87,6 +87,28 @@ class BoxQtyPerWarehouse(Base):
     )
 
 
+class BoxQtyPerOrder(Base):
+    """Override кратности коробки для строки заказа на фабрику (factory_order_item).
+
+    Живёт ТОЛЬКО для box-multiplicity: правка не меняет сам
+    factory_order_items.pcs_per_box — домен supply-chain (объём, логистика)
+    не затрагивается. При резолюции «Из заказа» / effective_box_qty:
+      box_qty_per_order.box_qty       ← если задан
+      → factory_order_items.pcs_per_box (или mix_pcs_per_box)
+    """
+
+    __tablename__ = "box_qty_per_order"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    factory_order_item_id: Mapped[int] = mapped_column(Integer, ForeignKey("factory_order_items.id"), nullable=False)
+    box_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    __table_args__ = (UniqueConstraint("project_id", "factory_order_item_id", name="uq_box_qty_po_project_foi"),)
+
+
 class DutyRule(Base, SoftDeleteMixin):
     __tablename__ = "duty_rules"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

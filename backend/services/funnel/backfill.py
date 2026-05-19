@@ -162,7 +162,7 @@ async def batch_resync_ads(project_id: int) -> dict:
                                     adv_clicks=ad["clicks"],
                                 )
                             )
-                            day_count += res.rowcount
+                            day_count += res.rowcount  # type: ignore[attr-defined]
 
                         await db.commit()
                         total_updated += day_count
