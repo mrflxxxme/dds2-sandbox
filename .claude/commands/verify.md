@@ -1,79 +1,42 @@
 ---
-description: "Полная верификация DDS2 — тесты, конвенции, безопасность. Запускай перед коммитом."
+description: "Верификация DDS2 перед коммитом: тесты, конвенции, безопасность. Аргумент quick — быстрый срез."
 ---
 
-# Verification — DDS2
+# /verify — проверка перед коммитом
 
-Комплексная проверка перед коммитом/PR. Запускает проверки ПАРАЛЛЕЛЬНО для скорости.
+## Режимы
+- `/verify quick` — быстрый срез (~30 сек): импорты + pytest + конвенции, последовательно.
+- `/verify` (по умолчанию) — полная проверка: тесты, конвенции, безопасность, frontend-сборка.
 
-## Инструкции
-
-### Шаг 1: Параллельные проверки
-
-Запустить **параллельно** 3 субагента (Agent tool, `run_in_background: true`):
-
-**Субагент 1 — Backend тесты:**
+## quick
 ```bash
-docker compose exec backend pytest tests/ -x --tb=short -q
-```
-Вернуть: пройдено / провалено / ошибки.
-
-**Субагент 2 — Конвенции + безопасность:**
-```bash
+docker compose exec backend python -c "from backend.models import *; print('models OK')"
+docker compose exec backend pytest tests/ -x --timeout=60 -q
 bash scripts/check_conventions.sh
 ```
-Плюс проверить:
-```bash
-grep -rn 'text(f"' --include="*.py" backend/ || echo "OK"
-grep -rn "text(f'" --include="*.py" backend/ || echo "OK"
-grep -rn "datetime.utcnow\|datetime.now" --include="*.py" backend/ || echo "OK"
-grep -rn "db.delete\|session.delete" --include="*.py" backend/ || echo "OK"
-grep -rn "Float" --include="*.py" backend/models/ || echo "OK"
+
+## full
+1. **Backend-тесты:** `docker compose exec backend pytest tests/ -x --tb=short -q`
+2. **Конвенции:** `bash scripts/check_conventions.sh`
+3. **Безопасность** — grep по `backend/`:
+   ```bash
+   grep -rn 'text(f' --include="*.py" backend/ || echo OK     # SQL-инъекции
+   grep -rn 'datetime.utcnow\|datetime.now(' --include="*.py" backend/ || echo OK
+   grep -rn 'db.delete\|session.delete' --include="*.py" backend/ || echo OK
+   grep -rn 'Float' --include="*.py" backend/models/ || echo OK
+   ```
+4. **Frontend-сборка** — если в diff есть `frontend-react/`: `cd frontend-react && npm run build`.
+
+Тяжёлые шаги можно гонять параллельно фоновыми агентами.
+
+## Отчёт
 ```
-Вернуть: OK или список проблем.
-
-**Субагент 3 — Frontend сборка (если менялись frontend файлы):**
-Проверить `git diff --name-only HEAD | grep -q "frontend-react/"`.
-Если да: `cd frontend-react && npm run build`
-Если нет: SKIP.
-Вернуть: OK / FAIL / SKIP.
-
-### Шаг 2: Собрать результаты
-
-Дождаться всех 3 субагентов и сгенерировать отчёт:
-
-```
-ВЕРИФИКАЦИЯ DDS2
-================
-
-Тесты:       [OK/FAIL] (X/Y пройдено)
-Конвенции:   [OK/FAIL]
-Безопасность: [OK/X проблем]
-Сборка:      [OK/FAIL/SKIP]
-
-Готов к коммиту: [ДА/НЕТ]
-
-Проблемы:
-1. ...
+ВЕРИФИКАЦИЯ
+  Тесты:        OK / FAIL (X/Y)
+  Конвенции:    OK / FAIL
+  Безопасность: OK / N проблем
+  Сборка:       OK / FAIL / SKIP
+  → готов к коммиту: ДА / НЕТ
 ```
 
-### Шаг 3: Автообновление документации
-
-Если все проверки прошли И изменены backend файлы (models/, services/, routers/, migrations/):
-- Проверь DOMAIN_*.md (новые модели, сервисы, эндпоинты)
-- Проверь backend/MAP.md (новые файлы)
-- Проверь docs/KNOWN_PITFALLS.md (если наткнулся на грабли)
-- Проверь CLAUDE.md (новый домен, антипаттерн)
-
-### Шаг 4: Git Status
-```bash
-git diff --stat
-git status
-```
-
-## Аргументы
-
-$ARGUMENTS:
-- `quick` — только конвенции + тесты (без субагентов, последовательно)
-- `full` — все проверки параллельно (по умолчанию)
-- `pre-commit` — конвенции + безопасность (без тестов)
+Если backend-код менялся — после проверок прогони `/learn` для синхронизации документации.

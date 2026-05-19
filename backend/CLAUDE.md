@@ -1,33 +1,15 @@
-# Backend Context
+# Backend — ориентир
 
-## Before ANY backend change
-1. Determine domain → read the corresponding DOMAIN_*.md file
-2. Follow architecture: Router → Service → Model (NEVER business logic in routers)
+## Перед изменением
+1. Определи домен → [DOMAIN_INDEX.md](DOMAIN_INDEX.md) → читай нужный `DOMAIN_*.md`.
+2. Архитектура: `routers/` → `services/` → `models/`. Логика — в сервисе, не в роутере.
+3. Навигация по коду — [MAP.md](MAP.md).
 
-## Quick Reference
-- Datetime: `from backend.utils.time import utcnow`
-- Money: `Numeric(18, 2)` (NEVER Float)
-- SQL: parameterized `:param` binding (NEVER f-strings)
-- Queries: MUST filter by `project_id` AND `is_deleted == False`
-- Cache: `@cached(ttl=300)` for reads, `invalidate_cache()` after mutations
-- Tests: `pytest tests/ -x --tb=short` before commit
-- Conventions: `bash scripts/check_conventions.sh`
+## Правила
+Iron rules — в корневом `CLAUDE.md`. Backend-детали (типы PG, кэш, multi-tenancy, тесты) — в `.claude/rules/backend.md` (грузится при правке `backend/`).
 
-## Domain files in this directory
-- `DOMAIN_TRANSACTIONS.md` — import, ETL, categorization
-- `DOMAIN_REPORTS.md` — DDS, BDR, OPIU, dashboard, stock/warehouse analytics
-- `DOMAIN_PLANNING.md` — orders, payments, customs
-- `DOMAIN_COST.md` — cost, nomenclature, duties
-- `DOMAIN_WB.md` — WB API, funnel, sync
-- `DOMAIN_WAREHOUSE.md` — warehouse, stock, receipts, shipments, transfers, FBO
-- `DOMAIN_ASSEMBLY.md` — assembly requests, logistics
-- `DOMAIN_TELEGRAM.md` — telegram bot, TMA, digest, notifications
-- `DOMAIN_AI.md` — AI multi-agent system (7 agents, orchestrator, memory, 19 tools)
-- `DOMAIN_SUPPLY_CHAIN.md` — factory orders, vehicles, delivery status
-- `DOMAIN_COUNTERPARTY.md` — counterparties + loans, Faktura.ru parser, ETL regex enrichment, backfill
-
-## Undomain files (shared/infra)
-- `services/refs_service.py` — CRUD для справочников (Account, Override, CounterpartyCategory)
-- `services/settings_service.py` — key-value настройки проекта (ProjectSetting)
-- `services/project_settings_service.py` — мутации настроек проекта (tax_rate, vat_rate) с инвалидацией кэша
-- `routers/refs.py`, `routers/auth.py`, `routers/projects.py` — базовые endpoints
+## Shared / infra (вне доменов)
+- `services/refs_service.py` — CRUD справочников (Account, Override, CounterpartyCategory).
+- `services/settings_service.py` — key-value настройки проекта (`ProjectSetting`).
+- `services/project_settings_service.py` — мутации настроек (tax_rate, vat_rate) с инвалидацией кэша.
+- `routers/refs.py`, `routers/auth.py`, `routers/projects.py` — базовые endpoints.

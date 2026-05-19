@@ -1,145 +1,88 @@
-# Domain: Reports (ДДС, БДР, ОПИУ, Dashboard)
+# DOMAIN_REPORTS — ДДС, БДР, ОПИУ, Dashboard, Cost-DNA
 
-## Ownership
-Файлы этого домена:
-- `services/reports/balance.py` — баланс по счетам
-- `services/reports/dds.py` — ДДС-месяц и PnL
-- `services/reports/dashboard.py` — KPI дашборда
-- `services/reports/queries.py` — общие SQL-запросы
-- `services/wb_bdr_service.py` — WB БДР (бюджет доходов и расходов)
-- `services/opiu_service.py` — ОПИУ (отчёт о прибылях и убытках)
-- `services/cost_dna_service.py` — Cost-DNA (декомпозиция выручки по категориям)
-- `services/cost_dna_helpers.py` — SQL builders и per-subject агрегации для Cost-DNA
-- `services/bdr_enrichment.py` — обогащение БДР данными
-- `services/bdr_loaders.py` — загрузчики данных для БДР
-- `services/fx_service.py` — курсы валют
-- `services/tax_service.py` — налоговые ставки
-- `services/stock_forecast_service.py` — прогноз запасов
-- `services/warehouse_stock_service.py` — остатки на складах WB
-- `services/order_geography_service.py` — география заказов WB
-- `services/warehouse_geo.py` — координаты складов
-- `services/warehouse_geo_data.py` — данные координат складов
-- `services/stock_analytics_service.py` — ре-экспорт stock_forecast + warehouse
-- `services/cold_start_distribution_service.py` — cold-start распределение SKU-новинок по WB-складам (см. секцию «Cold-start распределение» ниже)
-- `routers/reports.py` — HTTP endpoints отчётов
-- `routers/reports_wb.py` — WB-специфичные отчёты
-- `routers/reports_stock.py` — складские отчёты и прогноз
-- `schemas/reports.py`
-- `tests/test_api_reports.py`, `tests/test_wb_bdr_service.py`, `tests/test_opiu_service.py`, `tests/test_fx_service.py`
-- `tests/test_stock_analytics_service.py`, `tests/test_warehouse_stocks.py`, `tests/test_warehouse_geo.py`, `tests/test_order_geography.py`
-- `tests/test_cost_dna_helpers.py`, `tests/test_reports_cost_dna.py` — Cost-DNA unit + API
-- `tests/test_warehouse_unified_stock_bdr_parity.py` — гарантирует что Unified Stock и БДР не расходятся по реализации
+Финансовые и складские отчёты. Все строятся поверх `transactions`,
+`wb_finance_rows`, `wb_funnel_daily` (read-only). На запись — только `fx_rates`
+и `tax_rates`. Кэш отчётов TTL=300s.
 
-## Tables (read-only, кроме fx_rates и tax_rates)
-- `transactions` — источник данных (ЧТЕНИЕ)
-- `opening_balances` — начальные остатки
-- `fx_rates` — курсы валют (ЗАПИСЬ через backfill/manual)
-- `tax_rates` — налоговые ставки
+## Таблицы
+| Таблица | Роль |
+|---------|------|
+| `transactions` | источник данных всех отчётов (чтение) |
+| `opening_balances` | начальные остатки счетов |
+| `wb_finance_rows` | данные WB Finance API для БДР/ОПИУ/Cost-DNA |
+| `wb_funnel_daily` | данные воронки для unit-экономики |
+| `fx_rates` | курсы валют (запись через backfill/manual) |
+| `tax_rates` | помесячные налоговые ставки проекта |
 
-## Business Rules
+## Бизнес-правила
 
 ### ДДС (Cash Flow)
-- Баланс = opening_balance + SUM(net) WHERE is_cashflow2=1
-- Группировка по cat_lvl1_2 / cat_lvl2_2
-- Валюта: фильтр по currency, CNY конвертируется в RUB
+- Баланс = `opening_balance + SUM(net) WHERE is_cashflow2=1`.
+- Группировка по `cat_lvl1_2` / `cat_lvl2_2`. Фильтр по `currency`; CNY конвертируется в RUB.
 
 ### БДР (WB)
-- `deduction` содержит: рекламу, кредиты, отзывы, прочее
-- **КРИТИЧНО:** `ad_deduction` — ОТДЕЛЬНАЯ статья (НЕ включать в to_pay)
-- **КРИТИЧНО:** `loan_deduction` — финансовая операция (НЕ включать в операционную прибыль)
-- Только `other_deduction` → операционные расходы
-- При добавлении нового типа удержаний → обновить ОБОИХ: wb_bdr_service.py И opiu_service.py
+- `deduction` содержит рекламу, кредиты, отзывы, прочее.
+- **КРИТИЧНО:** `ad_deduction` — отдельная статья, НЕ включать в `to_pay`.
+- **КРИТИЧНО:** `loan_deduction` — финансовая операция, НЕ включать в операционную прибыль.
+- Только `other_deduction` → операционные расходы.
+- При добавлении нового типа удержаний — обновить ОБА файла: `wb_bdr_service.py` И `opiu_service.py`.
 
 ### ОПИУ (P&L)
-- Выручка = to_pay (от WB) + продажи из transactions
-- Себестоимость = cost_price * qty
-- Налог = % от выручки (6% по умолчанию, настраивается)
+- Выручка = `to_pay` (от WB) + продажи из `transactions`.
+- Себестоимость = `cost_price * qty`. Налог = % от выручки (по умолчанию 6%, настраивается).
 
 ### Cost-DNA (декомпозиция выручки по категориям)
-- **Endpoint:** `GET /reports/cost_dna` (`routers/reports_wb.py`) — возвращает per-subject разбор каждого рубля выручки: себестоимость (factory/duty/delivery/VAT) + комиссии WB (commission/logistics/storage/adv/other) + налоги + маржа.
-- **Период:** либо rolling (`period_days=30|60` от вчерашнего дня), либо custom `date_from`/`date_to` (оба обязательны, max 365 дней) — custom range нужен для прямого сравнения с БДР.
-- **Выручка / WB-fees:** `wb_finance_rows GROUP BY subject_name` (пустой subject игнорируется — ≈408k строк).
-- **Ad spend:** `wb_funnel_daily.adv_sum GROUP BY subject` — тот же паттерн что в БДР/ОПИУ.
-- **Cost aggregation (фикс 2026-04-14):** per-article weighted cost из `cost_order_items` (weight = purchase qty) умножается на per-article net sale qty из `wb_finance_rows` за период, потом суммируется по subject. Старый алгоритм (weight = purchase qty на subject-уровне) завышал себестоимость, если закупочный микс не совпадал с продажным.
-- **SA join (фикс 2026-04-14):** `LOWER(article_seller)` в `cost_order_items` ↔ `LOWER(sa_name)` в `wb_finance_rows` — CSV-импорты часто хранят SA в UPPERCASE, WB API — в lowercase. Без LOWER проекты с mixed-case каталогом видели cost_total=0.
-- **Commission + Tax:** совпадают с правилами OPIU (`opiu_service.py`) — меняешь там → меняй здесь синхронно.
-- **Cache key (фикс 2026-04-15):** `snapshot_date`, `date_from`, `date_to` ОБЯЗАНЫ быть в kwargs `get_cost_dna(...)` — иначе `@cached` не включит их в ключ и rolling snapshot будет тихо дрейфовать через полночь. Router (`reports_wb.py`) пиннит `snapshot_date=utcnow().date()` в момент запроса.
+`GET /reports/cost_dna` (`routers/reports_wb.py`) — per-subject разбор каждого рубля выручки: себестоимость (factory/duty/delivery/VAT) + комиссии WB + налоги + маржа.
+- **Период:** rolling (`period_days=30|60` от вчера) либо custom `date_from`/`date_to` (оба обязательны, max 365 дней — для сравнения с БДР).
+- **Выручка / WB-fees:** `wb_finance_rows GROUP BY subject_name` (пустой subject игнорируется).
+- **Ad spend:** `wb_funnel_daily.adv_sum GROUP BY subject`.
+- **Cost aggregation:** per-article weighted cost из `cost_order_items` (weight = purchase qty) × per-article net sale qty из `wb_finance_rows` за период, потом сумма по subject. Subject-уровневый вес завышал бы себестоимость при несовпадении закупочного и продажного микса.
+- **SA join:** `LOWER(article_seller)` ↔ `LOWER(sa_name)` — CSV-импорты хранят SA в UPPERCASE, WB API в lowercase; без LOWER mixed-case каталог даёт `cost_total=0`.
+- **Commission + Tax:** совпадают с правилами `opiu_service.py` — меняешь там, меняй здесь синхронно.
 
 ### FX
-- Курсы извлекаются из конвертационных транзакций ВТБ (backfill)
-- PnL использует AVG rate за год (ИЗВЕСТНЫЙ БАГ — нужен daily rate)
+- Курсы извлекаются из конвертационных транзакций ВТБ (backfill).
 
-### Stock Forecast (Аналитика остатков)
-- **Источник:** `stock_forecast_service.get_stock_analytics` (router `reports_stock.py /stock_analytics`).
-- **Режимы (`mode`):**
-  - `wb` — только полезный остаток WB
-  - `wb_rf` — WB + свободный РФ (РФ как scheduled delivery)
-  - `wb_rf_transit` — WB + свободный РФ + on-assembly + in-transit (полный pipeline)
-  - `wb_assembly_transit` — WB + on-assembly + in-transit (БЕЗ свободного РФ; «что прилетит на WB при условии что РФ-остаток никуда не двинется»)
-- **Стартовая точка матрицы прогноза:** ВСЕГДА только полезный остаток WB (`quantity + in_way_from_client + in_way_to_client × (1 − buyout%)`). РФ / on-assembly / in-transit НЕ плюсуются в день 0.
-- **Свободный РФ → WB:** `free_rf = stocks_rf − in_assembly_total` приходит синтетической поставкой через `total_days = assembly + avg(delivery) + wb_acceptance` ([WarehouseDeliveryTime](models/warehouse.py)). Если qty на нескольких складах — арифметическое среднее `total_days` (вариант B). Поле API: `articles[].rf_avg_days`. Fallback при пустой `warehouse_delivery_times` — `forecast_rf_default_days` (default 8).
-- **On-assembly (PENDING/IN_PROGRESS/READY/VEHICLE_ASSIGNED):** каждая `AssemblyRequestItem` идёт отдельной поставкой с собственной ETA. `ready = COALESCE(actual_ready_date, estimated_ready_date, created_at + 3 дн)`, далее `eta = ready + post_assembly_days[warehouse_id]`, где `post_assembly_days = avg(delivery) + wb_acceptance` (без assembly — оно уже в `ready_date`). Fallback: `max(0, forecast_rf_default_days − 3)`. Просроченные ETA (`eta < today`) попадают в день 0.
-- **In-transit (SHIPPED):** прибытие = `delivery_date` (она же «дата сдачи» из листа логиста). Без acceptance — `delivery_date` уже фиксирует сдачу.
-- **Дедупликация:** `free_rf` исключает on-assembly qty (физически на РФ, но уйдёт через свою ETA), иначе двойной счёт. SHIPPED заявки физически уже **не** на РФ-складе и `stocks_rf` их не содержит.
-- **`days_left` / traffic-light** — по `total_stock = WB + stocks_rf + in_transit` (физический остаток, без учёта расписаний). Дневная матрица может опустошиться раньше `days_left`, если РФ далеко.
-- **Настройка fallback-дней:** `GET/PUT /api/v1/refs/forecast-rf-default-days` (`settings_service.get/set_forecast_rf_default_days`, ключ `forecast_rf_default_days`, диапазон 0..365). UI: страница `warehouse/analytics` → вкладка «⚙️ Настройки» → карточка «📦 Время РФ → WB по умолчанию».
+### Stock Forecast (аналитика остатков)
+`stock_forecast_service.get_stock_analytics` (router `reports_stock.py /stock_analytics`).
+- **Режимы (`mode`):** `wb` (только полезный остаток WB); `wb_rf` (+ свободный РФ как scheduled delivery); `wb_rf_transit` (+ on-assembly + in-transit, полный pipeline); `wb_assembly_transit` (WB + on-assembly + in-transit, без свободного РФ).
+- **День 0 матрицы — всегда только полезный остаток WB:** `quantity + in_way_from_client + in_way_to_client × (1 − buyout%)`. РФ / on-assembly / in-transit в день 0 не плюсуются.
+- **Свободный РФ → WB:** `free_rf = stocks_rf − in_assembly_total` приходит синтетической поставкой через `total_days = assembly + avg(delivery) + wb_acceptance`. Несколько складов → арифметическое среднее `total_days`. Fallback при пустой `warehouse_delivery_times` — `forecast_rf_default_days` (default 8, настройка `GET/PUT /api/v1/refs/forecast-rf-default-days`, диапазон 0..365).
+- **On-assembly:** каждая `AssemblyRequestItem` (PENDING/IN_PROGRESS/READY/VEHICLE_ASSIGNED) — отдельная поставка. `ready = COALESCE(actual_ready_date, estimated_ready_date, created_at + 3 дн)`, `eta = ready + post_assembly_days[warehouse_id]` (`post_assembly_days = avg(delivery) + wb_acceptance`). Просроченные ETA попадают в день 0.
+- **In-transit (SHIPPED):** прибытие = `delivery_date` (дата сдачи из листа логиста).
+- **Дедупликация:** `free_rf` исключает on-assembly qty (иначе двойной счёт); SHIPPED-заявки физически не на РФ-складе и `stocks_rf` их не содержит.
+- **`days_left` / traffic-light** считаются по `total_stock = WB + stocks_rf + in_transit` (физический остаток, без расписаний) — дневная матрица может опустеть раньше `days_left`, если РФ далеко.
 
-## Dependencies
-- `transactions` — все отчёты строятся на транзакциях
-- `wb_finance_rows` — данные из WB Finance API для БДР/ОПИУ
-- `wb_funnel_daily` — данные воронки для unit-экономики
+### Cold-start (распределение SKU-новинок)
+SKU-новинка имеет ФФ-остаток, но нет статистики продаж — обычная локализация не работает. Cold-start распределяет ФФ-остаток по WB-складам пропорционально долям ФО проекта. Подробный алгоритм и связь с распределением сборки — в `DOMAIN_WAREHOUSE.md` (`cold_start_distribution_service.py`).
+- Endpoints: `POST /api/v1/reports/distribute_cold_start` (per-SKU), `GET /api/v1/reports/cold_start_table` (сегмент целиком, SKU-новинки с `rf_qty > 0`).
 
-## Known Issues & Gotchas
-- `get_dds_pnl()` — 170 строк, сложная функция, трудно тестировать
-- FX conversion использует среднюю ставку за год вместо daily rate
-- Кэш TTL=300s (5 мин) — может показывать устаревшие данные
-- wb_bdr_service.py (360 строк) и opiu_service.py (365 строк) — ниже лимита 400 строк
+## Зависимости
+- `transactions`, `wb_finance_rows`, `wb_funnel_daily` — источники данных всех отчётов.
+- `DOMAIN_ASSEMBLY` — on-assembly заявки в Stock Forecast.
+- `DOMAIN_WAREHOUSE` — cold-start алгоритм, остатки WB.
 
-## Cache Keys
+## Грабли
+- **Cost-DNA cache key:** `snapshot_date`, `date_from`, `date_to` обязаны быть в kwargs `get_cost_dna(...)` — иначе `@cached` не включит их в ключ и rolling snapshot тихо дрейфует через полночь. Router пиннит `snapshot_date=utcnow().date()` в момент запроса.
+- FX-конверсия в PnL использует среднюю годовую ставку вместо daily rate (известный баг).
+- Кэш TTL=300s — может показывать устаревшие данные.
+
+## Файлы
+- `services/reports/` — `dds.py` (ДДС + PnL), `balance.py`, `dashboard.py`, `queries.py`.
+- `services/wb_bdr_service.py` (+ `bdr_loaders.py`, `bdr_enrichment.py`) — WB БДР.
+- `services/opiu_service.py` — ОПИУ.
+- `services/cost_dna_service.py` (+ `cost_dna_helpers.py`) — Cost-DNA.
+- `services/fx_service.py`, `services/tax_service.py` — курсы валют, налоговые ставки.
+- `services/stock_forecast_service.py`, `services/warehouse_stock_service.py` — прогноз и остатки WB.
+- `services/order_geography_service.py`, `services/warehouse_geo*.py` — география заказов, координаты складов.
+- `services/cold_start_distribution_service.py` — cold-start распределение.
+- `routers/reports.py`, `routers/reports_wb.py`, `routers/reports_stock.py` — HTTP endpoints.
+- `schemas/reports.py`, `schemas/cold_start.py` — Pydantic.
+
+### Cache keys
 ```
 reports:balance:project_id={pid}:as_of={date}
 reports:dds_month:project_id={pid}:year={y}:month={m}:currency={c}
 reports:dashboard:project_id={pid}:date_from={d1}:date_to={d2}
-reports:opiu:project_id={pid}:...
-reports:wb_bdr:project_id={pid}:...
-reports:cost_dna:project_id={pid}:period_days={n}:date_from={d1}:date_to={d2}:snapshot_date={s}
+reports:opiu / reports:wb_bdr / reports:cost_dna  (см. примечание про cache key)
 ```
-
-## Cold-start распределение (новинки SKU)
-
-### Зачем
-SKU-новинка имеет ФФ-остаток, но **нет статистики продаж** — обычная
-локализация не работает (нечего из чего считать долю по складам). Cold-start
-распределяет ФФ-остаток по WB-складам пропорционально **долям ФО** проекта
-(где у проекта реально заказывают), без оглядки на per-SKU историю.
-
-### Файлы
-- `services/cold_start_distribution_service.py` — pure-логика + DB-fetchers
-- `routers/reports_stock.py` — endpoints
-- `schemas/cold_start.py` — Pydantic-схемы
-- `tests/test_cold_start_distribution.py` — 20 тестов на pure logic
-
-### Endpoints
-- `POST /api/v1/reports/distribute_cold_start` — per-SKU расчёт распределения
-  (вход: `nm_id`, `total_qty`, `window_days`, `min_pack`, `bench_from_project_id`)
-- `GET /api/v1/reports/cold_start_table` — сегмент целиком
-  (только SKU-новинки с `rf_qty > 0`)
-
-### Алгоритм (`distribute_multi`)
-1. **Сегмент:** `first_sale_date IS NULL OR first_sale_date >= today-14`
-   и `rf_qty > 0` (ФФ-остаток есть). SKU "🐢 без продаж 14д с историей"
-   НЕ попадают — у них есть собственная статистика.
-2. **Бенчмарк** (доли ФО): свои данные (≥ MIN_ORDERS_FOR_OWN_BENCH)
-   → соседний проект (`bench_from_project_id`) → общероссийский WB-фолбэк.
-3. **Топ-3 склада на округ** (`pick_warehouses_per_district`) — не из excluded.
-4. Сырое распределение по округам по share, leftover крупнейшему ФО.
-5. Pool: ФО с qty < `min_pack` → крупнейший ФО.
-6. Внутри округа qty делится между складами пропорционально трафику; склады
-   с qty < `min_pack` пуляются в крупнейший склад того же округа.
-7. Учёт активных сборок: `final_qty = max(0, allocated - already_in_assembly)`.
-
-### Связь с распределением сборки
-При создании сборки из cold-start UI передаётся `cold_start_shares: {warehouse: 0..1}`
-в `assembly_drafts.distribution` (JSONB). На странице `/warehouse/assembly/distribute`
-кнопка «Авто-баланс» приоритезирует cold-start доли (если есть) над `wbNeed`,
-поэтому при изменении src qty распределение пересчитывается по тем же долям ФО.

@@ -2,7 +2,7 @@
 DDS Financial Management System - FastAPI Backend
 
 Entry point: lifespan, middleware, router registration.
-See AGENTS.md for full architecture overview.
+See CLAUDE.md for the project overview.
 """
 
 import asyncio

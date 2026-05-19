@@ -17,6 +17,9 @@ regexes = [
   "staging_secret_change_me",
   "staging_redis_secret",
   "staging_minio_secret",
+  # Directory path in CLAUDE.md prose — generic-api-key triggers on the
+  # nearby word "API"; `scheduler/jobs/` is a folder name, not a secret.
+  "scheduler/jobs/",
 ]
 
 paths = [

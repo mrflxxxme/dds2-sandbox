@@ -1,51 +1,44 @@
-# Domain: Planning (Orders, Payments, Customs, Cashflow)
+# DOMAIN_PLANNING — Planning (Orders, Payments, Customs, Cashflow)
 
-## Ownership
-Файлы этого домена:
-- `services/planning/cashflow.py` — прогноз кэшфлоу
-- `services/planning/crud.py` — CRUD заказов и платежей
-- `services/planning/customs.py` — таможенные пополнения и распределения
-- `services/planning/fact_links.py` — привязка факта к плану
-- `services/planning/wb.py` — WB-выплаты
-- `routers/planning.py` — HTTP endpoints
-- `routers/planning_customs.py` — таможенные endpoints
-- `routers/planning_wb_payouts.py` — WB-выплаты endpoints
-- `models/planning.py` — Order, LeadTime, PlannedPayment, PlannedIncome, WbPayout, PaymentFactLink, BrandPlan
-- `services/planning/brand_plan.py` — CRUD план-факт по брендам
-- `models/customs.py` — CustomsTopup, CustomsAlloc, CustomsDT
-- `schemas/planning.py`
-- `tests/test_api_planning.py`
+Планирование закупок: заказы поставщикам → плановые платежи по lead-time → привязка факта → прогноз кэшфлоу. Плюс таможенные авансы и план-факт по брендам.
 
-## Tables
-- `orders` — заказы поставщикам (SoftDeleteMixin)
-- `lead_time` — сроки по направлениям (ORDER=50d, AUTO=14d, CONTAINER=40d, CUSTOMS=17d)
-- `planned_payments` — плановые платежи (SoftDeleteMixin)
-- `planned_incomes` — плановые доходы
-- `wb_payouts` — WB-выплаты (SoftDeleteMixin)
-- `payment_fact_links` — привязки факт→план (SoftDeleteMixin)
-- `customs_topup` — авансы на таможню
-- `customs_alloc` — распределение авансов по заказам
-- `customs_dt` — ДТ (декларации на товары)
-- `brand_plans` — план по брендам (year, month, brand → planned revenue/orders)
+## Таблицы
+| Модель | Назначение | Примечание |
+|--------|------------|------------|
+| `Order` (`orders`) | Заказы поставщикам, суммы CNY + RUB + логистика | `order_no` уникален; SoftDeleteMixin |
+| `LeadTime` (`lead_time`) | Сроки по направлениям | ORDER=50d, AUTO=14d, CONTAINER=40d, CUSTOMS=17d |
+| `PlannedPayment` (`planned_payments`) | Плановые платежи | SoftDeleteMixin; статусы planned → partial → paid |
+| `PlannedIncome` (`planned_incomes`) | Плановые доходы | |
+| `WbPayout` (`wb_payouts`) | WB-выплаты | SoftDeleteMixin |
+| `PaymentFactLink` (`payment_fact_links`) | Привязки факт → план | SoftDeleteMixin |
+| `CustomsTopup` (`customs_topup`) | Авансы на таможню | |
+| `CustomsAlloc` (`customs_alloc`) | Распределение авансов по заказам | |
+| `CustomsDT` (`customs_dt`) | ДТ (декларации на товары) | |
+| `BrandPlan` (`brand_plans`) | План по брендам | `(year, month, brand)` → planned revenue/orders |
 
-## Business Rules
-1. **Заказ:** order_no уникален, содержит суммы в CNY + RUB + логистику
-2. **Плановые платежи:** генерируются из заказа по lead_time, статусы: planned → partial → paid
-3. **Fact linking:** реальная транзакция привязывается к PlannedPayment через PaymentFactLink
-4. **is_paid:** автоматически = True когда SUM(fact_links.amount_rub) >= planned_payment.amount_rub
-5. **Cashflow forecast:** planned_payments (расход) + planned_incomes (доход) + opening_balance
-6. **Customs:** topup → alloc по заказам → ДТ с номерами
+## Бизнес-правила
+- **Плановые платежи** генерируются из заказа по `lead_time`.
+- **Fact linking:** реальная транзакция привязывается к `PlannedPayment` через `PaymentFactLink`.
+- **`is_paid`** автоматически = True, когда `SUM(fact_links.amount_rub) >= planned_payment.amount_rub`. Запрос `paid_amount` фильтрует `is_deleted` — удаление fact_link корректно сбрасывает `is_paid`.
+- **Cashflow forecast** = `planned_payments` (расход) + `planned_incomes` (доход) + `opening_balance`.
+- **Customs:** `topup` → `alloc` по заказам → ДТ с номерами.
 
-## Known Issues & Gotchas
-- **Race condition в fact_links:** commit() + update_payment_paid_amount() не атомарны
-- ~~**is_paid не сбрасывается:** при удалении fact_link is_paid остаётся True~~ — **ИСПРАВЛЕНО** (2026-03-16)
-- ~~**Soft delete fact_links:** запрос paid_amount НЕ фильтрует is_deleted~~ — **ИСПРАВЛЕНО** (2026-03-16)
-- **Нет валидации amount_rub:** можно передать отрицательную сумму
+## Зависимости
+- `DOMAIN_TRANSACTIONS` — fact linking привязывает `PlannedPayment` к `Transaction`; `etl/sync_payments.py` синхронизирует при импорте.
+- `fx_service.py` — конвертация CNY → RUB для заказов.
 
-## Dependencies
-- `transactions` — fact linking привязывает PlannedPayment к Transaction
-- `etl/sync_payments.py` — автоматическая синхронизация при импорте
-- `fx_service.py` — конвертация CNY→RUB для заказов
+## Грабли
+- **Race condition в fact_links** — `commit()` + `update_payment_paid_amount()` не атомарны.
+- **Нет валидации `amount_rub`** — можно передать отрицательную сумму.
+- После мутаций инвалидировать `reports:cashflow`.
 
-## Cache Invalidation
-После мутаций: `await invalidate_cache("reports:cashflow")`
+## Файлы
+- `services/planning/crud.py` — CRUD заказов и платежей.
+- `services/planning/cashflow.py` — прогноз кэшфлоу.
+- `services/planning/customs.py` — таможенные пополнения и распределения.
+- `services/planning/fact_links.py` — привязка факта к плану.
+- `services/planning/wb.py` — WB-выплаты.
+- `services/planning/brand_plan.py` — CRUD план-факт по брендам.
+- `routers/planning.py`, `routers/planning_customs.py`, `routers/planning_wb_payouts.py` — HTTP endpoints.
+- `models/planning.py`, `models/customs.py` — ORM.
+- `schemas/planning.py` — Pydantic схемы.
