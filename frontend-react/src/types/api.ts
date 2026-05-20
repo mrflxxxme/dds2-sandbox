@@ -2910,6 +2910,7 @@ export interface BoxMultiplicityPerWarehouseRow {
   rf_stock: number;                         // сток на этом ФФ
   machine_order_no: string | null;          // № машины (только source=machine)
   machine_received_at: string | null;       // ISO-date приёмки машины (только source=machine)
+  machine_variants: number;                  // иные машины этого ФФ с отличной кратностью
 }
 
 export interface BoxMultiplicityRow {
@@ -2921,6 +2922,7 @@ export interface BoxMultiplicityRow {
   box_qty_override: number | null;          // ручной дефолт SKU (редактируется всегда)
   use_box_multiplicity: boolean;            // SKU-level флаг «учитывать»
   has_machine_data: boolean;                // есть хотя бы один ФФ с source=machine
+  has_mixed_ppb: boolean;                    // у товара в истории машин (любой статус) >1 различных ppb
   rf_stock: number;                         // суммарный остаток на ФФ-складах
   in_assembly: number;                      // в активной сборке (PENDING..VEHICLE_ASSIGNED)
   in_transit: number;                       // в пути на WB (SHIPPED)
@@ -2961,6 +2963,24 @@ export interface BoxMultiplicityBulkResponse {
   not_found: string[];        // barcodes that don't exist in the project
   matched_count: number;      // how many barcodes matched (some may have had no diff)
   locked: string[];           // barcodes пропущены — ФФ машинно-заблокирован
+  batch_id: string | null;    // UUID этой вставки — позволяет откатить целиком
+}
+
+export interface BoxMultiplicityBatchRevertResponse {
+  reverted: number;
+  locked_barcodes: string[];
+  affected_barcodes: string[];
+}
+
+export interface BoxMultiplicityBatchSummary {
+  batch_id: string;
+  created_at: string;     // ISO datetime
+  changes_count: number;  // строк журнала в batch
+  affected_barcodes: number;  // уникальных barcode
+}
+
+export interface BoxMultiplicityBatchListResponse {
+  items: BoxMultiplicityBatchSummary[];
 }
 
 // Drill-down: история снабжения одного SKU (второй уровень под артикулом).

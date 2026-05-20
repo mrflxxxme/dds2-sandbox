@@ -23,6 +23,7 @@
 """
 
 import logging
+import uuid
 from datetime import date
 
 from sqlalchemy import func, select
@@ -76,11 +77,13 @@ def _log_change(
     old: object,
     new: object,
     source: str,
+    batch_id: str | None = None,
 ) -> None:
     """Добавить запись в журнал изменений кратности коробки.
 
     Только регистрирует строку в сессии (`db.add`) — коммит делает вызывающая
     функция вместе с самим изменением. `warehouse_id=None` → SKU-уровень.
+    `batch_id` группирует записи одной bulk-операции (для отката всей вставки).
     """
     db.add(
         BoxMultiplicityChangeLog(
@@ -91,6 +94,7 @@ def _log_change(
             old_value=_serialize_value(old),
             new_value=_serialize_value(new),
             change_source=source,
+            batch_id=batch_id,
             created_at=utcnow(),
         )
     )
@@ -124,8 +128,9 @@ async def _resolve_machine_box_qty(
     qty-weighted mode наполняемости её строк с этим barcode.
 
     Возвращает dict: (barcode, warehouse_id) → {
-        box_qty, box_size, order_no, received_at
-    }. Пары без машинного резолва в dict отсутствуют.
+        box_qty, box_size, order_no, received_at, machine_variants
+    }. `machine_variants` — число иных машин этого ФФ с отличной кратностью.
+    Пары без машинного резолва в dict отсутствуют.
     """
     if not barcodes:
         return {}
@@ -153,22 +158,22 @@ async def _resolve_machine_box_qty(
         )
     )
 
-    # Для каждой пары (barcode, warehouse_id) берём приёмку с максимальной
-    # (actual_date, id). actual_date может быть NULL — трактуем как date.min.
-    best_receipt: dict[tuple[str, int], tuple] = {}
-    # ^ key → (actual_date_or_min, receipt_id, cost_order_id, actual_date)
+    # Для каждой пары (barcode, warehouse_id) собираем ВСЕ ACCEPTED-приёмки.
+    # Лучшая (max actual_date, receipt_id) даёт основную машину-источник;
+    # остальные нужны для подсчёта расхождений кратности между машинами
+    # одного ФФ (machine_variants). actual_date NULL → трактуем как date.min.
+    receipts_by_key: dict[tuple[str, int], list[tuple]] = {}
+    # ^ key → list of (sort_key, cost_order_id, actual_date)
     for r in receipt_result:  # type: ignore[assignment]
         key = (r.barcode, r.warehouse_id)
         sort_key = (r.actual_date or date.min, r.receipt_id)
-        prev = best_receipt.get(key)
-        if prev is None or sort_key > prev[0]:
-            best_receipt[key] = (sort_key, r.cost_order_id, r.actual_date)
+        receipts_by_key.setdefault(key, []).append((sort_key, r.cost_order_id, r.actual_date))
 
-    if not best_receipt:
+    if not receipts_by_key:
         return {}
 
     # ─── Шаг 2: строки cost_order_items нужных машин с нужным barcode ─────
-    cost_order_ids = {co_id for _, co_id, _ in best_receipt.values()}
+    cost_order_ids = {co_id for receipts in receipts_by_key.values() for _, co_id, _ in receipts}
     coi_result = await db.execute(
         select(
             CostOrder.id.label("co_id"),
@@ -207,12 +212,12 @@ async def _resolve_machine_box_qty(
         order_no_by_co[row.co_id] = row.order_no
         coi_grouped.setdefault((row.co_id, row.barcode), []).append((ppb, box_size, int(row.qty or 0)))
 
-    # ─── Шаг 3: для каждой пары (barcode, ФФ) → qty-weighted mode ──────────
-    resolved: dict[tuple[str, int], dict] = {}
-    for (barcode, warehouse_id), (_sort_key, co_id, actual_date) in best_receipt.items():
+    # ─── Шаг 3: qty-weighted mode наполняемости одной машины для barcode ───
+    def _machine_primary(co_id: int, barcode: str) -> tuple[int, str | None] | None:
+        """(box_qty, box_size) машины co_id для barcode или None, если нет ppb."""
         entries = coi_grouped.get((co_id, barcode))
         if not entries:
-            continue
+            return None
         # Распределяем qty по ppb; параллельно собираем box_size per ppb.
         ppb_to_qty: dict[int, int] = {}
         ppb_to_box_size: dict[int, str | None] = {}
@@ -224,16 +229,81 @@ async def _resolve_machine_box_qty(
             if ppb_int not in ppb_to_box_size:
                 ppb_to_box_size[ppb_int] = box_size
         if not ppb_to_qty:
-            continue
+            return None
         # Mode: ppb с наибольшей суммарной qty.
         primary = max(ppb_to_qty.items(), key=lambda x: x[1])[0]
+        return primary, ppb_to_box_size.get(primary)
+
+    # Для каждой пары (barcode, ФФ): основная машина = лучшая приёмка;
+    # machine_variants = число иных машин этого ФФ с отличной кратностью.
+    resolved: dict[tuple[str, int], dict] = {}
+    for (barcode, warehouse_id), receipts in receipts_by_key.items():
+        receipts.sort(key=lambda x: x[0], reverse=True)
+        _best_sort, best_co_id, best_actual_date = receipts[0]
+        best = _machine_primary(best_co_id, barcode)
+        if best is None:
+            continue
+        primary, box_size = best
+        # Уникальные кратности прочих машин этого ФФ, отличные от основной.
+        other_ppbs: set[int] = set()
+        seen_co: set[int] = {best_co_id}
+        for _sort, co_id, _date in receipts[1:]:
+            if co_id in seen_co:
+                continue
+            seen_co.add(co_id)
+            other = _machine_primary(co_id, barcode)
+            if other is not None and other[0] != primary:
+                other_ppbs.add(other[0])
         resolved[(barcode, warehouse_id)] = {
             "box_qty": primary,
-            "box_size": ppb_to_box_size.get(primary),
-            "order_no": order_no_by_co.get(co_id),
-            "received_at": actual_date.isoformat() if actual_date else None,
+            "box_size": box_size,
+            "order_no": order_no_by_co.get(best_co_id),
+            "received_at": best_actual_date.isoformat() if best_actual_date else None,
+            "machine_variants": len(other_ppbs),
         }
     return resolved
+
+
+async def _resolve_mixed_ppb_barcodes(
+    db: AsyncSession,
+    project_id: int,
+    barcodes: list[str],
+) -> set[str]:
+    """Barcodes, у которых в истории машин >1 различных эффективных ppb.
+
+    Считаем все cost_order_items по машинам снабжения (`cost_orders.status IS NOT NULL`)
+    независимо от статуса приёмки — товар «имел разные кратности», даже если разные
+    машины ещё в пути. Эффективная ppb: `pcs_per_box_override` либо derived из FOI.
+    """
+    if not barcodes:
+        return set()
+
+    result = await db.execute(
+        select(
+            CostOrderItem.barcode,
+            CostOrderItem.pcs_per_box_override,
+            FactoryOrderItem.pcs_per_box.label("foi_pcs_per_box"),
+            FactoryOrderItem.mix_pcs_per_box.label("foi_mix_pcs_per_box"),
+            FactoryOrderItem.mix_group_id.label("foi_mix_group_id"),
+        )
+        .join(CostOrder, CostOrder.order_no == CostOrderItem.order_no)
+        .outerjoin(FactoryOrderItem, FactoryOrderItem.id == CostOrderItem.factory_order_item_id)
+        .where(
+            CostOrderItem.project_id == project_id,
+            CostOrderItem.is_deleted == False,  # noqa: E712
+            CostOrder.is_deleted == False,  # noqa: E712
+            CostOrder.status.isnot(None),
+            CostOrderItem.barcode.in_(barcodes),
+            CostOrderItem.qty > 0,
+        )
+    )
+    ppb_by_barcode: dict[str, set[int]] = {}
+    for r in result:  # type: ignore[assignment]
+        ppb = r.pcs_per_box_override or _foi_effective_ppb(r.foi_pcs_per_box, r.foi_mix_pcs_per_box, r.foi_mix_group_id)
+        if ppb is None or ppb <= 0:
+            continue
+        ppb_by_barcode.setdefault(r.barcode, set()).add(int(ppb))
+    return {bc for bc, s in ppb_by_barcode.items() if len(s) > 1}
 
 
 async def get_box_multiplicity_table(
@@ -276,6 +346,9 @@ async def get_box_multiplicity_table(
 
     # ─── Машинный резолв per (barcode, ФФ) ───────────────────────────────
     machine_map = await _resolve_machine_box_qty(db, project_id, barcodes)
+
+    # ─── SKU-уровень: barcodes с >1 различных ppb по всем машинам (любой статус)
+    mixed_ppb_barcodes = await _resolve_mixed_ppb_barcodes(db, project_id, barcodes)
 
     # ─── Ручная per-ФФ кратность: (barcode, warehouse_id) → row ──────────
     per_rf_map: dict[tuple[str, int], dict] = {}
@@ -418,6 +491,7 @@ async def get_box_multiplicity_table(
             # (если per-ФФ строка есть), иначе None.
             manual_box_size = manual["box_size"] if manual else None
 
+            machine_variants = 0
             if machine is not None:
                 has_machine = True
                 box_qty = machine["box_qty"]
@@ -426,6 +500,7 @@ async def get_box_multiplicity_table(
                 editable = False
                 order_no = machine["order_no"]
                 received_at = machine["received_at"]
+                machine_variants = machine["machine_variants"]
             elif manual is not None and manual["box_qty"] is not None:
                 box_qty = manual["box_qty"]
                 box_size = manual_box_size
@@ -460,6 +535,7 @@ async def get_box_multiplicity_table(
                     "rf_stock": per_rf_stock_map.get((n.article_wb, wh_id), 0) if n.article_wb else 0,
                     "machine_order_no": order_no,
                     "machine_received_at": received_at,
+                    "machine_variants": machine_variants,
                 }
             )
 
@@ -473,6 +549,7 @@ async def get_box_multiplicity_table(
                 "box_qty_override": n.box_qty_override,
                 "use_box_multiplicity": n.use_box_multiplicity,
                 "has_machine_data": has_machine,
+                "has_mixed_ppb": n.barcode in mixed_ppb_barcodes,
                 "rf_stock": rf_stock,
                 "in_assembly": in_asm,
                 "in_transit": in_tr,
@@ -761,11 +838,13 @@ async def bulk_update_by_barcode(
         "not_found": list of barcodes that don't exist (sorted, dedup),
         "updated_nm_ids": set of nm_ids whose row was actually changed,
         "locked": sorted list of barcodes machine-locked for box_qty change,
+        "batch_id": UUID этой bulk-операции (если были изменения), иначе None,
       }
     """
 
     def _empty() -> dict:
         return {
+            "batch_id": None,
             "matched_barcodes": set(),
             "not_found": [],
             "updated_nm_ids": set(),
@@ -813,6 +892,9 @@ async def bulk_update_by_barcode(
     updated_nm_ids: set[int] = set()
     locked: set[str] = set()
     any_change = False
+    # UUID одной bulk-операции — общий для всех записей этой вставки.
+    # Сохраним в журнал только если any_change=True (иначе rollback).
+    batch_id = str(uuid.uuid4())
 
     for it in items:
         bc = it.get("barcode")
@@ -845,6 +927,7 @@ async def bulk_update_by_barcode(
             new_size = it.get("box_size")
             new_use = bool(it["use_box_multiplicity"]) if use_set else True
             row = per_rf_existing.get((bc, wh_id))
+            item_changed = False  # реально ли что-то поменялось для этого item
             if row is None:
                 row = BoxQtyPerWarehouse(
                     project_id=project_id,
@@ -857,21 +940,28 @@ async def bulk_update_by_barcode(
                 db.add(row)
                 per_rf_existing[(bc, wh_id)] = row
                 any_change = True
+                item_changed = True
                 if apply_ppb and new_ppb is not None:
-                    _log_change(db, project_id, bc, wh_id, "box_qty", None, new_ppb, "bulk")
+                    _log_change(db, project_id, bc, wh_id, "box_qty", None, new_ppb, "bulk", batch_id=batch_id)
                 if apply_size and new_size is not None:
-                    _log_change(db, project_id, bc, wh_id, "box_size", None, new_size, "bulk")
+                    _log_change(db, project_id, bc, wh_id, "box_size", None, new_size, "bulk", batch_id=batch_id)
                 if use_set and new_use is not True:
-                    _log_change(db, project_id, bc, wh_id, "use_box_multiplicity", True, new_use, "bulk")
+                    _log_change(
+                        db, project_id, bc, wh_id, "use_box_multiplicity", True, new_use, "bulk", batch_id=batch_id
+                    )
             else:
                 if apply_ppb and row.box_qty != new_ppb:
-                    _log_change(db, project_id, bc, wh_id, "box_qty", row.box_qty, new_ppb, "bulk")
+                    _log_change(db, project_id, bc, wh_id, "box_qty", row.box_qty, new_ppb, "bulk", batch_id=batch_id)
                     row.box_qty = new_ppb
                     any_change = True
+                    item_changed = True
                 if apply_size and row.box_size != new_size:
-                    _log_change(db, project_id, bc, wh_id, "box_size", row.box_size, new_size, "bulk")
+                    _log_change(
+                        db, project_id, bc, wh_id, "box_size", row.box_size, new_size, "bulk", batch_id=batch_id
+                    )
                     row.box_size = new_size
                     any_change = True
+                    item_changed = True
                 if use_set and row.use_box_multiplicity != new_use:
                     _log_change(
                         db,
@@ -882,9 +972,13 @@ async def bulk_update_by_barcode(
                         row.use_box_multiplicity,
                         new_use,
                         "bulk",
+                        batch_id=batch_id,
                     )
                     row.use_box_multiplicity = new_use
                     any_change = True
+                    item_changed = True
+            if not item_changed:
+                continue
             for nom in noms:
                 if nom.article_wb is not None:
                     updated_nm_ids.add(nom.article_wb)
@@ -902,6 +996,7 @@ async def bulk_update_by_barcode(
                         nom.box_qty_override,
                         it["box_qty_override"],
                         "bulk",
+                        batch_id=batch_id,
                     )
                     nom.box_qty_override = it["box_qty_override"]
                     changed = True
@@ -915,6 +1010,7 @@ async def bulk_update_by_barcode(
                         nom.use_box_multiplicity,
                         bool(it["use_box_multiplicity"]),
                         "bulk",
+                        batch_id=batch_id,
                     )
                     nom.use_box_multiplicity = bool(it["use_box_multiplicity"])
                     changed = True
@@ -940,6 +1036,7 @@ async def bulk_update_by_barcode(
         len(locked),
     )
     return {
+        "batch_id": batch_id if any_change else None,
         "matched_barcodes": matched_barcodes,
         "not_found": not_found,
         "updated_nm_ids": updated_nm_ids,
@@ -1112,6 +1209,7 @@ async def get_change_log(
             BoxMultiplicityChangeLog.old_value,
             BoxMultiplicityChangeLog.new_value,
             BoxMultiplicityChangeLog.change_source,
+            BoxMultiplicityChangeLog.batch_id,
             BoxMultiplicityChangeLog.created_at,
         )
         .outerjoin(Warehouse, Warehouse.id == BoxMultiplicityChangeLog.warehouse_id)
@@ -1131,6 +1229,7 @@ async def get_change_log(
             "old_value": r.old_value,
             "new_value": r.new_value,
             "change_source": r.change_source,
+            "batch_id": r.batch_id,
             "created_at": r.created_at.isoformat() if r.created_at else "",
         }
         for r in result  # type: ignore[assignment]
@@ -1253,3 +1352,199 @@ async def revert_change(
         target_value,
     )
     return {"barcode": barcode, "machine_locked": False}
+
+
+async def list_recent_batches(
+    db: AsyncSession,
+    project_id: int,
+    limit: int = 50,
+) -> list[dict]:
+    """Список последних bulk-операций (batch_id != NULL) для проекта.
+
+    Группирует записи журнала по `batch_id`, отдаёт сводку:
+    - batch_id
+    - created_at (минимум по группе — момент применения)
+    - changes_count (число строк журнала в batch)
+    - affected_barcodes (число уникальных barcode в batch, для UI)
+    Сортировка: новейший batch первым.
+    """
+    if limit < 1:
+        limit = 1
+    if limit > 200:
+        limit = 200
+    result = await db.execute(
+        select(
+            BoxMultiplicityChangeLog.batch_id,
+            func.min(BoxMultiplicityChangeLog.created_at).label("created_at"),
+            func.count(BoxMultiplicityChangeLog.id).label("changes_count"),
+            func.count(func.distinct(BoxMultiplicityChangeLog.barcode)).label("affected_barcodes"),
+        )
+        .where(
+            BoxMultiplicityChangeLog.project_id == project_id,
+            BoxMultiplicityChangeLog.batch_id.isnot(None),
+        )
+        .group_by(BoxMultiplicityChangeLog.batch_id)
+        .order_by(func.min(BoxMultiplicityChangeLog.created_at).desc())
+        .limit(limit)
+    )
+    return [
+        {
+            "batch_id": r.batch_id,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "changes_count": int(r.changes_count),
+            "affected_barcodes": int(r.affected_barcodes),
+        }
+        for r in result
+    ]
+
+
+async def revert_batch(
+    db: AsyncSession,
+    project_id: int,
+    batch_id: str,
+) -> dict:
+    """Откатить всю bulk-операцию (все записи журнала с этим batch_id).
+
+    Применяет `old_value` записей в обратном хронологическом порядке (новейшая
+    первая), чтобы возможные промежуточные шаги внутри batch разворачивались
+    корректно. Машинно-заблокированные ФФ для `box_qty`/`box_size` пропускаются
+    и попадают в `locked_barcodes` — их кратность зафиксирована машиной и
+    отменить ручную правку поверх машины невозможно.
+
+    Returns:
+      {
+        "found": bool,                # был ли вообще такой batch_id у проекта
+        "reverted": int,              # сколько записей отменено
+        "locked_barcodes": list[str], # barcodes, где откат поля заблокирован машиной
+        "affected_barcodes": list[str], # уникальные barcodes, которых коснулся откат
+      }
+    """
+    log_result = await db.execute(
+        select(BoxMultiplicityChangeLog)
+        .where(
+            BoxMultiplicityChangeLog.project_id == project_id,
+            BoxMultiplicityChangeLog.batch_id == batch_id,
+        )
+        .order_by(BoxMultiplicityChangeLog.created_at.desc(), BoxMultiplicityChangeLog.id.desc())
+    )
+    logs: list[BoxMultiplicityChangeLog] = list(log_result.scalars().all())
+    if not logs:
+        return {"found": False, "reverted": 0, "locked_barcodes": [], "affected_barcodes": []}
+
+    barcodes = list({log.barcode for log in logs})
+    # Подгружаем все Nomenclature по barcode одним запросом — для SKU-level откатов.
+    nom_rows = await db.execute(
+        select(Nomenclature).where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.barcode.in_(barcodes),
+        )
+    )
+    noms_by_bc: dict[str, list[Nomenclature]] = {}
+    for nom in nom_rows.scalars().all():
+        noms_by_bc.setdefault(nom.barcode, []).append(nom)
+
+    # Машинные блокировки.
+    machine_map = await _resolve_machine_box_qty(db, project_id, barcodes)
+
+    # Подгружаем все per-ФФ строки одним запросом.
+    per_rf_keys = [(log.barcode, log.warehouse_id) for log in logs if log.warehouse_id is not None]
+    per_rf_existing: dict[tuple[str, int], BoxQtyPerWarehouse] = {}
+    if per_rf_keys:
+        bcs = list({bc for bc, _ in per_rf_keys})
+        whs = list({wh for _, wh in per_rf_keys})
+        per_rf_rows = await db.execute(
+            select(BoxQtyPerWarehouse).where(
+                BoxQtyPerWarehouse.project_id == project_id,
+                BoxQtyPerWarehouse.barcode.in_(bcs),
+                BoxQtyPerWarehouse.warehouse_id.in_(whs),
+            )
+        )
+        for r in per_rf_rows.scalars().all():
+            per_rf_existing[(r.barcode, r.warehouse_id)] = r
+
+    reverted = 0
+    locked_barcodes: set[str] = set()
+    affected: set[str] = set()
+
+    for log in logs:
+        target_value = _parse_logged_value(log.field, log.old_value)
+        if (
+            log.warehouse_id is not None
+            and log.field in ("box_qty", "box_size")
+            and (log.barcode, log.warehouse_id) in machine_map
+        ):
+            locked_barcodes.add(log.barcode)
+            continue
+
+        if log.warehouse_id is None:
+            noms = noms_by_bc.get(log.barcode, [])
+            if not noms:
+                continue
+            for nom in noms:
+                if log.field == "box_qty_override":
+                    old = nom.box_qty_override
+                    if old != target_value:
+                        _log_change(db, project_id, log.barcode, None, log.field, old, target_value, "revert")
+                    nom.box_qty_override = target_value  # type: ignore[assignment]
+                elif log.field == "use_box_multiplicity":
+                    old = nom.use_box_multiplicity
+                    if old != target_value:
+                        _log_change(db, project_id, log.barcode, None, log.field, old, target_value, "revert")
+                    nom.use_box_multiplicity = bool(target_value)
+            reverted += 1
+            affected.add(log.barcode)
+        else:
+            key = (log.barcode, log.warehouse_id)
+            row = per_rf_existing.get(key)
+            if row is None:
+                row = BoxQtyPerWarehouse(
+                    project_id=project_id,
+                    barcode=log.barcode,
+                    warehouse_id=log.warehouse_id,
+                    box_qty=None,
+                    box_size=None,
+                    use_box_multiplicity=True,
+                )
+                db.add(row)
+                per_rf_existing[key] = row
+            old_pw: object
+            if log.field == "box_qty":
+                old_pw = row.box_qty
+                if old_pw != target_value:
+                    _log_change(
+                        db, project_id, log.barcode, log.warehouse_id, log.field, old_pw, target_value, "revert"
+                    )
+                row.box_qty = target_value  # type: ignore[assignment]
+            elif log.field == "box_size":
+                old_pw = row.box_size
+                if old_pw != target_value:
+                    _log_change(
+                        db, project_id, log.barcode, log.warehouse_id, log.field, old_pw, target_value, "revert"
+                    )
+                row.box_size = target_value  # type: ignore[assignment]
+            elif log.field == "use_box_multiplicity":
+                old_pw = row.use_box_multiplicity
+                if old_pw != target_value:
+                    _log_change(
+                        db, project_id, log.barcode, log.warehouse_id, log.field, old_pw, target_value, "revert"
+                    )
+                row.use_box_multiplicity = bool(target_value)
+            reverted += 1
+            affected.add(log.barcode)
+
+    await db.commit()
+    await invalidate_cache("reports:warehouse_need")
+    logger.info(
+        "box_multiplicity revert_batch: project=%s batch=%s reverted=%s locked=%s affected=%s",
+        project_id,
+        batch_id,
+        reverted,
+        len(locked_barcodes),
+        len(affected),
+    )
+    return {
+        "found": True,
+        "reverted": reverted,
+        "locked_barcodes": sorted(locked_barcodes),
+        "affected_barcodes": sorted(affected),
+    }

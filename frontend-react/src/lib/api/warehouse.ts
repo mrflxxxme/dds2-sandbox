@@ -13,6 +13,8 @@ import type {
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
     BoxMultiplicityBulkRequest,
+    BoxMultiplicityBatchListResponse,
+    BoxMultiplicityBatchRevertResponse,
     BoxMultiplicityBulkResponse,
     BoxMultiplicityChangesResponse,
     BoxMultiplicityPatch,
@@ -475,6 +477,22 @@ export function addWarehouseMethods(api: ApiClient) {
             return api.request<BoxMultiplicityRow>(
                 'POST',
                 `/api/v1/warehouse/box-multiplicity/changes/${changeId}/revert`,
+                {},
+            );
+        },
+        /** Список последних bulk-вставок проекта (для журнала истории). */
+        listBoxMultiplicityBatches(limit = 50) {
+            const params = new URLSearchParams({ limit: String(limit) });
+            return api.request<BoxMultiplicityBatchListResponse>(
+                'GET',
+                `/api/v1/warehouse/box-multiplicity/changes/batches?${params}`,
+            );
+        },
+        /** Откат всей bulk-операции (вставки) по batch_id. */
+        revertBoxMultiplicityBatch(batchId: string) {
+            return api.request<BoxMultiplicityBatchRevertResponse>(
+                'POST',
+                `/api/v1/warehouse/box-multiplicity/changes/batch/${encodeURIComponent(batchId)}/revert`,
                 {},
             );
         },

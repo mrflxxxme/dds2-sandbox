@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useState, useCallback, useMemo } from 'react';
+import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, formatDateTime } from '@/lib/utils';
@@ -8,13 +9,14 @@ import type { Column } from '@/components/DataTable';
 import type {
     BoxMultiplicityRow,
     BoxMultiplicityBulkItem,
+    BoxMultiplicityBatchSummary,
     BoxMultiplicityChangeRow,
     BoxMultiplicityPerWarehouseRow,
     BoxMultiplicitySourceRow,
 } from '@/types/api';
 import { parseBoxMultiplicityPaste } from '@/lib/utils/boxMultiplicityPaste';
 
-type StockFilter = 'all' | 'rf' | 'no_box_qty';
+type StockFilter = 'all' | 'rf' | 'partial' | 'mixed' | 'no_box_qty';
 
 const SOURCE_TYPE_META: Record<string, { label: string; icon: string }> = {
     vehicle: { label: 'Машина', icon: '🚚' },
@@ -27,8 +29,19 @@ function SourceBadge({ wh }: { wh: BoxMultiplicityPerWarehouseRow }) {
         const date = wh.machine_received_at ? ` · ${formatDate(wh.machine_received_at)}` : '';
         const label = wh.machine_order_no ? `машина ${wh.machine_order_no}${date}` : 'машина';
         return (
-            <span className="badge badge-info" style={{ fontSize: 10 }} title="Кратность из принятой машины — заблокирована">
-                🔒 {label}
+            <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
+                <span className="badge badge-info" style={{ fontSize: 10 }} title="Кратность из принятой машины — заблокирована">
+                    🔒 {label}
+                </span>
+                {wh.machine_variants > 0 && (
+                    <span
+                        className="badge badge-warning"
+                        style={{ fontSize: 10 }}
+                        title={`Ещё ${wh.machine_variants} принятых машин на этом ФФ с другой кратностью — показана последняя`}
+                    >
+                        +{wh.machine_variants}
+                    </span>
+                )}
             </span>
         );
     }
@@ -820,8 +833,30 @@ function skuHasBoxQty(row: BoxMultiplicityRow): boolean {
     return row.per_warehouse.some(p => p.rf_stock > 0 && p.box_qty !== null);
 }
 
+// Частичная кратность: среди ФФ с остатком есть И с заданной, И без — не везде заполнено.
+function skuHasPartialBoxQty(row: BoxMultiplicityRow): boolean {
+    const stocked = row.per_warehouse.filter(p => p.rf_stock > 0);
+    if (stocked.length === 0) return false;
+    const withQty = stocked.filter(p => p.box_qty !== null).length;
+    return withQty > 0 && withQty < stocked.length;
+}
+
+// Разные кратности: у одного товара возможно несколько разных кратностей.
+// Срабатывает, если: (а) backend нашёл >1 ppb в истории всех машин (любой статус приёмки), ИЛИ
+// (б) среди резолвнутых ФФ есть >1 различных box_qty, ИЛИ
+// (в) на каком-то ФФ принято несколько машин с разной кратностью (machine_variants > 0).
+function skuHasMixedBoxQty(row: BoxMultiplicityRow): boolean {
+    if (row.has_mixed_ppb) return true;
+    if (row.per_warehouse.some(p => p.machine_variants > 0)) return true;
+    const distinct = new Set<number>();
+    for (const p of row.per_warehouse) {
+        if (p.box_qty !== null) distinct.add(p.box_qty);
+    }
+    return distinct.size > 1;
+}
+
 export default function BoxMultiplicityPage() {
-    useParams() as { slug: string };  // route guard — slug used by API client
+    const { slug } = useParams() as { slug: string };
     const [rows, setRows] = useState<BoxMultiplicityRow[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -837,15 +872,34 @@ export default function BoxMultiplicityPage() {
     const [stockFilter, setStockFilter] = useState<StockFilter>('all');
     const [search, setSearch] = useState('');
 
-    // Bulk-paste inline editor (как в приёмке) — 5+ редактируемых строк.
-    type PasteRow = { barcode: string; ppb: string; use: string };
-    const emptyPasteRow = (): PasteRow => ({ barcode: '', ppb: '', use: '' });
+    // Bulk-paste inline editor — 5+ редактируемых строк. Колонки:
+    //   barcode  — ключ (обязателен)
+    //   warehouse — имя ФФ (опционально, пусто = SKU-уровень)
+    //   ppb      — кратность (число, «-»/«0» = очистка, пусто = не трогать)
+    //   box_size — размер коробки (только при заданном warehouse)
+    // Флаг «учитывать» при apply всегда выставляется в true (см. applyPaste).
+    type PasteRow = { barcode: string; warehouse: string; ppb: string; box_size: string };
+    const emptyPasteRow = (): PasteRow => ({ barcode: '', warehouse: '', ppb: '', box_size: '' });
+    const isPasteRowFilled = (r: PasteRow): boolean =>
+        !!(r.barcode.trim() || r.warehouse.trim() || r.ppb.trim() || r.box_size.trim());
     const [pasteOpen, setPasteOpen] = useState(false);
     const [pasteRows, setPasteRows] = useState<PasteRow[]>(() => Array.from({ length: 5 }, emptyPasteRow));
+    // Raw-режим — для расширенного шаблона (header + per-ФФ + box_size), который
+    // нельзя уместить в 3-колоночный inline-редактор.
+    const [pasteRawText, setPasteRawText] = useState<string>('');
     const [pasteApplying, setPasteApplying] = useState(false);
     const [pasteResult, setPasteResult] = useState<{
         matched: number; updated: number; notFound: string[]; locked: string[];
+        batchId: string | null;          // null = ничего не изменилось, кнопка отката недоступна
+        reverted?: { count: number; locked: string[] }; // заполняется после успешного отката
     } | null>(null);
+    const [batchReverting, setBatchReverting] = useState(false);
+
+    // Глобальный журнал bulk-вставок проекта (toggle-панель).
+    const [historyOpen, setHistoryOpen] = useState(false);
+    const [batches, setBatches] = useState<BoxMultiplicityBatchSummary[] | null>(null);
+    const [batchesLoading, setBatchesLoading] = useState(false);
+    const [revertingBatchId, setRevertingBatchId] = useState<string | null>(null);
 
     const load = useCallback(async () => {
         try {
@@ -862,26 +916,48 @@ export default function BoxMultiplicityPage() {
 
     useEffect(() => { load(); }, [load]);
 
+    // ─── Карта имени ФФ → ID (для резолва per-ФФ paste) ────────────────────
+    const warehouseMap = useMemo(() => {
+        const map = new Map<string, number>();
+        for (const r of rows) {
+            for (const p of r.per_warehouse) {
+                if (!map.has(p.warehouse_name)) map.set(p.warehouse_name, p.warehouse_id);
+                const lower = p.warehouse_name.toLowerCase();
+                if (!map.has(lower)) map.set(lower, p.warehouse_id);
+            }
+        }
+        return map;
+    }, [rows]);
+
     // ─── Bulk paste (inline editor, не модалка) ───────────────────────────
-    // Конвертируем текущие inline-строки в TSV → парсер → распознанные items.
-    const pasteText = useMemo(
-        () => pasteRows
-            .filter(r => r.barcode.trim() || r.ppb.trim() || r.use.trim())
-            .map(r => `${r.barcode}\t${r.ppb}\t${r.use}`)
-            .join('\n'),
-        [pasteRows],
-    );
-    const parsedPaste = useMemo(() => parseBoxMultiplicityPaste(pasteText), [pasteText]);
+    // Источник TSV: либо raw-буфер (расширенный header-формат), либо inline-строки.
+    // Если хоть одна строка использует warehouse/box_size — шлём header-режим
+    // (парсер тогда распознает per-ФФ + box_size); иначе legacy 3-колоночный.
+    const pasteText = useMemo(() => {
+        if (pasteRawText.trim()) return pasteRawText;
+        const filled = pasteRows.filter(isPasteRowFilled);
+        if (filled.length === 0) return '';
+        const usesExtended = filled.some(r => r.warehouse.trim() || r.box_size.trim());
+        if (usesExtended) {
+            const header = 'Barcode\tСклад\tКратность по ФФ\tРазмер коробки';
+            const body = filled.map(r => `${r.barcode}\t${r.warehouse}\t${r.ppb}\t${r.box_size}`);
+            return [header, ...body].join('\n');
+        }
+        return filled.map(r => `${r.barcode}\t${r.ppb}`).join('\n');
+    }, [pasteRows, pasteRawText]);
+    const parsedPaste = useMemo(() => parseBoxMultiplicityPaste(pasteText, warehouseMap), [pasteText, warehouseMap]);
 
     const openPaste = () => {
         setPasteOpen(true);
         setPasteRows(Array.from({ length: 5 }, emptyPasteRow));
+        setPasteRawText('');
         setPasteResult(null);
     };
 
     const closePaste = () => {
         setPasteOpen(false);
         setPasteRows(Array.from({ length: 5 }, emptyPasteRow));
+        setPasteRawText('');
         setPasteResult(null);
     };
 
@@ -890,8 +966,7 @@ export default function BoxMultiplicityPage() {
             const next = [...prev];
             next[idx] = { ...next[idx], [field]: value };
             // Авто-добавляем буферные строки если последняя строка тронута.
-            const last = next[next.length - 1];
-            if (last.barcode.trim() || last.ppb.trim() || last.use.trim()) {
+            if (isPasteRowFilled(next[next.length - 1])) {
                 next.push(emptyPasteRow());
             }
             return next;
@@ -899,18 +974,62 @@ export default function BoxMultiplicityPage() {
     };
 
     // Excel-paste: TSV в первую пустую строку → распарсить и заполнить начиная отсюда.
+    // Если в первой строке детектится header расширенного шаблона — кидаем в raw-буфер
+    // (3-колоночный inline-редактор не умеет per-ФФ + box_size).
     const handleRowsPaste = (e: React.ClipboardEvent, startIdx: number) => {
         const text = e.clipboardData.getData('text/plain');
         if (!text.includes('\t') && !text.includes('\n')) return;
         e.preventDefault();
         const lines = text.replace(/\r\n/g, '\n').split('\n').filter(l => l.length > 0);
         if (lines.length === 0) return;
+
+        // Header-детект — только когда первая строка содержит ключевые слова.
+        // Если детект сработал → raw-режим, парсер сам распознает по header.
+        const firstCols = lines[0].split('\t').map(c => c.trim().toLowerCase());
+        const looksLikeHeader = firstCols.some(c =>
+            c.includes('склад') || c.includes('размер') || c === 'nm_id' || c.includes('артикул'),
+        );
+        if (looksLikeHeader) {
+            setPasteRawText(text);
+            return;
+        }
+
+        // Детектим формат по содержимому первой строки. Возможные раскладки
+        // (после удаления колонки «Учитывать» из UI):
+        //   • Long template (6 кол.): Артикул, Barcode, nm_id, Склад, Кратность, Размер
+        //   • Short (≥4 кол.):        Barcode, Склад, Кратность, Размер
+        //   • Legacy (≤3 кол.):       Barcode, Кратность
+        // Эвристика: если col[1] — длинная цифровая строка (12+), значит первая
+        // колонка артикул, второй — barcode (long template). Иначе короткий формат.
+        const isLongTemplate =
+            firstCols.length >= 5 && /^\d{8,}$/.test((firstCols[1] || '').trim());
+        const isShortPerFf = !isLongTemplate && firstCols.length >= 4;
         const parsed: PasteRow[] = lines.map(l => {
             const cols = l.split('\t');
+            if (isLongTemplate) {
+                // Артикул(0), Barcode(1), nm_id(2), Склад(3), Кратность(4), Размер(5)
+                return {
+                    barcode: (cols[1] ?? '').trim(),
+                    warehouse: (cols[3] ?? '').trim(),
+                    ppb: (cols[4] ?? '').trim(),
+                    box_size: (cols[5] ?? '').trim(),
+                };
+            }
+            if (isShortPerFf) {
+                // Barcode(0), Склад(1), Кратность(2), Размер(3)
+                return {
+                    barcode: (cols[0] ?? '').trim(),
+                    warehouse: (cols[1] ?? '').trim(),
+                    ppb: (cols[2] ?? '').trim(),
+                    box_size: (cols[3] ?? '').trim(),
+                };
+            }
+            // Legacy ≤3 колонок: Barcode, Кратность
             return {
                 barcode: (cols[0] ?? '').trim(),
+                warehouse: '',
                 ppb: (cols[1] ?? '').trim(),
-                use: (cols[2] ?? '').trim(),
+                box_size: '',
             };
         });
         setPasteRows(prev => {
@@ -921,7 +1040,7 @@ export default function BoxMultiplicityPage() {
             }
             // Гарантируем 2 буферные пустые строки в конце
             while (next.length < startIdx + parsed.length + 2 ||
-                   (next[next.length - 1].barcode || next[next.length - 1].ppb || next[next.length - 1].use)) {
+                   isPasteRowFilled(next[next.length - 1])) {
                 next.push(emptyPasteRow());
                 if (next.length > startIdx + parsed.length + 5) break;  // safety
             }
@@ -929,14 +1048,76 @@ export default function BoxMultiplicityPage() {
         });
     };
 
+    // ─── Глобальный журнал bulk-вставок ─────────────────────────────────────
+    const loadBatches = useCallback(async () => {
+        setBatchesLoading(true);
+        try {
+            const resp = await api.listBoxMultiplicityBatches(50);
+            setBatches(resp.items);
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка загрузки истории');
+        } finally {
+            setBatchesLoading(false);
+        }
+    }, []);
+
+    const toggleHistory = useCallback(() => {
+        setHistoryOpen(prev => {
+            const next = !prev;
+            if (next && batches === null) loadBatches();
+            return next;
+        });
+    }, [batches, loadBatches]);
+
+    const revertBatchFromHistory = useCallback(async (batchId: string, changesCount: number) => {
+        if (!confirm(`Откатить вставку (${changesCount} изменений)?`)) return;
+        setRevertingBatchId(batchId);
+        try {
+            const resp = await api.revertBoxMultiplicityBatch(batchId);
+            await load();
+            await loadBatches();
+            const lockedNote = resp.locked_barcodes.length > 0
+                ? `\n🔒 Заблокировано машиной: ${resp.locked_barcodes.length}`
+                : '';
+            alert(`↩ Откачено ${resp.reverted} записей${lockedNote}`);
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка отката');
+        } finally {
+            setRevertingBatchId(null);
+        }
+    }, [load, loadBatches]);
+
+    // Откат всей последней bulk-операции по batch_id, полученному от backend.
+    const revertLastBatch = useCallback(async () => {
+        if (!pasteResult?.batchId) return;
+        if (!confirm(`Откатить всю последнюю вставку (${pasteResult.updated} SKU)?`)) return;
+        setBatchReverting(true);
+        try {
+            const resp = await api.revertBoxMultiplicityBatch(pasteResult.batchId);
+            // Перезагружаем таблицу — после отката изменилось много строк.
+            await load();
+            setPasteResult(prev => prev ? {
+                ...prev,
+                reverted: { count: resp.reverted, locked: resp.locked_barcodes },
+            } : prev);
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка отката');
+        } finally {
+            setBatchReverting(false);
+        }
+    }, [pasteResult, load]);
+
     const applyPaste = async () => {
         if (parsedPaste.rows.length === 0) return;
         setPasteApplying(true);
         try {
             const items: BoxMultiplicityBulkItem[] = parsedPaste.rows.map(r => {
-                const item: BoxMultiplicityBulkItem = { barcode: r.barcode };
+                // При массовой вставке всегда включаем флаг «учитывать» —
+                // отдельной колонкой UI больше не управляется.
+                const item: BoxMultiplicityBulkItem = { barcode: r.barcode, use_box_multiplicity: true };
+                if (r.warehouse_id !== undefined) item.warehouse_id = r.warehouse_id;
                 if (r.box_qty_override !== undefined) item.box_qty_override = r.box_qty_override ?? null;
-                if (r.use_box_multiplicity !== undefined) item.use_box_multiplicity = r.use_box_multiplicity;
+                if (r.box_size !== undefined) item.box_size = r.box_size ?? null;
                 return item;
             });
             const resp = await api.bulkBoxMultiplicity(items);
@@ -949,8 +1130,12 @@ export default function BoxMultiplicityPage() {
                 updated: resp.updated.length,
                 notFound: resp.not_found,
                 locked: resp.locked,
+                batchId: resp.batch_id,
             });
             setPasteRows(Array.from({ length: 5 }, emptyPasteRow));
+            setPasteRawText('');
+            // Если панель истории открыта — обновим список (свежий batch появится сверху).
+            if (historyOpen) loadBatches(); else setBatches(null);
         } catch (e: unknown) {
             alert(e instanceof Error ? e.message : 'Ошибка применения');
         } finally {
@@ -1078,6 +1263,8 @@ export default function BoxMultiplicityPage() {
             }
             switch (stockFilter) {
                 case 'rf': return r.rf_stock > 0;
+                case 'partial': return skuHasPartialBoxQty(r);
+                case 'mixed': return skuHasMixedBoxQty(r);
                 case 'no_box_qty': return r.rf_stock > 0 && !skuHasBoxQty(r);
                 default: return true;
             }
@@ -1094,19 +1281,39 @@ export default function BoxMultiplicityPage() {
 
     const stats = useMemo(() => {
         const total = scopeRows.length;
-        // «С кратностью» — есть ФФ с остатком и заданной кратностью.
-        const withBoxQty = scopeRows.filter(skuHasBoxQty).length;
-        const noBoxQty = total - withBoxQty;
-        const withMachine = scopeRows.filter(r => r.has_machine_data).length;
-        // «Учитывается» — SKU-флаг включён и кратность фактически задана.
-        const active = scopeRows.filter(r => r.use_box_multiplicity && skuHasBoxQty(r)).length;
         const filterCounts = {
+            // «Есть на ФФ» — SKU с остатком на ФФ-складе.
             rf: scopeRows.filter(r => r.rf_stock > 0).length,
+            // «Частичная кратность» — у части ФФ с остатком кратность есть, у части — нет.
+            partial: scopeRows.filter(skuHasPartialBoxQty).length,
+            // «Разные кратности» — у одного товара возможно несколько разных кратностей (между ФФ или внутри одного ФФ).
+            mixed: scopeRows.filter(skuHasMixedBoxQty).length,
             // «Нет кратности» — есть остаток на ФФ И кратность не задана.
             no_box_qty: scopeRows.filter(r => r.rf_stock > 0 && !skuHasBoxQty(r)).length,
         };
-        return { total, withBoxQty, noBoxQty, withMachine, active, filterCounts };
+        return { total, filterCounts };
     }, [scopeRows]);
+
+    // ─── Per-ФФ строки для второго листа Excel (шаблон для вставки) ────────
+    // Только редактируемые (не machine-locked) ФФ с остатком или заданной кратностью.
+    const perWarehouseExportRows = useMemo(() => {
+        const out: Array<{ article: string; barcode: string; nm_id: number; warehouse: string; box_qty: number | ''; box_size: string }> = [];
+        for (const r of filteredRows) {
+            for (const p of r.per_warehouse) {
+                if (!p.editable) continue;                       // machine-locked — пропускаем
+                if (p.rf_stock <= 0 && p.box_qty === null) continue;
+                out.push({
+                    article: r.vendor_code || '',
+                    barcode: r.barcode,
+                    nm_id: r.nm_id,
+                    warehouse: p.warehouse_name,
+                    box_qty: p.box_qty ?? '',
+                    box_size: p.box_size ?? '',
+                });
+            }
+        }
+        return out;
+    }, [filteredRows]);
 
     const columns: Column[] = [
         {
@@ -1229,20 +1436,51 @@ export default function BoxMultiplicityPage() {
         },
         {
             key: 'has_machine_data',
-            label: 'Машина',
+            label: 'Кратность ФФ',
             align: 'center',
-            width: '110px',
-            getValue: (r: BoxMultiplicityRow) => (r.has_machine_data ? 1 : 0),
-            render: (_v: unknown, r: BoxMultiplicityRow) => (
-                r.has_machine_data ? (
-                    <span className="badge badge-info" style={{ fontSize: 11 }} title="Есть ФФ с кратностью из принятой машины">
-                        🔒 есть
+            width: '140px',
+            // Сортировка: 2 = есть на всех, 1 = частично, 0 = нет.
+            getValue: (r: BoxMultiplicityRow) => {
+                const stocked = r.per_warehouse.filter(p => p.rf_stock > 0);
+                if (stocked.length === 0) return 0;
+                const withQty = stocked.filter(p => p.box_qty !== null).length;
+                if (withQty === 0) return 0;
+                return withQty === stocked.length ? 2 : 1;
+            },
+            render: (_v: unknown, r: BoxMultiplicityRow) => {
+                const stocked = r.per_warehouse.filter(p => p.rf_stock > 0);
+                const withQty = stocked.filter(p => p.box_qty !== null).length;
+                const lock = r.has_machine_data ? '🔒 ' : '';
+                if (stocked.length === 0 || withQty === 0) {
+                    return <span style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>—</span>;
+                }
+                if (withQty === stocked.length) {
+                    return (
+                        <span
+                            className="badge badge-success"
+                            style={{ fontSize: 11 }}
+                            title={`Кратность задана на всех ФФ с остатком (${withQty} из ${stocked.length})`}
+                        >
+                            {lock}есть
+                        </span>
+                    );
+                }
+                return (
+                    <span
+                        className="badge badge-warning"
+                        style={{ fontSize: 11 }}
+                        title={`Кратность задана на ${withQty} из ${stocked.length} ФФ с остатком — на остальных нет`}
+                    >
+                        {lock}есть частично
                     </span>
-                ) : (
-                    <span style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>—</span>
-                )
-            ),
-            exportValue: (r: BoxMultiplicityRow) => (r.has_machine_data ? 'да' : 'нет'),
+                );
+            },
+            exportValue: (r: BoxMultiplicityRow) => {
+                const stocked = r.per_warehouse.filter(p => p.rf_stock > 0);
+                const withQty = stocked.filter(p => p.box_qty !== null).length;
+                if (stocked.length === 0 || withQty === 0) return 'нет';
+                return withQty === stocked.length ? 'есть' : 'есть частично';
+            },
         },
     ];
 
@@ -1261,46 +1499,372 @@ export default function BoxMultiplicityPage() {
         <div className="animate-in">
             <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
                 <div>
+                    <Link
+                        href={`/p/${slug}/warehouse/analytics`}
+                        className="btn btn-secondary btn-sm"
+                        style={{ marginBottom: 8, display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                    >
+                        ← Аналитика остатков
+                    </Link>
                     <h1 className="page-title">📦 Кратность коробок</h1>
                     <p className="page-subtitle">
                         Кратность резолвится по каждому ФФ-складу: машина → вручную → дефолт.
                         Разверните строку для настройки по ФФ. Используется в распределении при создании сборки.
                     </p>
                 </div>
-                <button className="btn btn-primary btn-sm" onClick={openPaste}>
-                    📋 Вставить из буфера
-                </button>
+                <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                        className={`btn btn-sm ${historyOpen ? 'btn-primary' : 'btn-secondary'}`}
+                        onClick={toggleHistory}
+                        title="История массовых вставок проекта с откатом"
+                    >
+                        📜 История вставок
+                    </button>
+                    <button className="btn btn-primary btn-sm" onClick={openPaste}>
+                        📋 Вставить из буфера
+                    </button>
+                </div>
             </div>
 
+            {/* ─── История массовых вставок (toggle-панель) ─────────────────── */}
+            {historyOpen && (
+                <div className="glass-card" style={{ padding: 20, marginTop: 16 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+                        <div>
+                            <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>📜 История массовых вставок</h3>
+                            <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                Последние 50 операций. Откат вернёт значения до вставки —
+                                машинно-заблокированные ФФ пропустятся.
+                            </p>
+                        </div>
+                        <button className="btn btn-secondary btn-sm" onClick={() => setHistoryOpen(false)}>✕ Свернуть</button>
+                    </div>
+
+                    {batchesLoading && (
+                        <div style={{ padding: 16, color: 'var(--color-text-muted)', fontSize: 13 }}>Загрузка…</div>
+                    )}
+                    {!batchesLoading && batches !== null && batches.length === 0 && (
+                        <div style={{ padding: 16, color: 'var(--color-text-muted)', fontSize: 13 }}>
+                            Нет массовых вставок в проекте.
+                        </div>
+                    )}
+                    {!batchesLoading && batches && batches.length > 0 && (
+                        <div style={{ overflowX: 'auto' }}>
+                            <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+                                <thead>
+                                    <tr style={{ color: 'var(--color-text-muted)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.05 }}>
+                                        <th style={{ textAlign: 'left', padding: '8px 8px' }}>Когда</th>
+                                        <th style={{ textAlign: 'right', padding: '8px 8px', width: 110 }}>Изменений</th>
+                                        <th style={{ textAlign: 'right', padding: '8px 8px', width: 110 }}>SKU</th>
+                                        <th style={{ textAlign: 'left', padding: '8px 8px', width: 180 }}>Batch ID</th>
+                                        <th style={{ textAlign: 'right', padding: '8px 8px', width: 200 }}>—</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {batches.map(b => (
+                                        <tr key={b.batch_id} style={{ borderTop: '1px solid var(--color-border)' }}>
+                                            <td style={{ padding: '8px 8px' }}>
+                                                {formatDateTime(b.created_at)}
+                                            </td>
+                                            <td style={{ padding: '8px 8px', textAlign: 'right' }}>
+                                                {formatNumber(b.changes_count, 0)}
+                                            </td>
+                                            <td style={{ padding: '8px 8px', textAlign: 'right' }}>
+                                                {formatNumber(b.affected_barcodes, 0)}
+                                            </td>
+                                            <td style={{ padding: '8px 8px', fontFamily: 'monospace', fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                                {b.batch_id.slice(0, 8)}…
+                                            </td>
+                                            <td style={{ padding: '8px 8px', textAlign: 'right' }}>
+                                                <button
+                                                    className="btn btn-secondary btn-sm"
+                                                    onClick={() => revertBatchFromHistory(b.batch_id, b.changes_count)}
+                                                    disabled={revertingBatchId !== null}
+                                                >
+                                                    {revertingBatchId === b.batch_id ? 'Откат…' : '↩ Откатить'}
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* ─── Bulk paste inline editor ───────────────────────────────── */}
+            {pasteOpen && (
+                <div className="glass-card" style={{ padding: 20, marginTop: 16 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+                        <div>
+                            <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>📋 Массовое редактирование</h3>
+                            <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                <strong>Шаблон выгрузки</strong> (Артикул, Barcode, nm_id, Склад, Кратность, Размер коробки) — per-ФФ.
+                                <br />
+                                <strong>Короткий формат</strong> (Barcode, Склад, Кратность, Размер) — без Артикула и nm_id.
+                                <br />
+                                <strong>SKU-дефолт</strong>: Barcode, Кратность (2 колонки).
+                                <br />
+                                кратность: число или <code>-</code>/<code>0</code> = очистить, пусто = не менять
+                                {' · '}флаг «учитывать» при вставке всегда выставляется в <strong>да</strong>
+                                {' · '}машинно-заблокированные ФФ пропускаются
+                            </p>
+                        </div>
+                        <button className="btn btn-secondary btn-sm" onClick={closePaste} disabled={pasteApplying}>✕ Свернуть</button>
+                    </div>
+
+                    {pasteResult && (
+                        <div style={{
+                            padding: '10px 14px', marginBottom: 12,
+                            borderRadius: 8, background: 'rgba(52, 199, 89, 0.08)',
+                            borderLeft: '3px solid var(--color-success)', fontSize: 13,
+                        }}>
+                            ✅ Обновлено <strong>{pasteResult.updated}</strong> SKU
+                            {' · '}найдено по barcode <strong>{pasteResult.matched}</strong>
+                            {pasteResult.updated === 0 && pasteResult.matched > 0 && (
+                                <div style={{ marginTop: 6, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                    Значения уже совпадают с сохранёнными — ничего не изменилось, журнал не пополнен.
+                                </div>
+                            )}
+                            {pasteResult.notFound.length > 0 && (
+                                <details style={{ marginTop: 6, fontSize: 12 }}>
+                                    <summary style={{ cursor: 'pointer', color: 'var(--color-warning)' }}>
+                                        Не найдено barcode ({pasteResult.notFound.length})
+                                    </summary>
+                                    <div style={{ fontFamily: 'monospace', marginTop: 4, maxHeight: 80, overflowY: 'auto' }}>
+                                        {pasteResult.notFound.join(', ')}
+                                    </div>
+                                </details>
+                            )}
+                            {pasteResult.locked.length > 0 && (
+                                <details style={{ marginTop: 6, fontSize: 12 }}>
+                                    <summary style={{ cursor: 'pointer', color: 'var(--color-accent)' }}>
+                                        🔒 Заблокировано машиной — пропущено ({pasteResult.locked.length})
+                                    </summary>
+                                    <div style={{ fontFamily: 'monospace', marginTop: 4, maxHeight: 80, overflowY: 'auto' }}>
+                                        {pasteResult.locked.join(', ')}
+                                    </div>
+                                </details>
+                            )}
+                            {pasteResult.batchId && !pasteResult.reverted && (
+                                <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={revertLastBatch}
+                                        disabled={batchReverting}
+                                        title={`Откатит все ${pasteResult.updated} изменённых строк к значениям до вставки`}
+                                    >
+                                        {batchReverting ? 'Откат…' : '↩ Откатить эту вставку'}
+                                    </button>
+                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                        batch <code>{pasteResult.batchId.slice(0, 8)}…</code>
+                                    </span>
+                                </div>
+                            )}
+                            {pasteResult.reverted && (
+                                <div style={{
+                                    marginTop: 8, padding: '8px 12px', borderRadius: 8,
+                                    background: 'rgba(0, 122, 255, 0.08)',
+                                    borderLeft: '3px solid var(--color-accent)', fontSize: 12,
+                                }}>
+                                    ↩ Отменено <strong>{pasteResult.reverted.count}</strong> записей
+                                    {pasteResult.reverted.locked.length > 0 && (
+                                        <> · 🔒 заблокировано машиной: <strong>{pasteResult.reverted.locked.length}</strong></>
+                                    )}
+                                </div>
+                            )}
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                style={{ marginTop: 8 }}
+                                onClick={() => setPasteResult(null)}
+                            >Закрыть</button>
+                        </div>
+                    )}
+
+                    {pasteRawText ? (
+                        <div style={{
+                            padding: 12, marginBottom: 8,
+                            borderRadius: 8, background: 'rgba(0, 122, 255, 0.06)',
+                            borderLeft: '3px solid var(--color-accent)', fontSize: 13,
+                        }}>
+                            🧾 Распознан расширенный шаблон с per-ФФ ({pasteRawText.split('\n').filter(l => l.trim()).length} строк).
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                style={{ marginLeft: 12 }}
+                                onClick={() => setPasteRawText('')}
+                            >Очистить</button>
+                            <details style={{ marginTop: 8 }}>
+                                <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                    Показать содержимое
+                                </summary>
+                                <pre style={{
+                                    fontSize: 11, fontFamily: 'monospace', marginTop: 6,
+                                    maxHeight: 240, overflow: 'auto', padding: 8,
+                                    background: 'var(--color-bg-card)', borderRadius: 6,
+                                }}>{pasteRawText}</pre>
+                            </details>
+                        </div>
+                    ) : (
+                    <div style={{ overflowX: 'auto' }}>
+                        <table style={{ width: '100%', fontSize: 13 }}>
+                            <thead>
+                                <tr style={{ color: 'var(--color-text-muted)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.05 }}>
+                                    <th style={{ textAlign: 'left', padding: '6px 8px', width: 40 }}>#</th>
+                                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>Баркод</th>
+                                    <th style={{ textAlign: 'left', padding: '6px 8px', width: 180 }}>Склад (пусто = SKU)</th>
+                                    <th style={{ textAlign: 'left', padding: '6px 8px', width: 110 }}>Кратность</th>
+                                    <th style={{ textAlign: 'left', padding: '6px 8px', width: 140 }}>Размер коробки</th>
+                                    <th style={{ textAlign: 'center', padding: '6px 8px', width: 50 }}>—</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {pasteRows.map((row, i) => {
+                                    const filled = isPasteRowFilled(row);
+                                    const whInvalid = row.warehouse.trim() !== '' && !warehouseMap.has(row.warehouse.trim()) && !warehouseMap.has(row.warehouse.trim().toLowerCase());
+                                    const inputStyle = (extra: React.CSSProperties = {}): React.CSSProperties => ({
+                                        width: '100%', padding: '6px 10px', fontSize: 13,
+                                        border: '1px solid var(--color-border)', borderRadius: 8,
+                                        ...extra,
+                                    });
+                                    return (
+                                        <tr key={i} style={{ borderTop: '1px solid var(--color-border)' }}>
+                                            <td style={{ padding: '6px 8px', color: 'var(--color-text-muted)' }}>{i + 1}</td>
+                                            <td style={{ padding: '6px 8px' }}>
+                                                <input
+                                                    type="text"
+                                                    value={row.barcode}
+                                                    onChange={e => updatePasteRow(i, 'barcode', e.target.value)}
+                                                    onPaste={e => handleRowsPaste(e, i)}
+                                                    placeholder="Баркод"
+                                                    style={inputStyle({ fontFamily: 'monospace' })}
+                                                />
+                                            </td>
+                                            <td style={{ padding: '6px 8px' }}>
+                                                <input
+                                                    type="text"
+                                                    value={row.warehouse}
+                                                    onChange={e => updatePasteRow(i, 'warehouse', e.target.value)}
+                                                    onPaste={e => handleRowsPaste(e, i)}
+                                                    placeholder="ФФ (опц.)"
+                                                    style={inputStyle({
+                                                        borderColor: whInvalid ? 'var(--color-danger)' : undefined,
+                                                    })}
+                                                    title={whInvalid ? 'Склад не найден' : 'Имя ФФ; пусто — обновится SKU-дефолт'}
+                                                />
+                                            </td>
+                                            <td style={{ padding: '6px 8px' }}>
+                                                <input
+                                                    type="text"
+                                                    inputMode="numeric"
+                                                    value={row.ppb}
+                                                    onChange={e => updatePasteRow(i, 'ppb', e.target.value)}
+                                                    onPaste={e => handleRowsPaste(e, i)}
+                                                    placeholder="0"
+                                                    style={inputStyle({ textAlign: 'right' })}
+                                                />
+                                            </td>
+                                            <td style={{ padding: '6px 8px' }}>
+                                                <input
+                                                    type="text"
+                                                    value={row.box_size}
+                                                    onChange={e => updatePasteRow(i, 'box_size', e.target.value)}
+                                                    onPaste={e => handleRowsPaste(e, i)}
+                                                    placeholder="напр. 30×40×20"
+                                                    style={inputStyle()}
+                                                    title="Только при заданном складе"
+                                                />
+                                            </td>
+                                            <td style={{ padding: '6px 8px', textAlign: 'center' }}>
+                                                {filled && pasteRows.length > 1 && (
+                                                    <button
+                                                        className="btn btn-secondary btn-sm"
+                                                        onClick={() => setPasteRows(prev => prev.filter((_, j) => j !== i))}
+                                                        title="Удалить строку"
+                                                        style={{ padding: '2px 8px' }}
+                                                    >✕</button>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                    )}
+
+                    {/* Errors summary */}
+                    {parsedPaste.errors.length > 0 && (
+                        <div style={{
+                            marginTop: 8, padding: '8px 12px', borderRadius: 8,
+                            background: 'rgba(255, 59, 48, 0.06)', borderLeft: '3px solid var(--color-danger)',
+                            fontSize: 12, color: 'var(--color-danger)',
+                        }}>
+                            <strong>Ошибки в строках:</strong>
+                            <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
+                                {parsedPaste.errors.slice(0, 5).map((err, i) => (
+                                    <li key={i}>строка {err.line}: {err.reason}</li>
+                                ))}
+                                {parsedPaste.errors.length > 5 && <li>…и ещё {parsedPaste.errors.length - 5}</li>}
+                            </ul>
+                        </div>
+                    )}
+
+                    <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end', alignItems: 'center' }}>
+                        <span style={{ marginRight: 'auto', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                            Распознано: <strong style={{ color: 'var(--color-success)' }}>{parsedPaste.rows.length}</strong>
+                            {parsedPaste.errors.length > 0 && (
+                                <> · ошибок: <strong style={{ color: 'var(--color-danger)' }}>{parsedPaste.errors.length}</strong></>
+                            )}
+                        </span>
+                        <button className="btn btn-secondary btn-sm" onClick={closePaste} disabled={pasteApplying}>
+                            Отмена
+                        </button>
+                        <button
+                            className="btn btn-primary btn-sm"
+                            onClick={applyPaste}
+                            disabled={pasteApplying || parsedPaste.rows.length === 0}
+                        >
+                            {pasteApplying ? 'Применяю…' : `Применить (${parsedPaste.rows.length})`}
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* KPI-карты совпадают с чипами фильтра остатков — клик активирует фильтр. */}
             <div className="stats-grid" style={{ marginBottom: 16 }}>
-                <div className="glass-card" style={{ padding: '14px 18px', textAlign: 'center' }}>
-                    <div style={{ fontSize: 26, fontWeight: 700 }}>{formatNumber(stats.total)}</div>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Всего SKU</div>
-                </div>
-                <div className="glass-card" style={{ padding: '14px 18px', textAlign: 'center' }}>
-                    <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--color-success)' }}>
-                        {formatNumber(stats.withBoxQty)}
-                    </div>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>С кратностью</div>
-                </div>
-                <div className="glass-card" style={{ padding: '14px 18px', textAlign: 'center' }}>
-                    <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--color-success)' }}>
-                        {formatNumber(stats.active)}
-                    </div>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Учитывается</div>
-                </div>
-                <div className="glass-card" style={{ padding: '14px 18px', textAlign: 'center' }}>
-                    <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--color-accent)' }}>
-                        {formatNumber(stats.withMachine)}
-                    </div>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>С машинными данными</div>
-                </div>
-                <div className="glass-card" style={{ padding: '14px 18px', textAlign: 'center' }}>
-                    <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--color-warning)' }}>
-                        {formatNumber(stats.noBoxQty)}
-                    </div>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Не задана</div>
-                </div>
+                {([
+                    { key: 'all', label: 'Все', count: stats.total, color: 'var(--color-text)' },
+                    { key: 'rf', label: 'Есть на ФФ', count: stats.filterCounts.rf, color: 'var(--color-success)' },
+                    { key: 'partial', label: 'Частичная кратность', count: stats.filterCounts.partial, color: 'var(--color-warning)' },
+                    { key: 'mixed', label: 'Разные кратности', count: stats.filterCounts.mixed, color: 'var(--color-accent)' },
+                    { key: 'no_box_qty', label: 'Нет кратности', count: stats.filterCounts.no_box_qty, color: 'var(--color-danger)' },
+                ] as Array<{ key: StockFilter; label: string; count: number; color: string }>).map(c => {
+                    const active = stockFilter === c.key;
+                    return (
+                        <div
+                            key={c.key}
+                            role="button"
+                            tabIndex={0}
+                            className="glass-card"
+                            onClick={() => setStockFilter(c.key)}
+                            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') setStockFilter(c.key); }}
+                            style={{
+                                padding: '14px 18px',
+                                textAlign: 'center',
+                                cursor: 'pointer',
+                                border: active ? '2px solid var(--color-accent)' : undefined,
+                                transition: 'all 0.2s',
+                            }}
+                            title={active ? 'Фильтр активен' : `Включить фильтр «${c.label}»`}
+                        >
+                            <div style={{ fontSize: 26, fontWeight: 700, color: c.color }}>
+                                {formatNumber(c.count)}
+                            </div>
+                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{c.label}</div>
+                        </div>
+                    );
+                })}
             </div>
 
             {rows.length === 0 ? (
@@ -1348,6 +1912,8 @@ export default function BoxMultiplicityPage() {
                         {([
                             { key: 'all', label: 'Все', count: rows.length },
                             { key: 'rf', label: 'Есть на ФФ', count: stats.filterCounts.rf },
+                            { key: 'partial', label: 'Частичная кратность', count: stats.filterCounts.partial },
+                            { key: 'mixed', label: 'Разные кратности', count: stats.filterCounts.mixed },
                             { key: 'no_box_qty', label: 'Нет кратности', count: stats.filterCounts.no_box_qty },
                         ] as Array<{ key: StockFilter; label: string; count: number }>).map(c => (
                             <button
@@ -1370,6 +1936,18 @@ export default function BoxMultiplicityPage() {
                             columns={columns}
                             data={filteredRows}
                             exportName="box_multiplicity"
+                            exportAdditionalSheets={[{
+                                sheetName: 'Шаблон для вставки',
+                                data: perWarehouseExportRows,
+                                columns: [
+                                    { key: 'article', label: 'Артикул' },
+                                    { key: 'barcode', label: 'Barcode' },
+                                    { key: 'nm_id', label: 'nm_id' },
+                                    { key: 'warehouse', label: 'Склад' },
+                                    { key: 'box_qty', label: 'Кратность по ФФ' },
+                                    { key: 'box_size', label: 'Размер коробки' },
+                                ],
+                            }]}
                             emptyText="Нет данных"
                             pageSize={100}
                             getRowId={(r: BoxMultiplicityRow) => r.barcode}
@@ -1392,171 +1970,6 @@ export default function BoxMultiplicityPage() {
                 </>
             )}
 
-            {/* ─── Bulk paste inline editor ───────────────────────────────── */}
-            {pasteOpen && (
-                <div className="glass-card" style={{ padding: 20, marginTop: 16 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
-                        <div>
-                            <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>📋 Массовое редактирование</h3>
-                            <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--color-text-muted)' }}>
-                                вставьте из Excel: <strong>Баркод, Кратность, Учитывать</strong>
-                                {' · '}кратность: число или <code>-</code>/<code>0</code> = очистить, пусто = не менять
-                                {' · '}учитывать: <code>да/нет</code>/<code>+/-</code>/<code>1/0</code>, пусто = не менять
-                                {' · '}обновляется ручной дефолт SKU; машинно-заблокированные ФФ пропускаются
-                            </p>
-                        </div>
-                        <button className="btn btn-secondary btn-sm" onClick={closePaste} disabled={pasteApplying}>✕ Свернуть</button>
-                    </div>
-
-                    {pasteResult && (
-                        <div style={{
-                            padding: '10px 14px', marginBottom: 12,
-                            borderRadius: 8, background: 'rgba(52, 199, 89, 0.08)',
-                            borderLeft: '3px solid var(--color-success)', fontSize: 13,
-                        }}>
-                            ✅ Обновлено <strong>{pasteResult.updated}</strong> SKU
-                            {' · '}найдено по barcode <strong>{pasteResult.matched}</strong>
-                            {pasteResult.notFound.length > 0 && (
-                                <details style={{ marginTop: 6, fontSize: 12 }}>
-                                    <summary style={{ cursor: 'pointer', color: 'var(--color-warning)' }}>
-                                        Не найдено barcode ({pasteResult.notFound.length})
-                                    </summary>
-                                    <div style={{ fontFamily: 'monospace', marginTop: 4, maxHeight: 80, overflowY: 'auto' }}>
-                                        {pasteResult.notFound.join(', ')}
-                                    </div>
-                                </details>
-                            )}
-                            {pasteResult.locked.length > 0 && (
-                                <details style={{ marginTop: 6, fontSize: 12 }}>
-                                    <summary style={{ cursor: 'pointer', color: 'var(--color-accent)' }}>
-                                        🔒 Заблокировано машиной — пропущено ({pasteResult.locked.length})
-                                    </summary>
-                                    <div style={{ fontFamily: 'monospace', marginTop: 4, maxHeight: 80, overflowY: 'auto' }}>
-                                        {pasteResult.locked.join(', ')}
-                                    </div>
-                                </details>
-                            )}
-                            <button
-                                className="btn btn-secondary btn-sm"
-                                style={{ marginTop: 8 }}
-                                onClick={() => setPasteResult(null)}
-                            >Ещё одна вставка</button>
-                        </div>
-                    )}
-
-                    <div style={{ overflowX: 'auto' }}>
-                        <table style={{ width: '100%', fontSize: 13 }}>
-                            <thead>
-                                <tr style={{ color: 'var(--color-text-muted)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.05 }}>
-                                    <th style={{ textAlign: 'left', padding: '6px 8px', width: 40 }}>#</th>
-                                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>Баркод</th>
-                                    <th style={{ textAlign: 'left', padding: '6px 8px', width: 140 }}>Кратность</th>
-                                    <th style={{ textAlign: 'left', padding: '6px 8px', width: 140 }}>Учитывать</th>
-                                    <th style={{ textAlign: 'center', padding: '6px 8px', width: 60 }}>—</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {pasteRows.map((row, i) => {
-                                    const filled = row.barcode.trim() || row.ppb.trim() || row.use.trim();
-                                    return (
-                                        <tr key={i} style={{ borderTop: '1px solid var(--color-border)' }}>
-                                            <td style={{ padding: '6px 8px', color: 'var(--color-text-muted)' }}>{i + 1}</td>
-                                            <td style={{ padding: '6px 8px' }}>
-                                                <input
-                                                    type="text"
-                                                    value={row.barcode}
-                                                    onChange={e => updatePasteRow(i, 'barcode', e.target.value)}
-                                                    onPaste={e => handleRowsPaste(e, i)}
-                                                    placeholder="Баркод"
-                                                    style={{
-                                                        width: '100%', padding: '6px 10px', fontSize: 13,
-                                                        border: '1px solid var(--color-border)', borderRadius: 8,
-                                                        fontFamily: 'monospace',
-                                                    }}
-                                                />
-                                            </td>
-                                            <td style={{ padding: '6px 8px' }}>
-                                                <input
-                                                    type="text"
-                                                    inputMode="numeric"
-                                                    value={row.ppb}
-                                                    onChange={e => updatePasteRow(i, 'ppb', e.target.value)}
-                                                    onPaste={e => handleRowsPaste(e, i)}
-                                                    placeholder="0"
-                                                    style={{
-                                                        width: '100%', padding: '6px 10px', fontSize: 13,
-                                                        border: '1px solid var(--color-border)', borderRadius: 8,
-                                                        textAlign: 'right',
-                                                    }}
-                                                />
-                                            </td>
-                                            <td style={{ padding: '6px 8px' }}>
-                                                <input
-                                                    type="text"
-                                                    value={row.use}
-                                                    onChange={e => updatePasteRow(i, 'use', e.target.value)}
-                                                    onPaste={e => handleRowsPaste(e, i)}
-                                                    placeholder="да / нет"
-                                                    style={{
-                                                        width: '100%', padding: '6px 10px', fontSize: 13,
-                                                        border: '1px solid var(--color-border)', borderRadius: 8,
-                                                    }}
-                                                />
-                                            </td>
-                                            <td style={{ padding: '6px 8px', textAlign: 'center' }}>
-                                                {filled && pasteRows.length > 1 && (
-                                                    <button
-                                                        className="btn btn-secondary btn-sm"
-                                                        onClick={() => setPasteRows(prev => prev.filter((_, j) => j !== i))}
-                                                        title="Удалить строку"
-                                                        style={{ padding: '2px 8px' }}
-                                                    >✕</button>
-                                                )}
-                                            </td>
-                                        </tr>
-                                    );
-                                })}
-                            </tbody>
-                        </table>
-                    </div>
-
-                    {/* Errors summary */}
-                    {parsedPaste.errors.length > 0 && (
-                        <div style={{
-                            marginTop: 8, padding: '8px 12px', borderRadius: 8,
-                            background: 'rgba(255, 59, 48, 0.06)', borderLeft: '3px solid var(--color-danger)',
-                            fontSize: 12, color: 'var(--color-danger)',
-                        }}>
-                            <strong>Ошибки в строках:</strong>
-                            <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
-                                {parsedPaste.errors.slice(0, 5).map((err, i) => (
-                                    <li key={i}>строка {err.line}: {err.reason}</li>
-                                ))}
-                                {parsedPaste.errors.length > 5 && <li>…и ещё {parsedPaste.errors.length - 5}</li>}
-                            </ul>
-                        </div>
-                    )}
-
-                    <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end', alignItems: 'center' }}>
-                        <span style={{ marginRight: 'auto', fontSize: 12, color: 'var(--color-text-muted)' }}>
-                            Распознано: <strong style={{ color: 'var(--color-success)' }}>{parsedPaste.rows.length}</strong>
-                            {parsedPaste.errors.length > 0 && (
-                                <> · ошибок: <strong style={{ color: 'var(--color-danger)' }}>{parsedPaste.errors.length}</strong></>
-                            )}
-                        </span>
-                        <button className="btn btn-secondary btn-sm" onClick={closePaste} disabled={pasteApplying}>
-                            Отмена
-                        </button>
-                        <button
-                            className="btn btn-primary btn-sm"
-                            onClick={applyPaste}
-                            disabled={pasteApplying || parsedPaste.rows.length === 0}
-                        >
-                            {pasteApplying ? 'Применяю…' : `Применить (${parsedPaste.rows.length})`}
-                        </button>
-                    </div>
-                </div>
-            )}
         </div>
     );
 }

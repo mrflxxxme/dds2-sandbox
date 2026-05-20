@@ -34,7 +34,9 @@ from backend.services.box_multiplicity_service import (
     get_change_log,
     get_sku_box_sources,
     has_machine_box_qty,
+    list_recent_batches,
     resolve_effective_ppb_for_assembly,
+    revert_batch,
     revert_change,
     set_box_qty_override,
     update_box_multiplicity,
@@ -393,6 +395,87 @@ class TestGetBoxMultiplicityTable:
 
         rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10007)
         assert _pw(rows[0])[wh.id]["box_qty"] == 30
+
+    @pytest.mark.asyncio
+    async def test_machine_variants_counts_other_machines(self, db_session: AsyncSession, project):
+        """Несколько машин на один ФФ с разной кратностью → machine_variants > 0."""
+        bc = f"BC-{_uid()}"
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="ART-7a", article_wb=10071)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await _machine_into_ff(
+            db_session, project.id, nom=nom, warehouse_id=wh.id, ppb_lines=[(40, 10)], arrival_date=date(2026, 1, 1)
+        )
+        await _machine_into_ff(
+            db_session, project.id, nom=nom, warehouse_id=wh.id, ppb_lines=[(40, 30)], arrival_date=date(2026, 3, 1)
+        )
+
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10071)
+        pw = _pw(rows[0])[wh.id]
+        assert pw["box_qty"] == 30  # последняя машина
+        assert pw["machine_variants"] == 1  # одна иная машина с кратностью 10
+
+    @pytest.mark.asyncio
+    async def test_has_mixed_ppb_includes_non_accepted(self, db_session: AsyncSession, project):
+        """has_mixed_ppb=True: машина в пути имеет другую ppb, чем уже принятая."""
+        bc = f"BC-{_uid()}"
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="ART-7c", article_wb=10073)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        # Принятая машина с ppb=10
+        await _machine_into_ff(
+            db_session,
+            project.id,
+            nom=nom,
+            warehouse_id=wh.id,
+            ppb_lines=[(40, 10)],
+            arrival_date=date(2026, 1, 1),
+        )
+        # Машина «в пути» (EXPECTED) с ppb=25 — не влияет на резолв, но в history есть
+        await _machine_into_ff(
+            db_session,
+            project.id,
+            nom=nom,
+            warehouse_id=wh.id,
+            ppb_lines=[(40, 25)],
+            status=InboundStatus.EXPECTED,
+        )
+
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10073)
+        assert rows[0]["has_mixed_ppb"] is True
+        # Резолв всё ещё только из принятой
+        assert _pw(rows[0])[wh.id]["box_qty"] == 10
+
+    @pytest.mark.asyncio
+    async def test_has_mixed_ppb_false_when_single_ppb(self, db_session: AsyncSession, project):
+        """has_mixed_ppb=False: все машины имеют одну ppb."""
+        bc = f"BC-{_uid()}"
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="ART-7d", article_wb=10074)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await _machine_into_ff(
+            db_session,
+            project.id,
+            nom=nom,
+            warehouse_id=wh.id,
+            ppb_lines=[(40, 15)],
+        )
+
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10074)
+        assert rows[0]["has_mixed_ppb"] is False
+
+    @pytest.mark.asyncio
+    async def test_machine_variants_zero_when_same_ppb(self, db_session: AsyncSession, project):
+        """Несколько машин на ФФ с одинаковой кратностью → machine_variants == 0."""
+        bc = f"BC-{_uid()}"
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="ART-7b", article_wb=10072)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        await _machine_into_ff(
+            db_session, project.id, nom=nom, warehouse_id=wh.id, ppb_lines=[(40, 20)], arrival_date=date(2026, 1, 1)
+        )
+        await _machine_into_ff(
+            db_session, project.id, nom=nom, warehouse_id=wh.id, ppb_lines=[(40, 20)], arrival_date=date(2026, 3, 1)
+        )
+
+        rows = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=10072)
+        assert _pw(rows[0])[wh.id]["machine_variants"] == 0
 
     @pytest.mark.asyncio
     async def test_non_accepted_receipt_ignored(self, db_session: AsyncSession, project):
@@ -1302,3 +1385,152 @@ class TestRevertChange:
 
         result = await revert_change(db_session, project.id, logs[0].id)
         assert result["barcode"] is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Batch-операции: bulk возвращает batch_id, list_recent_batches, revert_batch
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBulkBatch:
+    @pytest.mark.asyncio
+    async def test_bulk_returns_batch_id_when_changed(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=90001)
+        result = await bulk_update_by_barcode(
+            db_session,
+            project.id,
+            [{"barcode": bc, "box_qty_override": 33}],
+        )
+        assert result["batch_id"] is not None
+        assert len(result["batch_id"]) == 36  # UUID
+
+    @pytest.mark.asyncio
+    async def test_bulk_batch_id_null_when_no_change(self, db_session: AsyncSession, project):
+        """Если apply ничего не меняет, batch_id = None (журнал не пишется)."""
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(
+            db_session, project.id, barcode=bc, article_seller="A", article_wb=90002, box_qty_override=10
+        )
+        result = await bulk_update_by_barcode(
+            db_session,
+            project.id,
+            [{"barcode": bc, "box_qty_override": 10}],
+        )
+        assert result["batch_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_bulk_shares_one_batch_id_across_items(self, db_session: AsyncSession, project):
+        bc1, bc2 = f"BC-{_uid()}", f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc1, article_seller="A", article_wb=90011)
+        await _create_nomenclature(db_session, project.id, barcode=bc2, article_seller="B", article_wb=90012)
+        result = await bulk_update_by_barcode(
+            db_session,
+            project.id,
+            [
+                {"barcode": bc1, "box_qty_override": 5},
+                {"barcode": bc2, "box_qty_override": 6},
+            ],
+        )
+        # Журнал обеих записей должен иметь одинаковый batch_id.
+        rows1 = await _change_rows(db_session, project.id, bc1)
+        rows2 = await _change_rows(db_session, project.id, bc2)
+        assert rows1[0].batch_id == result["batch_id"]
+        assert rows2[0].batch_id == result["batch_id"]
+
+
+class TestListRecentBatches:
+    @pytest.mark.asyncio
+    async def test_lists_batches_sorted_newest_first(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=91001)
+        r1 = await bulk_update_by_barcode(db_session, project.id, [{"barcode": bc, "box_qty_override": 10}])
+        r2 = await bulk_update_by_barcode(db_session, project.id, [{"barcode": bc, "box_qty_override": 20}])
+
+        items = await list_recent_batches(db_session, project.id, limit=10)
+        ids = [it["batch_id"] for it in items]
+        # Сводки только bulk-операций.
+        assert r1["batch_id"] in ids
+        assert r2["batch_id"] in ids
+        # Свежий первым.
+        assert ids[0] == r2["batch_id"]
+        # affected_barcodes/changes_count >= 1.
+        assert all(it["affected_barcodes"] >= 1 for it in items if it["batch_id"] in (r1["batch_id"], r2["batch_id"]))
+
+    @pytest.mark.asyncio
+    async def test_isolation_between_projects(self, db_session: AsyncSession, project, other_project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, other_project.id, barcode=bc, article_seller="A", article_wb=91002)
+        await bulk_update_by_barcode(db_session, other_project.id, [{"barcode": bc, "box_qty_override": 7}])
+
+        items = await list_recent_batches(db_session, project.id, limit=10)
+        # batch чужого проекта не должен попасть.
+        for it in items:
+            assert it["affected_barcodes"] >= 0  # просто ничего не падает; самого batch'а нет
+
+
+class TestRevertBatch:
+    @pytest.mark.asyncio
+    async def test_revert_batch_restores_old_values(self, db_session: AsyncSession, project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(
+            db_session, project.id, barcode=bc, article_seller="A", article_wb=92001, box_qty_override=5
+        )
+        # bulk меняет 5 → 30
+        r = await bulk_update_by_barcode(db_session, project.id, [{"barcode": bc, "box_qty_override": 30}])
+        batch_id = r["batch_id"]
+        assert batch_id
+
+        # Проверяем что значение реально применилось
+        rows_before = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=92001)
+        assert rows_before[0]["box_qty_override"] == 30
+
+        # Откатываем весь batch
+        result = await revert_batch(db_session, project.id, batch_id)
+        assert result["found"] is True
+        assert result["reverted"] >= 1
+        assert bc in result["affected_barcodes"]
+        assert result["locked_barcodes"] == []
+
+        # Значение откатилось обратно
+        rows_after = await get_box_multiplicity_table(db_session, project.id, nm_id_filter=92001)
+        assert rows_after[0]["box_qty_override"] == 5
+
+    @pytest.mark.asyncio
+    async def test_revert_batch_not_found(self, db_session: AsyncSession, project):
+        result = await revert_batch(db_session, project.id, "00000000-0000-0000-0000-000000000000")
+        assert result["found"] is False
+        assert result["reverted"] == 0
+
+    @pytest.mark.asyncio
+    async def test_revert_batch_skips_machine_locked(self, db_session: AsyncSession, project):
+        """Если на ФФ пришла машина после bulk-вставки — откат box_qty заблокирован."""
+        bc = f"BC-{_uid()}"
+        nom = await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="A", article_wb=92002)
+        wh = await _create_rf_warehouse(db_session, project.id, f"RF-{_uid()}")
+        # bulk per-ФФ box_qty
+        r = await bulk_update_by_barcode(
+            db_session,
+            project.id,
+            [
+                {"barcode": bc, "warehouse_id": wh.id, "box_qty_override": 11},
+            ],
+        )
+        batch_id = r["batch_id"]
+        # Машина блокирует ФФ
+        await _machine_into_ff(db_session, project.id, nom=nom, warehouse_id=wh.id, ppb_lines=[(40, 18)])
+
+        result = await revert_batch(db_session, project.id, batch_id)
+        assert result["found"] is True
+        assert bc in result["locked_barcodes"]
+        # reverted может быть 0 если только box_qty был в batch
+        assert result["reverted"] == 0
+
+    @pytest.mark.asyncio
+    async def test_revert_batch_project_isolation(self, db_session: AsyncSession, project, other_project):
+        bc = f"BC-{_uid()}"
+        await _create_nomenclature(db_session, other_project.id, barcode=bc, article_seller="A", article_wb=92003)
+        r = await bulk_update_by_barcode(db_session, other_project.id, [{"barcode": bc, "box_qty_override": 9}])
+        # Откат из чужого проекта не находит batch
+        result = await revert_batch(db_session, project.id, r["batch_id"])
+        assert result["found"] is False

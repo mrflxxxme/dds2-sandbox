@@ -5,47 +5,66 @@ export interface ExcelExportColumn {
     exportValue?: (row: any) => any;
 }
 
+export interface ExcelExtraSheet {
+    sheetName: string;
+    data: Record<string, any>[];
+    columns?: ExcelExportColumn[];
+}
+
 function isPrimitive(v: unknown): boolean {
     if (v == null) return true;
     const t = typeof v;
     return t === 'string' || t === 'number' || t === 'boolean' || v instanceof Date;
 }
 
+// Заполняем worksheet по data + columns с учётом exportValue/getValue.
+function _fillSheet(worksheet: any, data: Record<string, any>[], columns?: ExcelExportColumn[]) {
+    if (data.length === 0) return;
+    if (columns && columns.length > 0) {
+        worksheet.columns = columns.map(c => ({ header: c.label, key: c.key }));
+        worksheet.addRows(
+            data.map(row => {
+                const out: Record<string, any> = {};
+                for (const c of columns) {
+                    let v: any;
+                    if (c.exportValue) v = c.exportValue(row);
+                    else if (c.getValue) v = c.getValue(row);
+                    else v = row[c.key];
+                    out[c.key] = isPrimitive(v) ? v : '';
+                }
+                return out;
+            }),
+        );
+    } else {
+        const headers = Object.keys(data[0]);
+        worksheet.columns = headers.map(key => ({ header: key, key }));
+        worksheet.addRows(data);
+    }
+}
+
 /**
  * Excel export utility — converts any data array to .xlsx download.
  * If `columns` is provided, uses column labels as headers and respects
  * `exportValue`/`getValue` accessors so nested/computed cells export correctly.
+ * `additionalSheets` — необязательные доп. листы (например, шаблон для вставки).
  */
 export function exportToExcel(
     data: Record<string, any>[],
     filename: string,
     columns?: ExcelExportColumn[],
+    additionalSheets?: ExcelExtraSheet[],
 ) {
     import('exceljs').then(ExcelJS => {
         const workbook = new ExcelJS.Workbook();
         const worksheet = workbook.addWorksheet('Data');
 
-        if (data.length === 0) return;
+        if (data.length === 0 && (!additionalSheets || additionalSheets.length === 0)) return;
 
-        if (columns && columns.length > 0) {
-            worksheet.columns = columns.map(c => ({ header: c.label, key: c.key }));
-            worksheet.addRows(
-                data.map(row => {
-                    const out: Record<string, any> = {};
-                    for (const c of columns) {
-                        let v: any;
-                        if (c.exportValue) v = c.exportValue(row);
-                        else if (c.getValue) v = c.getValue(row);
-                        else v = row[c.key];
-                        out[c.key] = isPrimitive(v) ? v : '';
-                    }
-                    return out;
-                }),
-            );
-        } else {
-            const headers = Object.keys(data[0]);
-            worksheet.columns = headers.map(key => ({ header: key, key }));
-            worksheet.addRows(data);
+        _fillSheet(worksheet, data, columns);
+
+        for (const extra of additionalSheets ?? []) {
+            const ws = workbook.addWorksheet(extra.sheetName);
+            _fillSheet(ws, extra.data, extra.columns);
         }
 
         workbook.xlsx.writeBuffer().then(buffer => {

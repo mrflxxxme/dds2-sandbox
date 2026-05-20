@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002, RUF003
 """
 Cost models: Nomenclature, DutyRule, CostOrder, CostOrderItem.
 """
@@ -89,13 +90,11 @@ class BoxQtyPerWarehouse(Base):
 
 
 class BoxQtyPerOrder(Base):
-    """Override кратности коробки для строки заказа на фабрику (factory_order_item).
+    """УСТАРЕЛО. Не используется ни одним сервисом/роутером.
 
-    Живёт ТОЛЬКО для box-multiplicity: правка не меняет сам
-    factory_order_items.pcs_per_box — домен supply-chain (объём, логистика)
-    не затрагивается. При резолюции «Из заказа» / effective_box_qty:
-      box_qty_per_order.box_qty       ← если задан
-      → factory_order_items.pcs_per_box (или mix_pcs_per_box)
+    Заказы фабрики больше не источник кратности — box-multiplicity резолвит
+    кратность per-ФФ из принятых машин (`BoxQtyPerWarehouse`). Таблица и модель
+    оставлены до отдельной миграции на удаление.
     """
 
     __tablename__ = "box_qty_per_order"
@@ -130,9 +129,15 @@ class BoxMultiplicityChangeLog(Base):
     new_value: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # change_source: manual | bulk | revert
     change_source: Mapped[str] = mapped_column(String(20), nullable=False, default="manual", server_default="manual")
+    # UUID одной bulk-операции (apply из буфера) — позволяет откатить всю
+    # вставку одним кликом. NULL для manual/revert или старых записей.
+    batch_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
-    __table_args__ = (Index("ix_box_mult_change_log_project_bc", "project_id", "barcode"),)
+    __table_args__ = (
+        Index("ix_box_mult_change_log_project_bc", "project_id", "barcode"),
+        Index("ix_box_mult_change_log_batch", "batch_id", postgresql_where="batch_id IS NOT NULL"),
+    )
 
 
 class DutyRule(Base, SoftDeleteMixin):

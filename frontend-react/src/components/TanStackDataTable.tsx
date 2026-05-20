@@ -12,7 +12,7 @@ import {
     type SortingState,
     type ColumnFiltersState,
 } from '@tanstack/react-table';
-import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
+import { formatNumber, formatDate, exportToExcel, type ExcelExtraSheet } from '@/lib/utils';
 import type { Column } from './DataTable';
 
 /* ------------------------------------------------------------------ */
@@ -27,6 +27,8 @@ interface TanStackDataTableProps {
     emptyText?: string;
     title?: string;
     exportName?: string;
+    /** Доп. листы в xlsx-выгрузке (например, шаблон для вставки). */
+    exportAdditionalSheets?: ExcelExtraSheet[];
     actions?: React.ReactNode;
     onRowClick?: (row: any, index: number) => void;
     selectedIndex?: number;
@@ -119,6 +121,7 @@ export default function TanStackDataTable({
     emptyText = 'Нет данных',
     title,
     exportName,
+    exportAdditionalSheets,
     actions,
     onRowClick,
     selectedIndex,
@@ -177,7 +180,10 @@ export default function TanStackDataTable({
                     )}
                     <div style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
                         {exportName && data.length > 0 && (
-                            <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, exportName, columns)}>
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => exportToExcel(data, exportName, columns, exportAdditionalSheets)}
+                            >
                                 📥 Excel
                             </button>
                         )}

@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002, RUF003
 """
 Router: /warehouse — warehouses CRUD, stock, receipts, shipments, transfers, adjustments.
 """
@@ -9,6 +10,8 @@ from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.box_multiplicity import (
+    BoxMultiplicityBatchListResponse,
+    BoxMultiplicityBatchRevertResponse,
     BoxMultiplicityBulkRequest,
     BoxMultiplicityBulkResponse,
     BoxMultiplicityChangesResponse,
@@ -895,10 +898,14 @@ async def bulk_box_multiplicity(
     """Bulk paste-update by barcode. Each item is partial: только переданные
     поля применяются (Pydantic `exclude_unset`-семантика)."""
     items_dicts = [it.model_dump(exclude_unset=True) for it in payload.items]
+    # Кэшируем project.id ДО commit-а в сервисе: после commit ORM-атрибуты
+    # помечаются expired и ленивая подгрузка ломается в async-контексте
+    # (MissingGreenlet).
+    project_id = project.id
 
     result = await box_multiplicity_service.bulk_update_by_barcode(
         db,
-        project.id,
+        project_id,
         items_dicts,
     )
 
@@ -906,7 +913,7 @@ async def bulk_box_multiplicity(
     if result["updated_nm_ids"]:
         all_rows = await box_multiplicity_service.get_box_multiplicity_table(
             db,
-            project.id,
+            project_id,
         )
         upd_set = result["updated_nm_ids"]
         updated_rows = [r for r in all_rows if r["nm_id"] in upd_set]
@@ -916,6 +923,7 @@ async def bulk_box_multiplicity(
         "not_found": result["not_found"],
         "matched_count": len(result["matched_barcodes"]),
         "locked": result["locked"],
+        "batch_id": result.get("batch_id"),
     }
 
 
@@ -964,7 +972,7 @@ async def patch_per_warehouse_box_multiplicity(
     if not ok:
         raise HTTPException(404, "barcode or warehouse not found in project")
 
-    # Вернём целую строку SKU (по barcode → nm_id) с обновлённым per_warehouse.  # noqa: RUF003
+    # Вернём целую строку SKU (по barcode → nm_id) с обновлённым per_warehouse.
     items = await box_multiplicity_service.get_box_multiplicity_table(db, project.id)
     row = next((r for r in items if r["barcode"] == barcode), None)
     if not row:
@@ -1029,3 +1037,42 @@ async def revert_box_multiplicity_change(
     if not row:
         raise HTTPException(404, "SKU not found after revert")
     return row
+
+
+@router.get(
+    "/box-multiplicity/changes/batches",
+    response_model=BoxMultiplicityBatchListResponse,
+)
+async def list_box_multiplicity_batches(
+    limit: int = 50,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Список последних bulk-операций проекта (для глобального вида истории)."""
+    items = await box_multiplicity_service.list_recent_batches(db, project.id, limit)
+    return {"items": items}
+
+
+@router.post(
+    "/box-multiplicity/changes/batch/{batch_id}/revert",
+    response_model=BoxMultiplicityBatchRevertResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def revert_box_multiplicity_batch(
+    batch_id: str,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Откатить всю bulk-операцию — все записи журнала с этим batch_id.
+
+    404 если batch не найден в проекте. Машинно-заблокированные ФФ для
+    box_qty/box_size пропускаются и возвращаются в `locked_barcodes`.
+    """
+    result = await box_multiplicity_service.revert_batch(db, project.id, batch_id)
+    if not result["found"]:
+        raise HTTPException(404, "Batch not found")
+    return {
+        "reverted": result["reverted"],
+        "locked_barcodes": result["locked_barcodes"],
+        "affected_barcodes": result["affected_barcodes"],
+    }

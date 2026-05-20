@@ -26,6 +26,7 @@ class BoxMultiplicityPerWarehouseRow(BaseModel):
     rf_stock: int = 0  # сток конкретно на этом ФФ (для UI)
     machine_order_no: str | None = None  # order_no машины-источника (source=machine)
     machine_received_at: str | None = None  # ISO date приёмки (source=machine)
+    machine_variants: int = 0  # иные машины этого ФФ с отличной кратностью (source=machine)
 
 
 class BoxMultiplicityRow(BaseModel):
@@ -39,6 +40,8 @@ class BoxMultiplicityRow(BaseModel):
     box_qty_override: int | None = None  # Nomenclature.box_qty_override (manual SKU-level)
     use_box_multiplicity: bool = True  # SKU-level флаг (default для ФФ без per-ФФ override)
     has_machine_data: bool = False  # есть хотя бы один ФФ с машинным резолвом
+    # True, если в истории всех машин (любой статус приёмки) у товара >1 различных ppb.
+    has_mixed_ppb: bool = False
     # ─── stock metrics for filters ────────────────────────────────────────
     rf_stock: int = 0  # total qty across active fulfillment warehouses
     in_assembly: int = 0  # reserved in PENDING/IN_PROGRESS/READY/VEHICLE_ASSIGNED
@@ -93,6 +96,9 @@ class BoxMultiplicityBulkResponse(BaseModel):
     not_found: list[str]  # barcodes that don't exist in this project
     matched_count: int  # how many barcodes matched (some may have had no diff)
     locked: list[str] = []  # barcodes/ФФ machine-locked — box_qty не применён
+    # UUID этой bulk-операции (если были изменения). NULL, если ничего не изменилось.
+    # Передаётся в /changes/batch/{batch_id}/revert для отката всей вставки.
+    batch_id: str | None = None
 
 
 class BoxMultiplicitySourceRow(BaseModel):
@@ -125,7 +131,27 @@ class BoxMultiplicityChangeRow(BaseModel):
     old_value: str | None = None  # None = было «не задано»
     new_value: str | None = None  # None = стало «не задано»
     change_source: str = "manual"  # manual | bulk | revert
+    batch_id: str | None = None  # UUID одной bulk-операции (null для manual/revert)
     created_at: str  # ISO datetime
+
+
+class BoxMultiplicityBatchSummary(BaseModel):
+    """Сводка одной массовой вставки (для глобального журнала)."""
+
+    batch_id: str
+    created_at: str
+    changes_count: int
+    affected_barcodes: int
+
+
+class BoxMultiplicityBatchListResponse(BaseModel):
+    items: list[BoxMultiplicityBatchSummary]
+
+
+class BoxMultiplicityBatchRevertResponse(BaseModel):
+    reverted: int  # сколько записей отменено
+    locked_barcodes: list[str] = []  # barcodes, где машина блокирует откат
+    affected_barcodes: list[str] = []  # уникальные barcodes, которые были изменены откатом
 
 
 class BoxMultiplicityChangesResponse(BaseModel):
