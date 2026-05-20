@@ -8,6 +8,7 @@ from sqlalchemy import delete, select, text
 
 from backend.models import WbStockSnapshot, WbWarehouseStock
 from backend.services.stock_analytics_service import compute_need
+from backend.services.warehouse_need_service import _bump_target_for_sku
 from backend.services.warehouse_stock_service import sync_warehouse_stocks
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -62,6 +63,44 @@ class TestComputeNeed:
     def test_need_days_30(self):
         """stock=10, avg=3/day, 30 days → 3*30-10 = 80."""
         assert compute_need(10, 3.0, 30) == 80
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tests: _bump_target_for_sku — целевой минимум при дораспределении
+# (SKU-кратность коробки > min_stock_per_main_warehouse)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBumpTargetForSku:
+    """SKU.box_qty_override (если use_box_multiplicity=True) переопределяет min_stock."""
+
+    def test_no_ppb_falls_back_to_min_stock(self):
+        """Без кратности — старая логика: минимум N штук."""
+        assert _bump_target_for_sku(None, 5) == 5
+
+    def test_ppb_overrides_min_stock(self):
+        """С кратностью K — целевой минимум = K (одна коробка), а не 5."""
+        assert _bump_target_for_sku(12, 5) == 12
+
+    def test_ppb_below_min_stock_still_wins(self):
+        """K=3, min=5 → шлём 3 (одна коробка), а не 5."""
+        assert _bump_target_for_sku(3, 5) == 3
+
+    def test_ppb_zero_treated_as_none(self):
+        """box_qty_override=0 — невалидная кратность, fallback на min_stock."""
+        assert _bump_target_for_sku(0, 5) == 5
+
+    def test_both_zero(self):
+        """Нет ни кратности, ни min_stock → 0 (bump-секция пропустит SKU)."""
+        assert _bump_target_for_sku(None, 0) == 0
+
+    def test_min_stock_off_but_ppb_set(self):
+        """min_stock=0 (выключен), но K=12 — bump до коробки всё равно работает."""
+        assert _bump_target_for_sku(12, 0) == 12
+
+    def test_negative_min_stock_clamped(self):
+        """Защита от отрицательного min_stock — clamp к 0."""
+        assert _bump_target_for_sku(None, -3) == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
