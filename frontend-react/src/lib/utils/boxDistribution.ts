@@ -56,26 +56,3 @@ export function distributeByBoxMultiple(
 
     return tgt;
 }
-
-/**
- * Распределение `qty` целыми коробками `ppb` ПРОПОРЦИОНАЛЬНО весам (`weight`),
- * а не абсолютной потребности. Используется для cold-start новинок, где «вес» —
- * это `share_pct` округа/склада из бенчмарка (своей истории продаж нет).
- *
- * Вес проецируется в эквивалентную потребность `qty × weight / Σweight`, после
- * чего применяется та же строгая box-логика {@link distributeByBoxMultiple}:
- * только целые коробки, минимум по одной самым «весомым» складам, хвост < короба
- * остаётся на ФФ. Без целой коробки (`qty < ppb`) — пустой объект.
- */
-export function distributeByBoxMultipleWeighted(
-    weights: ReadonlyArray<{ name: string; weight: number }>,
-    qty: number,
-    ppb: number,
-): Record<string, number> {
-    if (ppb <= 0 || qty <= 0) return {};
-    const positive = weights.filter(w => w.weight > 0);
-    const totalWeight = positive.reduce((s, w) => s + w.weight, 0);
-    if (totalWeight <= 0) return {};
-    const needs = positive.map(w => ({ name: w.name, need: (qty * w.weight) / totalWeight }));
-    return distributeByBoxMultiple(needs, qty, ppb);
-}

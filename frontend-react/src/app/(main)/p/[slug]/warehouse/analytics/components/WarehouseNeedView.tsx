@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, exportToExcel } from '@/lib/utils';
-import { distributeByBoxMultiple, distributeByBoxMultipleWeighted } from '@/lib/utils/boxDistribution';
+import { distributeByBoxMultiple } from '@/lib/utils/boxDistribution';
 import { DISTRICT_LABELS, DISTRICT_COLORS, DISTRICT_ORDER } from '@/lib/constants/localization';
 import type {
     AcceptanceCheckPerItem,
@@ -162,22 +162,6 @@ function recomputeColdStartAlloc(
     for (const [k, v] of Object.entries(raw)) {
         if (v > 0) alloc[k] = v;
     }
-    return { alloc, total: Object.values(alloc).reduce((s, v) => s + v, 0) };
-}
-
-// Cold-start с кратностью короба K: «как обычный поток» — qty раздаётся ЦЕЛЫМИ
-// коробками пропорционально share_pct, хвост < короба остаётся на ФФ. Строгая
-// кратность: qty < K → ничего (россыпью не уходит). Без K (ppb≤0) — fallback на
-// обычный pro-rata recomputeColdStartAlloc (min_pack pool).
-function recomputeColdStartAllocBoxed(
-    qty: number,
-    mainWarehouses: ColdStartMainWarehouse[],
-    minPack: number,
-    ppb: number | null,
-): { alloc: Record<string, number>; total: number } {
-    if (!ppb || ppb <= 0) return recomputeColdStartAlloc(qty, mainWarehouses, minPack);
-    const weights = mainWarehouses.map(w => ({ name: w.warehouse, weight: w.share_pct }));
-    const alloc = distributeByBoxMultipleWeighted(weights, qty, ppb);
     return { alloc, total: Object.values(alloc).reduce((s, v) => s + v, 0) };
 }
 
@@ -611,32 +595,76 @@ export function WarehouseNeedView() {
         return s;
     }, [coldStartData]);
 
-    /** Единый источник истины распределения новинок (cold-start) по WB-складам с
-     *  учётом кратности короба K. Map<nm_id, {alloc: wh→qty, total}>. Кормит и
-     *  матрицу (getBaseArticleWbNeed), и вкладку «Новинки», и итоги, и сборку.
-     *    • K задана (resolveSkuLevelPpb, use=on) → строго целые коробки
-     *      (recomputeColdStartAllocBoxed); qty<K → пусто, хвост на ФФ.
-     *    • K нет, но есть ручной override qty → pro-rata от override.
-     *    • K нет, без override → backend allocations как есть (с per-склад
-     *      вычетом активных сборок — его при пересчёте от total потеряли бы). */
+    /** Единый источник истины распределения новинок (cold-start) по WB-складам.
+     *  Map<nm_id, {alloc: wh→qty, total}>. Кормит матрицу (getBaseArticleWbNeed),
+     *  вкладку «Новинки», итоги и сборку.
+     *
+     *  Распределение (speed-anchor + вычет WB-стока) считает BACKEND — здесь его
+     *  только БОКСИМ под кратность K и масштабируем под ручной override; своего
+     *  share-перераспределения нет, иначе потеряли бы speed/WB-логику backend.
+     *    • K задана → целые коробки K по весам backend-аллокаций; qty<K → пусто.
+     *    • K нет → backend allocations как есть (override — пропорционально).
+     *    • backend выделил 0, но есть override → fallback по benchmark-долям. */
     const newcomerBoxedAlloc = useMemo(() => {
         const m = new Map<number, { alloc: Record<string, number>; total: number }>();
+        const sumVals = (a: Record<string, number>) => Object.values(a).reduce((s, v) => s + v, 0);
+        // Склад закрыт по приёмке (⛔) → туда нельзя отгружать. Backend cold-start
+        // про приёмку не знает и может выделить на закрытый склад; здесь (приёмка
+        // известна) такие склады исключаем — их доля становится свободным остатком.
+        const isClosed = (nmId: number, wh: string): boolean => {
+            const acc = acceptanceMap.get(nmId)?.availability?.[wh];
+            return !!acc && !acc.can_box && !acc.can_monopallet && !acc.can_supersafe;
+        };
         for (const row of coldStartData?.rows ?? []) {
+            // Ручная правка ячеек (режим «Редактировать») ПОЛНОСТЬЮ заменяет авто-
+            // распределение этого SKU — как в обычной матрице (edits Map).
+            const ed = edits.get(row.nm_id);
+            if (ed && ed.size > 0) {
+                const alloc: Record<string, number> = {};
+                for (const [wh, q] of ed) if (q > 0 && !isClosed(row.nm_id, wh)) alloc[wh] = q;
+                m.set(row.nm_id, { alloc, total: sumVals(alloc) });
+                continue;
+            }
             const overrideQty = coldStartQtyOverrides[row.nm_id];
             const useOverride = overrideQty !== undefined && overrideQty !== row.total_allocated;
             const { ppb, use } = resolveSkuLevelPpb(row.nm_id);
             const hasK = !!(ppb && ppb > 0 && use);
-            if (hasK) {
-                const baseQty = useOverride ? overrideQty : row.total_allocated;
-                m.set(row.nm_id, recomputeColdStartAllocBoxed(baseQty, filteredMainWarehouses, coldStartMinPack, ppb));
-            } else if (useOverride) {
-                m.set(row.nm_id, recomputeColdStartAlloc(overrideQty, filteredMainWarehouses, coldStartMinPack));
-            } else {
-                m.set(row.nm_id, { alloc: row.allocations, total: row.total_allocated });
+            const boxPpb = hasK && ppb ? ppb : 1;
+            const baseTotal = row.total_allocated || 0;
+            const targetTotal = useOverride ? overrideQty : baseTotal;
+
+            // Без кратности и без override — backend-аллокации без закрытых складов.
+            if (!useOverride && !hasK) {
+                const alloc: Record<string, number> = {};
+                for (const [wh, q] of Object.entries(row.allocations)) {
+                    if (q > 0 && !isClosed(row.nm_id, wh)) alloc[wh] = q;
+                }
+                m.set(row.nm_id, { alloc, total: sumVals(alloc) });
+                continue;
             }
+            let needs: { name: string; need: number }[];
+            if (baseTotal > 0 && Object.keys(row.allocations).length > 0) {
+                const scale = useOverride ? overrideQty / baseTotal : 1;
+                needs = Object.entries(row.allocations)
+                    .filter(([wh]) => !isClosed(row.nm_id, wh))
+                    .map(([wh, q]) => ({ name: wh, need: q * scale }));
+            } else if (targetTotal > 0) {
+                // backend выделил 0 (всё перетарено / нет якорей), но есть ручной
+                // override — раздаём по benchmark-долям speed-anchor складов.
+                const fb = recomputeColdStartAlloc(targetTotal, filteredMainWarehouses, coldStartMinPack);
+                needs = Object.entries(fb.alloc)
+                    .filter(([wh]) => !isClosed(row.nm_id, wh))
+                    .map(([wh, q]) => ({ name: wh, need: q }));
+            } else {
+                m.set(row.nm_id, { alloc: {}, total: 0 });
+                continue;
+            }
+            // closed-доля не уезжает (нельзя) → остаётся свободным остатком на ФФ.
+            const alloc = distributeByBoxMultiple(needs, targetTotal, boxPpb);
+            m.set(row.nm_id, { alloc, total: sumVals(alloc) });
         }
         return m;
-    }, [coldStartData, coldStartQtyOverrides, filteredMainWarehouses, coldStartMinPack, resolveSkuLevelPpb]);
+    }, [coldStartData, coldStartQtyOverrides, filteredMainWarehouses, coldStartMinPack, resolveSkuLevelPpb, edits, acceptanceMap]);
 
     /** Базовый per-cell need из backend Hamilton-cap / cold-start allocations.
      *  НЕ включает client-side bump (см. bumpedCells ниже).
@@ -1116,6 +1144,26 @@ export function WarehouseNeedView() {
         });
     }, [visibleWbWarehouses, getBaseArticleWbNeed, bumpedCells, acceptanceMap]);
 
+    /** Ручная правка ячейки новинки (nm_id, wb-склад). Аналог setCellEdit, но для
+     *  cold-start: новинок часто нет в data.articles, сеем из newcomerBoxedAlloc. */
+    const setColdStartCellEdit = useCallback((nmId: number, whName: string, qty: number) => {
+        setEdits(prev => {
+            const next = new Map(prev);
+            let m = next.get(nmId);
+            if (!m) {
+                m = new Map();
+                for (const [wh, q] of Object.entries(newcomerBoxedAlloc.get(nmId)?.alloc ?? {})) {
+                    if (q > 0) m.set(wh, q);
+                }
+            } else {
+                m = new Map(m);
+            }
+            if (qty > 0) m.set(whName, qty); else m.delete(whName);
+            next.set(nmId, m);
+            return next;
+        });
+    }, [newcomerBoxedAlloc]);
+
     /** Валидность ручных правок по SKU: '' = ок, иначе текст ошибки.
      *  Правило: Σ ≤ свободный остаток ФФ И каждая ячейка кратна K. */
     const editValidity = useMemo(() => {
@@ -1124,10 +1172,15 @@ export function WarehouseNeedView() {
         // По data.articles, а не filteredArticles: иначе правка отмеченного SKU,
         // выпавшего из текущего фильтра, не проверится и проскочит в сборку.
         const byNm = new Map((data?.articles ?? []).map(a => [a.nm_id, a]));
+        const csByNm = new Map((coldStartData?.rows ?? []).map(r => [r.nm_id, r]));
         for (const [nmId, m] of edits) {
             const a = byNm.get(nmId);
-            if (!a) continue;
-            const free = freeRfStock(a);
+            const cs = csByNm.get(nmId);
+            // Свободный остаток ФФ: обычный SKU — freeRfStock; новинка — rf − в сборке.
+            let free: number;
+            if (a) free = freeRfStock(a);
+            else if (cs) free = Math.max(0, (cs.rf_qty || 0) - (cs.in_assembly_total || 0));
+            else continue;
             const k = editStep(nmId);
             let sum = 0;
             let err = '';
@@ -1139,7 +1192,7 @@ export function WarehouseNeedView() {
             if (err) out.set(nmId, err);
         }
         return out;
-    }, [edits, data, freeRfStock, editStep]);
+    }, [edits, data, coldStartData, freeRfStock, editStep]);
 
     /** Есть ли невалидные правки среди ОТМЕЧЕННЫХ SKU — блокирует «Создать сборку». */
     const hasInvalidCheckedEdits = useMemo(() => {
@@ -1209,6 +1262,10 @@ export function WarehouseNeedView() {
             else if (col === 'wb_qty') { va = a.wb_qty; vb = b.wb_qty; }
             else if (col === 'in_assembly_total') { va = a.in_assembly_total; vb = b.in_assembly_total; }
             else if (col === 'total_allocated') { va = a.total_allocated; vb = b.total_allocated; }
+            else if (col === 'free_remainder') {
+                va = Math.max(0, a.rf_qty - a.in_assembly_total - a.total_allocated);
+                vb = Math.max(0, b.rf_qty - b.in_assembly_total - b.total_allocated);
+            }
             else if (col.startsWith('cs_rf_')) {
                 const id = parseInt(col.replace('cs_rf_', ''), 10);
                 va = a.rf_by_warehouse?.[id] || 0;
@@ -1231,6 +1288,7 @@ export function WarehouseNeedView() {
             wb_qty: 0,
             in_assembly_total: 0,
             total_allocated: 0,  // Σ box-кратно отгружаемого («Распределить» = «Итого» = per-wh)
+            free_remainder: 0,   // Σ свободного ФФ-остатка (что ещё можно распределить)
             rf: {} as Record<number, number>,
             wb: {} as Record<string, number>,
         };
@@ -1242,7 +1300,9 @@ export function WarehouseNeedView() {
             t.in_assembly_total += row.in_assembly_total || 0;
             // «Распределить»/«Итого»/wb — всё из box-кратной карты (хвост < короба на ФФ).
             const boxed = newcomerBoxedAlloc.get(row.nm_id);
-            t.total_allocated += boxed?.total ?? (row.total_allocated || 0);
+            const boxedTotal = boxed?.total ?? (row.total_allocated || 0);
+            t.total_allocated += boxedTotal;
+            t.free_remainder += Math.max(0, (row.rf_qty || 0) - (row.in_assembly_total || 0) - boxedTotal);
             for (const [whId, qty] of Object.entries(row.rf_by_warehouse || {})) {
                 const id = Number(whId);
                 t.rf[id] = (t.rf[id] || 0) + (qty || 0);
@@ -2370,9 +2430,9 @@ export function WarehouseNeedView() {
                             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                                 <thead>
                                     {/* Group-header: цветные плашки округов над WB-колонками (как в основной таблице).
-                                        colSpan = 9 + N: checkbox + Артикул + Реализ + Маржа + Хватит + % лок + N×RF + WB + В сборке + Распределить */}
+                                        colSpan = 10 + N: checkbox + Артикул + Реализ + Маржа + Хватит + % лок + N×RF + WB + В сборке + Распределить + Свободно */}
                                     <tr>
-                                        <th colSpan={9 + (coldStartData.rf_warehouses?.length ?? 0)} style={{ background: '#f5f5f7' }}>&nbsp;</th>
+                                        <th colSpan={10 + (coldStartData.rf_warehouses?.length ?? 0)} style={{ background: '#f5f5f7' }}>&nbsp;</th>
                                         {(() => {
                                             const groups: Array<{ key: string; count: number }> = [];
                                             for (const w of filteredMainWarehouses) {
@@ -2436,6 +2496,11 @@ export function WarehouseNeedView() {
                                                 ✏️ редактируй
                                             </div>
                                         </th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap', cursor: 'pointer' }}
+                                            onClick={() => handleColdStartSort('free_remainder')}
+                                            title="Свободный ФФ-остаток, который ещё можно распределить = остаток ФФ − в сборке − распределено">
+                                            Свободно{csSortArrow('free_remainder')}
+                                        </th>
                                         {filteredMainWarehouses.map(w => (
                                             <th key={w.warehouse} style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap', cursor: 'pointer' }}
                                                 onClick={() => handleColdStartSort(`cs_wb_${w.warehouse}`)}>
@@ -2470,6 +2535,9 @@ export function WarehouseNeedView() {
                                         </td>
                                         <td style={{ padding: '8px 10px', textAlign: 'right' }}>
                                             {coldStartTotals.total_allocated > 0 ? formatNumber(coldStartTotals.total_allocated, 0) : '—'}
+                                        </td>
+                                        <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--color-text-muted)' }}>
+                                            {coldStartTotals.free_remainder > 0 ? formatNumber(coldStartTotals.free_remainder, 0) : '—'}
                                         </td>
                                         {filteredMainWarehouses.map(w => (
                                             <td key={`tot_cs_wb_${w.warehouse}`} style={{ padding: '8px 10px', textAlign: 'right' }}>
@@ -2621,10 +2689,28 @@ export function WarehouseNeedView() {
                                                     }}
                                                 />
                                             </td>
+                                            {(() => {
+                                                // Свободный ФФ-остаток = остаток ФФ − в сборке − распределено (boxed).
+                                                const free = Math.max(0, (row.rf_qty || 0) - (row.in_assembly_total || 0) - effective.total);
+                                                return (
+                                                    <td style={{ padding: '8px 10px', textAlign: 'right', color: free > 0 ? 'var(--color-text)' : 'var(--color-text-muted)' }}
+                                                        title="Свободный ФФ-остаток, который ещё можно распределить">
+                                                        {free > 0 ? formatNumber(free, 0) : '—'}
+                                                    </td>
+                                                );
+                                            })()}
                                             {filteredMainWarehouses.map(w => {
                                                 const v = effective.alloc[w.warehouse] || 0;
                                                 const asmQty = row.asm_by_warehouse?.[w.warehouse] ?? 0;
                                                 const m = getCellAcceptanceMarks(row.nm_id, w.warehouse);
+                                                // Режим «Редактировать»: ячейки отмеченных новинок (не закрытых
+                                                // по приёмке) вводимы; шаг = K, потолок = свободный ФФ-остаток.
+                                                const isEditing = editMode && !m.closed;
+                                                const editK = editStep(row.nm_id);
+                                                const stepUp = editK > 0 ? editK : 1;
+                                                const cellInvalid = editValidity.has(row.nm_id);
+                                                const freeFf = Math.max(0, (row.rf_qty || 0) - (row.in_assembly_total || 0));
+                                                const canAddStep = effective.total + stepUp <= freeFf;
                                                 const onlyMono = m.checked && !m.box && m.mono;
                                                 const onlySuper = m.checked && !m.box && !m.mono && m.super;
                                                 const cellBg = m.closed
@@ -2680,10 +2766,28 @@ export function WarehouseNeedView() {
                                                         textDecoration: m.closed && v > 0 ? 'line-through' : undefined,
                                                     }}>
                                                         <div>
-                                                            {v > 0 ? formatNumber(v, 0) : '—'}
+                                                            {isEditing ? (
+                                                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }} onClick={(e) => e.stopPropagation()}>
+                                                                    <button type="button" disabled={v <= 0}
+                                                                        onClick={() => setColdStartCellEdit(row.nm_id, w.warehouse, Math.max(0, v - stepUp))}
+                                                                        title={`−${stepUp}`}
+                                                                        style={{ width: 22, height: 22, padding: 0, fontSize: 15, fontWeight: 700, lineHeight: 1, borderRadius: 6, border: '1px solid var(--color-border)', background: 'var(--color-bg-card)', cursor: v > 0 ? 'pointer' : 'default', opacity: v > 0 ? 1 : 0.3 }}
+                                                                    >{'−'}</button>
+                                                                    <input type="number" value={v || ''} min={0} step={stepUp}
+                                                                        title={cellInvalid ? (editValidity.get(row.nm_id) || '') : (editK > 0 ? `кратно ${editK}` : '')}
+                                                                        onChange={(e) => setColdStartCellEdit(row.nm_id, w.warehouse, Math.max(0, Math.round(Number(e.target.value) || 0)))}
+                                                                        style={{ width: 46, textAlign: 'center', fontSize: 13, padding: '3px 4px', borderRadius: 6, background: 'var(--color-bg-card)', color: 'var(--color-text)', border: `1px solid ${cellInvalid ? 'var(--color-danger)' : 'var(--color-border)'}` }}
+                                                                    />
+                                                                    <button type="button" disabled={!canAddStep}
+                                                                        onClick={() => setColdStartCellEdit(row.nm_id, w.warehouse, v + stepUp)}
+                                                                        title={!canAddStep ? `не хватает свободного остатка на +${stepUp}` : `+${stepUp}`}
+                                                                        style={{ width: 22, height: 22, padding: 0, fontSize: 15, fontWeight: 700, lineHeight: 1, borderRadius: 6, border: '1px solid var(--color-border)', background: 'var(--color-bg-card)', cursor: canAddStep ? 'pointer' : 'default', opacity: canAddStep ? 1 : 0.3 }}
+                                                                    >+</button>
+                                                                </span>
+                                                            ) : (v > 0 ? formatNumber(v, 0) : '—')}
                                                             {/* Бейдж приёмки: при v>0 — справа от qty; при v=0 + acceptance проверен и
                                                                 склад доступен — рядом с прочерком (видно куда ещё МОЖНО, даже без потребности). */}
-                                                            {badge && (v > 0 || (m.checked && !m.closed)) && (
+                                                            {!isEditing && badge && (v > 0 || (m.checked && !m.closed)) && (
                                                                 <span style={{ marginLeft: 4, fontSize: 10, opacity: v > 0 ? 1 : 0.55 }}>{badge}</span>
                                                             )}
                                                         </div>
@@ -3186,7 +3290,7 @@ export function WarehouseNeedView() {
                                             const onWayAtWh = asmAtWh + transitAtWh;
                                             // Режим редактирования: ячейки отмеченных SKU (не закрытых по
                                             // приёмке) вводимы; шаг = K, потолок = свободный остаток ФФ.
-                                            const isEditing = editMode && !m.closed && checkedIds.has(a.nm_id);
+                                            const isEditing = editMode && !m.closed;
                                             const editK = editStep(a.nm_id);
                                             const stepUp = editK > 0 ? editK : 1;
                                             const skuOv = edits.get(a.nm_id);
@@ -3215,17 +3319,17 @@ export function WarehouseNeedView() {
                                                             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }} onClick={(e) => e.stopPropagation()}>
                                                                 <button type="button" disabled={rawNeed <= 0}
                                                                     onClick={() => setCellEdit(a, wh.name, Math.max(0, rawNeed - stepUp))}
-                                                                    style={{ width: 15, height: 17, padding: 0, fontSize: 12, lineHeight: 1, borderRadius: 4, border: '1px solid var(--color-border)', background: 'transparent', cursor: rawNeed > 0 ? 'pointer' : 'default', opacity: rawNeed > 0 ? 1 : 0.3 }}
+                                                                    style={{ width: 22, height: 22, padding: 0, fontSize: 15, lineHeight: 1, borderRadius: 6, border: '1px solid var(--color-border)', background: 'transparent', cursor: rawNeed > 0 ? 'pointer' : 'default', opacity: rawNeed > 0 ? 1 : 0.3 }}
                                                                 >{'\u2212'}</button>
                                                                 <input type="number" value={rawNeed || ''} min={0} step={stepUp}
                                                                     title={cellInvalid ? (editValidity.get(a.nm_id) || '') : (editK > 0 ? `\u043a\u0440\u0430\u0442\u043d\u043e ${editK}` : '')}
                                                                     onChange={(e) => setCellEdit(a, wh.name, Math.max(0, Math.round(Number(e.target.value) || 0)))}
-                                                                    style={{ width: 42, textAlign: 'center', fontSize: 12, padding: '1px 2px', borderRadius: 4, background: 'var(--color-bg-card)', color: 'var(--color-text)', border: `1px solid ${cellInvalid ? 'var(--color-danger)' : 'var(--color-border)'}` }}
+                                                                    style={{ width: 46, textAlign: 'center', fontSize: 13, padding: '3px 4px', borderRadius: 6, background: 'var(--color-bg-card)', color: 'var(--color-text)', border: `1px solid ${cellInvalid ? 'var(--color-danger)' : 'var(--color-border)'}` }}
                                                                 />
                                                                 <button type="button" disabled={!canAddStep}
                                                                     onClick={() => setCellEdit(a, wh.name, rawNeed + stepUp)}
                                                                     title={!canAddStep ? `\u043d\u0435 \u0445\u0432\u0430\u0442\u0430\u0435\u0442 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e\u0433\u043e \u043e\u0441\u0442\u0430\u0442\u043a\u0430 \u043d\u0430 +${stepUp}` : `+${stepUp}`}
-                                                                    style={{ width: 15, height: 17, padding: 0, fontSize: 12, lineHeight: 1, borderRadius: 4, border: '1px solid var(--color-border)', background: 'transparent', cursor: canAddStep ? 'pointer' : 'default', opacity: canAddStep ? 1 : 0.3 }}
+                                                                    style={{ width: 22, height: 22, padding: 0, fontSize: 15, lineHeight: 1, borderRadius: 6, border: '1px solid var(--color-border)', background: 'transparent', cursor: canAddStep ? 'pointer' : 'default', opacity: canAddStep ? 1 : 0.3 }}
                                                                 >+</button>
                                                             </span>
                                                         ) : (need > 0 && !m.closed ? formatNumber(need, 0) : '\u2014')}

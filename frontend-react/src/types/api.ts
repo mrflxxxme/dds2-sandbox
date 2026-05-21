@@ -2824,6 +2824,7 @@ export interface ColdStartTableRow {
   rf_qty: number;
   rf_by_warehouse: Record<number, number>;
   wb_qty: number;
+  wb_by_warehouse: Record<string, number>;
   in_assembly_total: number;
   asm_by_warehouse: Record<string, number>;
   sales_14d: number;

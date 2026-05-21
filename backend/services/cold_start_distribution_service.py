@@ -46,6 +46,7 @@ from backend.services.warehouse_district import (
     okrug_to_district,
 )
 from backend.services.warehouse_geo_data import ACCEPTANCE_TO_STOCK_NAME
+from backend.services.warehouse_speed import get_anchors_for_okrug
 
 if TYPE_CHECKING:
     pass
@@ -621,6 +622,13 @@ async def fetch_cold_start_segment(db: AsyncSession, project_id: int) -> list[di
                  0
                ) AS wb_qty,
                COALESCE(
+                 (SELECT jsonb_object_agg(wws.warehouse_name, wws.quantity)
+                  FROM wb_warehouse_stocks wws
+                  WHERE wws.nm_id = n.article_wb AND wws.project_id = :project_id
+                    AND wws.quantity > 0),
+                 '{}'::jsonb
+               ) AS wb_by_wh,
+               COALESCE(
                  (SELECT SUM(ari.quantity)
                   FROM assembly_request_items ari
                   JOIN assembly_requests ar ON ar.id = ari.assembly_request_id
@@ -670,6 +678,13 @@ async def fetch_cold_start_segment(db: AsyncSession, project_id: int) -> list[di
         rf_by_wh_raw = r["rf_by_wh"] or {}
         # jsonb приходит как dict[str,int]; на всякий случай приводим типы.
         rf_by_warehouse: dict[int, int] = {int(k): int(v) for k, v in rf_by_wh_raw.items()}
+        # WB-сток per-склад: канонизируем имена в то же пространство, что и
+        # anchor-склады распределения (иначе вычет «уже на WB» не сматчится).
+        wb_by_wh_raw = r["wb_by_wh"] or {}
+        wb_by_warehouse: dict[str, int] = {}
+        for wh_name, q in wb_by_wh_raw.items():
+            canon = _canonicalize_asm_warehouse(str(wh_name))
+            wb_by_warehouse[canon] = wb_by_warehouse.get(canon, 0) + int(q)
         out.append(
             {
                 "internal_id": int(r["internal_id"]),
@@ -681,6 +696,7 @@ async def fetch_cold_start_segment(db: AsyncSession, project_id: int) -> list[di
                 "rf_qty": rf,
                 "rf_by_warehouse": rf_by_warehouse,
                 "wb_qty": wb,
+                "wb_by_warehouse": wb_by_warehouse,
                 "asm_qty": asm,
                 "sales_14d": sales,
                 "revenue_30d": float(r["revenue_30d"] or 0),
@@ -735,6 +751,19 @@ async def compute_cold_start_table(
     else:
         wh_per_district = {d: [(wh, 1)] for d, wh in _DEFAULT_MAIN_WAREHOUSES.items() if wh not in excluded}
 
+    # Принцип /warehouse/speed: кандидаты per-ФО — speed-anchor склады (быстрые
+    # для своего ФО из speed-карты POSTAVLENO), вес = cities_count. Товар уходит
+    # на склад, с которого WB замкнёт первый (быстрый) приоритет города, а не на
+    # склад с наибольшим sales-трафиком. Имена канонизируем в stock-пространство
+    # (чтобы совпали с wb_by_warehouse при вычете). ФО без anchor — fallback на трафик.
+    for d in DISTRICT_ORDER:
+        if d in {"abroad", "unknown"}:
+            continue
+        anchors = [(_canonicalize_asm_warehouse(wh), cnt) for wh, cnt in get_anchors_for_okrug(d)]
+        speed_whs = [(wh, cnt) for wh, cnt in anchors if wh not in excluded and cnt > 0][:3]
+        if speed_whs:
+            wh_per_district[d] = speed_whs
+
     # main_warehouses meta — все склады каждого ФО (top-3), РФ-округа (abroad/unknown скрыты)
     # share_pct = доля округа × доля склада в трафике округа
     main_wh_meta = []
@@ -782,6 +811,7 @@ async def compute_cold_start_table(
                     rf_qty=sku["rf_qty"],
                     rf_by_warehouse=sku.get("rf_by_warehouse", {}),
                     wb_qty=sku["wb_qty"],
+                    wb_by_warehouse=sku.get("wb_by_warehouse", {}),
                     in_assembly_total=sku["asm_qty"],
                     asm_by_warehouse=active_asm,
                     sales_14d=sku["sales_14d"],
@@ -793,11 +823,38 @@ async def compute_cold_start_table(
             )
             continue
 
-        allocation = distribute_multi(total_qty, bench_share, min_pack, wh_per_district)
+        # Принцип speed + учёт уже имеющегося на WB:
+        #   network = свободный ФФ + (WB-сток + сборки) на target-складах ФО,
+        #   target[wh] = benchmark-доля network (speed-взвешенно по anchor),
+        #   ship[wh]   = max(0, target − WB[wh] − asm[wh]).
+        # Перетаренные склады → 0 (доля остаётся на ФФ), недотаренные —
+        # допоставляются до benchmark. asm учитывается один раз (был вычтен из
+        # total_qty и добавлен в network → сокращается).
+        wb_by_wh: dict[str, int] = sku.get("wb_by_warehouse", {})
+        target_whs = {wh for whs in wh_per_district.values() for wh, _ in whs}
+        existing_at_targets = sum(wb_by_wh.get(wh, 0) + active_asm.get(wh, 0) for wh in target_whs)
+        network_total = total_qty + existing_at_targets
+        targets = distribute_multi(network_total, bench_share, min_pack, wh_per_district)
         final_alloc: dict[str, int] = {}
-        for wh, qty in allocation.items():
-            asm = active_asm.get(wh, 0)
-            final_alloc[wh] = max(0, qty - asm)
+        for wh, target in targets.items():
+            ship = target - wb_by_wh.get(wh, 0) - active_asm.get(wh, 0)
+            if ship > 0:
+                final_alloc[wh] = ship
+
+        # Σship может превысить свободный ФФ: min_pack-bump в distribute_multi
+        # раздувает отдельные target, а перетаренные склады дают ship=0 (их «минус»
+        # не компенсирует). Урезаем до total_qty (пропорционально + largest-remainder).
+        ship_total = sum(final_alloc.values())
+        if ship_total > total_qty:
+            scale = total_qty / ship_total
+            trimmed = {wh: int(q * scale) for wh, q in final_alloc.items()}
+            leftover = total_qty - sum(trimmed.values())
+            for wh in sorted(trimmed, key=lambda w: -final_alloc[w]):
+                if leftover <= 0:
+                    break
+                trimmed[wh] += 1
+                leftover -= 1
+            final_alloc = {wh: q for wh, q in trimmed.items() if q > 0}
 
         rows.append(
             ColdStartTableRow(

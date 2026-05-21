@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { distributeByBoxMultiple, distributeByBoxMultipleWeighted } from '@/lib/utils/boxDistribution';
+import { distributeByBoxMultiple } from '@/lib/utils/boxDistribution';
 
 describe('distributeByBoxMultiple', () => {
     it('returns empty object when ppb<=0', () => {
@@ -135,68 +135,5 @@ describe('distributeByBoxMultiple', () => {
         );
         expect(result).toEqual({ A: 10, B: 10 });
         expect(result.A + result.B).toBe(20);
-    });
-});
-
-describe('distributeByBoxMultipleWeighted', () => {
-    it('returns empty object when ppb<=0 or qty<=0', () => {
-        expect(distributeByBoxMultipleWeighted([{ name: 'A', weight: 60 }], 100, 0)).toEqual({});
-        expect(distributeByBoxMultipleWeighted([{ name: 'A', weight: 60 }], 0, 10)).toEqual({});
-    });
-
-    it('returns empty object when no positive weight', () => {
-        expect(distributeByBoxMultipleWeighted([{ name: 'A', weight: 0 }], 100, 10)).toEqual({});
-        expect(distributeByBoxMultipleWeighted([], 100, 10)).toEqual({});
-    });
-
-    it('returns empty when qty < one box (строгая кратность — хвост на ФФ)', () => {
-        // 8 шт, ppb=10 — целой коробки не набрать → ничего не распределяем.
-        expect(distributeByBoxMultipleWeighted(
-            [{ name: 'A', weight: 60 }, { name: 'B', weight: 40 }],
-            8, 10,
-        )).toEqual({});
-    });
-
-    it('splits whole boxes proportionally to weight', () => {
-        // qty=20, ppb=10. needs A=12, B=8. Pass1: каждому по коробке.
-        const result = distributeByBoxMultipleWeighted(
-            [{ name: 'A', weight: 60 }, { name: 'B', weight: 40 }],
-            20, 10,
-        );
-        expect(result).toEqual({ A: 10, B: 10 });
-    });
-
-    it('drops the sub-box tail (qty=25, ppb=10)', () => {
-        // budget=⌊25/10⌋×10=20; хвост 5 шт остаётся на ФФ.
-        const result = distributeByBoxMultipleWeighted(
-            [{ name: 'A', weight: 60 }, { name: 'B', weight: 40 }],
-            25, 10,
-        );
-        expect(result.A + result.B).toBe(20);
-    });
-
-    it('gives extra boxes to the heaviest weight (skewed shares)', () => {
-        // qty=30, ppb=10, веса 90/10. needs A=27, B=3. budget=30=3 box.
-        // Pass1: A=10, B=10. Pass2: остаток 10, unmet A=17≥10 → A+=10.
-        const result = distributeByBoxMultipleWeighted(
-            [{ name: 'A', weight: 90 }, { name: 'B', weight: 10 }],
-            30, 10,
-        );
-        expect(result).toEqual({ A: 20, B: 10 });
-    });
-
-    it('single warehouse takes all whole boxes', () => {
-        const result = distributeByBoxMultipleWeighted([{ name: 'A', weight: 100 }], 30, 10);
-        expect(result).toEqual({ A: 30 });
-    });
-
-    it('normalizes arbitrary weight scale (percent vs fraction equivalent)', () => {
-        const asPct = distributeByBoxMultipleWeighted(
-            [{ name: 'A', weight: 75 }, { name: 'B', weight: 25 }], 40, 10,
-        );
-        const asFraction = distributeByBoxMultipleWeighted(
-            [{ name: 'A', weight: 0.75 }, { name: 'B', weight: 0.25 }], 40, 10,
-        );
-        expect(asPct).toEqual(asFraction);
     });
 });
