@@ -19,6 +19,8 @@ from backend.schemas.assembly_draft import (
     AssemblyDraftCommitResponse,
     AssemblyDraftCreate,
     AssemblyDraftRead,
+    AssemblyDraftUnitEdit,
+    AssemblyDraftUnitRef,
     AssemblyDraftUpdate,
 )
 from backend.services import assembly_draft_service
@@ -94,13 +96,134 @@ async def commit_draft(
         default=None,
         description="Коммитить только этот тип упаковки (BOX/MONOPALLET); остальное остаётся в черновике",
     ),
+    newcomer_filter: str | None = Query(
+        default=None,
+        description="Коммитить только новинки/обычные (newcomer|regular|all); остальное остаётся в черновике",
+    ),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ) -> AssemblyDraftCommitResponse:
     """Turn a draft into N AssemblyRequests (one per non-zero pair).
 
-    Без `package_type` коммитит весь черновик и soft-delete'ит его. С
-    `package_type` коммитит только строки этого типа, остальные оставляет
-    в черновике (короб и моно можно собирать раздельно).
+    `package_type` (короб/моно) и `newcomer_filter` (новинки/обычные) —
+    независимые оси партиального коммита: всё не выбранное остаётся в
+    черновике для последующих сборок. Без фильтров коммитит весь черновик.
     """
-    return await assembly_draft_service.commit_draft(db, project.id, draft_id, package_type)
+    return await assembly_draft_service.commit_draft(db, project.id, draft_id, package_type, newcomer_filter)
+
+
+@router.post(
+    "/{draft_id}/units/hand-off",
+    response_model=AssemblyDraftRead,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def hand_off_unit(
+    draft_id: int,
+    unit: AssemblyDraftUnitRef,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> AssemblyDraftRead:
+    """«Передать на ФФ»: заморозить заявку-юнит (вырезать из rows в handed_units)."""
+    return await assembly_draft_service.hand_off_unit(
+        db,
+        project.id,
+        draft_id,
+        unit.source_ff_id,
+        unit.target_wb_name,
+        unit.package_type,
+        unit.is_newcomer,
+    )
+
+
+@router.post(
+    "/{draft_id}/units/revert",
+    response_model=AssemblyDraftRead,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def revert_unit(
+    draft_id: int,
+    unit: AssemblyDraftUnitRef,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> AssemblyDraftRead:
+    """«Вернуть в черновик»: вернуть позиции замороженного юнита обратно в rows."""
+    return await assembly_draft_service.revert_unit(
+        db,
+        project.id,
+        draft_id,
+        unit.source_ff_id,
+        unit.target_wb_name,
+        unit.package_type,
+        unit.is_newcomer,
+    )
+
+
+@router.post(
+    "/{draft_id}/units/commit",
+    response_model=AssemblyDraftCommitResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def commit_unit(
+    draft_id: int,
+    unit: AssemblyDraftUnitRef,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> AssemblyDraftCommitResponse:
+    """«В сборку»: создать AssemblyRequest из замороженного юнита (в общий список)."""
+    return await assembly_draft_service.commit_unit(
+        db,
+        project.id,
+        draft_id,
+        unit.source_ff_id,
+        unit.target_wb_name,
+        unit.package_type,
+        unit.is_newcomer,
+    )
+
+
+@router.post(
+    "/{draft_id}/units/items",
+    response_model=AssemblyDraftRead,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def set_unit_items(
+    draft_id: int,
+    edit: AssemblyDraftUnitEdit,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> AssemblyDraftRead:
+    """Заменить наполнение заявки-юнита (правка черновика): фиксирует авто-юнит и
+    сохраняет новый состав. Переданный на ФФ юнит править нельзя."""
+    return await assembly_draft_service.set_unit_items(
+        db,
+        project.id,
+        draft_id,
+        edit.source_ff_id,
+        edit.target_wb_name,
+        edit.package_type,
+        edit.is_newcomer,
+        edit.items,
+    )
+
+
+@router.post(
+    "/{draft_id}/units/delete",
+    response_model=AssemblyDraftRead,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def delete_unit(
+    draft_id: int,
+    unit: AssemblyDraftUnitRef,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> AssemblyDraftRead:
+    """Удалить заявку-юнит из черновика целиком (товар остаётся на ФФ)."""
+    return await assembly_draft_service.delete_unit(
+        db,
+        project.id,
+        draft_id,
+        unit.source_ff_id,
+        unit.target_wb_name,
+        unit.package_type,
+        unit.is_newcomer,
+    )

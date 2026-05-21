@@ -2761,6 +2761,23 @@ export interface AssemblyDraftRow {
   package_type?: PackageType;
 }
 
+export interface HandedUnitItem {
+  nm_id: number;
+  barcode: string;
+  vendor_code: string;
+  qty: number;
+}
+
+/** Заявка-юнит, переданная на ФФ: вырезана из rows, заморожена снимком. */
+export interface HandedUnit {
+  source_ff_id: number;
+  target_wb_name: string;
+  package_type: PackageType;
+  is_newcomer: boolean;
+  status: string; // "handed"
+  items: HandedUnitItem[];
+}
+
 export interface AssemblyDraftDistribution {
   source_warehouse_ids: number[];
   target_warehouse_names: string[];
@@ -2772,6 +2789,16 @@ export interface AssemblyDraftDistribution {
   /** Cold-start доли по WB-складам (name → 0..1). Если задано —
    *  Авто-баланс распределяет qty пропорционально этим долям, не по wbNeed. */
   cold_start_shares?: Record<string, number> | null;
+  /** Замороженные заявки-юниты, переданные на ФФ (вырезаны из rows). */
+  handed_units?: HandedUnit[];
+}
+
+/** Ссылка на заявку-юнит черновика (hand-off / revert / commit). */
+export interface AssemblyDraftUnitRef {
+  source_ff_id: number;
+  target_wb_name: string;
+  package_type: PackageType;
+  is_newcomer: boolean;
 }
 
 export interface AssemblyDraft {

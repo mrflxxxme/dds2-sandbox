@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF002, RUF003
 """
 Pydantic schemas for AssemblyDraft.
 
@@ -27,6 +28,28 @@ class AssemblyDraftRow(BaseModel):
     package_type: PackageTypeStr = "BOX"
 
 
+class HandedUnitItem(BaseModel):
+    """Позиция замороженной заявки-юнита (передан на ФФ)."""
+
+    nm_id: int
+    barcode: str
+    vendor_code: str = ""
+    qty: int
+
+
+class HandedUnit(BaseModel):
+    """Заявка-юнит (source_ff × target_wb × упаковка × новизна), вырезанная из
+    черновика и переданная на ФФ. Снимок заморожен: правки распределения его не
+    трогают (его уже нет в rows). `в сборке` создаёт из него AssemblyRequest."""
+
+    source_ff_id: int
+    target_wb_name: str
+    package_type: PackageTypeStr = "BOX"
+    is_newcomer: bool = False
+    status: str = "handed"  # пока только "handed" (передан на ФФ)
+    items: list[HandedUnitItem] = Field(default_factory=list)
+
+
 class AssemblyDraftDistribution(BaseModel):
     """Full distribution payload stored in AssemblyDraft.distribution JSONB."""
 
@@ -40,6 +63,8 @@ class AssemblyDraftDistribution(BaseModel):
     # Если задано — Авто-баланс на странице distribute распределяет qty
     # пропорционально этим долям (вместо wbNeed). None для обычных сборок.
     cold_start_shares: dict[str, float] | None = None
+    # Замороженные заявки-юниты, переданные на ФФ (вырезаны из rows).
+    handed_units: list[HandedUnit] = Field(default_factory=list)
 
 
 class AssemblyDraftCreate(BaseModel):
@@ -76,3 +101,18 @@ class AssemblyDraftCommitResponse(BaseModel):
 
     created_request_ids: list[int]
     draft_id: int
+
+
+class AssemblyDraftUnitRef(BaseModel):
+    """Ссылка на заявку-юнит черновика (для hand-off / revert / commit)."""
+
+    source_ff_id: int
+    target_wb_name: str
+    package_type: PackageTypeStr = "BOX"
+    is_newcomer: bool = False
+
+
+class AssemblyDraftUnitEdit(AssemblyDraftUnitRef):
+    """Замена наполнения заявки-юнита (ручная правка черновика)."""
+
+    items: list[HandedUnitItem] = Field(default_factory=list)

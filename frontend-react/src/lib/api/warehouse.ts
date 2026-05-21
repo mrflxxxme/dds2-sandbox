@@ -6,7 +6,9 @@ import type {
     AssemblyDraft,
     AssemblyDraftCommitResponse,
     AssemblyDraftCreate,
+    AssemblyDraftUnitRef,
     AssemblyDraftUpdate,
+    HandedUnitItem,
     AssemblyHistoryEntry,
     AssemblyListResponse,
     AssemblyRequest,
@@ -416,9 +418,35 @@ export function addWarehouseMethods(api: ApiClient) {
         deleteAssemblyDraft(id: number) {
             return api.request<void>('DELETE', `/api/v1/assembly/drafts/${id}`);
         },
-        commitAssemblyDraft(id: number, packageType?: string) {
-            const q = packageType ? `?package_type=${encodeURIComponent(packageType)}` : '';
-            return api.request<AssemblyDraftCommitResponse>('POST', `/api/v1/assembly/drafts/${id}/commit${q}`);
+        commitAssemblyDraft(id: number, packageType?: string, newcomerFilter?: string) {
+            const qs = new URLSearchParams();
+            if (packageType) qs.set('package_type', packageType);
+            if (newcomerFilter && newcomerFilter !== 'all') qs.set('newcomer_filter', newcomerFilter);
+            const q = qs.toString();
+            return api.request<AssemblyDraftCommitResponse>(
+                'POST',
+                `/api/v1/assembly/drafts/${id}/commit${q ? `?${q}` : ''}`,
+            );
+        },
+        /** «Передать на ФФ» — заморозить заявку-юнит (вырезать в handed_units). */
+        handOffDraftUnit(id: number, unit: AssemblyDraftUnitRef) {
+            return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${id}/units/hand-off`, unit);
+        },
+        /** «Вернуть в черновик» — вернуть позиции замороженного юнита в rows. */
+        revertDraftUnit(id: number, unit: AssemblyDraftUnitRef) {
+            return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${id}/units/revert`, unit);
+        },
+        /** «В сборку» — создать AssemblyRequest из замороженного юнита. */
+        commitDraftUnit(id: number, unit: AssemblyDraftUnitRef) {
+            return api.request<AssemblyDraftCommitResponse>('POST', `/api/v1/assembly/drafts/${id}/units/commit`, unit);
+        },
+        /** Заменить наполнение заявки-юнита (правка черновика → фиксация). */
+        setDraftUnitItems(id: number, unit: AssemblyDraftUnitRef, items: HandedUnitItem[]) {
+            return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${id}/units/items`, { ...unit, items });
+        },
+        /** Удалить заявку-юнит целиком (товар остаётся на ФФ). */
+        deleteDraftUnit(id: number, unit: AssemblyDraftUnitRef) {
+            return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${id}/units/delete`, unit);
         },
 
         // ─── Box-multiplicity (кратность коробки) ────────────────────────

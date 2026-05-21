@@ -55,6 +55,9 @@ export default function AssemblyDetailPage() {
     // History
     const [history, setHistory] = useState<AssemblyHistoryEntry[]>([]);
 
+    // Кратность короба по баркоду — для колонки «Коробок».
+    const [ppbByBarcode, setPpbByBarcode] = useState<Map<string, number | null>>(new Map());
+
     // FBO supply editing
     const [editingFbo, setEditingFbo] = useState(false);
     const [fboSupplies, setFboSupplies] = useState<WbFboSupply[]>([]);
@@ -79,6 +82,32 @@ export default function AssemblyDetailPage() {
     }, [id]);
 
     useEffect(() => { load(); }, [load]);
+
+    // Кратность короба per-баркод (override > минимальный per-warehouse box_qty).
+    useEffect(() => {
+        let cancelled = false;
+        api.getBoxMultiplicity()
+            .then(resp => {
+                if (cancelled) return;
+                const m = new Map<string, number | null>();
+                for (const r of resp.items) {
+                    let ppb: number | null = null;
+                    if (r.box_qty_override && r.box_qty_override > 0 && r.use_box_multiplicity) {
+                        ppb = r.box_qty_override;
+                    } else {
+                        let best = 0;
+                        for (const p of r.per_warehouse) {
+                            if (p.box_qty && p.box_qty > 0 && p.use_box_multiplicity && (best === 0 || p.box_qty < best)) best = p.box_qty;
+                        }
+                        ppb = best > 0 ? best : null;
+                    }
+                    if (r.barcode) m.set(r.barcode, ppb);
+                }
+                setPpbByBarcode(m);
+            })
+            .catch(() => { /* best-effort */ });
+        return () => { cancelled = true; };
+    }, []);
 
     // Close FBO dropdown on outside click
     useEffect(() => {
@@ -636,17 +665,38 @@ export default function AssemblyDetailPage() {
 
             {/* Items table */}
             {(() => {
+                // Доп. поля: _ppb (кратность по баркоду) и boxes (⌈шт/K⌉ — для Excel).
+                const itemsData = (assembly.items || []).map(it => {
+                    const k = ppbByBarcode.get(it.barcode) || 0;
+                    return { ...it, _ppb: k, boxes: k > 0 ? Math.ceil(it.quantity / k) : null };
+                });
                 const itemCols: Column[] = [
                     { key: 'barcode', label: 'ШК', render: (v: string) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</span> },
                     { key: 'product_name', label: 'Товар', render: (v: string) => <span style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block' }}>{v || '\u2014'}</span> },
+                    {
+                        key: 'boxes', label: 'Коробок', align: 'right',
+                        render: (_v: unknown, row: { quantity: number; _ppb?: number }) => {
+                            const k = row._ppb || 0;
+                            if (k <= 0) return <span style={{ color: 'var(--color-text-muted)' }}>—</span>;
+                            const full = Math.floor(row.quantity / k);
+                            const rem = row.quantity % k;
+                            return (
+                                <span style={{ whiteSpace: 'nowrap' }} title={`${full} полн. коробов по ${k} шт${rem > 0 ? ` + ${rem} шт россыпью (неполный короб)` : ''}`}>
+                                    <span style={{ fontWeight: 500 }}>{formatNumber(full, 0)} кор</span>
+                                    {rem > 0 && <span style={{ color: 'var(--color-warning)', fontWeight: 600 }}>{` + ${formatNumber(rem, 0)} шт`}</span>}
+                                </span>
+                            );
+                        },
+                    },
                     { key: 'quantity', label: 'В поставке', align: 'right', render: (v: number) => <span style={{ fontWeight: 500 }}>{v}</span> },
                     { key: 'stock_quantity', label: 'На складе', align: 'right', render: (v: number, row: any) => <span style={{ fontWeight: 500, color: v < row.quantity ? 'var(--color-danger)' : 'var(--color-success)' }}>{v}</span> },
                 ];
                 return (
                     <TanStackDataTable
                         columns={itemCols}
-                        data={assembly.items || []}
+                        data={itemsData}
                         title="Позиции"
+                        exportName={`Сборка_${assembly.number}`}
                         enableSorting
                         enablePagination={false}
                         emptyText="Нет позиций"

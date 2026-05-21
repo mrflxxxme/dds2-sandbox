@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
@@ -8,6 +8,7 @@ import type {
     AssemblyDraft,
     AssemblyDraftDistribution,
     AssemblyDraftRow,
+    HandedUnit,
     PackageType,
     Warehouse,
 } from '@/types/api';
@@ -45,7 +46,6 @@ export default function AssemblyDistributePage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [saving, setSaving] = useState(false);
-    const [committing, setCommitting] = useState(false);
     const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
     const [draft, setDraft] = useState<AssemblyDraft | null>(null);
@@ -61,8 +61,12 @@ export default function AssemblyDistributePage() {
     const [rows, setRows] = useState<AssemblyDraftRow[]>([]);
     const [pkgTab, setPkgTab] = useState<'BOX' | 'MONOPALLET'>('BOX');
     const [multFilter, setMultFilter] = useState<'none' | 'with' | 'without'>('none');
+    const [typeTab, setTypeTab] = useState<'all' | 'regular' | 'newcomer'>('all');
     const [nmPpb, setNmPpb] = useState<Map<number, number | null>>(new Map());
     const [coldStartShares, setColdStartShares] = useState<Record<string, number> | null>(null);
+    // Замороженные заявки (передан на ФФ) — вырезаны из rows, на distribute не
+    // редактируются. Храним, чтобы автосейв/сохранение не затёрло их.
+    const [handedUnits, setHandedUnits] = useState<HandedUnit[]>([]);
     const [newcomerNmIds, setNewcomerNmIds] = useState<Set<number>>(new Set());
 
     // Reference data
@@ -102,6 +106,7 @@ export default function AssemblyDistributePage() {
                 setTargetWarehouseNames(draftResp.distribution.target_warehouse_names || []);
                 setRows(draftResp.distribution.rows || []);
                 setColdStartShares(draftResp.distribution.cold_start_shares || null);
+                setHandedUnits(draftResp.distribution.handed_units || []);
                 setNewcomerNmIds(new Set(draftResp.newcomer_nm_ids || []));
                 setWarehouses(whs);
                 setStockNeed(stockNeedResp);
@@ -157,7 +162,8 @@ export default function AssemblyDistributePage() {
         pallet_weight_kg: palletWeightKg,
         estimated_ready_date: estimatedReadyDate || null,
         cold_start_shares: coldStartShares,
-    }), [sourceWarehouseIds, targetWarehouseNames, rows, palletsCount, palletWeightKg, estimatedReadyDate, coldStartShares]);
+        handed_units: handedUnits,
+    }), [sourceWarehouseIds, targetWarehouseNames, rows, palletsCount, palletWeightKg, estimatedReadyDate, coldStartShares, handedUnits]);
 
     // ─── Save draft (manual + autosave) ──────────────────────────────────
     const saveDraft = useCallback(async (silent = false): Promise<boolean> => {
@@ -228,25 +234,55 @@ export default function AssemblyDistributePage() {
     // ─── Вкладки Короб/Моно: строки активного типа упаковки ───────────────
     // Короб-вкладка показывает всё кроме моно (BOX + редкий SUPERSAFE), чтобы
     // ни одна строка не потерялась между двумя вкладками.
-    const visibleRows = useMemo(
-        () => rows.filter(r => {
-            const pkgOk = pkgTab === 'MONOPALLET'
-                ? r.package_type === 'MONOPALLET'
-                : r.package_type !== 'MONOPALLET';
-            if (!pkgOk) return false;
-            if (multFilter !== 'none') {
-                const hasK = !!nmPpb.get(r.nm_id);
-                if (multFilter === 'with' && !hasK) return false;
-                if (multFilter === 'without' && hasK) return false;
-            }
-            return true;
-        }),
-        [rows, pkgTab, multFilter, nmPpb],
+    // ─── Две независимых оси фильтра: упаковка (короб/моно) × тип товара ───
+    const pkgMatch = useCallback(
+        (r: AssemblyDraftRow) => pkgTab === 'MONOPALLET'
+            ? r.package_type === 'MONOPALLET'
+            : r.package_type !== 'MONOPALLET',
+        [pkgTab],
     );
-    const boxRowCount = useMemo(() => rows.filter(r => r.package_type !== 'MONOPALLET').length, [rows]);
-    const monoRowCount = useMemo(() => rows.filter(r => r.package_type === 'MONOPALLET').length, [rows]);
-    const withKCount = useMemo(() => rows.filter(r => !!nmPpb.get(r.nm_id)).length, [rows, nmPpb]);
-    const withoutKCount = useMemo(() => rows.filter(r => !nmPpb.get(r.nm_id)).length, [rows, nmPpb]);
+    const typeMatch = useCallback((r: AssemblyDraftRow) => {
+        if (typeTab === 'all') return true;
+        const isNew = newcomerNmIds.has(r.nm_id);
+        return typeTab === 'newcomer' ? isNew : !isNew;
+    }, [typeTab, newcomerNmIds]);
+
+    // Есть ли в черновике новинки — определяет показ сегмента «Тип товара».
+    const hasNewcomerRows = useMemo(
+        () => rows.some(r => newcomerNmIds.has(r.nm_id)), [rows, newcomerNmIds],
+    );
+
+    // committableRows — то, что реально уйдёт в commit (упаковка × тип товара).
+    // multFilter («Кратные / Без кратности») — только визуальный фильтр и на
+    // состав сборки НЕ влияет.
+    const committableRows = useMemo(
+        () => rows.filter(r => pkgMatch(r) && typeMatch(r)),
+        [rows, pkgMatch, typeMatch],
+    );
+    const visibleRows = useMemo(
+        () => committableRows.filter(r => {
+            if (multFilter === 'none') return true;
+            const hasK = !!nmPpb.get(r.nm_id);
+            return multFilter === 'with' ? hasK : !hasK;
+        }),
+        [committableRows, multFilter, nmPpb],
+    );
+
+    // Счётчики сегментов — каждый учитывает выбор по ВТОРОЙ оси.
+    const rowsForPkg = useMemo(() => rows.filter(pkgMatch), [rows, pkgMatch]);
+    const rowsForType = useMemo(() => rows.filter(typeMatch), [rows, typeMatch]);
+    const allTypeCount = rowsForPkg.length;
+    const regularCount = useMemo(
+        () => rowsForPkg.filter(r => !newcomerNmIds.has(r.nm_id)).length, [rowsForPkg, newcomerNmIds],
+    );
+    const newcomerCount = useMemo(
+        () => rowsForPkg.filter(r => newcomerNmIds.has(r.nm_id)).length, [rowsForPkg, newcomerNmIds],
+    );
+    const boxRowCount = useMemo(() => rowsForType.filter(r => r.package_type !== 'MONOPALLET').length, [rowsForType]);
+    const monoRowCount = useMemo(() => rowsForType.filter(r => r.package_type === 'MONOPALLET').length, [rowsForType]);
+    const withKCount = useMemo(() => committableRows.filter(r => !!nmPpb.get(r.nm_id)).length, [committableRows, nmPpb]);
+    const withoutKCount = useMemo(() => committableRows.filter(r => !nmPpb.get(r.nm_id)).length, [committableRows, nmPpb]);
+    const newcomerRowsTotal = useMemo(() => rows.filter(r => newcomerNmIds.has(r.nm_id)).length, [rows, newcomerNmIds]);
 
     const srcSumPerFf = useMemo(() => {
         const m: Record<number, number> = {};
@@ -386,49 +422,37 @@ export default function AssemblyDistributePage() {
     // ─── Commit ──────────────────────────────────────────────────────────
     // Должно совпадать с backend `commit_draft` группировкой:
     // (source_ff_id, target_wb_name, package_type, is_newcomer) → 1 AssemblyRequest.
-    const uniqueAssemblyCount = useMemo(() => {
-        const pairs = new Set<string>();
-        for (const r of visibleRows) {
+    // Кол-во заявок, которые создаст commit текущего среза — совпадает с backend
+    // группировкой (ФФ, WB, упаковка, новинка?). Считаем по committableRows
+    // (НЕ visibleRows): multFilter на состав сборки не влияет. Разбивка
+    // обычные/новинки показывает, что они уйдут раздельными заявками.
+    const commitBreakdown = useMemo(() => {
+        const reg = new Set<string>();
+        const nw = new Set<string>();
+        for (const r of committableRows) {
             const pkg = r.package_type || 'BOX';
-            const isNew = newcomerNmIds.has(r.nm_id) ? '1' : '0';
+            const isNew = newcomerNmIds.has(r.nm_id);
             for (const [ffId, srcQty] of Object.entries(r.src)) {
                 if ((srcQty || 0) <= 0) continue;
                 for (const [wbName, tgtQty] of Object.entries(r.tgt)) {
                     if ((tgtQty || 0) <= 0) continue;
-                    pairs.add(`${ffId}::${wbName}::${pkg}::${isNew}`);
+                    (isNew ? nw : reg).add(`${ffId}::${wbName}::${pkg}`);
                 }
             }
         }
-        return pairs.size;
-    }, [visibleRows, newcomerNmIds]);
+        return { regular: reg.size, newcomer: nw.size, total: reg.size + nw.size };
+    }, [committableRows, newcomerNmIds]);
+    const uniqueAssemblyCount = commitBreakdown.total;
 
-    const handleCommit = useCallback(async () => {
+    // «Создать» → сохраняем черновик и уходим на отдельную страницу
+    // предпросмотра заявок (группировка по складам + выгрузка + сам commit).
+    const handleGoToPreview = useCallback(async () => {
         if (!draftId) return;
-        // Save any pending changes first
         const ok = await saveDraft(true);
         if (!ok) return;
-        setCommitting(true);
-        try {
-            // Коммитим только активный тип упаковки (короб/моно — раздельно);
-            // строки другого типа остаются в черновике.
-            const resp = await api.commitAssemblyDraft(draftId, pkgTab);
-            const ids = resp.created_request_ids || [];
-            setToast({ message: `Создано сборок: ${ids.length}`, type: 'success' });
-            setTimeout(() => {
-                if (ids.length === 1) {
-                    router.push(`/p/${slug}/warehouse/assembly/${ids[0]}`);
-                } else if (ids.length > 1) {
-                    router.push(`/p/${slug}/warehouse/assembly?just_created=${ids.join(',')}`);
-                } else {
-                    router.push(`/p/${slug}/warehouse/assembly`);
-                }
-            }, 600);
-        } catch (e: unknown) {
-            setToast({ message: e instanceof Error ? e.message : 'Ошибка создания сборок', type: 'error' });
-        } finally {
-            setCommitting(false);
-        }
-    }, [draftId, saveDraft, router, slug, pkgTab]);
+        const qs = new URLSearchParams({ draft: String(draftId), pkg: pkgTab, type: typeTab });
+        router.push(`/p/${slug}/warehouse/assembly/distribute/preview?${qs.toString()}`);
+    }, [draftId, saveDraft, router, slug, pkgTab, typeTab]);
 
     // ─── Render ──────────────────────────────────────────────────────────
     if (loading) {
@@ -513,6 +537,9 @@ export default function AssemblyDistributePage() {
                         </div>
                         <p className="page-subtitle" style={{ margin: 0 }}>
                             Источников: {sourceWarehouseIds.length} · Целей: {targetWarehouseNames.length} · Артикулов: {rows.length}
+                            {newcomerRowsTotal > 0 && (
+                                <> · <span style={{ color: '#a855f7', fontWeight: 600 }}>🆕 Новинок: {newcomerRowsTotal}</span></>
+                            )}
                         </p>
                     </div>
                 </div>
@@ -526,10 +553,17 @@ export default function AssemblyDistributePage() {
                     </button>
                     <button
                         className="btn btn-primary"
-                        onClick={handleCommit}
-                        disabled={committing || uniqueAssemblyCount === 0}
+                        onClick={handleGoToPreview}
+                        disabled={saving || uniqueAssemblyCount === 0}
+                        title={
+                            `Предпросмотр и создание заявок: ${uniqueAssemblyCount}`
+                            + `\nОбычные: ${commitBreakdown.regular} · 🆕 Новинки: ${commitBreakdown.newcomer} (раздельные заявки)`
+                            + `\nГруппировка по складам-источникам + выгрузка в Excel.`
+                        }
                     >
-                        {committing ? 'Создание...' : `✓ Создать сборки (${uniqueAssemblyCount})`}
+                        {saving
+                            ? 'Сохранение...'
+                            : `✓ Создать: ${typeTab === 'all' ? '' : typeTab === 'newcomer' ? '🆕 Новинки · ' : 'Обычные · '}${pkgTab === 'MONOPALLET' ? 'Моно' : 'Короб'} (${uniqueAssemblyCount})`}
                     </button>
                 </div>
             </div>
@@ -593,9 +627,37 @@ export default function AssemblyDistributePage() {
                 </div>
             </div>
 
-            {/* Вкладки Короб / Моно — собираются раздельно */}
+            {/* Вкладки: Тип товара (новинки/обычные) × Упаковка (короб/моно) —
+                каждое измерение уходит раздельными заявками при commit. */}
             {rows.length > 0 && (
-                <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                    {hasNewcomerRows && (
+                        <>
+                            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Тип:</span>
+                            <button
+                                className={`btn btn-sm ${typeTab === 'all' ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setTypeTab('all')}
+                            >
+                                Все ({allTypeCount})
+                            </button>
+                            <button
+                                className={`btn btn-sm ${typeTab === 'regular' ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setTypeTab('regular')}
+                            >
+                                Обычные ({regularCount})
+                            </button>
+                            <button
+                                className={`btn btn-sm ${typeTab === 'newcomer' ? 'btn-primary' : 'btn-secondary'}`}
+                                style={typeTab !== 'newcomer' ? { borderColor: '#a855f7', color: '#a855f7' } : {}}
+                                onClick={() => setTypeTab('newcomer')}
+                                title="Новинки (cold-start) — уйдут отдельными заявками от обычных"
+                            >
+                                🆕 Новинки ({newcomerCount})
+                            </button>
+                            <div style={{ width: 1, alignSelf: 'stretch', background: 'var(--color-border)', margin: '0 4px' }} />
+                        </>
+                    )}
+                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Упак:</span>
                     <button
                         className={`btn btn-sm ${pkgTab === 'BOX' ? 'btn-primary' : 'btn-secondary'}`}
                         onClick={() => setPkgTab('BOX')}
@@ -637,12 +699,16 @@ export default function AssemblyDistributePage() {
                 </div>
             ) : visibleRows.length === 0 ? (
                 <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>
-                    Нет позиций типа «{pkgTab === 'MONOPALLET' ? 'Моно' : 'Короб'}»
+                    Нет позиций в выбранном срезе
+                    {' «'}{typeTab === 'newcomer' ? '🆕 Новинки' : typeTab === 'regular' ? 'Обычные' : 'Все'}
+                    {' · '}{pkgTab === 'MONOPALLET' ? 'Моно' : 'Короб'}{'»'}
+                    {multFilter !== 'none' && ` (${multFilter === 'with' ? 'кратные' : 'без кратности'})`}
                 </div>
             ) : (
                 <div className="glass-card" style={{ overflowX: 'auto', padding: 0 }}>
                     <DistributeMatrix
                         rows={visibleRows}
+                        groupByType={typeTab === 'all' && hasNewcomerRows}
                         nmPpb={nmPpb}
                         sourceWarehouseIds={sourceWarehouseIds}
                         targetWarehouseNames={targetWarehouseNames}
@@ -666,6 +732,7 @@ export default function AssemblyDistributePage() {
 
 interface DistributeMatrixProps {
     rows: AssemblyDraftRow[];
+    groupByType: boolean;
     nmPpb: Map<number, number | null>;
     sourceWarehouseIds: number[];
     targetWarehouseNames: string[];
@@ -682,6 +749,7 @@ interface DistributeMatrixProps {
 
 function DistributeMatrix({
     rows,
+    groupByType,
     nmPpb,
     sourceWarehouseIds,
     targetWarehouseNames,
@@ -717,7 +785,7 @@ function DistributeMatrix({
                     <th style={{ ...thStyle, textAlign: 'left', minWidth: 200, position: 'sticky', left: 0, zIndex: 3 }}>
                         Артикул
                     </th>
-                    <th style={{ ...thStyle, minWidth: 80 }}>N / M</th>
+                    <th style={{ ...thStyle, minWidth: 92 }} title="Отгружаем (Σ источников строки) / Потребность по SKU из «Потребности по складам». Оранжевым — отгрузка больше потребности (лишек).">Отгр. / Потреб.</th>
                     <th
                         colSpan={sourceWarehouseIds.length + 1}
                         style={{ ...thStyle, textAlign: 'center', background: 'rgba(59,130,246,0.08)', letterSpacing: 1, fontWeight: 700 }}
@@ -817,7 +885,8 @@ function DistributeMatrix({
                 </tr>
             </thead>
             <tbody>
-                {rows.map(row => {
+                {(() => {
+                    const renderRow = (row: AssemblyDraftRow) => {
                     const srcSum = Object.values(row.src).reduce((s, v) => s + (v || 0), 0);
                     const tgtSum = Object.values(row.tgt).reduce((s, v) => s + (v || 0), 0);
                     const balanced = srcSum === tgtSum;
@@ -982,8 +1051,52 @@ function DistributeMatrix({
                             </td>
                         </tr>
                     );
-                })}
+                    };
+                    if (!groupByType) return rows.map(renderRow);
 
+                    // «Все»: группируем строки секциями обычные / новинки —
+                    // делает раздельность будущих заявок видимой глазами.
+                    const regular = rows.filter(r => !newcomerNmIds.has(r.nm_id));
+                    const newcomers = rows.filter(r => newcomerNmIds.has(r.nm_id));
+                    const totalCols = 2 + sourceWarehouseIds.length + 1 + targetWarehouseNames.length + 1;
+                    const renderSection = (label: string, list: AssemblyDraftRow[], isNew: boolean) => {
+                        if (list.length === 0) return null;
+                        const sSrc = list.reduce((s, r) => s + Object.values(r.src).reduce((a, b) => a + (b || 0), 0), 0);
+                        const sTgt = list.reduce((s, r) => s + Object.values(r.tgt).reduce((a, b) => a + (b || 0), 0), 0);
+                        return (
+                            <Fragment key={`sec-${isNew ? 'new' : 'reg'}`}>
+                                <tr>
+                                    <td colSpan={totalCols} style={{
+                                        padding: '8px 12px',
+                                        background: isNew ? 'rgba(168,85,247,0.08)' : 'rgba(59,130,246,0.06)',
+                                        borderTop: '2px solid var(--color-border)',
+                                        borderBottom: '1px solid var(--color-border)',
+                                    }}>
+                                        <div style={{
+                                            position: 'sticky', left: 12, width: 'fit-content',
+                                            display: 'flex', gap: 16, alignItems: 'center',
+                                            fontSize: 12, fontWeight: 700,
+                                        }}>
+                                            <span style={{ color: isNew ? '#7e22ce' : 'var(--color-text)' }}>
+                                                {label} · {list.length}
+                                            </span>
+                                            <span style={{ fontWeight: 600, color: 'var(--color-text-muted)' }}>
+                                                Σ ист {formatNumber(sSrc, 0)} · Σ цель {formatNumber(sTgt, 0)}
+                                            </span>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {list.map(renderRow)}
+                            </Fragment>
+                        );
+                    };
+                    return (
+                        <>
+                            {renderSection('Обычные товары', regular, false)}
+                            {renderSection('🆕 Новинки', newcomers, true)}
+                        </>
+                    );
+                })()}
             </tbody>
         </table>
     );
