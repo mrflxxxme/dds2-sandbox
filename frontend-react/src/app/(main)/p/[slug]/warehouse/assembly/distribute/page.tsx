@@ -8,6 +8,7 @@ import type {
     AssemblyDraft,
     AssemblyDraftDistribution,
     AssemblyDraftRow,
+    PackageType,
     Warehouse,
 } from '@/types/api';
 
@@ -58,6 +59,8 @@ export default function AssemblyDistributePage() {
     const [sourceWarehouseIds, setSourceWarehouseIds] = useState<number[]>([]);
     const [targetWarehouseNames, setTargetWarehouseNames] = useState<string[]>([]);
     const [rows, setRows] = useState<AssemblyDraftRow[]>([]);
+    const [pkgTab, setPkgTab] = useState<'BOX' | 'MONOPALLET'>('BOX');
+    const [nmPpb, setNmPpb] = useState<Map<number, number | null>>(new Map());
     const [coldStartShares, setColdStartShares] = useState<Record<string, number> | null>(null);
     const [newcomerNmIds, setNewcomerNmIds] = useState<Set<number>>(new Set());
 
@@ -115,6 +118,34 @@ export default function AssemblyDistributePage() {
         load();
         return () => { cancelled = true; };
     }, [draftId]);
+
+    // Кратность коробки per nm — для бейджа у артикула.
+    useEffect(() => {
+        let cancelled = false;
+        api.getBoxMultiplicity()
+            .then(resp => {
+                if (cancelled) return;
+                const m = new Map<number, number | null>();
+                for (const r of resp.items) {
+                    let ppb: number | null = null;
+                    if (r.box_qty_override && r.box_qty_override > 0 && r.use_box_multiplicity) {
+                        ppb = r.box_qty_override;
+                    } else {
+                        let best = 0;
+                        for (const p of r.per_warehouse) {
+                            if (p.box_qty && p.box_qty > 0 && p.use_box_multiplicity && (best === 0 || p.box_qty < best)) {
+                                best = p.box_qty;
+                            }
+                        }
+                        ppb = best > 0 ? best : null;
+                    }
+                    m.set(r.nm_id, ppb);
+                }
+                setNmPpb(m);
+            })
+            .catch(() => { /* best-effort */ });
+        return () => { cancelled = true; };
+    }, []);
 
     // ─── Build current distribution snapshot ─────────────────────────────
     const buildDistribution = useCallback((): AssemblyDraftDistribution => ({
@@ -193,32 +224,46 @@ export default function AssemblyDistributePage() {
     }, [stockNeed]);
 
     // ─── Aggregate Σ src per FF (across all rows) ───────────────────────
+    // ─── Вкладки Короб/Моно: строки активного типа упаковки ───────────────
+    // Короб-вкладка показывает всё кроме моно (BOX + редкий SUPERSAFE), чтобы
+    // ни одна строка не потерялась между двумя вкладками.
+    const visibleRows = useMemo(
+        () => rows.filter(r => pkgTab === 'MONOPALLET'
+            ? r.package_type === 'MONOPALLET'
+            : r.package_type !== 'MONOPALLET'),
+        [rows, pkgTab],
+    );
+    const boxRowCount = useMemo(() => rows.filter(r => r.package_type !== 'MONOPALLET').length, [rows]);
+    const monoRowCount = useMemo(() => rows.filter(r => r.package_type === 'MONOPALLET').length, [rows]);
+
     const srcSumPerFf = useMemo(() => {
         const m: Record<number, number> = {};
-        for (const r of rows) {
+        for (const r of visibleRows) {
             for (const [ffIdStr, qty] of Object.entries(r.src)) {
                 const ffId = Number(ffIdStr);
                 m[ffId] = (m[ffId] || 0) + (qty || 0);
             }
         }
         return m;
-    }, [rows]);
+    }, [visibleRows]);
 
-    // ─── Aggregate Σ tgt per WB (across all rows) ───────────────────────
+    // ─── Aggregate Σ tgt per WB (по активной вкладке) ───────────────────
     const tgtSumPerWb = useMemo(() => {
         const m: Record<string, number> = {};
-        for (const r of rows) {
+        for (const r of visibleRows) {
             for (const [whName, qty] of Object.entries(r.tgt)) {
                 m[whName] = (m[whName] || 0) + (qty || 0);
             }
         }
         return m;
-    }, [rows]);
+    }, [visibleRows]);
 
     // ─── Cell editors ────────────────────────────────────────────────────
-    const setRowSrc = useCallback((nmId: number, ffId: number, qty: number) => {
+    // Матч по nm_id И типу упаковки: у SKU может быть две строки (короб + моно)
+    // с одним nm_id — без проверки package_type правка задела бы обе.
+    const setRowSrc = useCallback((nmId: number, pkg: PackageType, ffId: number, qty: number) => {
         setRows(prev => prev.map(r => {
-            if (r.nm_id !== nmId) return r;
+            if (r.nm_id !== nmId || (r.package_type || 'BOX') !== pkg) return r;
             const next = { ...r.src };
             if (qty > 0) next[String(ffId)] = qty;
             else delete next[String(ffId)];
@@ -226,9 +271,9 @@ export default function AssemblyDistributePage() {
         }));
     }, []);
 
-    const setRowTgt = useCallback((nmId: number, whName: string, qty: number) => {
+    const setRowTgt = useCallback((nmId: number, pkg: PackageType, whName: string, qty: number) => {
         setRows(prev => prev.map(r => {
-            if (r.nm_id !== nmId) return r;
+            if (r.nm_id !== nmId || (r.package_type || 'BOX') !== pkg) return r;
             const next = { ...r.tgt };
             if (qty > 0) next[whName] = qty;
             else delete next[whName];
@@ -331,7 +376,7 @@ export default function AssemblyDistributePage() {
     // (source_ff_id, target_wb_name, package_type, is_newcomer) → 1 AssemblyRequest.
     const uniqueAssemblyCount = useMemo(() => {
         const pairs = new Set<string>();
-        for (const r of rows) {
+        for (const r of visibleRows) {
             const pkg = r.package_type || 'BOX';
             const isNew = newcomerNmIds.has(r.nm_id) ? '1' : '0';
             for (const [ffId, srcQty] of Object.entries(r.src)) {
@@ -343,7 +388,7 @@ export default function AssemblyDistributePage() {
             }
         }
         return pairs.size;
-    }, [rows, newcomerNmIds]);
+    }, [visibleRows, newcomerNmIds]);
 
     const handleCommit = useCallback(async () => {
         if (!draftId) return;
@@ -352,7 +397,9 @@ export default function AssemblyDistributePage() {
         if (!ok) return;
         setCommitting(true);
         try {
-            const resp = await api.commitAssemblyDraft(draftId);
+            // Коммитим только активный тип упаковки (короб/моно — раздельно);
+            // строки другого типа остаются в черновике.
+            const resp = await api.commitAssemblyDraft(draftId, pkgTab);
             const ids = resp.created_request_ids || [];
             setToast({ message: `Создано сборок: ${ids.length}`, type: 'success' });
             setTimeout(() => {
@@ -369,7 +416,7 @@ export default function AssemblyDistributePage() {
         } finally {
             setCommitting(false);
         }
-    }, [draftId, saveDraft, router, slug]);
+    }, [draftId, saveDraft, router, slug, pkgTab]);
 
     // ─── Render ──────────────────────────────────────────────────────────
     if (loading) {
@@ -534,6 +581,24 @@ export default function AssemblyDistributePage() {
                 </div>
             </div>
 
+            {/* Вкладки Короб / Моно — собираются раздельно */}
+            {rows.length > 0 && (
+                <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+                    <button
+                        className={`btn btn-sm ${pkgTab === 'BOX' ? 'btn-primary' : 'btn-secondary'}`}
+                        onClick={() => setPkgTab('BOX')}
+                    >
+                        📦 Короб ({boxRowCount})
+                    </button>
+                    <button
+                        className={`btn btn-sm ${pkgTab === 'MONOPALLET' ? 'btn-primary' : 'btn-secondary'}`}
+                        onClick={() => setPkgTab('MONOPALLET')}
+                    >
+                        📐 Моно ({monoRowCount})
+                    </button>
+                </div>
+            )}
+
             {/* Matrix */}
             {rows.length === 0 ? (
                 <div className="glass-card" style={{ padding: 64, textAlign: 'center' }}>
@@ -543,10 +608,15 @@ export default function AssemblyDistributePage() {
                         Добавьте позиции из &laquo;Потребности по складам&raquo;
                     </div>
                 </div>
+            ) : visibleRows.length === 0 ? (
+                <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                    Нет позиций типа «{pkgTab === 'MONOPALLET' ? 'Моно' : 'Короб'}»
+                </div>
             ) : (
                 <div className="glass-card" style={{ overflowX: 'auto', padding: 0 }}>
                     <DistributeMatrix
-                        rows={rows}
+                        rows={visibleRows}
+                        nmPpb={nmPpb}
                         sourceWarehouseIds={sourceWarehouseIds}
                         targetWarehouseNames={targetWarehouseNames}
                         warehouseNameById={warehouseNameById}
@@ -569,6 +639,7 @@ export default function AssemblyDistributePage() {
 
 interface DistributeMatrixProps {
     rows: AssemblyDraftRow[];
+    nmPpb: Map<number, number | null>;
     sourceWarehouseIds: number[];
     targetWarehouseNames: string[];
     warehouseNameById: (id: number) => string;
@@ -577,13 +648,14 @@ interface DistributeMatrixProps {
     availableAtFf: (nmId: number, ffId: number) => number;
     initialNeedByNmId: Record<number, number>;
     newcomerNmIds: Set<number>;
-    onSrcChange: (nmId: number, ffId: number, qty: number) => void;
-    onTgtChange: (nmId: number, whName: string, qty: number) => void;
+    onSrcChange: (nmId: number, pkg: PackageType, ffId: number, qty: number) => void;
+    onTgtChange: (nmId: number, pkg: PackageType, whName: string, qty: number) => void;
     onMergeWb: (sourceWb: string, targetWb: string) => void;
 }
 
 function DistributeMatrix({
     rows,
+    nmPpb,
     sourceWarehouseIds,
     targetWarehouseNames,
     warehouseNameById,
@@ -726,7 +798,7 @@ function DistributeMatrix({
                     const overflow = initialNeed > 0 && srcSum > initialNeed;
 
                     return (
-                        <tr key={`row-${row.nm_id}`}>
+                        <tr key={`row-${row.nm_id}-${row.package_type || 'BOX'}`}>
                             <td
                                 style={{
                                     ...tdStyle,
@@ -780,6 +852,24 @@ function DistributeMatrix({
                                 <div style={{ fontSize: 10, color: 'var(--color-text-muted)' }}>
                                     {row.barcode}
                                 </div>
+                                {(() => {
+                                    const kPpb = nmPpb.get(row.nm_id);
+                                    const hasK = !!(kPpb && kPpb > 0);
+                                    return (
+                                        <span
+                                            title={hasK ? `Кратность короба: ${kPpb} шт` : 'Кратность не задана'}
+                                            style={{
+                                                display: 'inline-block', marginTop: 2,
+                                                padding: '1px 6px', borderRadius: 6,
+                                                fontSize: 9, fontWeight: 600,
+                                                background: hasK ? 'rgba(52,199,89,0.14)' : 'rgba(142,142,147,0.16)',
+                                                color: hasK ? '#1f7a3a' : '#6e6e73',
+                                            }}
+                                        >
+                                            {hasK ? `📦 кратно ${kPpb}` : 'без кратности'}
+                                        </span>
+                                    );
+                                })()}
                             </td>
                             <td
                                 style={{
@@ -808,7 +898,7 @@ function DistributeMatrix({
                                     >
                                         <NumericCell
                                             value={qty}
-                                            onChange={(v) => onSrcChange(row.nm_id, ffId, v)}
+                                            onChange={(v) => onSrcChange(row.nm_id, (row.package_type || 'BOX') as PackageType, ffId, v)}
                                             invalid={!balanced && qty > 0}
                                         />
                                         <div
@@ -847,7 +937,7 @@ function DistributeMatrix({
                                     >
                                         <NumericCell
                                             value={qty}
-                                            onChange={(v) => onTgtChange(row.nm_id, whName, v)}
+                                            onChange={(v) => onTgtChange(row.nm_id, (row.package_type || 'BOX') as PackageType, whName, v)}
                                             invalid={!balanced && qty > 0}
                                         />
                                     </td>

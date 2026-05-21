@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002
 """
 Router: /assembly/drafts — Assembly draft CRUD + commit to N AssemblyRequests.
 
@@ -8,7 +9,7 @@ unique (source_ff, target_wb) pair with non-zero qty, then soft-deletes
 the draft.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
@@ -89,8 +90,17 @@ async def delete_draft(
 )
 async def commit_draft(
     draft_id: int,
+    package_type: str | None = Query(
+        default=None,
+        description="Коммитить только этот тип упаковки (BOX/MONOPALLET); остальное остаётся в черновике",
+    ),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ) -> AssemblyDraftCommitResponse:
-    """Turn a draft into N AssemblyRequests (one per non-zero pair) and soft-delete it."""
-    return await assembly_draft_service.commit_draft(db, project.id, draft_id)
+    """Turn a draft into N AssemblyRequests (one per non-zero pair).
+
+    Без `package_type` коммитит весь черновик и soft-delete'ит его. С
+    `package_type` коммитит только строки этого типа, остальные оставляет
+    в черновике (короб и моно можно собирать раздельно).
+    """
+    return await assembly_draft_service.commit_draft(db, project.id, draft_id, package_type)

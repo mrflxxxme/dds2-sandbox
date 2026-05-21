@@ -236,11 +236,16 @@ async def commit_draft(
     db: AsyncSession,
     project_id: int,
     draft_id: int,
+    package_type: str | None = None,
 ) -> AssemblyDraftCommitResponse:
     """
     Validate the distribution, then create one AssemblyRequest per
     (source_ff_warehouse, target_wb_name) pair with non-zero qty.
-    On any failure rolls back. On success soft-deletes the draft.
+    On any failure rolls back.
+
+    Без `package_type` коммитит весь черновик и soft-delete'ит его. С
+    `package_type` коммитит только строки этого типа упаковки, остальные
+    оставляет в черновике (короб/моно — раздельные сборки).
     """
     draft = await get_draft(db, project_id, draft_id)
     if draft is None:
@@ -254,8 +259,20 @@ async def commit_draft(
     if not distribution.rows:
         raise HTTPException(status_code=400, detail="Distribution has no rows")
 
+    # Партиальный коммит по типу упаковки: коммитим только строки выбранного
+    # package_type, остальные оставляем в черновике (короб/моно — раздельно).
+    norm_pkg = (package_type or "").strip().upper() or None
+    if norm_pkg:
+        commit_rows = [r for r in distribution.rows if (r.package_type or "BOX") == norm_pkg]
+        leftover_rows = [r for r in distribution.rows if (r.package_type or "BOX") != norm_pkg]
+        if not commit_rows:
+            raise HTTPException(status_code=400, detail=f"Нет строк типа {norm_pkg} для сборки")
+    else:
+        commit_rows = list(distribution.rows)
+        leftover_rows = []
+
     # 1. Validate balance per row (Σ src == Σ tgt > 0)
-    for row in distribution.rows:
+    for row in commit_rows:
         src_sum = sum(int(v or 0) for v in row.src.values())
         tgt_sum = sum(int(v or 0) for v in row.tgt.values())
         if src_sum <= 0 or tgt_sum <= 0:
@@ -271,14 +288,14 @@ async def commit_draft(
 
     # 2. Detect newcomer SKUs — они группируются в отдельные AssemblyRequests,
     # чтобы заявку «новинки» можно было обрабатывать отдельно от обычных.
-    all_nm_ids = {row.nm_id for row in distribution.rows}
+    all_nm_ids = {row.nm_id for row in commit_rows}
     newcomer_nm_ids = await fetch_newcomer_nm_ids(db, project_id, all_nm_ids)
 
     # 3. Group items per (source_ff_id, target_wb_name, package_type, is_newcomer) tuple.
     # One AssemblyRequest = one transport unit = one package_type, новинки отдельно.
     # pair_items[(src_id, wb_name, pkg, is_new)] -> {barcode: total_qty}
     pair_items: dict[tuple[int, str, str, bool], dict[str, int]] = {}
-    for row in distribution.rows:
+    for row in commit_rows:
         if not row.barcode:
             raise HTTPException(
                 status_code=400,
@@ -373,8 +390,13 @@ async def commit_draft(
             await db.flush()
             created_ids.append(assembly_req.id)
 
-        # 7. Soft-delete draft on success
-        draft.soft_delete()
+        # 7. Если остались строки другого типа упаковки — оставляем черновик
+        # с ними (для раздельной сборки короб/моно); иначе soft-delete.
+        if leftover_rows:
+            distribution.rows = leftover_rows
+            draft.distribution = distribution.model_dump(mode="json")
+        else:
+            draft.soft_delete()
         await db.commit()
     except HTTPException:
         await db.rollback()

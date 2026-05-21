@@ -9,6 +9,7 @@ import { DISTRICT_LABELS, DISTRICT_COLORS, DISTRICT_ORDER } from '@/lib/constant
 import type {
     AcceptanceCheckPerItem,
     AssemblyDraftRow,
+    CitySpeedDTO,
     ColdStartMainWarehouse,
     ColdStartTableResponse,
     ColdStartTableRow,
@@ -271,27 +272,6 @@ export function WarehouseNeedView() {
         return () => { cancelled = true; };
     }, []);
 
-    // Резолвит (ppb, use) для выбранного RF-склада.
-    // Per-RF override побеждает SKU-level если задан.
-    const resolveBoxMult = useCallback((nmId: number, rfWarehouseId: number | null): { ppb: number | null; use: boolean } => {
-        const entry = boxMultiplicityData.get(nmId);
-        if (!entry) return { ppb: null, use: true };
-        if (rfWarehouseId !== null) {
-            const perRf = entry.perRf.get(rfWarehouseId);
-            if (perRf?.ppb && perRf.ppb > 0) {
-                return { ppb: perRf.ppb, use: perRf.use };
-            }
-            // RF-row может задавать только use-flag без override ppb → его флаг важнее
-            if (perRf && entry.skuPpb && entry.skuPpb > 0) {
-                return { ppb: entry.skuPpb, use: perRf.use };
-            }
-        }
-        if (entry.skuPpb && entry.skuPpb > 0) {
-            return { ppb: entry.skuPpb, use: entry.skuUse };
-        }
-        return { ppb: null, use: entry.skuUse };
-    }, [boxMultiplicityData]);
-
     /** Резолвит SKU-уровневую кратность для bump в WB-склад (конкретный ФФ-источник
      *  заранее не известен). Приоритет:
      *    1. Nomenclature.box_qty_override (SKU-level) если use=on.
@@ -375,19 +355,29 @@ export function WarehouseNeedView() {
         return () => { cancelled = true; };
     }, [coldStartMode, analysisDays, coldStartMinPack]);
 
-    // Speed-карта /okrug-info — anchors_top per ФО. Нужно для bump-логики:
-    // выбор main_wh для «Дораспределить» использует priority-rank склада в
-    // speed-карте (POSTAVLENO) как primary ключ сортировки, share_pct из
-    // cold-start — secondary. Anchors_top — статичный справочник, грузим один раз.
+    // Speed-карта /okrug-info — anchors_top per ФО. В «Дораспределить» нужен
+    // anchor_rank склада (POSTAVLENO) как tiebreak при выборе primary-якоря ФО
+    // (после суммарной потребности base), share_pct из cold-start — следующий
+    // tiebreak. Anchors_top — статичный справочник, грузим один раз.
     const [okrugInfo, setOkrugInfo] = useState<OkrugInfo[]>([]);
+    // Speed-карта /cities — полный список 97 городов с priority-цепочками складов.
+    // В bumpedCells используется только для построения карты «склад → свой ФО»
+    // (own_okrug в priorities) — она полнее cold-start warehouseToDistrict.
+    const [speedCities, setSpeedCities] = useState<CitySpeedDTO[]>([]);
     useEffect(() => {
         let cancelled = false;
         (async () => {
             try {
-                const resp = await api.warehouseSpeed.getOkrugInfo();
-                if (!cancelled) setOkrugInfo(resp);
+                const [okrug, cities] = await Promise.all([
+                    api.warehouseSpeed.getOkrugInfo(),
+                    api.warehouseSpeed.getCities(),
+                ]);
+                if (!cancelled) {
+                    setOkrugInfo(okrug);
+                    setSpeedCities(cities);
+                }
             } catch (e) {
-                if (!cancelled) console.warn('okrug-info load failed (bump fallback на share_pct):', e);
+                if (!cancelled) console.warn('speed-map load failed (bump fallback на per-okrug):', e);
             }
         })();
         return () => { cancelled = true; };
@@ -649,40 +639,24 @@ export function WarehouseNeedView() {
         return m;
     }, [coldStartData]);
 
-    /** Client-side bump: «Дораспределить излишки» — bump в underserved ФО
-     *  ТОЛЬКО для SKU с дисбалансом локализации ИЛИ с FF-излишком.
-     *  Алгоритм покрывает 2 кейса:
-     *    (A) WB-overstock в одном ФО + пустой в другом → перебросить из FF
-     *        в underserved (классический ребаланс ИЛ)
-     *    (B) FF-излишек ≥ 3×min_pack (мёртвый груз на FF, общий профицит SKU)
-     *        → распределить избыток на underserved ФО, чтобы не зависал на FF
-     *
-     *  Целевое qty для bump = max(min_pack, avg_d_district × supply_days):
-     *    - есть продажи в ФО (avg_d > 0): target = реальная потребность ФО
-     *      (например ЦФО avg_d=2 → 2×14=28 шт)
-     *    - нет продаж (avg_d=0, ФО без истории): target = min_pack=N — bootstrap
-     *      стартового запаса для дальних регионов
-     *
-     *  Условия bump для SKU:
-     *    1. acceptance проверен (без него не знаем, принимает ли WB).
-     *    2. (WB-overstock в ≥1 ФО) ИЛИ (FF-излишек ≥ 3×min_pack).
-     *    3. Хотя бы один ФО **underserved**: stock+asm+transit+baseNeed < target_qty
-     *       И acceptance на main_wh этого ФО разрешает наш package_type.
-     *    4. FF-излишек > 0 (rf_avail - usedFf > 0).
-     *
-     *  Bump идёт в main_wh underserved ФО. Выбор склада per district:
-     *    primary key — позиция в anchors_top из speed-карты (priority-rank),
-     *    secondary — share_pct из cold-start (исторический leader заказов).
-     *  Если okrugInfo не загрузился — fallback на чистый share_pct (старая логика).
-     *  Возвращает Map<nm_id, Map<wh, additional_qty>>. */
+    /** Client-side «Дораспределить» — корректирует backend-распределение после
+     *  проверки приёмки по принципу ОДИН якорь на ФО + бутстрап ≤1 короб:
+     *    • потребность каждого ФО (Σ base его складов) консолидируется на ОДИН
+     *      primary-якорь своего ФО, кратно коробам — не размазываем по складам
+     *      округа и не грузим склады-воришки чужих ФО;
+     *    • ФО, который продаёт, но пуст (нет покрытия) — получает ровно одну
+     *      стартовую коробку (бутстрап);
+     *    • добор ограничен свободным FF-остатком (FF в минус не уводим), сам
+     *      FF-излишек НЕ выпихивается на WB.
+     *  primary-якорь ФО: больше base → выше anchor_rank (speed-карта) → больше
+     *  share_pct (cold-start); закрытый по приёмке primary заменяется на открытый.
+     *  Запускается только после «Проверить приёмку». Возвращает
+     *  Map<nm_id, Map<wh, delta>> (delta может быть отрицательной — зануление). */
     const bumpedCells = useMemo(() => {
         const result = new Map<number, Map<string, number>>();
         if (!data?.articles || acceptanceMap.size === 0) return result;
         // Bump запускается всегда после «Проверить приёмку». Per-SKU skuFloor ниже
-        // определяет target: K (если задана) → DEFAULT_BUMP_FLOOR (5 шт — стартовая
-        // коробка/мин-пак для регионов без истории продаж).
-
-        const OVERSTOCK_DAYS = 21; // ФО считается перетарен если >= 3 нед запаса
+        // определяет размер коробки: K (если задана и use=on) → DEFAULT_BUMP_FLOOR (5 шт).
 
         // anchorRank: wh_name → district_key → rank (1-based; меньше = выше).
         // Источник: /warehouse/speed/okrug-info `anchors_top` (топ-5 anchor каждого ФО).
@@ -697,24 +671,13 @@ export function WarehouseNeedView() {
             });
         }
 
-        // Группируем main_warehouses per district, сортируем по
-        // (anchor_rank ASC, share_pct DESC) — anchor speed-карты побеждает,
-        // tiebreak — исторический share_pct.
+        // candidatesByDistrict: main_warehouses каждого ФО из cold-start —
+        // нужен для tiebreak по share_pct при выборе primary-якоря ФО.
         const candidatesByDistrict = new Map<string, ColdStartMainWarehouse[]>();
         for (const w of coldStartData?.main_warehouses ?? []) {
             const list = candidatesByDistrict.get(w.district_key) ?? [];
             list.push(w);
             candidatesByDistrict.set(w.district_key, list);
-        }
-        const mainWhPerDistrict = new Map<string, string>();
-        for (const [d, cands] of candidatesByDistrict.entries()) {
-            cands.sort((x, y) => {
-                const xRank = anchorRank.get(x.warehouse)?.get(d) ?? 999;
-                const yRank = anchorRank.get(y.warehouse)?.get(d) ?? 999;
-                if (xRank !== yRank) return xRank - yRank;
-                return (y.share_pct ?? 0) - (x.share_pct ?? 0);
-            });
-            if (cands.length > 0) mainWhPerDistrict.set(d, cands[0].warehouse);
         }
 
         for (const a of data.articles) {
@@ -724,251 +687,122 @@ export function WarehouseNeedView() {
             const skuPackages = new Set<string>(
                 (acceptanceItem.splits ?? []).map(s => s.package_type),
             );
-            // Per-SKU floor для bump (минимум на underserved main_wh округа):
-            //   1. K (если задана и use=on) — одна коробка, источник Nomenclature.box_qty_override
-            //      или per-ФФ box_qty_per_warehouse (mode по складам с большим стоком).
-            //   2. DEFAULT_BUMP_FLOOR=5 — стартовая коробка/мин-пак, чтобы SKU без K
-            //      тоже автоматически распределялись на пустые регионы после «Проверить
-            //      приёмку».
-            const DEFAULT_BUMP_FLOOR = 5;
+            // Кратность коробки SKU (K). Если K не задана/выключена — НЕ трогаем
+            // backend-распределение: отправляем как посчитано (исключение из правила
+            // «минимум коробка»). resolveSkuLevelPpb: Nomenclature.box_qty_override
+            // или per-ФФ box_qty_per_warehouse.
             const { ppb: skuPpb, use: skuUse } = resolveSkuLevelPpb(a.nm_id);
-            const skuFloor = (skuPpb && skuPpb > 0 && skuUse) ? skuPpb : DEFAULT_BUMP_FLOOR;
-            if (skuFloor <= 0) continue;
+            if (!(skuPpb && skuPpb > 0 && skuUse)) continue;
+            const ppb = skuPpb;
 
-            // Шаг 1: агрегируем coverage per district по всем wbWarehouses.
-            type DistAgg = { stock: number; asm: number; transit: number; need: number; avgD: number };
-            const byDistrict = new Map<string, DistAgg>();
-            for (const wh of wbWarehouses) {
-                const d = warehouseToDistrict.get(wh.name);
-                if (!d || d === 'unknown' || d === 'abroad') continue;
-                const whData = data.warehouses.find(w => w.name === wh.name);
-                const cell = whData?.articles?.[a.nm_id];
-                const prev = byDistrict.get(d) ?? { stock: 0, asm: 0, transit: 0, need: 0, avgD: 0 };
-                prev.stock += cell?.stock || 0;
-                prev.asm += a.asm_by_warehouse?.[wh.name] || 0;
-                prev.transit += a.transit_by_warehouse?.[wh.name] || 0;
-                prev.need += getBaseArticleWbNeed(a, wh.name);
-                prev.avgD += cell?.avg_daily || 0;
-                byDistrict.set(d, prev);
-            }
-
-            // Шаг 2: классифицируем ФО на overstocked / understocked.
-            // Target qty для каждого ФО = max(min_pack, avg_d_district × supply_days):
-            //   - есть продажи → реальная потребность ФО на горизонт планирования
-            //   - нет продаж (avg_d=0) → bootstrap min_pack=N (старт с пустого)
-            // Understocked = coverage < target. Это даёт правильный «bump до спроса»,
-            // а не «5 шт всем» — ЦФО с avg_d=2 получит 28 шт (2×14), а ДВ без
-            // продаж получит 5 шт (bootstrap).
-            // Если K задана и use=on — округляем target ВВЕРХ до целых коробок,
-            // иначе bump-цифра окажется частью коробки (demand=29, K=20 → шлём 40).
-            const effectivePpb = (skuPpb && skuPpb > 0 && skuUse) ? skuPpb : null;
-            let hasWbOverstock = false;
-            const understockedDistricts: { d: string; targetQty: number }[] = [];
-            for (const [d, agg] of byDistrict.entries()) {
-                const total = agg.stock + agg.asm + agg.transit;
-                const daysCovered = agg.avgD > 0 ? total / agg.avgD : Infinity;
-                const isOverstock = (
-                    daysCovered >= OVERSTOCK_DAYS
-                    || (agg.avgD === 0 && total >= 3 * skuFloor)
-                );
-                if (isOverstock) hasWbOverstock = true;
-                const totalWithPlan = total + agg.need;
-                // Target по спросу ФО; skuFloor — нижняя граница (K или DEFAULT_BUMP_FLOOR=5).
-                let targetQty = Math.max(skuFloor, Math.round(agg.avgD * supplyDays));
-                if (effectivePpb) {
-                    targetQty = Math.ceil(targetQty / effectivePpb) * effectivePpb;
-                }
-                if (totalWithPlan < targetQty) {
-                    understockedDistricts.push({ d, targetQty });
-                }
-            }
-
-            // Шаг 3: остаток FF после Hamilton-cap.
-            const totalRfAvail = Object.values(a.rf_stocks).reduce((s, v) => s + (v?.available || 0), 0);
-            let usedFf = 0;
-            for (const wh of wbWarehouses) {
-                usedFf += getBaseArticleWbNeed(a, wh.name);
-            }
-            const ffSurplus = Math.max(0, totalRfAvail - usedFf);
-            // FF-излишек = есть мёртвый груз на FF, который Hamilton не запланировал
-            // (total_need < rf_avail, профицит SKU в целом). Активирует bump
-            // независимо от того, перетарен ли где-то WB — иначе SKU с FF-стоком
-            // 500шт но без WB-overstock «зависает» в FF без распределения.
-            // Порог 3×skuFloor: считаем «мёртвым грузом» когда излишка хватает
-            // минимум на 3 стартовые коробки.
-            const hasFfSurplus = ffSurplus >= 3 * skuFloor;
-
-            // Дисбаланс = (WB-overstock в ФО ИЛИ FF-излишек) И understocked ФО.
-            // Только понижение без overstock — bump не нужен (общий дефицит SKU).
-            // Без understocked — bump некуда.
-            // Per-cell ceiling работает даже без understocked/overstock — если K
-            // задана, любая клетка с base>0 должна быть кратна коробке.
-            const oldBumpEligible = (hasWbOverstock || hasFfSurplus) && understockedDistricts.length > 0;
-            const ceilEligible = !!effectivePpb;
-            if (!oldBumpEligible && !ceilEligible) continue;
-            // Раньше тут был gate `if (ffSurplus <= 0) continue` — он блокировал
-            // округление до коробок для SKU, где Hamilton-cap уже выбрал весь FF
-            // (ffSurplus=0). Теперь оставляем continue только если К не задана:
-            // если К есть, продолжаем — шаги 4/5 на нулевом remaining ничего не
-            // сделают, но шаг 6 (floor-rebalance) подровняет клетки до коробок.
-            if (ffSurplus <= 0 && !effectivePpb) continue;
-            let remaining = ffSurplus;
-
-            // Шаг 4: bump ТОЛЬКО в main_wh underserved ФО, по убыванию приоритета
-            // (ДВ+СФО первым — самые проблемные; потом УФО, ПФО, СЗФО).
-            const priorityOrder = ['far_east_siberia', 'ural', 'volga', 'northwest', 'south_caucasus', 'central'];
-            const orderedUnderstocked = understockedDistricts
-                .slice()
-                .sort((x, y) => priorityOrder.indexOf(x.d) - priorityOrder.indexOf(y.d));
-
+            // Распределение «Дораспределить»: ОДИН якорь на ФО, отгрузка ЦЕЛЫМИ
+            // коробками в рамках свободного FF; дальние/проблемные ФО — первыми.
+            // Воришек чужих ФО не грузим. Если свободного FF меньше одной коробки —
+            // товар не трогаем, отправляем backend-базу как есть (исключение).
             const perSku = new Map<string, number>();
-            for (const { d, targetQty } of orderedUnderstocked) {
-                if (remaining <= 0) break;
-                const mainWh = mainWhPerDistrict.get(d);
-                if (!mainWh) continue;
-                const acceptance = acceptanceItem.availability?.[mainWh];
-                if (!acceptance) continue;
-                const canSendThisSku = (
-                    (skuPackages.has('BOX') && acceptance.can_box)
-                    || (skuPackages.has('MONOPALLET') && acceptance.can_monopallet)
-                    || (skuPackages.has('SUPERSAFE') && acceptance.can_supersafe)
-                );
-                if (!canSendThisSku) continue;
-                const agg = byDistrict.get(d);
-                if (!agg) continue;
-                const currentAtDistrict = agg.stock + agg.asm + agg.transit + agg.need;
-                if (currentAtDistrict >= targetQty) continue;
-                const bump = Math.min(targetQty - currentAtDistrict, remaining);
-                if (bump > 0) {
-                    perSku.set(mainWh, bump);
-                    remaining -= bump;
+            const totalRfAvail = Object.values(a.rf_stocks).reduce((s, v) => s + (v?.available || 0), 0);
+            const boxBudget = Math.floor(totalRfAvail / ppb);
+            if (boxBudget <= 0) continue;
+
+            // Карта склад → свой ФО из speed-карты (own_okrug в priorities);
+            // fallback на cold-start warehouseToDistrict (top-12).
+            const whOwnOkrug = new Map<string, string>();
+            for (const city of speedCities) {
+                for (const p of city.priorities) {
+                    if (p.own_okrug && p.own_okrug !== 'unknown' && !whOwnOkrug.has(p.warehouse_name)) {
+                        whOwnOkrug.set(p.warehouse_name, p.own_okrug);
+                    }
                 }
             }
+            const ownOkrugOf = (wh: string): string | undefined =>
+                whOwnOkrug.get(wh) || warehouseToDistrict.get(wh);
 
-            // Шаг 5: per-cell ceiling до коробок (если K задана).
-            // Каждая клетка SKU с потребностью >0 (base + bump_main) округляется
-            // ВВЕРХ до ближайшего кратного K. Применяется по приоритету
-            // (anchor_rank ASC, share_pct DESC) до исчерпания FF-бюджета.
-            // Логика: «3 шт на склад? нет, минимум 20 = одна коробка. 33 шт? 40 = две коробки».
-            if (effectivePpb && remaining > 0) {
-                type CeilCell = { wh: string; deficit: number; rank: number; share: number };
-                const ceilCells: CeilCell[] = [];
-                for (const wh of wbWarehouses) {
-                    const base = getBaseArticleWbNeed(a, wh.name);
-                    const bumped = perSku.get(wh.name) || 0;
-                    const current = base + bumped;
-                    // Округляем только клетки где сервер УЖЕ распределил отправку (base>0).
-                    // Acceptance check НЕ применяется: раз сервер положил туда base —
-                    // значит склад принимает SKU. Иначе теряем округление для клеток,
-                    // где acceptance.availability не покрыл склад полностью.
-                    if (current <= 0) continue;
-                    const target = Math.ceil(current / effectivePpb) * effectivePpb;
-                    const deficit = target - current;
-                    if (deficit <= 0) continue;
-                    // district известен только для top-12 cold-start main_warehouses;
-                    // для прочих складов (Воронеж, Владимир, Рязань, Пенза…) d=undefined.
-                    // Раньше эти клетки исключались целиком — Воронеж base=2 не округлялся
-                    // до коробки K=22. Теперь округляем все, прочим — rank=999, share=0,
-                    // т.е. они идут после main_warehouses в порядке применения.
-                    const d = warehouseToDistrict.get(wh.name);
-                    const rank = (d ? anchorRank.get(wh.name)?.get(d) : undefined) ?? 999;
-                    const cands = d ? (candidatesByDistrict.get(d) ?? []) : [];
-                    const share = cands.find(c => c.warehouse === wh.name)?.share_pct ?? 0;
-                    ceilCells.push({ wh: wh.name, deficit, rank, share });
-                }
-                ceilCells.sort((x, y) => {
+            const canSendToWh = (whName: string): boolean => {
+                const acc = acceptanceItem.availability?.[whName];
+                if (!acc) return false;
+                return (
+                    (skuPackages.has('BOX') && acc.can_box)
+                    || (skuPackages.has('MONOPALLET') && acc.can_monopallet)
+                    || (skuPackages.has('SUPERSAFE') && acc.can_supersafe)
+                );
+            };
+
+            // Агрегация по ФО (склады своего ФО — кандидаты в primary-якорь;
+            // воришки чужих ФО идут в агрегат СВОЕГО ФО).
+            type OkrugAgg = {
+                base: number; coverage: number; avgD: number;
+                anchors: { wh: string; base: number; rank: number; share: number }[];
+            };
+            const byOkrug = new Map<string, OkrugAgg>();
+            for (const wh of wbWarehouses) {
+                const ok = ownOkrugOf(wh.name);
+                if (!ok || ok === 'unknown' || ok === 'abroad') continue;
+                const cell = data.warehouses.find(w => w.name === wh.name)?.articles?.[a.nm_id];
+                const base = getBaseArticleWbNeed(a, wh.name);
+                const agg = byOkrug.get(ok) ?? { base: 0, coverage: 0, avgD: 0, anchors: [] };
+                agg.base += base;
+                agg.coverage += (cell?.stock || 0)
+                    + (a.asm_by_warehouse?.[wh.name] || 0)
+                    + (a.transit_by_warehouse?.[wh.name] || 0);
+                agg.avgD += cell?.avg_daily || 0;
+                const rank = anchorRank.get(wh.name)?.get(ok) ?? 999;
+                const share = (candidatesByDistrict.get(ok) ?? []).find(c => c.warehouse === wh.name)?.share_pct ?? 0;
+                agg.anchors.push({ wh: wh.name, base, rank, share });
+                byOkrug.set(ok, agg);
+            }
+
+            // Цели отгрузки: один primary-якорь на ФО (потребность = Σbase ФО, либо
+            // 1 коробка-бутстрап для продающего пустого ФО) + «осиротевшие» склады,
+            // чьё WB-имя не сопоставилось с ФО (округляются как отдельная цель).
+            const okrugPriority = ['far_east_siberia', 'ural', 'volga', 'northwest', 'south_caucasus', 'central'];
+            type ShipTarget = { wh: string; need: number; zero: string[]; pr: number };
+            const targets: ShipTarget[] = [];
+            for (const [ok, agg] of byOkrug) {
+                const ranked = agg.anchors.slice().sort((x, y) => {
+                    if (x.base !== y.base) return y.base - x.base;
                     if (x.rank !== y.rank) return x.rank - y.rank;
                     return y.share - x.share;
                 });
-                for (const cell of ceilCells) {
-                    if (remaining <= 0) break;
-                    const apply = Math.min(cell.deficit, remaining);
-                    if (apply > 0) {
-                        perSku.set(cell.wh, (perSku.get(cell.wh) || 0) + apply);
-                        remaining -= apply;
-                    }
-                }
+                const primary = ranked.find(c => canSendToWh(c.wh)) ?? ranked[0];
+                if (!canSendToWh(primary.wh)) continue;   // нет открытого якоря ФО — backend base как есть
+                let need = 0;
+                if (agg.base > 0) need = agg.base;
+                else if (agg.avgD > 0 && agg.coverage < ppb) need = ppb;   // бутстрап = 1 коробка
+                const zero = agg.anchors.filter(c => c.wh !== primary.wh && c.base > 0).map(c => c.wh);
+                targets.push({ wh: primary.wh, need, zero, pr: okrugPriority.indexOf(ok) });
             }
+            for (const wh of wbWarehouses) {              // осиротевшие склады (не в speed-карте)
+                const ok = ownOkrugOf(wh.name);
+                if (ok && ok !== 'unknown' && ok !== 'abroad') continue;
+                const base = getBaseArticleWbNeed(a, wh.name);
+                if (base <= 0 || !canSendToWh(wh.name)) continue;
+                targets.push({ wh: wh.name, need: base, zero: [], pr: 99 });
+            }
+            // Дальние ФО первыми (под тесный FF), затем по объёму потребности.
+            targets.sort((x, y) => (x.pr - y.pr) || (y.need - x.need));
 
-            // Шаг 6: floor-rebalance до целых коробок (если K задана).
-            // Запускается ПОСЛЕ шагов 4+5. Если ffSurplus был мал/0, ceil-up не
-            // округлил все клетки — здесь перераспределяем уже распределённое qty
-            // в целые коробки: cells с current >= K получают целые короба по
-            // нужде, мелкие хвосты зануляются (qty остаётся на FF).
-            // Пример: 120х160_пепельный K=19, can_send=87, ffSurplus=0 → 4 короба
-            // × 19 = 76 на top-4 main_wh, остальные клетки → 0, 11 шт на FF.
-            // bumpedCells здесь может содержать negative deltas — это корректно,
-            // getArticleWbNeed = base + delta даст итоговое qty.
-            if (effectivePpb) {
-                type RebalanceCell = { wh: string; current: number; rank: number; share: number };
-                const cellEntries: RebalanceCell[] = [];
-                let totalCurrent = 0;
-                let hasDirtyCell = false;
-                for (const wh of wbWarehouses) {
-                    const base = getBaseArticleWbNeed(a, wh.name);
-                    const bumped = perSku.get(wh.name) || 0;
-                    const current = base + bumped;
-                    if (current <= 0) continue;
-                    totalCurrent += current;
-                    if (current % effectivePpb !== 0) hasDirtyCell = true;
-                    const d = warehouseToDistrict.get(wh.name);
-                    const rank = (d ? anchorRank.get(wh.name)?.get(d) : undefined) ?? 999;
-                    const cands = d ? (candidatesByDistrict.get(d) ?? []) : [];
-                    const share = cands.find(c => c.warehouse === wh.name)?.share_pct ?? 0;
-                    cellEntries.push({ wh: wh.name, current, rank, share });
+            // Раздаём целые коробки по приоритету в рамках FF-бюджета. Хвост
+            // < коробки остаётся на FF (уедет в следующую поставку).
+            let boxesLeft = boxBudget;
+            for (const t of targets) {
+                for (const s of t.zero) {                 // консолидация: сателлиты ФО → 0
+                    const sBase = getBaseArticleWbNeed(a, s);
+                    perSku.set(s, (perSku.get(s) || 0) - sBase);
                 }
-                if (hasDirtyCell && cellEntries.length > 0) {
-                    const totalBoxes = Math.floor(totalCurrent / effectivePpb);
-                    const boxes = new Map<string, number>();
-                    let boxesLeft = totalBoxes;
-                    // Pass 1: жадно по нужде — клеткам c current ≥ K даём floor(current/K) коробок.
-                    // Сортировка: current DESC (наибольшая нужда первой), tiebreak (rank ASC, share DESC).
-                    const byNeed = cellEntries.slice().sort((x, y) => {
-                        if (x.current !== y.current) return y.current - x.current;
-                        if (x.rank !== y.rank) return x.rank - y.rank;
-                        return y.share - x.share;
-                    });
-                    for (const c of byNeed) {
-                        if (boxesLeft <= 0) break;
-                        const want = Math.floor(c.current / effectivePpb);
-                        if (want <= 0) continue;
-                        const give = Math.min(want, boxesLeft);
-                        boxes.set(c.wh, give);
-                        boxesLeft -= give;
-                    }
-                    // Pass 2: остаток коробок — клеткам, которые ещё не получили коробку,
-                    // в порядке (current % K DESC) — кто ближе к полной коробке.
-                    if (boxesLeft > 0) {
-                        const byRemainder = cellEntries.slice().sort((x, y) => {
-                            const rx = x.current % effectivePpb;
-                            const ry = y.current % effectivePpb;
-                            if (rx !== ry) return ry - rx;
-                            if (x.rank !== y.rank) return x.rank - y.rank;
-                            return y.share - x.share;
-                        });
-                        for (const c of byRemainder) {
-                            if (boxesLeft <= 0) break;
-                            if ((boxes.get(c.wh) || 0) > 0) continue;
-                            if ((c.current % effectivePpb) === 0) continue;
-                            boxes.set(c.wh, 1);
-                            boxesLeft -= 1;
-                        }
-                    }
-                    // Записываем delta в perSku: final = boxes×K, delta = final - current.
-                    for (const c of cellEntries) {
-                        const final = (boxes.get(c.wh) || 0) * effectivePpb;
-                        const delta = final - c.current;
-                        if (delta !== 0) {
-                            perSku.set(c.wh, (perSku.get(c.wh) || 0) + delta);
-                        }
-                    }
+                let shipped = 0;
+                if (t.need > 0 && boxesLeft > 0) {
+                    const give = Math.min(Math.ceil(t.need / ppb), boxesLeft);
+                    shipped = give * ppb;
+                    boxesLeft -= give;
                 }
+                const delta = shipped - getBaseArticleWbNeed(a, t.wh);
+                if (delta !== 0) perSku.set(t.wh, (perSku.get(t.wh) || 0) + delta);
             }
 
             if (perSku.size > 0) result.set(a.nm_id, perSku);
         }
         return result;
-    }, [supplyDays, data, newcomerSet, wbWarehouses, acceptanceMap, getBaseArticleWbNeed, coldStartData, warehouseToDistrict, okrugInfo, boxMultiplicityData, resolveSkuLevelPpb]);
+    }, [data, newcomerSet, wbWarehouses, acceptanceMap, getBaseArticleWbNeed, coldStartData, warehouseToDistrict, okrugInfo, speedCities, resolveSkuLevelPpb]);
 
     /** Итоговый per-cell need: base + client-side bump (если активен «Дораспределить»). */
     const getArticleWbNeed = useCallback((article: NeedArticle, whName: string): number => {
@@ -1417,6 +1251,8 @@ export function WarehouseNeedView() {
                 let qty = 0;
                 let tgt: Record<string, number> = {};
                 let srcAlloc: Record<string, number> = {};
+                let ppb = 0;
+                let ppbUse = false;
 
                 if (article) {
                     // Обычный SKU → используем итоговый план = can_send + bump из «Дораспределить»
@@ -1429,16 +1265,13 @@ export function WarehouseNeedView() {
                     const planTotal = getSendWithBump(nmId, article.can_send);
                     qty = Math.min(totalAvail, planTotal);
                     if (qty > 0) {
-                        // Определяем preferred RF для resolveBoxMult — assemblyWarehouseId если он
-                        // имеет сток, иначе RF с максимальным available.
-                        const sortedRf = [...allRfWarehouses].sort((a, b) =>
-                            (article.rf_stocks[b.id]?.available || 0) - (article.rf_stocks[a.id]?.available || 0),
-                        );
-                        const ppbRfId = (assemblyWarehouseId != null
-                            && (article.rf_stocks[assemblyWarehouseId]?.available || 0) > 0)
-                            ? assemblyWarehouseId
-                            : (sortedRf[0]?.id ?? 0);
-                        const { ppb, use } = resolveBoxMult(nmId, ppbRfId);
+                        // Кратность SKU-уровня — ТОТ ЖЕ K, что использует матрица
+                        // (resolveSkuLevelPpb в bump/бейдже). Иначе источник и матрица
+                        // расходятся: бейдж «кратно 22», а сборка бьёт не коробками.
+                        const bm = resolveSkuLevelPpb(nmId);
+                        ppb = bm.ppb || 0;
+                        ppbUse = bm.use;
+                        const use = bm.use;
                         // whNeeds = per-cell qty матрицы (base + bump), а не сырой backend need.
                         const whNeeds = data.warehouses
                             .map(wh => ({ name: wh.name, need: getArticleWbNeed(article, wh.name) }))
@@ -1472,76 +1305,126 @@ export function WarehouseNeedView() {
                     continue;
                 }
 
-                // Если acceptance проверен и вернул splits — используем post-redistribute
-                // распределение per package_type (одна транспортная единица = один тип).
-                // Иначе — fallback на исходный tgt с package_type=BOX.
-                // src на каждый split распределяем пропорционально доле splitQty/qty.
+                // tgt берём из МАТРИЦЫ (distributeByBoxMultiple по getArticleWbNeed —
+                // якоря + кратность коробок), а приёмку используем ТОЛЬКО чтобы
+                // определить тип упаковки каждого склада (короб/моно/сейф) и разбить
+                // tgt на отдельные строки per package_type. Так Σ черновика = «Отправить».
                 const acceptanceItem = acceptanceMap.get(nmId);
-                const allSplits = acceptanceItem?.splits ?? [];
-                // Уважаем фильтр Короб/Моно из шапки: если выбран короб — не пихаем
-                // моно-части в draft (и наоборот). Без этого SKU с двумя splits
-                // (BOX+MONOPALLET) попадали в draft обеими частями, даже когда
-                // пользователь явно выбрал только один тип.
-                const splits = packageFilter === 'box'
-                    ? allSplits.filter(s => s.package_type === 'BOX')
-                    : packageFilter === 'mono'
-                    ? allSplits.filter(s => s.package_type === 'MONOPALLET')
-                    : allSplits;
-                if (acceptanceItem && splits.length > 0) {
-                    for (const split of splits) {
-                        const splitQty = Object.values(split.distribution).reduce((a, b) => a + b, 0);
-                        if (splitQty <= 0) continue;
-                        // Пропорционально распределяем srcAlloc на split через largest-remainder:
-                        // floor по каждому ФФ + раздаём остаток по самым большим дробным частям.
-                        // Без этого `Math.round` для .5-долей округлял обе стороны вверх и
-                        // Σ ист становился > Σ цель (та самая разница 12543 vs 12541).
-                        const splitSrc: Record<string, number> = {};
-                        const fractions: Array<{ rfId: string; frac: number }> = [];
-                        let allocated = 0;
-                        for (const [rfId, take] of Object.entries(srcAlloc)) {
-                            const exact = (take * splitQty) / qty;
-                            const floor = Math.floor(exact);
-                            splitSrc[rfId] = floor;
-                            allocated += floor;
-                            fractions.push({ rfId, frac: exact - floor });
-                        }
-                        fractions.sort((a, b) => b.frac - a.frac || a.rfId.localeCompare(b.rfId));
-                        let remainder = splitQty - allocated;
-                        for (let i = 0; i < fractions.length && remainder > 0; i++) {
-                            splitSrc[fractions[i].rfId] += 1;
-                            remainder -= 1;
-                        }
-                        // Cleanup: убираем нулевые записи, чтобы backend не отвергал
-                        // (commit_draft требует Σ src > 0 и Σ src == Σ tgt).
-                        for (const k of Object.keys(splitSrc)) {
-                            if (splitSrc[k] <= 0) delete splitSrc[k];
-                        }
-                        draftRows.push({
-                            nm_id: nmId,
-                            barcode,
-                            vendor_code: vendor,
-                            src: splitSrc,
-                            tgt: { ...split.distribution },
-                            package_type: split.package_type,
-                        });
+                const whPkg: Record<string, PackageType> = {};
+                for (const split of acceptanceItem?.splits ?? []) {
+                    for (const wh of Object.keys(split.distribution)) {
+                        if (!(wh in whPkg)) whPkg[wh] = split.package_type;
                     }
-                } else if (!acceptanceItem || allSplits.length === 0) {
-                    // Acceptance не проверялся (или вернул пустой splits) — fallback.
-                    // packageFilter уважаем: если выбран Моно, default MONOPALLET, иначе BOX.
-                    const fallbackPkg: PackageType = packageFilter === 'mono'
-                        ? 'MONOPALLET'
-                        : (acceptanceItem?.package_type ?? 'BOX') as PackageType;
+                }
+                const pkgOf = (wh: string): PackageType => {
+                    if (whPkg[wh]) return whPkg[wh];
+                    const av = acceptanceItem?.availability?.[wh];
+                    if (av?.can_box) return 'BOX';
+                    if (av?.can_monopallet) return 'MONOPALLET';
+                    if (av?.can_supersafe) return 'SUPERSAFE';
+                    return 'BOX';
+                };
+
+                // Группируем матричный tgt по типу упаковки.
+                const byPkg = new Map<PackageType, Record<string, number>>();
+                for (const [wh, q] of Object.entries(tgt)) {
+                    if (q <= 0) continue;
+                    const pkg = pkgOf(wh);
+                    const d = byPkg.get(pkg) ?? {};
+                    d[wh] = q;
+                    byPkg.set(pkg, d);
+                }
+
+                // Источник: общий FF-пул на все упаковки SKU. В box-режиме берём
+                // ТОЛЬКО целыми коробками K (на FF хранятся короба — нельзя
+                // отгрузить «1 шт» из склада). Без кратности — пропорционально.
+                const ffPool: Record<number, number> = {};
+                for (const w of allRfWarehouses) ffPool[w.id] = article?.rf_stocks[w.id]?.available || 0;
+                const ffOrder = [...allRfWarehouses].sort((a, b) => {
+                    if (assemblyWarehouseId != null) {
+                        if (a.id === assemblyWarehouseId) return -1;
+                        if (b.id === assemblyWarehouseId) return 1;
+                    }
+                    return (ffPool[b.id] || 0) - (ffPool[a.id] || 0);
+                });
+                const boxMode = ppb > 0 && ppbUse;
+
+                // Урезать tgt до total целыми коробками (мелкие WB режем первыми).
+                const trimTgt = (t: Record<string, number>, total: number): Record<string, number> => {
+                    const out = { ...t };
+                    let cur = Object.values(out).reduce((s, v) => s + v, 0);
+                    for (const wh of Object.keys(out).sort((a, b) => out[a] - out[b])) {
+                        if (cur <= total) break;
+                        const drop = Math.min(out[wh], cur - total);
+                        out[wh] -= drop;
+                        cur -= drop;
+                        if (out[wh] <= 0) delete out[wh];
+                    }
+                    return out;
+                };
+
+                for (const [pkg, dist] of byPkg) {
+                    // Уважаем фильтр Короб/Моно из шапки.
+                    if (packageFilter === 'box' && pkg !== 'BOX') continue;
+                    if (packageFilter === 'mono' && pkg !== 'MONOPALLET') continue;
+                    let pkgTgt = dist;
+                    let pkgQty = Object.values(pkgTgt).reduce((a, b) => a + b, 0);
+                    if (pkgQty <= 0) continue;
+
+                    const pkgSrc: Record<string, number> = {};
+                    if (boxMode) {
+                        // Целые коробки K из общего FF-пула (короб/моно делят пул).
+                        let need = pkgQty;
+                        for (const w of ffOrder) {
+                            if (need <= 0) break;
+                            const boxes = Math.floor((ffPool[w.id] || 0) / ppb);
+                            if (boxes <= 0) continue;
+                            const takeBoxes = Math.min(Math.floor(need / ppb), boxes);
+                            if (takeBoxes <= 0) continue;
+                            const take = takeBoxes * ppb;
+                            pkgSrc[String(w.id)] = take;
+                            ffPool[w.id] -= take;
+                            need -= take;
+                        }
+                        const sourced = pkgQty - need;
+                        if (sourced <= 0) continue;            // нет целых коробок в источниках
+                        if (sourced < pkgQty) {
+                            pkgTgt = trimTgt(pkgTgt, sourced); // источников меньше — режем tgt коробками
+                            pkgQty = sourced;
+                        }
+                    } else {
+                        // Без кратности — берём из ОБЩЕГО FF-пула с истощением (units),
+                        // чтобы один остаток FF не задваивался между короб/моно.
+                        let need = pkgQty;
+                        for (const w of ffOrder) {
+                            if (need <= 0) break;
+                            const avail = ffPool[w.id] || 0;
+                            if (avail <= 0) continue;
+                            const take = Math.min(need, avail);
+                            pkgSrc[String(w.id)] = take;
+                            ffPool[w.id] -= take;
+                            need -= take;
+                        }
+                        const sourced = pkgQty - need;
+                        if (sourced <= 0) continue;            // нет остатка в источниках
+                        if (sourced < pkgQty) {
+                            pkgTgt = trimTgt(pkgTgt, sourced); // FF меньше — режем tgt
+                            pkgQty = sourced;
+                        }
+                    }
+                    for (const k of Object.keys(pkgSrc)) {
+                        if (pkgSrc[k] <= 0) delete pkgSrc[k];
+                    }
+                    if (Object.keys(pkgSrc).length === 0) continue;
                     draftRows.push({
                         nm_id: nmId,
                         barcode,
                         vendor_code: vendor,
-                        src: srcAlloc,
-                        tgt,
-                        package_type: fallbackPkg,
+                        src: pkgSrc,
+                        tgt: pkgTgt,
+                        package_type: pkg,
                     });
                 }
-                // Если acceptance был, splits были, но после фильтрации все отсеялись —
-                // пропускаем SKU (не подходит под текущий packageFilter).
             }
 
             if (draftRows.length === 0) {
@@ -1601,7 +1484,7 @@ export function WarehouseNeedView() {
         }
     }, [data, assemblyWarehouseId, checkedIds, router, slug, acceptanceMap, packageFilter,
         coldStartData, filteredMainWarehouses, coldStartQtyOverrides, coldStartMinPack,
-        getSendWithBump, getArticleWbNeed]);
+        getSendWithBump, getArticleWbNeed, resolveSkuLevelPpb]);
 
     /* (cold-start теперь идёт через объединённый handleCreateAssembly выше) */
 
@@ -2845,6 +2728,26 @@ export function WarehouseNeedView() {
                                                     {[a.brand, a.subject].filter(Boolean).join(' \u00B7 ')}
                                                 </div>
                                             )}
+                                            {(() => {
+                                                const { ppb: kPpb } = resolveSkuLevelPpb(a.nm_id);
+                                                const hasK = !!(kPpb && kPpb > 0);
+                                                return (
+                                                    <span
+                                                        title={hasK
+                                                            ? `\u041A\u0440\u0430\u0442\u043D\u043E\u0441\u0442\u044C \u043A\u043E\u0440\u043E\u0431\u0430: ${kPpb} \u0448\u0442`
+                                                            : '\u041A\u0440\u0430\u0442\u043D\u043E\u0441\u0442\u044C \u043D\u0435 \u0437\u0430\u0434\u0430\u043D\u0430 \u2014 \u043E\u0442\u043F\u0440\u0430\u0432\u043A\u0430 \u043A\u0430\u043A \u0435\u0441\u0442\u044C'}
+                                                        style={{
+                                                            display: 'inline-block', marginTop: 3,
+                                                            padding: '1px 6px', borderRadius: 6,
+                                                            fontSize: 9, fontWeight: 600,
+                                                            background: hasK ? 'rgba(52,199,89,0.14)' : 'rgba(142,142,147,0.16)',
+                                                            color: hasK ? '#1f7a3a' : '#6e6e73',
+                                                        }}
+                                                    >
+                                                        {hasK ? `\uD83D\uDCE6 \u043A\u0440\u0430\u0442\u043D\u043E ${kPpb}` : '\u0431\u0435\u0437 \u043A\u0440\u0430\u0442\u043D\u043E\u0441\u0442\u0438'}
+                                                    </span>
+                                                );
+                                            })()}
                                         </td>
                                         {/* Revenue */}
                                         <td style={{ ...tdBase, fontWeight: 500 }}>

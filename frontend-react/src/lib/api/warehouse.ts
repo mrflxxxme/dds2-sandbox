@@ -416,8 +416,9 @@ export function addWarehouseMethods(api: ApiClient) {
         deleteAssemblyDraft(id: number) {
             return api.request<void>('DELETE', `/api/v1/assembly/drafts/${id}`);
         },
-        commitAssemblyDraft(id: number) {
-            return api.request<AssemblyDraftCommitResponse>('POST', `/api/v1/assembly/drafts/${id}/commit`);
+        commitAssemblyDraft(id: number, packageType?: string) {
+            const q = packageType ? `?package_type=${encodeURIComponent(packageType)}` : '';
+            return api.request<AssemblyDraftCommitResponse>('POST', `/api/v1/assembly/drafts/${id}/commit${q}`);
         },
 
         // ─── Box-multiplicity (кратность коробки) ────────────────────────

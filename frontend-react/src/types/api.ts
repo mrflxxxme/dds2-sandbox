@@ -3063,6 +3063,9 @@ export interface OkrugBasketStats {
 export interface CityPriorityRow {
   warehouse_name: string;
   hours: number;
+  /** ФО самого склада (например 'volga' для Казани). Нужно для отличия
+   *  anchor (own_okrug === city.okrug_key) от stealer (другой ФО). */
+  own_okrug: string;
 }
 
 export interface CitySpeedDTO {
