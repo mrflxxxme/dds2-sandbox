@@ -11,10 +11,12 @@ import pytest
 from backend.schemas.cold_start import DistributeRequest
 from backend.services import cold_start_distribution_service as cs
 from backend.services.cold_start_distribution_service import (
+    _DEFAULT_MAIN_WAREHOUSES,
     FALLBACK_DISTRICT_SHARE,
     FAR_EAST_MAX_SHARE,
     _cap_far_east_share,
     _is_spec_warehouse,
+    _route_far_east_excess,
     distribute,
     distribute_multi,
     pick_main_warehouse_per_district,
@@ -168,6 +170,21 @@ class TestFarEastCap:
         src = {"far_east_siberia": 0.19, "ural": 0.09}
         _cap_far_east_share(src)
         assert src["far_east_siberia"] == 0.19  # вход не мутирован (важно для общего FALLBACK)
+
+    def test_route_30pct_excess_ekb_to_els(self) -> None:
+        ekb = _DEFAULT_MAIN_WAREHOUSES["ural"]
+        els = _DEFAULT_MAIN_WAREHOUSES["central"]
+        alloc = {ekb: 100, els: 50}
+        _route_far_east_excess(alloc, excess_qty=100)  # 30% → Электросталь
+        assert alloc[ekb] == 70
+        assert alloc[els] == 80
+        assert alloc[ekb] + alloc[els] == 150  # total сохранён
+
+    def test_route_noop_if_ekb_insufficient(self) -> None:
+        ekb = _DEFAULT_MAIN_WAREHOUSES["ural"]
+        alloc = {ekb: 5}  # move=30 > 5 → не трогаем
+        _route_far_east_excess(alloc, excess_qty=100)
+        assert alloc == {ekb: 5}
 
 
 class TestSpecWarehouse:

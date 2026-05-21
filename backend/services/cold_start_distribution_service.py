@@ -86,10 +86,16 @@ _SKIP_DISTRICTS_DEFAULT: frozenset[str] = frozenset({"abroad", "unknown"})
 # ворота в Сибирь/ДВ: туда довозим, а WB дотягивает последнюю милю восточнее).
 FAR_EAST_MAX_SHARE: float = 0.06
 
+# Доля излишка ДВ, уходящая на Электросталь (остальное — Екатеринбург). Оба склада
+# по speed-карте обслуживают ДВ как «воришки» (WB развозит ДВ-заказы с них).
+FAR_EAST_EXCESS_TO_ELS: float = 0.30
+
 
 def _cap_far_east_share(bench_share: dict[str, float]) -> dict[str, float]:
     """ДВ-доля сверх FAR_EAST_MAX_SHARE перекидывается на Урал. Возвращает НОВЫЙ
-    dict (не мутирует вход — bench_share может быть общим FALLBACK_DISTRICT_SHARE)."""
+    dict (не мутирует вход — bench_share может быть общим FALLBACK_DISTRICT_SHARE).
+    Часть этой доли позже уходит на Электросталь на уровне складов — см.
+    `_route_far_east_excess` (ФО-доля не умеет целиться в конкретный склад)."""
     fe = bench_share.get("far_east_siberia", 0.0)
     if fe <= FAR_EAST_MAX_SHARE:
         return bench_share
@@ -97,6 +103,19 @@ def _cap_far_east_share(bench_share: dict[str, float]) -> dict[str, float]:
     capped["far_east_siberia"] = FAR_EAST_MAX_SHARE
     capped["ural"] = capped.get("ural", 0.0) + (fe - FAR_EAST_MAX_SHARE)
     return capped
+
+
+def _route_far_east_excess(alloc: dict[str, int], excess_qty: int) -> None:
+    """Перенести FAR_EAST_EXCESS_TO_ELS излишка ДВ с Екатеринбурга на Электросталь.
+    Излишек ДВ `_cap_far_east_share` целиком кладёт на Урал (Екатеринбург); здесь
+    часть уводим на Электросталь — оба склада-воришки реально обслуживают ДВ.
+    Мутирует alloc на месте; total сохраняется."""
+    ekb = _DEFAULT_MAIN_WAREHOUSES["ural"]  # Екатеринбург - Перспективная 14
+    els = _DEFAULT_MAIN_WAREHOUSES["central"]  # Электросталь
+    move = round(FAR_EAST_EXCESS_TO_ELS * excess_qty)
+    if move > 0 and alloc.get(ekb, 0) >= move:
+        alloc[ekb] -= move
+        alloc[els] = alloc.get(els, 0) + move
 
 
 def _is_spec_warehouse(name: str) -> bool:
@@ -557,6 +576,7 @@ async def compute_distribution(db: AsyncSession, project_id: int, req: Distribut
         bench_source = "wb_fallback"
         bench_total = 0
 
+    fe_excess_share = max(0.0, bench_share.get("far_east_siberia", 0.0) - FAR_EAST_MAX_SHARE)
     bench_share = _cap_far_east_share(bench_share)
 
     # 4. Главный склад в каждом ФО (по трафику bench-источника)
@@ -568,6 +588,8 @@ async def compute_distribution(db: AsyncSession, project_id: int, req: Distribut
 
     # 6. Распределение и вычитание уже идущих сборок (active_asm уже загружены выше)
     allocation = distribute(total_qty, bench_share, req.min_pack, main_wh)
+    if fe_excess_share > 0:
+        _route_far_east_excess(allocation, round(fe_excess_share * total_qty))
 
     # 7. Сборка ответа в каноничном порядке ФО
     allocations: list[AllocationItem] = []
@@ -782,7 +804,9 @@ async def compute_cold_start_table(
         bench_source = "wb_fallback"
         bench_total = 0
 
-    # ДВ-кап: излишек доли Дальневосточного ФО (со склада не довезти) → на Урал.
+    # ДВ-кап: излишек доли Дальневосточного ФО (со склада не довезти) → на Урал
+    # (часть позже уводится на Электросталь — см. _route_far_east_excess).
+    fe_excess_share = max(0.0, bench_share.get("far_east_siberia", 0.0) - FAR_EAST_MAX_SHARE)
     bench_share = _cap_far_east_share(bench_share)
 
     if bench_wh_traffic:
@@ -876,6 +900,8 @@ async def compute_cold_start_table(
         existing_at_targets = sum(wb_by_wh.get(wh, 0) + active_asm.get(wh, 0) for wh in target_whs)
         network_total = total_qty + existing_at_targets
         targets = distribute_multi(network_total, bench_share, min_pack, wh_per_district)
+        if fe_excess_share > 0:
+            _route_far_east_excess(targets, round(fe_excess_share * network_total))
         final_alloc: dict[str, int] = {}
         for wh, target in targets.items():
             ship = target - wb_by_wh.get(wh, 0) - active_asm.get(wh, 0)
