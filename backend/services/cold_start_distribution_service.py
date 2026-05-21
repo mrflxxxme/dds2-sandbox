@@ -22,7 +22,7 @@ Read-only: никаких записей в БД.
 import logging
 from collections import defaultdict
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -86,9 +86,15 @@ _SKIP_DISTRICTS_DEFAULT: frozenset[str] = frozenset({"abroad", "unknown"})
 # ворота в Сибирь/ДВ: туда довозим, а WB дотягивает последнюю милю восточнее).
 FAR_EAST_MAX_SHARE: float = 0.06
 
-# Доля излишка ДВ, уходящая на Электросталь (остальное — Екатеринбург). Оба склада
-# по speed-карте обслуживают ДВ как «воришки» (WB развозит ДВ-заказы с них).
-FAR_EAST_EXCESS_TO_ELS: float = 0.30
+# Как делится излишек доли ДВ между складами-воришками (по speed-карте реально
+# обслуживают ДВ: WB развозит ДВ-заказы с них). Сумма долей = 1.0. Ключ ДВ-якоря
+# (Екатеринбург) — сколько остаётся на нём; остальное уводится на другие склады.
+FAR_EAST_EXCESS_ANCHOR: str = "Екатеринбург - Перспективная 14"
+FAR_EAST_EXCESS_ROUTING: dict[str, float] = {
+    FAR_EAST_EXCESS_ANCHOR: 0.40,  # Екатеринбург
+    "Электросталь": 0.35,
+    "Сарапул": 0.25,
+}
 
 
 def _cap_far_east_share(bench_share: dict[str, float]) -> dict[str, float]:
@@ -106,16 +112,19 @@ def _cap_far_east_share(bench_share: dict[str, float]) -> dict[str, float]:
 
 
 def _route_far_east_excess(alloc: dict[str, int], excess_qty: int) -> None:
-    """Перенести FAR_EAST_EXCESS_TO_ELS излишка ДВ с Екатеринбурга на Электросталь.
-    Излишек ДВ `_cap_far_east_share` целиком кладёт на Урал (Екатеринбург); здесь
-    часть уводим на Электросталь — оба склада-воришки реально обслуживают ДВ.
-    Мутирует alloc на месте; total сохраняется."""
-    ekb = _DEFAULT_MAIN_WAREHOUSES["ural"]  # Екатеринбург - Перспективная 14
-    els = _DEFAULT_MAIN_WAREHOUSES["central"]  # Электросталь
-    move = round(FAR_EAST_EXCESS_TO_ELS * excess_qty)
-    if move > 0 and alloc.get(ekb, 0) >= move:
-        alloc[ekb] -= move
-        alloc[els] = alloc.get(els, 0) + move
+    """Распределить излишек ДВ по складам-воришкам (FAR_EAST_EXCESS_ROUTING).
+    `_cap_far_east_share` кладёт весь излишек на Екатеринбург (anchor); здесь часть
+    уводим на остальных получателей (Электросталь/Сарапул). Мутирует alloc на месте;
+    total сохраняется (Екатеринбург теряет ровно столько, сколько получают другие)."""
+    anchor = FAR_EAST_EXCESS_ANCHOR  # Екатеринбург — на нём сейчас весь излишек
+    moves = {wh: round(share * excess_qty) for wh, share in FAR_EAST_EXCESS_ROUTING.items() if wh != anchor}
+    move_out = sum(moves.values())
+    if move_out <= 0 or alloc.get(anchor, 0) < move_out:
+        return
+    alloc[anchor] -= move_out
+    for wh, qty in moves.items():
+        if qty > 0:
+            alloc[wh] = alloc.get(wh, 0) + qty
 
 
 def _is_spec_warehouse(name: str) -> bool:
@@ -831,7 +840,7 @@ async def compute_cold_start_table(
 
     # main_warehouses meta — все склады каждого ФО (top-3), РФ-округа (abroad/unknown скрыты)
     # share_pct = доля округа × доля склада в трафике округа
-    main_wh_meta = []
+    main_wh_meta: list[dict[str, Any]] = []
     for d in DISTRICT_ORDER:
         if d in {"abroad", "unknown"}:
             continue
@@ -850,6 +859,37 @@ async def compute_cold_start_table(
                     "share_pct": round(wh_share * 100, 2),
                 }
             )
+
+    # Заголовки %: отразить переброс излишка ДВ (зеркало _route_far_east_excess на
+    # уровне долей) — Екатеринбург отдаёт, Электросталь/Сарапул получают. Сарапул
+    # добавляем КОЛОНКОЙ (он не top-3 anchor — иначе его аллокация была бы скрыта,
+    # «Итого» > суммы видимых колонок).
+    if fe_excess_share > 0:
+        by_wh = {m["warehouse"]: m for m in main_wh_meta}
+        move_out_pct = round(fe_excess_share * (1 - FAR_EAST_EXCESS_ROUTING[FAR_EAST_EXCESS_ANCHOR]) * 100, 2)
+        anchor_meta = by_wh.get(FAR_EAST_EXCESS_ANCHOR)
+        if anchor_meta:
+            anchor_meta["share_pct"] = round(max(0.0, anchor_meta["share_pct"] - move_out_pct), 2)
+        for wh, share in FAR_EAST_EXCESS_ROUTING.items():
+            if wh == FAR_EAST_EXCESS_ANCHOR:
+                continue
+            add_pct = round(fe_excess_share * share * 100, 2)
+            if add_pct <= 0:
+                continue
+            if wh in by_wh:
+                by_wh[wh]["share_pct"] = round(by_wh[wh]["share_pct"] + add_pct, 2)
+            else:
+                d_wh = WAREHOUSE_TO_DISTRICT.get(wh, "far_east_siberia")
+                if d_wh in {"abroad", "unknown"}:
+                    d_wh = "far_east_siberia"
+                main_wh_meta.append(
+                    {
+                        "district_key": d_wh,
+                        "district_label": DISTRICT_LABELS.get(d_wh, d_wh),
+                        "warehouse": wh,
+                        "share_pct": add_pct,
+                    }
+                )
 
     # ФФ-склады проекта (id+name) — для разбивки rf_qty по локациям на UI.
     rf_warehouses = await fetch_rf_warehouses(db, project_id)
