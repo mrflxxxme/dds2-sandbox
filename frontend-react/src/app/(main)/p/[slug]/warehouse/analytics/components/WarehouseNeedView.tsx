@@ -107,6 +107,7 @@ function formatTransitDate(dateStr: string | null): string {
 // + «Моно» одновременно: остаются SKU где can_send>0 И есть моно-split.
 type StatusFilter = 'all' | 'deficit' | 'can_send' | 'no_wb' | 'no_stock';
 type PackageFilter = 'none' | 'box' | 'mono';
+type MultiplicityFilter = 'none' | 'with' | 'without';
 
 /** Persist WB acceptance check result so F5 не теряет состояние.
  *  TTL соответствует backend Redis-кэшу (5 мин). */
@@ -217,6 +218,12 @@ export function WarehouseNeedView() {
     const [subjectFilter, setSubjectFilter] = useState('');
     const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
     const [packageFilter, setPackageFilter] = useState<PackageFilter>('none');
+    const [multiplicityFilter, setMultiplicityFilter] = useState<MultiplicityFilter>('none');
+    // Ручное редактирование матрицы «Отправить»: nm_id → (wb-склад → qty).
+    // Если у SKU есть запись — она ПОЛНОСТЬЮ заменяет авто-распределение (см.
+    // getArticleWbNeed/getSendWithBump). Доступно после «Проверить приёмку».
+    const [editMode, setEditMode] = useState(false);
+    const [edits, setEdits] = useState<Map<number, Map<string, number>>>(new Map());
     const [searchQuery, setSearchQuery] = useState('');
     const [sortCol, setSortCol] = useState<string>('revenue_30d');
     const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -701,8 +708,8 @@ export function WarehouseNeedView() {
             // товар не трогаем, отправляем backend-базу как есть (исключение).
             const perSku = new Map<string, number>();
             const totalRfAvail = Object.values(a.rf_stocks).reduce((s, v) => s + (v?.available || 0), 0);
+            if (totalRfAvail <= 0) continue;
             const boxBudget = Math.floor(totalRfAvail / ppb);
-            if (boxBudget <= 0) continue;
 
             // Карта склад → свой ФО из speed-карты (own_okrug в priorities);
             // fallback на cold-start warehouseToDistrict (top-12).
@@ -726,6 +733,35 @@ export function WarehouseNeedView() {
                     || (skuPackages.has('SUPERSAFE') && acc.can_supersafe)
                 );
             };
+
+            // Россыпь-консолидация: остатка не хватает даже на одну коробку (K).
+            // НЕ размазываем backend-base поштучно по складам — отправляем всю
+            // доступную россыпь на ОДИН склад с максимальной потребностью, открытый
+            // по приёмке; остальные ячейки SKU зануляем. Σ отгрузки не меняется.
+            if (boxBudget <= 0) {
+                let winner: string | null = null;
+                let winnerBase = 0;
+                let sumBase = 0;
+                for (const wh of data.warehouses) {
+                    const base = getBaseArticleWbNeed(a, wh.name);
+                    if (base <= 0) continue;
+                    sumBase += base;
+                    if (base > winnerBase && canSendToWh(wh.name)) {
+                        winner = wh.name;
+                        winnerBase = base;
+                    }
+                }
+                if (!winner) continue;                 // нет открытого склада — base как есть
+                const consolidated = Math.min(totalRfAvail, sumBase);
+                for (const wh of data.warehouses) {
+                    if (wh.name === winner) continue;
+                    const base = getBaseArticleWbNeed(a, wh.name);
+                    if (base > 0) perSku.set(wh.name, -base);
+                }
+                perSku.set(winner, consolidated - winnerBase);
+                if (perSku.size > 0) result.set(a.nm_id, perSku);
+                continue;
+            }
 
             // Агрегация по ФО (склады своего ФО — кандидаты в primary-якорь;
             // воришки чужих ФО идут в агрегат СВОЕГО ФО).
@@ -791,7 +827,9 @@ export function WarehouseNeedView() {
                 }
                 let shipped = 0;
                 if (t.need > 0 && boxesLeft > 0) {
-                    const give = Math.min(Math.ceil(t.need / ppb), boxesLeft);
+                    // round, не ceil: округляем к ближайшему целому коробок (min 1),
+                    // чтобы не перетаривать ФО лишней коробкой сверх потребности.
+                    const give = Math.min(Math.max(1, Math.round(t.need / ppb)), boxesLeft);
                     shipped = give * ppb;
                     boxesLeft -= give;
                 }
@@ -806,20 +844,33 @@ export function WarehouseNeedView() {
 
     /** Итоговый per-cell need: base + client-side bump (если активен «Дораспределить»). */
     const getArticleWbNeed = useCallback((article: NeedArticle, whName: string): number => {
+        const ov = edits.get(article.nm_id);
+        if (ov) return ov.get(whName) || 0;   // ручной оверрайд заменяет авто-распределение
+        // Склад, закрытый по приёмке, принять не может → план туда = 0 везде
+        // (ячейка, итог колонки, сборка). Иначе «осиротевший» base висел бы 1 шт
+        // и в шапке колонки выглядел как «надо вести на закрытый склад».
+        const acc = acceptanceMap.get(article.nm_id)?.availability?.[whName];
+        if (acc && !acc.can_box && !acc.can_monopallet && !acc.can_supersafe) return 0;
         const base = getBaseArticleWbNeed(article, whName);
         const bump = bumpedCells.get(article.nm_id)?.get(whName) || 0;
         return base + bump;
-    }, [getBaseArticleWbNeed, bumpedCells]);
+    }, [getBaseArticleWbNeed, bumpedCells, edits, acceptanceMap]);
 
     /** Per-SKU total к отгрузке (Hamilton-cap + bump из «Дораспределить»).
      *  Это итоговый план отгрузки, который пойдёт в сборку. */
     const getSendWithBump = useCallback((nmId: number, canSend: number): number => {
+        const ov = edits.get(nmId);
+        if (ov) {
+            let s = 0;
+            for (const q of ov.values()) s += q;
+            return s;
+        }
         const bumpMap = bumpedCells.get(nmId);
         if (!bumpMap) return canSend;
         let bumpSum = 0;
         for (const q of bumpMap.values()) bumpSum += q;
         return canSend + bumpSum;
-    }, [bumpedCells]);
+    }, [bumpedCells, edits]);
 
     /** Сколько шт добавлено через «Дораспределить» суммарно. Показывается в кнопке
      *  чтобы пользователь видел реальное действие фичи. */
@@ -924,9 +975,15 @@ export function WarehouseNeedView() {
                 const hasType = (it.splits ?? []).some(s => s.package_type === expected);
                 if (!hasType) return false;
             }
+            if (multiplicityFilter !== 'none') {
+                const { ppb, use } = resolveSkuLevelPpb(a.nm_id);
+                const hasK = !!(ppb && ppb > 0 && use);
+                if (multiplicityFilter === 'with' && !hasK) return false;
+                if (multiplicityFilter === 'without' && hasK) return false;
+            }
             return true;
         });
-    }, [data, brandFilter, subjectFilter, searchQuery, statusFilter, packageFilter, acceptanceMap, newcomerSet]);
+    }, [data, brandFilter, subjectFilter, searchQuery, statusFilter, packageFilter, multiplicityFilter, resolveSkuLevelPpb, acceptanceMap, newcomerSet]);
 
     /** WB-колонки в матрице, отфильтрованные по packageFilter.
      *  При packageFilter='mono' — оставляем только склады где для хотя бы одного
@@ -973,6 +1030,85 @@ export function WarehouseNeedView() {
         }
         return { box, mono };
     }, [acceptanceMap]);
+
+    /** Счётчики SKU с заданной кратностью короба и без — для фильтра. */
+    const multiplicityCounts = useMemo(() => {
+        let withK = 0, without = 0;
+        if (!data?.articles) return { withK, without };
+        for (const a of data.articles) {
+            if (newcomerSet.has(a.nm_id)) continue;
+            const { ppb, use } = resolveSkuLevelPpb(a.nm_id);
+            if (ppb && ppb > 0 && use) withK++; else without++;
+        }
+        return { withK, without };
+    }, [data, newcomerSet, resolveSkuLevelPpb]);
+
+    /* ── Ручное редактирование матрицы «Отправить» ── */
+
+    /** Свободный остаток ФФ по SKU (Σ available по всем ФФ-складам). */
+    const freeRfStock = useCallback((a: NeedArticle): number =>
+        Object.values(a.rf_stocks).reduce((s, v) => s + (v?.available || 0), 0), []);
+
+    /** Кратность короба SKU для редактирования (0 = без кратности). */
+    const editStep = useCallback((nmId: number): number => {
+        const { ppb, use } = resolveSkuLevelPpb(nmId);
+        return (ppb && ppb > 0 && use) ? ppb : 0;
+    }, [resolveSkuLevelPpb]);
+
+    /** Установить ручное кол-во в ячейку (nm_id, wb-склад). При первой правке SKU
+     *  засеивается текущим авто-распределением, дальше правится точечно. */
+    const setCellEdit = useCallback((a: NeedArticle, whName: string, qty: number) => {
+        setEdits(prev => {
+            const next = new Map(prev);
+            let m = next.get(a.nm_id);
+            if (!m) {
+                m = new Map();
+                for (const wh of visibleWbWarehouses) {
+                    // Закрытые по приёмке склады не сеем — туда отгружать нельзя.
+                    const acc = acceptanceMap.get(a.nm_id)?.availability?.[wh.name];
+                    if (acc && !acc.can_box && !acc.can_monopallet && !acc.can_supersafe) continue;
+                    const cur = getBaseArticleWbNeed(a, wh.name) + (bumpedCells.get(a.nm_id)?.get(wh.name) || 0);
+                    if (cur > 0) m.set(wh.name, cur);
+                }
+            } else {
+                m = new Map(m);
+            }
+            if (qty > 0) m.set(whName, qty); else m.delete(whName);
+            next.set(a.nm_id, m);
+            return next;
+        });
+    }, [visibleWbWarehouses, getBaseArticleWbNeed, bumpedCells, acceptanceMap]);
+
+    /** Валидность ручных правок по SKU: '' = ок, иначе текст ошибки.
+     *  Правило: Σ ≤ свободный остаток ФФ И каждая ячейка кратна K. */
+    const editValidity = useMemo(() => {
+        const out = new Map<number, string>();
+        if (edits.size === 0) return out;
+        // По data.articles, а не filteredArticles: иначе правка отмеченного SKU,
+        // выпавшего из текущего фильтра, не проверится и проскочит в сборку.
+        const byNm = new Map((data?.articles ?? []).map(a => [a.nm_id, a]));
+        for (const [nmId, m] of edits) {
+            const a = byNm.get(nmId);
+            if (!a) continue;
+            const free = freeRfStock(a);
+            const k = editStep(nmId);
+            let sum = 0;
+            let err = '';
+            for (const q of m.values()) {
+                sum += q;
+                if (k > 0 && q % k !== 0) err = `кол-во должно быть кратно ${k}`;
+            }
+            if (sum > free) err = `превышен свободный остаток: ${formatNumber(sum, 0)} > ${formatNumber(free, 0)}`;
+            if (err) out.set(nmId, err);
+        }
+        return out;
+    }, [edits, data, freeRfStock, editStep]);
+
+    /** Есть ли невалидные правки среди ОТМЕЧЕННЫХ SKU — блокирует «Создать сборку». */
+    const hasInvalidCheckedEdits = useMemo(() => {
+        for (const id of checkedIds) if (editValidity.has(id)) return true;
+        return false;
+    }, [checkedIds, editValidity]);
 
     const sortedArticles = useMemo(() => {
         return [...filteredArticles].sort((a, b) => {
@@ -1335,9 +1471,11 @@ export function WarehouseNeedView() {
                     byPkg.set(pkg, d);
                 }
 
-                // Источник: общий FF-пул на все упаковки SKU. В box-режиме берём
-                // ТОЛЬКО целыми коробками K (на FF хранятся короба — нельзя
-                // отгрузить «1 шт» из склада). Без кратности — пропорционально.
+                // Источник: общий FF-пул на все упаковки SKU. В box-режиме отгружаем
+                // ТОЛЬКО целые коробки K, собираемые целиком с ОДНОГО ФФ (короб с двух
+                // складов физически не собрать); недобранный остаток < короба на каждом
+                // ФФ остаётся на ФФ до накопления целого короба. Без кратности —
+                // пропорционально из пула.
                 const ffPool: Record<number, number> = {};
                 for (const w of allRfWarehouses) ffPool[w.id] = article?.rf_stocks[w.id]?.available || 0;
                 const ffOrder = [...allRfWarehouses].sort((a, b) => {
@@ -1363,7 +1501,16 @@ export function WarehouseNeedView() {
                     return out;
                 };
 
-                for (const [pkg, dist] of byPkg) {
+                // Приоритет типа поставки за общий FF-пул: КОРОБ забирает целые
+                // короба раньше МОНО/СЕЙФ. Иначе при нехватке коробов на ФФ моно
+                // могло бы выхватить короб у короба (порядок зависел от данных tgt).
+                const pkgOrder: PackageType[] = ['BOX', 'MONOPALLET', 'SUPERSAFE'];
+                const orderedPkgs: PackageType[] = [
+                    ...pkgOrder.filter(p => byPkg.has(p)),
+                    ...[...byPkg.keys()].filter(p => !pkgOrder.includes(p)),
+                ];
+                for (const pkg of orderedPkgs) {
+                    const dist = byPkg.get(pkg)!;
                     // Уважаем фильтр Короб/Моно из шапки.
                     if (packageFilter === 'box' && pkg !== 'BOX') continue;
                     if (packageFilter === 'mono' && pkg !== 'MONOPALLET') continue;
@@ -1373,23 +1520,25 @@ export function WarehouseNeedView() {
 
                     const pkgSrc: Record<string, number> = {};
                     if (boxMode) {
-                        // Целые коробки K из общего FF-пула (короб/моно делят пул).
                         let need = pkgQty;
+                        // Только целые коробки K, собираемые ЦЕЛИКОМ с одного ФФ.
+                        // Россыпь-добора с других складов НЕТ: короб с двух ФФ не собрать.
+                        // Остаток < короба на каждом ФФ просто не уезжает (ждёт на ФФ).
                         for (const w of ffOrder) {
-                            if (need <= 0) break;
+                            if (need < ppb) break;
                             const boxes = Math.floor((ffPool[w.id] || 0) / ppb);
                             if (boxes <= 0) continue;
                             const takeBoxes = Math.min(Math.floor(need / ppb), boxes);
                             if (takeBoxes <= 0) continue;
                             const take = takeBoxes * ppb;
-                            pkgSrc[String(w.id)] = take;
+                            pkgSrc[String(w.id)] = (pkgSrc[String(w.id)] || 0) + take;
                             ffPool[w.id] -= take;
                             need -= take;
                         }
                         const sourced = pkgQty - need;
-                        if (sourced <= 0) continue;            // нет целых коробок в источниках
+                        if (sourced <= 0) continue;            // ни одного целого короба с одного ФФ
                         if (sourced < pkgQty) {
-                            pkgTgt = trimTgt(pkgTgt, sourced); // источников меньше — режем tgt коробками
+                            pkgTgt = trimTgt(pkgTgt, sourced); // целых коробов меньше потребности — режем tgt
                             pkgQty = sourced;
                         }
                     } else {
@@ -1829,9 +1978,10 @@ export function WarehouseNeedView() {
 
                 <button
                     className="btn btn-sm btn-primary"
-                    disabled={checkedCount === 0 || creatingAssembly}
+                    disabled={checkedCount === 0 || creatingAssembly || hasInvalidCheckedEdits}
                     onClick={handleCreateAssembly}
-                    style={{ opacity: (checkedCount === 0 || creatingAssembly) ? 0.5 : 1 }}
+                    title={hasInvalidCheckedEdits ? 'Есть ячейки с превышением свободного остатка или некратные K (красные) — исправьте, иначе сохранить нельзя' : undefined}
+                    style={{ opacity: (checkedCount === 0 || creatingAssembly || hasInvalidCheckedEdits) ? 0.5 : 1 }}
                 >
                     {creatingAssembly ? 'Создание...' : `Создать сборку (${checkedCount})`}
                 </button>
@@ -1860,6 +2010,26 @@ export function WarehouseNeedView() {
                         style={{ padding: '4px 8px', fontSize: 14, lineHeight: 1 }}
                     >
                         ✕
+                    </button>
+                )}
+
+                {acceptanceMap.size > 0 && (
+                    <button
+                        className={`btn btn-sm ${editMode ? 'btn-primary' : 'btn-secondary'}`}
+                        onClick={() => setEditMode(v => !v)}
+                        title="Ручная правка матрицы «Отправить»: вводите кол-во кратно K, в пределах свободного остатка ФФ"
+                        style={!editMode ? { borderColor: '#0ea5e9', color: '#0ea5e9' } : {}}
+                    >
+                        {editMode ? '✓ Готово' : '✏️ Редактировать'}
+                    </button>
+                )}
+                {editMode && edits.size > 0 && (
+                    <button
+                        className="btn btn-sm btn-secondary"
+                        onClick={() => setEdits(new Map())}
+                        title="Сбросить все ручные правки и вернуть авто-распределение"
+                    >
+                        Сбросить правки
                     </button>
                 )}
 
@@ -1924,6 +2094,22 @@ export function WarehouseNeedView() {
                         </button>
                     </>
                 )}
+                <button
+                    className={`btn btn-sm ${multiplicityFilter === 'with' ? 'btn-primary' : 'btn-secondary'}`}
+                    style={multiplicityFilter !== 'with' ? { borderColor: '#0ea5e9', color: '#0ea5e9' } : {}}
+                    onClick={() => setMultiplicityFilter(multiplicityFilter === 'with' ? 'none' : 'with')}
+                    title="Только SKU с заданной кратностью короба (K)."
+                >
+                    📦 Кратные ({multiplicityCounts.withK})
+                </button>
+                <button
+                    className={`btn btn-sm ${multiplicityFilter === 'without' ? 'btn-primary' : 'btn-secondary'}`}
+                    style={multiplicityFilter !== 'without' ? { borderColor: '#94a3b8', color: '#64748b' } : {}}
+                    onClick={() => setMultiplicityFilter(multiplicityFilter === 'without' ? 'none' : 'without')}
+                    title="SKU без заданной кратности короба."
+                >
+                    Без кратности ({multiplicityCounts.without})
+                </button>
                 <button
                     className={`btn btn-sm ${coldStartMode ? 'btn-primary' : 'btn-secondary'}`}
                     style={!coldStartMode ? { borderColor: '#a855f7', color: '#a855f7' } : {}}
@@ -2936,6 +3122,17 @@ export function WarehouseNeedView() {
                                             const asmAtWh = a.asm_by_warehouse?.[wh.name] || 0;
                                             const transitAtWh = a.transit_by_warehouse?.[wh.name] || 0;
                                             const onWayAtWh = asmAtWh + transitAtWh;
+                                            // Режим редактирования: ячейки отмеченных SKU (не закрытых по
+                                            // приёмке) вводимы; шаг = K, потолок = свободный остаток ФФ.
+                                            const isEditing = editMode && !m.closed && checkedIds.has(a.nm_id);
+                                            const editK = editStep(a.nm_id);
+                                            const stepUp = editK > 0 ? editK : 1;
+                                            const skuOv = edits.get(a.nm_id);
+                                            const skuSum = skuOv
+                                                ? Array.from(skuOv.values()).reduce((s, q) => s + q, 0)
+                                                : getSendWithBump(a.nm_id, a.can_send);
+                                            const cellInvalid = editValidity.has(a.nm_id);
+                                            const canAddStep = skuSum + stepUp <= freeRfStock(a);
                                             const stockAtWh = getArticleWbStock(a, wh.name);
                                             const tooltip = [
                                                 tooltipBase,
@@ -2952,12 +3149,29 @@ export function WarehouseNeedView() {
                                                     textDecoration: m.closed && need > 0 ? 'line-through' : undefined,
                                                 }}>
                                                     <div>
-                                                        {need > 0 ? formatNumber(need, 0) : '\u2014'}
+                                                        {isEditing ? (
+                                                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }} onClick={(e) => e.stopPropagation()}>
+                                                                <button type="button" disabled={rawNeed <= 0}
+                                                                    onClick={() => setCellEdit(a, wh.name, Math.max(0, rawNeed - stepUp))}
+                                                                    style={{ width: 15, height: 17, padding: 0, fontSize: 12, lineHeight: 1, borderRadius: 4, border: '1px solid var(--color-border)', background: 'transparent', cursor: rawNeed > 0 ? 'pointer' : 'default', opacity: rawNeed > 0 ? 1 : 0.3 }}
+                                                                >{'\u2212'}</button>
+                                                                <input type="number" value={rawNeed || ''} min={0} step={stepUp}
+                                                                    title={cellInvalid ? (editValidity.get(a.nm_id) || '') : (editK > 0 ? `\u043a\u0440\u0430\u0442\u043d\u043e ${editK}` : '')}
+                                                                    onChange={(e) => setCellEdit(a, wh.name, Math.max(0, Math.round(Number(e.target.value) || 0)))}
+                                                                    style={{ width: 42, textAlign: 'center', fontSize: 12, padding: '1px 2px', borderRadius: 4, background: 'var(--color-bg-card)', color: 'var(--color-text)', border: `1px solid ${cellInvalid ? 'var(--color-danger)' : 'var(--color-border)'}` }}
+                                                                />
+                                                                <button type="button" disabled={!canAddStep}
+                                                                    onClick={() => setCellEdit(a, wh.name, rawNeed + stepUp)}
+                                                                    title={!canAddStep ? `\u043d\u0435 \u0445\u0432\u0430\u0442\u0430\u0435\u0442 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e\u0433\u043e \u043e\u0441\u0442\u0430\u0442\u043a\u0430 \u043d\u0430 +${stepUp}` : `+${stepUp}`}
+                                                                    style={{ width: 15, height: 17, padding: 0, fontSize: 12, lineHeight: 1, borderRadius: 4, border: '1px solid var(--color-border)', background: 'transparent', cursor: canAddStep ? 'pointer' : 'default', opacity: canAddStep ? 1 : 0.3 }}
+                                                                >+</button>
+                                                            </span>
+                                                        ) : (need > 0 && !m.closed ? formatNumber(need, 0) : '\u2014')}
                                                         {/* \u0411\u0435\u0439\u0434\u0436 \u043f\u0440\u0438\u0451\u043c\u043a\u0438. \u0415\u0441\u043b\u0438 packageFilter \u043d\u0435 \u0441\u043e\u0432\u043f\u0430\u0434\u0430\u0435\u0442 \u0441 \u0440\u0435\u0430\u043b\u044c\u043d\u044b\u043c
                                                             \u043f\u0430\u043a\u0435\u0442\u043e\u043c \u0434\u043b\u044f \u044d\u0442\u043e\u0439 \u043f\u0430\u0440\u044b (SKU, \u0441\u043a\u043b\u0430\u0434) \u2014 \u0431\u0435\u0439\u0434\u0436 \u0441\u043a\u0440\u044b\u0432\u0430\u0435\u043c, \u0447\u0442\u043e\u0431\u044b
                                                             \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c \u0432\u0438\u0434\u0435\u043b \u0442\u043e\u043b\u044c\u043a\u043e \u0440\u0435\u043b\u0435\u0432\u0430\u043d\u0442\u043d\u0443\u044e \u0438\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u044e (\u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440,
                                                             \u043f\u0440\u0438 \u00ab\u041c\u043e\u043d\u043e\u00bb \u043d\u0435 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u043c \ud83d\udce6). */}
-                                                        {badge && (need > 0 || (m.checked && !m.closed))
+                                                        {badge && (need > 0 || m.checked)
                                                             && !(packageFilter === 'mono' && !m.mono)
                                                             && !(packageFilter === 'box' && !m.box) && (
                                                             <span style={{ marginLeft: 4, fontSize: 10, opacity: need > 0 ? 1 : 0.55 }}>{badge}</span>

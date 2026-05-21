@@ -60,6 +60,7 @@ export default function AssemblyDistributePage() {
     const [targetWarehouseNames, setTargetWarehouseNames] = useState<string[]>([]);
     const [rows, setRows] = useState<AssemblyDraftRow[]>([]);
     const [pkgTab, setPkgTab] = useState<'BOX' | 'MONOPALLET'>('BOX');
+    const [multFilter, setMultFilter] = useState<'none' | 'with' | 'without'>('none');
     const [nmPpb, setNmPpb] = useState<Map<number, number | null>>(new Map());
     const [coldStartShares, setColdStartShares] = useState<Record<string, number> | null>(null);
     const [newcomerNmIds, setNewcomerNmIds] = useState<Set<number>>(new Set());
@@ -228,13 +229,24 @@ export default function AssemblyDistributePage() {
     // Короб-вкладка показывает всё кроме моно (BOX + редкий SUPERSAFE), чтобы
     // ни одна строка не потерялась между двумя вкладками.
     const visibleRows = useMemo(
-        () => rows.filter(r => pkgTab === 'MONOPALLET'
-            ? r.package_type === 'MONOPALLET'
-            : r.package_type !== 'MONOPALLET'),
-        [rows, pkgTab],
+        () => rows.filter(r => {
+            const pkgOk = pkgTab === 'MONOPALLET'
+                ? r.package_type === 'MONOPALLET'
+                : r.package_type !== 'MONOPALLET';
+            if (!pkgOk) return false;
+            if (multFilter !== 'none') {
+                const hasK = !!nmPpb.get(r.nm_id);
+                if (multFilter === 'with' && !hasK) return false;
+                if (multFilter === 'without' && hasK) return false;
+            }
+            return true;
+        }),
+        [rows, pkgTab, multFilter, nmPpb],
     );
     const boxRowCount = useMemo(() => rows.filter(r => r.package_type !== 'MONOPALLET').length, [rows]);
     const monoRowCount = useMemo(() => rows.filter(r => r.package_type === 'MONOPALLET').length, [rows]);
+    const withKCount = useMemo(() => rows.filter(r => !!nmPpb.get(r.nm_id)).length, [rows, nmPpb]);
+    const withoutKCount = useMemo(() => rows.filter(r => !nmPpb.get(r.nm_id)).length, [rows, nmPpb]);
 
     const srcSumPerFf = useMemo(() => {
         const m: Record<number, number> = {};
@@ -595,6 +607,21 @@ export default function AssemblyDistributePage() {
                         onClick={() => setPkgTab('MONOPALLET')}
                     >
                         📐 Моно ({monoRowCount})
+                    </button>
+                    <div style={{ width: 1, alignSelf: 'stretch', background: 'var(--color-border)', margin: '0 4px' }} />
+                    <button
+                        className={`btn btn-sm ${multFilter === 'with' ? 'btn-primary' : 'btn-secondary'}`}
+                        onClick={() => setMultFilter(multFilter === 'with' ? 'none' : 'with')}
+                        title="Только SKU с заданной кратностью короба"
+                    >
+                        Кратные ({withKCount})
+                    </button>
+                    <button
+                        className={`btn btn-sm ${multFilter === 'without' ? 'btn-primary' : 'btn-secondary'}`}
+                        onClick={() => setMultFilter(multFilter === 'without' ? 'none' : 'without')}
+                        title="SKU без заданной кратности короба"
+                    >
+                        Без кратности ({withoutKCount})
                     </button>
                 </div>
             )}

@@ -7,8 +7,9 @@ describe('distributeByBoxMultiple', () => {
         expect(distributeByBoxMultiple([{ name: 'A', need: 100 }], 100, -5)).toEqual({});
     });
 
-    it('returns empty object when totalCanSend<ppb', () => {
-        expect(distributeByBoxMultiple([{ name: 'A', need: 100 }], 5, 10)).toEqual({});
+    it('returns empty object when totalCanSend<=0', () => {
+        expect(distributeByBoxMultiple([{ name: 'A', need: 100 }], 0, 10)).toEqual({});
+        expect(distributeByBoxMultiple([{ name: 'A', need: 100 }], -3, 10)).toEqual({});
     });
 
     it('returns empty object when no warehouse has need', () => {
@@ -44,8 +45,8 @@ describe('distributeByBoxMultiple', () => {
         expect(result).toEqual({ A: 30, B: 10, C: 10 });
     });
 
-    it('skips warehouse when remaining unmet < ppb', () => {
-        // need=15, ppb=10 → unmet после первой коробки = 5 < ppb → больше не получит
+    it('skips warehouse for further boxes when remaining unmet < ppb', () => {
+        // need=15, ppb=10 → unmet после первой коробки = 5 < ppb → больше коробок не получит
         const result = distributeByBoxMultiple(
             [
                 { name: 'A', need: 15 },
@@ -53,13 +54,14 @@ describe('distributeByBoxMultiple', () => {
             ],
             100, 10,
         );
-        // Pass1: A=10, B=10 (20). Остаток 80 = 8 box. A unmet=5 (skip), B unmet=90 → всё B.
+        // Pass1: A=10, B=10 (20). Pass2: остаток 80 = 8 box. A unmet=5 (skip коробки),
+        // B unmet=90 → всё B (B=90). A коробок больше не получает (unmet 5 < ppb).
         expect(result.A).toBe(10);
         expect(result.B).toBe(90);
     });
 
-    it('limits total to floor(totalCanSend / ppb) * ppb', () => {
-        // 47 шт, ppb=10 → max 4 коробки = 40 шт
+    it('drops the sub-box tail — only whole boxes ship', () => {
+        // 47 шт, ppb=10. 4 коробки = 40 шт; хвост 7 шт остаётся на ФФ, в WB не уходит.
         const result = distributeByBoxMultiple(
             [{ name: 'A', need: 200 }],
             47, 10,
@@ -93,22 +95,45 @@ describe('distributeByBoxMultiple', () => {
         expect(result.A).toBe(50);
     });
 
-    it('allocates only multiples of ppb', () => {
-        const result = distributeByBoxMultiple(
-            [{ name: 'A', need: 23 }],
-            23, 7,
-        );
-        // 23/7 = 3 box = 21 шт. need=23 → одна коробка не нужна (21 ≤ 23 ok)
-        expect(result.A).toBe(21);
-        expect(result.A % 7).toBe(0);
-    });
-
-    it('caps allocation at need (no overshoot)', () => {
-        // need=15, ppb=10. Pass1: 10. Pass2: unmet=5 < ppb → стоп. Итого 10, не 20.
+    it('caps total at whole boxes within Σneed (no overshoot, no tail)', () => {
+        // need=15, total=100, ppb=10. budget=⌊min(100,15)/10⌋×10=10.
+        // 1 коробка; хвост 5 шт остаётся на ФФ (а не уходит россыпью до need).
         const result = distributeByBoxMultiple(
             [{ name: 'A', need: 15 }],
             100, 10,
         );
         expect(result.A).toBe(10);
+    });
+
+    it('ships only whole boxes, остаток на ФФ (23 шт, ppb=7)', () => {
+        // need=23, total=23, ppb=7. 3 коробки = 21; хвост 2 шт остаётся на ФФ.
+        const result = distributeByBoxMultiple(
+            [{ name: 'A', need: 23 }],
+            23, 7,
+        );
+        expect(result.A).toBe(21);
+    });
+
+    it('returns empty when available is less than one box', () => {
+        // 5 шт, ppb=10 — целой коробки не набрать → ничего не уходит, всё остаётся на ФФ.
+        const result = distributeByBoxMultiple(
+            [{ name: 'A', need: 100 }],
+            5, 10,
+        );
+        expect(result).toEqual({});
+    });
+
+    it('ships only whole boxes, leftover остаётся на ФФ', () => {
+        // total=27, ppb=10, два склада. budget=⌊min(27,80)/10⌋×10=20.
+        // Pass1: A=10, B=10. Хвост 7 шт НЕ уходит россыпью — остаётся на ФФ.
+        const result = distributeByBoxMultiple(
+            [
+                { name: 'A', need: 50 },
+                { name: 'B', need: 30 },
+            ],
+            27, 10,
+        );
+        expect(result).toEqual({ A: 10, B: 10 });
+        expect(result.A + result.B).toBe(20);
     });
 });

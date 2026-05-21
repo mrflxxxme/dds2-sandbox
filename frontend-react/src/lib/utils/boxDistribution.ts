@@ -1,39 +1,45 @@
 /**
- * Распределение qty по WB-складам кратно `ppb` (pcs-per-box).
+ * Распределение qty по WB-складам ТОЛЬКО целыми коробками `ppb` (pcs-per-box).
  *
  * Правила:
- *  1. **Минимум 1 коробка каждому складу с need>0**, пока хватает товара.
- *     Приоритет получения «первой коробки» — у склада с большей потребностью.
- *  2. Остаток коробок раздаётся жадно: каждая следующая коробка — складу с
- *     максимальной незакрытой потребностью (`need - already_given >= ppb`).
- *  3. Хвост `< ppb` остаётся неотправленным (floor-стратегия).
+ *  1. **Только целые коробки.** Сначала минимум 1 коробка каждому складу с
+ *     need>0 (приоритет «первой коробки» — у склада с большей потребностью), затем
+ *     остаток коробок раздаётся жадно складу с максимальной незакрытой потребностью.
+ *  2. **Остаток < короба остаётся на источнике.** Хвост, не собравшийся в целую
+ *     коробку, в WB НЕ уходит — кратность важнее, чем «отгрузить всё до штуки».
+ *     Он остаётся на ФФ и уедет в следующую поставку.
+ *  3. Суммарно раздаётся целое число коробок:
+ *     `⌊min(totalCanSend, Σ need) / ppb⌋ × ppb` — сверх потребности не отгружаем.
  *
- * Возвращает `Record<warehouseName, qty>` где qty всегда кратно ppb.
- * Пустой объект если ppb≤0, totalCanSend<ppb или нет складов с need>0.
+ * Возвращает `Record<warehouseName, qty>`. Пустой объект если ppb≤0,
+ * totalCanSend≤0, нет складов с need>0 или доступного меньше одной коробки.
  */
 export function distributeByBoxMultiple(
     needs: ReadonlyArray<{ name: string; need: number }>,
     totalCanSend: number,
     ppb: number,
 ): Record<string, number> {
-    if (ppb <= 0 || totalCanSend < ppb) return {};
+    if (ppb <= 0 || totalCanSend <= 0) return {};
     const sorted = [...needs]
         .filter(w => w.need > 0)
         .sort((a, b) => b.need - a.need);
     if (sorted.length === 0) return {};
 
+    const totalNeed = sorted.reduce((s, w) => s + w.need, 0);
     const tgt: Record<string, number> = {};
-    let remainingBoxes = Math.floor(totalCanSend / ppb);
+    // Только целые коробки: бюджет округляем вниз до кратного ppb, остаток < короба
+    // остаётся на ФФ (в WB россыпью не уходит). Сверх потребности не отгружаем.
+    let remaining = Math.floor(Math.min(totalCanSend, totalNeed) / ppb) * ppb;
 
     // Pass 1: минимум по 1 коробке, приоритет — самым нуждающимся.
     for (const wh of sorted) {
-        if (remainingBoxes <= 0) break;
+        if (remaining < ppb) break;
         tgt[wh.name] = ppb;
-        remainingBoxes--;
+        remaining -= ppb;
     }
 
-    // Pass 2: доразать остаток по убыванию незакрытой потребности.
-    while (remainingBoxes > 0) {
+    // Pass 2: доразать целые коробки по убыванию незакрытой потребности.
+    while (remaining >= ppb) {
         let bestName: string | null = null;
         let bestUnmet = 0;
         for (const wh of sorted) {
@@ -45,7 +51,7 @@ export function distributeByBoxMultiple(
         }
         if (!bestName) break;
         tgt[bestName] = (tgt[bestName] || 0) + ppb;
-        remainingBoxes--;
+        remaining -= ppb;
     }
 
     return tgt;
