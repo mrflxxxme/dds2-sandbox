@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, exportToExcel } from '@/lib/utils';
-import { distributeByBoxMultiple } from '@/lib/utils/boxDistribution';
+import { distributeByBoxMultiple, distributeByBoxMultipleWeighted } from '@/lib/utils/boxDistribution';
 import { DISTRICT_LABELS, DISTRICT_COLORS, DISTRICT_ORDER } from '@/lib/constants/localization';
 import type {
     AcceptanceCheckPerItem,
@@ -162,6 +162,22 @@ function recomputeColdStartAlloc(
     for (const [k, v] of Object.entries(raw)) {
         if (v > 0) alloc[k] = v;
     }
+    return { alloc, total: Object.values(alloc).reduce((s, v) => s + v, 0) };
+}
+
+// Cold-start с кратностью короба K: «как обычный поток» — qty раздаётся ЦЕЛЫМИ
+// коробками пропорционально share_pct, хвост < короба остаётся на ФФ. Строгая
+// кратность: qty < K → ничего (россыпью не уходит). Без K (ppb≤0) — fallback на
+// обычный pro-rata recomputeColdStartAlloc (min_pack pool).
+function recomputeColdStartAllocBoxed(
+    qty: number,
+    mainWarehouses: ColdStartMainWarehouse[],
+    minPack: number,
+    ppb: number | null,
+): { alloc: Record<string, number>; total: number } {
+    if (!ppb || ppb <= 0) return recomputeColdStartAlloc(qty, mainWarehouses, minPack);
+    const weights = mainWarehouses.map(w => ({ name: w.warehouse, weight: w.share_pct }));
+    const alloc = distributeByBoxMultipleWeighted(weights, qty, ppb);
     return { alloc, total: Object.values(alloc).reduce((s, v) => s + v, 0) };
 }
 
@@ -595,6 +611,33 @@ export function WarehouseNeedView() {
         return s;
     }, [coldStartData]);
 
+    /** Единый источник истины распределения новинок (cold-start) по WB-складам с
+     *  учётом кратности короба K. Map<nm_id, {alloc: wh→qty, total}>. Кормит и
+     *  матрицу (getBaseArticleWbNeed), и вкладку «Новинки», и итоги, и сборку.
+     *    • K задана (resolveSkuLevelPpb, use=on) → строго целые коробки
+     *      (recomputeColdStartAllocBoxed); qty<K → пусто, хвост на ФФ.
+     *    • K нет, но есть ручной override qty → pro-rata от override.
+     *    • K нет, без override → backend allocations как есть (с per-склад
+     *      вычетом активных сборок — его при пересчёте от total потеряли бы). */
+    const newcomerBoxedAlloc = useMemo(() => {
+        const m = new Map<number, { alloc: Record<string, number>; total: number }>();
+        for (const row of coldStartData?.rows ?? []) {
+            const overrideQty = coldStartQtyOverrides[row.nm_id];
+            const useOverride = overrideQty !== undefined && overrideQty !== row.total_allocated;
+            const { ppb, use } = resolveSkuLevelPpb(row.nm_id);
+            const hasK = !!(ppb && ppb > 0 && use);
+            if (hasK) {
+                const baseQty = useOverride ? overrideQty : row.total_allocated;
+                m.set(row.nm_id, recomputeColdStartAllocBoxed(baseQty, filteredMainWarehouses, coldStartMinPack, ppb));
+            } else if (useOverride) {
+                m.set(row.nm_id, recomputeColdStartAlloc(overrideQty, filteredMainWarehouses, coldStartMinPack));
+            } else {
+                m.set(row.nm_id, { alloc: row.allocations, total: row.total_allocated });
+            }
+        }
+        return m;
+    }, [coldStartData, coldStartQtyOverrides, filteredMainWarehouses, coldStartMinPack, resolveSkuLevelPpb]);
+
     /** Базовый per-cell need из backend Hamilton-cap / cold-start allocations.
      *  НЕ включает client-side bump (см. bumpedCells ниже).
      *
@@ -612,21 +655,15 @@ export function WarehouseNeedView() {
      *  Σ Hamilton-cap = 87 (= can_send), Σ share_pct = 173 (= total_need),
      *  раньше матрица показывала ~173 после нажатия «Проверить приёмку WB». */
     const getBaseArticleWbNeed = useCallback((article: NeedArticle, whName: string): number => {
-        // Для cold-start новинок (нет истории продаж) — allocations из cold-start.
-        const newcomer = coldStartData?.rows.find(r => r.nm_id === article.nm_id);
-        if (newcomer) {
-            const overrideQty = coldStartQtyOverrides[article.nm_id];
-            const useOverride = overrideQty !== undefined && overrideQty !== newcomer.total_allocated;
-            const alloc = useOverride
-                ? recomputeColdStartAlloc(overrideQty, filteredMainWarehouses, coldStartMinPack).alloc
-                : newcomer.allocations;
-            return alloc[whName] || 0;
-        }
+        // Для cold-start новинок (нет истории продаж) — box-кратное распределение
+        // из единой карты newcomerBoxedAlloc (учёт кратности K + ручной override).
+        const boxed = newcomerBoxedAlloc.get(article.nm_id);
+        if (boxed) return boxed.alloc[whName] || 0;
         // Обычный SKU — Hamilton-capped per-WB-need из backend (Σ = can_send).
         if (!data?.warehouses) return 0;
         const wh = data.warehouses.find(w => w.name === whName);
         return wh?.articles?.[article.nm_id]?.need || 0;
-    }, [data, coldStartData, filteredMainWarehouses, coldStartQtyOverrides, coldStartMinPack]);
+    }, [data, newcomerBoxedAlloc]);
 
     /** Текущий WB-сток per-cell — из data.warehouses[].articles[nm_id].stock. */
     const getArticleWbStock = useCallback((article: NeedArticle, whName: string): number => {
@@ -1193,7 +1230,7 @@ export function WarehouseNeedView() {
             rf_qty: 0,
             wb_qty: 0,
             in_assembly_total: 0,
-            total_allocated: 0,
+            total_allocated: 0,  // Σ box-кратно отгружаемого («Распределить» = «Итого» = per-wh)
             rf: {} as Record<number, number>,
             wb: {} as Record<string, number>,
         };
@@ -1203,18 +1240,19 @@ export function WarehouseNeedView() {
             t.rf_qty += row.rf_qty || 0;
             t.wb_qty += row.wb_qty || 0;
             t.in_assembly_total += row.in_assembly_total || 0;
-            const overrideQty = coldStartQtyOverrides[row.nm_id];
-            t.total_allocated += overrideQty !== undefined ? overrideQty : (row.total_allocated || 0);
+            // «Распределить»/«Итого»/wb — всё из box-кратной карты (хвост < короба на ФФ).
+            const boxed = newcomerBoxedAlloc.get(row.nm_id);
+            t.total_allocated += boxed?.total ?? (row.total_allocated || 0);
             for (const [whId, qty] of Object.entries(row.rf_by_warehouse || {})) {
                 const id = Number(whId);
                 t.rf[id] = (t.rf[id] || 0) + (qty || 0);
             }
-            for (const [wh, qty] of Object.entries(row.allocations || {})) {
+            for (const [wh, qty] of Object.entries(boxed?.alloc ?? row.allocations ?? {})) {
                 t.wb[wh] = (t.wb[wh] || 0) + (qty || 0);
             }
         }
         return t;
-    }, [coldStartData, coldStartQtyOverrides]);
+    }, [coldStartData, newcomerBoxedAlloc]);
 
     const handleColdStartSort = (col: string) => {
         if (coldStartSortCol === col) setColdStartSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
@@ -1294,14 +1332,9 @@ export function WarehouseNeedView() {
         // Берём min(total_avail_по_всем_RF, plan = can_send + bump).
         let sum = 0;
         for (const nmId of checkedIds) {
-            const newcomer = coldStartData?.rows.find(r => r.nm_id === nmId);
-            if (newcomer) {
-                const overrideQty = coldStartQtyOverrides[nmId];
-                const useOverride = overrideQty !== undefined && overrideQty !== newcomer.total_allocated;
-                const total = useOverride
-                    ? recomputeColdStartAlloc(overrideQty, filteredMainWarehouses, coldStartMinPack).total
-                    : newcomer.total_allocated;
-                sum += total;
+            const boxed = newcomerBoxedAlloc.get(nmId);
+            if (boxed) {
+                sum += boxed.total;
                 continue;
             }
             const article = data.articles.find(a => a.nm_id === nmId);
@@ -1313,7 +1346,7 @@ export function WarehouseNeedView() {
             sum += Math.min(totalAvail, plan);
         }
         return sum;
-    }, [checkedIds, data, coldStartData, filteredMainWarehouses, coldStartQtyOverrides, coldStartMinPack, getSendWithBump]);
+    }, [checkedIds, data, newcomerBoxedAlloc, getSendWithBump]);
 
     const checkedNewcomersCount = useMemo(() => {
         let n = 0;
@@ -1331,7 +1364,6 @@ export function WarehouseNeedView() {
             const draftRows: AssemblyDraftRow[] = [];
             const skippedNoBarcode: string[] = [];
             const skippedNoQty: string[] = [];
-            const skippedNewcomer: string[] = [];
             const newcomerByNm = new Map<number, ColdStartTableRow>();
             for (const r of coldStartData?.rows ?? []) newcomerByNm.set(r.nm_id, r);
 
@@ -1370,19 +1402,19 @@ export function WarehouseNeedView() {
             for (const nmId of checkedIds) {
                 const article = data.articles.find(a => a.nm_id === nmId);
                 const newcomer = newcomerByNm.get(nmId);
-                const barcode = article?.barcode;
+                const barcode = article?.barcode || newcomer?.barcode || undefined;
                 const vendor = article?.vendor_code || newcomer?.article_seller || `nm=${nmId}`;
                 if (!barcode) {
                     skippedNoBarcode.push(vendor);
                     continue;
                 }
 
-                // Новинки cold-start идут ОТДЕЛЬНОЙ заявкой — пропускаем здесь.
-                // Для них есть свой workflow в вкладке «Новинки».
-                if (newcomer) {
-                    skippedNewcomer.push(vendor);
-                    continue;
-                }
+                // FF-сток SKU: обычный — из article.rf_stocks; новинка часто не в
+                // data.articles (нет orders) → из ColdStartTableRow.rf_by_warehouse.
+                const rfStocksForSku: Record<number, { available: number }> = article?.rf_stocks
+                    ?? Object.fromEntries(
+                        Object.entries(newcomer?.rf_by_warehouse ?? {}).map(([k, v]) => [Number(k), { available: v }]),
+                    );
 
                 let qty = 0;
                 let tgt: Record<string, number> = {};
@@ -1390,13 +1422,26 @@ export function WarehouseNeedView() {
                 let ppb = 0;
                 let ppbUse = false;
 
-                if (article) {
+                if (newcomer) {
+                    // Новинка cold-start → box-кратное распределение по бенчмарку (как
+                    // обычный поток): tgt уже целыми коробками из newcomerBoxedAlloc,
+                    // источник box-aware из FF (rf_by_warehouse) ниже по общему пути.
+                    const boxed = newcomerBoxedAlloc.get(nmId);
+                    if (boxed && boxed.total > 0) {
+                        tgt = { ...boxed.alloc };
+                        qty = boxed.total;
+                        const bm = resolveSkuLevelPpb(nmId);
+                        ppb = bm.ppb || 0;
+                        ppbUse = bm.use;
+                        srcAlloc = allocateFromSources(qty, rfStocksForSku);
+                    }
+                } else if (article) {
                     // Обычный SKU → используем итоговый план = can_send + bump из «Дораспределить»
                     // (то же что видно в колонке «Отправить» матрицы). Без этого SKU с
                     // total_need=0 но активным bump попадали в skippedNoQty.
                     // available = Σ по всем FF-складам (multi-source).
                     const totalAvail = allRfWarehouses.reduce(
-                        (s, w) => s + (article.rf_stocks[w.id]?.available || 0), 0,
+                        (s, w) => s + (rfStocksForSku[w.id]?.available || 0), 0,
                     );
                     const planTotal = getSendWithBump(nmId, article.can_send);
                     qty = Math.min(totalAvail, planTotal);
@@ -1432,7 +1477,7 @@ export function WarehouseNeedView() {
                                 tgt[firstKey] = (tgt[firstKey] || 0) + remaining;
                             }
                         }
-                        srcAlloc = allocateFromSources(qty, article.rf_stocks);
+                        srcAlloc = allocateFromSources(qty, rfStocksForSku);
                     }
                 }
 
@@ -1477,7 +1522,7 @@ export function WarehouseNeedView() {
                 // ФФ остаётся на ФФ до накопления целого короба. Без кратности —
                 // пропорционально из пула.
                 const ffPool: Record<number, number> = {};
-                for (const w of allRfWarehouses) ffPool[w.id] = article?.rf_stocks[w.id]?.available || 0;
+                for (const w of allRfWarehouses) ffPool[w.id] = rfStocksForSku[w.id]?.available || 0;
                 const ffOrder = [...allRfWarehouses].sort((a, b) => {
                     if (assemblyWarehouseId != null) {
                         if (a.id === assemblyWarehouseId) return -1;
@@ -1586,17 +1631,14 @@ export function WarehouseNeedView() {
                     lines.push('', `Нечего отправлять (${skippedNoQty.length}):`, ...skippedNoQty.slice(0, 10).map(s => `  • ${s}`));
                     if (skippedNoQty.length > 10) lines.push(`  …и ещё ${skippedNoQty.length - 10}`);
                 }
-                if (skippedNewcomer.length) {
-                    lines.push('', `Новинки (создавай отдельной заявкой во вкладке «Новинки») — ${skippedNewcomer.length}:`,
-                        ...skippedNewcomer.slice(0, 10).map(s => `  • ${s}`));
-                    if (skippedNewcomer.length > 10) lines.push(`  …и ещё ${skippedNewcomer.length - 10}`);
-                }
                 alert(lines.join('\n'));
                 setCreatingAssembly(false);
                 return;
             }
 
-            // Newcomer'ы создаются отдельной заявкой (см. вкладку «Новинки»).
+            // Обычные SKU + новинки (cold-start, box-кратно) — в один draft.
+            // cold_start_shares не нужны: tgt уже посчитан целыми коробками per-склад,
+            // distribute-страница не должна перераспределять его pro-rata.
             const targetNames = Array.from(new Set(draftRows.flatMap(r => Object.keys(r.tgt))));
 
             // Union всех использованных RF-источников по всем строкам draft.
@@ -1632,10 +1674,9 @@ export function WarehouseNeedView() {
             setCreatingAssembly(false);
         }
     }, [data, assemblyWarehouseId, checkedIds, router, slug, acceptanceMap, packageFilter,
-        coldStartData, filteredMainWarehouses, coldStartQtyOverrides, coldStartMinPack,
-        getSendWithBump, getArticleWbNeed, resolveSkuLevelPpb]);
+        coldStartData, newcomerBoxedAlloc, getSendWithBump, getArticleWbNeed, resolveSkuLevelPpb]);
 
-    /* (cold-start теперь идёт через объединённый handleCreateAssembly выше) */
+    /* (cold-start новинки идут через тот же handleCreateAssembly — box-кратно) */
 
     /* ── Check WB acceptance availability (Проверить приёмку WB) ── */
 
@@ -2444,10 +2485,15 @@ export function WarehouseNeedView() {
                                     {sortedColdStartRows.map(row => {
                                         const overrideQty = coldStartQtyOverrides[row.nm_id];
                                         const useOverride = overrideQty !== undefined && overrideQty !== row.total_allocated;
-                                        const effective = useOverride
-                                            ? recomputeColdStartAlloc(overrideQty, filteredMainWarehouses, coldStartMinPack)
-                                            : { alloc: row.allocations, total: row.total_allocated };
-                                        const inputValue = overrideQty !== undefined ? overrideQty : row.total_allocated;
+                                        // Box-кратное распределение (как в матрице/сборке): ячейки и «Итого»
+                                        // целыми коробками; input ниже остаётся желаемым qty (хвост на ФФ).
+                                        const effective = newcomerBoxedAlloc.get(row.nm_id)
+                                            ?? { alloc: row.allocations, total: row.total_allocated };
+                                        // Дефолт «Распределить» = box-кратный total (как «Итого» и ячейки),
+                                        // чтобы заглавное число = тому, что реально уедет (целые коробки K).
+                                        const inputValue = overrideQty !== undefined ? overrideQty : effective.total;
+                                        // Кратность короба K (та же, что в newcomerBoxedAlloc). 0 = без кратности.
+                                        const boxK = editStep(row.nm_id);
                                         return (
                                         <tr key={row.nm_id} style={{ borderBottom: '1px solid var(--color-border)' }}>
                                             <td style={{ padding: '6px 6px', textAlign: 'center' }}>
@@ -2466,6 +2512,22 @@ export function WarehouseNeedView() {
                                                         background: '#a855f7', color: '#fff', fontSize: 9, fontWeight: 700,
                                                     }}>🆕</span>
                                                     {row.article_seller || '—'}
+                                                    {boxK > 0 ? (
+                                                        <span style={{
+                                                            marginLeft: 6, padding: '1px 6px', borderRadius: 6,
+                                                            background: 'rgba(34,197,94,0.15)', color: '#16a34a',
+                                                            fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap',
+                                                        }} title={`Кратность короба: ${boxK} шт — распределяется целыми коробками K`}>
+                                                            📦×{boxK}
+                                                        </span>
+                                                    ) : (
+                                                        <span style={{
+                                                            marginLeft: 6, fontSize: 10, fontWeight: 400,
+                                                            color: 'var(--color-text-muted)', whiteSpace: 'nowrap',
+                                                        }} title="Без кратности короба — распределяется поштучно (pro-rata)">
+                                                            россыпь
+                                                        </span>
+                                                    )}
                                                 </div>
                                                 <div style={{ fontSize: 10, color: 'var(--color-text-muted)' }}>
                                                     {[row.brand, row.subject].filter(Boolean).join(' · ')}
@@ -2549,7 +2611,7 @@ export function WarehouseNeedView() {
                                                         const v = Math.max(0, Number(e.target.value) || 0);
                                                         setColdStartQtyOverrides(prev => ({ ...prev, [row.nm_id]: v }));
                                                     }}
-                                                    title="Распределить столько штук пропорционально долям ФО (округление + min_pack pool)"
+                                                    title="Распределить столько штук пропорционально долям ФО; при заданной кратности — целыми коробками (хвост < короба остаётся на ФФ)"
                                                     style={{
                                                         padding: '3px 6px', borderRadius: 6,
                                                         border: useOverride ? '1px solid #a855f7' : '1px solid var(--color-border)',
