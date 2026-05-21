@@ -81,6 +81,40 @@ _DEFAULT_MAIN_WAREHOUSES: dict[str, str] = {
 
 _SKIP_DISTRICTS_DEFAULT: frozenset[str] = frozenset({"abroad", "unknown"})
 
+# ДВ (Дальневосточный) снабжаем со склада максимум на эту долю заказов — дальше
+# товар физически не довезти. Излишек доли ДВ перекидываем на Урал (Екатеринбург —
+# ворота в Сибирь/ДВ: туда довозим, а WB дотягивает последнюю милю восточнее).
+FAR_EAST_MAX_SHARE: float = 0.06
+
+
+def _cap_far_east_share(bench_share: dict[str, float]) -> dict[str, float]:
+    """ДВ-доля сверх FAR_EAST_MAX_SHARE перекидывается на Урал. Возвращает НОВЫЙ
+    dict (не мутирует вход — bench_share может быть общим FALLBACK_DISTRICT_SHARE)."""
+    fe = bench_share.get("far_east_siberia", 0.0)
+    if fe <= FAR_EAST_MAX_SHARE:
+        return bench_share
+    capped = dict(bench_share)
+    capped["far_east_siberia"] = FAR_EAST_MAX_SHARE
+    capped["ural"] = capped.get("ural", 0.0) + (fe - FAR_EAST_MAX_SHARE)
+    return capped
+
+
+def _is_spec_warehouse(name: str) -> bool:
+    """Спец/сортировочные склады — не для FBO cold-start (зеркало фронтового
+    isSpecWarehouse). СЦ/СГТ/виртуальные/Питание/Горючее не должны быть anchor-
+    кандидатами: фронт их прячет, иначе была бы скрытая аллокация."""
+    if name.startswith("Виртуальный "):
+        return True
+    if name.startswith("СЦ "):
+        return True
+    if " СГТ" in name:
+        return True
+    if ": Питание" in name or ":Питание" in name:
+        return True
+    if ": Горючее" in name or ":Горючее" in name:
+        return True
+    return False
+
 
 # ─── Async DB-fetchers (parametrized SQL, project_id-фильтр везде) ─────────
 
@@ -523,6 +557,8 @@ async def compute_distribution(db: AsyncSession, project_id: int, req: Distribut
         bench_source = "wb_fallback"
         bench_total = 0
 
+    bench_share = _cap_far_east_share(bench_share)
+
     # 4. Главный склад в каждом ФО (по трафику bench-источника)
     if bench_wh_traffic:
         main_wh = pick_main_warehouse_per_district(bench_wh_traffic, excluded)
@@ -746,6 +782,9 @@ async def compute_cold_start_table(
         bench_source = "wb_fallback"
         bench_total = 0
 
+    # ДВ-кап: излишек доли Дальневосточного ФО (со склада не довезти) → на Урал.
+    bench_share = _cap_far_east_share(bench_share)
+
     if bench_wh_traffic:
         wh_per_district = pick_warehouses_per_district(bench_wh_traffic, excluded, top_n=3)
     else:
@@ -760,7 +799,9 @@ async def compute_cold_start_table(
         if d in {"abroad", "unknown"}:
             continue
         anchors = [(_canonicalize_asm_warehouse(wh), cnt) for wh, cnt in get_anchors_for_okrug(d)]
-        speed_whs = [(wh, cnt) for wh, cnt in anchors if wh not in excluded and cnt > 0][:3]
+        speed_whs = [(wh, cnt) for wh, cnt in anchors if wh not in excluded and not _is_spec_warehouse(wh) and cnt > 0][
+            :3
+        ]
         if speed_whs:
             wh_per_district[d] = speed_whs
 

@@ -12,6 +12,9 @@ from backend.schemas.cold_start import DistributeRequest
 from backend.services import cold_start_distribution_service as cs
 from backend.services.cold_start_distribution_service import (
     FALLBACK_DISTRICT_SHARE,
+    FAR_EAST_MAX_SHARE,
+    _cap_far_east_share,
+    _is_spec_warehouse,
     distribute,
     distribute_multi,
     pick_main_warehouse_per_district,
@@ -146,6 +149,40 @@ class TestDistribute:
         )
         # Сумма = 200 (abroad=5% пропускается, его доля идёт в крупнейший как leftover)
         assert sum(result.values()) == 200, f"Сумма ≠ 200: {result}"
+
+
+class TestFarEastCap:
+    """Кап доли ДВ → излишек на Урал."""
+
+    def test_excess_far_east_share_moves_to_ural(self) -> None:
+        capped = _cap_far_east_share({"far_east_siberia": 0.19, "ural": 0.09, "central": 0.30})
+        assert capped["far_east_siberia"] == FAR_EAST_MAX_SHARE
+        assert abs(capped["ural"] - (0.09 + 0.19 - FAR_EAST_MAX_SHARE)) < 1e-9
+        assert capped["central"] == 0.30  # прочие ФО не тронуты
+
+    def test_far_east_below_cap_unchanged(self) -> None:
+        src = {"far_east_siberia": 0.04, "ural": 0.09}
+        assert _cap_far_east_share(src) is src  # ≤ кап → без копии/изменений
+
+    def test_input_not_mutated(self) -> None:
+        src = {"far_east_siberia": 0.19, "ural": 0.09}
+        _cap_far_east_share(src)
+        assert src["far_east_siberia"] == 0.19  # вход не мутирован (важно для общего FALLBACK)
+
+
+class TestSpecWarehouse:
+    """Спец/сортировочные склады исключаются из anchor-кандидатов."""
+
+    def test_spec_warehouses_detected(self) -> None:
+        assert _is_spec_warehouse("СЦ Барнаул")
+        assert _is_spec_warehouse("Виртуальный Челябинск")
+        assert _is_spec_warehouse("Ярославль СГТ")
+        assert _is_spec_warehouse("Коледино: Питание")
+
+    def test_normal_warehouses_kept(self) -> None:
+        assert not _is_spec_warehouse("Владивосток")
+        assert not _is_spec_warehouse("Электросталь")
+        assert not _is_spec_warehouse("Екатеринбург - Перспективная 14")
 
 
 class TestPickMainWarehouse:
