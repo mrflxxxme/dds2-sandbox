@@ -330,7 +330,9 @@ export default function AssemblyDistributePage() {
     }, []);
 
     // ─── Merge two WB target columns (drag & drop) ────────────────────────
-    const handleMergeWb = useCallback((sourceWb: string, targetWb: string) => {
+    // convertPkg: when set, also changes package_type of every moved row
+    // (used when user drags a MONO column onto a BOX column or vice versa).
+    const handleMergeWb = useCallback((sourceWb: string, targetWb: string, convertPkg?: PackageType) => {
         if (sourceWb === targetWb) return;
         setRows(prev => prev.map(r => {
             const srcQty = r.tgt[sourceWb] || 0;
@@ -339,7 +341,11 @@ export default function AssemblyDistributePage() {
             if (srcQty > 0) {
                 next[targetWb] = (next[targetWb] || 0) + srcQty;
             }
-            return { ...r, tgt: next };
+            return {
+                ...r,
+                tgt: next,
+                ...(convertPkg !== undefined && srcQty > 0 ? { package_type: convertPkg } : {}),
+            };
         }));
         setTargetWarehouseNames(prev => prev.filter(n => n !== sourceWb));
     }, []);
@@ -708,6 +714,7 @@ export default function AssemblyDistributePage() {
                 <div className="glass-card" style={{ overflowX: 'auto', padding: 0 }}>
                     <DistributeMatrix
                         rows={visibleRows}
+                        allRows={rows}
                         groupByType={typeTab === 'all' && hasNewcomerRows}
                         nmPpb={nmPpb}
                         sourceWarehouseIds={sourceWarehouseIds}
@@ -732,6 +739,8 @@ export default function AssemblyDistributePage() {
 
 interface DistributeMatrixProps {
     rows: AssemblyDraftRow[];
+    /** All rows across all package-type tabs — used for cross-type drag detection. */
+    allRows: AssemblyDraftRow[];
     groupByType: boolean;
     nmPpb: Map<number, number | null>;
     sourceWarehouseIds: number[];
@@ -744,11 +753,12 @@ interface DistributeMatrixProps {
     newcomerNmIds: Set<number>;
     onSrcChange: (nmId: number, pkg: PackageType, ffId: number, qty: number) => void;
     onTgtChange: (nmId: number, pkg: PackageType, whName: string, qty: number) => void;
-    onMergeWb: (sourceWb: string, targetWb: string) => void;
+    onMergeWb: (sourceWb: string, targetWb: string, convertPkg?: PackageType) => void;
 }
 
 function DistributeMatrix({
     rows,
+    allRows,
     groupByType,
     nmPpb,
     sourceWarehouseIds,
@@ -852,8 +862,37 @@ function DistributeMatrix({
                                     e.preventDefault();
                                     const src = e.dataTransfer.getData('text/plain') || dragSourceWb;
                                     if (src && src !== whName) {
-                                        if (window.confirm(`Объединить «${src}» в «${whName}»? Все количества будут перенесены.`)) {
-                                            onMergeWb(src, whName);
+                                        // Determine package types going to each column (across ALL rows,
+                                        // not just the currently-visible tab) so we can detect cross-type drag.
+                                        const srcPkgs = new Set(
+                                            allRows.filter(r => (r.tgt[src] || 0) > 0).map(r => r.package_type || 'BOX'),
+                                        );
+                                        const tgtPkgs = new Set(
+                                            allRows.filter(r => (r.tgt[whName] || 0) > 0).map(r => r.package_type || 'BOX'),
+                                        );
+                                        const srcOnlyMono = srcPkgs.size === 1 && srcPkgs.has('MONOPALLET');
+                                        const srcOnlyBox  = srcPkgs.size > 0 && !srcPkgs.has('MONOPALLET');
+                                        const tgtHasMono  = tgtPkgs.has('MONOPALLET');
+                                        const tgtHasBox   = !tgtPkgs.has('MONOPALLET') && tgtPkgs.size > 0;
+
+                                        // Cross-type: source is unambiguously one type, target is unambiguously the other
+                                        const crossToBox  = srcOnlyMono && tgtHasBox && !tgtHasMono;
+                                        const crossToMono = srcOnlyBox  && tgtHasMono && !tgtHasBox;
+
+                                        if (crossToBox || crossToMono) {
+                                            const srcLabel  = srcOnlyMono ? 'Моно' : 'Короб';
+                                            const tgtLabel  = crossToBox  ? 'Короб' : 'Моно';
+                                            const convertPkg: PackageType = crossToBox ? 'BOX' : 'MONOPALLET';
+                                            if (window.confirm(
+                                                `Объединить «${src}» (${srcLabel}) в «${whName}» (${tgtLabel})?\n\n` +
+                                                `Тип упаковки перемещаемых строк изменится с «${srcLabel}» на «${tgtLabel}».`,
+                                            )) {
+                                                onMergeWb(src, whName, convertPkg);
+                                            }
+                                        } else {
+                                            if (window.confirm(`Объединить «${src}» в «${whName}»? Все количества будут перенесены.`)) {
+                                                onMergeWb(src, whName);
+                                            }
                                         }
                                     }
                                     setDragSourceWb(null);
