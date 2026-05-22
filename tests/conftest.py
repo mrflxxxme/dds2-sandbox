@@ -14,7 +14,9 @@ pytest_plugins = ["tests.conftest_api"]
 
 # Real (production-equivalent) projects we never delete in cleanup.
 # id=4 — Default seed; id=15 — main user project (вяткин).
-_KEEP_PROJECT_IDS = (4, 15)
+# 991/992 — изолированные проекты test_wb_returns: держим, чтобы cleanup не
+# удалял их между параллельными воркерами (иначе FK на wb_goods_returns.project_id).
+_KEEP_PROJECT_IDS = (4, 15, 991, 992)
 
 
 def pytest_sessionfinish(session, exitstatus):
